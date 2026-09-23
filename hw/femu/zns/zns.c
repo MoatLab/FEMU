@@ -719,6 +719,15 @@ static uint16_t zns_auto_open_zone(NvmeNamespace *ns, NvmeZone *zone)
     uint8_t zs = zns_get_zone_state(zone);
 
     if (zs == NVME_ZONE_STATE_EMPTY) {
+        /*
+         * An empty zone also needs an active resource, which closing another
+         * zone does not free: check it first, so a write refused for it has
+         * not closed a zone on the way.
+         */
+        status = zns_aor_check(ns, 1, 0);
+        if (status) {
+            return status;
+        }
         zns_auto_transition_zone(ns);
         status = zns_aor_check(ns, 1, 1);
     } else if (zs == NVME_ZONE_STATE_CLOSED) {
@@ -923,6 +932,13 @@ static uint16_t zns_open_zone(NvmeNamespace *ns, NvmeZone *zone,
      * make room, as a write does (ZNS 1.4, 2.1.1.4).
      */
     if (state == NVME_ZONE_STATE_EMPTY || state == NVME_ZONE_STATE_CLOSED) {
+        /* as for a write: no zone is closed for an open that cannot happen */
+        if (state == NVME_ZONE_STATE_EMPTY) {
+            status = zns_aor_check(ns, 1, 0);
+            if (status) {
+                return status;
+            }
+        }
         zns_auto_transition_zone(ns);
     }
 

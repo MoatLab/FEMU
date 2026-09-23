@@ -4635,6 +4635,45 @@ static void femu_test_kv_mdts(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_TOO_MANY_ACTIVE    0x1bd   /* command specific */
+
+/*
+ * With two zones allowed active and open, opening a third empty zone fails
+ * on the active limit, whether a write or Open asks for it. Neither may close
+ * one of the open zones on the way to failing.
+ */
+static void femu_test_zone_active_limit(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t zsze;
+    uint8_t zs[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_states(&c, buf, zs, &zsze);
+
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, zsze, buf), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2 * zsze, buf)), ==,
+                    FEMU_TOO_MANY_ACTIVE);
+    g_assert_cmpint(femu_zone_action(&c, 2 * zsze, FEMU_ZONE_ACTION_OPEN), ==,
+                    FEMU_TOO_MANY_ACTIVE);
+    femu_zone_states(&c, buf, zs, &zsze);
+    g_assert_cmpint(zs[0], ==, FEMU_ZS_IMP_OPEN);
+    g_assert_cmpint(zs[1], ==, FEMU_ZS_IMP_OPEN);
+
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET |
+                                     FEMU_ZONE_SELECT_ALL), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4954,6 +4993,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zone-active-limit", "femu", femu_test_zone_active_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=3,secsz=512,zns_max_open=2,zns_max_active=2"
     });
     qos_add_test("zoned-compare", "femu", femu_test_zoned_compare,
                  &(QOSGraphTestOptions) {
