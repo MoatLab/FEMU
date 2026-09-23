@@ -2904,6 +2904,74 @@ static void femu_test_fdp_write_zeroes(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_CSD_COMPUTE_LOAD   0x22
+#define FEMU_CSD_TYPE_SHARED_LIB 0x03
+
+/* where the csd-program-dir test keeps its programs; one per test process */
+static char *femu_csd_dir;
+
+static uint16_t femu_csd_load(FemuCtrlState *c, uint64_t buf,
+                              const char *name, const char *symbol)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    size_t name_len = strlen(name) + 1;
+    size_t size = name_len + strlen(symbol) + 1;
+    NvmeCmd cmd;
+
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, name, name_len);
+    qtest_memwrite(qts, buf + name_len, symbol, strlen(symbol) + 1);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_COMPUTE_LOAD;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    /* program index 1, shared library, whole program in one piece */
+    cmd.cdw10 = cpu_to_le32(1 | (FEMU_CSD_TYPE_SHARED_LIB << 16));
+    cmd.cdw11 = cpu_to_le32(size);
+    cmd.cdw14 = cpu_to_le32(size);
+
+    return femu_admin(c, &cmd);
+}
+
+/*
+ * A program name from the guest is resolved inside csd_program_dir. Each way
+ * the lookup can end, a missing file, a link out of the directory, and a file
+ * that is there but is no library, has to be refused and leave the controller
+ * working.
+ */
+static void femu_test_csd_program_dir(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    g_autofree char *link = g_build_filename(femu_csd_dir, "escape", NULL);
+    g_autofree char *file = g_build_filename(femu_csd_dir, "notalib", NULL);
+    uint64_t buf;
+
+    g_assert_cmpint(g_mkdir_with_parents(femu_csd_dir, 0700), ==, 0);
+    g_assert_true(g_file_set_contents(file, "not an ELF", -1, NULL));
+    g_assert_cmpint(symlink("/etc/hostname", link), ==, 0);
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_csd_load(&c, buf, "missing", "run"), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    g_assert_cmpint(femu_csd_load(&c, buf, "escape", "run"), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    g_assert_cmpint(femu_csd_load(&c, buf, "notalib", "run"), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 3);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+
+    unlink(link);
+    unlink(file);
+    rmdir(femu_csd_dir);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -3106,6 +3174,13 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    femu_csd_dir = g_strdup_printf("%s/femu-csd-%d", g_get_tmp_dir(),
+                                   (int)getpid());
+    qos_add_test("csd-program-dir", "femu", femu_test_csd_program_dir,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = g_strdup_printf(
+            "femu_mode=4,fdm_size=16,csd_program_dir=%s", femu_csd_dir),
     });
     qos_add_test("buffer-counters", "femu", femu_test_buffer_counters,
                  &(QOSGraphTestOptions) {

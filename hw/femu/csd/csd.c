@@ -443,14 +443,10 @@ static uint16_t csd_program_path(FemuCtrl *n, const char *name, char **path)
     if (!real || !realdir || !g_str_has_prefix(real, realdir) ||
         real[strlen(realdir)] != '/') {
         femu_err("CSD: %s does not resolve inside csd_program_dir\n", joined);
-        free(real);
-        free(realdir);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    *path = g_strdup(real);
-    free(real);
-    free(realdir);
+    *path = g_steal_pointer(&real);
 
     return NVME_SUCCESS;
 }
