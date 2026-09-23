@@ -3839,6 +3839,67 @@ static void femu_test_cc_states(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, ring);
 }
 
+/*
+ * Features other than the saveable ones return to their defaults on a
+ * Controller Level Reset (Base 2.3, 4.4). Volatile Write Cache exists only
+ * on a controller that reports a write cache, and keeps only its enable bit;
+ * Power Management takes only a power state the controller describes.
+ */
+static void femu_test_features_reset(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    bool vwc = data && *(bool *)data;
+    FemuCtrlState c = { 0 };
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ARBITRATION, false, 0,
+                                             0x1, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, 0x2, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_POWER_MANAGEMENT, false,
+                                             0, 1, NULL)),
+                    ==, NVME_INVALID_FIELD);
+    if (vwc) {
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                                 NVME_VOLATILE_WRITE_CACHE,
+                                                 false, 0, 0xfe, NULL)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_get_feature(&c, NVME_VOLATILE_WRITE_CACHE, 0, 0,
+                                         0, &result), ==, NVME_SUCCESS);
+        g_assert_cmpint(result, ==, 0);
+    } else {
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                                 NVME_VOLATILE_WRITE_CACHE,
+                                                 false, 0, 1, NULL)),
+                        ==, NVME_INVALID_FIELD);
+        g_assert_cmpint(FEMU_SC(femu_get_feature(&c,
+                                                 NVME_VOLATILE_WRITE_CACHE, 0,
+                                                 0, 0, &result)),
+                        ==, NVME_INVALID_FIELD);
+    }
+    femu_disable(&c);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_get_feature(&c, NVME_ARBITRATION, 0, 0, 0, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x1f0f0706);
+    g_assert_cmpint(femu_get_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, 0, 0,
+                                     0, &result), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0);
+    if (vwc) {
+        g_assert_cmpint(femu_get_feature(&c, NVME_VOLATILE_WRITE_CACHE, 0, 0,
+                                         0, &result), ==, NVME_SUCCESS);
+        g_assert_cmpint(result, ==, 1);
+    }
+    femu_disable(&c);
+}
+
+static bool femu_vwc = true;
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4117,6 +4178,12 @@ static void femu_register_nodes(void)
     qos_add_test("queue-create-status", "femu", femu_test_queue_create_status,
                  NULL);
     qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
+    qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
+    qos_add_test("features-reset-vwc", "femu", femu_test_features_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "vwc=1",
+        .arg = &femu_vwc,
+    });
     qos_add_test("sgl-zoned", "femu", femu_test_sgl_zoned,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"

@@ -1004,6 +1004,10 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         result = 0x14d;
         break;
     case NVME_VOLATILE_WRITE_CACHE:
+        /* only a controller that reports a write cache has the feature */
+        if (!n->vwc) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         result = n->vwc;
         break;
     case NVME_NUMBER_OF_QUEUES:
@@ -1134,6 +1138,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         cqe->n.result = cpu_to_le32(nvme_ns(n, nsid)->err_rec);
         break;
     case NVME_VOLATILE_WRITE_CACHE:
+        if (!n->vwc) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         cqe->n.result = cpu_to_le32(n->features.volatile_wc);
         break;
     case NVME_INTERRUPT_COALESCING:
@@ -1230,7 +1237,11 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         n->features.arbitration = dw11;
         break;
     case NVME_POWER_MANAGEMENT:
-        n->features.power_mgmt = dw11;
+        /* a power state the controller does not describe (Figure 405) */
+        if ((dw11 & 0x1f) > n->id_ctrl.npss) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        n->features.power_mgmt = dw11 & 0xff;
         break;
     case NVME_LBA_RANGE_TYPE:
         if (nsid == NVME_NSID_BROADCAST) {
@@ -1315,14 +1326,18 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     }
     case NVME_VOLATILE_WRITE_CACHE: {
+        bool resume;
+
+        if (!n->vwc) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         /*
          * buffer_enabled() reads this on the FTL thread to decide whether the
          * write buffer may still accept pages, so change it with the dataplane
          * stopped rather than under a request in flight.
          */
-        bool resume = nvme_pause_pollers(n);
-
-        n->features.volatile_wc = dw11;
+        resume = nvme_pause_pollers(n);
+        n->features.volatile_wc = dw11 & 0x1;
         nvme_resume_pollers(n, resume);
         break;
     }

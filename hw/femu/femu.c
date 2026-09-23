@@ -348,6 +348,34 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
 
 /* ========== End FDP Subsystem ========== */
 
+/*
+ * Feature values a Controller Level Reset returns to their defaults (Base 2.3,
+ * 4.4). None of these is saveable. The Software Progress Marker is left alone:
+ * it exists to be read back after a reset.
+ */
+static void nvme_reset_features(FemuCtrl *n)
+{
+    int i;
+
+    n->features.arbitration     = 0x1f0f0706;
+    n->features.power_mgmt      = 0;
+    n->features.temp_thresh     = 0x14d;
+    n->features.temp_thresh_under = 0;
+    n->features.volatile_wc     = n->vwc;
+    n->features.nr_io_queues    = (n->nr_io_queues - 1) |
+                                  ((n->nr_io_queues - 1) << 16);
+    n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
+    n->features.write_atomicity = 0;
+    n->features.async_config    = 0x0;
+
+    for (i = 0; i <= n->nr_io_queues; i++) {
+        n->features.int_vector_config[i] = i | (n->intc << 16);
+    }
+    for (i = 0; i < n->num_namespaces; i++) {
+        n->namespaces[i].err_rec = 0;
+    }
+}
+
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
     NvmeAsyncEvent *event;
@@ -410,7 +438,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     pci_irq_deassert(&n->parent_obj);
 
     n->bar.cc = 0;
-    n->features.temp_thresh = 0x14d;
+    nvme_reset_features(n);
     n->temp_warn_issued = 0;
     /*
      * Release the doorbell buffers as well as forgetting them: each enable and
@@ -1255,7 +1283,6 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NvmeIdCtrl *id = &n->id_ctrl;
     uint8_t *pci_conf = n->parent_obj.config;
     char *subnqn;
-    int i;
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -1303,20 +1330,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
 
-    n->features.arbitration     = 0x1f0f0706;
-    n->features.power_mgmt      = 0;
-    n->features.temp_thresh     = 0x14d;
-    n->features.volatile_wc     = n->vwc;
-    n->features.nr_io_queues   = ((n->nr_io_queues - 1) | ((n->nr_io_queues -
-                                                              1) << 16));
-    n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
-    n->features.write_atomicity = 0;
-    n->features.async_config    = 0x0;
     n->features.sw_prog_marker  = 0;
-
-    for (i = 0; i <= n->nr_io_queues; i++) {
-        n->features.int_vector_config[i] = i | (n->intc << 16);
-    }
+    nvme_reset_features(n);
 
     n->bar.cap = 0;
     NVME_CAP_SET_MQES(n->bar.cap, n->max_q_ents);
