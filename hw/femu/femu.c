@@ -367,6 +367,7 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
     n->features.write_atomicity = 0;
     n->features.async_config    = 0x0;
+    memset(n->features.host_behavior, 0, sizeof(n->features.host_behavior));
 
     for (i = 0; i <= n->nr_io_queues; i++) {
         n->features.int_vector_config[i] = i | (n->intc << 16);
@@ -1392,7 +1393,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->rab          = 6;
     id->cntrltype    = 0x1;     /* an I/O controller */
-    id->ocfs         = cpu_to_le16(n->oncs & NVME_ONCS_COPY ? 0x1 : 0);
+    /* descriptor formats 0 and 2 (the latter names a source namespace) */
+    id->ocfs         = cpu_to_le16(n->oncs & NVME_ONCS_COPY ? 0x5 : 0);
     id->wctemp       = cpu_to_le16(NVME_TEMPERATURE_WARNING);
     id->cctemp       = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
     id->ieee[0]      = 0x00;
@@ -1424,7 +1426,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->sqes         = (n->max_sqes << 4) | 0x6;
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
-    id->oncs         = cpu_to_le16(n->oncs);
+    /* a Copy's write portion is one write here, so it is single-atomic */
+    id->oncs         = cpu_to_le16(n->oncs |
+                                   (n->oncs & NVME_ONCS_COPY ? NVME_ONCS_NVMCSA
+                                                             : 0));
     /* the Open-Channel commands take PRPs only, so they get no SGLs */
     if (n->sgl && !OCSSD(n)) {
         id->sgls     = cpu_to_le32(0x1);   /* advertise address-SGL support */

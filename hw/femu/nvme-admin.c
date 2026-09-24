@@ -25,6 +25,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_KV_FEAT_CONFIG]           = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
+    [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -39,6 +40,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_INTERRUPT_COALESCING]     = NVME_FEAT_CAP_CHANGE,
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
+    [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
@@ -1055,6 +1057,14 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
                                          uint8_t fid, uint32_t dw11,
                                          NvmeCqe *cqe)
 {
+    /* Host Behavior Support defaults to every behavior off */
+    if (fid == NVME_HOST_BEHAVIOR_SUPPORT) {
+        uint8_t hbs[512] = { 0 };
+
+        return dma_read_prp(n, hbs, sizeof(hbs), le64_to_cpu(cmd->dptr.prp1),
+                            le64_to_cpu(cmd->dptr.prp2));
+    }
+
     uint32_t result = 0;
 
     switch (fid) {
@@ -1262,6 +1272,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     case NVME_FDP_EVENTS:
         return nvme_get_feature_fdp_events(n, cmd, dw11, cqe);
+    case NVME_HOST_BEHAVIOR_SUPPORT:
+        return dma_read_prp(n, n->features.host_behavior,
+                            sizeof(n->features.host_behavior), prp1, prp2);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -1453,6 +1466,29 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          * namespaces, and FEMU builds them at realize, so it never can.
          */
         return NVME_CMD_SEQ_ERROR | NVME_DNR;
+    case NVME_HOST_BEHAVIOR_SUPPORT: {
+        /*
+         * A 512-byte structure (Base 2.3, Figure 426). The first four bytes
+         * are each 0 or 1; Copy Descriptor Formats Enable ignores its bits
+         * 1:0, which name formats that need no enabling.
+         */
+        uint8_t hbs[512];
+        uint16_t status;
+        int i;
+
+        status = dma_write_prp(n, hbs, sizeof(hbs), prp1, prp2);
+        if (status) {
+            return status;
+        }
+        for (i = 0; i < 4; i++) {
+            if (hbs[i] > 1) {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        }
+        hbs[4] &= ~0x3;
+        memcpy(n->features.host_behavior, hbs, sizeof(hbs));
+        break;
+    }
     case NVME_FDP_EVENTS: {
         /*
          * NOET in dword 11 counts the one-byte event types in the buffer, and

@@ -1074,6 +1074,39 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
  * sources and programs the destination like a write, which is what keeps its
  * mapping, garbage collection and write amplification right.
  */
+/*
+ * The namespace a Copy range reads from: the command's own for descriptor
+ * format 0, or the one the SNSID of a format 2 range names. Format 2 reads
+ * logical blocks, so both ends have to be block namespaces; and they have to
+ * be formatted alike, which without protection information means the same
+ * data size and metadata size (NVM 1.2, 3.3.2).
+ */
+static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
+                                 const NvmeCopyRange *r, NvmeNamespace **out)
+{
+    uint32_t snsid = le32_to_cpu(r->snsid);
+    NvmeNamespace *s;
+
+    if (fmt == 0) {
+        *out = ns;
+        return NVME_SUCCESS;
+    }
+    if (snsid == 0 || snsid == NVME_NSID_BROADCAST ||
+        snsid > n->num_namespaces) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    s = &n->namespaces[snsid - 1];
+    if (!(NS_BBSSD(s) || NS_NOSSD(s)) || !(NS_BBSSD(ns) || NS_NOSSD(ns))) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    if (NVME_ID_NS_LBADS(s) != NVME_ID_NS_LBADS(ns) ||
+        nvme_ns_ms(s) != nvme_ns_ms(ns)) {
+        return NVME_NS_INCOMPATIBLE | NVME_DNR;
+    }
+    *out = s;
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           NvmeRequest *req)
 {
@@ -1084,7 +1117,9 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
     uint8_t lbaf = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     uint8_t lbads = ns->id_ns.lbaf[lbaf].lbads;
+    uint8_t fmt = (dw12 >> 8) & 0xf;
     g_autofree NvmeCopyRange *ranges = NULL;
+    g_autofree NvmeNamespace **sns = NULL;
     g_autofree uint8_t *data = NULL;
     g_autofree uint8_t *mstage = NULL;
     uint16_t ms;
@@ -1095,7 +1130,9 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t status;
     uint32_t i;
 
-    if (((dw12 >> 8) & 0xf) != 0) {
+    /* format 2 works only once the host has enabled it (Figure 426) */
+    if ((fmt != 0 && fmt != 2) ||
+        (fmt == 2 && !(n->features.host_behavior[4] & (1 << 2)))) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (nr > FEMU_COPY_MSRC + 1) {
@@ -1109,10 +1146,17 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     /* every range is checked before anything moves */
+    sns = g_new(NvmeNamespace *, nr);
     for (i = 0; i < nr; i++) {
         uint64_t slba = le64_to_cpu(ranges[i].slba);
         uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
+        uint64_t snsze;
 
+        status = nvme_copy_source(n, ns, fmt, &ranges[i], &sns[i]);
+        if (status) {
+            return status;
+        }
+        snsze = le64_to_cpu(sns[i]->id_ns.nsze);
         if (nlb > FEMU_COPY_MSSRL) {
             return NVME_CMD_SIZE_LIMIT | NVME_DNR;
         }
@@ -1120,7 +1164,7 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (total > FEMU_COPY_MCL) {
             return NVME_CMD_SIZE_LIMIT | NVME_DNR;
         }
-        if (slba >= nsze || nlb > nsze - slba) {
+        if (slba >= snsze || nlb > snsze - slba) {
             return NVME_LBA_RANGE | NVME_DNR;
         }
     }
@@ -1132,13 +1176,14 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
         uint64_t elba = slba + nlb;
 
-        if (slba < sdlba + total && sdlba < elba) {
+        /* only a range in the destination namespace can overlap it */
+        if (sns[i] == ns && slba < sdlba + total && sdlba < elba) {
             return NVME_CMD_OVERLAP_IO_RANGE | NVME_DNR;
         }
-        if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+        if (find_next_bit(sns[i]->uncorrectable, elba, slba) < elba) {
             return NVME_UNRECOVERED_READ;
         }
-        status = nvme_check_dulbe(n, ns, slba, elba);
+        status = nvme_check_dulbe(n, sns[i], slba, elba);
         if (status) {
             return status;
         }
@@ -1150,23 +1195,33 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     ms = nvme_ns_ms(ns);
     if (ns->mdata) {
         mstage = g_malloc(total * ms);
-        qemu_mutex_lock(&ns->mdata_lock);
     }
     src = g_new(NvmeDsmRange, nr);
     for (i = 0; i < nr; i++) {
+        NvmeNamespace *s = sns[i];
+        uint8_t *sbase = (uint8_t *)n->mbe->logical_space + s->backend_offset;
         uint64_t slba = le64_to_cpu(ranges[i].slba);
         uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
 
-        memcpy(data + (done << lbads), base + (slba << lbads),
+        /* each source's blocks are read as one snapshot of data and metadata */
+        if (mstage) {
+            qemu_mutex_lock(&s->mdata_lock);
+        }
+        memcpy(data + (done << lbads), sbase + (slba << lbads),
                (uint64_t)nlb << lbads);
         if (mstage) {
-            memcpy(mstage + done * ms, ns->mdata + slba * ms,
+            memcpy(mstage + done * ms, s->mdata + slba * ms,
                    (uint64_t)nlb * ms);
+            qemu_mutex_unlock(&s->mdata_lock);
         }
         done += nlb;
-        src[i].cattr = 0;
+        /* the FTL charges each read to the namespace it comes from */
+        src[i].cattr = cpu_to_le32(s->id);
         src[i].slba = cpu_to_le64(slba);
         src[i].nlb = cpu_to_le32(nlb);
+    }
+    if (mstage) {
+        qemu_mutex_lock(&ns->mdata_lock);
     }
     memcpy(base + (sdlba << lbads), data, total << lbads);
     if (mstage) {

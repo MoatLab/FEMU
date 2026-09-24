@@ -866,7 +866,8 @@ enum {
 
 /* Copy source range, descriptor format 0 (NVM 1.2, Figure 39) */
 typedef struct QEMU_PACKED NvmeCopyRange {
-    uint8_t     rsvd0[8];
+    uint32_t    snsid;          /* format 2; reserved in format 0 */
+    uint8_t     rsvd4[4];
     uint64_t    slba;
     uint16_t    nlb;            /* 0's based */
     uint8_t     rsvd18[6];
@@ -955,6 +956,7 @@ enum NvmeStatusCodes {
     NVME_NS_NOT_READY           = 0x0082,
     NVME_NS_RESV_CONFLICT       = 0x0083,
     NVME_CMD_SIZE_LIMIT         = 0x0183,
+    NVME_NS_INCOMPATIBLE        = 0x0185,
     NVME_CMD_OVERLAP_IO_RANGE   = 0x0187,
     NVME_INVALID_CQID           = 0x0100,
     NVME_INVALID_QID            = 0x0101,
@@ -1292,6 +1294,7 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_RESRVATIONS   = 1 << 5,
     NVME_ONCS_VERIFY        = 1 << 7,
     NVME_ONCS_COPY          = 1 << 8,
+    NVME_ONCS_NVMCSA        = 1 << 9,
 };
 
 enum NvmeIdCtrlFrmw {
@@ -1322,6 +1325,7 @@ typedef struct NvmeFeatureVal {
     uint32_t    write_atomicity;
     uint32_t    async_config;
     uint32_t    sw_prog_marker;
+    uint8_t     host_behavior[512]; /* Host Behavior Support (16h) */
 } NvmeFeatureVal;
 
 #define NVME_ARB_AB(arb)        (arb & 0x7)

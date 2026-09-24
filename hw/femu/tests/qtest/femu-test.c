@@ -5141,6 +5141,139 @@ static uint16_t femu_copy(FemuCtrlState *c, uint64_t list, uint64_t sdlba,
     return femu_io(c, &cmd);
 }
 
+#define FEMU_NS_INCOMPATIBLE    0x185
+
+/* 4 KiB of 512-byte blocks on namespace nsid */
+static uint16_t femu_rw_ns(FemuCtrlState *c, uint8_t opcode, uint32_t nsid,
+                           uint64_t slba, uint64_t data)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / 512 - 1);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+#define FEMU_FEAT_HBS           0x16
+
+/* Get (or, with set, Set) Host Behavior Support through a 512-byte buffer */
+static uint16_t femu_hbs(FemuCtrlState *c, bool set, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FEAT_HBS);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* a descriptor format 2 Copy of one range, from snsid into namespace 1 */
+static uint16_t femu_copy_fmt2(FemuCtrlState *c, uint64_t list,
+                               uint64_t sdlba, uint32_t snsid, uint64_t slba,
+                               uint16_t nlb)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writel(qts, list, snsid);
+    qtest_writeq(qts, list + 8, slba);
+    qtest_writew(qts, list + 16, nlb - 1);
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(sdlba);
+    cmd.cdw11 = cpu_to_le32(sdlba >> 32);
+    cmd.cdw12 = cpu_to_le32(2 << 8);             /* one range, format 2 */
+    return femu_io(c, &cmd);
+}
+
+/*
+ * Copy descriptor format 2 (NVM 1.2, 3.3.2): each range names the namespace
+ * it comes from, which has to be a block namespace formatted the same way;
+ * only ranges in the destination namespace can overlap the destination. The
+ * host has to enable the format through Host Behavior Support first.
+ */
+static void femu_test_copy_fmt2(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t w[FEMU_DATA_SIZE];
+    uint8_t r[FEMU_DATA_SIZE];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 534) & 0x5, ==, 0x5);  /* OCFS */
+    g_assert_cmpint(qtest_readw(qts, buf + 520) & (1 << 9), !=, 0); /* ONCS */
+
+    /* not until the host enables it */
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 2, 16, 8), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_hbs(&c, false, buf), ==, NVME_SUCCESS);
+    for (i = 0; i < 512; i++) {
+        g_assert_cmpint(qtest_readb(qts, buf + i), ==, 0);
+    }
+    qtest_writeb(qts, buf, 2);                    /* ACRE is 0 or 1 */
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_INVALID_FIELD);
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writew(qts, buf + 4, 0x7);              /* bits 1:0 are not used */
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0xff, 512);
+    g_assert_cmpint(femu_hbs(&c, false, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 4), ==, 0x4);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0);
+
+    /* from namespace 2 into namespace 1 */
+    for (i = 0; i < sizeof(w); i++) {
+        w[i] = (uint8_t)(0x2c + i * 5);
+    }
+    qtest_memwrite(qts, buf, w, sizeof(w));
+    g_assert_cmpint(femu_rw_ns(&c, NVME_CMD_WRITE, 2, 16, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 2, 16, 8), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, sizeof(r));
+    g_assert_cmpint(femu_rw_ns(&c, NVME_CMD_READ, 1, 64, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmpint(memcmp(w, r, sizeof(r)), ==, 0);
+
+    /* the source has to exist */
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 0, 16, 8), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 3, 16, 8), ==,
+                    NVME_INVALID_NSID);
+
+    /* in the destination namespace, a source over the destination is refused */
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 1, 60, 8), ==,
+                    FEMU_OVERLAP_IO_RANGE);
+
+    /* and it has to be formatted like the destination */
+    {
+        NvmeCmd f = { 0 };
+
+        f.opcode = NVME_ADM_CMD_FORMAT_NVM;
+        f.nsid = cpu_to_le32(2);
+        f.cdw10 = cpu_to_le32(3);                 /* 4 KiB blocks */
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &f)), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_copy_fmt2(&c, list, 64, 2, 1, 1), ==,
+                    FEMU_NS_INCOMPATIBLE);
+
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
 /*
  * Copy (NVM 1.2, 3.3.2): the limits Identify reports, two ranges landing back
  * to back at the destination and read back intact, the FTL charging the
@@ -7356,6 +7489,17 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "meta=8,mc=3,extended=1,mdts=1,oncs=0x19f"
+    });
+    qos_add_test("copy-fmt2", "femu", femu_test_copy_fmt2,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "namespaces=2,oacs=0x2,oncs=0x19f"
+    });
+    qos_add_test("copy-fmt2-bbssd", "femu", femu_test_copy_fmt2,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "namespaces=2,oacs=0x2,oncs=0x19f"
     });
     qos_add_test("admin-fuzz", "femu", femu_test_admin_fuzz,
                  &(QOSGraphTestOptions) {
