@@ -151,12 +151,12 @@ jobs:
   # aborts, and so does a heap overrun in the controller.
   debug-build:
     runs-on: ubuntu-24.04
-    # The fuzz tests are most of the sanitized qtest time, so they get a runner
-    # of their own and the two halves run side by side.
+    # The fuzz tests are most of the sanitized qtest time, so they are shared
+    # out over runners of their own and every part runs side by side.
     strategy:
       fail-fast: false
       matrix:
-        part: [main, fuzz]
+        part: [main, fuzz0, fuzz1, fuzz2]
     name: debug-build (${{ matrix.part }})
 
     steps:
@@ -243,10 +243,16 @@ jobs:
         fuzz=$(./tests/qtest/qos-test -l | sed -n "s|^# \($B/[^ ]*fuzz[^ ]*\)$|\1|p")
         # an empty list would make both halves pass without the fuzz tests
         [ -n "$fuzz" ] || { echo "no fuzz tests found"; exit 1; }
-        if [ "${{ matrix.part }}" = fuzz ]; then
-          # qos-test takes one -p path, so run them one at a time
+        part="${{ matrix.part }}"
+        if [ "${part#fuzz}" != "$part" ]; then
+          # every third test, from this part's offset; qos-test takes one -p
+          # path, so they run one at a time
+          i=0
           for t in $fuzz; do
-            ./tests/qtest/qos-test -m quick -p "$t"
+            if [ $((i % 3)) -eq "${part#fuzz}" ]; then
+              ./tests/qtest/qos-test -m quick -p "$t"
+            fi
+            i=$((i + 1))
           done
         else
           ./tests/qtest/qos-test -m quick -p "$B" $(printf -- '-s %s ' $fuzz)
