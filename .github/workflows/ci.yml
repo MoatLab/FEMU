@@ -151,6 +151,13 @@ jobs:
   # aborts, and so does a heap overrun in the controller.
   debug-build:
     runs-on: ubuntu-24.04
+    # The fuzz tests are most of the sanitized qtest time, so they get a runner
+    # of their own and the two halves run side by side.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [main, fuzz]
+    name: debug-build (${{ matrix.part }})
 
     steps:
     - name: Checkout code
@@ -180,12 +187,14 @@ jobs:
         make -j "$(nproc)"
 
     - name: Run the FEMU unit tests under the sanitizers
+      if: matrix.part == 'main'
       run: |
         cd build-debug
         ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
           --print-errorlogs
 
     - name: Instantiate every mode with the checks armed
+      if: matrix.part == 'main'
       env:
         # QEMU frees little at exit by design; only real errors should fail.
         ASAN_OPTIONS: detect_leaks=0
@@ -229,10 +238,22 @@ jobs:
         # access instead of continuing past it. This is what makes an
         # out-of-bounds index deterministic: without the sanitizers it lands
         # somewhere in the allocator and the test still passes.
-        QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
-          -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
+        B=/x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
+        export QTEST_QEMU_BINARY=./qemu-system-x86_64
+        fuzz=$(./tests/qtest/qos-test -l | sed -n "s|^# \($B/[^ ]*fuzz[^ ]*\)$|\1|p")
+        # an empty list would make both halves pass without the fuzz tests
+        [ -n "$fuzz" ] || { echo "no fuzz tests found"; exit 1; }
+        if [ "${{ matrix.part }}" = fuzz ]; then
+          # qos-test takes one -p path, so run them one at a time
+          for t in $fuzz; do
+            ./tests/qtest/qos-test -m quick -p "$t"
+          done
+        else
+          ./tests/qtest/qos-test -m quick -p "$B" $(printf -- '-s %s ' $fuzz)
+        fi
 
     - name: Expand every example config with the checks armed
+      if: matrix.part == 'main'
       env:
         # QEMU builds without -fno-sanitize-recover, so an undefined-behaviour
         # report would otherwise print and let the process exit 0. The script
