@@ -155,6 +155,28 @@ printf 'mode = nonsense\n' > "$t"
 printf 'this line has no equals sign\n' > "$t"
 "$CFG" "$t" --check >/dev/null 2>&1 && bad "malformed line rejected" || ok "malformed line rejected"
 
+echo "== the device refuses what it cannot carry =="
+# check_args() only sees property errors; a device that refuses at realize is
+# checked here by its message and exit, with an accepted twin as the control.
+start_femu() {
+    ASAN_OPTIONS="detect_leaks=0${ASAN_OPTIONS:+,$ASAN_OPTIONS}" \
+        timeout 5 "$FEMU" -machine q35 -device "femu,$1" -S -no-user-config \
+        -nodefaults -display none </dev/null 2>&1
+}
+out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=3")"; rc=$?
+if (( rc != 0 && rc != 124 )) &&
+   grep -q "meta: only separate metadata" <<<"$out"; then
+    ok "metadata with the extended capability refused"
+else
+    bad "metadata with the extended capability refused (exit $rc): $out"
+fi
+out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=2")"; rc=$?
+if (( rc == 124 )) && ! grep -q "meta:" <<<"$out"; then
+    ok "separate metadata accepted"
+else
+    bad "separate metadata accepted (exit $rc): $out"
+fi
+
 echo
 echo "SSD_CONFIG_TEST pass=$pass fail=$fail"
 [[ $fail -eq 0 ]]

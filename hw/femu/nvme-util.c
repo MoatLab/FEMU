@@ -41,6 +41,9 @@ void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                            uint32_t nlb)
 {
+    if (ns->mdata) {
+        qemu_mutex_lock(&ns->mdata_lock);
+    }
     if (ns->util) {
         bitmap_clear(ns->util, slba, nlb);
     }
@@ -50,6 +53,13 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
         uint64_t off = ns->backend_offset + (slba << data_shift);
         uint64_t len = (uint64_t)nlb << data_shift;
         memset((uint8_t *)n->mbe->logical_space + off, 0, len);
+    }
+    /* deallocated and zeroed blocks read back zero metadata (DLFEAT) */
+    if (ns->mdata) {
+        uint16_t ms = nvme_ns_ms(ns);
+
+        memset(ns->mdata + slba * ms, 0, (uint64_t)nlb * ms);
+        qemu_mutex_unlock(&ns->mdata_lock);
     }
 }
 
@@ -383,7 +393,8 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (meta_size) {
+    /* metadata is carried only where the namespace keeps a store for it */
+    if (meta_size && !ns->mdata) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, control), ctrl, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;

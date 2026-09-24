@@ -2357,6 +2357,9 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
             memset((uint8_t *)n->mbe->logical_space + ns->backend_offset, 0,
                    ns->size);
         }
+        if (ns->mdata) {
+            memset(ns->mdata, 0, ns->mdata_len);
+        }
         if (NS_BBSSD(ns)) {
             bbssd_deallocate_all(ns);
         }
@@ -2632,13 +2635,30 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     NvmeIdNs *id_ns = &ns->id_ns;
     FemuCtrl *n = ns->ctrl;
     uint64_t blks;
+    uint64_t mlen;
+    uint8_t *mdata = NULL;
     uint16_t status;
 
     blks = ns->size / (1 << id_ns->lbaf[lba_idx].lbads);
+    /*
+     * The metadata store is sized to the new format and taken before anything
+     * changes, so a format that cannot have it leaves the namespace as it was.
+     */
+    mlen = blks * le16_to_cpu(id_ns->lbaf[lba_idx].ms);
+    if (mlen) {
+        mdata = g_try_malloc0(mlen);
+        if (!mdata) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+    }
     status = nvme_format_resize(ns, blks);
     if (status != NVME_SUCCESS) {
+        g_free(mdata);
         return status;
     }
+    g_free(ns->mdata);
+    ns->mdata = mdata;
+    ns->mdata_len = mlen;
 
     /*
      * The block count and the state sized to it are changed together. Nothing

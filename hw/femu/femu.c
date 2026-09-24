@@ -938,9 +938,26 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "nlbaf must be in [1, 16] and lba_index below it");
         return false;
     }
-    if (n->meta) {
-        error_setg(errp, "meta: LBA metadata is not supported, every I/O "
-                   "would be rejected");
+    /*
+     * Metadata is kept in a buffer of its own and moved through MPTR; it is
+     * not interleaved with the data, and protection information is not
+     * computed or checked. Each block size is offered with and without it,
+     * so the formats with metadata take the second half of the list.
+     */
+    if (n->meta && (n->extended || !NVME_ID_NS_MC_SEPARATE(n->mc) ||
+                    NVME_ID_NS_MC_EXTENDED(n->mc))) {
+        error_setg(errp, "meta: only separate metadata is supported "
+                   "(mc=2, extended=0)");
+        return false;
+    }
+    if (n->meta && (n->dpc || n->dps)) {
+        error_setg(errp, "meta: protection information (dpc, dps) is not "
+                   "supported");
+        return false;
+    }
+    if (n->meta && n->nlbaf > 8) {
+        error_setg(errp, "meta: at most 8 block sizes (nlbaf), each is also "
+                   "offered with metadata");
         return false;
     }
     if ((n->meta && !n->mc) ||
@@ -987,13 +1004,14 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
     id_ns->nsfeat        |= (0x4 | 0x10);
-    id_ns->nlbaf         = n->nlbaf - 1;
+    id_ns->nlbaf         = (n->meta ? 2 * n->nlbaf : n->nlbaf) - 1;
     if (n->oncs & NVME_ONCS_COPY) {
         id_ns->mssrl     = cpu_to_le16(FEMU_COPY_MSSRL);
         id_ns->mcl       = cpu_to_le32(FEMU_COPY_MCL);
         id_ns->msrc      = FEMU_COPY_MSRC;
     }
-    id_ns->flbas         = n->lba_index | (n->extended << 4);
+    id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
+                           (n->extended << 4);
     id_ns->mc            = n->mc;
     id_ns->dpc           = n->dpc;
     id_ns->dps           = n->dps;
@@ -1006,7 +1024,11 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 
     for (i = 0; i < n->nlbaf; i++) {
         id_ns->lbaf[i].lbads = BDRV_SECTOR_BITS + i;
-        id_ns->lbaf[i].ms    = cpu_to_le16(n->meta);
+        id_ns->lbaf[i].ms    = 0;
+        if (n->meta) {
+            id_ns->lbaf[n->nlbaf + i].lbads = BDRV_SECTOR_BITS + i;
+            id_ns->lbaf[n->nlbaf + i].ms    = cpu_to_le16(n->meta);
+        }
     }
 }
 
@@ -1027,6 +1049,19 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ns->ns_blks = ns_blks(ns, lba_index);
     ns->util = bitmap_new(num_blks);
     ns->uncorrectable = bitmap_new(num_blks);
+    if (n->meta) {
+        qemu_mutex_init(&ns->mdata_lock);
+        ns->mdata_lock_init = true;
+    }
+    ns->mdata_len = num_blks * le16_to_cpu(id_ns->lbaf[lba_index].ms);
+    if (ns->mdata_len) {
+        ns->mdata = g_try_malloc0(ns->mdata_len);
+        if (!ns->mdata) {
+            error_setg(errp, "cannot allocate %" PRIu64 " bytes of metadata",
+                       ns->mdata_len);
+            return -1;
+        }
+    }
 
     /* the block format the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_index];
@@ -1270,6 +1305,26 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
      * other modes on the same controller -- only a second CSD namespace is the
      * problem -- so count CSD namespaces rather than rejecting the mode outright.
      */
+    /* metadata is carried by the plain block data path only */
+    if (n->meta) {
+        for (i = 0; i < n->num_namespaces; i++) {
+            if (ns_modes[i] != FEMU_BBSSD_MODE &&
+                ns_modes[i] != FEMU_NOSSD_MODE) {
+                error_setg(errp, "meta: namespace %d runs a mode without "
+                           "metadata support (block or no-SSD only)", i + 1);
+                g_free(ns_sizes);
+                g_free(ns_modes);
+                return 1;
+            }
+        }
+        if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+            error_setg(errp, "meta: not supported with placement (fdp)");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
     {
         int n_csd = 0;
 
@@ -1906,6 +1961,13 @@ static void femu_free_namespace_bitmaps(FemuCtrl *n)
         n->namespaces[i].util = NULL;
         g_free(n->namespaces[i].uncorrectable);
         n->namespaces[i].uncorrectable = NULL;
+        g_free(n->namespaces[i].mdata);
+        n->namespaces[i].mdata = NULL;
+        n->namespaces[i].mdata_len = 0;
+        if (n->namespaces[i].mdata_lock_init) {
+            qemu_mutex_destroy(&n->namespaces[i].mdata_lock);
+            n->namespaces[i].mdata_lock_init = false;
+        }
     }
 }
 

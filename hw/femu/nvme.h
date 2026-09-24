@@ -1673,6 +1673,20 @@ typedef struct NvmeNamespace {
     uint32_t        err_rec;
     unsigned long   *util;
     unsigned long   *uncorrectable;
+    /*
+     * Separate LBA metadata, ms bytes per block of the current format, kept
+     * apart from the data backend so the data slice and the FTL are unchanged.
+     * NULL when the format has none.
+     */
+    uint8_t         *mdata;
+    uint64_t        mdata_len;
+    /*
+     * Held while a block's data and metadata change or are read together, so
+     * pollers serving different queues cannot pair one command's data with
+     * another's metadata. Set up whenever the controller offers metadata.
+     */
+    QemuMutex       mdata_lock;
+    bool            mdata_lock_init;
     uint32_t        id;
     uint64_t        size; /* Coperd: for ZNS, FIXME */
     uint64_t        ns_blks;
@@ -2224,6 +2238,13 @@ enum OC20AdminCommands {
 static inline bool OCSSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_OCSSD_MODE);
+}
+
+/* Metadata bytes per block in the namespace's current format. */
+static inline uint16_t nvme_ns_ms(NvmeNamespace *ns)
+{
+    return le16_to_cpu(
+        ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].ms);
 }
 
 static inline bool NS_OCSSD(NvmeNamespace *ns)

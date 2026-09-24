@@ -686,6 +686,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
      */
     uint64_t data_offset = ns->backend_offset + (slba << data_shift);
     uint64_t meta_size = nlb * ms;
+    uint64_t mptr = le64_to_cpu(rw->mptr);
+    g_autofree uint8_t *mbuf = NULL;
     uint64_t elba = slba + nlb;
     uint16_t err;
     int ret;
@@ -699,6 +701,48 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                                  data_size, meta_size);
     if (err)
         return err;
+
+    /*
+     * Separate metadata travels through one contiguous, dword aligned buffer
+     * at MPTR, whichever way the data does; only PSDT 10b would make MPTR an
+     * SGL descriptor, and that is not offered. A write's metadata is taken
+     * before any data moves and stored only once the data is, so a bad MPTR
+     * leaves the blocks as they were rather than new data with old metadata.
+     */
+    if (meta_size) {
+        if (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL || (mptr & 0x3) ||
+            NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                                offsetof(NvmeRwCmd, mptr), 0, ns->id);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (req->is_write) {
+            /*
+             * Take all of both before storing either: a transfer that fails
+             * part way must leave the blocks as they were, data and metadata.
+             */
+            g_autofree uint8_t *dbuf = g_malloc(data_size);
+
+            mbuf = g_malloc(meta_size);
+            if (pci_dma_read(&n->parent_obj, mptr, mbuf, meta_size)) {
+                return NVME_DATA_TRAS_ERROR | NVME_DNR;
+            }
+            err = dma_write_cmd(n, cmd, dbuf, data_size);
+            if (err) {
+                return err;
+            }
+            qemu_mutex_lock(&ns->mdata_lock);
+            memcpy((uint8_t *)n->mbe->logical_space + data_offset, dbuf,
+                   data_size);
+            memcpy(ns->mdata + slba * ms, mbuf, meta_size);
+            qemu_mutex_unlock(&ns->mdata_lock);
+            req->slba = slba;
+            req->nlb = nlb;
+            req->status = NVME_SUCCESS;
+            nvme_mark_written(ns, slba, nlb);
+            return NVME_SUCCESS;
+        }
+    }
 
     /*
      * SGL data transfers map their scatter-gather list here and join the
@@ -732,7 +776,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         uint64_t len0 = MIN(data_size, pg - off0);
         uint64_t rem = data_size - len0;
         /* a misaligned first entry takes the checked path below */
-        if (NS_NOSSD(ns) && !(prp1 & 0x3) &&
+        if (NS_NOSSD(ns) && !meta_size && !(prp1 & 0x3) &&
             (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0))) {
             DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
                                              : DMA_DIRECTION_FROM_DEVICE;
@@ -801,7 +845,18 @@ mapped:
         req->fdp_dtype = (le16_to_cpu(rw->control) >> 4) & 0xF;
     }
 
+    /* a read takes a block's data and metadata as one snapshot */
+    if (meta_size) {
+        qemu_mutex_lock(&ns->mdata_lock);
+    }
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    if (!ret && meta_size &&
+        pci_dma_write(&n->parent_obj, mptr, ns->mdata + slba * ms, meta_size)) {
+        ret = -EIO;
+    }
+    if (meta_size) {
+        qemu_mutex_unlock(&ns->mdata_lock);
+    }
     if (!ret) {
         if (req->is_write) {
             nvme_mark_written(ns, slba, nlb);
@@ -967,6 +1022,8 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t lbads = ns->id_ns.lbaf[lbaf].lbads;
     g_autofree NvmeCopyRange *ranges = NULL;
     g_autofree uint8_t *data = NULL;
+    g_autofree uint8_t *mstage = NULL;
+    uint16_t ms;
     NvmeDsmRange *src;
     uint8_t *base;
     uint64_t total = 0;
@@ -1025,6 +1082,12 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     base = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
     data = g_malloc(total << lbads);
+    /* the blocks' metadata moves with them, staged the same way */
+    ms = nvme_ns_ms(ns);
+    if (ns->mdata) {
+        mstage = g_malloc(total * ms);
+        qemu_mutex_lock(&ns->mdata_lock);
+    }
     src = g_new(NvmeDsmRange, nr);
     for (i = 0; i < nr; i++) {
         uint64_t slba = le64_to_cpu(ranges[i].slba);
@@ -1032,12 +1095,20 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         memcpy(data + (done << lbads), base + (slba << lbads),
                (uint64_t)nlb << lbads);
+        if (mstage) {
+            memcpy(mstage + done * ms, ns->mdata + slba * ms,
+                   (uint64_t)nlb * ms);
+        }
         done += nlb;
         src[i].cattr = 0;
         src[i].slba = cpu_to_le64(slba);
         src[i].nlb = cpu_to_le32(nlb);
     }
     memcpy(base + (sdlba << lbads), data, total << lbads);
+    if (mstage) {
+        memcpy(ns->mdata + sdlba * ms, mstage, total * ms);
+        qemu_mutex_unlock(&ns->mdata_lock);
+    }
     nvme_mark_written(ns, sdlba, total);
     nvme_note_user_write(n);
 
@@ -1085,6 +1156,11 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* metadata is compared too, from the buffer at MPTR as a Write takes it */
+    if (ns->mdata && (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL ||
+                      (le64_to_cpu(rw->mptr) & 0x3))) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (cmd->psdt) {
         uint16_t sc = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
 
@@ -1110,6 +1186,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_UNRECOVERED_READ | NVME_DNR;
     }
 
+    /* data and metadata are compared against one snapshot of the blocks */
+    if (ns->mdata) {
+        qemu_mutex_lock(&ns->mdata_lock);
+    }
     for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
         uint8_t *host = g_malloc(len);
@@ -1126,12 +1206,30 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(host);
         if (cmp) {
             qemu_sglist_destroy(&req->qsg);
+            if (ns->mdata) {
+                qemu_mutex_unlock(&ns->mdata_lock);
+            }
             return NVME_CMP_FAILURE;
         }
         offset += len;
     }
 
     qemu_sglist_destroy(&req->qsg);
+
+    if (ns->mdata) {
+        uint16_t ms = nvme_ns_ms(ns);
+        uint64_t mlen = (uint64_t)nlb * ms;
+        g_autofree uint8_t *host = g_malloc(mlen);
+        uint16_t status = NVME_SUCCESS;
+
+        if (pci_dma_read(&n->parent_obj, le64_to_cpu(rw->mptr), host, mlen)) {
+            status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+        } else if (memcmp(ns->mdata + slba * ms, host, mlen)) {
+            status = NVME_CMP_FAILURE;
+        }
+        qemu_mutex_unlock(&ns->mdata_lock);
+        return status;
+    }
 
     return NVME_SUCCESS;
 }

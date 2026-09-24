@@ -5220,6 +5220,190 @@ static void femu_test_copy(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* A Read, Write or Compare of nlb blocks with separate metadata at mptr. */
+static uint16_t femu_rw_md(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                           uint16_t nlb, uint64_t data, uint64_t mptr,
+                           uint8_t psdt)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opcode;
+    rw.flags = psdt << 6;
+    rw.nsid = cpu_to_le32(1);
+    rw.mptr = cpu_to_le64(mptr);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(data + 4096);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+#define FEMU_MD_MS      8
+#define FEMU_MD_NLBAF   5           /* the nlbaf default */
+
+/*
+ * Separate LBA metadata (NVM 1.2, 2.1.4): each block size is offered with and
+ * without metadata, the device boots on the one with it, and every command
+ * that moves or drops blocks treats their metadata the same way.
+ */
+static void femu_test_metadata(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    uint64_t dbuf = buf, mbuf = buf + 0x4000, list = buf + 0x8000;
+    uint8_t d[1024], m[64], r[1024], rm[64];
+    const uint64_t cslba[1] = { 16 };
+    const uint16_t cnlb[1] = { 2 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 25), ==,
+                    2 * FEMU_MD_NLBAF - 1);                 /* NLBAF */
+    g_assert_cmpint(qtest_readb(qts, buf + 26) & 0xf, ==, FEMU_MD_NLBAF);
+    g_assert_cmpint(qtest_readw(qts, buf + 128), ==, 0);    /* LBAF0 MS */
+    g_assert_cmpint(qtest_readw(qts, buf + 128 + 4 * FEMU_MD_NLBAF), ==,
+                    FEMU_MD_MS);
+    g_assert_cmpint(qtest_readb(qts, buf + 27) & 0x2, ==, 0x2); /* MC */
+
+    /* data and metadata go in together and come back together */
+    for (i = 0; i < sizeof(d); i++) {
+        d[i] = (uint8_t)(0x31 + i * 3);
+    }
+    for (i = 0; i < sizeof(m); i++) {
+        m[i] = (uint8_t)(0xa0 + i);
+    }
+    qtest_memwrite(qts, dbuf, d, sizeof(d));
+    qtest_memwrite(qts, mbuf, m, 2 * FEMU_MD_MS);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_WRITE, 16, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, dbuf, 0, sizeof(d));
+    qtest_memset(qts, mbuf, 0, sizeof(m));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 16, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, dbuf, r, sizeof(r));
+    qtest_memread(qts, mbuf, rm, 2 * FEMU_MD_MS);
+    g_assert_cmpint(memcmp(d, r, sizeof(r)), ==, 0);
+    g_assert_cmpint(memcmp(m, rm, 2 * FEMU_MD_MS), ==, 0);
+
+    /* a misaligned MPTR, or MPTR as an SGL, is refused */
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 16, 2, dbuf, mbuf + 2, 0),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 16, 2, dbuf, mbuf, 2),
+                    ==, NVME_INVALID_FIELD);
+
+    /* metadata that cannot be fetched fails the write and changes nothing */
+    qtest_memset(qts, dbuf, 0x77, sizeof(d));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_WRITE, 16, 2, dbuf,
+                               0xffffffff00000000ULL, 0), ==,
+                    NVME_DATA_TRAS_ERROR);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 16, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, dbuf, r, sizeof(r));
+    qtest_memread(qts, mbuf, rm, 2 * FEMU_MD_MS);
+    g_assert_cmpint(memcmp(d, r, sizeof(r)), ==, 0);
+    g_assert_cmpint(memcmp(m, rm, 2 * FEMU_MD_MS), ==, 0);
+
+    /*
+     * A write whose data cannot all be fetched changes nothing either: the
+     * second page of this one is outside guest memory, and the first page
+     * used to land before the transfer failed, next to the old metadata.
+     */
+    {
+        NvmeRwCmd w = { 0 };
+        uint8_t big[8192];
+        uint8_t rbig[8192];
+        uint8_t mm[16 * FEMU_MD_MS];
+        uint8_t rmm[16 * FEMU_MD_MS];
+
+        for (i = 0; i < sizeof(big); i++) {
+            big[i] = (uint8_t)(0x13 + i * 7);
+        }
+        for (i = 0; i < sizeof(mm); i++) {
+            mm[i] = (uint8_t)(0x55 ^ i);
+        }
+        qtest_memwrite(qts, dbuf, big, sizeof(big));
+        qtest_memwrite(qts, mbuf, mm, sizeof(mm));
+        g_assert_cmpint(femu_rw_md(&c, NVME_CMD_WRITE, 128, 16, dbuf, mbuf, 0),
+                        ==, NVME_SUCCESS);
+
+        qtest_memset(qts, dbuf, 0x99, 4096);
+        qtest_memset(qts, mbuf, 0x99, sizeof(mm));
+        w.opcode = NVME_CMD_WRITE;
+        w.nsid = cpu_to_le32(1);
+        w.mptr = cpu_to_le64(mbuf);
+        w.dptr.prp1 = cpu_to_le64(dbuf);
+        w.dptr.prp2 = cpu_to_le64(0xffffffff00000000ULL);
+        w.slba = cpu_to_le64(128);
+        w.nlb = cpu_to_le16(15);
+        g_assert_cmpint(femu_io(&c, (NvmeCmd *)&w), ==, NVME_DATA_TRAS_ERROR);
+
+        g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 128, 16, dbuf, mbuf, 0),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, dbuf, rbig, sizeof(rbig));
+        qtest_memread(qts, mbuf, rmm, sizeof(rmm));
+        g_assert_cmpint(memcmp(big, rbig, sizeof(rbig)), ==, 0);
+        g_assert_cmpint(memcmp(mm, rmm, sizeof(rmm)), ==, 0);
+    }
+
+    /* compare looks at the metadata as well as the data */
+    qtest_memwrite(qts, dbuf, d, sizeof(d));
+    qtest_memwrite(qts, mbuf, m, 2 * FEMU_MD_MS);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 16, 2, dbuf, mbuf, 0),
+                    ==, NVME_SUCCESS);
+    qtest_writeb(qts, mbuf + 9, m[9] ^ 0xff);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 16, 2, dbuf, mbuf, 0),
+                    ==, NVME_CMP_FAILURE);
+
+    /* copy carries it */
+    g_assert_cmpint(femu_copy(&c, list, 64, cslba, cnlb, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, mbuf, 0, sizeof(m));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 64, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, mbuf, rm, 2 * FEMU_MD_MS);
+    g_assert_cmpint(memcmp(m, rm, 2 * FEMU_MD_MS), ==, 0);
+
+    /* write zeroes clears it */
+    {
+        NvmeRwCmd wz = { 0 };
+
+        wz.opcode = NVME_CMD_WRITE_ZEROES;
+        wz.nsid = cpu_to_le32(1);
+        wz.slba = cpu_to_le64(64);
+        wz.nlb = cpu_to_le16(0);
+        g_assert_cmpint(femu_io(&c, (NvmeCmd *)&wz), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 64, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, mbuf, rm, 2 * FEMU_MD_MS);
+    for (i = 0; i < FEMU_MD_MS; i++) {
+        g_assert_cmpint(rm[i], ==, 0);
+    }
+    g_assert_cmpint(memcmp(m + FEMU_MD_MS, rm + FEMU_MD_MS, FEMU_MD_MS), ==, 0);
+
+    /* a format without metadata and back leaves none behind */
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 16, dbuf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF), ==, NVME_SUCCESS);
+    qtest_memset(qts, mbuf, 0xee, sizeof(m));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 16, 2, dbuf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, mbuf, rm, 2 * FEMU_MD_MS);
+    for (i = 0; i < 2 * FEMU_MD_MS; i++) {
+        g_assert_cmpint(rm[i], ==, 0);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_FUZZ_ROUNDS    20000
 #define FEMU_ADM_DEBUG      0xee
 
@@ -5631,6 +5815,8 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         memset(&rw, 0, sizeof(rw));
         rw.opcode = ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))];
         rw.nsid = cpu_to_le32(1);
+        /* where separate metadata goes, if the format has any */
+        rw.mptr = cpu_to_le64(lists - 4096);
         rw.slba = cpu_to_le64(g_rand_int_range(rng, 0,
                                                MIN(nsze, 1 << 20) - nlb));
         rw.nlb = cpu_to_le16(nlb);
@@ -6948,10 +7134,26 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=4,fdm_size=16,sgl=on"
     });
+    qos_add_test("io-fuzz-metadata", "femu", femu_test_io_fuzz,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_io_fuzz_conv,
+        .edge.extra_device_opts = "sgl=on,vwc=1,oncs=0x19f,meta=8,mc=2"
+    });
     qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
                  &(QOSGraphTestOptions) {
         .arg = (void *)&femu_io_fuzz_conv,
         .edge.extra_device_opts = "femu_mode=2,sgl=on,oncs=0x19f"
+    });
+    qos_add_test("metadata", "femu", femu_test_metadata,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "meta=8,mc=2,oncs=0x19f"
+    });
+    qos_add_test("metadata-bbssd", "femu", femu_test_metadata,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "meta=8,mc=2,oncs=0x19f"
     });
     qos_add_test("admin-fuzz", "femu", femu_test_admin_fuzz,
                  &(QOSGraphTestOptions) {
