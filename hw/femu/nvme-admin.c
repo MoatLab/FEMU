@@ -2600,10 +2600,15 @@ static uint16_t nvme_format_check(NvmeNamespace *ns, uint8_t lba_idx,
 
     ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
     if (pi) {
-        if (pil && !NVME_ID_NS_DPC_LAST_EIGHT(ns->id_ns.dpc)) {
+        /* the protection information is eight bytes of the metadata */
+        if (ms < 8) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
-        if (!pil && !NVME_ID_NS_DPC_FIRST_EIGHT(ns->id_ns.dpc)) {
+        /* PIL set puts it in the first eight bytes, clear in the last */
+        if (pil && !NVME_ID_NS_DPC_FIRST_EIGHT(ns->id_ns.dpc)) {
+            return NVME_INVALID_FORMAT | NVME_DNR;
+        }
+        if (!pil && !NVME_ID_NS_DPC_LAST_EIGHT(ns->id_ns.dpc)) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
         if (!((ns->id_ns.dpc & 0x7) & (1 << (pi - 1)))) {

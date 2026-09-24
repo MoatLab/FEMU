@@ -4533,6 +4533,40 @@ static uint16_t femu_format_dw10(FemuCtrlState *c, uint32_t dw10)
 }
 
 /*
+ * Protection information lives in the metadata, eight bytes of it, so a
+ * format that turns it on must pick an LBA format with at least that much
+ * (NVM 1.2, Format NVM). Advertising a protection type in DPC is not enough:
+ * every format here has no metadata, and the command used to succeed and
+ * leave the namespace reporting protection it had nowhere to keep.
+ */
+static void femu_test_format_pi_needs_metadata(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(femu->dev.bus->qts, buf + 128 + 0), ==, 0);
+
+    /* Type 1, with and without PIL */
+    g_assert_cmpint(femu_format_dw10(&c, 1 << 5), ==, NVME_INVALID_FORMAT);
+    g_assert_cmpint(femu_format_dw10(&c, (1 << 5) | (1 << 8)), ==,
+                    NVME_INVALID_FORMAT);
+
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(femu->dev.bus->qts, buf + 29), ==, 0); /* DPS */
+    /* the plain format still works */
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
  * Secure Erase Settings are bits 11:9 of CDW10 (Base 2.3, Figure 193). No
  * erase and a user data erase are accepted; a cryptographic erase is not
  * offered and 011b and above are reserved. Bit 8 is PIL, not part of it.
@@ -6739,6 +6773,12 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("format-pi-needs-metadata", "femu",
+                 femu_test_format_pi_needs_metadata,
+                 &(QOSGraphTestOptions) {
+        /* Type 1 in either position is advertised; no format has metadata */
+        .edge.extra_device_opts = "dpc=0x19"
     });
     qos_add_test("format", "femu", femu_test_format,
                  &(QOSGraphTestOptions) {
