@@ -694,6 +694,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_DOWNLOAD_FW    = 0x11,
     NVME_ADM_CMD_DEV_SELF_TEST  = 0x14,
     NVME_ADM_CMD_SANITIZE       = 0x84,
+    NVME_ADM_CMD_GET_LBA_STATUS = 0x86,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
@@ -1103,6 +1104,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_TELEMETRY_HOST = 0x07,
     NVME_LOG_TELEMETRY_CTRL = 0x08,
+    NVME_LOG_LBA_STATUS     = 0x0e,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_FDP_CONFS      = 0x20,
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
@@ -1278,6 +1280,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_DST           = 1 << 4,
     NVME_OACS_DIRECTIVES    = 1 << 5,
     NVME_OACS_DBBUF         = 1 << 8,
+    NVME_OACS_GLSS          = 1 << 9,
 };
 
 enum NvmeIdCtrlOncs {

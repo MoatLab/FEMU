@@ -6094,6 +6094,123 @@ static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+#define FEMU_ADM_GET_LBA_STATUS  0x86
+#define FEMU_LOG_LBA_STATUS      0x0e
+
+static uint16_t femu_get_lba_status(FemuCtrlState *c, uint64_t buf,
+                                    uint64_t slba, uint32_t mndw,
+                                    uint8_t atype, uint16_t rl)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_ADM_GET_LBA_STATUS;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(mndw);
+    cmd.cdw13 = cpu_to_le32((uint32_t)atype << 24 | rl);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* one block uncorrectable, or back to readable by writing it */
+static void femu_mark_uncor(FemuCtrlState *c, uint64_t slba, uint16_t nlb)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_WRITE_UNCOR;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    g_assert_cmpint(femu_io(c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+}
+
+/*
+ * Get LBA Status (NVM 1.2, 4.2.1): the blocks a read would fail on, as runs
+ * of LBAs, and the allocated ones; plus the LBA Status Information log that
+ * says how many there are to look for.
+ */
+static void femu_test_get_lba_status(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 256) & (1 << 9), !=, 0); /* GLSS */
+
+    femu_mark_uncor(&c, 10, 3);
+    femu_mark_uncor(&c, 20, 1);
+
+    /* both runs, coalesced, reported as written uncorrectable */
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 1023, 0x11, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 2);             /* NLSD */
+    g_assert_cmpint(qtest_readb(qts, buf + 4), ==, 2);         /* COMPLETE */
+    g_assert_cmpuint(qtest_readq(qts, buf + 8), ==, 10);
+    g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 2);        /* 0's based */
+    g_assert_cmpint(qtest_readb(qts, buf + 21) & 0x7, ==, 3);
+    g_assert_cmpuint(qtest_readq(qts, buf + 24), ==, 20);
+    g_assert_cmpint(qtest_readl(qts, buf + 32), ==, 0);
+
+    /* room for one: the rest is left for another command */
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, (8 + 16) / 4 - 1, 0x10,
+                                        0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 1);
+    g_assert_cmpint(qtest_readb(qts, buf + 4), ==, 1);         /* INCOMPLETE */
+
+    /* the first run starts at the starting LBA, and the range bounds it */
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 11, 1023, 0x11, 5), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, buf + 8), ==, 11);
+    g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 1);
+
+    /* LBA Status Information: nothing listed, an estimate to look for */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_LBA_STATUS) & 1, ==, 1);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_LBA_STATUS, buf, 16,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 16);            /* LSLPLEN */
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 4);         /* ESTULB */
+
+    /* a rewritten block is readable again and is no longer reported */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 1023, 0x11, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 1);
+
+    /*
+     * allocated blocks: the ones marked uncorrectable are not deallocated,
+     * and the eight just written from LBA 20
+     */
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 1023, 0x02, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 2);
+    g_assert_cmpuint(qtest_readq(qts, buf + 8), ==, 10);
+    g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 2);
+    g_assert_cmpuint(qtest_readq(qts, buf + 24), ==, 20);
+    g_assert_cmpint(qtest_readl(qts, buf + 32), ==, 7);
+    g_assert_cmpint(qtest_readb(qts, buf + 37) & 0x7, ==, 2);
+
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 1023, 0x05, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 1ULL << 40, 1023, 0x11, 0),
+                    ==, NVME_LBA_RANGE);
+
+    femu_disable(&c);
+    guest_free(alloc, dbuf);
+    guest_free(alloc, buf);
+}
+
 #define FEMU_KV_FUZZ_KEYS   16
 
 /* Put key @k of the pool into the command, @len bytes of it. */
@@ -7048,6 +7165,10 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lba_index=3"
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
+    qos_add_test("get-lba-status", "femu", femu_test_get_lba_status,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x19f"
+    });
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {
         /* the captured counters come from the FTL, which NoSSD has none of */

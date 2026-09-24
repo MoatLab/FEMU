@@ -1410,7 +1410,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
 
     /* TODO: NVME_OACS_NS_MGMT */
-    id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST);
+    id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST |
+                                   NVME_OACS_GLSS);
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;

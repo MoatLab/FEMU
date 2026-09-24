@@ -60,6 +60,7 @@ static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_GET_FEATURES]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_DEV_SELF_TEST]    = NVME_CMD_EFF_CSUPP,
+    [NVME_ADM_CMD_GET_LBA_STATUS]   = NVME_CMD_EFF_CSUPP,
 };
 
 //static const uint32_t nvme_cse_iocs_none[256];
@@ -1598,6 +1599,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_TELEMETRY_CTRL] = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_LBA_STATUS]   = cpu_to_le32(NVME_LIDS_LSUPP);
     if (nvme_can_sanitize(n)) {
         lids[NVME_LOG_SANITIZE] = cpu_to_le32(NVME_LIDS_LSUPP);
     }
@@ -2323,6 +2325,128 @@ static uint16_t nvme_dst_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
  * the command completes so no sanitize is ever in progress and none can fail.
  * Media verification, overwrite and cryptographic erase are not offered.
  */
+/*
+ * Get LBA Status (NVM 1.2, 4.2.1). The blocks a read would fail on here are
+ * the ones a Write Uncorrectable marked, and a write clears them, so the
+ * tracked list and a scan are the same thing: action types 10h and 11h both
+ * report runs of the uncorrectable map (LBARS 011b), and 02h reports runs of
+ * allocated blocks (010b). Runs are as long as possible; CMPC says whether
+ * more remained than MNDW had room for.
+ */
+static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint64_t slba = (uint64_t)le32_to_cpu(cmd->cdw11) << 32 |
+                    le32_to_cpu(cmd->cdw10);
+    uint64_t len = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) * 4;
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
+    uint8_t atype = dw13 >> 24;
+    uint32_t rl = dw13 & 0xffff;
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    g_autofree uint8_t *buf = NULL;
+    NvmeNamespace *ns;
+    unsigned long *map;
+    uint64_t nsze, end, lba;
+    uint32_t room, nlsd = 0;
+    uint8_t lbars;
+
+    if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    ns = nvme_ns(n, nsid);
+    if (!ns) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    switch (atype) {
+    case 0x10:
+    case 0x11:
+        map = ns->uncorrectable;
+        lbars = 0x3;
+        break;
+    case 0x02:
+        map = ns->util;
+        lbars = 0x2;
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    nsze = le64_to_cpu(ns->id_ns.nsze);
+    if (slba >= nsze) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+    if (!map) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (nvme_check_mdts(n, len) || len > UINT32_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    end = rl ? MIN(slba + rl, nsze) : nsze;
+    room = len < 8 ? 0 : (len - 8) / 16;
+
+    buf = g_malloc0(len);
+    buf[4] = 0x2;                       /* COMPLETE unless a run is left out */
+    for (lba = slba; lba < end; ) {
+        uint64_t first = find_next_bit(map, end, lba);
+        uint64_t last;
+        uint8_t *d;
+
+        if (first >= end) {
+            break;
+        }
+        if (nlsd == room) {
+            buf[4] = 0x1;               /* INCOMPLETE */
+            break;
+        }
+        last = find_next_zero_bit(map, end, first);
+        /* the block count is 32 bits and 0's based */
+        last = MIN(last, first + ((uint64_t)UINT32_MAX + 1));
+        d = buf + 8 + 16 * nlsd;
+        stq_le_p(d, first);
+        stl_le_p(d + 8, last - first - 1);
+        d[13] = lbars;
+        nlsd++;
+        lba = last;
+    }
+    if (len >= 4) {
+        stl_le_p(buf, nlsd);
+    }
+
+    return dma_read_prp(n, buf, len, prp1, prp2);
+}
+
+/*
+ * LBA Status Information (NVM 1.2, 4.1.4.5). No namespace elements are listed;
+ * the estimate says how many blocks a Get LBA Status over each namespace
+ * would find, which is what a host is told to do in that case.
+ */
+static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
+                                    uint32_t buf_len, uint64_t off)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint8_t log[16] = { 0 };
+    uint64_t estulb = 0;
+    int i;
+
+    if (off >= sizeof(log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->uncorrectable) {
+            estulb += bitmap_count_one(ns->uncorrectable,
+                                       le64_to_cpu(ns->id_ns.nsze));
+        }
+    }
+    stl_le_p(log, sizeof(log));
+    stl_le_p(log + 8, MIN(estulb, UINT32_MAX - 1));
+
+    return dma_read_prp(n, log + off, MIN(sizeof(log) - off, buf_len),
+                        prp1, prp2);
+}
+
 static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -2459,6 +2583,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_TELEMETRY_HOST:
     case NVME_LOG_TELEMETRY_CTRL:
         return nvme_telemetry_log(n, cmd, lid, len, off);
+    case NVME_LOG_LBA_STATUS:
+        return nvme_lba_status_log(n, cmd, len, off);
     case NVME_LOG_SANITIZE:
         if (!nvme_can_sanitize(n)) {
             return NVME_INVALID_LOG_ID | NVME_DNR;
@@ -2821,6 +2947,8 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_set_db_memory(n, cmd);
     case NVME_ADM_CMD_SANITIZE:
         return nvme_sanitize(n, cmd);
+    case NVME_ADM_CMD_GET_LBA_STATUS:
+        return nvme_get_lba_status(n, cmd);
     case NVME_ADM_CMD_DEV_SELF_TEST:
         return nvme_dev_self_test(n, cmd);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
