@@ -939,17 +939,12 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         return false;
     }
     /*
-     * Metadata is kept in a buffer of its own and moved through MPTR; it is
-     * not interleaved with the data, and protection information is not
-     * computed or checked. Each block size is offered with and without it,
-     * so the formats with metadata take the second half of the list.
+     * Metadata is kept in a store of its own and moved either through MPTR
+     * or interleaved with the data, as mc allows (checked below); protection
+     * information is not computed or checked. Each block size is offered
+     * with and without it, so the formats with metadata take the second half
+     * of the list.
      */
-    if (n->meta && (n->extended || !NVME_ID_NS_MC_SEPARATE(n->mc) ||
-                    NVME_ID_NS_MC_EXTENDED(n->mc))) {
-        error_setg(errp, "meta: only separate metadata is supported "
-                   "(mc=2, extended=0)");
-        return false;
-    }
     if (n->meta && (n->dpc || n->dps)) {
         error_setg(errp, "meta: protection information (dpc, dps) is not "
                    "supported");

@@ -5404,6 +5404,82 @@ static void femu_test_metadata(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+#define FEMU_MD_UNIT    (512 + FEMU_MD_MS)
+
+/*
+ * Extended LBAs (NVM 1.2, 2.1.4.1): each block's metadata follows its data in
+ * the host buffer. The same commands carry it, the transfer (and so MDTS) is
+ * data plus metadata, and Format moves between interleaved and separate.
+ */
+static void femu_test_metadata_extended(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    uint64_t mbuf = buf + 0x8000;
+    uint8_t d[2 * FEMU_MD_UNIT];
+    uint8_t r[2 * FEMU_MD_UNIT];
+    uint8_t rm[2 * FEMU_MD_MS];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 26), ==, 0x10 | FEMU_MD_NLBAF);
+    g_assert_cmpint(qtest_readb(qts, buf + 27) & 0x3, ==, 0x3);   /* MC */
+
+    /* interleaved in, interleaved out */
+    for (i = 0; i < sizeof(d); i++) {
+        d[i] = (uint8_t)(0x47 + i * 13);
+    }
+    qtest_memwrite(qts, buf, d, sizeof(d));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_WRITE, 8, 2, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, sizeof(d));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 8, 2, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmpint(memcmp(d, r, sizeof(r)), ==, 0);
+
+    /* compare covers both parts of each block */
+    qtest_memwrite(qts, buf, d, sizeof(d));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 8, 2, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    qtest_writeb(qts, buf + FEMU_MD_UNIT + 512 + 3, d[FEMU_MD_UNIT + 515] ^ 1);
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 8, 2, buf, 0, 0), ==,
+                    NVME_CMP_FAILURE);
+
+    /*
+     * MDTS is two 4 KiB pages here: sixteen blocks are exactly that much
+     * data, and more once their metadata rides along.
+     */
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_WRITE, 8, 16, buf, 0, 0), ==,
+                    NVME_INVALID_FIELD);
+
+    /* the same blocks, formatted to separate metadata, then back */
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF), ==, NVME_SUCCESS);
+    qtest_memset(qts, mbuf, 0xee, sizeof(rm));
+    g_assert_cmpint(femu_rw_md(&c, NVME_CMD_READ, 8, 2, buf, mbuf, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, mbuf, rm, sizeof(rm));
+    for (i = 0; i < sizeof(rm); i++) {
+        g_assert_cmpint(rm[i], ==, 0);
+    }
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | 1 << 4), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 26), ==, 0x10 | FEMU_MD_NLBAF);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_FUZZ_ROUNDS    20000
 #define FEMU_ADM_DEBUG      0xee
 
@@ -7154,6 +7230,11 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "meta=8,mc=2,oncs=0x19f"
+    });
+    qos_add_test("metadata-extended", "femu", femu_test_metadata_extended,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "meta=8,mc=3,extended=1,mdts=1,oncs=0x19f"
     });
     qos_add_test("admin-fuzz", "femu", femu_test_admin_fuzz,
                  &(QOSGraphTestOptions) {

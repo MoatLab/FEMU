@@ -163,19 +163,21 @@ start_femu() {
         timeout 5 "$FEMU" -machine q35 -device "femu,$1" -S -no-user-config \
         -nodefaults -display none </dev/null 2>&1
 }
-out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=3")"; rc=$?
+out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=2,extended=1")"; rc=$?
 if (( rc != 0 && rc != 124 )) &&
-   grep -q "meta: only separate metadata" <<<"$out"; then
-    ok "metadata with the extended capability refused"
+   grep -q "need a matching metadata capability" <<<"$out"; then
+    ok "interleaved metadata without the capability refused"
 else
-    bad "metadata with the extended capability refused (exit $rc): $out"
+    bad "interleaved metadata without the capability refused (exit $rc): $out"
 fi
-out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=2")"; rc=$?
-if (( rc == 124 )) && ! grep -q "meta:" <<<"$out"; then
-    ok "separate metadata accepted"
-else
-    bad "separate metadata accepted (exit $rc): $out"
-fi
+for mc in 2 3; do
+    out="$(start_femu "devsz_mb=512,femu_mode=2,meta=8,mc=$mc")"; rc=$?
+    if (( rc == 124 )) && ! grep -q "meta" <<<"$out"; then
+        ok "metadata with mc=$mc accepted"
+    else
+        bad "metadata with mc=$mc accepted (exit $rc): $out"
+    fi
+done
 
 echo
 echo "SSD_CONFIG_TEST pass=$pass fail=$fail"

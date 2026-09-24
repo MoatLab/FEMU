@@ -120,7 +120,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `dpc` | uint8 | `0` | Protection types offered (Identify DPC); must be 0 with `meta` | set on `-device femu,...` |
 | `dps` | uint8 | `0` | Protection type in use (Identify DPS); must be 0 with `meta` | set on `-device femu,...` |
 | `elpe` | uint8 | `3` | _undocumented_ | set on `-device femu,...` |
-| `extended` | uint8 | `0` | Metadata interleaved with data; not supported with `meta`, keep 0 | set on `-device femu,...` |
+| `extended` | uint8 | `0` | Boot with metadata interleaved with the data (extended LBAs); needs `mc` bit 0 | set on `-device femu,...` |
 | `fdm_size` | uint64 | `0` | Functional data memory size (MB), required | set on `-device femu,...` |
 | `fdp` | bool | `false` | Enable Flexible Data Placement on the subsystem. | set on `-device femu-subsys,...` |
 | `fdp.isolation_mode` | uint32 | `0` | _undocumented_ | set on `-device femu-subsys,...` |
@@ -145,8 +145,8 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `lver` | uint8 | `0x2` | _undocumented_ | set on `-device femu,...` |
 | `max_cqes` | uint8 | `0x4` | _undocumented_ | set on `-device femu,...` |
 | `max_sqes` | uint8 | `0x6` | _undocumented_ | set on `-device femu,...` |
-| `mc` | uint8 | `0` | Metadata capabilities; `2` (separate buffer) is required with `meta` | set on `-device femu,...` |
-| `meta` | uint8 | `0` | Metadata bytes per block, carried in a separate buffer (MPTR); block and no-SSD modes, no placement. Each block size is then offered without metadata (formats 0 to `nlbaf`-1) and with it (the next `nlbaf`), and the device boots on the one with it | set on `-device femu,...` |
+| `mc` | uint8 | `0` | Metadata capabilities: bit 0 interleaved, bit 1 separate buffer; Format may pick either one offered | set on `-device femu,...` |
+| `meta` | uint8 | `0` | Metadata bytes per block, carried through MPTR or interleaved with the data (see `mc`, `extended`); block and no-SSD modes, no placement, no protection information. Each block size is then offered without metadata (formats 0 to `nlbaf`-1) and with it (the next `nlbaf`), and the device boots on the one with it | set on `-device femu,...` |
 | `mpsmax` | uint8 | `0` | _undocumented_ | set on `-device femu,...` |
 | `mpsmin` | uint8 | `0` | _undocumented_ | set on `-device femu,...` |
 | `ms` | uint8 | `16` | _undocumented_ | set on `-device femu,...` |

@@ -667,6 +667,64 @@ static uint16_t nvme_rw_map_sgl(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return status;
 }
 
+/*
+ * Extended LBAs (NVM 1.2, 2.1.4.1): each block's metadata follows its data in
+ * the host buffer, so the transfer is nlb * (block + ms) bytes, split between
+ * the two stores. A write takes the whole buffer before storing any of it,
+ * and both directions hold the metadata lock so a block's pair stays together.
+ */
+static uint16_t nvme_rw_extended(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                                 NvmeRequest *req, uint64_t slba, uint32_t nlb,
+                                 uint64_t data_offset)
+{
+    uint16_t ms = nvme_ns_ms(ns);
+    uint64_t ds = 1ULL << NVME_ID_NS_LBADS(ns);
+    uint64_t unit = ds + ms;
+    uint64_t len = (uint64_t)nlb * unit;
+    uint8_t *data = (uint8_t *)n->mbe->logical_space + data_offset;
+    g_autofree uint8_t *buf = NULL;
+    uint16_t status;
+    uint32_t i;
+
+    /*
+     * The data pointer is walked with a 32-bit length; without MDTS the
+     * interleaved total can pass it where the data alone does not.
+     */
+    if (len > UINT32_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    buf = g_malloc(len);
+    if (req->is_write) {
+        status = dma_write_cmd(n, cmd, buf, len);
+        if (status) {
+            return status;
+        }
+        qemu_mutex_lock(&ns->mdata_lock);
+        for (i = 0; i < nlb; i++) {
+            memcpy(data + i * ds, buf + i * unit, ds);
+            memcpy(ns->mdata + (slba + i) * ms, buf + i * unit + ds, ms);
+        }
+        qemu_mutex_unlock(&ns->mdata_lock);
+        nvme_mark_written(ns, slba, nlb);
+    } else {
+        qemu_mutex_lock(&ns->mdata_lock);
+        for (i = 0; i < nlb; i++) {
+            memcpy(buf + i * unit, data + i * ds, ds);
+            memcpy(buf + i * unit + ds, ns->mdata + (slba + i) * ms, ms);
+        }
+        qemu_mutex_unlock(&ns->mdata_lock);
+        status = dma_read_cmd(n, cmd, buf, len);
+        if (status) {
+            return status;
+        }
+    }
+
+    req->slba = slba;
+    req->nlb = nlb;
+    req->status = NVME_SUCCESS;
+    return NVME_SUCCESS;
+}
+
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
@@ -686,6 +744,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
      */
     uint64_t data_offset = ns->backend_offset + (slba << data_shift);
     uint64_t meta_size = nlb * ms;
+    /* interleaved metadata counts towards the transfer, and so MDTS */
+    bool extended = meta_size && NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas);
     uint64_t mptr = le64_to_cpu(rw->mptr);
     g_autofree uint8_t *mbuf = NULL;
     uint64_t elba = slba + nlb;
@@ -698,9 +758,14 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     }
 
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
-                                 data_size, meta_size);
+                                 extended ? data_size + meta_size : data_size,
+                                 meta_size);
     if (err)
         return err;
+
+    if (extended) {
+        return nvme_rw_extended(n, ns, cmd, req, slba, nlb, data_offset);
+    }
 
     /*
      * Separate metadata travels through one contiguous, dword aligned buffer
@@ -710,8 +775,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
      * leaves the blocks as they were rather than new data with old metadata.
      */
     if (meta_size) {
-        if (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL || (mptr & 0x3) ||
-            NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
+        if (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL || (mptr & 0x3)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                                 offsetof(NvmeRwCmd, mptr), 0, ns->id);
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -1124,6 +1188,43 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+/* Compare with extended LBAs: the interleaved buffer against both stores. */
+static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
+                                      NvmeCmd *cmd, uint64_t slba,
+                                      uint32_t nlb, uint64_t data_offset)
+{
+    uint16_t ms = nvme_ns_ms(ns);
+    uint64_t ds = 1ULL << NVME_ID_NS_LBADS(ns);
+    uint64_t unit = ds + ms;
+    uint64_t len = (uint64_t)nlb * unit;
+    const uint8_t *data = (uint8_t *)n->mbe->logical_space + data_offset;
+    g_autofree uint8_t *host = NULL;
+    uint16_t status = NVME_SUCCESS;
+    uint32_t i;
+
+    /* as for Read and Write, the data pointer takes a 32-bit length */
+    if (nvme_check_mdts(n, len) || len > UINT32_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (find_next_bit(ns->uncorrectable, slba + nlb, slba) < slba + nlb) {
+        return NVME_UNRECOVERED_READ | NVME_DNR;
+    }
+    host = g_malloc(len);
+    status = dma_write_cmd(n, cmd, host, len);
+    if (status) {
+        return status;
+    }
+    qemu_mutex_lock(&ns->mdata_lock);
+    for (i = 0; i < nlb && status == NVME_SUCCESS; i++) {
+        if (memcmp(host + i * unit, data + i * ds, ds) ||
+            memcmp(host + i * unit + ds, ns->mdata + (slba + i) * ms, ms)) {
+            status = NVME_CMP_FAILURE;
+        }
+    }
+    qemu_mutex_unlock(&ns->mdata_lock);
+    return status;
+}
+
 static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                              NvmeRequest *req)
 {
@@ -1150,6 +1251,9 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);
     if (dulbe) {
         return dulbe;
+    }
+    if (ns->mdata && NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
+        return nvme_compare_extended(n, ns, cmd, slba, nlb, offset);
     }
     if (nvme_check_mdts(n, data_size)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
