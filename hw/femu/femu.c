@@ -609,6 +609,8 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             nvme_clear_ctrl(n, shutdown);
             n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED |
                              (CSTS_SHST_MASK << CSTS_SHST_SHIFT));
+            /* the Timestamp is not kept across a Controller Level Reset */
+            nvme_timestamp_set(n, 0, 0);
             n->bar.cc = data;
         } else if (!NVME_CC_EN(data)) {
             /* the other fields are the host's to set while disabled */
@@ -1427,7 +1429,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
     /* a Copy's write portion is one write here, so it is single-atomic */
-    id->oncs         = cpu_to_le16(n->oncs |
+    id->oncs         = cpu_to_le16(n->oncs | NVME_ONCS_TIMESTAMP |
                                    (n->oncs & NVME_ONCS_COPY ? NVME_ONCS_NVMCSA
                                                              : 0));
     /* the Open-Channel commands take PRPs only, so they get no SGLs */
@@ -1819,6 +1821,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
     /* the backing store starts empty, as if never written */
     n->sanitize_sstat = NVME_SSTAT_GDE;
+    seqlock_init(&n->ts_seq);
+    nvme_timestamp_set(n, 0, 0);
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);

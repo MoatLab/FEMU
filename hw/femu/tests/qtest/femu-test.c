@@ -1817,6 +1817,21 @@ static uint16_t femu_ruh_update(FemuCtrlState *c, uint64_t pids, uint16_t npid)
     return FEMU_SC(status);
 }
 
+#define FEMU_FID_TIMESTAMP      0x0e
+#define FEMU_ONCS_TIMESTAMP     (1 << 6)
+
+/* Get or Set the Timestamp feature through an 8-byte buffer at buf */
+static uint16_t femu_timestamp(FemuCtrlState *c, bool set, uint8_t sel,
+                               uint32_t save, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FID_TIMESTAMP | sel << 8 | save << 31);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
 static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -1826,12 +1841,16 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
     uint16_t list[2] = { cpu_to_le16(0), cpu_to_le16(1) };
     uint8_t buf[64 + 2 * 64];
     uint32_t numd = sizeof(buf) / 4 - 1;
+    const uint64_t host = 0x0123456789abULL;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
+    /* each event carries the Timestamp feature's value, as the host set it */
     pids = guest_alloc(alloc, 4096);
+    qtest_writeq(femu->dev.bus->qts, pids, host);
+    g_assert_cmpint(femu_timestamp(&c, true, 0, 0, pids), ==, NVME_SUCCESS);
     qtest_memwrite(femu->dev.bus->qts, pids, list, sizeof(list));
     g_assert_cmpint(femu_ruh_update(&c, pids, 2), ==, NVME_SUCCESS);
 
@@ -1856,7 +1875,10 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
         /* placement id, namespace id and reclaim unit fields are all valid */
         g_assert_cmpint(ev[1], ==, 0x7);
         g_assert_cmpint(lduw_le_p(ev + 2), ==, i);
-        g_assert_cmpint(ldq_le_p(ev + 4) & ((1ull << 48) - 1), !=, 0);
+        g_assert_cmpuint(ldq_le_p(ev + 4) & ((1ull << 48) - 1), >=, host);
+        g_assert_cmpuint(ldq_le_p(ev + 4) & ((1ull << 48) - 1), <,
+                         host + 60 * 1000);
+        g_assert_cmpint(ev[10], ==, 1 << 1);            /* origin 001b */
         g_assert_cmpint(ldl_le_p(ev + 12), ==, 1);
     }
 
@@ -7486,6 +7508,66 @@ static void femu_test_kv_list_mdts0(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Timestamp (Base 2.3, 5.2.26.1.7): advertised in ONCS; after a Set the
+ * controller counts on from the host's value and reports origin 001b; a
+ * Controller Level Reset clears it to the time since that reset, origin 000b.
+ * The value is 48 bits and the two bytes above it are reserved.
+ */
+static void femu_test_timestamp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint64_t host = 0x0123456789abULL;
+    uint64_t mem, buf, ts;
+    uint32_t cap;
+
+    femu_enable(&c, &femu->dev, alloc);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 520) & FEMU_ONCS_TIMESTAMP, !=, 0);
+
+    qtest_memset(qts, buf, 0xff, 8);
+    g_assert_cmpint(femu_timestamp(&c, false, 0, 0, buf), ==, NVME_SUCCESS);
+    ts = qtest_readq(qts, buf);
+    g_assert_cmpuint(ts >> 48, ==, 0);          /* origin 000b, sync 0 */
+    g_assert_cmpuint(ts, <, 60 * 1000);
+
+    /* the reserved bytes of the host's value are ignored */
+    qtest_writeq(qts, buf, host | 0xabcdULL << 48);
+    g_assert_cmpint(femu_timestamp(&c, true, 0, 0, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, 8);
+    g_assert_cmpint(femu_timestamp(&c, false, 0, 0, buf), ==, NVME_SUCCESS);
+    ts = qtest_readq(qts, buf);
+    g_assert_cmpuint(ts & 0xffffffffffffULL, >=, host);
+    g_assert_cmpuint(ts & 0xffffffffffffULL, <, host + 60 * 1000);
+    g_assert_cmpuint((ts >> 48) & 0xff, ==, 1 << 1);    /* origin 001b */
+
+    /* not saveable; changeable; the default is a reset's zero */
+    g_assert_cmpint(femu_timestamp(&c, true, 0, 1, buf), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmpint(femu_get_feature(&c, FEMU_FID_TIMESTAMP, 3, 0, 0, &cap),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(cap, ==, NVME_FEAT_CAP_CHANGE);
+    qtest_memset(qts, buf, 0xff, 8);
+    g_assert_cmpint(femu_timestamp(&c, false, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
+
+    /* a Controller Level Reset starts it over */
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_timestamp(&c, false, 0, 0, buf), ==, NVME_SUCCESS);
+    ts = qtest_readq(qts, buf);
+    g_assert_cmpuint(ts >> 48, ==, 0);
+    g_assert_cmpuint(ts, <, 60 * 1000);
+
+    guest_free(alloc, mem);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -7670,6 +7752,7 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
     });
+    qos_add_test("timestamp", "femu", femu_test_timestamp, NULL);
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {
         /* the captured counters come from the FTL, which NoSSD has none of */

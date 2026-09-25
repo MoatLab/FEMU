@@ -6,6 +6,7 @@
 #include "qemu/units.h"
 #include "qemu/cutils.h"
 #include "qemu/memalign.h"
+#include "qemu/seqlock.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
@@ -1292,6 +1293,7 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_WRITE_ZEROS   = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,
     NVME_ONCS_RESRVATIONS   = 1 << 5,
+    NVME_ONCS_TIMESTAMP     = 1 << 6,
     NVME_ONCS_VERIFY        = 1 << 7,
     NVME_ONCS_COPY          = 1 << 8,
     NVME_ONCS_NVMCSA        = 1 << 9,
@@ -2064,6 +2066,14 @@ typedef struct FemuCtrl {
     bool            telemetry_captured;
     uint8_t         telemetry_dgn;
     uint16_t        sanitize_sstat;     /* Sanitize Status log SSTAT */
+    /*
+     * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set
+     * under the BQL, read from the pollers too, hence the sequence lock.
+     */
+    QemuSeqLock     ts_seq;
+    uint64_t        ts_base;
+    int64_t         ts_anchor;
+    uint8_t         ts_origin;
     uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
     uint32_t        aer_queued;    /* events waiting for an outstanding AER */
@@ -2321,6 +2331,8 @@ int nvme_check_sqid(FemuCtrl *n, uint16_t sqid);
 int nvme_check_cqid(FemuCtrl *n, uint16_t cqid);
 void nvme_inc_cq_tail(NvmeCQueue *cq);
 void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe);
+uint64_t nvme_timestamp(FemuCtrl *n);
+void nvme_timestamp_set(FemuCtrl *n, uint64_t value, uint8_t origin);
 void nvme_inc_sq_head(NvmeSQueue *sq);
 void nvme_update_cq_head(NvmeCQueue *cq);
 void nvme_update_cq_eventidx(NvmeCQueue *cq);

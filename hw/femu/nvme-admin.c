@@ -26,6 +26,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
+    [NVME_TIMESTAMP]                = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -41,6 +42,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
+    [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
@@ -1064,6 +1066,13 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         return dma_read_prp(n, hbs, sizeof(hbs), le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
+    /* the Timestamp a Controller Level Reset leaves: zero, origin 000b */
+    if (fid == NVME_TIMESTAMP) {
+        uint8_t ts[8] = { 0 };
+
+        return dma_read_prp(n, ts, sizeof(ts), le64_to_cpu(cmd->dptr.prp1),
+                            le64_to_cpu(cmd->dptr.prp2));
+    }
 
     uint32_t result = 0;
 
@@ -1275,6 +1284,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return dma_read_prp(n, n->features.host_behavior,
                             sizeof(n->features.host_behavior), prp1, prp2);
+    case NVME_TIMESTAMP: {
+        uint8_t ts[8];
+
+        stq_le_p(ts, nvme_timestamp(n));
+        return dma_read_prp(n, ts, sizeof(ts), prp1, prp2);
+    }
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -1487,6 +1502,18 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         hbs[4] &= ~0x3;
         memcpy(n->features.host_behavior, hbs, sizeof(hbs));
+        break;
+    }
+    case NVME_TIMESTAMP: {
+        /* Figure 414: 48 bits of milliseconds; bytes 7:6 are reserved */
+        uint8_t ts[8];
+        uint16_t status;
+
+        status = dma_write_prp(n, ts, sizeof(ts), prp1, prp2);
+        if (status) {
+            return status;
+        }
+        nvme_timestamp_set(n, ldq_le_p(ts), 1);
         break;
     }
     case NVME_FDP_EVENTS: {

@@ -159,6 +159,43 @@ void nvme_resume_pollers(FemuCtrl *n, bool was_started)
  * soon as it flips, so on a host without strong store ordering a single copy
  * could show the new phase beside the previous command identifier.
  */
+/*
+ * The Timestamp feature (Base 2.3, 5.2.26.1.7) as Figure 415 lays it out:
+ * milliseconds modulo 2^48, then Synch in bit 48 and the origin in 51:49.
+ * The host clock counts on continuously, paused guest or not, so Synch is 0.
+ */
+uint64_t nvme_timestamp(FemuCtrl *n)
+{
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    uint64_t base, ms;
+    int64_t anchor;
+    uint8_t origin;
+    unsigned seq;
+
+    do {
+        seq = seqlock_read_begin(&n->ts_seq);
+        base = n->ts_base;
+        anchor = n->ts_anchor;
+        origin = n->ts_origin;
+    } while (seqlock_read_retry(&n->ts_seq, seq));
+
+    ms = (base + (now - anchor)) & ((1ULL << 48) - 1);
+    return ms | (uint64_t)origin << 49;
+}
+
+/*
+ * Origin 0 means a Controller Level Reset cleared it, 1 that the host set it.
+ * Called only under the BQL, so there is one writer.
+ */
+void nvme_timestamp_set(FemuCtrl *n, uint64_t value, uint8_t origin)
+{
+    seqlock_write_begin(&n->ts_seq);
+    n->ts_base = value & ((1ULL << 48) - 1);
+    n->ts_anchor = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    n->ts_origin = origin;
+    seqlock_write_end(&n->ts_seq);
+}
+
 void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe)
 {
     const size_t body = offsetof(NvmeCqe, cid);     /* dwords 0 to 2 */

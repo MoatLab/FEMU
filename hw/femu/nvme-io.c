@@ -1458,27 +1458,6 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 /* ========== FDP IO Command Helpers ========== */
 
-static inline uint64_t nvme_get_timestamp(FemuCtrl *n)
-{
-    uint64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-
-    union nvme_timestamp {
-        struct {
-            uint64_t timestamp : 48;
-            uint64_t sync      : 1;
-            uint64_t origin    : 3;
-            uint64_t rsvd1     : 12;
-        };
-        uint64_t all;
-    };
-
-    union nvme_timestamp ts;
-    ts.all = 0;
-    ts.timestamp = now;
-
-    return cpu_to_le64(ts.all);
-}
-
 uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid)
 {
     uint16_t rgif = ns->endgrp->fdp.rgif;
@@ -1555,7 +1534,8 @@ void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
     qemu_mutex_lock(&eg->fdp.events_lock);
     slot = ebuf->next;
     ebuf->events[slot] = *ev;
-    ebuf->events[slot].timestamp = nvme_get_timestamp(n);
+    /* the Timestamp feature's current value (Base 2.3, Figure 296) */
+    ebuf->events[slot].timestamp = cpu_to_le64(nvme_timestamp(n));
     ebuf->next = (slot + 1) % NVME_FDP_MAX_EVENTS;
     if (ebuf->nelems == NVME_FDP_MAX_EVENTS) {
         ebuf->start = ebuf->next;   /* full: the oldest is overwritten */
