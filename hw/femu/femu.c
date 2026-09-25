@@ -611,6 +611,8 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                              (CSTS_SHST_MASK << CSTS_SHST_SHIFT));
             /* the Timestamp is not kept across a Controller Level Reset */
             nvme_timestamp_set(n, 0, 0);
+            n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            femu_pel_reset(n);
             n->bar.cc = data;
         } else if (!NVME_CC_EN(data)) {
             /* the other fields are the host's to set while disabled */
@@ -1422,7 +1424,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->aerl         = n->aerl;
     id->frmw         = 7 << 1 | 1;
     id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED |
-                       NVME_LPA_TELEMETRY;
+                       NVME_LPA_TELEMETRY | NVME_LPA_PERSISTENT_EVENT;
+    id->pels         = cpu_to_le32(1);
     id->elpe         = n->elpe;
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;
@@ -1794,7 +1797,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     pthread_spin_init(&n->fw_cpu_lock, PTHREAD_PROCESS_PRIVATE);
 
     n->completed = 0;
-    n->start_time = time(NULL);
+    n->power_on_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     /* doorbells start at 0x1000, two per queue, each 4 << stride bytes apart */
     /*
      * The transport makes BAR0 bits 13:4 read only, so the registers take at
@@ -1823,6 +1826,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->sanitize_sstat = NVME_SSTAT_GDE;
     seqlock_init(&n->ts_seq);
     nvme_timestamp_set(n, 0, 0);
+    n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);
@@ -1884,6 +1888,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
     }
+
+    /* last, so its power-on snapshot sees a device that is fully up */
+    femu_pel_init(n);
 }
 
 /*
@@ -2034,6 +2041,7 @@ static void femu_exit(PCIDevice *pci_dev)
      */
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
+    femu_pel_exit(n);
     femu_exit_extensions(n);
 
     nvme_clear_ctrl(n, true);

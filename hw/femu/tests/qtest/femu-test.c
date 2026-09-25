@@ -1926,9 +1926,12 @@ static void femu_test_log_pages(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(le32_to_cpu(lids[NVME_LOG_ENDGRP]), ==, 0);
     g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_CHANGED_ZONE_LIST]), ==, 0);
 
-    /* every identifier claimed must actually answer */
+    /*
+     * Every identifier claimed must actually answer. The Persistent Event log
+     * reads only within a reporting context, which its own test covers.
+     */
     for (i = 0; i < 256; i++) {
-        if (!(le32_to_cpu(lids[i]) & FEMU_LIDS_LSUPP)) {
+        if (!(le32_to_cpu(lids[i]) & FEMU_LIDS_LSUPP) || i == 0x0d) {
             continue;
         }
         g_assert_cmpint(FEMU_SC(femu_get_log(&c, i, buf, 512, 0)),
@@ -7568,6 +7571,148 @@ static void femu_test_timestamp(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_LOG_PEL            0x0d
+#define FEMU_CMD_SEQ_ERROR      0x0c
+
+/* Get Log Page 0Dh with an action (Figure 229), len bytes at off */
+static uint16_t femu_pel(FemuCtrlState *c, uint8_t act, uint64_t buf,
+                         uint32_t len, uint64_t off)
+{
+    uint32_t numd = len / 4 - 1;
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_PEL | act << 8 | (numd & 0xffff) << 16);
+    cmd.cdw11 = cpu_to_le32(numd >> 16);
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* the event type of the i'th event reported, counting from the newest */
+static uint8_t femu_pel_event(QTestState *qts, uint64_t buf, int i)
+{
+    uint64_t e = buf + 512;
+
+    while (i--) {
+        e += 3 + qtest_readb(qts, e + 2) + qtest_readw(qts, e + 22);
+    }
+    return qtest_readb(qts, e);
+}
+
+/*
+ * Persistent Event log (Base 2.3, 5.2.12.1.14): advertised in LPA, PELS and
+ * the supported pages; each action's rules for the reporting context; the
+ * context is a snapshot, newest event first; Reporting Context Information
+ * says whether one existed before the command; a Controller Level Reset
+ * releases the context and is itself an event.
+ */
+static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t mem, buf, ts;
+    uint8_t sn[20], hdr_sn[20];
+    uint32_t tnev;
+    uint16_t gnum;
+
+    femu_enable(&c, &femu->dev, alloc);
+    mem = guest_alloc(alloc, 3 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+    ts = buf + 8192;
+
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 261) & (1 << 4), !=, 0);
+    g_assert_cmpuint(qtest_readl(qts, buf + 352), ==, 1);
+    qtest_memread(qts, buf + 4, sn, sizeof(sn));
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4 * FEMU_LOG_PEL), ==,
+                     1 | 1 << 16);
+
+    /* no context yet: reading needs one */
+    g_assert_cmpint(femu_pel(&c, 0, buf, 4096, 0), ==, FEMU_CMD_SEQ_ERROR);
+
+    /* power on logged a reset event, then a SMART snapshot after it */
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, FEMU_LOG_PEL);
+    tnev = qtest_readl(qts, buf + 4);
+    g_assert_cmpuint(tnev, >=, 2);
+    g_assert_cmpuint(qtest_readq(qts, buf + 8), >, 512);
+    g_assert_cmpint(qtest_readb(qts, buf + 16), ==, 3);
+    g_assert_cmpint(qtest_readw(qts, buf + 18), ==, 512 - 20);
+    qtest_memread(qts, buf + 56, hdr_sn, sizeof(hdr_sn));
+    g_assert_cmpint(memcmp(hdr_sn, sn, sizeof(sn)), ==, 0);
+    gnum = qtest_readw(qts, buf + 372);
+    g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 0);   /* new context */
+    g_assert_cmpint(qtest_readb(qts, buf + 480), ==, 1 << 1 | 1 << 3 | 1 << 4);
+    g_assert_cmpint(femu_pel_event(qts, buf, 0), ==, 0x01);
+    g_assert_cmpint(femu_pel_event(qts, buf, 1), ==, 0x04);
+    g_assert_cmpint(qtest_readb(qts, buf + 512 + 3) & 3, ==, 3);
+    g_assert_cmpint(qtest_readw(qts, buf + 512 + 22), ==, 512);
+
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, FEMU_CMD_SEQ_ERROR);
+
+    /* an event logged now is kept but not in the context being read */
+    qtest_writeq(qts, ts, 0x0123456789abULL);
+    g_assert_cmpint(femu_timestamp(&c, true, 0, 0, ts), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 0, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, tnev);
+    g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 1 << 18 | 1 << 16);
+
+    /* header only, with the length and offset ignored */
+    qtest_memset(qts, buf, 0xff, 1024);
+    g_assert_cmpint(femu_pel(&c, 3, buf, 4, 3), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, tnev);
+    g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 1 << 18 | 1 << 16);
+    g_assert_cmpint(qtest_readb(qts, buf + 512), ==, 0xff);
+
+    /* but not the offset type bit, which a page without indexes refuses */
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(FEMU_LOG_PEL | 3 << 8 | 127 << 16);
+        cmd.cdw14 = cpu_to_le32(1 << 23);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+        cmd.cdw10 = cpu_to_le32(FEMU_LOG_PEL | 2 << 8);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    }
+
+    /* release ignores them too, and releasing twice is not an error */
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 3), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 3), ==, NVME_SUCCESS);
+
+    /* a new context reports the timestamp change, newest first */
+    g_assert_cmpint(femu_pel(&c, 3, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 372), ==, (uint16_t)(gnum + 1));
+    g_assert_cmpint(femu_pel(&c, 0, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, tnev + 1);
+    g_assert_cmpint(femu_pel_event(qts, buf, 0), ==, 0x03);
+    g_assert_cmpuint(qtest_readq(qts, buf + 512 + 24) & ((1ULL << 48) - 1),
+                     <, 0x0123456789abULL);
+
+    /* a reset drops the context and logs itself, then a snapshot */
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_pel(&c, 0, buf, 4096, 0), ==, FEMU_CMD_SEQ_ERROR);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, tnev + 3);
+    g_assert_cmpint(femu_pel_event(qts, buf, 0), ==, 0x01);
+    g_assert_cmpint(femu_pel_event(qts, buf, 1), ==, 0x04);
+    g_assert_cmpint(femu_pel_event(qts, buf, 2), ==, 0x03);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    guest_free(alloc, mem);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -7753,6 +7898,7 @@ static void femu_register_nodes(void)
             "subsys=fdpsub",
     });
     qos_add_test("timestamp", "femu", femu_test_timestamp, NULL);
+    qos_add_test("persistent-event-log", "femu", femu_test_pel, NULL);
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {
         /* the captured counters come from the FTL, which NoSSD has none of */

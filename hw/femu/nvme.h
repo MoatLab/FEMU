@@ -1107,6 +1107,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_TELEMETRY_HOST = 0x07,
     NVME_LOG_TELEMETRY_CTRL = 0x08,
+    NVME_LOG_PERSISTENT_EVENT = 0x0d,
     NVME_LOG_LBA_STATUS     = 0x0e,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_FDP_CONFS      = 0x20,
@@ -1252,7 +1253,9 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     rsvd332[6];
     uint16_t    nsetidmax;
     uint16_t    endgidmax;
-    uint8_t     rsvd342[170];
+    uint8_t     rsvd342[10];
+    uint32_t    pels;           /* Persistent Event log size, 64 KiB units */
+    uint8_t     rsvd356[156];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -1308,6 +1311,14 @@ enum NvmeIdCtrlLpa {
     NVME_LPA_CSE      = 1 << 1,
     NVME_LPA_EXTENDED = 1 << 2,
     NVME_LPA_TELEMETRY = 1 << 3,
+    NVME_LPA_PERSISTENT_EVENT = 1 << 4,
+};
+
+/* Persistent Event log event types (Base 2.3, Figure 233) */
+enum NvmePelEventType {
+    NVME_PEL_SMART_SNAPSHOT     = 0x01,
+    NVME_PEL_TIMESTAMP_CHANGE   = 0x03,
+    NVME_PEL_POWER_ON_RESET     = 0x04,
 };
 
 #define NVME_CTRL_SQES_MIN(sqes) ((sqes) & 0xf)
@@ -2001,7 +2012,7 @@ typedef struct FemuCtrl {
      */
     void           *csd_ctrl_state;
 
-    time_t      start_time;
+    int64_t     power_on_ms;    /* QEMU_CLOCK_REALTIME at power on */
     uint16_t    temperature;
     uint32_t    page_size;
     uint16_t    page_bits;
@@ -2074,6 +2085,8 @@ typedef struct FemuCtrl {
     uint64_t        ts_base;
     int64_t         ts_anchor;
     uint8_t         ts_origin;
+    int64_t         clr_ms;             /* realtime of the last reset */
+    struct FemuPel  *pel;               /* Persistent Event log */
     uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
     uint32_t        aer_queued;    /* events waiting for an outstanding AER */
@@ -2332,6 +2345,26 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid);
 void nvme_inc_cq_tail(NvmeCQueue *cq);
 void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe);
 uint64_t nvme_timestamp(FemuCtrl *n);
+void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart);
+
+/*
+ * Time powered on, in ms, on the monotonic clock: every power-on count and
+ * the 24-hour snapshot use it, so a change to the host's wall clock moves
+ * none of them.
+ */
+static inline int64_t nvme_power_on_ms(FemuCtrl *n)
+{
+    return qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - n->power_on_ms;
+}
+
+typedef struct FemuPel FemuPel;
+void femu_pel_init(FemuCtrl *n);
+void femu_pel_exit(FemuCtrl *n);
+void femu_pel_reset(FemuCtrl *n);
+void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
+                  uint16_t len);
+uint16_t femu_pel_get_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                          uint64_t off);
 void nvme_timestamp_set(FemuCtrl *n, uint64_t value, uint8_t origin);
 void nvme_inc_sq_head(NvmeSQueue *sq);
 void nvme_update_cq_head(NvmeCQueue *cq);

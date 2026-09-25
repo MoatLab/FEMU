@@ -1509,11 +1509,17 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         uint8_t ts[8];
         uint16_t status;
 
+        uint8_t ev[16];
+
         status = dma_write_prp(n, ts, sizeof(ts), prp1, prp2);
         if (status) {
             return status;
         }
+        /* Figure 236: the value it had, and the time since the last reset */
+        stq_le_p(ev, nvme_timestamp(n) & ((1ULL << 48) - 1));
+        stq_le_p(ev + 8, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - n->clr_ms);
         nvme_timestamp_set(n, ldq_le_p(ts), 1);
+        femu_pel_log(n, NVME_PEL_TIMESTAMP_CHANGE, 1, ev, sizeof(ev));
         break;
     }
     case NVME_FDP_EVENTS: {
@@ -1663,6 +1669,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_TELEMETRY_CTRL] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_LBA_STATUS]   = cpu_to_le32(NVME_LIDS_LSUPP);
+    /* its LID specific parameter: Establish Context and Read Header (ECRH) */
+    lids[NVME_LOG_PERSISTENT_EVENT] = cpu_to_le32(NVME_LIDS_LSUPP | 1 << 16);
     if (nvme_can_sanitize(n)) {
         lids[NVME_LOG_SANITIZE] = cpu_to_le32(NVME_LIDS_LSUPP);
     }
@@ -1872,37 +1880,16 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
                              prp1, prp2);
 }
 
-static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
-                                uint64_t off, bool rae)
+/*
+ * The SMART / Health Information page (Base 2.3, Figure 210) as it stands,
+ * without transferring it or touching the events behind it, so the
+ * Persistent Event log can take a snapshot.
+ */
+void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
 {
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-
-    uint32_t nsid = le32_to_cpu(cmd->nsid);
-    uint32_t trans_len;
-    time_t current_seconds;
-    FemuMediaStats st;
     NvmeSmartLog smart;
-    uint16_t status;
+    FemuMediaStats st;
 
-    /*
-     * Per-namespace SMART is advertised, and the page holds nothing namespace
-     * specific, so a namespace gets the controller's page; one that does not
-     * exist gets an error (Base 2.3, 5.2.12.1.3).
-     */
-    if (nsid && nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
-        return NVME_INVALID_NSID | NVME_DNR;
-    }
-
-    /*
-     * A host may read a log page in pieces, from the offset in the command.
-     * Both of these used to hand back the start of the page whatever was
-     * asked for, so a second read returned the first bytes again.
-     */
-    if (off >= sizeof(smart)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    trans_len = MIN(sizeof(smart) - off, buf_len);
     memset(&smart, 0x0, sizeof(smart));
     nvme_collect_media_stats(n, &st);
 
@@ -1927,9 +1914,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.available_spare = st.available_spare;
     smart.percentage_used = st.percentage_used;
 
-    current_seconds = time(NULL);
-    smart.power_on_hours[0] = cpu_to_le64(
-        ((current_seconds - n->start_time) / 60) / 60);
+    smart.power_on_hours[0] = cpu_to_le64(nvme_power_on_ms(n) / 3600000);
 
     smart.available_spare_threshold = NVME_SPARE_THRESHOLD;
     if (smart.available_spare <= NVME_SPARE_THRESHOLD) {
@@ -1938,6 +1923,40 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     if (n->features.temp_thresh <= n->temperature) {
         smart.critical_warning |= NVME_SMART_TEMPERATURE;
     }
+
+    *smart_out = smart;
+}
+
+static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                uint64_t off, bool rae)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint32_t trans_len;
+    NvmeSmartLog smart;
+    uint16_t status;
+
+    /*
+     * Per-namespace SMART is advertised, and the page holds nothing namespace
+     * specific, so a namespace gets the controller's page; one that does not
+     * exist gets an error (Base 2.3, 5.2.12.1.3).
+     */
+    if (nsid && nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    /*
+     * A host may read a log page in pieces, from the offset in the command.
+     * Both of these used to hand back the start of the page whatever was
+     * asked for, so a second read returned the first bytes again.
+     */
+    if (off >= sizeof(smart)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    trans_len = MIN(sizeof(smart) - off, buf_len);
+    nvme_smart_fill(n, &smart);
 
     status = dma_read_prp(n, (uint8_t *)&smart + off, trans_len, prp1, prp2);
 
@@ -2356,7 +2375,7 @@ static uint16_t nvme_dev_self_test(FemuCtrl *n, NvmeCmd *cmd)
     memmove(&r[1], &r[0], sizeof(*r) * (NVME_DST_RESULTS - 1));
     memset(&r[0], 0, sizeof(*r));
     r[0].status = stc << 4;                 /* completed without error */
-    r[0].poh = cpu_to_le64((time(NULL) - n->start_time) / 3600);
+    r[0].poh = cpu_to_le64(nvme_power_on_ms(n) / 3600000);
     r[0].nsid = cpu_to_le32(nsid);
 
     return NVME_SUCCESS;
@@ -2629,6 +2648,18 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     len = ((((uint64_t)numdu << 16) | numdl) + 1) << 2;
     off = (lpou << 32ULL) | lpol;
 
+    /*
+     * Releasing a Persistent Event context, or reading its header, ignores the
+     * length and offset (Figure 229), so they are not checked for it.
+     */
+    if (lid == NVME_LOG_PERSISTENT_EVENT && ((dw10 >> 8) & 0x3) >= 2) {
+        /* but not the offset type: the page has no index offsets either */
+        if ((le32_to_cpu(cmd->cdw14) >> 23) & 0x1) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return femu_pel_get_log(n, cmd, 0, 0);
+    }
+
     /* The log handlers and PRP transfer helpers take a 32-bit length. */
     if (len > UINT32_MAX || (off & 0x3)) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -2663,6 +2694,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_telemetry_log(n, cmd, lid, len, off);
     case NVME_LOG_LBA_STATUS:
         return nvme_lba_status_log(n, cmd, len, off);
+    case NVME_LOG_PERSISTENT_EVENT:
+        return femu_pel_get_log(n, cmd, len, off);
     case NVME_LOG_SANITIZE:
         if (!nvme_can_sanitize(n)) {
             return NVME_INVALID_LOG_ID | NVME_DNR;
