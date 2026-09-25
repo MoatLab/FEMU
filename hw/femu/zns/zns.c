@@ -146,6 +146,13 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
                        "enabled");
             return -1;
         }
+        /* ZNS 1.4, 5.7: or a flush could never fill the zone */
+        if (ns->zone_capacity % ns->zrwafg_size) {
+            error_setg(errp, "zone capacity of %" PRIu64 " blocks must be a "
+                       "multiple of zns_zrwafg_size %" PRIu64,
+                       ns->zone_capacity, ns->zrwafg_size);
+            return -1;
+        }
     } else if (ns->zrwafg_size || ns->zrwa_num) {
         error_setg(errp, "zns_zrwafg_size and zns_zrwa_num have no effect "
                    "without zns_zrwa_size");
@@ -568,16 +575,16 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
         }
     } else if (zone->d.za & NVME_ZA_ZRWA_VALID) {
         /*
-         * A zone with a ZRWA takes writes anywhere in the window
-         * [w_ptr, w_ptr + zrwas). Zone append targets the write pointer, which
-         * the window decouples from each write, so it is not allowed. The window
-         * accepted here spans two ZRWA sizes: the active one plus the buffer the
-         * implicit flush rolls into. Beyond that is out of range.
+         * A zone with a ZRWA takes writes that start in the window or in the
+         * implicit flush range behind it, [w_ptr, w_ptr + 2 * zrwas), and may
+         * run to the zone's capacity (ZNS 1.4, 5.7), which the boundary check
+         * above enforces. Zone append targets the write pointer, which the
+         * window decouples from each write, so it is not allowed.
          */
         if (append) {
             status = NVME_INVALID_ZONE_OP;
         } else if (unlikely(slba < zone->w_ptr ||
-                            slba + nlb > zone->w_ptr + 2 * ns->zrwa_size)) {
+                            slba >= zone->w_ptr + 2 * ns->zrwa_size)) {
             status = NVME_ZONE_INVALID_WRITE;
         }
     } else {
@@ -985,6 +992,36 @@ static uint16_t zns_close_zone(NvmeNamespace *ns, NvmeZone *zone,
     default:
         return NVME_ZONE_INVAL_TRANSITION;
     }
+}
+
+/* whether a Zone Management Send asks for a ZRWA the zone does not hold */
+static bool zns_zrwa_wanted(NvmeZone *zone, uint32_t dw13)
+{
+    return (dw13 & NVME_ZSFLAG_ZRWA_ALLOC) &&
+           !(zone->d.za & NVME_ZA_ZRWA_VALID);
+}
+
+/*
+ * A ZRWA goes to an empty zone of a namespace configured for ZRWA while a
+ * resource is left (ZNS 1.4, 3.4.3.1.4.1). Flushes are counted from the zone
+ * start, so its absolute LBA need not be a multiple of the flush granularity.
+ */
+static uint16_t zns_zrwa_check_alloc(NvmeNamespace *ns, NvmeZone *zone)
+{
+    if (!ns->zrwa_size || !ns->zrwafg_size || !ns->zrwa_num) {
+        return NVME_INVALID_ZONE_OP;
+    } else if (zns_get_zone_state(zone) != NVME_ZONE_STATE_EMPTY) {
+        return NVME_INVALID_ZONE_OP;
+    } else if (ns->zrwa_avail == 0) {
+        return NVME_NOZRWA;
+    }
+    return NVME_SUCCESS;
+}
+
+static void zns_zrwa_alloc(NvmeNamespace *ns, NvmeZone *zone)
+{
+    zone->d.za |= NVME_ZA_ZRWA_VALID;
+    ns->zrwa_avail--;
 }
 
 /* Give back a zone's ZRWA resource, on finish or reset of a ZRWA-active zone. */
@@ -1456,6 +1493,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     uint16_t status;
     uint8_t action;
     bool all;
+    bool zrwa;
     enum NvmeZoneProcessingMask proc_mask = NVME_PROC_CURRENT_ZONE;
 
     action = dw13 & 0xff;
@@ -1484,23 +1522,12 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 
     switch (action) {
     case NVME_ZONE_ACTION_OPEN:
-        /*
-         * Opening with the ZRWA-allocate flag hands the zone a ZRWA. It has to
-         * be a namespace configured for ZRWA, an empty zone that does not
-         * already hold one, aligned to the flush granularity, and there has to
-         * be a resource left. Check before opening so a rejection leaves the
-         * zone closed.
-         */
-        if (!all && (dw13 & NVME_ZSFLAG_ZRWA_ALLOC) &&
-            !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
-            if (!ns->zrwa_size || !ns->zrwafg_size || !ns->zrwa_num) {
-                return NVME_INVALID_ZONE_OP | NVME_DNR;
-            } else if (zns_get_zone_state(zone) != NVME_ZONE_STATE_EMPTY) {
-                return NVME_INVALID_ZONE_OP | NVME_DNR;
-            } else if (zone->w_ptr % ns->zrwafg_size) {
-                return NVME_NOZRWA | NVME_DNR;
-            } else if (ns->zrwa_avail == 0) {
-                return NVME_NOZRWA | NVME_DNR;
+        /* check before opening so a rejection leaves the zone as it was */
+        zrwa = !all && zns_zrwa_wanted(zone, dw13);
+        if (zrwa) {
+            status = zns_zrwa_check_alloc(ns, zone);
+            if (status) {
+                return status | NVME_DNR;
             }
         }
         if (all) {
@@ -1522,11 +1549,8 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
-        if (status == NVME_SUCCESS && !all &&
-            (dw13 & NVME_ZSFLAG_ZRWA_ALLOC) &&
-            !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
-            zone->d.za |= NVME_ZA_ZRWA_VALID;
-            ns->zrwa_avail--;
+        if (status == NVME_SUCCESS && zrwa) {
+            zns_zrwa_alloc(ns, zone);
         }
         break;
     case NVME_ZONE_ACTION_FLUSH_ZRWA:
@@ -1612,6 +1636,14 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
             return NVME_ZONE_INVAL_TRANSITION | NVME_DNR;
         }
+        /* this action allocates a ZRWA just as Open Zone does */
+        zrwa = zns_zrwa_wanted(zone, dw13);
+        if (zrwa) {
+            status = zns_zrwa_check_alloc(ns, zone);
+            if (status) {
+                return status | NVME_DNR;
+            }
+        }
         /*
          * Into a buffer of its own first. The transfer used to land in the
          * extension itself before the state was tested, so a command that came
@@ -1625,6 +1657,9 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         status = zns_set_zd_ext(ns, zone);
         if (status == NVME_SUCCESS) {
+            if (zrwa) {
+                zns_zrwa_alloc(ns, zone);
+            }
             zd_ext = zns_get_zd_extension(ns, zone_idx);
             memcpy(zd_ext, staged, ns->zd_extension_size);
             return status;

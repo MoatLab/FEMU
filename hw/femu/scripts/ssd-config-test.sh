@@ -178,6 +178,21 @@ for mc in 2 3; do
         bad "metadata with mc=$mc accepted (exit $rc): $out"
     fi
 done
+zrwa="devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1"
+zrwa="$zrwa,zns_zrwa_size=128,zns_zrwafg_size=32,zns_zrwa_num=1"
+out="$(start_femu "$zrwa,zns_zone_cap=1000K")"; rc=$?
+if (( rc != 0 && rc != 124 )) &&
+   grep -q "multiple of zns_zrwafg_size" <<<"$out"; then
+    ok "zone capacity off the ZRWA flush granularity refused"
+else
+    bad "zone capacity off the ZRWA flush granularity refused (exit $rc): $out"
+fi
+out="$(start_femu "$zrwa,zns_zone_cap=1M")"; rc=$?
+if (( rc == 124 )) && ! grep -q "zrwafg" <<<"$out"; then
+    ok "zone capacity on the ZRWA flush granularity accepted"
+else
+    bad "zone capacity on the ZRWA flush granularity accepted (exit $rc): $out"
+fi
 
 echo
 echo "SSD_CONFIG_TEST pass=$pass fail=$fail"

@@ -4836,6 +4836,156 @@ static uint16_t femu_lba_cmd(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
     return femu_io(c, (NvmeCmd *)&rw);
 }
 
+#define FEMU_ZRWA_SZ    128
+#define FEMU_ZRWA_FG    32
+
+/* a write of up to one page from buf */
+static uint16_t femu_zrwa_write(FemuCtrlState *c, uint64_t slba, uint32_t nlb,
+                                uint64_t buf)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+static uint64_t femu_zone0_wp(FemuCtrlState *c, uint64_t buf)
+{
+    uint8_t report[192];
+
+    femu_zone_report(c, buf, report);
+    return ldq_le_p(report + 64 + 24);
+}
+
+/*
+ * ZNS 1.4, 5.7: a write that starts in the ZRWA or the implicit flush range
+ * behind it may run to the end of the zone, and moves the write pointer by
+ * whole flush granules. A write starting past that range is refused and
+ * moves nothing.
+ */
+static void femu_test_zrwa_write_bounds(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t open = NVME_ZONE_ACTION_OPEN | (NVME_ZSFLAG_ZRWA_ALLOC << 8);
+    uint64_t mem, buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_SUCCESS);
+
+    /* inside the window: the write pointer stays */
+    g_assert_cmpint(femu_zrwa_write(&c, 8, 8, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_zone0_wp(&c, buf), ==, 0);
+
+    /* starts in the flush range, ends past it: last LBA 257 */
+    g_assert_cmpint(femu_zrwa_write(&c, 250, 8, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_zone0_wp(&c, buf), ==,
+                     ((257 - FEMU_ZRWA_SZ) / FEMU_ZRWA_FG + 1) * FEMU_ZRWA_FG);
+
+    /* below the write pointer, and past the flush range */
+    g_assert_cmpint(femu_zrwa_write(&c, 8, 8, buf), ==,
+                    NVME_ZONE_INVALID_WRITE);
+    g_assert_cmpint(femu_zrwa_write(&c, 160 + 2 * FEMU_ZRWA_SZ, 8, buf), ==,
+                    NVME_ZONE_INVALID_WRITE);
+    g_assert_cmpuint(femu_zone0_wp(&c, buf), ==, 160);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Only sizes and flush lengths have to be whole flush granules (ZNS 1.4, 5.7);
+ * a zone's start LBA need not be. With a granule of 3 blocks the second zone
+ * starts off it and must still take a ZRWA.
+ */
+static void femu_test_zrwa_odd_granule(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t open = NVME_ZONE_ACTION_OPEN | (NVME_ZSFLAG_ZRWA_ALLOC << 8);
+    uint8_t report[192];
+    uint64_t buf, second;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_report(&c, buf, report);
+    second = ldq_le_p(report + 128 + 16);
+    g_assert_cmpuint(second % 3, !=, 0);
+
+    g_assert_cmpint(femu_zone_action(&c, second, open), ==, NVME_SUCCESS);
+    femu_zone_report(&c, buf, report);
+    g_assert_cmpint(report[128 + 2] & NVME_ZA_ZRWA_VALID, !=, 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * ZNS 1.4, 3.4.3.1.4.1: Set Zone Descriptor Extension allocates a ZRWA just
+ * as Open Zone does, and takes it from the same pool.
+ */
+static void femu_test_zrwa_zd_ext(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t open = NVME_ZONE_ACTION_OPEN | (NVME_ZSFLAG_ZRWA_ALLOC << 8);
+    uint8_t report[192];
+    uint64_t mem, buf, second;
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+    femu_zone_report(&c, buf, report);
+    second = ldq_le_p(report + 128 + 16);
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(second);
+    cmd.cdw11 = cpu_to_le32(second >> 32);
+    cmd.cdw13 = cpu_to_le32(NVME_ZONE_ACTION_SET_ZD_EXT |
+                            (NVME_ZSFLAG_ZRWA_ALLOC << 8));
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+
+    femu_zone_report(&c, buf, report);
+    g_assert_cmpint(report[128 + 1] >> 4, ==, NVME_ZONE_STATE_CLOSED);
+    g_assert_cmpint(report[128 + 2] & NVME_ZA_ZD_EXT_VALID, !=, 0);
+    g_assert_cmpint(report[128 + 2] & NVME_ZA_ZRWA_VALID, !=, 0);
+    /* the only resource is taken */
+    g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_NOZRWA);
+
+    /* the window takes random writes, then Finish gives the resource back */
+    g_assert_cmpint(femu_zrwa_write(&c, second + 64, 8, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zrwa_write(&c, second, 8, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, second, NVME_ZONE_ACTION_FINISH), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_SUCCESS);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * Verify (NVM 1.2, 3.3.4) moves no data and fails where a Read would: on an
  * uncorrectable block, and past the end of the namespace. It is listed in the
@@ -7263,6 +7413,26 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1,"
             "zns_zrwa_size=128,zns_zrwafg_size=32,zns_zrwa_num=1"
+    });
+    qos_add_test("zrwa-write-bounds", "femu", femu_test_zrwa_write_bounds,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1,"
+            "zns_zrwa_size=128,zns_zrwafg_size=32,zns_zrwa_num=1"
+    });
+    qos_add_test("zrwa-odd-granule", "femu", femu_test_zrwa_odd_granule,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1,"
+            "zns_zone_cap=3M,zns_zrwa_size=129,zns_zrwafg_size=3,"
+            "zns_zrwa_num=1"
+    });
+    qos_add_test("zrwa-zd-ext", "femu", femu_test_zrwa_zd_ext,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1,"
+            "zns_zrwa_size=128,zns_zrwafg_size=32,zns_zrwa_num=1,"
+            "zns_zd_ext_size=64"
     });
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
