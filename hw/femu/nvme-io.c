@@ -1662,7 +1662,8 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
         }
     }
 
-    return dma_read_cmd(n, cmd, (uint8_t *)buf, trans_len);
+    /* zeroes past the report (Base 2.3, 7.3.1.1) */
+    return dma_read_cmd_fill(n, cmd, (uint8_t *)buf, trans_len, len);
 }
 
 static uint16_t nvme_io_mgmt_recv(FemuCtrl *n, NvmeRequest *req)

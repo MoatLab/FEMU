@@ -2389,6 +2389,10 @@ uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
                        QEMUIOVector *iov, uint32_t len);
 uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
+uint16_t dma_read_prp_fill(FemuCtrl *n, const uint8_t *ptr, uint32_t len,
+                           uint32_t xfer, uint64_t prp1, uint64_t prp2);
+uint16_t dma_read_cmd_fill(FemuCtrl *n, NvmeCmd *cmd, const uint8_t *ptr,
+                           uint32_t len, uint32_t xfer);
 
 
 uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);

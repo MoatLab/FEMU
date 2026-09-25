@@ -1814,7 +1814,6 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
     bool create = (le32_to_cpu(cmd->cdw10) >> 8) & 0x1;
     uint8_t page[sizeof(NvmeTelemetryLog) + sizeof(FemuStatsLog)] = { 0 };
     NvmeTelemetryLog *hdr = (NvmeTelemetryLog *)page;
-    g_autofree uint8_t *buf = NULL;
     uint64_t have = sizeof(*hdr);
 
     if ((off | buf_len) & 511) {
@@ -1840,11 +1839,10 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
         }
     }
 
-    buf = g_malloc0(buf_len);
-    if (off < have) {
-        memcpy(buf, page + off, MIN(have - off, buf_len));
-    }
-    return dma_read_prp(n, buf, buf_len, prp1, prp2);
+    /* every block asked for is sent; those past the page as zeroes */
+    return dma_read_prp_fill(n, page + MIN(off, have),
+                             MIN(have - MIN(off, have), buf_len), buf_len,
+                             prp1, prp2);
 }
 
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
@@ -2383,7 +2381,7 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
     g_autofree uint8_t *buf = NULL;
     NvmeNamespace *ns;
     unsigned long *map;
-    uint64_t nsze, end, lba;
+    uint64_t nsze, end, lba, cap;
     uint32_t room, nlsd = 0;
     uint8_t lbars;
 
@@ -2420,7 +2418,13 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
     end = rl ? MIN(slba + rl, nsze) : nsze;
     room = len < 8 ? 0 : (len - 8) / 16;
 
-    buf = g_malloc0(len);
+    /*
+     * Without MDTS the host buffer can be gigabytes; grow ours with the
+     * descriptors found and send zeroes after them. The 8-byte header is
+     * built whole even when fewer bytes are asked for.
+     */
+    cap = MAX(8, MIN(len, 4096));
+    buf = g_malloc0(cap);
     buf[4] = 0x2;                       /* COMPLETE unless a run is left out */
     for (lba = slba; lba < end; ) {
         uint64_t first = find_next_bit(map, end, lba);
@@ -2437,7 +2441,14 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
         last = find_next_zero_bit(map, end, first);
         /* the block count is 32 bits and 0's based */
         last = MIN(last, first + ((uint64_t)UINT32_MAX + 1));
-        d = buf + 8 + 16 * nlsd;
+        if (8 + 16 * ((uint64_t)nlsd + 1) > cap) {
+            uint64_t grown = MAX(cap, MIN(len, cap * 2));
+
+            buf = g_realloc(buf, grown);
+            memset(buf + cap, 0, grown - cap);
+            cap = grown;
+        }
+        d = buf + 8 + 16 * (uint64_t)nlsd;
         stq_le_p(d, first);
         stl_le_p(d + 8, last - first - 1);
         d[13] = lbars;
@@ -2448,7 +2459,8 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
         stl_le_p(buf, nlsd);
     }
 
-    return dma_read_prp(n, buf, len, prp1, prp2);
+    return dma_read_prp_fill(n, buf, MIN(len, 8 + 16 * (uint64_t)nlsd), len,
+                             prp1, prp2);
 }
 
 /*

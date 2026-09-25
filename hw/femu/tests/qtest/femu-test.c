@@ -7307,6 +7307,135 @@ static void femu_test_csd_program_dir(void *obj, void *data,
     rmdir(femu_csd_dir);
 }
 
+/* the QEMU process's peak virtual size, which a large allocation raises */
+static uint64_t femu_vm_peak_kb(QTestState *qts)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%d/status", qtest_pid(qts));
+    g_autofree char *text = NULL;
+    const char *line;
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    line = strstr(text, "VmPeak:");
+    g_assert_nonnull(line);
+    return g_ascii_strtoull(line + strlen("VmPeak:"), NULL, 10);
+}
+
+/*
+ * With MDTS 0 there is no transfer limit, so the host can ask for up to 4 GiB
+ * of a report whose data is a few hundred bytes. The device allocated a
+ * buffer of the whole request. Each report is sent in full, so without a PRP
+ * list for 4 GiB these are refused, but only after the allocation would have
+ * happened, which is why the size is checked first.
+ */
+static void femu_test_mdts0_reports(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t mem, buf, peak;
+    uint16_t st;
+
+    femu_enable(&c, &femu->dev, alloc);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    /* a single dword, shorter than the 8-byte header */
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 0, 0x10, 0), ==,
+                    NVME_SUCCESS);
+
+    peak = femu_vm_peak_kb(qts);
+    st = femu_get_lba_status(&c, buf, 0, 0x3ffffffe, 0x10, 0);
+    g_assert_cmpuint(femu_vm_peak_kb(qts) - peak, <, 1024 * 1024);
+    g_assert_cmpint(st, !=, NVME_SUCCESS);
+
+    st = femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false, buf,
+                            0xfffffe00, 0);
+    g_assert_cmpuint(femu_vm_peak_kb(qts) - peak, <, 1024 * 1024);
+    g_assert_cmpint(st, !=, NVME_SUCCESS);
+
+    guest_free(alloc, mem);
+    femu_disable(&c);
+}
+
+/* Report Zones under MDTS 0: the same bound as the reports above */
+static void femu_test_mdts0_zone_report(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t mem, buf, peak;
+    NvmeCmd cmd = { 0 };
+    uint16_t st;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+    peak = femu_vm_peak_kb(qts);
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(0x3ffffffe);
+    st = femu_io(&c, &cmd);
+    g_assert_cmpuint(femu_vm_peak_kb(qts) - peak, <, 1024 * 1024);
+    g_assert_cmpint(st, !=, NVME_SUCCESS);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Past the end of the data, RUH Status sends zeroes (Base 2.3, 7.3.1.1), and
+ * so does telemetry, which sends every block asked for. The host's buffer is
+ * filled with a pattern first so that bytes left untouched show up.
+ */
+static void femu_test_report_zero_tail(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t page[4096], zero[4096] = { 0 };
+    uint64_t mem, buf;
+    NvmeCmd cmd = { 0 };
+    uint32_t used;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    memset(page, 0xa5, sizeof(page));
+    qtest_memwrite(qts, buf, page, sizeof(page));
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(page) / 4 - 1);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    used = 16 + 32 * lduw_le_p(page + 14);
+    g_assert_cmpuint(used, <, sizeof(page));
+    g_assert_cmpint(memcmp(page + used, zero, sizeof(page) - used), ==, 0);
+
+    memset(page, 0xa5, sizeof(page));
+    qtest_memwrite(qts, buf, page, sizeof(page));
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, sizeof(page), 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[0], ==, FEMU_LOG_TELEMETRY_HOST);
+    g_assert_cmpint(memcmp(page + 512, zero, sizeof(page) - 512), ==, 0);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -7471,6 +7600,21 @@ static void femu_register_nodes(void)
     qos_add_test("get-lba-status", "femu", femu_test_get_lba_status,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f"
+    });
+    qos_add_test("mdts0-reports", "femu", femu_test_mdts0_reports,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x19f,mdts=0"
+    });
+    qos_add_test("mdts0-zone-report", "femu", femu_test_mdts0_zone_report,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,mdts=0"
+    });
+    qos_add_test("report-zero-tail", "femu", femu_test_report_zero_tail,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "subsys=fdpsub",
     });
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {

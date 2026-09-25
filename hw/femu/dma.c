@@ -342,6 +342,50 @@ static uint16_t dma_copy(QEMUSGList *qsg, QEMUIOVector *iov, uint8_t *ptr,
     return status;
 }
 
+/*
+ * Send @len bytes of @ptr to the host and zeroes after them, up to @xfer, for
+ * a report the host may ask for more of than there is. The zeroes come from a
+ * fixed page, so a request of gigabytes needs no buffer of its own.
+ */
+static uint16_t dma_copy_fill(QEMUSGList *qsg, QEMUIOVector *iov,
+                              const uint8_t *ptr, uint32_t len, uint32_t xfer)
+{
+    static const uint8_t zeroes[4096];
+    uint16_t status = NVME_SUCCESS;
+    uint64_t pos = 0;
+    int i;
+
+    if (qsg->nsg == 0) {
+        size_t done = qemu_iovec_from_buf(iov, 0, ptr, len);
+
+        done += qemu_iovec_memset(iov, len, 0, xfer - len);
+        qemu_iovec_destroy(iov);
+        return done == xfer ? NVME_SUCCESS : NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    for (i = 0; i < qsg->nsg && status == NVME_SUCCESS; i++) {
+        dma_addr_t addr = qsg->sg[i].base;
+        dma_addr_t left = qsg->sg[i].len;
+
+        while (left && status == NVME_SUCCESS) {
+            const uint8_t *src = pos < len ? ptr + pos : zeroes;
+            dma_addr_t n = pos < len ? MIN(left, len - pos) :
+                                       MIN(left, sizeof(zeroes));
+
+            if (dma_memory_write(qsg->as, addr, src, n,
+                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+                status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+            }
+            addr += n;
+            left -= n;
+            pos += n;
+        }
+    }
+    qemu_sglist_destroy(qsg);
+
+    return status;
+}
+
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
                        uint64_t prp2)
 {
@@ -368,6 +412,24 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
     }
 
     return dma_copy(&qsg, &iov, ptr, len, true);
+}
+
+uint16_t dma_read_prp_fill(FemuCtrl *n, const uint8_t *ptr, uint32_t len,
+                           uint32_t xfer, uint64_t prp1, uint64_t prp2)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    if (!xfer) {
+        return NVME_SUCCESS;
+    }
+    status = nvme_map_prp(&qsg, &iov, prp1, prp2, xfer, n);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy_fill(&qsg, &iov, ptr, MIN(len, xfer), xfer);
 }
 
 /*
@@ -435,6 +497,26 @@ uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
     }
 
     return dma_copy(&qsg, &iov, ptr, len, false);
+}
+
+/* as dma_read_cmd(), then zeroes up to @xfer */
+uint16_t dma_read_cmd_fill(FemuCtrl *n, NvmeCmd *cmd, const uint8_t *ptr,
+                           uint32_t len, uint32_t xfer)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    /* an empty SGL maps no iov either, so there is nothing to release */
+    if (!xfer) {
+        return NVME_SUCCESS;
+    }
+    status = femu_map_dptr(n, cmd, &qsg, &iov, xfer);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy_fill(&qsg, &iov, ptr, MIN(len, xfer), xfer);
 }
 
 /* controller to host, through an I/O command's data pointer */

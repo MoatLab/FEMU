@@ -1717,7 +1717,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     uint64_t data_size = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) << 2;
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint32_t zone_idx, zra, zrasf, partial;
-    uint64_t max_zones, nr_zones = 0;
+    uint64_t max_zones, built, nr_zones = 0;
     uint16_t status;
     uint64_t slba;
     uint32_t i;
@@ -1766,8 +1766,17 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
         zone_entry_sz += ns->zd_extension_size;
     }
 
+    /*
+     * Without MDTS the host may ask for gigabytes, far more than there are
+     * zones to describe. Build only the descriptors that can exist and send
+     * zeroes for the rest; its whole buffer is still transferred, since an
+     * SGL has to describe exactly that much.
+     */
     max_zones = (data_size - sizeof(NvmeZoneReportHeader)) / zone_entry_sz;
-    buf = g_malloc0(data_size);
+    max_zones = MIN(max_zones, ns->num_zones - zone_idx);
+    built = MIN(data_size,
+                sizeof(NvmeZoneReportHeader) + max_zones * zone_entry_sz);
+    buf = g_malloc0(built);
 
     /*
      * Count over the zones that exist. The namespace may hold a partial zone's
@@ -1815,7 +1824,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
         }
     }
 
-    status = dma_read_cmd(n, cmd, (uint8_t *)buf, data_size);
+    status = dma_read_cmd_fill(n, cmd, buf, built, data_size);
 
     g_free(buf);
 
