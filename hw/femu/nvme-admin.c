@@ -2536,11 +2536,14 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
             bbssd_deallocate_all(ns);
         }
     }
-    nvme_resume_pollers(n, resume);
-
     n->sanitize_cdw10 = dw10;
-    /* completed, 001b, or 100b when the host asked for no deallocation */
+    /*
+     * Completed, 001b, or 100b when the host asked for no deallocation. Set
+     * before the pollers resume: a write clears GDE, and one that ran first
+     * would leave the status claiming no data was written since.
+     */
     qatomic_set(&n->sanitize_sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
+    nvme_resume_pollers(n, resume);
 
     return NVME_SUCCESS;
 }
