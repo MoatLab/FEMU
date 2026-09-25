@@ -7436,6 +7436,56 @@ static void femu_test_report_zero_tail(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * KV List takes its host buffer size from the command, and with MDTS 0
+ * nothing bounds it: the device allocated all of it, up to 4 GiB. Enough
+ * keys to pass one page make its buffer grow instead, and every one of them
+ * must still be listed.
+ */
+static void femu_test_kv_list_mdts0(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const int keys = 300;               /* 20 bytes each, past 4 KiB */
+    uint64_t mem, buf, peak;
+    NvmeCmd cmd;
+    uint16_t st;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 3 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    for (k = 0; k < keys; k++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_STORE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(64);
+        femu_kv_fuzz_key(&cmd, k, 16);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    peak = femu_vm_peak_kb(qts);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_LIST;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32(0xfffffffc);
+    st = femu_io(&c, &cmd);
+    g_assert_cmpuint(femu_vm_peak_kb(qts) - peak, <, 1024 * 1024);
+    g_assert_cmpint(st, ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, keys);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -7495,6 +7545,10 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "subsys=fdpsub"
+    });
+    qos_add_test("kv-list-mdts0", "femu", femu_test_kv_list_mdts0,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,mdts=0"
     });
     qos_add_test("kv-fuzz", "femu", femu_test_kv_fuzz,
                  &(QOSGraphTestOptions) {

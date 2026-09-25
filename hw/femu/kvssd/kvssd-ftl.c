@@ -865,19 +865,21 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
                                      uint32_t *out_nrk)
 {
     uint8_t *buf;
-    uint32_t cap = hbs;
+    uint32_t cap;
     uint32_t pos = 4;                  /* leave room for the NRK header */
     uint32_t nrk = 0;
     uint32_t start_slot = 0;
     int slot;
 
-    if (cap < 4) {
+    if (hbs < 4) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    buf = g_try_malloc0(cap);
-    if (!buf) {
-        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
-    }
+    /*
+     * Without MDTS the host buffer can be 4 GiB; grow ours with the keys
+     * found rather than allocate what the host asked for.
+     */
+    cap = MIN(hbs, 4096);
+    buf = g_malloc0(cap);
 
     if (start_len) {
         slot = s->index->find(s, start_key, start_len, NULL);
@@ -910,8 +912,15 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
          * keys that fit in the host buffer are returned.
          */
         padded = (pos + need + 3) & ~3u;
-        if (padded > cap) {
+        if (padded > hbs) {
             break;
+        }
+        if (padded > cap) {
+            uint32_t grown = MAX(padded, (uint32_t)MIN(hbs, 2ULL * cap));
+
+            buf = g_realloc(buf, grown);
+            memset(buf + cap, 0, grown - cap);
+            cap = grown;
         }
         stw_le_p(buf + pos, e->key_len);
         memcpy(buf + pos + 2, e->key, e->key_len);
