@@ -758,12 +758,18 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         nvme_note_user_write(n);
     }
 
+    if (femu_pi_type(ns) && ms == 8 && (ctrl & NVME_RW_PRINFO_PRACT)) {
+        extended = false;
+    }
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
                                  extended ? data_size + meta_size : data_size,
                                  meta_size);
     if (err)
         return err;
 
+    if (femu_pi_type(ns)) {
+        return femu_pi_rw(n, ns, cmd, req);
+    }
     if (extended) {
         return nvme_rw_extended(n, ns, cmd, req, slba, nlb, data_offset);
     }

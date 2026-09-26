@@ -449,10 +449,6 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, control), ctrl, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    /*
-     * PRACT is not checked: it says what to do with protection information,
-     * and no namespace here is formatted with any, so the bit is ignored.
-     */
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
                             offsetof(NvmeRwCmd, slba), elba, ns->id);
