@@ -9388,6 +9388,40 @@ static void femu_test_namespace_failed_identity(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static void femu_test_namespace_kv_byte_capacity(void *obj, void *data,
+                                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t capacity;
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'kv-bytes','addr':'5',"
+                    "'devsz_mb':8,'femu_mode':5,'nlbaf':16,'lba_index':15,"
+                    "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                    "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
+                    "'nchs':1}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, 5, FEMU_CSI_KV << 24, buf), ==,
+                   NVME_SUCCESS);
+    capacity = qtest_readq(qts, buf);
+    g_assert_cmpuint(capacity, >, 0);
+    g_assert_cmpuint(capacity, <=, 5 * 1024 * 1024);
+    g_assert_cmpuint(qtest_readq(qts, buf + 16), ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
 /* Preserve the legacy mode initializers' identity consumption. */
 static void femu_test_namespace_failure_naming(void *obj, void *data,
                                                 QGuestAllocator *alloc)
@@ -10565,6 +10599,8 @@ static void femu_register_nodes(void)
             "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
             "pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
+    qos_add_test("namespace-kv-byte-capacity", "femu",
+                 femu_test_namespace_kv_byte_capacity, NULL);
     qos_add_test("namespace-partial-failure-naming", "femu",
                  femu_test_namespace_failure_naming, &(QOSGraphTestOptions) {
         .arg = GUINT_TO_POINTER(1),

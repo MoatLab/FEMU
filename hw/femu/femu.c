@@ -1075,14 +1075,17 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
-    if (!num_blks || num_blks > LONG_MAX ||
-        num_blks > SIZE_MAX / MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms))) {
+    /* KV capacity is measured in bytes, independent of the block format. */
+    if (!NS_KVSSD(ns) &&
+        (!num_blks || num_blks > LONG_MAX ||
+         num_blks > SIZE_MAX /
+             MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms)))) {
         error_setg(errp, "namespace allocation size is not representable");
         return -1;
     }
     ns->util = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
     ns->uncorrectable = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
-    if (!ns->util || !ns->uncorrectable) {
+    if (num_blks && (!ns->util || !ns->uncorrectable)) {
         error_setg(errp, "cannot allocate namespace bitmaps");
         return -1;
     }
