@@ -1735,6 +1735,7 @@ typedef struct NvmeNamespace {
     uint32_t        id;
     bool            attached;
     bool            allocated;
+    uint64_t        creation_generation;
     uint64_t        size; /* logical data capacity in bytes */
     uint64_t        extent_size; /* owned backend bytes, including padding */
     uint64_t        ns_blks;
@@ -2060,6 +2061,7 @@ typedef struct FemuCtrl {
     bool        ns_notice_pending;
     bool        ns_notice_masked;
     uint32_t    namespace_limit;
+    uint64_t    ns_creation_generation;
     uint64_t    namespace_pool_size;
     uint32_t    nr_io_queues;
     uint32_t    max_q_ents;

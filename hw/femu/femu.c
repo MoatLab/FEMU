@@ -1883,6 +1883,7 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     if (nvme_ns_mgmt_supported(n)) {
         stq_le_p(ns->id_ns.nvmcap, length);
     }
+    ns->creation_generation = ++n->ns_creation_generation;
     ns->attached = attached;
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);

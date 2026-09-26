@@ -911,6 +911,14 @@ static void nvme_ns_uuid(FemuCtrl *n, NvmeNamespace *ns, uint8_t *uuid)
     guint8 digest[32];
     gsize len = sizeof(digest);
 
+    /* Boot namespaces retain the original serial/NSID identity. */
+    if (ns->creation_generation) {
+        char *created = g_strdup_printf("%s:%" PRIu64, name,
+                                       ns->creation_generation);
+
+        g_free(name);
+        name = created;
+    }
     g_checksum_update(ck, (const guchar *)name, strlen(name));
     g_checksum_get_digest(ck, digest, &len);
     g_checksum_free(ck);

@@ -9411,14 +9411,21 @@ static void femu_test_namespace_identity(void *obj, void *data,
     uint8_t before[4096];
     uint8_t after[4096];
     uint8_t uuid[4096];
+    uint8_t replaced[4096];
+    uint8_t created[4096];
+    uint16_t cntlid;
     uint32_t nsid;
+    int i;
     uint64_t buf = guest_alloc(alloc, 4096);
 
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, before, sizeof(before));
+    cntlid = qtest_readw(qts, buf + 78);
     g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, uuid, sizeof(uuid));
+    g_assert_cmpint(femu_identify(&c, 2, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, replaced, sizeof(replaced));
     g_assert_cmpint(femu_ns_delete(&c, 2), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
     g_assert_cmpuint(nsid, ==, 2);
@@ -9430,6 +9437,31 @@ static void femu_test_namespace_identity(void *obj, void *data,
     g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, after, sizeof(after));
     g_assert_cmpmem(uuid, sizeof(uuid), after, sizeof(after));
+    for (i = 0; i < 2; i++) {
+        g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpint(femu_identify(&c, nsid, 3, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, created, sizeof(created));
+        g_assert_cmpint(memcmp(replaced + 4, created + 4, 16), !=, 0);
+        g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, false), ==,
+                       NVME_SUCCESS);
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpint(femu_identify(&c, nsid, 3, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, after, sizeof(after));
+        g_assert_cmpmem(created, sizeof(created), after, sizeof(after));
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        g_assert_cmpint(femu_identify(&c, nsid, 3, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, after, sizeof(after));
+        g_assert_cmpmem(created, sizeof(created), after, sizeof(after));
+        memcpy(replaced, created, sizeof(replaced));
+        g_assert_cmpint(femu_ns_delete(&c, nsid), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, 2);
+    }
     femu_disable(&c);
     guest_free(alloc, buf);
 }
