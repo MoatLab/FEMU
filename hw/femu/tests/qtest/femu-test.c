@@ -9144,6 +9144,27 @@ static void femu_ns_make_sparse(FemuCtrlState *c, uint64_t buf)
     g_assert_cmpint(femu_ns_attach(c, buf, 256, 0, true), ==, NVME_SUCCESS);
 }
 
+static void femu_test_namespace_sanitize_bounds(void *obj, void *data,
+                                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_ns_fixture(qts, "seed-sanitize");
+    femu_enable(&c, &femu->dev, alloc);
+    if (data) {
+        g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_ns_attach(&c, buf, 2, 0, false), ==,
+                       NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    femu_ns_fixture(qts, "check-sanitize");
+    guest_free(alloc, buf);
+}
+
 static void femu_test_namespace_sanitize_free(void *obj, void *data,
                                               QGuestAllocator *alloc)
 {
@@ -10043,6 +10064,23 @@ static void femu_register_nodes(void)
     });
     qos_add_test("namespace-failed-identity", "femu",
                  femu_test_namespace_failed_identity, NULL);
+    qos_add_test("namespace-sanitize-bounds", "femu",
+                 femu_test_namespace_sanitize_bounds, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ns-test,namespaces=2,namespace_sizes=1M,,1M"
+    });
+    qos_add_test("namespace-sanitize-pool", "femu",
+                 femu_test_namespace_sanitize_bounds, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ns-test,namespaces=2,namespace_sizes=1M,,1M,ns_mgmt=on",
+        .arg = (void *)1,
+    });
+    qos_add_test("namespace-sanitize-op", "femu",
+                 femu_test_namespace_sanitize_bounds, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ns-test,femu_mode=1,op_pcent=20,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
     qos_add_test("namespace-sanitize-free", "femu",
                  femu_test_namespace_sanitize_free, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2"

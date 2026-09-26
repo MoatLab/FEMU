@@ -2459,6 +2459,24 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
 
+    if (!n->sq[0] && !strcmp(value, "seed-sanitize")) {
+        memset(n->mbe->logical_space, 0x5a, n->mbe->size);
+        return;
+    }
+    if (!n->sq[0] && !strcmp(value, "check-sanitize")) {
+        const uint8_t *bytes = n->mbe->logical_space;
+
+        for (uint64_t i = 0; i < n->mbe->size; i++) {
+            uint8_t expected = i < n->namespace_pool_size ? 0 : 0x5a;
+
+            if (bytes[i] != expected) {
+                error_setg(errp, "sanitize byte at %" PRIu64
+                           " is %u, expected %u", i, bytes[i], expected);
+                return;
+            }
+        }
+        return;
+    }
     if (!nvme_ns_mgmt_supported(n)) {
         error_setg(errp, "namespace fixture requires namespace management");
         return;

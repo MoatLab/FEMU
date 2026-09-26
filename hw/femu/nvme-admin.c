@@ -2742,14 +2742,19 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
 
     resume = nvme_pause_pollers(n);
-    if (n->mbe && n->mbe->logical_space) {
-        memset(n->mbe->logical_space, 0, n->mbe->size);
+    if (n->ns_mgmt && n->mbe && n->mbe->logical_space) {
+        /* The pool includes deleted extents, but excludes spare capacity. */
+        memset(n->mbe->logical_space, 0, n->namespace_pool_size);
     }
     for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
         if (!ns->allocated) {
             continue;
+        }
+        if (!n->ns_mgmt && n->mbe && n->mbe->logical_space) {
+            memset(n->mbe->logical_space + ns->backend_offset, 0,
+                   ns->extent_size);
         }
         bitmap_zero(ns->util, ns->ns_blks);
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
