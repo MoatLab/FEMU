@@ -154,7 +154,7 @@ static void csd_mrs_free(gpointer opaque)
     g_free(mrs);
 }
 
-static void csd_init_ctrl_str(FemuCtrl *n)
+static void csd_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int csd_id;
     const char *mn = "FEMU Computational Storage Controller";
@@ -212,8 +212,6 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         error_setg(errp, "CSD csf_runtime_scale must be non-zero");
         return;
     }
-
-    csd_init_ctrl_str(n);
 
     ssd = ns->ssd = g_malloc0(sizeof(*ssd));
     if (!n->ssd) {
@@ -1318,6 +1316,7 @@ int nvme_register_csd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = csd_init_ctrl_str,
         .init             = csd_init,
         .exit             = csd_exit,
         .rw_check_req     = NULL,

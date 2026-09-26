@@ -1,7 +1,7 @@
 #include "../nvme.h"
 #include "./ftl.h"
 
-static void bb_init_ctrl_str(FemuCtrl *n)
+static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int fsid_vbb = 0;
     const char *vbbssd_mn = "FEMU BlackBox-SSD Controller";

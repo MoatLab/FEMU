@@ -1868,7 +1868,7 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_INVALID_OPCODE | NVME_DNR;
 }
 
-static void zns_set_ctrl_str(FemuCtrl *n)
+static void zns_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int fsid_zns = 0;
     const char *zns_mn = "FEMU ZMS-SSD Controller [by Misao]";
@@ -1881,7 +1881,6 @@ static void zns_set_ctrl(FemuCtrl *n)
 {
     uint8_t *pci_conf = n->parent_obj.config;
 
-    zns_set_ctrl_str(n);
     pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
     pci_config_set_device_id(pci_conf, 0x5845);
 }
@@ -2368,6 +2367,7 @@ int nvme_register_znssd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = zns_set_ctrl_str,
         .init             = zns_init,
         .exit             = zns_exit,
         .rw_check_req     = NULL,

@@ -1348,7 +1348,7 @@ static uint16_t oc12_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
-static void oc12_set_ctrl_str(FemuCtrl *n)
+static void oc12_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int fsid_voc12 = 0;
     const char *vocssd12_mn = "FEMU OpenChannel-SSD Controller (v1.2)";
@@ -1368,7 +1368,6 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
-    oc12_set_ctrl_str(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *cur_ns = &n->namespaces[i];
@@ -1385,6 +1384,7 @@ int nvme_register_ocssd12(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = oc12_set_ctrl_str,
         .init             = oc12_init,
         .exit             = oc12_exit,
         .rw_check_req     = NULL,

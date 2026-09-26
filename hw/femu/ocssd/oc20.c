@@ -1548,7 +1548,7 @@ static int oc20_init_namespaces(FemuCtrl *n, Error **errp)
     return 0;
 }
 
-static void oc20_set_ctrl_str(FemuCtrl *n)
+static void oc20_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int fsid_voc20 = 0;
     const char *vocssd20_mn = "FEMU OpenChannel-SSD Controller (v2.0)";
@@ -1608,7 +1608,6 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
-    oc20_set_ctrl_str(n);
     if (oc20_init_namespaces(n, errp)) {
         return;
     }
@@ -1644,6 +1643,7 @@ int nvme_register_ocssd20(FemuCtrl *n)
     Oc20Ctrl *ln = g_malloc0(sizeof(Oc20Ctrl));
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = ln,
+        .init_ctrl_name   = oc20_set_ctrl_str,
         .init             = oc20_init,
         .exit             = oc20_exit,
         .rw_check_req     = oc20_rw_check_req,

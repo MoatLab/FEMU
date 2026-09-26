@@ -9049,6 +9049,70 @@ static void femu_test_ns_mgmt_default(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_namespace_mixed_identity(void *obj, void *data,
+                                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    char serial[21] = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(c.pdev->bus->qts, buf + 4, serial, 20);
+    g_strchomp(serial);
+    g_assert_cmpstr(serial, ==, "vCSD0");
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_namespace_failed_identity(void *obj, void *data,
+                                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    char serial[21] = { 0 };
+    char nqn[256];
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'secsz':0}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected-mixed','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'namespaces':2,"
+                    "'namespace_modes':'bbssd,csd',"
+                    "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+                    "'pls_per_lun':1,'luns_per_ch':4,'nchs':4}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'accepted','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'namespaces':2,"
+                    "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+                    "'pls_per_lun':1,'luns_per_ch':4,'nchs':4}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, serial, 20);
+    g_strchomp(serial);
+    g_assert_cmpstr(serial, ==, "vSSD1");
+    qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
+    g_assert_cmpstr(nqn, ==, "nqn.2021-05.org.femu:vSSD1");
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
 static void femu_ns_fixture(QTestState *qts, const char *value)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set', 'arguments':{"
@@ -9970,6 +10034,15 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test"
     });
+    qos_add_test("namespace-mixed-identity", "femu",
+                 femu_test_namespace_mixed_identity, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "namespaces=2,namespace_modes=nossd,,csd,fdm_size=16,"
+            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("namespace-failed-identity", "femu",
+                 femu_test_namespace_failed_identity, NULL);
     qos_add_test("namespace-sanitize-free", "femu",
                  femu_test_namespace_sanitize_free, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2"

@@ -2057,10 +2057,6 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         NvmeNamespace *ns = &n->namespaces[i];
 
         nvme_register_extensions_ns(n, ns);
-        /* Preserve boot naming order without naming during namespace init. */
-        if (ns->ext_ops.init_ctrl_name) {
-            ns->ext_ops.init_ctrl_name(n);
-        }
         if (ns->ext_ops.init) {
             Error *local_err = NULL;
 
@@ -2070,6 +2066,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                 femu_realize_undo(n);
                 return;
             }
+        }
+    }
+
+    /* Only successful devices consume identities, in boot namespace order. */
+    for (int i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->ext_ops.init_ctrl_name) {
+            ns->ext_ops.init_ctrl_name(n, ns);
         }
     }
 

@@ -1,6 +1,6 @@
 #include "../nvme.h"
 
-static void bb_init_ctrl_str(FemuCtrl *n)
+static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int fsid_vno = 0;
     const char *vnossd_mn = "FEMU NoSSD NVMe Controller";

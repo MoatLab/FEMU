@@ -280,13 +280,15 @@ static uint16_t kvssd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
-static void kvssd_init_ctrl_str(FemuCtrl *n)
+static void kvssd_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 {
     static int kvssd_id;
     const char *mn = "FEMU KV-SSD Controller";
     const char *sn = "vKVSSD";
 
-    nvme_set_ctrl_name(n, mn, sn, &kvssd_id);
+    if (ns == &n->namespaces[0]) {
+        nvme_set_ctrl_name(n, mn, sn, &kvssd_id);
+    }
 }
 
 static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
@@ -319,10 +321,6 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* the first KV namespace also answers admin paths that name none */
     if (!n->ext_ops.state) {
         n->ext_ops.state = kvssd;
-    }
-
-    if (ns == &n->namespaces[0]) {
-        kvssd_init_ctrl_str(n);
     }
 }
 
@@ -359,6 +357,7 @@ int nvme_register_kvssd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = kvssd_init_ctrl_str,
         .init             = kvssd_init,
         .exit             = kvssd_exit,
         .rw_check_req     = NULL,

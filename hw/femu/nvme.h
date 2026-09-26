@@ -1693,7 +1693,7 @@ typedef struct NvmeZone NvmeZone;
 
 typedef struct FemuExtCtrlOps {
     void     *state;
-    void     (*init_ctrl_name)(struct FemuCtrl *);
+    void     (*init_ctrl_name)(struct FemuCtrl *, struct NvmeNamespace *);
     void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
     void     (*exit)(struct FemuCtrl *);
     void     (*ns_exit)(struct FemuCtrl *, NvmeNamespace *);
