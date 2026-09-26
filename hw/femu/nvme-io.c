@@ -1237,10 +1237,11 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint16_t sms = nvme_ns_ms(s);
         uint8_t *dbuf = data + (done << lbads);
         uint8_t *mbuf = mstage ? mstage + done * ms : NULL;
-        g_autofree uint8_t *smeta = sms ? g_malloc((size_t)nlb * sms) : NULL;
         uint32_t dref = femu_pi_type(ns) == DPS_TYPE_3 ? ref : ref + done;
 
         if (femu_pi_type(s)) {
+            g_autofree uint8_t *smeta = g_malloc((size_t)nlb * sms);
+
             femu_pi_snapshot(s, slba, nlb, dbuf, smeta);
             status = femu_pi_check(s, dbuf, smeta, nlb, read_control, slba,
                                    le32_to_cpu(ranges[i].eilbrt),
@@ -1249,20 +1250,18 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (status) {
                 return status;
             }
+            if (mbuf) {
+                memcpy(mbuf, smeta, (size_t)nlb * ms);
+            }
         } else {
             if (sms) {
                 qemu_mutex_lock(&s->mdata_lock);
             }
             memcpy(dbuf, sbase + (slba << lbads), (uint64_t)nlb << lbads);
             if (sms) {
-                memcpy(smeta, s->mdata + slba * sms, (size_t)nlb * sms);
+                memcpy(mbuf, s->mdata + slba * ms, (size_t)nlb * ms);
                 qemu_mutex_unlock(&s->mdata_lock);
-            }
-        }
-        if (mbuf) {
-            if (smeta) {
-                memcpy(mbuf, smeta, (size_t)nlb * ms);
-            } else {
+            } else if (mbuf) {
                 memset(mbuf, 0, (size_t)nlb * ms);
             }
         }

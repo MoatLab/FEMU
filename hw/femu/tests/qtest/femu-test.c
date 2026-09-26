@@ -6091,6 +6091,59 @@ static void femu_test_pi_generate_ref(void *obj, void *data,
     guest_free(alloc, dbuf);
 }
 
+static void femu_test_pi_copy_no_pi(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint64_t mbuf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t d[512];
+    uint8_t m[8];
+    uint8_t rd[512];
+    uint8_t rm[8];
+    unsigned int fmt;
+    unsigned int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, list, 0, 512);
+    qtest_writeb(qts, list + 4, 1 << 2);
+    g_assert_cmpint(femu_hbs(&c, true, list), ==, NVME_SUCCESS);
+    for (fmt = 0; fmt <= 2; fmt += 2) {
+        uint32_t snsid = fmt == 2 ? 2 : 1;
+
+        for (i = 0; i < 128; i++) {
+            memset(d, i, sizeof(d));
+            memset(m, i ^ 0xa5, sizeof(m));
+            qtest_memwrite(qts, dbuf, d, sizeof(d));
+            qtest_memwrite(qts, mbuf, m, sizeof(m));
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, snsid, 16 + i, 1,
+                           dbuf, mbuf, 15, 0, 0, 0xffff), ==, NVME_SUCCESS);
+            femu_pi_range(qts, list + i * 32, snsid, 16 + 127 - i, 0);
+            qtest_writew(qts, list + i * 32 + 16, 0);
+        }
+        g_assert_cmpint(femu_pi_copy(&c, list, 512, fmt, 128, 15, 15, 0, 0), ==,
+                       NVME_SUCCESS);
+        for (i = 0; i < 128; i++) {
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 512 + i, 1,
+                           dbuf, mbuf, 15, 0, 0, 0xffff), ==, NVME_SUCCESS);
+            memset(d, 127 - i, sizeof(d));
+            memset(m, (127 - i) ^ 0xa5, sizeof(m));
+            qtest_memread(qts, dbuf, rd, sizeof(rd));
+            qtest_memread(qts, mbuf, rm, sizeof(rm));
+            g_assert_cmpmem(rd, sizeof(rd), d, sizeof(d));
+            g_assert_cmpmem(rm, sizeof(rm), m, sizeof(m));
+        }
+    }
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, mbuf);
+    guest_free(alloc, dbuf);
+}
+
 static void femu_test_pi_copy(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -9112,6 +9165,16 @@ static void femu_register_nodes(void)
         .arg = GUINT_TO_POINTER(528),
         .edge.extra_device_opts =
             "pi=on,meta=16,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-off-copy-metadata", "femu", femu_test_pi_copy_no_pi,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "pi=off,meta=8,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-no-pi", "femu", femu_test_pi_copy_no_pi,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
     });
     qos_add_test("pi-copy-convert", "femu", femu_test_pi_copy_convert,
                  &(QOSGraphTestOptions) {
