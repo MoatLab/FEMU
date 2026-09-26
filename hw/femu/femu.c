@@ -945,8 +945,8 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
     /*
      * Metadata is kept in a store of its own and moved either through MPTR
-     * or interleaved with the data, as mc allows (checked below); protection
-     * information is not computed or checked. Each block size is offered
+     * or interleaved with the data, as mc allows (checked below). Each block
+     * size is offered
      * with and without it, so the formats with metadata take the second half
      * of the list.
      */
@@ -1013,7 +1013,7 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
                            (n->extended << 4);
     id_ns->mc            = n->mc;
-    id_ns->dpc           = n->dpc;
+    id_ns->dpc           = n->pi && n->meta >= 8 ? 0x1f : 0;
     id_ns->dps           = n->dps;
     id_ns->dlfeat        = 0x9;
     id_ns->lbaf[0].lbads = 9;
@@ -2127,6 +2127,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
+    DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),
     DEFINE_PROP_UINT8("dpc", FemuCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", FemuCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", FemuCtrl, mc, 0),

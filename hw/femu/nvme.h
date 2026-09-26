@@ -2045,6 +2045,7 @@ typedef struct FemuCtrl {
     uint8_t     max_sqes;
     uint8_t     max_cqes;
     uint8_t     meta;
+    bool        pi;
     uint8_t     vwc;
     uint8_t     mc;
     uint8_t     dpc;

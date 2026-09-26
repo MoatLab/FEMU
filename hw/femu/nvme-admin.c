@@ -2871,7 +2871,7 @@ static uint16_t nvme_format_check(NvmeNamespace *ns, uint8_t lba_idx,
     ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
     if (pi) {
         /* the protection information is eight bytes of the metadata */
-        if (ms < 8) {
+        if (!ns->ctrl->pi || pi > DPS_TYPE_3 || ms < 8) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
         /* PIL set puts it in the first eight bytes, clear in the last */
@@ -2935,7 +2935,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
      */
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->id_ns.flbas = lba_idx | meta_loc;
-    ns->id_ns.dps = pil | pi;
+    ns->id_ns.dps = pi ? pil | pi : 0;
     /* the copy the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_idx];
     ns->ns_blks = ns_blks(ns, lba_idx);
@@ -2984,6 +2984,10 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
      * No erase or a user data erase. FNA reports no cryptographic erase, and
      * 011b and above are reserved (Base 2.3, Figure 193).
      */
+    /* Only legacy LBA formats with 16-bit guards; no ELBAF or 64-bit PI. */
+    if (n->pi && (dw10 & (3 << 12))) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
     if (sec_erase > 1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }

@@ -5549,6 +5549,48 @@ static uint16_t femu_rw_md(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
 #define FEMU_MD_MS      8
 #define FEMU_MD_NLBAF   5           /* the nlbaf default */
 
+static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool enabled = GPOINTER_TO_INT(data);
+    unsigned int type;
+    unsigned int first;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 28), ==, enabled ? 0x1f : 0);
+    g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    for (type = 1; type <= 3; type++) {
+        for (first = 0; first <= 1; first++) {
+            uint32_t dw10 = FEMU_MD_NLBAF | (type << 5) | (first << 8);
+
+            g_assert_cmpint(femu_format_dw10(&c, dw10), ==,
+                           enabled ? NVME_SUCCESS : NVME_INVALID_FORMAT);
+            g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                           NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf + 29), ==,
+                           enabled ? type | (first << 3) : 0);
+        }
+    }
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | (4 << 5)), ==,
+                   NVME_INVALID_FORMAT);
+    g_assert_cmpint(femu_format_dw10(&c, 1 << 5), ==, NVME_INVALID_FORMAT);
+    if (enabled) {
+        g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | (1 << 12)), ==,
+                       NVME_INVALID_FORMAT);
+    }
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /*
  * Separate LBA metadata (NVM 1.2, 2.1.4): each block size is offered with and
  * without metadata, the device boots on the one with it, and every command
@@ -8216,6 +8258,15 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)&femu_io_fuzz_conv,
         .edge.extra_device_opts = "femu_mode=2,sgl=on,oncs=0x19f"
+    });
+    qos_add_test("pi-format", "femu", femu_test_pi_format,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts = "pi=on,meta=8,mc=3"
+    });
+    qos_add_test("pi-off", "femu", femu_test_pi_format,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "meta=8,mc=3"
     });
     qos_add_test("metadata", "femu", femu_test_metadata,
                  &(QOSGraphTestOptions) {
