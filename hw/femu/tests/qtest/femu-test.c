@@ -8516,13 +8516,6 @@ static uint8_t femu_pel_event(QTestState *qts, uint64_t buf, int i)
     return qtest_readb(qts, e);
 }
 
-/*
- * Persistent Event log (Base 2.3, 5.2.12.1.14): advertised in LPA, PELS and
- * the supported pages; each action's rules for the reporting context; the
- * context is a snapshot, newest event first; Reporting Context Information
- * says whether one existed before the command; a Controller Level Reset
- * releases the context and is itself an event.
- */
 static void femu_ns_fixture(QTestState *qts, const char *value)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set', 'arguments':{"
@@ -8535,6 +8528,7 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
     }
     g_assert_true(qdict_haskey(rsp, "return"));
     qobject_unref(rsp);
+    qos_invalidate_command_line();
 }
 
 static void femu_test_namespace_sanitize_free(void *obj, void *data,
@@ -8609,6 +8603,7 @@ static void femu_test_namespace_lifecycle(void *obj, void *data,
     g_assert_cmpuint(qtest_readq(qts, buf), ==, 3);
     femu_disable(&c);
     guest_free(alloc, buf);
+    qpci_unplug_acpi_device_test(qts, "ns-test", 4);
 }
 
 static void femu_test_namespace_capacity(void *obj, void *data,
@@ -8711,8 +8706,16 @@ static void femu_test_namespace_sparse(void *obj, void *data,
     g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
     femu_disable(&c);
     guest_free(alloc, buf);
+    qpci_unplug_acpi_device_test(qts, "ns-test", 4);
 }
 
+/*
+ * Persistent Event log (Base 2.3, 5.2.12.1.14): advertised in LPA, PELS and
+ * the supported pages; each action's rules for the reporting context; the
+ * context is a snapshot, newest event first; Reporting Context Information
+ * says whether one existed before the command; a Controller Level Reset
+ * releases the context and is itself an event.
+ */
 static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
