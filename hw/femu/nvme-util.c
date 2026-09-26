@@ -548,6 +548,102 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
     }
 }
 
+static void nvme_retire_ns_request(NvmeRequest *req)
+{
+    nvme_req_release_ranges(req);
+    req->status = NVME_NS_NOT_READY;
+    req->ns = NULL;
+    req->opaque = NULL;
+    req->expire_time = 0;
+    req->cqe.n.result = 0;
+}
+
+/*
+ * The caller holds the BQL and keeps the dataplane paused until namespace
+ * teardown is complete. Retire processing, not CQ delivery: the host may leave
+ * a CQ full indefinitely. Backlogs hold only namespace-independent completions
+ * after this returns, and their normal pollers deliver them when space appears.
+ */
+void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
+{
+    NvmeRequest *req;
+    NvmeRequest *next;
+    NvmeRequest **kept;
+    size_t count;
+    size_t i;
+    size_t nkept;
+    int p;
+    int q;
+
+    assert(!n->dataplane_started);
+    assert(ns);
+    for (p = 1; p <= n->nr_pollers; p++) {
+        struct rte_ring *rings[2];
+        int r;
+
+        if (n->cpl_backlog) {
+            QTAILQ_FOREACH(req, &n->cpl_backlog[p], entry) {
+                if (req->ns == ns) {
+                    nvme_retire_ns_request(req);
+                }
+            }
+        }
+        rings[0] = n->to_ftl ? n->to_ftl[p] : NULL;
+        rings[1] = n->to_poller ? n->to_poller[p] : NULL;
+        for (r = 0; r < ARRAY_SIZE(rings); r++) {
+            if (!rings[r]) {
+                continue;
+            }
+            /* One rotation preserves survivor order without a second buffer. */
+            count = femu_ring_count(rings[r]);
+            for (i = 0; i < count; i++) {
+                int rc = femu_ring_dequeue(rings[r], (void **)&req, 1);
+
+                assert(rc == 1);
+                if (req->ns == ns) {
+                    nvme_retire_ns_request(req);
+                    QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
+                } else {
+                    rc = femu_ring_enqueue(rings[r], (void **)&req, 1);
+                    assert(rc == 1);
+                }
+            }
+        }
+        if (!n->pq || !n->pq[p]) {
+            continue;
+        }
+        count = pqueue_size(n->pq[p]);
+        kept = g_new(NvmeRequest *, count);
+        nkept = 0;
+        while ((req = pqueue_pop(n->pq[p]))) {
+            if (req->ns == ns) {
+                nvme_retire_ns_request(req);
+                QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
+            } else {
+                kept[nkept++] = req;
+            }
+        }
+        for (i = 0; i < nkept; i++) {
+            pqueue_insert(n->pq[p], kept[i]);
+        }
+        g_free(kept);
+    }
+    for (q = 1; n->cq && q <= n->nr_io_queues; q++) {
+        if (!n->cq[q]) {
+            continue;
+        }
+        QTAILQ_FOREACH_SAFE(req, &n->cq[q]->req_list, entry, next) {
+            if (req->ns == ns) {
+                QTAILQ_REMOVE(&n->cq[q]->req_list, req, entry);
+                nvme_retire_ns_request(req);
+                /* Only the SQ's owning poller may recycle its requests. */
+                p = 1 + (req->sq->sqid - 1) % n->nr_pollers;
+                QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
+            }
+        }
+    }
+}
+
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
 {
     n->sq[sq->sqid] = NULL;

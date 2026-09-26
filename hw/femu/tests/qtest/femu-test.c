@@ -54,6 +54,7 @@
 #define FEMU_CC_CSS_CSI     0x06    /* CC.CSS: a command set is selected */
 #define FEMU_FEAT_CMD_SET_PROFILE       0x19
 #define FEMU_IOCS_COMBINATION_REJECTED  0x12b
+#define FEMU_ADM_QTEST_RETIRE_NS 0xed
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
 
 typedef struct QFemu QFemu;
@@ -3004,6 +3005,106 @@ static void femu_test_fdp_write_zeroes(void *obj, void *data,
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
+}
+
+/* Internal retirement is exercised before a namespace delete opcode exists. */
+static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    FemuQueue shared;
+    FemuQueue other;
+    NvmeCmd cmd = { 0 };
+    NvmeCqe full[FEMU_QSIZE];
+    NvmeCqe after[FEMU_QSIZE];
+    NvmeCqe cqe;
+    uint32_t result;
+    uint32_t seen = 0;
+    uint16_t first;
+    uint16_t cid;
+    uint16_t status;
+    int waited = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_queue_init(&c, &shared, 2);
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(shared.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | shared.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    femu_queue_init(&c, &other, 3);
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(other.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | other.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(other.sq_addr);
+    cmd.cdw11 = cpu_to_le32((other.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* Fill CQ1 and leave its head untouched throughout retirement. */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    first = c.cid;
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        femu_submit(&c, &c.io, &cmd);
+    }
+    do {
+        qtest_memread(c.pdev->bus->qts,
+                      c.io.cq_addr + (FEMU_QSIZE - 2) * sizeof(cqe),
+                      &cqe, sizeof(cqe));
+        g_assert_cmpint(waited++, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    } while (!(le16_to_cpu(cqe.status) & 1));
+    qtest_memread(c.pdev->bus->qts, c.io.cq_addr, full, sizeof(full));
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_ADM_QTEST_RETIRE_NS;
+    g_assert_cmpint(femu_admin_result(&c, &cmd, &result), ==, NVME_SUCCESS);
+    /* Five retired records and four untouched namespace-2 survivors. */
+    g_assert_cmphex(result, ==, 0x1ff);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(2);
+    femu_submit(&c, &other, &cmd);
+    g_assert_cmpint(femu_complete(&c, &other, &cid, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, le16_to_cpu(cmd.cid));
+    qtest_memread(c.pdev->bus->qts, c.io.cq_addr, after, sizeof(after));
+    g_assert_cmpmem(full, sizeof(full), after, sizeof(after));
+
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        g_assert_cmpint(femu_complete(&c, &c.io, &cid, NULL), ==, NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, first + i);
+    }
+    for (i = 0; i < 9; i++) {
+        status = femu_complete(&c, &c.io, &cid, NULL);
+        g_assert_cmpint(cid, >=, 0x8000);
+        g_assert_cmpint(cid, <, 0x8009);
+        g_assert_cmphex(seen & (1u << (cid - 0x8000)), ==, 0);
+        seen |= 1u << (cid - 0x8000);
+        g_assert_cmpint(status, ==, cid < 0x8005 ? 0x82 : NVME_SUCCESS);
+    }
+    g_assert_cmphex(seen, ==, 0x1ff);
+    /* Cycle both request pools to check recycling after deferred delivery. */
+    for (i = 0; i < FEMU_QSIZE; i++) {
+        femu_round_trip(&c, 0x69 + i);
+        femu_submit(&c, &shared, &cmd);
+        g_assert_cmpint(femu_complete(&c, &c.io, &cid, NULL), ==, NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, le16_to_cpu(cmd.cid));
+    }
+    qtest_memread(c.pdev->bus->qts,
+                  c.io.cq_addr + c.io.cq_head * sizeof(cqe), &cqe, sizeof(cqe));
+    g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c.io.phase);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    femu_queue_free(&c, &other);
+    femu_queue_free(&c, &shared);
 }
 
 /*
@@ -9305,6 +9406,23 @@ static void femu_register_nodes(void)
     qos_add_test("invalid-nsid-reuse", "femu", femu_test_invalid_nsid_reuse,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "pcie_prop_delay_ns=2000000000"
+    });
+    qos_add_test("ns-retire-nossd", "femu", femu_test_ns_retire,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "namespaces=2,femu_mode=2"
+    });
+    qos_add_test("ns-retire", "femu", femu_test_ns_retire,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("ns-retire-pollers", "femu", femu_test_ns_retire,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "multipoller_enabled=1"
     });
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
