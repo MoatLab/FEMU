@@ -5968,6 +5968,246 @@ static void femu_test_pi_zeroes(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, dbuf);
 }
 
+static uint16_t femu_pi_format_ns(FemuCtrlState *c, uint32_t nsid,
+                                  uint32_t dw10)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_pi_copy(FemuCtrlState *c, uint64_t list, uint64_t dst,
+                             uint8_t fmt, uint8_t nr, uint8_t prinfor,
+                             uint8_t prinfow, uint32_t ref, uint16_t app)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(dst);
+    cmd.cdw11 = cpu_to_le32(dst >> 32);
+    cmd.cdw12 = cpu_to_le32((nr - 1) | (fmt << 8) | (prinfor << 12) |
+                           (prinfow << 26));
+    cmd.cdw14 = cpu_to_le32(ref);
+    cmd.cdw15 = cpu_to_le32(0xffff0000U | app);
+    return FEMU_SC(femu_io(c, &cmd));
+}
+
+static void femu_pi_range(QTestState *qts, uint64_t list, uint32_t nsid,
+                          uint64_t slba, uint32_t ref)
+{
+    uint8_t range[32] = { 0 };
+
+    stl_le_p(range, nsid);
+    stq_le_p(range + 8, slba);
+    stw_le_p(range + 16, 1);
+    stl_le_p(range + 24, ref);
+    stw_le_p(range + 28, 0x12ab);
+    stw_le_p(range + 30, 0xff00);
+    qtest_memwrite(qts, list, range, sizeof(range));
+}
+
+static void femu_test_pi_copy(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint64_t mbuf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    unsigned int ms = GPOINTER_TO_UINT(data) & 0xff;
+    unsigned int fmt = GPOINTER_TO_UINT(data) >> 8;
+    uint32_t snsid = fmt == 2 ? 2 : 1;
+    uint8_t d[1024];
+    uint8_t m[32];
+    unsigned int type;
+    unsigned int first;
+    unsigned int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    if (fmt == 2) {
+        qtest_memset(qts, list, 0, 512);
+        qtest_writeb(qts, list + 4, 1 << 2);
+        g_assert_cmpint(femu_hbs(&c, true, list), ==, NVME_SUCCESS);
+    }
+    for (type = 1; type <= 3; type++) {
+        for (first = 0; first <= 1; first++) {
+            uint32_t format = FEMU_MD_NLBAF | (type << 5) | (first << 8);
+            uint32_t ref = type == 1 ? 16 : UINT32_MAX;
+            uint32_t ref2 = type == 1 ? 32 : 0x12345678;
+            uint32_t dstref = type == 1 ? 64 : 0xfffffffe;
+            unsigned int off = first ? 0 : ms - 8;
+
+            g_assert_cmpint(femu_pi_format_ns(&c, 1, format), ==, NVME_SUCCESS);
+            if (fmt == 2) {
+                g_assert_cmpint(femu_pi_format_ns(&c, 2, format), ==,
+                               NVME_SUCCESS);
+            }
+            memset(d, 0, sizeof(d));
+            memset(m, 0, sizeof(m));
+            femu_pi_host(qts, dbuf, mbuf, d, m, ms, false);
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, snsid, 16, 2,
+                           dbuf, mbuf, 15, ref, 0x1234, 0xffff), ==,
+                           NVME_SUCCESS);
+            for (i = 0; i < sizeof(d); i++) {
+                d[i] = i;
+            }
+            femu_pi_host(qts, dbuf, mbuf, d, m, ms, false);
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, snsid, 32, 2,
+                           dbuf, mbuf, 15, ref2, 0x1234, 0xffff), ==,
+                           NVME_SUCCESS);
+            femu_pi_range(qts, list, snsid, 16, ref);
+            femu_pi_range(qts, list + 32, snsid, 32, ref2);
+            g_assert_cmpint(femu_pi_copy(&c, list, 64, fmt, 2, 15, 7,
+                           dstref, 0xabcd), ==, NVME_INVALID_FIELD);
+            g_assert_cmpint(femu_pi_copy(&c, list, 64, fmt, 2, 15, 15,
+                           dstref, 0xabcd), ==, NVME_SUCCESS);
+            for (i = 0; i < 2; i++) {
+                unsigned int j;
+                uint32_t expected_ref = type == 3 ? dstref : dstref + i * 2;
+                uint16_t guard = 0;
+
+                for (j = 0; j < sizeof(d); j++) {
+                    d[j] = i ? j : 0;
+                }
+                if (i) {
+                    /* CRC over the data and, for last PI, eight zero bytes. */
+                    guard = off ? 0x3219 : 0x4f10;
+                }
+                memset(m, 0, sizeof(m));
+                femu_pi_tuple(m + off, guard, 0xabcd, expected_ref);
+                femu_pi_tuple(m + ms + off, guard, 0xabcd,
+                              type == 3 ? expected_ref : expected_ref + 1);
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 64 + i * 2, 2,
+                               dbuf, mbuf, 7, expected_ref, 0xabcd, 0xffff), ==,
+                               NVME_SUCCESS);
+                femu_pi_result(qts, dbuf, mbuf, d, m, ms, false);
+            }
+            /* Pass-through retains the source tuple. */
+            g_assert_cmpint(femu_pi_copy(&c, list, 128, fmt, 1, 0, 0,
+                           128, 0), ==, NVME_SUCCESS);
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, snsid, 16, 2,
+                           dbuf, mbuf, 0, ref, 0, 0), ==, NVME_SUCCESS);
+            qtest_memread(qts, mbuf, m, 2 * ms);
+            memset(d, 0, sizeof(d));
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 128, 2,
+                           dbuf, mbuf, 0, 128, 0, 0), ==, NVME_SUCCESS);
+            femu_pi_result(qts, dbuf, mbuf, d, m, ms, false);
+            g_assert_cmpint(femu_pi_copy(&c, list, 128, fmt, 1, 7, 7,
+                           128, 0x1234), ==,
+                           type == 3 ? NVME_SUCCESS : 0x284);
+            /* Corrupt a later source; the destination must stay intact. */
+            for (i = 0; i < 3; i++) {
+                unsigned int j;
+
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, snsid, 32, 2,
+                               dbuf, mbuf, 0, ref2, 0, 0), ==, NVME_SUCCESS);
+                qtest_memread(qts, mbuf, m, 2 * ms);
+                m[off + 2 * i] ^= 1;
+                qtest_memwrite(qts, mbuf, m, 2 * ms);
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, snsid, 32, 2,
+                               dbuf, mbuf, 0, ref2, 0, 0), ==, NVME_SUCCESS);
+                g_assert_cmpint(femu_pi_copy(&c, list, 64, fmt, 2, 15, 15,
+                               dstref, type == 3 && i == 2 ? 0xabcd : 0x7777),
+                               ==, type == 3 && i == 2 ? NVME_SUCCESS :
+                                                        0x282 + i);
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 64, 4,
+                               dbuf, mbuf, 7, dstref, 0xabcd, 0xffff), ==,
+                               NVME_SUCCESS);
+                /* Restore with generated PI and the original source data. */
+                for (j = 0; j < sizeof(d); j++) {
+                    d[j] = j;
+                }
+                memset(m, 0, sizeof(m));
+                femu_pi_host(qts, dbuf, mbuf, d, m, ms, false);
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, snsid, 32, 2,
+                               dbuf, mbuf, 15, ref2, 0x1234, 0xffff), ==,
+                               NVME_SUCCESS);
+            }
+        }
+    }
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, mbuf);
+    guest_free(alloc, dbuf);
+}
+
+static void femu_test_pi_copy_convert(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint64_t mbuf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t d[1024];
+    uint8_t out[1024];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, list, 0, 512);
+    qtest_writeb(qts, list + 4, 1 << 2);
+    g_assert_cmpint(femu_hbs(&c, true, list), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_format_ns(&c, 1, FEMU_MD_NLBAF | (1 << 5)), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_format_ns(&c, 2, 0), ==, NVME_SUCCESS);
+    memset(d, 0x5a, sizeof(d));
+    qtest_memwrite(qts, dbuf, d, sizeof(d));
+    g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, 2, 16, 2,
+                   dbuf, 1, 0, 0, 0, 0), ==, NVME_SUCCESS);
+    femu_pi_range(qts, list, 2, 16, 16);
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 0, 15, 64, 0xabcd), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 64, 2,
+                   dbuf, mbuf, 7, 64, 0xabcd, 0xffff), ==, NVME_SUCCESS);
+    qtest_memread(qts, dbuf, out, sizeof(out));
+    g_assert_cmpmem(out, sizeof(out), d, sizeof(d));
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 0, 0, 64, 0), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    /* A later source cannot change from inserting PI to replacing it. */
+    femu_pi_range(qts, list + 32, 1, 64, 64);
+    g_assert_cmpint(femu_pi_copy(&c, list, 128, 2, 2, 15, 15, 128, 0xabcd), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    g_assert_cmpint(femu_pi_copy(&c, list, 128, 2, 2, 0, 15, 128, 0xabcd), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    g_assert_cmpint(femu_pi_format_ns(&c, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_format_ns(&c, 2, FEMU_MD_NLBAF | (2 << 5)), ==,
+                   NVME_SUCCESS);
+    qtest_memwrite(qts, dbuf, d, sizeof(d));
+    g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, 2, 16, 2,
+                   dbuf, 1, 15, 0xffffffff, 0x1234, 0xffff), ==, NVME_SUCCESS);
+    femu_pi_range(qts, list, 2, 16, 0xffffffff);
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 15, 0, 0, 0), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 64, 2,
+                   dbuf, 1, 0, 0, 0, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, dbuf, out, sizeof(out));
+    g_assert_cmpmem(out, sizeof(out), d, sizeof(d));
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 7, 0, 0, 0), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    g_assert_cmpint(femu_pi_format_ns(&c, 1, FEMU_MD_NLBAF | (1 << 5)), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 15, 15, 64, 0), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    g_assert_cmpint(femu_pi_format_ns(&c, 2, FEMU_MD_NLBAF | (1 << 5) |
+                   (1 << 8)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 15, 15, 64, 0), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    g_assert_cmpint(femu_pi_format_ns(&c, 2, FEMU_MD_NLBAF), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 0, 15, 64, 0), ==,
+                   FEMU_NS_INCOMPATIBLE);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, mbuf);
+    guest_free(alloc, dbuf);
+}
+
 static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -6006,6 +6246,20 @@ static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                    NVME_SUCCESS);
     g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    if (!enabled) {
+        femu_create_io_queues(&c);
+        qtest_memset(qts, buf, 0x5a, 512);
+        qtest_memset(qts, buf + 2048, 0xa5, 8);
+        g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, 1, 16, 1, buf,
+                       buf + 2048, 15, 0, 0, 0xffff), ==, NVME_SUCCESS);
+        qtest_memset(qts, buf, 0, 4096);
+        g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 16, 1, buf,
+                       buf + 2048, 15, 0, 0, 0xffff), ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, 0x5a5a5a5a5a5a5a5aULL);
+        g_assert_cmphex(qtest_readq(qts, buf + 504), ==, 0x5a5a5a5a5a5a5a5aULL);
+        g_assert_cmphex(qtest_readq(qts, buf + 2048), ==,
+                        0xa5a5a5a5a5a5a5a5ULL);
+    }
     femu_disable(&c);
     guest_free(alloc, buf);
 }
@@ -8715,6 +8969,43 @@ static void femu_register_nodes(void)
     qos_add_test("pi-zeroes", "femu", femu_test_pi_zeroes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "pi=on,meta=16,mc=3,oncs=0x19f"
+    });
+    qos_add_test("pi-copy-8-fmt0", "femu", femu_test_pi_copy,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(8),
+        .edge.extra_device_opts =
+            "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-8-fmt2", "femu", femu_test_pi_copy,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(520),
+        .edge.extra_device_opts =
+            "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-16-fmt0", "femu", femu_test_pi_copy,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(16),
+        .edge.extra_device_opts =
+            "pi=on,meta=16,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-16-fmt2", "femu", femu_test_pi_copy,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(528),
+        .edge.extra_device_opts =
+            "pi=on,meta=16,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-convert", "femu", femu_test_pi_copy_convert,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-copy-bbssd", "femu", femu_test_pi_copy,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(8 | (2 << 8)),
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
     });
     qos_add_test("pi-format", "femu", femu_test_pi_format,
                  &(QOSGraphTestOptions) {

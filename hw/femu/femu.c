@@ -946,9 +946,8 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     /*
      * Metadata is kept in a store of its own and moved either through MPTR
      * or interleaved with the data, as mc allows (checked below). Each block
-     * size is offered
-     * with and without it, so the formats with metadata take the second half
-     * of the list.
+     * size is offered with and without it; metadata formats take the second
+     * half of the list.
      */
     if (n->meta && (n->dpc || n->dps)) {
         error_setg(errp, "meta: protection information (dpc, dps) is not "

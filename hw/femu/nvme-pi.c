@@ -373,3 +373,32 @@ uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     qemu_mutex_unlock(&ns->mdata_lock);
     return NVME_SUCCESS;
 }
+
+uint16_t femu_pi_copy_compatible(NvmeNamespace *src, NvmeNamespace *dst,
+                                 uint16_t read_control, uint16_t write_control)
+{
+    bool spi = femu_pi_type(src);
+    bool dpi = femu_pi_type(dst);
+    uint16_t sms = nvme_ns_ms(src);
+    uint16_t dms = nvme_ns_ms(dst);
+
+    if (NVME_ID_NS_LBADS(src) != NVME_ID_NS_LBADS(dst)) {
+        return NVME_NS_INCOMPATIBLE | NVME_DNR;
+    }
+    if (spi && dpi &&
+        ((read_control ^ write_control) & NVME_RW_PRINFO_PRACT)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (spi == dpi) {
+        if (sms == dms && (!spi || src->id_ns.dps == dst->id_ns.dps)) {
+            return NVME_SUCCESS;
+        }
+    } else if (spi) {
+        if (sms == 8 && !dms && (read_control & NVME_RW_PRINFO_PRACT)) {
+            return NVME_SUCCESS;
+        }
+    } else if (!sms && dms == 8 && (write_control & NVME_RW_PRINFO_PRACT)) {
+        return NVME_SUCCESS;
+    }
+    return NVME_NS_INCOMPATIBLE | NVME_DNR;
+}

@@ -33,4 +33,7 @@ uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
 uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
 
+uint16_t femu_pi_copy_compatible(NvmeNamespace *src, NvmeNamespace *dst,
+                                 uint16_t read_control, uint16_t write_control);
+
 #endif

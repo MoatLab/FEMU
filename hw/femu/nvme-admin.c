@@ -2980,14 +2980,14 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     if (nsid != 0xffffffff && (nsid == 0 || nsid > n->num_namespaces)) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
-    /*
-     * No erase or a user data erase. FNA reports no cryptographic erase, and
-     * 011b and above are reserved (Base 2.3, Figure 193).
-     */
     /* Only legacy LBA formats with 16-bit guards; no ELBAF or 64-bit PI. */
     if (n->pi && (dw10 & (3 << 12))) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
+    /*
+     * No erase or a user data erase. FNA reports no cryptographic erase, and
+     * 011b and above are reserved (Base 2.3, Figure 193).
+     */
     if (sec_erase > 1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
