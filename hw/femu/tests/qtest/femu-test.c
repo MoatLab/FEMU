@@ -8633,6 +8633,8 @@ static uint16_t femu_ns_delete(FemuCtrlState *c, uint32_t nsid)
 {
     NvmeCmd cmd = { 0 };
 
+    /* Namespace changes outlive qgraph's reset between tests. */
+    qos_invalidate_command_line();
     cmd.opcode = 0x0d;
     cmd.nsid = cpu_to_le32(nsid);
     cmd.cdw10 = cpu_to_le32(1);
@@ -8644,6 +8646,7 @@ static uint16_t femu_ns_create(FemuCtrlState *c, uint64_t buf, uint64_t nsze,
 {
     NvmeCmd cmd = { 0 };
 
+    qos_invalidate_command_line();
     qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
     qtest_writeq(c->pdev->bus->qts, buf, nsze);
     qtest_writeq(c->pdev->bus->qts, buf + 8, nsze);
@@ -8658,6 +8661,7 @@ static uint16_t femu_ns_attach(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
 {
     NvmeCmd cmd = { 0 };
 
+    qos_invalidate_command_line();
     qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
     qtest_writew(c->pdev->bus->qts, buf, 1);
     qtest_writew(c->pdev->bus->qts, buf + 2, cntlid);
