@@ -402,8 +402,9 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
     return prp_list;
 }
 
-void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
-                         status, uint16_t location, uint64_t lba, uint32_t nsid)
+void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
+                         uint16_t status, uint16_t location, uint64_t lba,
+                         uint32_t nsid, uint64_t info)
 {
     NvmeErrorLog *elp;
 
@@ -419,9 +420,17 @@ void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
     elp->param_error_location = cpu_to_le16(location);
     elp->lba = cpu_to_le64(lba);
     elp->nsid = cpu_to_le32(nsid);
+    elp->csinfo = cpu_to_le64(info);
     n->elp_index = (n->elp_index + 1) % (n->elpe + 1);
     ++n->num_errors;
     qemu_spin_unlock(&n->elp_lock);
+}
+
+void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
+                         uint16_t status, uint16_t location, uint64_t lba,
+                         uint32_t nsid)
+{
+    nvme_set_error_info(n, sqid, cid, status, location, lba, nsid, 0);
 }
 
 uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

@@ -977,6 +977,7 @@ enum NvmeStatusCodes {
     NVME_NS_NOT_ATTACHED        = 0x011a,
     NVME_NS_THIN_PROVISION      = 0x011b,
     NVME_CTRL_LIST_INVALID      = 0x011c,
+    NVME_ANA_GROUP_INVALID      = 0x0124,
     NVME_IOCS_NOT_SUPPORTED     = 0x0129,
     NVME_INVALID_FORMAT         = 0x010a,
     NVME_FW_REQ_RESET           = 0x010b,
@@ -1060,7 +1061,9 @@ typedef struct NvmeErrorLog {
     uint64_t    lba;
     uint32_t    nsid;
     uint8_t     vs;
-    uint8_t     resv[35];
+    uint8_t     resv[3];
+    uint64_t    csinfo;
+    uint8_t     resv40[24];
 } NvmeErrorLog;
 
 typedef struct NvmeSmartLog {
@@ -1208,6 +1211,8 @@ enum NvmeIdCns {
     NVME_ID_CNS_CS_NS_ACTIVE_LIST     = 0x07,
     NVME_ID_CNS_NS_PRESENT_LIST       = 0x10,
     NVME_ID_CNS_NS_PRESENT            = 0x11,
+    NVME_ID_CNS_NS_CTRL_LIST          = 0x12,
+    NVME_ID_CNS_CTRL_LIST             = 0x13,
     NVME_ID_CNS_CS_NS_PRESENT_LIST    = 0x1a,
     NVME_ID_CNS_CS_NS_PRESENT         = 0x1b,
     NVME_ID_CNS_IO_COMMAND_SET        = 0x1c,
@@ -2268,6 +2273,7 @@ typedef struct NvmeDifTuple {
 #define CQ_POLLING_PERIOD_NS	(5000)
 /* Caller must stop processing and retire references before removal. */
 bool nvme_ns_mgmt_supported(FemuCtrl *n);
+void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id);
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);
 int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
                    uint8_t mode, bool attached, Error **errp);
@@ -2510,6 +2516,9 @@ void bbssd_deallocate_all(NvmeNamespace *ns);
 /* Misc */
 uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
                                queue_depth, uint16_t entry_size);
+void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
+                         uint16_t status, uint16_t location, uint64_t lba,
+                         uint32_t nsid, uint64_t info);
 void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
                          status, uint16_t location, uint64_t lba, uint32_t
                          nsid);

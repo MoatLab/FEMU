@@ -8736,6 +8736,157 @@ static void femu_test_ns_mgmt_commands(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_ns_mgmt_validation(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, 0x115);
+    g_assert_cmpint(femu_get_log(&c, 1, buf, 64, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 32), ==, 4096);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 0, 0, &nsid), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_ns_create(&c, buf, UINT64_MAX, 0, &nsid), ==,
+                   NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 15, &nsid), ==, 0x10a);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    cmd.opcode = 0x0d;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    qtest_writeq(qts, buf + 8, 4);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x11b);
+    qtest_writeq(qts, buf + 8, 0);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_writeq(qts, buf + 8, 8);
+    qtest_writeb(qts, buf + 29, 1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x10a);
+    qtest_writeb(qts, buf + 29, 0);
+    qtest_writeb(qts, buf + 30, 1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_writeb(qts, buf + 30, 0);
+    qtest_writel(qts, buf + 92, 1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x124);
+    qtest_writel(qts, buf + 92, 0);
+    qtest_writew(qts, buf + 100, 1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_writew(qts, buf + 100, 0);
+    qtest_writew(qts, buf + 102, 1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_writew(qts, buf + 102, 0);
+    cmd.cdw11 = cpu_to_le32(2u << 24);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x129);
+    cmd.cdw11 = 0;
+    cmd.cdw10 = cpu_to_le32(2);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, false), ==, 0x11a);
+    g_assert_cmpint(femu_get_log(&c, 1, buf, 64, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 32), ==, 2);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 1, true), ==, 0x11c);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, 0x118);
+    qtest_writew(qts, buf, 2);
+    qtest_writew(qts, buf + 4, 0);
+    cmd.opcode = 0x15;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(1);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x11c);
+    g_assert_cmpint(femu_get_log(&c, 1, buf, 64, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 32), ==, 4);
+    g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    for (int i = 2; i <= 256; i++) {
+        g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, i);
+    }
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, 0x116);
+    g_assert_cmpint(femu_identify(&c, 255, 0x10, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 0);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void *femu_ns_subsys_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line,
+        " -device femu-subsys,id=nssub,nqn=nssub,fdp=off "
+        "-device femu,devsz_mb=1,femu_mode=2,subsys=nssub,addr=05.0 ");
+    return arg;
+}
+
+static void femu_test_ns_mgmt_identify(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t common[4096];
+    uint16_t cntlid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 0, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, common, sizeof(common));
+    g_assert_cmpuint(ldq_le_p(common), ==, 0);
+    g_assert_cmpuint(ldq_le_p(common + 8), ==, 0);
+    g_assert_cmpuint(common[25], ==, 4);
+    g_assert_cmpuint(common[26], ==, 0);
+    g_assert_cmpuint(common[130], ==, 9);
+    g_assert_cmpuint(common[146], ==, 13);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpuint(cntlid, ==, 1);
+    g_assert_cmpint(femu_identify(&c, 1, 0x12, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, cntlid);
+    g_assert_cmpint(femu_identify(&c, 1, 0x12 | cntlid << 16, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
+    g_assert_cmpint(femu_identify(&c, 1, 0x12 | (cntlid + 1) << 16, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 0, 0x13, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 2);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 4), ==, cntlid);
+    g_assert_cmpint(femu_identify(&c, 0, 0x13 | cntlid << 16, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, cntlid);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, cntlid, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, 0x12, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, cntlid, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 0, 0, buf), ==, NVME_SUCCESS);
+    for (int i = 0; i < sizeof(common); i++) {
+        g_assert_cmpuint(qtest_readb(qts, buf + i), ==, common[i]);
+    }
+    g_assert_cmpint(femu_identify(&c, 256, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 257, 0x11, 0, buf), ==, NVME_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 0x11, 0, buf), ==,
+                   NVME_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 0xfffffffe, 0x10, 0, buf), ==,
+                   NVME_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 0x12, 0, buf), ==,
+                   NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_CMD_EFFECTS, buf, 4096, 0), ==,
+                   NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x0d), ==, 0x0b);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x15), ==, 0x09);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_default(void *obj, void *data,
                                       QGuestAllocator *alloc)
 {
@@ -9522,6 +9673,15 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-commands", "femu", femu_test_ns_mgmt_commands,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
+    });
+    qos_add_test("ns-mgmt-validation", "femu", femu_test_ns_mgmt_validation,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on"
+    });
+    qos_add_test("ns-mgmt-identify", "femu", femu_test_ns_mgmt_identify,
+                 &(QOSGraphTestOptions) {
+        .before = femu_ns_subsys_before,
+        .edge.extra_device_opts = "ns_mgmt=on,subsys=nssub"
     });
     qos_add_test("ns-mgmt-default", "femu", femu_test_ns_mgmt_default,
                  &(QOSGraphTestOptions) {

@@ -1034,6 +1034,17 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     }
 }
 
+void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id)
+{
+    NvmeIdNs caps = { 0 };
+
+    nvme_ns_init_identify(n, &caps);
+    memset(id, 0, sizeof(*id));
+    id->nlbaf = caps.nlbaf;
+    id->mc = caps.mc;
+    memcpy(id->lbaf, caps.lbaf, sizeof(id->lbaf));
+}
+
 static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
 {
     if (ns->ext_ops.ns_exit) {
@@ -1816,11 +1827,12 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
         }
     }
     nvme_ns_init_identify(n, &id_ns);
-    if (flbas > id_ns.nlbaf || !nsze) {
+    if ((flbas & 0xe0) || NVME_ID_NS_FLBAS_INDEX(flbas) > id_ns.nlbaf ||
+        !nsze) {
         error_setg(errp, "invalid namespace format or size");
         return -1;
     }
-    ds = id_ns.lbaf[flbas].lbads;
+    ds = id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(flbas)].lbads;
     if (ds >= 64 || nsze > (UINT64_MAX >> ds)) {
         error_setg(errp, "namespace size overflows");
         return -1;

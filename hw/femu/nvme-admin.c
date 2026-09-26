@@ -604,6 +604,13 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
+    if (!present && nsid == NVME_NSID_BROADCAST &&
+        nvme_ns_mgmt_supported(n)) {
+        NvmeIdNs id;
+
+        nvme_ns_common_identify(n, &id);
+        return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
+    }
     if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
@@ -910,6 +917,44 @@ static uint16_t nvme_identify_cmd_set(FemuCtrl *n, NvmeCmd *cmd)
     return dma_read_prp(n, list, data_len, prp1, prp2);
 }
 
+static uint16_t nvme_identify_ctrl_list(FemuCtrl *n, NvmeCmd *cmd,
+                                        bool attached)
+{
+    uint16_t list[2048] = { 0 };
+    uint16_t min = le32_to_cpu(cmd->cdw10) >> 16;
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    NvmeNamespace *ns;
+    uint16_t count = 0;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (attached) {
+        if (nsid == NVME_NSID_BROADCAST) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        ns = nvme_ns_allocated(n, nsid);
+        if (!ns) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if (ns->attached && n->cntlid >= min) {
+            list[++count] = cpu_to_le16(n->cntlid);
+        }
+    } else if (n->subsys) {
+        for (uint32_t i = min; i < NVME_MAX_CONTROLLERS; i++) {
+            if (nvme_subsys_ctrl(n->subsys, i)) {
+                list[++count] = cpu_to_le16(i);
+            }
+        }
+    } else if (n->cntlid >= min) {
+        list[++count] = cpu_to_le16(n->cntlid);
+    }
+    list[0] = cpu_to_le16(count);
+    return dma_read_prp(n, (uint8_t *)list, sizeof(list),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -917,6 +962,10 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t cns  = le32_to_cpu(c->cns) & 0xff;
 
     switch (cns) {
+    case NVME_ID_CNS_NS_CTRL_LIST:
+        return nvme_identify_ctrl_list(n, cmd, true);
+    case NVME_ID_CNS_CTRL_LIST:
+        return nvme_identify_ctrl_list(n, cmd, false);
     case NVME_ID_CNS_NS_CS_INDEP:
         return nvme_identify_ns_cs_indep(n, cmd);
     case NVME_ID_CNS_NS:
@@ -2319,6 +2368,12 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         log.acs[NVME_ADM_CMD_SANITIZE] = NVME_CMD_EFF_CSUPP |
                                          NVME_CMD_EFF_LBCC;
     }
+    if (nvme_ns_mgmt_supported(n)) {
+        log.acs[NVME_ADM_CMD_NS_MGMT] = NVME_CMD_EFF_CSUPP |
+                                       NVME_CMD_EFF_LBCC | NVME_CMD_EFF_NIC;
+        log.acs[NVME_ADM_CMD_NS_ATTACHMENT] = NVME_CMD_EFF_CSUPP |
+                                             NVME_CMD_EFF_NIC;
+    }
     log.acs[NVME_ADM_CMD_SET_DB_MEMORY] = NVME_CMD_EFF_CSUPP;
 
     if (src_iocs) {
@@ -3075,11 +3130,23 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     return status;
 }
 
+static uint16_t nvme_ns_cmd_error(FemuCtrl *n, NvmeCmd *cmd, uint16_t status,
+                                  uint64_t info)
+{
+    status |= NVME_DNR;
+    nvme_set_error_info(n, 0, cmd->cid, status, 0xffff, 0,
+                        le32_to_cpu(cmd->nsid), info);
+    return status;
+}
+
 static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     NvmeIdNs id;
+    NvmeIdNs caps;
+    uint8_t idx;
+    uint64_t bytes;
     NvmeNamespace *ns;
     Error *err = NULL;
     uint64_t nsze;
@@ -3118,18 +3185,33 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return status;
     }
     nsze = le64_to_cpu(id.nsze);
-    if (!nsze || le64_to_cpu(id.ncap) > nsze) {
+    if (!nsze || !id.ncap || le64_to_cpu(id.ncap) > nsze) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (le64_to_cpu(id.ncap) != nsze) {
         return NVME_NS_THIN_PROVISION | NVME_DNR;
     }
-    if (id.flbas >= n->nlbaf || id.dps) {
+    nvme_ns_common_identify(n, &caps);
+    idx = NVME_ID_NS_FLBAS_INDEX(id.flbas);
+    if ((id.flbas & 0xe0) || idx > caps.nlbaf || id.dps ||
+        (caps.lbaf[idx].ms &&
+         !(caps.mc & (NVME_ID_NS_FLBAS_EXTENDED(id.flbas) ? 1 : 2)))) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
     if (id.nmic || id.nvmsetid || id.endgid) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    if (ldl_le_p((uint8_t *)&id + 92)) {
+        return NVME_ANA_GROUP_INVALID | NVME_DNR;
+    }
+    if (nsze > (UINT64_MAX >> caps.lbaf[idx].lbads)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    bytes = nsze << caps.lbaf[idx].lbads;
+    if (bytes > UINT64_MAX - 4095) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    bytes = QEMU_ALIGN_UP(bytes, 4096);
     for (nsid = 1; nsid <= n->namespace_limit; nsid++) {
         if (!nvme_ns_allocated(n, nsid)) {
             break;
@@ -3143,9 +3225,11 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                          &err);
     nvme_resume_pollers(n, resume);
     error_free(err);
+    if (ret == -ENOSPC) {
+        return nvme_ns_cmd_error(n, cmd, NVME_NS_INSUFFICIENT_CAP, bytes);
+    }
     if (ret) {
-        return (ret == -ENOSPC ? NVME_NS_INSUFFICIENT_CAP :
-                NVME_INTERNAL_DEV_ERROR) | NVME_DNR;
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
     cqe->n.result = cpu_to_le32(nsid);
     return NVME_SUCCESS;
@@ -3157,6 +3241,7 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
     NvmeNamespace *ns;
     uint16_t status;
+    uint16_t count;
     bool resume;
 
     if (!nvme_ns_mgmt_supported(n)) {
@@ -3175,12 +3260,21 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     if (status) {
         return status;
     }
-    if (le16_to_cpu(list[0]) != 1 || le16_to_cpu(list[1]) != n->cntlid) {
-        return NVME_CTRL_LIST_INVALID | NVME_DNR;
+    count = le16_to_cpu(list[0]);
+    if (!count || count >= ARRAY_SIZE(list)) {
+        return nvme_ns_cmd_error(n, cmd, NVME_CTRL_LIST_INVALID, 0);
+    }
+    /* Validate the whole list before changing this controller's private NS. */
+    for (uint16_t i = 1; i <= count; i++) {
+        if (le16_to_cpu(list[i]) != n->cntlid ||
+            (i > 1 && le16_to_cpu(list[i]) <= le16_to_cpu(list[i - 1]))) {
+            return nvme_ns_cmd_error(n, cmd, NVME_CTRL_LIST_INVALID, 2 * i);
+        }
     }
     if (ns->attached == !sel) {
-        return (sel ? NVME_NS_NOT_ATTACHED : NVME_NS_ALREADY_ATTACHED) |
-               NVME_DNR;
+        return nvme_ns_cmd_error(n, cmd,
+                                  sel ? NVME_NS_NOT_ATTACHED :
+                                  NVME_NS_ALREADY_ATTACHED, 2);
     }
     resume = nvme_pause_pollers(n);
     if (sel) {
