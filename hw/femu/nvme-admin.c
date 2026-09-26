@@ -3139,7 +3139,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     /* SES is bits 11:9; bit 8 is PIL, which used to be read as an erase */
     uint8_t sec_erase = (dw10 >> 9) & 0x7;
 
-    if (nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
+    if (nsid != NVME_NSID_BROADCAST && !nvme_ns_allocated(n, nsid)) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
     /* Only legacy LBA formats with 16-bit guards; no ELBAF or 64-bit PI. */

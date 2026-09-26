@@ -8753,6 +8753,35 @@ static void femu_test_ns_mgmt_commands(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_ns_mgmt_format_detached(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 16, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, nsid, 1, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, nsid, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 26), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 8);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 0xffffffff, 0, 0)), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, nsid, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 26), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 8);
+    g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 0, 0, 0)), ==, NVME_INVALID_NSID);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_INVALID_NSID);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_validation(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
@@ -10120,6 +10149,10 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-overflow", "femu", femu_test_ns_mgmt_overflow,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test,ns_mgmt=on"
+    });
+    qos_add_test("ns-mgmt-format-detached", "femu",
+                 femu_test_ns_mgmt_format_detached, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on,oacs=0x2"
     });
     qos_add_test("ns-mgmt-validation", "femu", femu_test_ns_mgmt_validation,
                  &(QOSGraphTestOptions) {
