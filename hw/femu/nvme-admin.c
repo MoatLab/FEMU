@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#include "./bbssd/ftl.h"
 #include "./kvssd/kvssd.h"
 #include "system/qtest.h"
 
@@ -3335,6 +3336,7 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     NvmeIdNs caps;
     uint8_t idx;
     uint64_t bytes;
+    uint64_t unit = 4096;
     NvmeNamespace *ns;
     Error *err = NULL;
     uint64_t nsze;
@@ -3412,10 +3414,13 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     bytes = nsze << caps.lbaf[idx].lbads;
-    if (bytes > UINT64_MAX - 4095) {
+    if (BBSSD(n)) {
+        unit = (uint64_t)n->bb_params.secs_per_pg * n->bb_params.secsz;
+    }
+    if (bytes > UINT64_MAX - (unit - 1)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    bytes = QEMU_ALIGN_UP(bytes, 4096);
+    bytes = DIV_ROUND_UP(bytes, unit) * unit;
     for (nsid = 1; nsid <= n->namespace_limit; nsid++) {
         if (!nvme_ns_allocated(n, nsid)) {
             break;
@@ -3425,11 +3430,18 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
     }
     if (BBSSD(n)) {
+        NvmeNamespace candidate = { .id = nsid, .size = bytes };
+
         for (uint32_t i = 0; i < n->namespace_limit; i++) {
             allocated += n->namespaces[i].allocated;
         }
         if (allocated >= n->bbssd_ns_limit) {
             return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
+        }
+        /* A free backend extent may still exceed one FTL's usable capacity. */
+        if (bb_check_capacity(n, &candidate, &err)) {
+            error_free(err);
+            return nvme_ns_cmd_error(n, cmd, NVME_NS_INSUFFICIENT_CAP, bytes);
         }
     }
     resume = nvme_pause_pollers(n);

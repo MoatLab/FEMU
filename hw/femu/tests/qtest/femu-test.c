@@ -8831,6 +8831,29 @@ static void femu_test_ns_mgmt_bbssd_boot_cap(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static void femu_test_ns_mgmt_bbssd_capacity(void *obj, void *data,
+                                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    /* The pool fits this size; one FTL needs part of it for GC reserves. */
+    g_assert_cmphex(femu_ns_create(&c, buf, 8192, 0, &nsid), ==, 0x115);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 296), ==, 4 * 1024 * 1024);
+    g_assert_cmpint(femu_identify(&c, 0, 0x10, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_ns_page(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
                          uint32_t page, uint8_t pattern, bool write)
 {
@@ -10282,6 +10305,13 @@ static void femu_register_nodes(void)
             "id=ns-test,ns_mgmt=on,femu_mode=1,oacs=0x2,namespaces=2,"
             "namespace_sizes=2M,,2M,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=40,"
+            "pls_per_lun=1,luns_per_ch=1,nchs=1",
+    });
+    qos_add_test("ns-mgmt-bbssd-capacity", "femu",
+                 femu_test_ns_mgmt_bbssd_capacity, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "ns_mgmt=on,femu_mode=1,namespaces=2,namespace_sizes=2M,,2M,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=40,"
             "pls_per_lun=1,luns_per_ch=1,nchs=1",
     });
     qos_add_test("ns-mgmt-bbssd-retire", "femu",
