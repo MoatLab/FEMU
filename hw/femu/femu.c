@@ -1266,8 +1266,7 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n)
 {
     uint32_t i;
 
-    if (!n->ns_mgmt || !NOSSD(n) || n->dps ||
-        (n->subsys && n->subsys->endgrp.fdp.enabled)) {
+    if (!n->ns_mgmt || !NOSSD(n) || n->dps || n->subsys) {
         return false;
     }
     for (i = 0; i < n->namespace_limit; i++) {
@@ -1953,6 +1952,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
     uint64_t nand_cap = 0;
+
+    if (n->ns_mgmt && n->subsys) {
+        error_setg(errp, "ns_mgmt=on does not support subsys; "
+                   "use a standalone controller");
+        return;
+    }
 
     nvme_check_size();
 

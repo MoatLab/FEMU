@@ -8948,9 +8948,30 @@ static void femu_test_ns_mgmt_overflow(void *obj, void *data,
 static void *femu_ns_subsys_before(GString *cmd_line, void *arg)
 {
     g_string_prepend(cmd_line,
-        " -device femu-subsys,id=nssub,nqn=nssub,fdp=off "
-        "-device femu,devsz_mb=1,femu_mode=2,subsys=nssub,addr=05.0 ");
+        " -device femu-subsys,id=nssub,nqn=nssub,fdp=off ");
     return arg;
+}
+
+static void femu_test_ns_mgmt_subsys(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *subsystems[] = { "nssub", "fdpsub" };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(subsystems); i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'rejected','addr':'5',"
+                        "'devsz_mb':1,'femu_mode':2,'ns_mgmt':true,"
+                        "'subsys':%s}}", subsystems[i]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"),
+                               "ns_mgmt=on does not support subsys"));
+        qobject_unref(rsp);
+    }
 }
 
 static void femu_test_ns_mgmt_identify(void *obj, void *data,
@@ -8974,7 +8995,7 @@ static void femu_test_ns_mgmt_identify(void *obj, void *data,
     g_assert_cmpuint(common[146], ==, 13);
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
     cntlid = qtest_readw(qts, buf + 78);
-    g_assert_cmpuint(cntlid, ==, 1);
+    g_assert_cmpuint(cntlid, ==, 0);
     g_assert_cmpint(femu_identify(&c, 1, 0x12, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
     g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, cntlid);
@@ -8985,9 +9006,8 @@ static void femu_test_ns_mgmt_identify(void *obj, void *data,
                    NVME_SUCCESS);
     g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
     g_assert_cmpint(femu_identify(&c, 0, 0x13, 0, buf), ==, NVME_SUCCESS);
-    g_assert_cmpuint(qtest_readw(qts, buf), ==, 2);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
     g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 0);
-    g_assert_cmpuint(qtest_readw(qts, buf + 4), ==, cntlid);
     g_assert_cmpint(femu_identify(&c, 0, 0x13 | cntlid << 16, 0, buf), ==,
                    NVME_SUCCESS);
     g_assert_cmpuint(qtest_readw(qts, buf), ==, 1);
@@ -9986,7 +10006,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ns-mgmt-unavailable-fdp", "femu",
                  femu_test_ns_mgmt_unavailable, &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "ns_mgmt=on,subsys=fdpsub",
+        .edge.extra_device_opts = "subsys=fdpsub",
         .arg = GUINT_TO_POINTER(1),
     });
     qos_add_test("ns-mgmt-unavailable-zoned", "femu",
@@ -10105,10 +10125,13 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
-    qos_add_test("ns-mgmt-identify", "femu", femu_test_ns_mgmt_identify,
+    qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {
         .before = femu_ns_subsys_before,
-        .edge.extra_device_opts = "ns_mgmt=on,subsys=nssub"
+    });
+    qos_add_test("ns-mgmt-identify", "femu", femu_test_ns_mgmt_identify,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on"
     });
     qos_add_test("ns-mgmt-default", "femu", femu_test_ns_mgmt_default,
                  &(QOSGraphTestOptions) {
