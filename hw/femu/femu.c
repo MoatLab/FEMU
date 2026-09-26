@@ -2273,6 +2273,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("meta", FemuCtrl, meta, 0),
     DEFINE_PROP_UINT32("cmbsz", FemuCtrl, cmbsz, 0),
     DEFINE_PROP_UINT32("cmbloc", FemuCtrl, cmbloc, 0),
+    DEFINE_PROP_BOOL("ns_mgmt", FemuCtrl, ns_mgmt, false),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
     /*
      * Save/Select Feature Support is how a host learns it may use the Select

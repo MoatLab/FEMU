@@ -8617,6 +8617,34 @@ static uint8_t femu_pel_event(QTestState *qts, uint64_t buf, int i)
     return qtest_readb(qts, e);
 }
 
+static void femu_test_ns_mgmt_default(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QDict *rsp = qtest_qmp(femu->dev.bus->qts,
+        "{'execute':'qom-get','arguments':{"
+        "'path':'/machine/peripheral/ns-test','property':'ns_mgmt'}}");
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_false(qdict_get_bool(rsp, "return"));
+    qobject_unref(rsp);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(c.pdev->bus->qts, buf + 256) & 8, ==, 0);
+    g_assert_cmpuint(qtest_readl(c.pdev->bus->qts, buf + 516), ==, 1);
+    cmd.opcode = 0x0d;
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_OPCODE);
+    cmd.opcode = 0x15;
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_OPCODE);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 0, 0, buf), ==,
+                   NVME_INVALID_NSID);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_ns_fixture(QTestState *qts, const char *value)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set', 'arguments':{"
@@ -9371,6 +9399,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("ns-mgmt-default", "femu", femu_test_ns_mgmt_default,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test"
     });
     qos_add_test("namespace-sanitize-free", "femu",
                  femu_test_namespace_sanitize_free, &(QOSGraphTestOptions) {
