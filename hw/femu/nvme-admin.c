@@ -1024,7 +1024,8 @@ static uint16_t nvme_identify_ctrl_list(FemuCtrl *n, NvmeCmd *cmd,
         }
         ns = nvme_ns_allocated(n, nsid);
         if (!ns) {
-            return NVME_INVALID_NSID | NVME_DNR;
+            return (nvme_nsid_valid(n, nsid) ? NVME_INVALID_FIELD :
+                    NVME_INVALID_NSID) | NVME_DNR;
         }
         if (ns->attached && n->cntlid >= min) {
             list[++count] = cpu_to_le16(n->cntlid);

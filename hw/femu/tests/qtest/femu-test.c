@@ -9002,6 +9002,7 @@ static void femu_test_ns_mgmt_identify(void *obj, void *data,
     for (int i = 0; i < sizeof(common); i++) {
         g_assert_cmpuint(qtest_readb(qts, buf + i), ==, common[i]);
     }
+    g_assert_cmpint(femu_identify(&c, 1, 0x12, 0, buf), ==, NVME_INVALID_FIELD);
     g_assert_cmpint(femu_identify(&c, 256, 0x11, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
     g_assert_cmpint(femu_identify(&c, 257, 0x11, 0, buf), ==,
