@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#include "nvme-pi.h"
 
 /*
  * Compare, Write Zeroes, Write Uncorrectable and Dataset Management belong to
@@ -959,7 +960,24 @@ static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_UNRECOVERED_READ;
     }
 
-    return nvme_check_dulbe(n, ns, slba, elba);
+    status = nvme_check_dulbe(n, ns, slba, elba);
+    if (!status && femu_pi_type(ns)) {
+        uint16_t control = le16_to_cpu(rw->control);
+        g_autofree uint8_t *data = NULL;
+        g_autofree uint8_t *meta = NULL;
+
+        if (control & NVME_RW_PRINFO_PRACT) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        data = g_malloc((size_t)nlb << NVME_ID_NS_LBADS(ns));
+        meta = g_malloc((size_t)nlb * nvme_ns_ms(ns));
+        femu_pi_snapshot(ns, slba, nlb, data, meta);
+        status = femu_pi_check(ns, data, meta, nlb, control, slba,
+                               le32_to_cpu(rw->reftag),
+                               le16_to_cpu(rw->apptag),
+                               le16_to_cpu(rw->appmask));
+    }
+    return status;
 }
 
 static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
