@@ -630,7 +630,8 @@ static void nvme_ns_changed(FemuCtrl *n, uint32_t nsid, bool notify)
     if (notify && (n->features.async_config & NVME_AEC_NS_ATTR) &&
         !n->ns_notice_pending) {
         n->ns_notice_pending = true;
-        nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, 0, NVME_LOG_CHANGED_NS_LIST);
+        nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, 0,
+                            NVME_LOG_CHANGED_NS_LIST);
     }
 }
 
@@ -668,7 +669,8 @@ static uint16_t nvme_changed_ns_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     for (uint32_t i = 0; i < n->changed_ns_count; i++) {
         list[i] = cpu_to_le32(n->changed_nsids[i]);
     }
-    status = dma_read_prp(n, (uint8_t *)list + off, MIN(len, sizeof(list) - off),
+    status = dma_read_prp(n, (uint8_t *)list + off,
+                          MIN(len, sizeof(list) - off),
                           le64_to_cpu(cmd->dptr.prp1),
                           le64_to_cpu(cmd->dptr.prp2));
     if (!status) {
@@ -3288,6 +3290,26 @@ static uint16_t nvme_ns_cmd_error(FemuCtrl *n, NvmeCmd *cmd, uint16_t status,
     return status;
 }
 
+/* Figure 244: reserved fields stay zero, including delete-all attributes. */
+static void nvme_pel_ns_change(FemuCtrl *n, NvmeCmd *cmd, const NvmeIdNs *id,
+                                uint32_t nsid)
+{
+    uint8_t ev[48] = { 0 };
+
+    stl_le_p(ev, le32_to_cpu(cmd->cdw10));
+    if (id) {
+        memcpy(ev + 8, &id->nsze, 8);
+        memcpy(ev + 24, &id->ncap, 8);
+        ev[32] = id->flbas;
+        ev[33] = id->dps;
+        ev[34] = id->nmic;
+        memcpy(ev + 40, &id->nvmsetid, 2);
+        memcpy(ev + 42, &id->endgid, 2);
+    }
+    stl_le_p(ev + 44, nsid);
+    femu_pel_log(n, NVME_PEL_CHANGE_NS, 2, ev, sizeof(ev));
+}
+
 static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
@@ -3310,6 +3332,9 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (nsid != NVME_NSID_BROADCAST && !nvme_ns_allocated(n, nsid)) {
             return NVME_INVALID_NSID | NVME_DNR;
         }
+        if (nsid != NVME_NSID_BROADCAST) {
+            id = nvme_ns_allocated(n, nsid)->id_ns;
+        }
         resume = nvme_pause_pollers(n);
         if (qtest_enabled() && n->test_ns_seed) {
             n->test_ns_seed = false;
@@ -3326,6 +3351,8 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 nvme_ns_destroy(n, ns);
             }
         }
+        nvme_pel_ns_change(n, cmd, nsid == NVME_NSID_BROADCAST ? NULL : &id,
+                           nsid);
         nvme_resume_pollers(n, resume);
         return NVME_SUCCESS;
     }
@@ -3388,6 +3415,7 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (ret) {
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
+    nvme_pel_ns_change(n, cmd, &id, nsid);
     cqe->n.result = cpu_to_le32(nsid);
     return NVME_SUCCESS;
 }

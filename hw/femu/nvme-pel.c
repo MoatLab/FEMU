@@ -31,6 +31,7 @@ static const uint8_t pel_supported[] = {
     NVME_PEL_TIMESTAMP_CHANGE,
     NVME_PEL_POWER_ON_RESET,
     NVME_PEL_HW_ERROR,
+    NVME_PEL_CHANGE_NS,
     NVME_PEL_FORMAT_START,
     NVME_PEL_FORMAT_COMPLETION,
     NVME_PEL_SANITIZE_START,
@@ -296,6 +297,10 @@ static void pel_establish(FemuCtrl *n)
     pel->gnum++;                                /* wraps FFFFh to 0 */
     stw_le_p(h + 372, pel->gnum);
     for (i = 0; i < ARRAY_SIZE(pel_supported); i++) {
+        if (pel_supported[i] == NVME_PEL_CHANGE_NS &&
+            !nvme_ns_mgmt_supported(n)) {
+            continue;
+        }
         h[480 + pel_supported[i] / 8] |= 1 << (pel_supported[i] % 8);
     }
 

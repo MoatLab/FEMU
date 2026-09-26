@@ -1335,6 +1335,7 @@ enum NvmePelEventType {
     NVME_PEL_TIMESTAMP_CHANGE   = 0x03,
     NVME_PEL_POWER_ON_RESET     = 0x04,
     NVME_PEL_HW_ERROR           = 0x05,
+    NVME_PEL_CHANGE_NS          = 0x06,
     NVME_PEL_FORMAT_START       = 0x07,
     NVME_PEL_FORMAT_COMPLETION  = 0x08,
     NVME_PEL_SANITIZE_START     = 0x09,
