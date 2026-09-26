@@ -1115,6 +1115,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_ERROR_INFO     = 0x01,
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
+    NVME_LOG_CHANGED_NS_LIST = 0x04,
     NVME_LOG_CMD_EFFECTS    = 0x05,
     NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_TELEMETRY_HOST = 0x07,
@@ -1537,6 +1538,7 @@ static inline void nvme_check_size(void)
 
 /* Async Event Configuration, bits 7:0: which SMART warnings raise an event */
 #define NVME_AEC_SMART(aec) ((aec) & 0xff)
+#define NVME_AEC_NS_ATTR    (1u << 8)
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 
 /*
@@ -2052,6 +2054,10 @@ typedef struct FemuCtrl {
     bool        ns_mgmt;
     bool        test_ns_seed;
     bool        test_ns_fail;
+    uint32_t    changed_nsids[1024];
+    uint16_t    changed_ns_count;
+    bool        ns_notice_pending;
+    bool        ns_notice_masked;
     uint32_t    namespace_limit;
     uint64_t    namespace_pool_size;
     uint32_t    nr_io_queues;

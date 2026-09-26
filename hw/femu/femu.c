@@ -413,6 +413,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->aer_queued = 0;
     qemu_mutex_unlock(&n->aer_lock);
     n->aer_mask = 0;
+    n->ns_notice_pending = false;
+    n->ns_notice_masked = false;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
 
@@ -1445,6 +1447,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
         n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
         n->id_ctrl.oacs |= cpu_to_le16(NVME_OACS_NS_MGMT);
+        n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_NS_ATTR);
         for (i = 0; i < n->num_namespaces; i++) {
             stq_le_p(n->namespaces[i].id_ns.nvmcap,
                      n->namespaces[i].extent_size);
@@ -2457,6 +2460,12 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     }
     if (!strcmp(value, "retire")) {
         n->test_ns_seed = true;
+    } else if (!strcmp(value, "changed-list-full")) {
+        /* The controller's slot limit cannot fill a 1,024-entry log. */
+        n->changed_ns_count = ARRAY_SIZE(n->changed_nsids);
+        for (uint32_t i = 0; i < n->changed_ns_count; i++) {
+            n->changed_nsids[i] = i + 2;
+        }
     } else if (!strcmp(value, "fail-create")) {
         n->test_ns_fail = true;
     } else if (!strcmp(value, "check-erased") && !n->sq[0]) {

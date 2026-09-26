@@ -594,6 +594,94 @@ static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
     return false;
 }
 
+static bool nvme_is_ns_notice(const NvmeAsyncEvent *event)
+{
+    return event->result.event_type == NVME_AER_TYPE_NOTICE &&
+           event->result.event_info == 0 &&
+           event->result.log_page == NVME_LOG_CHANGED_NS_LIST;
+}
+
+static void nvme_ns_changed(FemuCtrl *n, uint32_t nsid, bool notify)
+{
+    uint32_t i;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return;
+    }
+    if (n->changed_nsids[0] != NVME_NSID_BROADCAST) {
+        for (i = 0; i < n->changed_ns_count; i++) {
+            if (n->changed_nsids[i] >= nsid) {
+                break;
+            }
+        }
+        if (i == n->changed_ns_count || n->changed_nsids[i] != nsid) {
+            if (n->changed_ns_count == ARRAY_SIZE(n->changed_nsids)) {
+                memset(n->changed_nsids, 0, sizeof(n->changed_nsids));
+                n->changed_nsids[0] = NVME_NSID_BROADCAST;
+                n->changed_ns_count = 1;
+            } else {
+                memmove(&n->changed_nsids[i + 1], &n->changed_nsids[i],
+                        (n->changed_ns_count - i) * sizeof(uint32_t));
+                n->changed_nsids[i] = nsid;
+                n->changed_ns_count++;
+            }
+        }
+    }
+    if (notify && (n->features.async_config & NVME_AEC_NS_ATTR) &&
+        !n->ns_notice_pending) {
+        n->ns_notice_pending = true;
+        nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, 0, NVME_LOG_CHANGED_NS_LIST);
+    }
+}
+
+/* Acknowledging this log must leave unrelated Notice events alone. */
+static void nvme_clear_ns_notice(FemuCtrl *n)
+{
+    NvmeAsyncEvent *event;
+    NvmeAsyncEvent *next;
+
+    n->ns_notice_pending = false;
+    n->ns_notice_masked = false;
+    qemu_mutex_lock(&n->aer_lock);
+    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
+        if (nvme_is_ns_notice(event)) {
+            QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
+            n->aer_queued--;
+            g_free(event);
+        }
+    }
+    qemu_mutex_unlock(&n->aer_lock);
+}
+
+static uint16_t nvme_changed_ns_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                                    uint64_t off, bool rae)
+{
+    uint32_t list[1024] = { 0 };
+    uint16_t status;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+    if (off >= sizeof(list)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    for (uint32_t i = 0; i < n->changed_ns_count; i++) {
+        list[i] = cpu_to_le32(n->changed_nsids[i]);
+    }
+    status = dma_read_prp(n, (uint8_t *)list + off, MIN(len, sizeof(list) - off),
+                          le64_to_cpu(cmd->dptr.prp1),
+                          le64_to_cpu(cmd->dptr.prp2));
+    if (!status) {
+        /* The list is since the last successful read; RAE retains the event. */
+        memset(n->changed_nsids, 0, sizeof(n->changed_nsids));
+        n->changed_ns_count = 0;
+        if (!rae) {
+            nvme_clear_ns_notice(n);
+        }
+    }
+    return status;
+}
+
 static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
                                   bool present)
 {
@@ -1724,6 +1812,9 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_ERROR_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_SMART_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
+    if (nvme_ns_mgmt_supported(n)) {
+        lids[NVME_LOG_CHANGED_NS_LIST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    }
     lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
@@ -2776,6 +2867,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_femu_stats_info(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off);
+    case NVME_LOG_CHANGED_NS_LIST:
+        return nvme_changed_ns_log(n, cmd, len, off, rae);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, cmd, csi, len, off);
     case NVME_LOG_DEV_SELF_TEST:
@@ -3102,6 +3195,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
             if (status != NVME_SUCCESS) {
                 break;
             }
+            nvme_ns_changed(n, ns->id, true);
             modified = true;
         }
     } else {
@@ -3109,6 +3203,9 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
                                        sec_erase);
         modified = status == NVME_SUCCESS;
+        if (modified) {
+            nvme_ns_changed(n, ns->id, true);
+        }
     }
 
     /*
@@ -3222,6 +3319,10 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             ns = nvme_ns_allocated(n, i);
             if (ns && (nsid == NVME_NSID_BROADCAST || nsid == i)) {
                 nvme_retire_ns_requests(n, ns);
+                if (ns->attached) {
+                    /* Delete does not notify its issuing controller. */
+                    nvme_ns_changed(n, ns->id, false);
+                }
                 nvme_ns_destroy(n, ns);
             }
         }
@@ -3337,6 +3438,7 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
         nvme_retire_ns_requests(n, ns);
     }
     ns->attached = !sel;
+    nvme_ns_changed(n, ns->id, true);
     nvme_resume_pollers(n, resume);
     return NVME_SUCCESS;
 }
@@ -3500,7 +3602,8 @@ void nvme_process_aers(FemuCtrl *n)
             if (!n->outstanding_aers) {
                 break;          /* nothing to complete it with */
             }
-            if (n->aer_mask & (1 << cand->result.event_type)) {
+            if (nvme_is_ns_notice(cand) ? n->ns_notice_masked :
+                n->aer_mask & (1 << cand->result.event_type)) {
                 continue;       /* already reported, awaiting the log read */
             }
             QSIMPLEQ_REMOVE(&n->aer_queue, cand, NvmeAsyncEvent, entry);
@@ -3514,7 +3617,11 @@ void nvme_process_aers(FemuCtrl *n)
             return;
         }
 
-        n->aer_mask |= 1 << event->result.event_type;
+        if (nvme_is_ns_notice(event)) {
+            n->ns_notice_masked = true;
+        } else {
+            n->aer_mask |= 1 << event->result.event_type;
+        }
         n->outstanding_aers--;
 
         nvme_post_held_cqe(n, &n->aer_held[n->outstanding_aers],
