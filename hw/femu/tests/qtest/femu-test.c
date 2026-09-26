@@ -8782,6 +8782,41 @@ static void femu_test_ns_mgmt_format_detached(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_ns_mgmt_unallocated(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t ids[] = { 1, 256, 0, 257, 0xfffffffe };
+    uint16_t cntlid;
+    uint16_t status;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    for (i = 0; i < ARRAY_SIZE(ids); i++) {
+        status = i < 2 ? NVME_INVALID_FIELD : NVME_INVALID_NSID;
+        if (data) {
+            g_assert_cmpint(femu_ns_attach(&c, buf, ids[i], cntlid, true),
+                           ==, status);
+            g_assert_cmpint(femu_ns_attach(&c, buf, ids[i], cntlid, false),
+                           ==, status);
+        } else {
+            g_assert_cmpint(femu_ns_delete(&c, ids[i]), ==, status);
+        }
+    }
+    g_assert_cmpint(femu_ns_attach(&c, buf, 0xffffffff, cntlid, true), ==,
+                   NVME_INVALID_NSID);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_validation(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
@@ -10153,6 +10188,15 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-format-detached", "femu",
                  femu_test_ns_mgmt_format_detached, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on,oacs=0x2"
+    });
+    qos_add_test("ns-mgmt-delete-unallocated", "femu",
+                 femu_test_ns_mgmt_unallocated, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on"
+    });
+    qos_add_test("ns-mgmt-attach-unallocated", "femu",
+                 femu_test_ns_mgmt_unallocated, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on",
+        .arg = GUINT_TO_POINTER(1),
     });
     qos_add_test("ns-mgmt-validation", "femu", femu_test_ns_mgmt_validation,
                  &(QOSGraphTestOptions) {

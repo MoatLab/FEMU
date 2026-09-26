@@ -3335,8 +3335,11 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
     if (sel == 1) {
-        if (nsid != NVME_NSID_BROADCAST && !nvme_ns_allocated(n, nsid)) {
+        if (!nvme_nsid_valid(n, nsid)) {
             return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if (nsid != NVME_NSID_BROADCAST && !nvme_ns_allocated(n, nsid)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
         }
         if (nsid != NVME_NSID_BROADCAST) {
             id = nvme_ns_allocated(n, nsid)->id_ns;
@@ -3433,6 +3436,7 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     NvmeNamespace *ns;
     uint16_t status;
     uint16_t count;
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
     bool resume;
 
     if (!nvme_ns_mgmt_supported(n)) {
@@ -3441,9 +3445,12 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     if (sel > 1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    ns = nvme_ns_allocated(n, le32_to_cpu(cmd->nsid));
-    if (!ns) {
+    if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
+    }
+    ns = nvme_ns_allocated(n, nsid);
+    if (!ns) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
     status = dma_write_prp(n, (uint8_t *)list, sizeof(list),
                            le64_to_cpu(cmd->dptr.prp1),
