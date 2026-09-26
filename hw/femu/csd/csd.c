@@ -213,6 +213,10 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    if (!n->ns_mgmt) {
+        csd_init_ctrl_str(n, ns);
+    }
+
     ssd = ns->ssd = g_malloc0(sizeof(*ssd));
     if (!n->ssd) {
         n->ssd = ssd;

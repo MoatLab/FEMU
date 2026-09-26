@@ -1608,6 +1608,9 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
+    if (!n->ns_mgmt) {
+        oc20_set_ctrl_str(n, ns);
+    }
     if (oc20_init_namespaces(n, errp)) {
         return;
     }

@@ -1368,6 +1368,9 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
+    if (!n->ns_mgmt) {
+        oc12_set_ctrl_str(n, ns);
+    }
 
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *cur_ns = &n->namespaces[i];

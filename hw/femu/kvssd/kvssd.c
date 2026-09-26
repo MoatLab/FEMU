@@ -322,6 +322,9 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (!n->ext_ops.state) {
         n->ext_ops.state = kvssd;
     }
+    if (!n->ns_mgmt) {
+        kvssd_init_ctrl_str(n, ns);
+    }
 }
 
 static void kvssd_exit(FemuCtrl *n)

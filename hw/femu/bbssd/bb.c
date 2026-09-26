@@ -155,6 +155,9 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
 
+    if (!n->ns_mgmt) {
+        bb_init_ctrl_str(n, ns);
+    }
 
     /*
      * Each bbssd namespace carries its own FTL, so the controller can mix it

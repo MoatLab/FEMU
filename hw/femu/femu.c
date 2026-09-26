@@ -2094,11 +2094,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
-    /* Only successful devices consume identities, in boot namespace order. */
+    /* Managed devices name boot namespaces once, never during Create. */
     for (int i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->ext_ops.init_ctrl_name) {
+        if (n->ns_mgmt && ns->ext_ops.init_ctrl_name) {
             ns->ext_ops.init_ctrl_name(n, ns);
         }
     }

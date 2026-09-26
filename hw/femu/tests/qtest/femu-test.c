@@ -9379,9 +9379,78 @@ static void femu_test_namespace_failed_identity(void *obj, void *data,
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf + 4, serial, 20);
     g_strchomp(serial);
-    g_assert_cmpstr(serial, ==, "vSSD1");
+    g_assert_cmpstr(serial, ==, "vSSD2");
     qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
-    g_assert_cmpstr(nqn, ==, "nqn.2021-05.org.femu:vSSD1");
+    g_assert_cmpstr(nqn, ==, "nqn.2021-05.org.femu:vSSD2");
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
+/* Preserve the legacy mode initializers' identity consumption. */
+static void femu_test_namespace_failure_naming(void *obj, void *data,
+                                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool partial = GPOINTER_TO_UINT(data);
+    const char *expected = partial ? "vNoSSD2" : "vZNSSD1";
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    char serial[21] = { 0 };
+    char nqn[256];
+    char padded[21];
+    g_autofree char *name = NULL;
+    g_autofree char *expected_nqn = NULL;
+    GChecksum *ck;
+    uint8_t digest[32];
+    uint8_t uuid[16];
+    gsize len = sizeof(digest);
+
+    if (partial) {
+        /* The graph consumed 0; namespace 1 consumes 1 before 2 fails. */
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'rejected','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':2,'namespaces':2,"
+                        "'namespace_modes':'nossd,bbssd','secsz':0}}");
+    } else {
+        /* ZNS names the controller before discovering missing MLC timing. */
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'rejected','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':3,'zns_flash_type':2}}");
+    }
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'accepted','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':%u}}", partial ? 2 : 3);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, serial, 20);
+    g_strchomp(serial);
+    g_assert_cmpstr(serial, ==, expected);
+    qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
+    expected_nqn = g_strdup_printf("nqn.2021-05.org.femu:%s", expected);
+    g_assert_cmpstr(nqn, ==, expected_nqn);
+
+    snprintf(padded, sizeof(padded), "%-20s", expected);
+    name = g_strdup_printf("%s:1", padded);
+    ck = g_checksum_new(G_CHECKSUM_SHA256);
+    g_checksum_update(ck, (const guchar *)name, strlen(name));
+    g_checksum_get_digest(ck, digest, &len);
+    g_checksum_free(ck);
+    digest[6] = (digest[6] & 0x0f) | 0x80;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, uuid, sizeof(uuid));
+    g_assert_cmpmem(uuid, sizeof(uuid), digest, sizeof(uuid));
     femu_disable(&c);
     guest_free(alloc, buf);
     g_free(pdev);
@@ -10496,6 +10565,12 @@ static void femu_register_nodes(void)
             "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
             "pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
+    qos_add_test("namespace-partial-failure-naming", "femu",
+                 femu_test_namespace_failure_naming, &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(1),
+    });
+    qos_add_test("namespace-early-failure-naming", "femu",
+                 femu_test_namespace_failure_naming, NULL);
     qos_add_test("namespace-failed-identity", "femu",
                  femu_test_namespace_failed_identity, NULL);
     qos_add_test("namespace-sanitize-bounds", "femu",

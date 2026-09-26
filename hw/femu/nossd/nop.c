@@ -23,8 +23,9 @@ static uint16_t nop_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static void nop_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
-    (void)ns;
-
+    if (!n->ns_mgmt) {
+        bb_init_ctrl_str(n, ns);
+    }
 }
 
 int nvme_register_nossd(FemuCtrl *n)

@@ -2197,6 +2197,9 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    if (!n->ns_mgmt) {
+        zns_set_ctrl_str(n, ns);
+    }
     zns_set_ctrl(n);
     zns_init_params(n, ns);
 
