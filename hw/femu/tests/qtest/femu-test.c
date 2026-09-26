@@ -9229,6 +9229,40 @@ static void femu_test_ns_mgmt_subsys(void *obj, void *data,
     }
 }
 
+static void femu_test_ns_mgmt_identify_csi_common(void *obj, void *data,
+                                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t common[4096];
+    uint8_t zero[4096] = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    /* Common NVM capabilities must also be available without namespaces. */
+    for (int i = 0; i < 3; i++) {
+        qtest_memset(qts, buf, 0xa5, sizeof(common));
+        g_assert_cmpint(femu_identify(&c, 0xffffffff, 5, 0, buf), ==,
+                       NVME_SUCCESS);
+        qtest_memread(qts, buf, common, sizeof(common));
+        g_assert_cmpmem(common, sizeof(common), zero, sizeof(zero));
+        g_assert_cmpint(femu_identify(&c, 0xffffffff, 5,
+                                     FEMU_CSI_ZONED << 24, buf), ==,
+                       NVME_INVALID_FIELD);
+        if (i == 0) {
+            g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, false), ==,
+                           NVME_SUCCESS);
+        } else if (i == 1) {
+            g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+        }
+    }
+    g_assert_cmpint(femu_identify(&c, 0, 5, 0, buf), ==, NVME_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 257, 5, 0, buf), ==, NVME_INVALID_NSID);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_identify(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -9319,6 +9353,8 @@ static void femu_test_ns_mgmt_default(void *obj, void *data,
     cmd.opcode = 0x15;
     g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_OPCODE);
     g_assert_cmpint(femu_identify(&c, 0xffffffff, 0, 0, buf), ==,
+                   NVME_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 0xffffffff, 5, 0, buf), ==,
                    NVME_INVALID_NSID);
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -10570,6 +10606,11 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {
         .before = femu_ns_subsys_before,
+    });
+    qos_add_test("ns-mgmt-identify-csi-common", "femu",
+                 femu_test_ns_mgmt_identify_csi_common,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on"
     });
     qos_add_test("ns-mgmt-identify", "femu", femu_test_ns_mgmt_identify,
                  &(QOSGraphTestOptions) {

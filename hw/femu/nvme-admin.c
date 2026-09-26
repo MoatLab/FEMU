@@ -730,6 +730,14 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
+    if (!present && nsid == NVME_NSID_BROADCAST &&
+        nvme_ns_mgmt_supported(n)) {
+        if (c->csi != NVME_CSI_NVM) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        /* Supported NVM formats have no command-set-specific capabilities. */
+        return nvme_rpt_empty_id_struct(n, cmd);
+    }
     if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
