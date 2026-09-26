@@ -1331,6 +1331,9 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (dulbe) {
         return dulbe;
     }
+    if (femu_pi_type(ns)) {
+        return femu_pi_compare(n, ns, cmd);
+    }
     if (ns->mdata && NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
         return nvme_compare_extended(n, ns, cmd, slba, nlb, offset);
     }
@@ -1441,6 +1444,10 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), slba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    if (femu_pi_type(ns)) {
+        return femu_pi_zeroes(n, ns, cmd);
     }
 
     /*

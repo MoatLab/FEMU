@@ -30,4 +30,7 @@ uint16_t femu_pi_transfer(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                     NvmeRequest *req);
 
+uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
+uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
+
 #endif

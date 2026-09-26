@@ -278,3 +278,98 @@ uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     return NVME_SUCCESS;
 }
+
+uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint16_t control = le16_to_cpu(rw->control);
+    uint32_t ref = le32_to_cpu(rw->reftag);
+    uint16_t app = le16_to_cpu(rw->apptag);
+    uint16_t mask = le16_to_cpu(rw->appmask);
+    uint16_t ms = nvme_ns_ms(ns);
+    uint16_t off = femu_pi_offset(ns);
+    uint64_t len = (uint64_t)nlb << NVME_ID_NS_LBADS(ns);
+    uint64_t xfer = len;
+    g_autofree uint8_t *data = NULL;
+    g_autofree uint8_t *meta = NULL;
+    g_autofree uint8_t *host = NULL;
+    g_autofree uint8_t *hmeta = NULL;
+    uint16_t status;
+    uint32_t i;
+
+    if (control & NVME_RW_PRINFO_PRACT) {
+        return NVME_INVALID_PROT_INFO | NVME_DNR;
+    }
+    if (NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
+        xfer += (uint64_t)nlb * ms;
+    }
+    if (xfer > UINT32_MAX || nvme_check_mdts(n, xfer)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (find_next_bit(ns->uncorrectable, slba + nlb, slba) < slba + nlb) {
+        return NVME_UNRECOVERED_READ;
+    }
+    data = g_malloc(len);
+    host = g_malloc(len);
+    meta = g_malloc((size_t)nlb * ms);
+    hmeta = g_malloc((size_t)nlb * ms);
+    status = femu_pi_transfer(n, ns, cmd, host, hmeta, false);
+    if (status) {
+        return status;
+    }
+    status = femu_pi_check(ns, host, hmeta, nlb, control, slba, ref, app, mask);
+    if (status) {
+        return status;
+    }
+    femu_pi_snapshot(ns, slba, nlb, data, meta);
+    status = femu_pi_check(ns, data, meta, nlb, control, slba, ref, app, mask);
+    if (status) {
+        return status;
+    }
+    if (memcmp(data, host, len)) {
+        return NVME_CMP_FAILURE;
+    }
+    /* Compare only the metadata outside the checked PI tuple. */
+    for (i = 0; i < nlb; i++) {
+        if (memcmp(meta + i * ms, hmeta + i * ms, off) ||
+            memcmp(meta + i * ms + off + 8, hmeta + i * ms + off + 8,
+                   ms - off - 8)) {
+            return NVME_CMP_FAILURE;
+        }
+    }
+    return NVME_SUCCESS;
+}
+
+uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint16_t control = le16_to_cpu(rw->control);
+    uint16_t ms = nvme_ns_ms(ns);
+    uint32_t ds = 1U << NVME_ID_NS_LBADS(ns);
+    uint8_t *data = (uint8_t *)n->mbe->logical_space + ns->backend_offset +
+                    slba * ds;
+    uint8_t *meta = ns->mdata + slba * ms;
+
+    if (control & (NVME_RW_PRINFO_PRCHK_GUARD | NVME_RW_PRINFO_PRCHK_APP |
+                   NVME_RW_PRINFO_PRCHK_REF)) {
+        return NVME_INVALID_PROT_INFO | NVME_DNR;
+    }
+    if (control & NVME_WZ_DEAC) {
+        nvme_deallocate_range(n, ns, slba, nlb);
+        return NVME_SUCCESS;
+    }
+    qemu_mutex_lock(&ns->mdata_lock);
+    memset(data, 0, (size_t)nlb * ds);
+    memset(meta, 0, (size_t)nlb * ms);
+    if (control & NVME_RW_PRINFO_PRACT) {
+        femu_pi_generate(ns, data, meta, nlb, slba, le32_to_cpu(rw->reftag),
+                         le16_to_cpu(rw->apptag));
+    }
+    nvme_mark_written(ns, slba, nlb);
+    qemu_mutex_unlock(&ns->mdata_lock);
+    return NVME_SUCCESS;
+}
