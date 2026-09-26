@@ -1075,9 +1075,13 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
-    /* KV capacity is measured in bytes, independent of the block format. */
+    /*
+     * KV capacity is measured in bytes, independent of the block format. A
+     * slice smaller than one block leaves an empty namespace, as it always
+     * has; Namespace Management refuses a zero size on its own.
+     */
     if (!NS_KVSSD(ns) &&
-        (!num_blks || num_blks > LONG_MAX ||
+        (num_blks > LONG_MAX ||
          num_blks > SIZE_MAX /
              MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms)))) {
         error_setg(errp, "namespace allocation size is not representable");

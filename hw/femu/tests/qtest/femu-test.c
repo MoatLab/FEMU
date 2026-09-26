@@ -9464,6 +9464,37 @@ static void femu_test_namespace_kv_byte_capacity(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * A namespace slice smaller than one block realizes as an empty namespace,
+ * as it always has, rather than refusing the device.
+ */
+static void femu_test_namespace_empty_slice(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'empty-slice','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':2,'namespace_sizes':'512',"
+                    "'lba_index':3}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);             /* NSZE */
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
 /* Preserve the legacy mode initializers' identity consumption. */
 static void femu_test_namespace_failure_naming(void *obj, void *data,
                                                 QGuestAllocator *alloc)
@@ -10648,6 +10679,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("namespace-kv-byte-capacity", "femu",
                  femu_test_namespace_kv_byte_capacity, NULL);
+    qos_add_test("namespace-empty-slice", "femu",
+                 femu_test_namespace_empty_slice, NULL);
     qos_add_test("namespace-partial-failure-naming", "femu",
                  femu_test_namespace_failure_naming, &(QOSGraphTestOptions) {
         .arg = GUINT_TO_POINTER(1),
