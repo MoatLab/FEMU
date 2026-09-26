@@ -24,7 +24,7 @@ void femu_pi_snapshot(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
                        uint8_t *data, uint8_t *meta);
 
 void femu_pi_generate(NvmeNamespace *ns, const uint8_t *data, uint8_t *meta,
-                       uint32_t nlb, uint64_t slba, uint32_t ref, uint16_t app);
+                       uint32_t nlb, uint32_t ref, uint16_t app);
 uint16_t femu_pi_transfer(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           uint8_t *data, uint8_t *meta, bool to_host);
 uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

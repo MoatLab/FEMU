@@ -134,7 +134,7 @@ void femu_pi_snapshot(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
 }
 
 void femu_pi_generate(NvmeNamespace *ns, const uint8_t *data, uint8_t *meta,
-                       uint32_t nlb, uint64_t slba, uint32_t ref, uint16_t app)
+                       uint32_t nlb, uint32_t ref, uint16_t app)
 {
     uint16_t ms = nvme_ns_ms(ns);
     uint16_t off = femu_pi_offset(ns);
@@ -142,9 +142,6 @@ void femu_pi_generate(NvmeNamespace *ns, const uint8_t *data, uint8_t *meta,
     uint8_t type = femu_pi_type(ns);
     uint32_t i;
 
-    if (type == DPS_TYPE_1) {
-        ref = slba;
-    }
     for (i = 0; i < nlb; i++, data += ds, meta += ms) {
         uint16_t guard = femu_pi_crc(0, data, ds);
 
@@ -250,7 +247,7 @@ uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return status;
         }
         if (control & NVME_RW_PRINFO_PRACT) {
-            femu_pi_generate(ns, data, meta, nlb, slba, ref, app);
+            femu_pi_generate(ns, data, meta, nlb, ref, app);
         } else {
             status = femu_pi_check(ns, data, meta, nlb, control, slba,
                                    ref, app, le16_to_cpu(rw->appmask));
@@ -370,7 +367,7 @@ uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     memset(data, 0, (size_t)nlb * ds);
     memset(meta, 0, (size_t)nlb * ms);
     if (control & NVME_RW_PRINFO_PRACT) {
-        femu_pi_generate(ns, data, meta, nlb, slba, le32_to_cpu(rw->reftag),
+        femu_pi_generate(ns, data, meta, nlb, le32_to_cpu(rw->reftag),
                          le16_to_cpu(rw->apptag));
     }
     nvme_mark_written(ns, slba, nlb);
