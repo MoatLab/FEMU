@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "libqtest.h"
+#include "qobject/qdict.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "libqos/libqos-malloc.h"
@@ -364,6 +365,7 @@ static void femu_test_invalid_nsid_reuse(void *obj, void *data,
     g_assert_cmpint(g_get_monotonic_time() - start, <, G_USEC_PER_SEC);
 
     guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -8521,6 +8523,67 @@ static uint8_t femu_pel_event(QTestState *qts, uint64_t buf, int i)
  * says whether one existed before the command; a Controller Level Reset
  * releases the context and is itself an event.
  */
+static void femu_ns_fixture(QTestState *qts, const char *value)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set', 'arguments':{"
+                          "'path':'/machine/peripheral/ns-test',"
+                          "'property':'x-ns-test','value':%s}}", value);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_namespace_sparse(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint32_t result;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_ns_fixture(qts, "sparse");
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 2, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 256, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), >, 0);
+    cmd.opcode = NVME_CMD_READ;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.nsid = cpu_to_le32(1);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                   NVME_INVALID_NSID);
+    cmd.nsid = cpu_to_le32(2);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                   NVME_INVALID_NSID);
+    cmd.nsid = cpu_to_le32(256);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_set_feature(&c, NVME_ERROR_RECOVERY, false,
+                                     0xffffffff, 7, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_feature(&c, NVME_ERROR_RECOVERY, 0, 256, 0,
+                                     &result), ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 7);
+    g_assert_cmpint(femu_format(&c, 0xffffffff, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -9043,6 +9106,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("namespace-sparse", "femu", femu_test_namespace_sparse,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
     });
     qos_add_test("invalid-nsid-reuse", "femu", femu_test_invalid_nsid_reuse,
                  &(QOSGraphTestOptions) {

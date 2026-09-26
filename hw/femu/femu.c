@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "system/qtest.h"
 #include "hw/qdev-properties.h"
 
 #include "./nvme.h"
@@ -372,8 +373,10 @@ static void nvme_reset_features(FemuCtrl *n)
     for (i = 0; i <= n->nr_io_queues; i++) {
         n->features.int_vector_config[i] = i | (n->intc << 16);
     }
-    for (i = 0; i < n->num_namespaces; i++) {
-        n->namespaces[i].err_rec = 0;
+    for (i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].id) {
+            n->namespaces[i].err_rec = 0;
+        }
     }
 }
 
@@ -479,10 +482,10 @@ static int femu_start_ctrl_extensions(FemuCtrl *n)
         seen[nseen++] = n->ext_ops.start_ctrl;
     }
 
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         int (*sc)(struct FemuCtrl *) = n->namespaces[i].ext_ops.start_ctrl;
 
-        if (!sc) {
+        if (!n->namespaces[i].id || !sc) {
             continue;
         }
         for (j = 0; j < nseen; j++) {
@@ -1213,8 +1216,10 @@ static void nvme_set_ctrl_capacity(FemuCtrl *n)
     uint64_t total = 0;
     int i;
 
-    for (i = 0; i < n->num_namespaces; i++) {
-        total += n->namespaces[i].size;
+    for (i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].id) {
+            total += n->namespaces[i].size;
+        }
     }
 
     memset(n->id_ctrl.tnvmcap, 0, sizeof(n->id_ctrl.tnvmcap));
@@ -1351,6 +1356,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->start_block = running_offset >> BDRV_SECTOR_BITS;
         running_offset += ns_sizes[i];
         ns->id = i + 1;
+        ns->attached = true;
 
         /* mode and command set for this namespace */
         ns->femu_mode = ns_modes[i];
@@ -1617,10 +1623,10 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
 {
     int i;
 
-    for (i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns)) {
+        if (ns->id && (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns))) {
             return true;
         }
     }
@@ -1726,7 +1732,7 @@ static void femu_realize_undo(FemuCtrl *n)
     n->features.int_vector_config = NULL;
     g_free(n->cmbuf);
     n->cmbuf = NULL;
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         g_free(n->namespaces[i].fdp.phs);
         n->namespaces[i].fdp.phs = NULL;
     }
@@ -1815,7 +1821,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* Coperd: [1..nr_io_queues] are used as IO queues */
     n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));
     n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
-    n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
+    n->namespace_limit = n->num_namespaces;
+    n->namespaces = g_new0(NvmeNamespace, NVME_MAX_NUM_NAMESPACES);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     qemu_spin_init(&n->elp_lock);
     for (int d = 0; d < NVME_DST_RESULTS; d++) {
@@ -1967,7 +1974,7 @@ static void femu_free_namespace_bitmaps(FemuCtrl *n)
 {
     int i;
 
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         g_free(n->namespaces[i].util);
         n->namespaces[i].util = NULL;
         g_free(n->namespaces[i].uncorrectable);
@@ -2002,10 +2009,10 @@ static void femu_exit_extensions(FemuCtrl *n)
         seen[nseen++] = n->ext_ops.exit;
     }
 
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         void (*ex)(struct FemuCtrl *) = n->namespaces[i].ext_ops.exit;
 
-        if (!ex) {
+        if (!n->namespaces[i].id || !ex) {
             continue;
         }
         for (j = 0; j < nseen; j++) {
@@ -2053,7 +2060,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
     /* FDP: free namespace FDP placement handles */
     if (n->namespaces) {
-        for (int i = 0; i < n->num_namespaces; i++) {
+        for (int i = 0; i < n->namespace_limit; i++) {
             g_free(n->namespaces[i].fdp.phs);
         }
     }
@@ -2267,6 +2274,37 @@ static const VMStateDescription femu_vmstate = {
     .unmigratable = 1,
 };
 
+/* Exercise unreachable lifecycle states without enabling guest commands. */
+static void femu_test_namespace(Object *obj, const char *value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns;
+
+    if (!n->sq || n->sq[0] || n->meta || n->num_namespaces != 2 ||
+        !NS_NOSSD(&n->namespaces[0]) || !NS_NOSSD(&n->namespaces[1])) {
+        error_setg(errp, "namespace fixture requires a disabled NoSSD pair");
+        return;
+    }
+    if (strcmp(value, "sparse")) {
+        error_setg(errp, "unknown namespace fixture");
+        return;
+    }
+    ns = &n->namespaces[NVME_MAX_NUM_NAMESPACES - 1];
+    *ns = n->namespaces[1];
+    ns->id = NVME_MAX_NUM_NAMESPACES;
+    memset(&n->namespaces[1], 0, sizeof(*ns));
+    n->namespaces[0].attached = false;
+    n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
+    n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
+}
+
+static void femu_instance_init(Object *obj)
+{
+    if (qtest_enabled()) {
+        object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
+    }
+}
+
 static void femu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -2290,6 +2328,7 @@ static const TypeInfo femu_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(FemuCtrl),
     .class_init    = femu_class_init,
+    .instance_init = femu_instance_init,
     .interfaces = (InterfaceInfo[]) {
         { INTERFACE_PCIE_DEVICE },
         { }

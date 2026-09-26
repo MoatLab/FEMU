@@ -191,10 +191,10 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
      */
     resume = nvme_pause_pollers(n);
 
-    for (i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->namespace_limit; i++) {
         struct ssd *ssd = n->namespaces[i].ssd;
 
-        if (!ssd) {
+        if (!n->namespaces[i].id || !ssd) {
             continue;
         }
 
@@ -293,7 +293,7 @@ static void bb_exit(FemuCtrl *n)
 {
     int i;
 
-    for (i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
         if (!NS_BBSSD(ns) || !ns->ssd) {

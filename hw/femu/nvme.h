@@ -1714,6 +1714,7 @@ typedef struct NvmeNamespace {
     QemuMutex       mdata_lock;
     bool            mdata_lock_init;
     uint32_t        id;
+    bool            attached;
     uint64_t        size; /* Coperd: for ZNS, FIXME */
     uint64_t        ns_blks;
     uint64_t        start_block;
@@ -2030,6 +2031,7 @@ typedef struct FemuCtrl {
     bool        sgl;        /* advertise + accept NVMe SGL data transfers */
     uint32_t    reg_size;
     uint32_t    num_namespaces;
+    uint32_t    namespace_limit;
     uint32_t    nr_io_queues;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
@@ -2249,6 +2251,27 @@ typedef struct NvmeDifTuple {
 
 #define SQ_POLLING_PERIOD_NS	(5000)
 #define CQ_POLLING_PERIOD_NS	(5000)
+static inline bool nvme_nsid_valid(FemuCtrl *n, uint32_t nsid)
+{
+    return nsid && (nsid == NVME_NSID_BROADCAST || nsid <= n->namespace_limit);
+}
+
+static inline NvmeNamespace *nvme_ns_allocated(FemuCtrl *n, uint32_t nsid)
+{
+    if (!n->namespaces || !nsid || nsid > n->namespace_limit ||
+        !n->namespaces[nsid - 1].id) {
+        return NULL;
+    }
+    return &n->namespaces[nsid - 1];
+}
+
+static inline NvmeNamespace *nvme_ns(FemuCtrl *n, uint32_t nsid)
+{
+    NvmeNamespace *ns = nvme_ns_allocated(n, nsid);
+
+    return ns && ns->attached ? ns : NULL;
+}
+
 #define FEMU_MAX_INF_REQS       (65536)
 
 enum {

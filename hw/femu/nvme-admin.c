@@ -573,20 +573,6 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
-static bool nvme_nsid_valid(FemuCtrl *n, uint32_t nsid)
-{
-    return nsid && (nsid == NVME_NSID_BROADCAST || nsid <= n->num_namespaces);
-}
-
-static inline NvmeNamespace *nvme_ns(FemuCtrl *n, uint32_t nsid)
-{
-    if (!nsid || nsid > n->num_namespaces) {
-        return NULL;
-    }
-
-    return &n->namespaces[nsid - 1];
-}
-
 static uint16_t nvme_rpt_empty_id_struct(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
@@ -677,12 +663,15 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
  */
 static bool nvme_can_sanitize(FemuCtrl *n)
 {
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (int i = 0; i < n->namespace_limit; i++) {
+        if (!n->namespaces[i].id) {
+            continue;
+        }
         if (!NS_BBSSD(&n->namespaces[i]) && !NS_NOSSD(&n->namespaces[i])) {
             return false;
         }
     }
-    return n->num_namespaces > 0;
+    return n->namespace_limit > 0;
 }
 
 static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
@@ -693,8 +682,8 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
     /* assigned when the controller joins its subsystem, after realize */
     n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
     n->id_ctrl.sanicap = cpu_to_le32(nvme_can_sanitize(n) ? 1 << 1 : 0);
-    for (int i = 0; i < n->num_namespaces; i++) {
-        if (NS_ZNSSD(&n->namespaces[i])) {
+    for (int i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].id && NS_ZNSSD(&n->namespaces[i])) {
             n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_ZDCN);
         }
     }
@@ -752,7 +741,7 @@ static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    for (i = 1; i <= n->num_namespaces; i++) {
+    for (i = 1; i <= n->namespace_limit; i++) {
         ns = nvme_ns(n, i);
         if (!ns) {
             continue;
@@ -790,7 +779,7 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    for (i = 1; i <= n->num_namespaces; i++) {
+    for (i = 1; i <= n->namespace_limit; i++) {
         ns = nvme_ns(n, i);
         if (!ns) {
             continue;
@@ -959,8 +948,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
                        NVME_INVALID_FIELD | NVME_DNR;
             }
             if (!kv_nsid) {
-                for (int i = 0; i < n->num_namespaces; i++) {
-                    if (NS_KVSSD(&n->namespaces[i])) {
+                for (int i = 0; i < n->namespace_limit; i++) {
+                    if (n->namespaces[i].id && NS_KVSSD(&n->namespaces[i])) {
                         return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i],
                                                          cmd);
                     }
@@ -1439,8 +1428,10 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         bool resume = nvme_pause_pollers(n);
 
         if (nsid == NVME_NSID_BROADCAST) {
-            for (uint32_t i = 0; i < n->num_namespaces; i++) {
-                n->namespaces[i].err_rec = dw11;
+            for (uint32_t i = 0; i < n->namespace_limit; i++) {
+                if (n->namespaces[i].id) {
+                    n->namespaces[i].err_rec = dw11;
+                }
             }
         } else {
             nvme_ns(n, nsid)->err_rec = dw11;
@@ -1697,8 +1688,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
         lids[NVME_LOG_FDP_EVENTS]    = cpu_to_le32(NVME_LIDS_LSUPP);
     }
 
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
-        if (NS_ZNSSD(&n->namespaces[i])) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        if (n->namespaces[i].id && NS_ZNSSD(&n->namespaces[i])) {
             zoned = true;
             break;
         }
@@ -1745,11 +1736,14 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->wr_bytes += n->poller_ctr[p].nr_host_wr_bytes;
     }
 
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         uint64_t reads;
         uint8_t spare, used;
 
+        if (!ns->id) {
+            continue;
+        }
         st->media_errors += zns_media_errors(ns);
 
         if (!ns->ssd) {
@@ -2541,10 +2535,10 @@ static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
     if (off >= sizeof(log)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->uncorrectable) {
+        if (ns->id && ns->uncorrectable) {
             estulb += bitmap_count_one(ns->uncorrectable,
                                        le64_to_cpu(ns->id_ns.nsze));
         }
@@ -2589,9 +2583,12 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
 
     resume = nvme_pause_pollers(n);
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
+        if (!ns->id) {
+            continue;
+        }
         bitmap_zero(ns->util, ns->ns_blks);
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
         if (n->mbe && n->mbe->logical_space) {
@@ -2750,7 +2747,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
          */
         uint32_t nsid = le32_to_cpu(cmd->nsid);
 
-        if (nsid && nsid != NVME_NSID_BROADCAST && nsid <= n->num_namespaces) {
+        if (nvme_ns(n, nsid)) {
             NvmeNamespace *ns = &n->namespaces[nsid - 1];
 
             if (ns->ext_ops.get_log) {
@@ -2977,7 +2974,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     /* SES is bits 11:9; bit 8 is PIL, which used to be read as an erase */
     uint8_t sec_erase = (dw10 >> 9) & 0x7;
 
-    if (nsid != 0xffffffff && (nsid == 0 || nsid > n->num_namespaces)) {
+    if (nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
     /* Only legacy LBA formats with 16-bit guards; no ELBAF or 64-bit PI. */
@@ -2999,7 +2996,10 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
      * and still report that the command failed.
      */
     if (nsid == 0xffffffff) {
-        for (uint32_t i = 0; i < n->num_namespaces; ++i) {
+        for (uint32_t i = 0; i < n->namespace_limit; ++i) {
+            if (!nvme_ns(n, i + 1)) {
+                continue;
+            }
             status = nvme_format_check(&n->namespaces[i], lba_idx, meta_loc,
                                        pil, pi);
             if (status != NVME_SUCCESS) {
@@ -3028,8 +3028,11 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     resume = nvme_pause_pollers(n);
 
     if (nsid == 0xffffffff) {
-        for (uint32_t i = 0; i < n->num_namespaces; ++i) {
-            ns = &n->namespaces[i];
+        for (uint32_t i = 0; i < n->namespace_limit; ++i) {
+            ns = nvme_ns(n, i + 1);
+            if (!ns) {
+                continue;
+            }
             status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
                                            sec_erase);
             if (status != NVME_SUCCESS) {

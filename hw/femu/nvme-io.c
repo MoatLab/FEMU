@@ -1818,12 +1818,11 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
-    if (nsid == 0 || nsid > n->num_namespaces) {
+    req->ns = ns = nvme_ns(n, nsid);
+    if (!ns) {
         femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
     }
-
-    req->ns = ns = &n->namespaces[nsid - 1];
 
     switch (cmd->opcode) {
     case NVME_OP_ABORTED:
