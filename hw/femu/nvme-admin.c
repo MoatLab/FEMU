@@ -3075,6 +3075,122 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     return status;
 }
 
+static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{
+    uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    NvmeIdNs id;
+    NvmeNamespace *ns;
+    Error *err = NULL;
+    uint64_t nsze;
+    uint16_t status;
+    bool resume;
+    int ret;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+    if (sel == 1) {
+        if (nsid != NVME_NSID_BROADCAST && !nvme_ns_allocated(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        resume = nvme_pause_pollers(n);
+        for (uint32_t i = 1; i <= n->namespace_limit; i++) {
+            ns = nvme_ns_allocated(n, i);
+            if (ns && (nsid == NVME_NSID_BROADCAST || nsid == i)) {
+                nvme_retire_ns_requests(n, ns);
+                nvme_ns_destroy(n, ns);
+            }
+        }
+        nvme_resume_pollers(n, resume);
+        return NVME_SUCCESS;
+    }
+    if (sel || nsid) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (le32_to_cpu(cmd->cdw11) >> 24 != NVME_CSI_NVM) {
+        return NVME_IOCS_NOT_SUPPORTED | NVME_DNR;
+    }
+    status = dma_write_prp(n, (uint8_t *)&id, sizeof(id),
+                           le64_to_cpu(cmd->dptr.prp1),
+                           le64_to_cpu(cmd->dptr.prp2));
+    if (status) {
+        return status;
+    }
+    nsze = le64_to_cpu(id.nsze);
+    if (!nsze || le64_to_cpu(id.ncap) > nsze) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (le64_to_cpu(id.ncap) != nsze) {
+        return NVME_NS_THIN_PROVISION | NVME_DNR;
+    }
+    if (id.flbas >= n->nlbaf || id.dps) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
+    if (id.nmic || id.nvmsetid || id.endgid) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    for (nsid = 1; nsid <= n->namespace_limit; nsid++) {
+        if (!nvme_ns_allocated(n, nsid)) {
+            break;
+        }
+    }
+    if (nsid > n->namespace_limit) {
+        return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
+    }
+    resume = nvme_pause_pollers(n);
+    ret = nvme_ns_create(n, nsid, nsze, id.flbas, FEMU_NOSSD_MODE, false,
+                         &err);
+    nvme_resume_pollers(n, resume);
+    error_free(err);
+    if (ret) {
+        return (ret == -ENOSPC ? NVME_NS_INSUFFICIENT_CAP :
+                NVME_INTERNAL_DEV_ERROR) | NVME_DNR;
+    }
+    cqe->n.result = cpu_to_le32(nsid);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint16_t list[2048];
+    uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
+    NvmeNamespace *ns;
+    uint16_t status;
+    bool resume;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+    if (sel > 1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    ns = nvme_ns_allocated(n, le32_to_cpu(cmd->nsid));
+    if (!ns) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    status = dma_write_prp(n, (uint8_t *)list, sizeof(list),
+                           le64_to_cpu(cmd->dptr.prp1),
+                           le64_to_cpu(cmd->dptr.prp2));
+    if (status) {
+        return status;
+    }
+    if (le16_to_cpu(list[0]) != 1 || le16_to_cpu(list[1]) != n->cntlid) {
+        return NVME_CTRL_LIST_INVALID | NVME_DNR;
+    }
+    if (ns->attached == !sel) {
+        return (sel ? NVME_NS_NOT_ATTACHED : NVME_NS_ALREADY_ATTACHED) |
+               NVME_DNR;
+    }
+    resume = nvme_pause_pollers(n);
+    if (sel) {
+        nvme_retire_ns_requests(n, ns);
+    }
+    ns->attached = !sel;
+    nvme_resume_pollers(n, resume);
+    return NVME_SUCCESS;
+}
+
 /*
  * Only qtest can seed otherwise transient queue states. Use SQ-owned requests
  * so completion, CQ pressure and recycling follow the normal dataplane paths.
@@ -3171,6 +3287,10 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_qtest_retire_ns(n, cqe);
     }
     switch (cmd->opcode) {
+    case NVME_ADM_CMD_NS_MGMT:
+        return nvme_ns_mgmt(n, cmd, cqe);
+    case NVME_ADM_CMD_NS_ATTACHMENT:
+        return nvme_ns_attachment(n, cmd);
     case NVME_ADM_CMD_FEMU_DEBUG:
         n->upg_rd_lat_ns = le64_to_cpu(cmd->cdw10);
         n->lpg_rd_lat_ns = le64_to_cpu(cmd->cdw11);

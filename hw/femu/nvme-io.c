@@ -1820,6 +1820,9 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     req->ns = ns = nvme_ns(n, nsid);
     if (!ns) {
+        if (nvme_ns_mgmt_supported(n) && nsid && nsid <= n->namespace_limit) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
     }

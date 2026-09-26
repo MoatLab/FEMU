@@ -686,6 +686,8 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_GET_LOG_PAGE   = 0x02,
     NVME_ADM_CMD_DELETE_CQ      = 0x04,
     NVME_ADM_CMD_CREATE_CQ      = 0x05,
+    NVME_ADM_CMD_NS_MGMT        = 0x0d,
+    NVME_ADM_CMD_NS_ATTACHMENT  = 0x15,
     NVME_ADM_CMD_IDENTIFY       = 0x06,
     NVME_ADM_CMD_ABORT          = 0x08,
     NVME_ADM_CMD_SET_FEATURES   = 0x09,
@@ -969,6 +971,13 @@ enum NvmeStatusCodes {
     NVME_INVALID_FW_IMAGE       = 0x0107,
     NVME_INVALID_IRQ_VECTOR     = 0x0108,
     NVME_INVALID_LOG_ID         = 0x0109,
+    NVME_NS_INSUFFICIENT_CAP    = 0x0115,
+    NVME_NS_ID_UNAVAILABLE      = 0x0116,
+    NVME_NS_ALREADY_ATTACHED    = 0x0118,
+    NVME_NS_NOT_ATTACHED        = 0x011a,
+    NVME_NS_THIN_PROVISION      = 0x011b,
+    NVME_CTRL_LIST_INVALID      = 0x011c,
+    NVME_IOCS_NOT_SUPPORTED     = 0x0129,
     NVME_INVALID_FORMAT         = 0x010a,
     NVME_FW_REQ_RESET           = 0x010b,
     NVME_INVALID_QUEUE_DEL      = 0x010c,
@@ -2258,6 +2267,7 @@ typedef struct NvmeDifTuple {
 #define SQ_POLLING_PERIOD_NS	(5000)
 #define CQ_POLLING_PERIOD_NS	(5000)
 /* Caller must stop processing and retire references before removal. */
+bool nvme_ns_mgmt_supported(FemuCtrl *n);
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);
 int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
                    uint8_t mode, bool attached, Error **errp);

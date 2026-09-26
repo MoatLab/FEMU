@@ -1249,6 +1249,22 @@ static void nvme_set_ctrl_capacity(FemuCtrl *n)
     stq_le_p(n->id_ctrl.unvmcap, n->namespace_pool_size - total);
 }
 
+bool nvme_ns_mgmt_supported(FemuCtrl *n)
+{
+    uint32_t i;
+
+    if (!n->ns_mgmt || !NOSSD(n) || n->dps ||
+        (n->subsys && n->subsys->endgrp.fdp.enabled)) {
+        return false;
+    }
+    for (i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].allocated && !NS_NOSSD(&n->namespaces[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1414,6 +1430,15 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     for (i = 0; i < n->num_namespaces; i++) {
         n->namespace_pool_size += n->namespaces[i].extent_size;
     }
+    if (nvme_ns_mgmt_supported(n)) {
+        n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
+        n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
+        n->id_ctrl.oacs |= cpu_to_le16(NVME_OACS_NS_MGMT);
+        for (i = 0; i < n->num_namespaces; i++) {
+            stq_le_p(n->namespaces[i].id_ns.nvmcap,
+                     n->namespaces[i].extent_size);
+        }
+    }
     nvme_set_ctrl_capacity(n);
 
     return 0;
@@ -1448,7 +1473,6 @@ static void nvme_init_ctrl(FemuCtrl *n)
         id->endgidmax = cpu_to_le16(1);
     }
 
-    /* TODO: NVME_OACS_NS_MGMT */
     id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST |
                                    NVME_OACS_GLSS);
     /* an extended self-test takes a minute at most; both complete at once */
@@ -1812,7 +1836,7 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     length = DIV_ROUND_UP(bytes, unit) * unit;
     if (!nvme_ns_find_extent(n, length, &offset)) {
         error_setg(errp, "insufficient namespace capacity");
-        return -1;
+        return -ENOSPC;
     }
     ns = &n->namespaces[nsid - 1];
     ns->ctrl = n;
@@ -1843,6 +1867,9 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
         goto fail;
     }
     memset((uint8_t *)n->mbe->logical_space + offset, 0, length);
+    if (nvme_ns_mgmt_supported(n)) {
+        stq_le_p(ns->id_ns.nvmcap, length);
+    }
     ns->attached = attached;
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);
