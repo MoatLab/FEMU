@@ -8529,8 +8529,34 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
                           "'path':'/machine/peripheral/ns-test',"
                           "'property':'x-ns-test','value':%s}}", value);
 
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("namespace fixture: %s",
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
     g_assert_true(qdict_haskey(rsp, "return"));
     qobject_unref(rsp);
+}
+
+static void femu_test_namespace_sanitize_free(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_ns_fixture(qts, "empty");
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    femu_ns_fixture(qts, "check-erased");
+    guest_free(alloc, buf);
 }
 
 static void femu_test_namespace_lifecycle(void *obj, void *data,
@@ -9209,6 +9235,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("namespace-sanitize-free", "femu",
+                 femu_test_namespace_sanitize_free, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,namespaces=2"
     });
     qos_add_test("namespace-lifecycle-bbssd", "femu",
                  femu_test_namespace_lifecycle, &(QOSGraphTestOptions) {

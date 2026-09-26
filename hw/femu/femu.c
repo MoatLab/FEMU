@@ -2418,6 +2418,17 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
         error_setg(errp, "namespace fixture requires a disabled NVM pair");
         return;
     }
+    if (!strcmp(value, "check-erased")) {
+        const uint8_t *bytes = n->mbe->logical_space;
+
+        for (uint64_t i = 0; i < n->mbe->size; i++) {
+            if (bytes[i]) {
+                error_setg(errp, "backend still contains data at %" PRIu64, i);
+                return;
+            }
+        }
+        return;
+    }
     if (!strcmp(value, "empty")) {
         for (uint32_t i = 0; i < n->namespace_limit; i++) {
             nvme_ns_destroy(n, &n->namespaces[i]);

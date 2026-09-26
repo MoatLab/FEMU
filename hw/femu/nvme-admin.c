@@ -2584,6 +2584,9 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
 
     resume = nvme_pause_pollers(n);
+    if (n->mbe && n->mbe->logical_space) {
+        memset(n->mbe->logical_space, 0, n->mbe->size);
+    }
     for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
@@ -2592,10 +2595,6 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
         }
         bitmap_zero(ns->util, ns->ns_blks);
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
-        if (n->mbe && n->mbe->logical_space) {
-            memset((uint8_t *)n->mbe->logical_space + ns->backend_offset, 0,
-                   ns->size);
-        }
         if (ns->mdata) {
             memset(ns->mdata, 0, ns->mdata_len);
         }
