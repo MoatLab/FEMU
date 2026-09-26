@@ -1115,11 +1115,10 @@ static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
         *out = ns;
         return NVME_SUCCESS;
     }
-    if (snsid == 0 || snsid == NVME_NSID_BROADCAST ||
-        snsid > n->num_namespaces) {
+    s = nvme_ns(n, snsid);
+    if (!s) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
-    s = &n->namespaces[snsid - 1];
     if (!(NS_BBSSD(s) || NS_NOSSD(s)) || !(NS_BBSSD(ns) || NS_NOSSD(ns))) {
         return NVME_INVALID_NSID | NVME_DNR;
     }

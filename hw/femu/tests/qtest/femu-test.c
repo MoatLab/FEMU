@@ -9152,6 +9152,57 @@ static void femu_ns_make_sparse(FemuCtrlState *c, uint64_t buf)
     g_assert_cmpint(femu_ns_attach(c, buf, 256, 0, true), ==, NVME_SUCCESS);
 }
 
+static void femu_test_namespace_copy_source(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    bool detached = data != NULL;
+    uint32_t source = detached ? 1 : 256;
+    uint32_t dest = detached ? 256 : 1;
+    uint8_t bytes[4096];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_ns_make_sparse(&c, buf);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writew(qts, buf + 4, 4);
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    g_assert_cmpint(femu_rw_ns(&c, NVME_CMD_WRITE, source, 0, buf), ==,
+                   NVME_SUCCESS);
+    if (detached) {
+        g_assert_cmpint(femu_ns_attach(&c, buf, source, 0, false), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpint(femu_rw_ns(&c, NVME_CMD_READ, source, 0, buf), ==,
+                       NVME_INVALID_FIELD);
+    }
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writel(qts, list, source);
+    qtest_writew(qts, list + 16, 7);
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(dest);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw12 = cpu_to_le32(2 << 8);
+    g_assert_cmpint(femu_io(&c, &cmd), ==,
+                   detached ? NVME_INVALID_NSID : NVME_SUCCESS);
+    g_assert_cmpint(femu_rw_ns(&c, NVME_CMD_READ, dest, 0, buf), ==,
+                   NVME_SUCCESS);
+    qtest_memread(qts, buf, bytes, sizeof(bytes));
+    for (i = 0; i < sizeof(bytes); i++) {
+        g_assert_cmpuint(bytes[i], ==, detached ? 0 : 0x5a);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    guest_free(alloc, list);
+}
+
 static void femu_test_namespace_sanitize_bounds(void *obj, void *data,
                                                 QGuestAllocator *alloc)
 {
@@ -10062,6 +10113,15 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-default", "femu", femu_test_ns_mgmt_default,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test"
+    });
+    qos_add_test("namespace-copy-detached", "femu",
+                 femu_test_namespace_copy_source, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on,namespaces=2,oncs=0x100",
+        .arg = (void *)1,
+    });
+    qos_add_test("namespace-copy-high", "femu",
+                 femu_test_namespace_copy_source, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on,namespaces=2,oncs=0x100"
     });
     qos_add_test("namespace-large", "femu", femu_test_namespace_large,
                  &(QOSGraphTestOptions) {

@@ -224,13 +224,15 @@ static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
          * that one's place in the backing store, which is what the request's
          * namespace stands for while the read is charged.
          */
-        if (snsid && snsid != dns->id && snsid <= n->num_namespaces) {
+        if (snsid && snsid != dns->id) {
+            NvmeNamespace *source = nvme_ns(n, snsid);
+
             /* a namespace without media (no-SSD) costs nothing to read */
-            if (!n->namespaces[snsid - 1].ssd) {
+            if (!source || !source->ssd) {
                 continue;
             }
-            from = n->namespaces[snsid - 1].ssd;
-            req->ns = &n->namespaces[snsid - 1];
+            from = source->ssd;
+            req->ns = source;
         }
         req->slba = le64_to_cpu(req->dsm_ranges[i].slba);
         req->nlb = le32_to_cpu(req->dsm_ranges[i].nlb);
