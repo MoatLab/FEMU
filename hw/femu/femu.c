@@ -1012,7 +1012,7 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
                            (n->extended << 4);
     id_ns->mc            = n->mc;
-    id_ns->dpc           = n->pi && n->meta >= 8 ? 0x1f : 0;
+    id_ns->dpc           = n->pi ? (n->meta >= 8 ? 0x1f : 0) : n->dpc;
     id_ns->dps           = n->dps;
     id_ns->dlfeat        = 0x9;
     id_ns->lbaf[0].lbads = 9;

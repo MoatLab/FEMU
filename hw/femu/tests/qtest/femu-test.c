@@ -6344,6 +6344,25 @@ static void femu_test_pi_copy_convert(void *obj, void *data,
     guest_free(alloc, dbuf);
 }
 
+static void femu_test_pi_dpc_no_metadata(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    unsigned int dpc = GPOINTER_TO_UINT(data);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                   NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 28), ==, dpc);
+    g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    g_assert_cmpint(femu_format_dw10(&c, 1 << 5), ==, NVME_INVALID_FORMAT);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -6353,6 +6372,7 @@ static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
     bool enabled = GPOINTER_TO_INT(data);
     unsigned int type;
     unsigned int first;
+    unsigned int lbaf;
 
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
@@ -6382,6 +6402,17 @@ static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                    NVME_SUCCESS);
     g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    for (lbaf = 0; lbaf <= FEMU_MD_NLBAF; lbaf += FEMU_MD_NLBAF) {
+        g_assert_cmpint(femu_format_dw10(&c, lbaf | (1 << 8)), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                       NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 29), ==, enabled ? 0 : 8);
+        g_assert_cmpint(femu_format_dw10(&c, lbaf), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                       NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
+    }
     if (!enabled) {
         femu_create_io_queues(&c);
         qtest_memset(qts, buf, 0x5a, 512);
@@ -9188,6 +9219,15 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2"
+    });
+    qos_add_test("pi-off-dpc-no-metadata", "femu", femu_test_pi_dpc_no_metadata,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(0x19),
+        .edge.extra_device_opts = "pi=off,meta=0,dpc=0x19"
+    });
+    qos_add_test("pi-dpc-no-metadata", "femu", femu_test_pi_dpc_no_metadata,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "pi=on,meta=0,dpc=0x19"
     });
     qos_add_test("pi-format", "femu", femu_test_pi_format,
                  &(QOSGraphTestOptions) {

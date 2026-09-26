@@ -2935,7 +2935,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
      */
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->id_ns.flbas = lba_idx | meta_loc;
-    ns->id_ns.dps = pi ? pil | pi : 0;
+    ns->id_ns.dps = !n->pi || pi ? pil | pi : 0;
     /* the copy the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_idx];
     ns->ns_blks = ns_blks(ns, lba_idx);
