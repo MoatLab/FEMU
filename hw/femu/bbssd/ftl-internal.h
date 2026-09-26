@@ -216,9 +216,9 @@ extern const struct femu_mapping_ops femu_mapping_hybrid_ops;
 extern const struct femu_mapping_ops femu_mapping_fast_ops;
 
 /*
- * The logical pages blocks [slba, slba + nlb) cover. One FTL maps the whole
- * device, so each namespace sits at its byte offset in it, and a block is
- * whatever size the namespace was formatted with, not a sector of secsz.
+ * Translate blocks [slba, slba + nlb) using the namespace's current format.
+ * Fixed namespaces retain device-relative numbering; managed namespaces use
+ * their private FTL address spaces.
  */
 static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
                                  uint64_t slba, uint64_t nlb,
@@ -228,6 +228,11 @@ static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
     uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
     uint64_t off = req->ns ? req->ns->backend_offset : 0;
 
+    /* Managed namespaces index their private FTL independently of placement. */
+    if (ssd->n->ns_mgmt &&
+        (le16_to_cpu(ssd->n->id_ctrl.oacs) & NVME_OACS_NS_MGMT)) {
+        off = 0;
+    }
     off += slba << lbads;
     *start_lpn = off / pg;
     *end_lpn = (off + (nlb << lbads) - 1) / pg;

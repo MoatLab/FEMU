@@ -8831,6 +8831,96 @@ static void femu_test_ns_mgmt_bbssd_boot_cap(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static void femu_ns_page(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                         uint32_t page, uint8_t pattern, bool write)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t bytes[4096];
+    int i;
+
+    qtest_memset(qts, buf, write ? pattern : 0xff, 4096);
+    g_assert_cmpint(femu_rw_ns(c, write ? NVME_CMD_WRITE : NVME_CMD_READ,
+                             nsid, page * 8, buf), ==, NVME_SUCCESS);
+    if (!write) {
+        qtest_memread(qts, buf, bytes, sizeof(bytes));
+        for (i = 0; i < sizeof(bytes); i++) {
+            g_assert_cmphex(bytes[i], ==, pattern);
+        }
+    }
+}
+
+static void femu_test_ns_mgmt_bbssd_isolation(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    uint16_t cntlid;
+    int pass;
+    int i;
+    int ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    for (ns = 1; ns <= 2; ns++) {
+        g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, ns);
+        g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                       NVME_SUCCESS);
+    }
+    femu_create_io_queues(&c);
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i, ns * 32 + i % 17, true);
+        }
+    }
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i, ns * 32 + i % 17, false);
+        }
+    }
+    /* Every original line mixes cold pages with pages invalidated below. */
+    for (pass = 0; pass < 8; pass++) {
+        for (ns = 1; ns <= 2; ns++) {
+            for (i = 0; i < 512; i += 2) {
+                femu_ns_page(&c, buf, ns, i, ns * 64 + pass, true);
+            }
+        }
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         512, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 16), >, 0);
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i,
+                         i % 2 ? ns * 32 + i % 17 : ns * 64 + 7, false);
+        }
+    }
+    g_assert_cmpint(femu_format(&c, 1, 0, 1), ==, NVME_SUCCESS);
+    for (i = 0; i < 512; i++) {
+        femu_ns_page(&c, buf, 1, i, 0, false);
+        femu_ns_page(&c, buf, 2, i,
+                     i % 2 ? 64 + i % 17 : 135, false);
+    }
+    femu_ns_page(&c, buf, 1, 0, 0xa5, true);
+    femu_ns_page(&c, buf, 1, 0, 0xa5, false);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, cntlid, true), ==, NVME_SUCCESS);
+    femu_ns_page(&c, buf, 1, 0, 0, false);
+    femu_ns_page(&c, buf, 2, 0, 135, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qpci_unplug_acpi_device_test(qts, "ns-test", 4);
+}
+
 static void femu_test_ns_mgmt_format_detached(void *obj, void *data,
                                               QGuestAllocator *alloc)
 {
@@ -10186,6 +10276,14 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ns-mgmt-bbssd-boot-cap", "femu",
                  femu_test_ns_mgmt_bbssd_boot_cap, NULL);
+    qos_add_test("ns-mgmt-bbssd-isolation", "femu",
+                 femu_test_ns_mgmt_bbssd_isolation, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ns-test,ns_mgmt=on,femu_mode=1,oacs=0x2,namespaces=2,"
+            "namespace_sizes=2M,,2M,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=40,"
+            "pls_per_lun=1,luns_per_ch=1,nchs=1",
+    });
     qos_add_test("ns-mgmt-bbssd-retire", "femu",
                  femu_test_ns_retire, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
