@@ -9235,6 +9235,30 @@ static void femu_test_ns_mgmt_subsys(void *obj, void *data,
     }
 }
 
+/*
+ * The broadcast Identify Namespace reports what every namespace can be
+ * formatted or created with (NVM 1.2, Figure 114), protection included.
+ */
+static void femu_test_ns_mgmt_common_dpc(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t dpc;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    dpc = qtest_readb(qts, buf + 28);
+    g_assert_cmpint(dpc, ==, 0x1f);
+    g_assert_cmpint(femu_identify(&c, NVME_NSID_BROADCAST, 0, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 28), ==, dpc);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_identify_csi_common(void *obj, void *data,
                                                   QGuestAllocator *alloc)
 {
@@ -10643,6 +10667,10 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {
         .before = femu_ns_subsys_before,
+    });
+    qos_add_test("ns-mgmt-common-dpc", "femu", femu_test_ns_mgmt_common_dpc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "ns_mgmt=on,pi=on,meta=8,mc=3"
     });
     qos_add_test("ns-mgmt-identify-csi-common", "femu",
                  femu_test_ns_mgmt_identify_csi_common,

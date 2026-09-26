@@ -1042,8 +1042,11 @@ void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id)
 
     nvme_ns_init_identify(n, &caps);
     memset(id, 0, sizeof(*id));
+    /* the fields NVM 1.2 Figure 114 marks Reported */
     id->nlbaf = caps.nlbaf;
     id->mc = caps.mc;
+    id->dpc = caps.dpc;
+    id->nmic = caps.nmic;
     memcpy(id->lbaf, caps.lbaf, sizeof(id->lbaf));
 }
 
