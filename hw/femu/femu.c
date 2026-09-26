@@ -374,7 +374,7 @@ static void nvme_reset_features(FemuCtrl *n)
         n->features.int_vector_config[i] = i | (n->intc << 16);
     }
     for (i = 0; i < n->namespace_limit; i++) {
-        if (n->namespaces[i].id) {
+        if (n->namespaces[i].allocated) {
             n->namespaces[i].err_rec = 0;
         }
     }
@@ -485,7 +485,7 @@ static int femu_start_ctrl_extensions(FemuCtrl *n)
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         int (*sc)(struct FemuCtrl *) = n->namespaces[i].ext_ops.start_ctrl;
 
-        if (!n->namespaces[i].id || !sc) {
+        if (!n->namespaces[i].allocated || !sc) {
             continue;
         }
         for (j = 0; j < nseen; j++) {
@@ -1034,6 +1034,21 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     }
 }
 
+static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
+{
+    if (ns->ext_ops.ns_exit) {
+        ns->ext_ops.ns_exit(n, ns);
+    }
+    g_free(ns->util);
+    g_free(ns->uncorrectable);
+    g_free(ns->mdata);
+    g_free(ns->fdp.phs);
+    if (ns->mdata_lock_init) {
+        qemu_mutex_destroy(&ns->mdata_lock);
+    }
+    memset(ns, 0, sizeof(*ns));
+}
+
 static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     NvmeIdNs *id_ns = &ns->id_ns;
@@ -1047,8 +1062,17 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
-    ns->util = bitmap_new(num_blks);
-    ns->uncorrectable = bitmap_new(num_blks);
+    if (!num_blks || num_blks > INT_MAX ||
+        num_blks > SIZE_MAX / MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms))) {
+        error_setg(errp, "namespace allocation size is not representable");
+        return -1;
+    }
+    ns->util = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
+    ns->uncorrectable = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
+    if (!ns->util || !ns->uncorrectable) {
+        error_setg(errp, "cannot allocate namespace bitmaps");
+        return -1;
+    }
     if (n->meta) {
         qemu_mutex_init(&ns->mdata_lock);
         ns->mdata_lock_init = true;
@@ -1206,8 +1230,7 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
  * are sized, since nvme_init_ctrl() runs before that and would only ever see
  * zero -- which is what `nvme id-ctrl` used to print.
  *
- * Every namespace is created at realize and none can be added later, so no
- * capacity is left unallocated.
+ * The exposed boot pool stays fixed as extents are returned and reused.
  */
 static void nvme_set_ctrl_capacity(FemuCtrl *n)
 {
@@ -1215,14 +1238,15 @@ static void nvme_set_ctrl_capacity(FemuCtrl *n)
     int i;
 
     for (i = 0; i < n->namespace_limit; i++) {
-        if (n->namespaces[i].id) {
-            total += n->namespaces[i].size;
+        if (n->namespaces[i].allocated) {
+            total += n->namespaces[i].extent_size;
         }
     }
 
     memset(n->id_ctrl.tnvmcap, 0, sizeof(n->id_ctrl.tnvmcap));
     memset(n->id_ctrl.unvmcap, 0, sizeof(n->id_ctrl.unvmcap));
-    stq_le_p(n->id_ctrl.tnvmcap, total);
+    stq_le_p(n->id_ctrl.tnvmcap, n->namespace_pool_size);
+    stq_le_p(n->id_ctrl.unvmcap, n->namespace_pool_size - total);
 }
 
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
@@ -1356,6 +1380,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         running_offset += ns_sizes[i];
         ns->id = i + 1;
         ns->attached = true;
+        ns->allocated = true;
 
         /* mode and command set for this namespace */
         ns->femu_mode = ns_modes[i];
@@ -1386,6 +1411,9 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     g_free(ns_sizes);
     g_free(ns_modes);
 
+    for (i = 0; i < n->num_namespaces; i++) {
+        n->namespace_pool_size += n->namespaces[i].extent_size;
+    }
     nvme_set_ctrl_capacity(n);
 
     return 0;
@@ -1626,7 +1654,7 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
     for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->id && (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns))) {
+        if (ns->allocated && (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns))) {
             return true;
         }
     }
@@ -1702,6 +1730,129 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
     n->ext_ops = saved_ops;
 }
 
+static bool femu_test_ns_fail;
+
+void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)
+{
+    nvme_ns_release(n, ns);
+    nvme_set_ctrl_capacity(n);
+}
+
+/* The complement of owned extents coalesces automatically on removal. */
+static bool nvme_ns_find_extent(FemuCtrl *n, uint64_t length, uint64_t *offset)
+{
+    uint64_t start = 0;
+    uint32_t i = 0;
+
+    while (i < n->namespace_limit) {
+        NvmeNamespace *ns = &n->namespaces[i++];
+
+        if (length > n->namespace_pool_size - start) {
+            return false;
+        }
+        if (ns->allocated && start < ns->backend_offset + ns->extent_size &&
+            ns->backend_offset < start + length) {
+            start = ns->backend_offset + ns->extent_size;
+            i = 0;
+        }
+    }
+    if (length > n->namespace_pool_size - start) {
+        return false;
+    }
+    *offset = start;
+    return true;
+}
+
+int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
+                   uint8_t mode, bool attached, Error **errp)
+{
+    NvmeNamespace *ns;
+    NvmeIdNs id_ns = { 0 };
+    uint64_t bytes;
+    uint64_t unit = 4096;
+    uint64_t length;
+    uint64_t offset;
+    uint8_t ds;
+    uint32_t i;
+
+    if (!nsid || nsid > n->namespace_limit || nvme_ns_allocated(n, nsid)) {
+        error_setg(errp, "namespace slot is unavailable");
+        return -1;
+    }
+    if ((mode != FEMU_NOSSD_MODE && mode != FEMU_BBSSD_MODE) ||
+        (n->subsys && n->subsys->endgrp.fdp.enabled) || n->dps ||
+        (mode == FEMU_BBSSD_MODE && !n->ftl_thread_running)) {
+        error_setg(errp, "namespace lifecycle is unsupported for this mode");
+        return -1;
+    }
+    for (i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].allocated && n->namespaces[i].femu_mode != mode) {
+            error_setg(errp, "namespace lifecycle requires a homogeneous mode");
+            return -1;
+        }
+    }
+    nvme_ns_init_identify(n, &id_ns);
+    if (flbas > id_ns.nlbaf || !nsze) {
+        error_setg(errp, "invalid namespace format or size");
+        return -1;
+    }
+    ds = id_ns.lbaf[flbas].lbads;
+    if (ds >= 64 || nsze > (UINT64_MAX >> ds)) {
+        error_setg(errp, "namespace size overflows");
+        return -1;
+    }
+    bytes = nsze << ds;
+    if (mode == FEMU_BBSSD_MODE) {
+        unit = (uint64_t)n->bb_params.secs_per_pg * n->bb_params.secsz;
+    }
+    if (!unit || bytes > UINT64_MAX - (unit - 1)) {
+        error_setg(errp, "namespace extent overflows");
+        return -1;
+    }
+    length = DIV_ROUND_UP(bytes, unit) * unit;
+    if (!nvme_ns_find_extent(n, length, &offset)) {
+        error_setg(errp, "insufficient namespace capacity");
+        return -1;
+    }
+    ns = &n->namespaces[nsid - 1];
+    ns->ctrl = n;
+    ns->id = nsid;
+    ns->size = bytes;
+    ns->extent_size = length;
+    ns->backend_offset = offset;
+    ns->start_block = offset >> BDRV_SECTOR_BITS;
+    ns->femu_mode = mode;
+    ns->csi = NVME_CSI_NVM;
+    ns->id_ns = id_ns;
+    ns->id_ns.flbas = flbas;
+    if (nvme_init_namespace(n, ns, errp)) {
+        goto fail;
+    }
+    nvme_register_extensions_ns(n, ns);
+    if (ns->ext_ops.init) {
+        Error *local_err = NULL;
+
+        ns->ext_ops.init(n, ns, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            goto fail;
+        }
+    }
+    if (qtest_enabled() && femu_test_ns_fail) {
+        error_setg(errp, "injected namespace initialization failure");
+        goto fail;
+    }
+    memset((uint8_t *)n->mbe->logical_space + offset, 0, length);
+    ns->attached = attached;
+    ns->allocated = true;
+    nvme_set_ctrl_capacity(n);
+    return 0;
+
+fail:
+    nvme_ns_release(n, ns);
+    return -1;
+}
+
 /*
  * Give back what realize has taken. QEMU does not call the exit callback for a
  * device that never realized, and a device_add that fails validation is an
@@ -1710,8 +1861,6 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
  */
 static void femu_realize_undo(FemuCtrl *n)
 {
-    int i;
-
     /*
      * Namespaces that did come up own an FTL and its channel tree, which is
      * the largest allocation here. Every mode's exit tests the state it frees
@@ -1732,10 +1881,6 @@ static void femu_realize_undo(FemuCtrl *n)
     n->features.int_vector_config = NULL;
     g_free(n->cmbuf);
     n->cmbuf = NULL;
-    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        g_free(n->namespaces[i].fdp.phs);
-        n->namespaces[i].fdp.phs = NULL;
-    }
     femu_free_namespace_bitmaps(n);
     g_free(n->aer_held);
     n->aer_held = NULL;
@@ -1979,17 +2124,7 @@ static void femu_free_namespace_bitmaps(FemuCtrl *n)
     int i;
 
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        g_free(n->namespaces[i].util);
-        n->namespaces[i].util = NULL;
-        g_free(n->namespaces[i].uncorrectable);
-        n->namespaces[i].uncorrectable = NULL;
-        g_free(n->namespaces[i].mdata);
-        n->namespaces[i].mdata = NULL;
-        n->namespaces[i].mdata_len = 0;
-        if (n->namespaces[i].mdata_lock_init) {
-            qemu_mutex_destroy(&n->namespaces[i].mdata_lock);
-            n->namespaces[i].mdata_lock_init = false;
-        }
+        nvme_ns_release(n, &n->namespaces[i]);
     }
 }
 
@@ -2016,7 +2151,7 @@ static void femu_exit_extensions(FemuCtrl *n)
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         void (*ex)(struct FemuCtrl *) = n->namespaces[i].ext_ops.exit;
 
-        if (!n->namespaces[i].id || !ex) {
+        if (!n->namespaces[i].allocated || !ex) {
             continue;
         }
         for (j = 0; j < nseen; j++) {
@@ -2062,12 +2197,6 @@ static void femu_exit(PCIDevice *pci_dev)
     qemu_mutex_destroy(&n->aer_lock);
     free_dram_backend(n->mbe);
 
-    /* FDP: free namespace FDP placement handles */
-    if (n->namespaces) {
-        for (int i = 0; i < n->namespace_limit; i++) {
-            g_free(n->namespaces[i].fdp.phs);
-        }
-    }
     femu_free_namespace_bitmaps(n);
     pthread_spin_destroy(&n->pcie_lock);
     pthread_spin_destroy(&n->fw_cpu_lock);
@@ -2285,32 +2414,40 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     NvmeNamespace *ns;
 
     if (!n->sq || n->sq[0] || n->meta || n->num_namespaces != 2 ||
-        !NS_NOSSD(&n->namespaces[0]) || !NS_NOSSD(&n->namespaces[1])) {
-        error_setg(errp, "namespace fixture requires a disabled NoSSD pair");
+        (n->femu_mode != FEMU_NOSSD_MODE && n->femu_mode != FEMU_BBSSD_MODE)) {
+        error_setg(errp, "namespace fixture requires a disabled NVM pair");
+        return;
+    }
+    if (!strcmp(value, "empty")) {
+        for (uint32_t i = 0; i < n->namespace_limit; i++) {
+            nvme_ns_destroy(n, &n->namespaces[i]);
+        }
+        return;
+    }
+    if (!strcmp(value, "rollback")) {
+        Error *local_err = NULL;
+        int ret;
+
+        femu_test_ns_fail = true;
+        ret = nvme_ns_create(n, 1, 3, 1, n->femu_mode, true, &local_err);
+        femu_test_ns_fail = false;
+        error_free(local_err);
+        if (ret == 0) {
+            error_setg(errp, "namespace fault injection did not fail");
+        }
         return;
     }
     if (!strcmp(value, "recreate")) {
-        ns = &n->namespaces[0];
-        g_free(ns->util);
-        g_free(ns->uncorrectable);
-        memset(ns, 0, sizeof(*ns));
-        ns->id = 1;
-        ns->attached = true;
-        ns->femu_mode = FEMU_NOSSD_MODE;
-        ns->size = 3072;
-        ns->extent_size = 4096;
-        nvme_ns_init_identify(n, &ns->id_ns);
-        ns->id_ns.flbas = 1;
-        ns->id_ns.nsze = cpu_to_le64(3);
-        nvme_init_namespace(n, ns, errp);
-        nvme_register_extensions_ns(n, ns);
+        nvme_ns_destroy(n, &n->namespaces[0]);
+        nvme_ns_create(n, 1, 3, 1, n->femu_mode, true, errp);
         return;
     }
     if (!strcmp(value, "reinit")) {
         n->namespaces[0].ext_ops.init(n, &n->namespaces[0], errp);
         return;
     }
-    if (strcmp(value, "sparse")) {
+    if (strcmp(value, "sparse") ||
+        !nvme_ns_allocated(n, 2) || n->femu_mode != FEMU_NOSSD_MODE) {
         error_setg(errp, "unknown namespace fixture");
         return;
     }

@@ -1679,6 +1679,7 @@ typedef struct FemuExtCtrlOps {
     void     (*init_ctrl_name)(struct FemuCtrl *);
     void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
     void     (*exit)(struct FemuCtrl *);
+    void     (*ns_exit)(struct FemuCtrl *, NvmeNamespace *);
     uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
     int      (*start_ctrl)(struct FemuCtrl *);
     uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
@@ -1716,6 +1717,7 @@ typedef struct NvmeNamespace {
     bool            mdata_lock_init;
     uint32_t        id;
     bool            attached;
+    bool            allocated;
     uint64_t        size; /* logical data capacity in bytes */
     uint64_t        extent_size; /* owned backend bytes, including padding */
     uint64_t        ns_blks;
@@ -2034,6 +2036,7 @@ typedef struct FemuCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     uint32_t    namespace_limit;
+    uint64_t    namespace_pool_size;
     uint32_t    nr_io_queues;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
@@ -2253,6 +2256,11 @@ typedef struct NvmeDifTuple {
 
 #define SQ_POLLING_PERIOD_NS	(5000)
 #define CQ_POLLING_PERIOD_NS	(5000)
+/* Caller must stop processing and retire references before removal. */
+void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);
+int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
+                   uint8_t mode, bool attached, Error **errp);
+
 static inline bool nvme_nsid_valid(FemuCtrl *n, uint32_t nsid)
 {
     return nsid && (nsid == NVME_NSID_BROADCAST || nsid <= n->namespace_limit);
@@ -2261,7 +2269,7 @@ static inline bool nvme_nsid_valid(FemuCtrl *n, uint32_t nsid)
 static inline NvmeNamespace *nvme_ns_allocated(FemuCtrl *n, uint32_t nsid)
 {
     if (!n->namespaces || !nsid || nsid > n->namespace_limit ||
-        !n->namespaces[nsid - 1].id) {
+        !n->namespaces[nsid - 1].allocated) {
         return NULL;
     }
     return &n->namespaces[nsid - 1];

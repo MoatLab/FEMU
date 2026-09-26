@@ -664,7 +664,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
 static bool nvme_can_sanitize(FemuCtrl *n)
 {
     for (int i = 0; i < n->namespace_limit; i++) {
-        if (!n->namespaces[i].id) {
+        if (!n->namespaces[i].allocated) {
             continue;
         }
         if (!NS_BBSSD(&n->namespaces[i]) && !NS_NOSSD(&n->namespaces[i])) {
@@ -683,7 +683,7 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
     n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
     n->id_ctrl.sanicap = cpu_to_le32(nvme_can_sanitize(n) ? 1 << 1 : 0);
     for (int i = 0; i < n->namespace_limit; i++) {
-        if (n->namespaces[i].id && NS_ZNSSD(&n->namespaces[i])) {
+        if (n->namespaces[i].allocated && NS_ZNSSD(&n->namespaces[i])) {
             n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_ZDCN);
         }
     }
@@ -949,7 +949,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
             }
             if (!kv_nsid) {
                 for (int i = 0; i < n->namespace_limit; i++) {
-                    if (n->namespaces[i].id && NS_KVSSD(&n->namespaces[i])) {
+                    if (n->namespaces[i].allocated &&
+                        NS_KVSSD(&n->namespaces[i])) {
                         return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i],
                                                          cmd);
                     }
@@ -1429,7 +1430,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 
         if (nsid == NVME_NSID_BROADCAST) {
             for (uint32_t i = 0; i < n->namespace_limit; i++) {
-                if (n->namespaces[i].id) {
+                if (n->namespaces[i].allocated) {
                     n->namespaces[i].err_rec = dw11;
                 }
             }
@@ -1689,7 +1690,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     }
 
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        if (n->namespaces[i].id && NS_ZNSSD(&n->namespaces[i])) {
+        if (n->namespaces[i].allocated && NS_ZNSSD(&n->namespaces[i])) {
             zoned = true;
             break;
         }
@@ -1741,7 +1742,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         uint64_t reads;
         uint8_t spare, used;
 
-        if (!ns->id) {
+        if (!ns->allocated) {
             continue;
         }
         st->media_errors += zns_media_errors(ns);
@@ -2538,7 +2539,7 @@ static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->id && ns->uncorrectable) {
+        if (ns->allocated && ns->uncorrectable) {
             estulb += bitmap_count_one(ns->uncorrectable,
                                        le64_to_cpu(ns->id_ns.nsze));
         }
@@ -2586,7 +2587,7 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (!ns->id) {
+        if (!ns->allocated) {
             continue;
         }
         bitmap_zero(ns->util, ns->ns_blks);
@@ -2960,7 +2961,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
-    uint16_t status;
+    uint16_t status = NVME_SUCCESS;
     bool resume;
     bool modified = false;
     uint8_t ev[12] = { 0 };

@@ -193,7 +193,7 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
     for (i = 0; i < n->namespace_limit; i++) {
         struct ssd *ssd = n->namespaces[i].ssd;
 
-        if (!n->namespaces[i].id || !ssd) {
+        if (!n->namespaces[i].allocated || !ssd) {
             continue;
         }
 
@@ -288,6 +288,19 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
  * down exactly once. n->ssd aliases the first namespace's, so clear it before
  * the memory goes.
  */
+static void bb_ns_exit(FemuCtrl *n, NvmeNamespace *ns)
+{
+    if (!ns->ssd) {
+        return;
+    }
+    if (n->ssd == ns->ssd) {
+        n->ssd = NULL;
+    }
+    ssd_free(ns->ssd);
+    g_free(ns->ssd);
+    ns->ssd = NULL;
+}
+
 static void bb_exit(FemuCtrl *n)
 {
     int i;
@@ -295,15 +308,9 @@ static void bb_exit(FemuCtrl *n)
     for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (!NS_BBSSD(ns) || !ns->ssd) {
-            continue;
+        if (NS_BBSSD(ns)) {
+            bb_ns_exit(n, ns);
         }
-        if (n->ssd == ns->ssd) {
-            n->ssd = NULL;
-        }
-        ssd_free(ns->ssd);
-        g_free(ns->ssd);
-        ns->ssd = NULL;
     }
 }
 
@@ -341,6 +348,7 @@ int nvme_register_bbssd(FemuCtrl *n)
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
         .init_ctrl_name   = bb_init_ctrl_str,
+        .ns_exit          = bb_ns_exit,
         .init             = bb_init,
         .exit             = bb_exit,
         .rw_check_req     = NULL,
