@@ -3269,9 +3269,11 @@ static void nvme_qtest_seed_ns_requests(FemuCtrl *n)
         req->expire_time = i < 5 ? INT64_MAX : 0;
         req->status = i == 3 ? NVME_LBA_RANGE : NVME_SUCCESS;
         req->cqe.n.result = cpu_to_le32(0x100 + i);
-        /* Exercise ownership release without asking the FTL to apply ranges. */
-        req->dsm_ranges = g_new0(NvmeDsmRange, 1);
-        req->dsm_nr_ranges = 1;
+        /* Completed survivor backlogs have already released their payloads. */
+        if (i < 8) {
+            req->dsm_ranges = g_new0(NvmeDsmRange, 1);
+            req->dsm_nr_ranges = 1;
+        }
         p = 1 + (sq->sqid - 1) % n->nr_pollers;
         switch (i < 5 ? i : i - 5) {
         case 0:
@@ -3328,6 +3330,7 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint32_t allocated = 0;
     NvmeIdNs id;
     NvmeIdNs caps;
     uint8_t idx;
@@ -3421,8 +3424,16 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (nsid > n->namespace_limit) {
         return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
     }
+    if (BBSSD(n)) {
+        for (uint32_t i = 0; i < n->namespace_limit; i++) {
+            allocated += n->namespaces[i].allocated;
+        }
+        if (allocated >= n->bbssd_ns_limit) {
+            return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
+        }
+    }
     resume = nvme_pause_pollers(n);
-    ret = nvme_ns_create(n, nsid, nsze, id.flbas, FEMU_NOSSD_MODE, false,
+    ret = nvme_ns_create(n, nsid, nsze, id.flbas, n->femu_mode, false,
                          &err);
     nvme_resume_pollers(n, resume);
     error_free(err);

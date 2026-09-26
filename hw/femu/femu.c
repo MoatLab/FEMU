@@ -1266,11 +1266,12 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n)
 {
     uint32_t i;
 
-    if (!n->ns_mgmt || !NOSSD(n) || n->dps || n->subsys) {
+    if (!n->ns_mgmt || (!NOSSD(n) && !BBSSD(n)) || n->dps || n->subsys) {
         return false;
     }
     for (i = 0; i < n->namespace_limit; i++) {
-        if (n->namespaces[i].allocated && !NS_NOSSD(&n->namespaces[i])) {
+        if (n->namespaces[i].allocated &&
+            n->namespaces[i].femu_mode != n->femu_mode) {
             return false;
         }
     }
@@ -1304,6 +1305,24 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;
+    }
+
+    if (n->ns_mgmt && BBSSD(n)) {
+        for (i = 0; i < n->num_namespaces; i++) {
+            if (ns_modes[i] != FEMU_BBSSD_MODE) {
+                break;
+            }
+        }
+        if (i == n->num_namespaces &&
+            (!n->bbssd_ns_limit ||
+             n->bbssd_ns_limit > NVME_MAX_NUM_NAMESPACES ||
+             n->num_namespaces > n->bbssd_ns_limit)) {
+            error_setg(errp, "bbssd_ns_limit must be between 1 and %u and "
+                       "cover the boot namespaces", NVME_MAX_NUM_NAMESPACES);
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
     }
 
     for (i = 0; i < n->num_namespaces; i++) {
@@ -2326,6 +2345,13 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("cmbsz", FemuCtrl, cmbsz, 0),
     DEFINE_PROP_UINT32("cmbloc", FemuCtrl, cmbloc, 0),
     DEFINE_PROP_BOOL("ns_mgmt", FemuCtrl, ns_mgmt, false),
+    /*
+     * With ns_mgmt, each bbssd namespace owns a full-geometry FTL: 20 bytes
+     * per NAND page for maps and page state (80 MiB at default geometry),
+     * plus block/line state and optional caches, apart from the shared backend.
+     * Bound allocated namespaces, including detached ones, before FTL setup.
+     */
+    DEFINE_PROP_UINT32("bbssd_ns_limit", FemuCtrl, bbssd_ns_limit, 4),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
     /*
      * Save/Select Feature Support is how a host learns it may use the Select

@@ -3027,6 +3027,7 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     uint32_t result;
     uint64_t buf = guest_alloc(alloc, 4096);
     uint32_t seen = 0;
+    uint32_t full_seen = 0;
     uint16_t first;
     uint16_t cid;
     uint16_t status;
@@ -3034,7 +3035,21 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
+    if (data) {
+        g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+        for (i = 1; i <= 2; i++) {
+            g_assert_cmpint(femu_ns_create(&c, buf, 2048, 0, &result), ==,
+                           NVME_SUCCESS);
+            g_assert_cmpuint(result, ==, i);
+            g_assert_cmpint(femu_ns_attach(&c, buf, i, 0, true), ==,
+                           NVME_SUCCESS);
+        }
+    }
     femu_create_io_queues(&c);
+    if (data) {
+        /* Populate FTL state before exercising retirement. */
+        femu_round_trip(&c, 0x5a);
+    }
     femu_queue_init(&c, &shared, 2);
     cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
     cmd.dptr.prp1 = cpu_to_le64(shared.sq_addr);
@@ -3089,7 +3104,10 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
 
     for (i = 0; i < FEMU_QSIZE - 1; i++) {
         g_assert_cmpint(femu_complete(&c, &c.io, &cid, NULL), ==, NVME_SUCCESS);
-        g_assert_cmpint(cid, ==, first + i);
+        g_assert_cmpuint(cid, >=, first);
+        g_assert_cmpuint(cid, <, first + FEMU_QSIZE - 1);
+        g_assert_cmphex(full_seen & (1u << (cid - first)), ==, 0);
+        full_seen |= 1u << (cid - first);
     }
     for (i = 0; i < 9; i++) {
         status = femu_complete(&c, &c.io, &cid, &result);
@@ -3117,6 +3135,9 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     femu_queue_free(&c, &c.io);
     femu_queue_free(&c, &other);
     femu_queue_free(&c, &shared);
+    if (data) {
+        qpci_unplug_acpi_device_test(c.pdev->bus->qts, "ns-test", 4);
+    }
 }
 
 /*
@@ -8753,6 +8774,63 @@ static void femu_test_ns_mgmt_commands(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_ns_mgmt_bbssd_cap(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    int limit = data ? GPOINTER_TO_INT(data) : 4;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    for (i = 1; i <= limit; i++) {
+        g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, i);
+    }
+    /* Detached allocations consume FTL resources too. */
+    g_assert_cmphex(femu_ns_create(&c, buf, 8, 0, &nsid), ==, 0x116);
+    g_assert_cmpint(femu_ns_delete(&c, 2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 2);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_ns_mgmt_bbssd_boot_cap(void *obj, void *data,
+                                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected','addr':'5',"
+                    "'devsz_mb':5,'femu_mode':1,'ns_mgmt':true,"
+                    "'namespaces':5,'secsz':512,'secs_per_pg':8,"
+                    "'pgs_per_blk':16,'blks_per_pl':40,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"), "bbssd_ns_limit"));
+    qobject_unref(rsp);
+
+    /* The cap must not constrain fixed boot configurations. */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'fixed','addr':'5',"
+                    "'devsz_mb':5,'femu_mode':1,'ns_mgmt':false,"
+                    "'namespaces':5,'secsz':512,'secs_per_pg':8,"
+                    "'pgs_per_blk':16,'blks_per_pl':40,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "fixed", 5);
+    qos_invalidate_command_line();
+}
+
 static void femu_test_ns_mgmt_format_detached(void *obj, void *data,
                                               QGuestAllocator *alloc)
 {
@@ -10085,11 +10163,35 @@ static void femu_register_nodes(void)
         .arg = GUINT_TO_POINTER(1),
     });
     qos_add_test("persistent-event-log-fixed", "femu", femu_test_pel, NULL);
-    qos_add_test("ns-mgmt-unavailable-bbssd", "femu",
-                 femu_test_ns_mgmt_unavailable, &(QOSGraphTestOptions) {
+    qos_add_test("ns-mgmt-bbssd-lifecycle", "femu",
+                 femu_test_ns_mgmt_commands, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "ns_mgmt=on,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4",
+    });
+    qos_add_test("ns-mgmt-bbssd-cap", "femu",
+                 femu_test_ns_mgmt_bbssd_cap, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "ns_mgmt=on,femu_mode=1,namespace_sizes=1M,secsz=512,"
+            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=1,nchs=1",
+    });
+    qos_add_test("ns-mgmt-bbssd-cap-custom", "femu",
+                 femu_test_ns_mgmt_bbssd_cap, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "ns_mgmt=on,femu_mode=1,bbssd_ns_limit=2,namespace_sizes=1M,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=1,nchs=1",
+        .arg = GUINT_TO_POINTER(2),
+    });
+    qos_add_test("ns-mgmt-bbssd-boot-cap", "femu",
+                 femu_test_ns_mgmt_bbssd_boot_cap, NULL);
+    qos_add_test("ns-mgmt-bbssd-retire", "femu",
+                 femu_test_ns_retire, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ns-test,ns_mgmt=on,femu_mode=1,namespaces=2,buffer_size=16,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4",
         .arg = GUINT_TO_POINTER(1),
     });
     qos_add_test("ns-mgmt-unavailable-mixed", "femu",

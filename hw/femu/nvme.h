@@ -2054,6 +2054,7 @@ typedef struct FemuCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     bool        ns_mgmt;
+    uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
     bool        test_ns_fail;
     uint32_t    changed_nsids[1024];
