@@ -231,10 +231,13 @@ uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     size_t len = (size_t)nlb << NVME_ID_NS_LBADS(ns);
     g_autofree uint8_t *data = NULL;
     g_autofree uint8_t *meta = NULL;
-    uint16_t status = femu_pi_check_ref(ns, control, slba, ref);
+    uint16_t status;
 
-    if (status) {
-        return status;
+    if (!req->is_write || !(control & NVME_RW_PRINFO_PRACT)) {
+        status = femu_pi_check_ref(ns, control, slba, ref);
+        if (status) {
+            return status;
+        }
     }
     if (len > UINT32_MAX) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -354,8 +357,9 @@ uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
                     slba * ds;
     uint8_t *meta = ns->mdata + slba * ms;
 
-    if (control & (NVME_RW_PRINFO_PRCHK_GUARD | NVME_RW_PRINFO_PRCHK_APP |
-                   NVME_RW_PRINFO_PRCHK_REF)) {
+    if (!(control & NVME_RW_PRINFO_PRACT) &&
+        (control & (NVME_RW_PRINFO_PRCHK_GUARD | NVME_RW_PRINFO_PRCHK_APP |
+                    NVME_RW_PRINFO_PRCHK_REF))) {
         return NVME_INVALID_PROT_INFO | NVME_DNR;
     }
     if (control & NVME_WZ_DEAC) {

@@ -1267,10 +1267,6 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
         }
         if (femu_pi_type(ns)) {
-            status = femu_pi_check_ref(ns, write_control, sdlba + done, dref);
-            if (status) {
-                return status;
-            }
             if (write_control & NVME_RW_PRINFO_PRACT) {
                 femu_pi_generate(ns, dbuf, mbuf, nlb, sdlba + done, dref, app);
             } else {

@@ -5741,6 +5741,15 @@ static void femu_test_pi_rw(void *obj, void *data, QGuestAllocator *alloc)
                            NVME_SUCCESS);
             memset(m, 0xa5, sizeof(m));
             femu_pi_host(qts, dbuf, mbuf, d, m, ms == 8 ? 0 : ms, extended);
+            /* PRACT writes ignore every PRCHK bit, including ILBRT checks. */
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, 1, 16, 2,
+                           dbuf, ms == 8 ? 1 : mbuf, 15, 0, 0x1234,
+                           0xffff), ==, NVME_SUCCESS);
+            if (type == 1) {
+                g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 16, 2,
+                               dbuf, mbuf, 15, 0, 0x1234, 0xffff), ==,
+                               NVME_INVALID_PROT_INFO);
+            }
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE, 1, 16, 2,
                            dbuf, ms == 8 ? 1 : mbuf, 15, ref, 0x1234,
                            0xffff), ==, NVME_SUCCESS);
@@ -5937,10 +5946,12 @@ static void femu_test_pi_zeroes(void *obj, void *data, QGuestAllocator *alloc)
                           type == 3 ? ref : ref + 1);
             femu_pi_result(qts, dbuf, mbuf, d, m, 16, false);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE_ZEROES, 1, 16, 2,
-                           1, 1, 15, ref, 0, 0), ==, NVME_INVALID_PROT_INFO);
+                           1, 1, 15, 0, 0x1234, 0xffff), ==, NVME_SUCCESS);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 16, 2,
-                           dbuf, mbuf, 7, ref, 0x1234, 0xffff), ==,
+                           dbuf, mbuf, 6, 0, 0x1234, 0xffff), ==,
                            NVME_SUCCESS);
+            g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE_ZEROES, 1, 16, 2,
+                           1, 1, 7, ref, 0, 0), ==, NVME_INVALID_PROT_INFO);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE_ZEROES, 1, 16, 2,
                            1, 1, 0, ref, 0x1234, 0), ==, NVME_SUCCESS);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_READ, 1, 16, 2,
@@ -6063,6 +6074,9 @@ static void femu_test_pi_copy(void *obj, void *data, QGuestAllocator *alloc)
                            NVME_SUCCESS);
             femu_pi_range(qts, list, snsid, 16, ref);
             femu_pi_range(qts, list + 32, snsid, 32, ref2);
+            /* Only destination PRCHK is ignored when generating new PI. */
+            g_assert_cmpint(femu_pi_copy(&c, list, 192, fmt, 2, 15, 15,
+                           0, 0xabcd), ==, NVME_SUCCESS);
             g_assert_cmpint(femu_pi_copy(&c, list, 64, fmt, 2, 15, 7,
                            dstref, 0xabcd), ==, NVME_INVALID_FIELD);
             g_assert_cmpint(femu_pi_copy(&c, list, 64, fmt, 2, 15, 15,
