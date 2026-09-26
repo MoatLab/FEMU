@@ -166,15 +166,20 @@ void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe)
 {
     FemuPel *pel = n->pel;
     uint8_t sc = (le16_to_cpu(cqe->status) >> 1) & 0xff;
-    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-    int64_t refill;
+    int64_t now, refill;
     bool log;
 
     if (!pel) {
         return;
     }
+    /*
+     * Read the clock under the lock: pollers on other queues post the same
+     * status, and a time taken before waiting here could be older than the
+     * one already applied, which would take tokens away.
+     */
     qemu_mutex_lock(&pel->lock);
-    refill = (now - pel->media_ms[sc]) * PEL_MEDIA_RATE;
+    now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    refill = MAX(0, now - pel->media_ms[sc]) * PEL_MEDIA_RATE;
     pel->media_tokens[sc] = MIN(PEL_MEDIA_BURST * 1000LL,
                                 pel->media_tokens[sc] + refill);
     pel->media_ms[sc] = now;

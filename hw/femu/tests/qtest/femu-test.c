@@ -7761,6 +7761,7 @@ static void femu_test_pel_events(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t mem, buf, e;
     uint32_t result, tnev;
+    int64_t t0, allowed;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
@@ -7804,8 +7805,8 @@ static void femu_test_pel_events(void *obj, void *data,
     g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
 
     /*
-     * 100 unrecovered reads in a row: the first 10 are logged, and then
-     * about 10 a second, so however slowly this runs some are suppressed.
+     * 100 unrecovered reads in a row: a burst of 10 is logged, then 10 a
+     * second, so no more than 10 + 10 per elapsed second (+1 for rounding).
      * Counted by the change in TNEV, which sees every event, not only those
      * in the 4 KiB read back.
      */
@@ -7814,10 +7815,12 @@ static void femu_test_pel_events(void *obj, void *data,
     g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8), ==,
                     NVME_SUCCESS);
+    t0 = g_get_monotonic_time();
     for (i = 0; i < 100; i++) {
         g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf + 4096), ==,
                         FEMU_UNRECOVERED_READ);
     }
+    allowed = 10 + (g_get_monotonic_time() - t0) / 100000 + 1;
     g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
     e = femu_pel_at(qts, buf, 0);
     g_assert_cmpint(qtest_readb(qts, e), ==, 0x05);
@@ -7828,7 +7831,8 @@ static void femu_test_pel_events(void *obj, void *data,
                      FEMU_UNRECOVERED_READ);
     g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x0a), >=, 10);
     g_assert_cmpuint(qtest_readl(qts, buf + 4) - tnev, >=, 10);
-    g_assert_cmpuint(qtest_readl(qts, buf + 4) - tnev, <, 100);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4) - tnev, <=,
+                     MIN(allowed, 100));
     g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
 
     /* a threshold at or under the temperature, twice: two events */
