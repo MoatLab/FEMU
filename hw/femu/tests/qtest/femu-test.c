@@ -8968,7 +8968,13 @@ static void femu_test_ns_mgmt_format_detached(void *obj, void *data,
     g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
     g_assert_cmpint(FEMU_SC(femu_format(&c, 0, 0, 0)), ==, NVME_INVALID_NSID);
-    g_assert_cmpint(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_INVALID_NSID);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 256, 0, 0)), ==,
+                   NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 257, 0, 0)), ==, NVME_INVALID_NSID);
+    g_assert_cmpint(femu_ns_delete(&c, nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, nsid, 0, 0)), ==,
+                   NVME_INVALID_FIELD);
     femu_disable(&c);
     guest_free(alloc, buf);
 }
