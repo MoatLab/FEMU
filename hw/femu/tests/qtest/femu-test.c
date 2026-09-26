@@ -337,6 +337,36 @@ static uint16_t femu_rw(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
     return status;
 }
 
+/* Invalid namespace commands must not inherit a recycled transfer. */
+static void femu_test_invalid_nsid_reuse(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf;
+    int64_t start;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    for (i = 0; i < FEMU_QSIZE; i++) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    }
+
+    cmd.opcode = NVME_CMD_READ;
+    cmd.nsid = cpu_to_le32(2);
+    start = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                   NVME_INVALID_NSID);
+    g_assert_cmpint(g_get_monotonic_time() - start, <, G_USEC_PER_SEC);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 /* write a pattern, read it back, and expect the same bytes */
 static void femu_round_trip(FemuCtrlState *c, uint8_t seed)
 {
@@ -9013,6 +9043,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("invalid-nsid-reuse", "femu", femu_test_invalid_nsid_reuse,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "pcie_prop_delay_ns=2000000000"
     });
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);

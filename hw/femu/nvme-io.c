@@ -231,6 +231,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * append, feature get) overwrite it explicitly.
          */
         req->cqe.res64 = 0;
+        req->ns = NULL;
         req->xfer_bytes = 0;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
