@@ -54,7 +54,6 @@
 #define FEMU_CC_CSS_CSI     0x06    /* CC.CSS: a command set is selected */
 #define FEMU_FEAT_CMD_SET_PROFILE       0x19
 #define FEMU_IOCS_COMBINATION_REJECTED  0x12b
-#define FEMU_ADM_QTEST_RETIRE_NS 0xed
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
 
 typedef struct QFemu QFemu;
@@ -3007,7 +3006,14 @@ static void femu_test_fdp_write_zeroes(void *obj, void *data,
     femu_disable(&c);
 }
 
-/* Internal retirement is exercised before a namespace delete opcode exists. */
+static void femu_ns_fixture(QTestState *qts, const char *value);
+static uint16_t femu_ns_delete(FemuCtrlState *c, uint32_t nsid);
+static uint16_t femu_ns_create(FemuCtrlState *c, uint64_t buf, uint64_t nsze,
+                               uint8_t flbas, uint32_t *nsid);
+static uint16_t femu_ns_attach(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                               uint16_t cntlid, bool attach);
+
+/* Delete must finish even when two SQs share a full CQ. */
 static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -3019,6 +3025,7 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     NvmeCqe after[FEMU_QSIZE];
     NvmeCqe cqe;
     uint32_t result;
+    uint64_t buf = guest_alloc(alloc, 4096);
     uint32_t seen = 0;
     uint16_t first;
     uint16_t cid;
@@ -3063,11 +3070,12 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     } while (!(le16_to_cpu(cqe.status) & 1));
     qtest_memread(c.pdev->bus->qts, c.io.cq_addr, full, sizeof(full));
 
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = FEMU_ADM_QTEST_RETIRE_NS;
-    g_assert_cmpint(femu_admin_result(&c, &cmd, &result), ==, NVME_SUCCESS);
-    /* Five retired records and four untouched namespace-2 survivors. */
-    g_assert_cmphex(result, ==, 0x1ff);
+    femu_ns_fixture(c.pdev->bus->qts, "retire");
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 1024, 1, &result), ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
+    c.lba_size = 1024;
 
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = NVME_CMD_FLUSH;
@@ -3083,12 +3091,14 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmpint(cid, ==, first + i);
     }
     for (i = 0; i < 9; i++) {
-        status = femu_complete(&c, &c.io, &cid, NULL);
+        status = femu_complete(&c, &c.io, &cid, &result);
         g_assert_cmpint(cid, >=, 0x8000);
         g_assert_cmpint(cid, <, 0x8009);
         g_assert_cmphex(seen & (1u << (cid - 0x8000)), ==, 0);
         seen |= 1u << (cid - 0x8000);
-        g_assert_cmpint(status, ==, cid < 0x8005 ? 0x82 : NVME_SUCCESS);
+        g_assert_cmpint(status, ==, cid < 0x8003 ? NVME_INVALID_FIELD :
+                       cid == 0x8003 ? NVME_LBA_RANGE : NVME_SUCCESS);
+        g_assert_cmpuint(result, ==, cid < 0x8003 ? 0 : 0x100 + cid - 0x8000);
     }
     g_assert_cmphex(seen, ==, 0x1ff);
     /* Cycle both request pools to check recycling after deferred delivery. */
@@ -3101,6 +3111,7 @@ static void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc)
     qtest_memread(c.pdev->bus->qts,
                   c.io.cq_addr + c.io.cq_head * sizeof(cqe), &cqe, sizeof(cqe));
     g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c.io.phase);
+    guest_free(alloc, buf);
     femu_disable(&c);
     femu_queue_free(&c, &c.io);
     femu_queue_free(&c, &other);
@@ -8930,6 +8941,22 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
     qos_invalidate_command_line();
 }
 
+static void femu_ns_make_sparse(FemuCtrlState *c, uint64_t buf)
+{
+    uint32_t nsid;
+    int i;
+
+    g_assert_cmpint(femu_ns_delete(c, 0xffffffff), ==, NVME_SUCCESS);
+    for (i = 1; i <= 256; i++) {
+        g_assert_cmpint(femu_ns_create(c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, i);
+    }
+    for (i = 2; i < 256; i++) {
+        g_assert_cmpint(femu_ns_delete(c, i), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_ns_attach(c, buf, 256, 0, true), ==, NVME_SUCCESS);
+}
+
 static void femu_test_namespace_sanitize_free(void *obj, void *data,
                                               QGuestAllocator *alloc)
 {
@@ -8943,9 +8970,7 @@ static void femu_test_namespace_sanitize_free(void *obj, void *data,
     qtest_memset(qts, buf, 0x5a, 4096);
     g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
     femu_queue_free(&c, &c.io);
-    femu_disable(&c);
-    femu_ns_fixture(qts, "empty");
-    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
     femu_disable(&c);
     femu_ns_fixture(qts, "check-erased");
@@ -8961,18 +8986,16 @@ static void femu_test_namespace_lifecycle(void *obj, void *data,
     NvmeCmd cmd = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint8_t bytes[1024];
+    uint32_t nsid;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x5a, 4096);
     g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
-    femu_queue_free(&c, &c.io);
-    femu_disable(&c);
-
-    femu_ns_fixture(qts, "recreate");
-    femu_enable(&c, &femu->dev, alloc);
-    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 3, 1, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
     cmd.opcode = NVME_CMD_READ;
     cmd.nsid = cpu_to_le32(1);
     cmd.dptr.prp1 = cpu_to_le64(buf);
@@ -8983,11 +9006,11 @@ static void femu_test_namespace_lifecycle(void *obj, void *data,
         g_assert_cmpuint(bytes[i], ==, 0);
     }
     femu_queue_free(&c, &c.io);
-    femu_disable(&c);
-    femu_ns_fixture(qts, "empty");
-    femu_ns_fixture(qts, "empty");
-    femu_ns_fixture(qts, "rollback");
-    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    femu_ns_fixture(qts, "fail-create");
+    g_assert_cmpint(femu_ns_create(&c, buf, 3, 1, &nsid), ==,
+                   NVME_INTERNAL_DEV_ERROR);
     g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
@@ -8995,9 +9018,8 @@ static void femu_test_namespace_lifecycle(void *obj, void *data,
     g_assert_cmpuint(qtest_readq(qts, buf + 296), ==, 64 * 1024 * 1024);
     g_assert_cmpint(femu_format(&c, 0xffffffff, 0, 0), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
-    femu_disable(&c);
-    femu_ns_fixture(qts, "recreate");
-    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_create(&c, buf, 3, 1, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readq(qts, buf), ==, 3);
     femu_disable(&c);
@@ -9013,8 +9035,12 @@ static void femu_test_namespace_capacity(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
 
-    femu_ns_fixture(qts, "recreate");
+    uint32_t nsid;
+
     femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 3, 1, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, 0, true), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readb(qts, buf + 26), ==, 1);
     g_assert_cmpuint(qtest_readq(qts, buf), ==, 3);
@@ -9034,6 +9060,7 @@ static void femu_test_namespace_identity(void *obj, void *data,
     uint8_t before[4096];
     uint8_t after[4096];
     uint8_t uuid[4096];
+    uint32_t nsid;
     uint64_t buf = guest_alloc(alloc, 4096);
 
     femu_enable(&c, &femu->dev, alloc);
@@ -9041,9 +9068,9 @@ static void femu_test_namespace_identity(void *obj, void *data,
     qtest_memread(qts, buf, before, sizeof(before));
     g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, uuid, sizeof(uuid));
-    femu_disable(&c);
-    femu_ns_fixture(qts, "reinit");
-    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 2);
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, after, sizeof(after));
     g_assert_cmpmem(before + 4, 20, after + 4, 20);
@@ -9064,8 +9091,8 @@ static void femu_test_namespace_allocated(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
 
-    femu_ns_fixture(qts, "sparse");
     femu_enable(&c, &femu->dev, alloc);
+    femu_ns_make_sparse(&c, buf);
     g_assert_cmpint(femu_identify(&c, 0, 0x10, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
     g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 256);
@@ -9098,8 +9125,8 @@ static void femu_test_namespace_sparse(void *obj, void *data,
     uint32_t result;
     uint64_t buf = guest_alloc(alloc, 4096);
 
-    femu_ns_fixture(qts, "sparse");
     femu_enable(&c, &femu->dev, alloc);
+    femu_ns_make_sparse(&c, buf);
     femu_create_io_queues(&c);
     g_assert_cmpint(femu_identify(&c, 0, 2, 0, buf), ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
@@ -9115,11 +9142,11 @@ static void femu_test_namespace_sparse(void *obj, void *data,
     cmd.nsid = cpu_to_le32(1);
     femu_submit(&c, &c.io, &cmd);
     g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                   NVME_INVALID_NSID);
+                   NVME_INVALID_FIELD);
     cmd.nsid = cpu_to_le32(2);
     femu_submit(&c, &c.io, &cmd);
     g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                   NVME_INVALID_NSID);
+                   NVME_INVALID_FIELD);
     cmd.nsid = cpu_to_le32(256);
     femu_submit(&c, &c.io, &cmd);
     g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
@@ -9689,34 +9716,27 @@ static void femu_register_nodes(void)
     });
     qos_add_test("namespace-sanitize-free", "femu",
                  femu_test_namespace_sanitize_free, &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2"
-    });
-    qos_add_test("namespace-lifecycle-bbssd", "femu",
-                 femu_test_namespace_lifecycle, &(QOSGraphTestOptions) {
-        .edge.extra_device_opts =
-            "id=ns-test,namespaces=2,oacs=0x2,femu_mode=1,secsz=512,"
-            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
-            "luns_per_ch=4,nchs=4"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2"
     });
     qos_add_test("namespace-lifecycle", "femu", femu_test_namespace_lifecycle,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2,oacs=0x2"
     });
     qos_add_test("namespace-capacity", "femu", femu_test_namespace_capacity,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2,oacs=0x2"
     });
     qos_add_test("namespace-identity", "femu", femu_test_namespace_identity,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2"
     });
     qos_add_test("namespace-allocated", "femu", femu_test_namespace_allocated,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2"
     });
     qos_add_test("namespace-sparse", "femu", femu_test_namespace_sparse,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
+        .edge.extra_device_opts = "id=ns-test,ns_mgmt=on,namespaces=2,oacs=0x2"
     });
     qos_add_test("invalid-nsid-reuse", "femu", femu_test_invalid_nsid_reuse,
                  &(QOSGraphTestOptions) {
@@ -9724,19 +9744,12 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ns-retire-nossd", "femu", femu_test_ns_retire,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "namespaces=2,femu_mode=2"
-    });
-    qos_add_test("ns-retire", "femu", femu_test_ns_retire,
-                 &(QOSGraphTestOptions) {
-        .edge.extra_device_opts =
-            "namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
-            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+        .edge.extra_device_opts = "id=ns-test,namespaces=2,ns_mgmt=on"
     });
     qos_add_test("ns-retire-pollers", "femu", femu_test_ns_retire,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
-            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "id=ns-test,namespaces=2,ns_mgmt=on,"
             "multipoller_enabled=1"
     });
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);

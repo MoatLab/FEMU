@@ -2050,6 +2050,8 @@ typedef struct FemuCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     bool        ns_mgmt;
+    bool        test_ns_seed;
+    bool        test_ns_fail;
     uint32_t    namespace_limit;
     uint64_t    namespace_pool_size;
     uint32_t    nr_io_queues;

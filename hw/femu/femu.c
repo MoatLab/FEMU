@@ -1765,8 +1765,6 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
     n->ext_ops = saved_ops;
 }
 
-static bool femu_test_ns_fail;
-
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)
 {
     nvme_ns_release(n, ns);
@@ -1874,7 +1872,8 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
             goto fail;
         }
     }
-    if (qtest_enabled() && femu_test_ns_fail) {
+    if (qtest_enabled() && n->test_ns_fail) {
+        n->test_ns_fail = false;
         error_setg(errp, "injected namespace initialization failure");
         goto fail;
     }
@@ -2447,68 +2446,32 @@ static const VMStateDescription femu_vmstate = {
     .unmigratable = 1,
 };
 
-/* Exercise unreachable lifecycle states without enabling guest commands. */
+/* Faults and transient queue states cannot be requested by an NVMe host. */
 static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
-    NvmeNamespace *ns;
 
-    if (!n->sq || n->sq[0] || n->meta || n->num_namespaces != 2 ||
-        (n->femu_mode != FEMU_NOSSD_MODE && n->femu_mode != FEMU_BBSSD_MODE)) {
-        error_setg(errp, "namespace fixture requires a disabled NVM pair");
+    if (!nvme_ns_mgmt_supported(n)) {
+        error_setg(errp, "namespace fixture requires namespace management");
         return;
     }
-    if (!strcmp(value, "check-erased")) {
+    if (!strcmp(value, "retire")) {
+        n->test_ns_seed = true;
+    } else if (!strcmp(value, "fail-create")) {
+        n->test_ns_fail = true;
+    } else if (!strcmp(value, "check-erased") && !n->sq[0]) {
         const uint8_t *bytes = n->mbe->logical_space;
 
+        /* A create would erase this extent and conceal a failed sanitize. */
         for (uint64_t i = 0; i < n->mbe->size; i++) {
             if (bytes[i]) {
                 error_setg(errp, "backend still contains data at %" PRIu64, i);
                 return;
             }
         }
-        return;
-    }
-    if (!strcmp(value, "empty")) {
-        for (uint32_t i = 0; i < n->namespace_limit; i++) {
-            nvme_ns_destroy(n, &n->namespaces[i]);
-        }
-        return;
-    }
-    if (!strcmp(value, "rollback")) {
-        Error *local_err = NULL;
-        int ret;
-
-        femu_test_ns_fail = true;
-        ret = nvme_ns_create(n, 1, 3, 1, n->femu_mode, true, &local_err);
-        femu_test_ns_fail = false;
-        error_free(local_err);
-        if (ret == 0) {
-            error_setg(errp, "namespace fault injection did not fail");
-        }
-        return;
-    }
-    if (!strcmp(value, "recreate")) {
-        nvme_ns_destroy(n, &n->namespaces[0]);
-        nvme_ns_create(n, 1, 3, 1, n->femu_mode, true, errp);
-        return;
-    }
-    if (!strcmp(value, "reinit")) {
-        n->namespaces[0].ext_ops.init(n, &n->namespaces[0], errp);
-        return;
-    }
-    if (strcmp(value, "sparse") ||
-        !nvme_ns_allocated(n, 2) || n->femu_mode != FEMU_NOSSD_MODE) {
+    } else {
         error_setg(errp, "unknown namespace fixture");
-        return;
     }
-    ns = &n->namespaces[NVME_MAX_NUM_NAMESPACES - 1];
-    *ns = n->namespaces[1];
-    ns->id = NVME_MAX_NUM_NAMESPACES;
-    memset(&n->namespaces[1], 0, sizeof(*ns));
-    n->namespaces[0].attached = false;
-    n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
-    n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
 }
 
 static void femu_instance_init(Object *obj)

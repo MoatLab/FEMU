@@ -3,7 +3,6 @@
 #include "system/qtest.h"
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
-#define NVME_ADM_QTEST_RETIRE_NS 0xed
 
 /*
  * Which features the controller answers, and what a host may do with each.
@@ -3130,6 +3129,59 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     return status;
 }
 
+/*
+ * Only qtest can seed otherwise transient queue states. Use SQ-owned requests
+ * so completion, CQ pressure and recycling follow the normal dataplane paths.
+ */
+static void nvme_qtest_seed_ns_requests(FemuCtrl *n)
+{
+    NvmeRequest *held[9];
+    NvmeRequest *req;
+    NvmeSQueue *sq;
+    int i;
+    int p;
+
+    assert(!n->dataplane_started);
+    assert(n->sq[1] && n->sq[2] && n->cpl_backlog);
+    for (i = 0; i < ARRAY_SIZE(held); i++) {
+        sq = n->sq[1 + (i + 1) % 2];
+        req = QTAILQ_FIRST(&sq->req_list);
+        assert(req);
+        QTAILQ_REMOVE(&sq->req_list, req, entry);
+        memset(req, 0, sizeof(*req));
+        req->sq = sq;
+        req->ns = &n->namespaces[i < 5 ? 0 : 1];
+        req->cmd_opcode = NVME_CMD_FLUSH;
+        req->cqe.cid = cpu_to_le16(0x8000 + i);
+        req->expire_time = i < 5 ? INT64_MAX : 0;
+        req->status = i == 3 ? NVME_LBA_RANGE : NVME_SUCCESS;
+        req->cqe.n.result = cpu_to_le32(0x100 + i);
+        /* Exercise ownership release without asking the FTL to apply ranges. */
+        req->dsm_ranges = g_new0(NvmeDsmRange, 1);
+        req->dsm_nr_ranges = 1;
+        p = 1 + (sq->sqid - 1) % n->nr_pollers;
+        switch (i < 5 ? i : i - 5) {
+        case 0:
+            femu_ring_enqueue(n->to_ftl[p], (void **)&req, 1);
+            break;
+        case 1:
+            femu_ring_enqueue(n->use_ftl_thread || i < 5 ?
+                              n->to_poller[p] : n->to_ftl[p],
+                              (void **)&req, 1);
+            break;
+        case 2:
+            pqueue_insert(n->pq[p], req);
+            break;
+        case 3:
+            QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
+            break;
+        case 4:
+            QTAILQ_INSERT_TAIL(&n->cq[sq->cqid]->req_list, req, entry);
+            break;
+        }
+    }
+}
+
 static uint16_t nvme_ns_cmd_error(FemuCtrl *n, NvmeCmd *cmd, uint16_t status,
                                   uint64_t info)
 {
@@ -3162,6 +3214,10 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_NSID | NVME_DNR;
         }
         resume = nvme_pause_pollers(n);
+        if (qtest_enabled() && n->test_ns_seed) {
+            n->test_ns_seed = false;
+            nvme_qtest_seed_ns_requests(n);
+        }
         for (uint32_t i = 1; i <= n->namespace_limit; i++) {
             ns = nvme_ns_allocated(n, i);
             if (ns && (nsid == NVME_NSID_BROADCAST || nsid == i)) {
@@ -3285,101 +3341,8 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
-/*
- * Only qtest can seed otherwise transient queue states. Use SQ-owned requests
- * so completion, CQ pressure and recycling follow the normal dataplane paths.
- */
-static uint16_t nvme_qtest_retire_ns(FemuCtrl *n, NvmeCqe *cqe)
-{
-    NvmeRequest *held[9];
-    NvmeRequest *req;
-    NvmeSQueue *sq;
-    bool resume;
-    uint32_t result = 0;
-    int available = 0;
-    int i;
-    int p;
-
-    if (n->num_namespaces < 2 || nvme_check_sqid(n, 1) ||
-        nvme_check_sqid(n, 2) || !n->cpl_backlog) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    resume = nvme_pause_pollers(n);
-    for (i = 1; i <= 2; i++) {
-        available = 0;
-        QTAILQ_FOREACH(req, &n->sq[i]->req_list, entry) {
-            available++;
-        }
-        if (available < ARRAY_SIZE(held)) {
-            nvme_resume_pollers(n, resume);
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-    }
-    for (i = 0; i < ARRAY_SIZE(held); i++) {
-        sq = n->sq[1 + (i + 1) % 2];
-        req = QTAILQ_FIRST(&sq->req_list);
-        QTAILQ_REMOVE(&sq->req_list, req, entry);
-        memset(req, 0, sizeof(*req));
-        held[i] = req;
-        req->sq = sq;
-        req->ns = &n->namespaces[i < 5 ? 0 : 1];
-        req->cmd_opcode = NVME_CMD_FLUSH;
-        req->cqe.cid = cpu_to_le16(0x8000 + i);
-        req->expire_time = INT64_MAX;
-        /* Exercise ownership release without asking the FTL to apply ranges. */
-        req->dsm_ranges = g_new0(NvmeDsmRange, 1);
-        req->dsm_nr_ranges = 1;
-        p = 1 + (sq->sqid - 1) % n->nr_pollers;
-        switch (i < 5 ? i : i - 5) {
-        case 0:
-            femu_ring_enqueue(n->to_ftl[p], (void **)&req, 1);
-            break;
-        case 1:
-            femu_ring_enqueue(n->use_ftl_thread || i < 5 ?
-                              n->to_poller[p] : n->to_ftl[p],
-                              (void **)&req, 1);
-            break;
-        case 2:
-            pqueue_insert(n->pq[p], req);
-            break;
-        case 3:
-            QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
-            break;
-        case 4:
-            QTAILQ_INSERT_TAIL(&n->cq[sq->cqid]->req_list, req, entry);
-            break;
-        }
-    }
-    nvme_retire_ns_requests(n, &n->namespaces[0]);
-    /* A second call must neither enqueue duplicates nor change survivors. */
-    nvme_retire_ns_requests(n, &n->namespaces[0]);
-    for (i = 0; i < ARRAY_SIZE(held); i++) {
-        req = held[i];
-        if (i < 5 ? (!req->ns && !req->dsm_ranges &&
-                     !req->dsm_nr_ranges && req->status == NVME_NS_NOT_READY) :
-                    (req->ns == &n->namespaces[1] && req->dsm_ranges &&
-                     req->expire_time == INT64_MAX && !req->status)) {
-            result |= 1u << i;
-        }
-    }
-    /* Change the fixture's due time outside the heap. */
-    p = 1 + (held[7]->sq->sqid - 1) % n->nr_pollers;
-    pqueue_remove(n->pq[p], held[7]);
-    for (i = 5; i < ARRAY_SIZE(held); i++) {
-        held[i]->expire_time = 0;
-        nvme_req_release_ranges(held[i]);
-    }
-    pqueue_insert(n->pq[p], held[7]);
-    cqe->n.result = cpu_to_le32(result);
-    nvme_resume_pollers(n, resume);
-    return NVME_SUCCESS;
-}
-
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
-    if (qtest_enabled() && cmd->opcode == NVME_ADM_QTEST_RETIRE_NS) {
-        return nvme_qtest_retire_ns(n, cqe);
-    }
     switch (cmd->opcode) {
     case NVME_ADM_CMD_NS_MGMT:
         return nvme_ns_mgmt(n, cmd, cqe);

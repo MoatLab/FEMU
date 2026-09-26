@@ -557,14 +557,21 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
     }
 }
 
-static void nvme_retire_ns_request(NvmeRequest *req)
+static void nvme_retire_ns_request(NvmeRequest *req, bool completed)
 {
     nvme_req_release_ranges(req);
-    req->status = NVME_NS_NOT_READY;
+    /*
+     * CQ pressure cannot undo finished work. Only unfinished commands take
+     * the inactive-NSID status, Invalid Field in Command (Base 2.3, 8.1.16
+     * and Figure 92); Namespace Not Ready describes a temporary condition.
+     */
+    if (!completed) {
+        req->status = NVME_INVALID_FIELD;
+        req->cqe.res64 = 0;
+    }
     req->ns = NULL;
     req->opaque = NULL;
     req->expire_time = 0;
-    req->cqe.n.result = 0;
 }
 
 /*
@@ -593,7 +600,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
         if (n->cpl_backlog) {
             QTAILQ_FOREACH(req, &n->cpl_backlog[p], entry) {
                 if (req->ns == ns) {
-                    nvme_retire_ns_request(req);
+                    nvme_retire_ns_request(req, true);
                 }
             }
         }
@@ -610,7 +617,13 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
 
                 assert(rc == 1);
                 if (req->ns == ns) {
-                    nvme_retire_ns_request(req);
+                    bool completed = req->status != NVME_SUCCESS ||
+                        ((!n->use_ftl_thread || r == 1) &&
+                         !n->pcie_enabled && !n->fw_cpu_ns &&
+                         req->expire_time <=
+                         qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+
+                    nvme_retire_ns_request(req, completed);
                     QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
                 } else {
                     rc = femu_ring_enqueue(rings[r], (void **)&req, 1);
@@ -626,7 +639,9 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
         nkept = 0;
         while ((req = pqueue_pop(n->pq[p]))) {
             if (req->ns == ns) {
-                nvme_retire_ns_request(req);
+                nvme_retire_ns_request(req, req->status != NVME_SUCCESS ||
+                                        req->expire_time <=
+                                        qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
             } else {
                 kept[nkept++] = req;
@@ -644,7 +659,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
         QTAILQ_FOREACH_SAFE(req, &n->cq[q]->req_list, entry, next) {
             if (req->ns == ns) {
                 QTAILQ_REMOVE(&n->cq[q]->req_list, req, entry);
-                nvme_retire_ns_request(req);
+                nvme_retire_ns_request(req, true);
                 /* Only the SQ's owning poller may recycle its requests. */
                 p = 1 + (req->sq->sqid - 1) % n->nr_pollers;
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
