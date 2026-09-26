@@ -30,7 +30,26 @@ static const uint8_t pel_supported[] = {
     NVME_PEL_SMART_SNAPSHOT,
     NVME_PEL_TIMESTAMP_CHANGE,
     NVME_PEL_POWER_ON_RESET,
+    NVME_PEL_HW_ERROR,
+    NVME_PEL_FORMAT_START,
+    NVME_PEL_FORMAT_COMPLETION,
+    NVME_PEL_SANITIZE_START,
+    NVME_PEL_SANITIZE_COMPLETION,
+    NVME_PEL_TELEMETRY_CREATED,
 };
+
+/* NVM Subsystem Hardware Error event codes (Figure 240) */
+#define PEL_HWE_CRITICAL_WARNING    0x06
+#define PEL_HWE_MEDIA_INTEGRITY     0x0a
+
+/*
+ * A media error can come back on every command of a failing workload. Each
+ * status is limited to 10 events a second, in bursts of up to 10, which the
+ * spec allows for an event that recurs, so a storm of one kind cannot push
+ * everything else out of the log.
+ */
+#define PEL_MEDIA_RATE          10
+#define PEL_MEDIA_BURST         10
 
 struct FemuPel {
     /* guards everything below; taken from the pollers as well as the BQL */
@@ -42,6 +61,11 @@ struct FemuPel {
     uint8_t     *ctx;           /* header and events, or NULL for no context */
     uint32_t    ctx_len;
     QEMUTimer   *snapshot;
+    /* per status code: allowance in thousandths of an event, and when */
+    int32_t     media_tokens[256];
+    int64_t     media_ms[256];
+    /* the critical warning bits last seen; only the BQL touches this */
+    uint8_t     warning;
 };
 
 static uint32_t pel_event_len(const uint8_t *e)
@@ -103,12 +127,75 @@ static void pel_log_power_on_reset(FemuCtrl *n)
     femu_pel_log(n, NVME_PEL_POWER_ON_RESET, 1, ev, sizeof(ev));
 }
 
+/* an NVM Subsystem Hardware Error event (Figure 239), revision 2 */
+static void pel_log_hw_error(FemuCtrl *n, uint16_t code, const void *info,
+                             uint16_t len)
+{
+    uint8_t ev[4 + sizeof(NvmeCqe)] = { 0 };
+
+    stw_le_p(ev, code);
+    memcpy(ev + 4, info, len);
+    femu_pel_log(n, NVME_PEL_HW_ERROR, 2, ev, 4 + len);
+}
+
+/*
+ * A Critical Warning bit that has just come on is an event (code 06h), with
+ * the whole warning byte as it now stands. Bits that go off are only noted,
+ * so the same bit coming back on is a new event.
+ */
+void femu_pel_warning(FemuCtrl *n, uint8_t warning)
+{
+    FemuPel *pel = n->pel;
+
+    if (!pel) {
+        return;
+    }
+    if (warning & ~pel->warning) {
+        pel_log_hw_error(n, PEL_HWE_CRITICAL_WARNING, &warning, 1);
+    }
+    pel->warning = warning;
+}
+
+/*
+ * A completion with a Media and Data Integrity status other than Access
+ * Denied or Deallocated or Unwritten Logical Block (code 0Ah), carrying the
+ * completion entry. Called from wherever completions are written, pollers
+ * included.
+ */
+void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe)
+{
+    FemuPel *pel = n->pel;
+    uint8_t sc = (le16_to_cpu(cqe->status) >> 1) & 0xff;
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    int64_t refill;
+    bool log;
+
+    if (!pel) {
+        return;
+    }
+    qemu_mutex_lock(&pel->lock);
+    refill = (now - pel->media_ms[sc]) * PEL_MEDIA_RATE;
+    pel->media_tokens[sc] = MIN(PEL_MEDIA_BURST * 1000LL,
+                                pel->media_tokens[sc] + refill);
+    pel->media_ms[sc] = now;
+    log = pel->media_tokens[sc] >= 1000;
+    if (log) {
+        pel->media_tokens[sc] -= 1000;
+    }
+    qemu_mutex_unlock(&pel->lock);
+
+    if (log) {
+        pel_log_hw_error(n, PEL_HWE_MEDIA_INTEGRITY, cqe, sizeof(*cqe));
+    }
+}
+
 static void pel_log_smart(FemuCtrl *n)
 {
     NvmeSmartLog smart;
 
     nvme_smart_fill(n, &smart);
     femu_pel_log(n, NVME_PEL_SMART_SNAPSHOT, 1, &smart, sizeof(smart));
+    femu_pel_warning(n, smart.critical_warning);
 }
 
 /*
@@ -131,6 +218,9 @@ void femu_pel_init(FemuCtrl *n)
     FemuPel *pel = g_new0(FemuPel, 1);
 
     qemu_mutex_init(&pel->lock);
+    for (int i = 0; i < ARRAY_SIZE(pel->media_tokens); i++) {
+        pel->media_tokens[i] = PEL_MEDIA_BURST * 1000;
+    }
     n->pel = pel;
     pel->snapshot = timer_new_ms(QEMU_CLOCK_REALTIME, pel_snapshot_timer, n);
     timer_mod(pel->snapshot, n->power_on_ms + PEL_SNAPSHOT_MS);

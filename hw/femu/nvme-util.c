@@ -204,6 +204,19 @@ void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe)
 
     memcpy(&dw3, &cqe->cid, sizeof(dw3));
 
+    /*
+     * Every completion is written here, so this is where a media error is
+     * seen for the Persistent Event log: Status Code Type 2, other than 86h
+     * (Access Denied) and 87h (Deallocated or Unwritten Logical Block).
+     */
+    if (unlikely(((le16_to_cpu(cqe->status) >> 9) & 0x7) == 0x2)) {
+        uint8_t sc = (le16_to_cpu(cqe->status) >> 1) & 0xff;
+
+        if (sc != 0x86 && sc != 0x87) {
+            femu_pel_media_error(n, cqe);
+        }
+    }
+
     if (cq->phys_contig && cq->dma_addr_hva) {
         uint8_t *slot = (uint8_t *)cq->dma_addr_hva + cq->tail * n->cqe_size;
 

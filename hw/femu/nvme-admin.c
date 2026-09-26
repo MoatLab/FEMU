@@ -1297,6 +1297,15 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return NVME_SUCCESS;
 }
 
+/* the Critical Warning byte the SMART page would report now */
+static uint8_t nvme_critical_warning(FemuCtrl *n)
+{
+    NvmeSmartLog smart;
+
+    nvme_smart_fill(n, &smart);
+    return smart.critical_warning;
+}
+
 static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeRangeType *rt;
@@ -1402,6 +1411,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             break;
         }
         n->features.temp_thresh = dw11 & 0xffff;
+        femu_pel_warning(n, nvme_critical_warning(n));
         /*
          * Crossing the threshold raises a SMART event once, pointing the host
          * at the health log. It is armed again when the threshold moves back
@@ -1872,6 +1882,10 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
                    sizeof(n->telemetry_data));
             have = sizeof(page);
         }
+        /* a capture is an event, carrying the header it made (Figure 251) */
+        if (create) {
+            femu_pel_log(n, NVME_PEL_TELEMETRY_CREATED, 1, hdr, sizeof(*hdr));
+        }
     }
 
     /* every block asked for is sent; those past the page as zeroes */
@@ -1957,6 +1971,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     }
     trans_len = MIN(sizeof(smart) - off, buf_len);
     nvme_smart_fill(n, &smart);
+    femu_pel_warning(n, smart.critical_warning);
 
     status = dma_read_prp(n, (uint8_t *)&smart + off, trans_len, prp1, prp2);
 
@@ -2548,6 +2563,7 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     bool ndas = dw10 & (1 << 9);
     bool emvs = dw10 & (1 << 10);
     bool resume;
+    uint8_t ev[16] = { 0 };
 
     if (!nvme_can_sanitize(n)) {
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -2564,6 +2580,13 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    /* Sanitize Start (Figure 247): the whole subsystem is the target */
+    stl_le_p(ev, le32_to_cpu(n->id_ctrl.sanicap));
+    stl_le_p(ev + 4, dw10);
+    stl_le_p(ev + 8, le32_to_cpu(cmd->cdw11));
+    stl_le_p(ev + 12, NVME_NSID_BROADCAST);
+    femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
 
     resume = nvme_pause_pollers(n);
     for (int i = 0; i < n->num_namespaces; i++) {
@@ -2589,6 +2612,13 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
      * would leave the status claiming no data was written since.
      */
     qatomic_set(&n->sanitize_sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
+
+    /* Sanitize Completion (Figure 248): progress FFFFh, done */
+    memset(ev, 0, sizeof(ev));
+    stw_le_p(ev, 0xffff);
+    stw_le_p(ev + 2, qatomic_read(&n->sanitize_sstat));
+    stl_le_p(ev + 8, NVME_NSID_BROADCAST);
+    femu_pel_log(n, NVME_PEL_SANITIZE_COMPLETION, 2, ev, 12);
     nvme_resume_pollers(n, resume);
 
     return NVME_SUCCESS;
@@ -2935,6 +2965,8 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     NvmeNamespace *ns;
     uint16_t status;
     bool resume;
+    bool modified = false;
+    uint8_t ev[12] = { 0 };
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
@@ -2978,6 +3010,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    /* validated, and nothing changed yet: Format NVM Start (Figure 245) */
+    stl_le_p(ev, nsid);
+    ev[4] = n->id_ctrl.fna;
+    stl_le_p(ev + 8, dw10);
+    femu_pel_log(n, NVME_PEL_FORMAT_START, 1, ev, 12);
+
     /*
      * The bitmaps about to be replaced are indexed by every read and write, so
      * no poller may be inside a sweep while they are swapped and the backing
@@ -2993,11 +3031,26 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
             if (status != NVME_SUCCESS) {
                 break;
             }
+            modified = true;
         }
     } else {
         ns = &n->namespaces[nsid - 1];
         status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
                                        sec_erase);
+        modified = status == NVME_SUCCESS;
+    }
+
+    /*
+     * Format NVM Completion (Figure 246), only if something changed. A
+     * namespace that refuses changes nothing, so a failure after one did is
+     * an incomplete format. The status is the completion's, without phase.
+     */
+    if (modified) {
+        memset(ev, 0, sizeof(ev));
+        stl_le_p(ev, nsid);
+        ev[5] = status == NVME_SUCCESS ? 0 : 0x3;
+        stw_le_p(ev + 8, status << 1);
+        femu_pel_log(n, NVME_PEL_FORMAT_COMPLETION, 2, ev, 12);
     }
 
     nvme_resume_pollers(n, resume);

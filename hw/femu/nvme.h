@@ -1319,6 +1319,12 @@ enum NvmePelEventType {
     NVME_PEL_SMART_SNAPSHOT     = 0x01,
     NVME_PEL_TIMESTAMP_CHANGE   = 0x03,
     NVME_PEL_POWER_ON_RESET     = 0x04,
+    NVME_PEL_HW_ERROR           = 0x05,
+    NVME_PEL_FORMAT_START       = 0x07,
+    NVME_PEL_FORMAT_COMPLETION  = 0x08,
+    NVME_PEL_SANITIZE_START     = 0x09,
+    NVME_PEL_SANITIZE_COMPLETION = 0x0a,
+    NVME_PEL_TELEMETRY_CREATED  = 0x0c,
 };
 
 #define NVME_CTRL_SQES_MIN(sqes) ((sqes) & 0xf)
@@ -2363,6 +2369,8 @@ void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
                   uint16_t len);
+void femu_pel_warning(FemuCtrl *n, uint8_t warning);
+void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe);
 uint16_t femu_pel_get_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                           uint64_t off);
 void nvme_timestamp_set(FemuCtrl *n, uint64_t value, uint8_t origin);

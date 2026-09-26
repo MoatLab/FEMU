@@ -7648,7 +7648,9 @@ static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(memcmp(hdr_sn, sn, sizeof(sn)), ==, 0);
     gnum = qtest_readw(qts, buf + 372);
     g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 0);   /* new context */
-    g_assert_cmpint(qtest_readb(qts, buf + 480), ==, 1 << 1 | 1 << 3 | 1 << 4);
+    /* SEB: events 01h, 03h, 04h, 05h, 07h-0Ah and 0Ch */
+    g_assert_cmpint(qtest_readb(qts, buf + 480), ==, 0xba);
+    g_assert_cmpint(qtest_readb(qts, buf + 481), ==, 0x17);
     g_assert_cmpint(femu_pel_event(qts, buf, 0), ==, 0x01);
     g_assert_cmpint(femu_pel_event(qts, buf, 1), ==, 0x04);
     g_assert_cmpint(qtest_readb(qts, buf + 512 + 3) & 3, ==, 3);
@@ -7710,6 +7712,142 @@ static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
 
     guest_free(alloc, mem);
+    femu_disable(&c);
+}
+
+/* the offset of the i'th event reported, counting from the newest */
+static uint64_t femu_pel_at(QTestState *qts, uint64_t buf, int i)
+{
+    uint64_t e = buf + 512;
+
+    while (i--) {
+        e += 3 + qtest_readb(qts, e + 2) + qtest_readw(qts, e + 22);
+    }
+    return e;
+}
+
+/* how many of the events in the first 4 KiB of a context have this type */
+static int femu_pel_count(QTestState *qts, uint64_t buf, uint8_t et,
+                          uint16_t code)
+{
+    uint32_t tnev = qtest_readl(qts, buf + 4);
+    int i, count = 0;
+
+    for (i = 0; i < tnev; i++) {
+        uint64_t e = femu_pel_at(qts, buf, i);
+
+        if (e + 28 > buf + 4096) {
+            break;
+        }
+        if (qtest_readb(qts, e) == et &&
+            (et != 0x05 || qtest_readw(qts, e + 24) == code)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/*
+ * The events other commands leave in the Persistent Event log: Format NVM
+ * start and completion, Sanitize start and completion, a telemetry capture,
+ * a media error in a completion (limited to about 10 a second of a status),
+ * and a Critical Warning bit coming on, each time it comes on.
+ */
+static void femu_test_pel_events(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t mem, buf, e;
+    uint32_t result, tnev;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    g_assert_cmpint(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    e = femu_pel_at(qts, buf, 0);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x08);
+    g_assert_cmpint(qtest_readb(qts, e + 1), ==, 2);
+    g_assert_cmpuint(qtest_readl(qts, e + 24), ==, 1);          /* NSID */
+    g_assert_cmpint(qtest_readb(qts, e + 24 + 5), ==, 0);       /* FNVMS */
+    e = femu_pel_at(qts, buf, 1);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x07);
+    g_assert_cmpuint(qtest_readl(qts, e + 24 + 8), ==, 0);      /* CDW10 */
+    tnev = qtest_readl(qts, buf + 4);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    /* a refused Format changed nothing, so it leaves no events */
+    g_assert_cmpint(femu_format(&c, 1, 15, 0), !=, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, tnev);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    e = femu_pel_at(qts, buf, 0);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x0c);
+    g_assert_cmpint(qtest_readb(qts, e + 24), ==, FEMU_LOG_TELEMETRY_HOST);
+    e = femu_pel_at(qts, buf, 1);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x0a);
+    g_assert_cmpuint(qtest_readw(qts, e + 24), ==, 0xffff);     /* SPROG */
+    g_assert_cmpuint(qtest_readl(qts, e + 24 + 8), ==, 0xffffffff);
+    e = femu_pel_at(qts, buf, 2);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x09);
+    g_assert_cmpuint(qtest_readl(qts, e + 24 + 4), ==, 0x2);    /* CDW10 */
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    /*
+     * 100 unrecovered reads in a row: the first 10 are logged, and then
+     * about 10 a second, so however slowly this runs some are suppressed.
+     * Counted by the change in TNEV, which sees every event, not only those
+     * in the 4 KiB read back.
+     */
+    g_assert_cmpint(femu_pel(&c, 3, buf, 4096, 0), ==, NVME_SUCCESS);
+    tnev = qtest_readl(qts, buf + 4);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8), ==,
+                    NVME_SUCCESS);
+    for (i = 0; i < 100; i++) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf + 4096), ==,
+                        FEMU_UNRECOVERED_READ);
+    }
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    e = femu_pel_at(qts, buf, 0);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x05);
+    g_assert_cmpint(qtest_readb(qts, e + 1), ==, 2);
+    g_assert_cmpuint(qtest_readw(qts, e + 24), ==, 0x0a);
+    /* the completion itself, status in its top half with the phase */
+    g_assert_cmpuint(qtest_readw(qts, e + 28 + 14) >> 1 & 0x7ff, ==,
+                     FEMU_UNRECOVERED_READ);
+    g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x0a), >=, 10);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4) - tnev, >=, 10);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4) - tnev, <, 100);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    /* a threshold at or under the temperature, twice: two events */
+    for (i = 0; i < 2; i++) {
+        g_assert_cmpint(femu_set_feature(&c, 0x04, false, 0, 0, &result), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_set_feature(&c, 0x04, false, 0, 0xffff,
+                                         &result), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    e = femu_pel_at(qts, buf, 0);
+    g_assert_cmpint(qtest_readb(qts, e), ==, 0x05);
+    g_assert_cmpuint(qtest_readw(qts, e + 24), ==, 0x06);
+    g_assert_cmpint(qtest_readb(qts, e + 28) & (1 << 1), !=, 0);
+    g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x06), ==, 2);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -7899,6 +8037,10 @@ static void femu_register_nodes(void)
     });
     qos_add_test("timestamp", "femu", femu_test_timestamp, NULL);
     qos_add_test("persistent-event-log", "femu", femu_test_pel, NULL);
+    qos_add_test("persistent-event-log-events", "femu", femu_test_pel_events,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x86"
+    });
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {
         /* the captured counters come from the FTL, which NoSSD has none of */
