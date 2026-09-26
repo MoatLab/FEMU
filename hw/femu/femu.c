@@ -1040,8 +1040,6 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     uint64_t num_blks;
     int lba_index;
 
-    nvme_ns_init_identify(n, id_ns);
-
     lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     /* size this namespace from its own backend slice, not the whole backend */
     num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
@@ -1352,6 +1350,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
          * the offset is 0 and the size is the whole backend, exactly as before.
          */
         ns->size = ns_sizes[i];
+        ns->extent_size = ns_sizes[i];
         ns->backend_offset = running_offset;
         ns->start_block = running_offset >> BDRV_SECTOR_BITS;
         running_offset += ns_sizes[i];
@@ -1377,6 +1376,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->zrwa_avail = n->zns_params.zns_zrwa_num;
         ns->cross_zone_read = n->zns_params.zns_cross_zone_read;
 
+        nvme_ns_init_identify(n, &ns->id_ns);
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
             g_free(ns_modes);
@@ -2287,6 +2287,23 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     if (!n->sq || n->sq[0] || n->meta || n->num_namespaces != 2 ||
         !NS_NOSSD(&n->namespaces[0]) || !NS_NOSSD(&n->namespaces[1])) {
         error_setg(errp, "namespace fixture requires a disabled NoSSD pair");
+        return;
+    }
+    if (!strcmp(value, "recreate")) {
+        ns = &n->namespaces[0];
+        g_free(ns->util);
+        g_free(ns->uncorrectable);
+        memset(ns, 0, sizeof(*ns));
+        ns->id = 1;
+        ns->attached = true;
+        ns->femu_mode = FEMU_NOSSD_MODE;
+        ns->size = 3072;
+        ns->extent_size = 4096;
+        nvme_ns_init_identify(n, &ns->id_ns);
+        ns->id_ns.flbas = 1;
+        ns->id_ns.nsze = cpu_to_le64(3);
+        nvme_init_namespace(n, ns, errp);
+        nvme_register_extensions_ns(n, ns);
         return;
     }
     if (!strcmp(value, "reinit")) {

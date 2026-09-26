@@ -8533,6 +8533,26 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
     qobject_unref(rsp);
 }
 
+static void femu_test_namespace_capacity(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_ns_fixture(qts, "recreate");
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 26), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 3);
+    g_assert_cmpint(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 6);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_namespace_identity(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
@@ -9137,6 +9157,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("namespace-capacity", "femu", femu_test_namespace_capacity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
     });
     qos_add_test("namespace-identity", "femu", femu_test_namespace_identity,
                  &(QOSGraphTestOptions) {

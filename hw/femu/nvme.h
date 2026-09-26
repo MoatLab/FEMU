@@ -1716,7 +1716,8 @@ typedef struct NvmeNamespace {
     bool            mdata_lock_init;
     uint32_t        id;
     bool            attached;
-    uint64_t        size; /* Coperd: for ZNS, FIXME */
+    uint64_t        size; /* logical data capacity in bytes */
+    uint64_t        extent_size; /* owned backend bytes, including padding */
     uint64_t        ns_blks;
     uint64_t        start_block;
     /*
