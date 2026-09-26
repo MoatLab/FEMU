@@ -9128,6 +9128,14 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
     qos_invalidate_command_line();
 }
 
+static void femu_test_namespace_large(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+
+    femu_ns_fixture(femu->dev.bus->qts, "check-large-namespace");
+}
+
 static void femu_ns_make_sparse(FemuCtrlState *c, uint64_t buf)
 {
     uint32_t nsid;
@@ -10054,6 +10062,10 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-default", "femu", femu_test_ns_mgmt_default,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test"
+    });
+    qos_add_test("namespace-large", "femu", femu_test_namespace_large,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,lba_index=0"
     });
     qos_add_test("namespace-mixed-identity", "femu",
                  femu_test_namespace_mixed_identity, &(QOSGraphTestOptions) {

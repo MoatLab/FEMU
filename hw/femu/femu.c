@@ -1075,7 +1075,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
-    if (!num_blks || num_blks > INT_MAX ||
+    if (!num_blks || num_blks > LONG_MAX ||
         num_blks > SIZE_MAX / MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms))) {
         error_setg(errp, "namespace allocation size is not representable");
         return -1;
@@ -2459,6 +2459,25 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
 
+    if (!n->sq[0] && !strcmp(value, "check-large-namespace")) {
+        NvmeNamespace ns = { 0 };
+        uint64_t blocks = (1ULL << 31) + 8;
+
+        /* Exercise construction without allocating a terabyte of backend. */
+        ns.size = blocks << BDRV_SECTOR_BITS;
+        nvme_ns_init_identify(n, &ns.id_ns);
+        if (!nvme_init_namespace(n, &ns, errp)) {
+            bitmap_set(ns.util, blocks - 1, 1);
+            bitmap_set(ns.uncorrectable, blocks - 1, 1);
+            if (le64_to_cpu(ns.id_ns.nsze) != blocks ||
+                !test_bit(blocks - 1, ns.util) || test_bit(7, ns.util) ||
+                !test_bit(blocks - 1, ns.uncorrectable)) {
+                error_setg(errp, "large namespace block count was truncated");
+            }
+        }
+        nvme_ns_release(n, &ns);
+        return;
+    }
     if (!n->sq[0] && !strcmp(value, "seed-sanitize")) {
         memset(n->mbe->logical_space, 0x5a, n->mbe->size);
         return;
