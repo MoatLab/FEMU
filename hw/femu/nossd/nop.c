@@ -25,13 +25,13 @@ static void nop_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     (void)ns;
 
-    bb_init_ctrl_str(n);
 }
 
 int nvme_register_nossd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = bb_init_ctrl_str,
         .init             = nop_init,
         .exit             = NULL,
         .rw_check_req     = NULL,

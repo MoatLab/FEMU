@@ -155,7 +155,6 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
 
-    bb_init_ctrl_str(n);
 
     /*
      * Each bbssd namespace carries its own FTL, so the controller can mix it
@@ -341,6 +340,7 @@ int nvme_register_bbssd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
+        .init_ctrl_name   = bb_init_ctrl_str,
         .init             = bb_init,
         .exit             = bb_exit,
         .rw_check_req     = NULL,

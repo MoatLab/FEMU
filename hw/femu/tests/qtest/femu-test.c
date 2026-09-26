@@ -8533,6 +8533,37 @@ static void femu_ns_fixture(QTestState *qts, const char *value)
     qobject_unref(rsp);
 }
 
+static void femu_test_namespace_identity(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t before[4096];
+    uint8_t after[4096];
+    uint8_t uuid[4096];
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, before, sizeof(before));
+    g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, uuid, sizeof(uuid));
+    femu_disable(&c);
+    femu_ns_fixture(qts, "reinit");
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, after, sizeof(after));
+    g_assert_cmpmem(before + 4, 20, after + 4, 20);
+    g_assert_cmpmem(before + 24, 40, after + 24, 40);
+    g_assert_cmpmem(before + 768, 256, after + 768, 256);
+    g_assert_cmpint(femu_identify(&c, 1, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, after, sizeof(after));
+    g_assert_cmpmem(uuid, sizeof(uuid), after, sizeof(after));
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_namespace_sparse(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -9106,6 +9137,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("namespace-identity", "femu", femu_test_namespace_identity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,namespaces=2"
     });
     qos_add_test("namespace-sparse", "femu", femu_test_namespace_sparse,
                  &(QOSGraphTestOptions) {

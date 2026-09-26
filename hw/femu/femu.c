@@ -1871,6 +1871,10 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         NvmeNamespace *ns = &n->namespaces[i];
 
         nvme_register_extensions_ns(n, ns);
+        /* Preserve boot naming order without naming during namespace init. */
+        if (ns->ext_ops.init_ctrl_name) {
+            ns->ext_ops.init_ctrl_name(n);
+        }
         if (ns->ext_ops.init) {
             Error *local_err = NULL;
 
@@ -2283,6 +2287,10 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     if (!n->sq || n->sq[0] || n->meta || n->num_namespaces != 2 ||
         !NS_NOSSD(&n->namespaces[0]) || !NS_NOSSD(&n->namespaces[1])) {
         error_setg(errp, "namespace fixture requires a disabled NoSSD pair");
+        return;
+    }
+    if (!strcmp(value, "reinit")) {
+        n->namespaces[0].ext_ops.init(n, &n->namespaces[0], errp);
         return;
     }
     if (strcmp(value, "sparse")) {
