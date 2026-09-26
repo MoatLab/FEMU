@@ -593,7 +593,8 @@ static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
     return false;
 }
 
-static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
+                                  bool present)
 {
     NvmeNamespace *ns;
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -605,7 +606,7 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ns = nvme_ns(n, nsid);
+    ns = present ? nvme_ns_allocated(n, nsid) : nvme_ns(n, nsid);
     if (unlikely(!ns)) {
         return nvme_rpt_empty_id_struct(n, cmd);
     }
@@ -621,7 +622,8 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
     return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
 }
 
-static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
+                                  bool present)
 {
     NvmeNamespace *ns;
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -633,7 +635,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ns = nvme_ns(n, nsid);
+    ns = present ? nvme_ns_allocated(n, nsid) : nvme_ns(n, nsid);
     if (unlikely(!ns)) {
         return nvme_rpt_empty_id_struct(n, cmd);
     }
@@ -719,7 +721,8 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_INVALID_FIELD | NVME_DNR;
 }
 
-static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd,
+                                  bool present)
 {
     NvmeNamespace *ns;
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -742,7 +745,7 @@ static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     for (i = 1; i <= n->namespace_limit; i++) {
-        ns = nvme_ns(n, i);
+        ns = present ? nvme_ns_allocated(n, i) : nvme_ns(n, i);
         if (!ns) {
             continue;
         }
@@ -758,7 +761,8 @@ static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd)
     return dma_read_prp(n, list, data_len, prp1, prp2);
 }
 
-static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd,
+                                  bool present)
 {
     NvmeNamespace *ns;
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -780,7 +784,7 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     for (i = 1; i <= n->namespace_limit; i++) {
-        ns = nvme_ns(n, i);
+        ns = present ? nvme_ns_allocated(n, i) : nvme_ns(n, i);
         if (!ns) {
             continue;
         }
@@ -914,11 +918,13 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_ID_CNS_NS_CS_INDEP:
         return nvme_identify_ns_cs_indep(n, cmd);
     case NVME_ID_CNS_NS:
+        return nvme_identify_ns(n, cmd, false);
     case NVME_ID_CNS_NS_PRESENT:
-        return nvme_identify_ns(n, cmd);
+        return nvme_identify_ns(n, cmd, true);
     case NVME_ID_CNS_CS_NS:
+        return nvme_identify_ns_csi(n, cmd, false);
     case NVME_ID_CNS_CS_NS_PRESENT:
-        return nvme_identify_ns_csi(n, cmd);
+        return nvme_identify_ns_csi(n, cmd, true);
     case NVME_ID_CNS_CTRL:
         return nvme_identify_ctrl(n, cmd);
     case NVME_ID_CNS_CS_CTRL:
@@ -959,11 +965,13 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         }
         return NVME_INVALID_FIELD | NVME_DNR;
     case NVME_ID_CNS_NS_ACTIVE_LIST:
+        return nvme_identify_nslist(n, cmd, false);
     case NVME_ID_CNS_NS_PRESENT_LIST:
-        return nvme_identify_nslist(n, cmd);
+        return nvme_identify_nslist(n, cmd, true);
     case NVME_ID_CNS_CS_NS_ACTIVE_LIST:
+        return nvme_identify_nslist_csi(n, cmd, false);
     case NVME_ID_CNS_CS_NS_PRESENT_LIST:
-        return nvme_identify_nslist_csi(n, cmd);
+        return nvme_identify_nslist_csi(n, cmd, true);
     case NVME_ID_CNS_NS_DESCR_LIST:
         return nvme_identify_ns_descr_list(n, cmd);
     case NVME_ID_CNS_IO_COMMAND_SET:

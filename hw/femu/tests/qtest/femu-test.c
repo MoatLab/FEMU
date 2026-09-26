@@ -8657,6 +8657,38 @@ static void femu_test_namespace_identity(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_namespace_allocated(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_ns_fixture(qts, "sparse");
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 0x10, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 256);
+    g_assert_cmpuint(qtest_readl(qts, buf + 8), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 1, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), >, 0);
+    g_assert_cmpint(femu_identify(&c, 2, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&c, 0, 0x1a, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 256);
+    g_assert_cmpint(femu_identify(&c, 0, 7, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);
+    g_assert_cmpint(FEMU_SC(femu_identify(&c, 1, 0x1b,
+                                         FEMU_CSI_ZONED << 24,
+                                         buf)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_identify(&c, 1, 5, FEMU_CSI_ZONED << 24, buf), ==,
+                   NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_namespace_sparse(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -9259,6 +9291,10 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=ns-test,namespaces=2,oacs=0x2"
     });
     qos_add_test("namespace-identity", "femu", femu_test_namespace_identity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ns-test,namespaces=2"
+    });
+    qos_add_test("namespace-allocated", "femu", femu_test_namespace_allocated,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=ns-test,namespaces=2"
     });
