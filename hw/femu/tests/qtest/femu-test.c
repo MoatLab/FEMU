@@ -10703,10 +10703,15 @@ static void femu_test_streams_churn(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint16_t status;
     unsigned i;
+    bool retained[41] = { false };
+    bool exhausted = false;
+    uint8_t expected[4096];
+    uint8_t actual[4096];
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -10714,11 +10719,43 @@ static void femu_test_streams_churn(void *obj, void *data,
                    ==, NVME_SUCCESS);
     /* Preserve old data while repeatedly opening distinct stream lifetimes. */
     for (i = 1; i <= 40; i++) {
+        qtest_memset(qts, buf, i, 4096);
         status = femu_stream_write(&c, 1, i * 8, buf, 1, i);
-        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        if (i <= 8) {
+            g_assert_cmphex(status, ==, NVME_SUCCESS);
+        } else {
+            g_assert_true(status == NVME_SUCCESS ||
+                          status == NVME_CAP_EXCEEDED);
+        }
+        retained[i] = status == NVME_SUCCESS;
+        exhausted |= status == NVME_CAP_EXCEEDED;
         g_assert_cmphex(femu_directive(&c, false, 1, (i << 16) | 0x101,
                                      0, 0, 0, NULL), ==, NVME_SUCCESS);
     }
+    g_assert_true(exhausted);
+    for (i = 1; i <= 40; i++) {
+        if (!retained[i]) {
+            continue;
+        }
+        memset(expected, i, sizeof(expected));
+        qtest_memset(qts, buf, 0, sizeof(actual));
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf),
+                       ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, actual, sizeof(actual));
+        g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    }
+    for (i = 0; i <= 16; i++) {
+        status = femu_stream_write(&c, 1, (64 + i) * 8, buf, 0, 0);
+        g_assert_cmphex(status, ==, i < 16 ? NVME_SUCCESS : NVME_CAP_EXCEEDED);
+    }
+    g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x5a, sizeof(expected));
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 0, 0), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, sizeof(actual));
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    memset(expected, 0x5a, sizeof(expected));
+    qtest_memread(qts, buf, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
