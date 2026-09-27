@@ -2151,6 +2151,8 @@ typedef struct FemuCtrl {
     int64_t         ts_anchor;
     uint8_t         ts_origin;
     int64_t         clr_ms;             /* realtime of the last reset */
+    char            *pel_file;
+    uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
     uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
@@ -2452,7 +2454,7 @@ static inline int64_t nvme_power_on_ms(FemuCtrl *n)
 }
 
 typedef struct FemuPel FemuPel;
-void femu_pel_init(FemuCtrl *n);
+bool femu_pel_init(FemuCtrl *n, Error **errp);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_power_loss(FemuCtrl *n);

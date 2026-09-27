@@ -2206,6 +2206,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
+    /* Validate retention before starting threads that would need unwinding. */
+    if (!femu_pel_init(n, errp)) {
+        femu_realize_undo(n);
+        return;
+    }
+
     /*
      * One FTL thread serves every namespace that needs one. It is started after
      * all namespaces are built, so it never runs against half-initialized state,
@@ -2217,9 +2223,6 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
     }
-
-    /* last, so its power-on snapshot sees a device that is fully up */
-    femu_pel_init(n);
 }
 
 /*
@@ -2411,6 +2414,7 @@ static void femu_exit(PCIDevice *pci_dev)
 static const Property femu_props[] = {
     //DEFINE_BLOCK_PROPERTIES(FemuCtrl, blkconf),
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
+    DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),

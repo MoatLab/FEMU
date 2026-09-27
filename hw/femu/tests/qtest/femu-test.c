@@ -10614,11 +10614,15 @@ static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(qtest_readl(qts, buf + 4 * FEMU_LOG_PEL), ==,
                      1 | 1 << 16);
 
+    g_assert_cmpint(femu_get_log(&c, 2, buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 112), ==, 0);
+
     /* no context yet: reading needs one */
     g_assert_cmpint(femu_pel(&c, 0, buf, 4096, 0), ==, FEMU_CMD_SEQ_ERROR);
 
     /* power on logged a reset event, then a SMART snapshot after it */
     g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 44), ==, 1);
     g_assert_cmpint(qtest_readb(qts, buf), ==, FEMU_LOG_PEL);
     tnev = qtest_readl(qts, buf + 4);
     g_assert_cmpuint(tnev, >=, 2);
@@ -11492,6 +11496,184 @@ static void femu_test_pel_set_feature(void *obj, void *data,
  * a media error in a completion (limited to about 10 a second of a status),
  * and a Critical Warning bit coming on, each time it comes on.
  */
+static void femu_pel_file_wait(const char *path, uint32_t events,
+                               uint16_t generation)
+{
+    int64_t until = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+    bool saved = false;
+
+    do {
+        g_autofree char *bytes = NULL;
+        gsize len;
+
+        if (g_file_get_contents(path, &bytes, &len, NULL) && len >= 64) {
+            saved = ldl_le_p(bytes + 16) == events &&
+                    lduw_le_p(bytes + 20) == generation;
+        }
+        if (saved) {
+            break;
+        }
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < until);
+    g_assert_true(saved);
+}
+
+static void femu_test_pel_file(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    g_autofree char *dir = g_dir_make_tmp("femu-pel-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "events", NULL);
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QPCIDevice *pdev;
+    QDict *rsp;
+    bool media = data != NULL;
+    int run;
+
+    for (run = 1; run <= 2; run++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                       "'driver':'femu','id':'pel-disk','addr':'5',"
+                       "'devsz_mb':64,'femu_mode':2,'oncs':134,"
+                       "'multipoller_enabled':1,'pel_file':%s}}", path);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+        femu_enable(&c, pdev, alloc);
+        g_assert_cmpint(FEMU_SC(femu_pel(&c, 0, buf, 4096, 0)), ==,
+                       NVME_CMD_SEQ_ERROR);
+        if (run == 1 && media) {
+            FemuQueue second;
+            NvmeCmd cmd = { 0 };
+
+            femu_create_io_queues(&c);
+            femu_zap_create_queue(&c, &second, 2);
+            g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8),
+                           ==, NVME_SUCCESS);
+            cmd.opcode = NVME_CMD_READ;
+            cmd.nsid = cpu_to_le32(1);
+            cmd.dptr.prp1 = cpu_to_le64(buf);
+            femu_submit(&c, &c.io, &cmd);
+            femu_submit(&c, &second, &cmd);
+            g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==,
+                           FEMU_UNRECOVERED_READ);
+            g_assert_cmpint(femu_complete(&c, &second, NULL, NULL), ==,
+                           FEMU_UNRECOVERED_READ);
+            femu_queue_free(&c, &c.io);
+            femu_queue_free(&c, &second);
+        } else if (run == 1) {
+            g_assert_cmpint(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+        }
+        g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, buf + 44), ==, run);
+        g_assert_cmpuint(qtest_readw(qts, buf + 372), ==, run == 1 ? 1 : 3);
+        g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, run == 1 ? 4 : 8);
+        g_assert_cmpint(femu_pel_count(qts, buf, media ? 0x05 : 0x07,
+                                     media ? 0x0a : 0), ==, media ? 2 : 1);
+        g_assert_cmpuint(qtest_readl(qts,
+                         femu_pel_at(qts, buf, run == 1 ? 3 : 1) + 48),
+                         ==, run);
+        femu_pel_file_wait(path, run == 1 ? 4 : 8, run == 1 ? 1 : 3);
+        g_assert_cmpint(femu_get_log(&c, 2, buf, 512, 0), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, buf + 112), ==, run);
+        femu_disable(&c);
+        if (run == 1) {
+            femu_pel_file_wait(path, 6, 1);
+            femu_enable(&c, pdev, alloc);
+            g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readq(qts, buf + 44), ==, 1);
+            /* Remove with a context still established; it must not reload. */
+            qpci_unplug_acpi_device_test(qts, "pel-disk", 5);
+            femu_queue_free(&c, &c.admin);
+        } else {
+            qpci_unplug_acpi_device_test(qts, "pel-disk", 5);
+        }
+        g_free(pdev);
+    }
+    guest_free(alloc, buf);
+    unlink(path);
+    rmdir(dir);
+}
+
+static void femu_test_pel_file_invalid(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-pel-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "events", NULL);
+    g_autofree char *valid = NULL;
+    gsize len;
+    QDict *rsp;
+    int i;
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                   "'driver':'femu','id':'pel-disk','addr':'5',"
+                   "'devsz_mb':64,'femu_mode':2,'pel_file':%s}}", path);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "pel-disk", 5);
+    g_assert_true(g_file_get_contents(path, &valid, &len, NULL));
+
+    /* Magic, version, size, checksum, truncation, and encoded event bounds. */
+    for (i = 0; i < 6; i++) {
+        g_autofree char *bad = g_memdup2(valid, len);
+        g_autofree char *after = NULL;
+        gsize bad_len = len;
+        gsize after_len;
+        const char *desc;
+
+        switch (i) {
+        case 0:
+            bad[0] ^= 1;
+            break;
+        case 1:
+            bad[8] = 2;
+            break;
+        case 2:
+            bad[12] ^= 1;
+            break;
+        case 3:
+            bad[len - 1] ^= 1;
+            break;
+        case 4:
+            bad_len = 12;
+            break;
+        case 5: {
+            GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+            gsize digest_len = 32;
+
+            stw_le_p(bad + 64 + 22, 0xffff);
+            g_checksum_update(sum, (uint8_t *)bad, 32);
+            g_checksum_update(sum, (uint8_t *)bad + 64, len - 64);
+            g_checksum_get_digest(sum, (uint8_t *)bad + 32, &digest_len);
+            g_checksum_free(sum);
+            break;
+        }
+        }
+        g_assert_true(g_file_set_contents(path, bad, bad_len, NULL));
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                       "'driver':'femu','id':'pel-disk','addr':'5',"
+                       "'devsz_mb':64,'femu_mode':2,'pel_file':%s}}", path);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_assert_nonnull(strstr(desc, "Invalid or incompatible PEL file"));
+        qobject_unref(rsp);
+        g_assert_true(g_file_get_contents(path, &after, &after_len, NULL));
+        g_assert_cmpmem(after, after_len, bad, bad_len);
+    }
+    /* A refusal releases its resources, so the same slot and ID can retry. */
+    g_assert_true(g_file_set_contents(path, valid, len, NULL));
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                   "'driver':'femu','id':'pel-disk','addr':'5',"
+                   "'devsz_mb':64,'femu_mode':2,'pel_file':%s}}", path);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "pel-disk", 5);
+    unlink(path);
+    rmdir(dir);
+}
+
 static void femu_test_pel_events(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
@@ -12631,6 +12813,10 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("pel-file-invalid", "femu", femu_test_pel_file_invalid, NULL);
+    qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
+    qos_add_test("pel-file-media", "femu", femu_test_pel_file,
+                 &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-set-feature", "femu", femu_test_pel_set_feature, NULL);
     qos_add_test("pel-set-feature-buffer", "femu", femu_test_pel_set_feature,
                  &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(1) });

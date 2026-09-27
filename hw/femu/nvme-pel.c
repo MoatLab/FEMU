@@ -7,11 +7,14 @@
  * frozen copy of the header and the events, newest first, so that events
  * logged while the host reads it are kept but not reported in it.
  *
- * FEMU keeps no state across QEMU runs, so events outlive controller resets
- * but not the process, unlike the device the spec describes.
+ * An optional backing file retains events and power cycles across runs.
  */
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
+#include "qemu/error-report.h"
+#include "qapi/error.h"
+#include "system/system.h"
 #include "nvme.h"
 
 #define PEL_SIZE            (64 * KiB)  /* PELS: one 64 KiB unit */
@@ -56,6 +59,9 @@ static const uint8_t pel_supported[] = {
 struct FemuPel {
     /* guards everything below; taken from the pollers as well as the BQL */
     QemuMutex   lock;
+    QEMUBH      *write_bh;
+    Notifier    exit_notifier;
+    FemuCtrl    *ctrl;
     uint8_t     events[PEL_EVENTS_SIZE];
     uint32_t    used;
     uint32_t    nev;
@@ -73,6 +79,170 @@ struct FemuPel {
 static uint32_t pel_event_len(const uint8_t *e)
 {
     return 3 + e[2] + lduw_le_p(e + 22);
+}
+
+/* Private file format: little-endian metadata, SHA-256, encoded events. */
+#define PEL_FILE_HDR_SIZE 64
+
+static void pel_file_digest(const uint8_t *buf, size_t len, uint8_t *digest)
+{
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    gsize size = 32;
+
+    g_checksum_update(sum, buf, 32);
+    g_checksum_update(sum, buf + PEL_FILE_HDR_SIZE, len - PEL_FILE_HDR_SIZE);
+    g_checksum_get_digest(sum, digest, &size);
+    g_checksum_free(sum);
+}
+
+static bool pel_file_load(FemuCtrl *n, Error **errp)
+{
+    FemuPel *pel = n->pel;
+    g_autofree uint8_t *buf = g_malloc(PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE + 1);
+    uint8_t digest[32];
+    size_t len = 0;
+    uint32_t off;
+    uint32_t count = 0;
+    ssize_t got;
+    int fd;
+
+    fd = open(n->pel_file, O_RDONLY);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            return true;
+        }
+        error_setg_errno(errp, errno, "Cannot read PEL file '%s'", n->pel_file);
+        return false;
+    }
+    do {
+        got = read(fd, buf + len,
+                   PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE + 1 - len);
+        if (got > 0) {
+            len += got;
+        }
+    } while ((got > 0 && len <= PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE) ||
+             (got < 0 && errno == EINTR));
+    close(fd);
+    if (got < 0 || len < PEL_FILE_HDR_SIZE ||
+        len > PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE ||
+        memcmp(buf, "FEMUPEL\0", 8) || ldl_le_p(buf + 8) != 1 ||
+        ldl_le_p(buf + 12) != len - PEL_FILE_HDR_SIZE) {
+        goto invalid;
+    }
+    pel_file_digest(buf, len, digest);
+    if (memcmp(digest, buf + 32, sizeof(digest))) {
+        goto invalid;
+    }
+    for (off = PEL_FILE_HDR_SIZE; off < len; count++) {
+        uint32_t size;
+
+        if (len - off < PEL_EV_HDR_SIZE || buf[off + 2] != 21) {
+            goto invalid;
+        }
+        size = pel_event_len(buf + off);
+        if (size > len - off) {
+            goto invalid;
+        }
+        off += size;
+    }
+    if (count != ldl_le_p(buf + 16) || ldq_le_p(buf + 24) == UINT64_MAX) {
+        goto invalid;
+    }
+    pel->used = len - PEL_FILE_HDR_SIZE;
+    pel->nev = count;
+    pel->gnum = lduw_le_p(buf + 20);
+    n->pel_power_cycles = ldq_le_p(buf + 24);
+    memcpy(pel->events, buf + PEL_FILE_HDR_SIZE, pel->used);
+    return true;
+
+invalid:
+    error_setg(errp, "Invalid or incompatible PEL file '%s'", n->pel_file);
+    return false;
+}
+
+/* Only the main loop calls this; no file I/O while holding the log lock. */
+static bool pel_file_save(FemuCtrl *n, Error **errp)
+{
+    FemuPel *pel = n->pel;
+    g_autofree uint8_t *buf = NULL;
+    g_autofree char *tmp = NULL;
+    g_autofree char *dir = NULL;
+    size_t len;
+    int fd;
+    int saved_errno;
+
+    if (!n->pel_file) {
+        return true;
+    }
+    qemu_mutex_lock(&pel->lock);
+    len = PEL_FILE_HDR_SIZE + pel->used;
+    buf = g_malloc0(len);
+    memcpy(buf, "FEMUPEL\0", 8);
+    stl_le_p(buf + 8, 1);
+    stl_le_p(buf + 12, pel->used);
+    stl_le_p(buf + 16, pel->nev);
+    stw_le_p(buf + 20, pel->gnum);
+    stq_le_p(buf + 24, n->pel_power_cycles);
+    memcpy(buf + PEL_FILE_HDR_SIZE, pel->events, pel->used);
+    qemu_mutex_unlock(&pel->lock);
+    pel_file_digest(buf, len, buf + 32);
+
+    tmp = g_strconcat(n->pel_file, ".XXXXXX", NULL);
+    fd = g_mkstemp(tmp);
+    if (fd < 0) {
+        goto fail;
+    }
+    if (qemu_write_full(fd, buf, len) != len || fsync(fd) < 0) {
+        saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        goto fail;
+    }
+    if (close(fd) < 0 || rename(tmp, n->pel_file) < 0) {
+        goto fail;
+    }
+    /* Make the replacement durable in the containing directory too. */
+    dir = g_path_get_dirname(n->pel_file);
+    fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) {
+        goto fail;
+    }
+    if (fsync(fd) < 0) {
+        saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        goto fail;
+    }
+    if (close(fd) < 0) {
+        goto fail;
+    }
+    return true;
+
+fail:
+    saved_errno = errno;
+    unlink(tmp);
+    error_setg_errno(errp, saved_errno, "Cannot save PEL file '%s'",
+                     n->pel_file);
+    return false;
+}
+
+static void pel_file_write(void *opaque)
+{
+    FemuCtrl *n = opaque;
+    Error *err = NULL;
+
+    if (!pel_file_save(n, &err)) {
+        error_report_err(err);
+    }
+}
+
+static void pel_file_exit(Notifier *notifier, void *data)
+{
+    FemuPel *pel = container_of(notifier, FemuPel, exit_notifier);
+    bool resume = nvme_pause_pollers(pel->ctrl);
+
+    pel_file_write(pel->ctrl);
+    nvme_resume_pollers(pel->ctrl, resume);
 }
 
 /* Figure 414: the value alone, its top two bytes reserved */
@@ -112,6 +282,9 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
     memcpy(e + PEL_EV_HDR_SIZE, data, len);
     pel->used += size;
     pel->nev++;
+    if (pel->write_bh) {
+        qemu_bh_schedule(pel->write_bh);
+    }
     qemu_mutex_unlock(&pel->lock);
 }
 
@@ -162,7 +335,7 @@ static void pel_log_power_on_reset(FemuCtrl *n)
 
     memcpy(ev, n->id_ctrl.fr, 8);
     stw_le_p(d, n->cntlid);
-    stl_le_p(d + 16, 1);                        /* one power cycle, this run */
+    stl_le_p(d + 16, MIN(n->pel_power_cycles, UINT32_MAX));
     stq_le_p(d + 20, nvme_power_on_ms(n));
     stq_le_p(d + 28, pel_ts414(n));
     femu_pel_log(n, NVME_PEL_POWER_ON_RESET, 1, ev, sizeof(ev));
@@ -271,7 +444,7 @@ static void pel_snapshot_timer(void *opaque)
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + PEL_SNAPSHOT_MS);
 }
 
-void femu_pel_init(FemuCtrl *n)
+bool femu_pel_init(FemuCtrl *n, Error **errp)
 {
     FemuPel *pel = g_new0(FemuPel, 1);
 
@@ -280,11 +453,33 @@ void femu_pel_init(FemuCtrl *n)
         pel->media_tokens[i] = PEL_MEDIA_BURST * 1000;
     }
     n->pel = pel;
+    n->pel_power_cycles = 1;
+    if (n->pel_file) {
+        n->pel_power_cycles = 0;
+        if (!pel_file_load(n, errp)) {
+            n->pel = NULL;
+            qemu_mutex_destroy(&pel->lock);
+            g_free(pel);
+            return false;
+        }
+        n->pel_power_cycles++;
+    }
     pel->snapshot = timer_new_ms(QEMU_CLOCK_REALTIME, pel_snapshot_timer, n);
     timer_mod(pel->snapshot, n->power_on_ms + PEL_SNAPSHOT_MS);
 
     pel_log_power_on_reset(n);
     pel_log_smart(n);
+    if (!pel_file_save(n, errp)) {
+        femu_pel_exit(n);
+        return false;
+    }
+    if (n->pel_file) {
+        pel->ctrl = n;
+        pel->write_bh = qemu_bh_new(pel_file_write, n);
+        pel->exit_notifier.notify = pel_file_exit;
+        qemu_add_exit_notifier(&pel->exit_notifier);
+    }
+    return true;
 }
 
 void femu_pel_exit(FemuCtrl *n)
@@ -293,6 +488,11 @@ void femu_pel_exit(FemuCtrl *n)
 
     if (!pel) {
         return;
+    }
+    if (pel->write_bh) {
+        pel_file_write(n);
+        qemu_bh_delete(pel->write_bh);
+        qemu_remove_exit_notifier(&pel->exit_notifier);
     }
     timer_free(pel->snapshot);
     n->pel = NULL;
@@ -319,6 +519,7 @@ void femu_pel_reset(FemuCtrl *n)
 
     pel_log_power_on_reset(n);
     pel_log_smart(n);
+    pel_file_write(n);
 }
 
 /* build the context: Figure 230's header, then the events newest first */
@@ -340,13 +541,16 @@ static void pel_establish(FemuCtrl *n)
     h[16] = 3;                                  /* LREV */
     stw_le_p(h + 18, PEL_HDR_SIZE - 20);        /* LHL */
     stq_le_p(h + 20, nvme_timestamp(n));        /* Figure 415 */
-    stq_le_p(h + 44, 1);                        /* PWRCC */
+    stq_le_p(h + 44, n->pel_power_cycles);       /* PWRCC */
     memcpy(h + 52, &id->vid, 2);
     memcpy(h + 54, &id->ssvid, 2);
     memcpy(h + 56, id->sn, sizeof(id->sn));
     memcpy(h + 76, id->mn, sizeof(id->mn));
     memcpy(h + 116, id->subnqn, sizeof(id->subnqn));
     pel->gnum++;                                /* wraps FFFFh to 0 */
+    if (pel->write_bh) {
+        qemu_bh_schedule(pel->write_bh);
+    }
     stw_le_p(h + 372, pel->gnum);
     for (i = 0; i < ARRAY_SIZE(pel_supported); i++) {
         if (pel_supported[i] == NVME_PEL_CHANGE_NS &&

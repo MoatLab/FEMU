@@ -807,6 +807,27 @@ mode is upstreamed.
 
 ## Configuration
 
+### Persistent Event log retention
+
+Add `pel_file=/absolute/path/events.pel` to a FEMU device to retain its
+Persistent Event log across QEMU runs. An unset property keeps the in-memory
+behavior. A missing file starts an empty history; a corrupt or incompatible
+file refuses device creation without changing that file.
+
+The file stores encoded events, generation, and power cycles. Each realize adds
+one power cycle and a new power-on event and SMART snapshot. PEL PWRCC,
+Controller Power Cycle, and SMART Power Cycles use the retained count. Reporting
+contexts, other SMART counters, namespace contents, and power-on hours are not
+retained.
+
+Writes run on the main loop after events and generation changes, with additional
+saves at controller reset, device removal, and normal process exit. Updates use
+a temporary file in the same directory, file fsync, rename, and directory fsync.
+An abrupt process termination can lose changes still queued for the main loop.
+Runtime write errors are reported to stderr; subsequent events and lifecycle
+saves retry. Use one file per device and only one QEMU writer per file; the file
+is not a shared storage or migration mechanism.
+
 Every property FEMU accepts is listed in
 [`hw/femu/docs/properties.md`](hw/femu/docs/properties.md), with its type,
 default and the line of source it comes from. That file is generated from the
