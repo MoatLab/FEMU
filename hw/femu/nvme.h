@@ -2222,6 +2222,7 @@ typedef struct FemuCtrl {
     pthread_spinlock_t chip_locks[FEMU_MAX_NUM_CHIPS];
     volatile int64_t chnl_next_avail_time[FEMU_MAX_NUM_CHNLS];
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];
+    GArray *chnl_reservations[FEMU_MAX_NUM_CHNLS];
 
     /* Latency numbers for whitebox-mode only */
     int64_t upg_rd_lat_ns; /* upper page in MLC/TLC/QLC */

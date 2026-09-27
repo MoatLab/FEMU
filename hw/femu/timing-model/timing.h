@@ -5,6 +5,8 @@ typedef struct FemuCtrl FemuCtrl;
 
 int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
                                   uint64_t transfer_ns);
+int64_t advance_read_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
+                                       uint64_t earliest, uint64_t transfer_ns);
 int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
                                uint8_t page_type);
 void set_latency(FemuCtrl *n);

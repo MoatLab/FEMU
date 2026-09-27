@@ -63,22 +63,75 @@ void set_latency(FemuCtrl *n)
     }
 }
 
-/* Reserve one transfer on the channel shared by its LUNs. */
-int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
-                                  uint64_t transfer_ns)
+typedef struct OcChannelReservation {
+    uint64_t start;
+    uint64_t end;
+} OcChannelReservation;
+
+/* Fit transfers around future reads, as in the NAND media channel model. */
+static int64_t reserve_channel(FemuCtrl *n, int ch, uint64_t now,
+                               uint64_t earliest, uint64_t transfer_ns,
+                               bool future)
 {
-    uint64_t data_ready_ts;
+    GArray *reservations;
+    OcChannelReservation reservation;
+    uint64_t start;
+    unsigned i;
 
     if (!transfer_ns) {
-        return now;
+        return earliest;
     }
 
     pthread_spin_lock(&n->chnl_locks[ch]);
-    data_ready_ts = MAX(now, n->chnl_next_avail_time[ch]) + transfer_ns;
-    n->chnl_next_avail_time[ch] = data_ready_ts;
+    reservations = n->chnl_reservations[ch];
+    if (!reservations) {
+        reservations = g_array_new(false, false, sizeof(reservation));
+        n->chnl_reservations[ch] = reservations;
+    }
+
+    /* Prune at submission time, never at a read's future array completion. */
+    for (i = 0; i < reservations->len; i++) {
+        if (g_array_index(reservations, OcChannelReservation, i).end > now) {
+            break;
+        }
+    }
+    g_array_remove_range(reservations, 0, i);
+    start = MAX(earliest, n->chnl_next_avail_time[ch]);
+    for (i = 0; i < reservations->len; i++) {
+        OcChannelReservation *r = &g_array_index(reservations,
+                                                OcChannelReservation, i);
+
+        if (r->end <= start) {
+            continue;
+        }
+        if (r->start >= start + transfer_ns) {
+            break;
+        }
+        start = r->end;
+    }
+    reservation.start = start;
+    reservation.end = start + transfer_ns;
+    if (future) {
+        /* Growing the list preserves gaps even with many reads outstanding. */
+        g_array_insert_val(reservations, i, reservation);
+    } else {
+        n->chnl_next_avail_time[ch] = reservation.end;
+    }
     pthread_spin_unlock(&n->chnl_locks[ch]);
 
-    return data_ready_ts;
+    return reservation.end;
+}
+
+int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
+                                  uint64_t transfer_ns)
+{
+    return reserve_channel(n, ch, now, now, transfer_ns, false);
+}
+
+int64_t advance_read_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
+                                       uint64_t earliest, uint64_t transfer_ns)
+{
+    return reserve_channel(n, ch, now, earliest, transfer_ns, true);
 }
 
 int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,

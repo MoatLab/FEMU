@@ -484,8 +484,9 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, page_type);
         } else {
             chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, page_type);
-            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts,
-                                                         transfer_ns);
+            io_done_ts = advance_read_channel_timestamp(n, ch, now,
+                                                        chip_end_ts,
+                                                        transfer_ns);
         }
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
@@ -1059,6 +1060,7 @@ static void oc12_release_locks(FemuCtrl *n)
     int i;
 
     for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+        g_clear_pointer(&n->chnl_reservations[i], g_array_unref);
         ret = pthread_spin_destroy(&n->chnl_locks[i]);
         assert(ret == 0);
     }

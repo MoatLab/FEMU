@@ -8035,6 +8035,68 @@ static void femu_oc12_channel_pair(FemuCtrlState *c, uint64_t second,
     guest_free(c->alloc, buf);
 }
 
+static void femu_test_oc12_channel_gap(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const uint64_t deadlines[] = { 1250000, 3000000, 3448000 };
+    const unsigned order[] = { 2, 0, 1 };
+    NvmeCmd cmd = { 0 };
+    NvmeCqe cqe;
+    uint16_t first;
+    uint16_t got;
+    uint64_t elapsed = 0;
+    unsigned i;
+
+    femu_oc12_clock_start(&c, femu, alloc);
+    first = c.cid;
+    cmd.opcode = FEMU_OC20_VECT_ERASE;
+    cmd.nsid = cpu_to_le32(1);
+    femu_submit(&c, &c.io, &cmd);
+
+    for (i = 0; i < 8; i++) {
+        uint64_t ppa = cpu_to_le64(i < 4 ? i : 32768 + i - 4);
+
+        qtest_memwrite(qts, list + i * sizeof(ppa), &ppa, sizeof(ppa));
+    }
+    cmd.opcode = FEMU_OC20_VECT_READ;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(list);
+    cmd.cdw12 = cpu_to_le32(3);
+    femu_submit(&c, &c.io, &cmd);
+    cmd.opcode = FEMU_OC20_VECT_WRITE;
+    cmd.cdw10 = cpu_to_le32(list + 4 * sizeof(uint64_t));
+    femu_submit(&c, &c.io, &cmd);
+
+    /* Keep virtual time fixed until all three entries have been processed. */
+    cmd.opcode = 0x93;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                   NVME_INVALID_OPCODE);
+    g_assert_cmpuint(got, ==, (uint16_t)(first + 3));
+
+    for (i = 0; i < G_N_ELEMENTS(deadlines); i++) {
+        qtest_clock_step(qts, deadlines[i] - elapsed - 1);
+        g_usleep(10000);
+        qtest_memread(qts, c.io.cq_addr + c.io.cq_head * sizeof(cqe),
+                      &cqe, sizeof(cqe));
+        g_assert_cmpuint(le16_to_cpu(cqe.status) & 1, !=, c.io.phase);
+        qtest_clock_step(qts, 1);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(got, ==, (uint16_t)(first + order[i]));
+        elapsed = deadlines[i];
+    }
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_oc12_channel_timing(void *obj, void *data,
                                           QGuestAllocator *alloc)
 {
@@ -11882,6 +11944,13 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
+    });
+    qos_add_test("oc12-channel-gap", "femu", femu_test_oc12_channel_gap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,oc12_channel_timing=on,"
+            "flash_type=2,ch_xfer_lat=400000,lsec_size=512,lsecs_per_pg=4,"
+            "lnum_pln=1,lnum_ch=2,lnum_lun=2,lpgs_per_blk=512"
     });
     qos_add_test("oc12-channel-timing", "femu", femu_test_oc12_channel_timing,
                  &(QOSGraphTestOptions) {
