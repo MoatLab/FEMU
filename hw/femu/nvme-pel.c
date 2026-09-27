@@ -121,10 +121,13 @@ void femu_pel_set_feature(FemuCtrl *n, const NvmeCmd *cmd,
 {
     g_autofree uint8_t *ev = NULL;
 
-    /* Figure 249 excludes P/NR entries for an I/O controller. */
+    /*
+     * Figure 249 excludes P/NR entries for an I/O controller; LBA Range Type
+     * is NR in the NVM Command Set (Figure 16), and its 4 KiB buffer would
+     * push out a log's worth of events in a few commands.
+     */
     switch (NVME_GETSETFEAT_FID(le32_to_cpu(cmd->cdw10))) {
     case NVME_ARBITRATION:
-    case NVME_LBA_RANGE_TYPE:
     case NVME_TEMPERATURE_THRESHOLD:
     case NVME_ERROR_RECOVERY:
     case NVME_VOLATILE_WRITE_CACHE:

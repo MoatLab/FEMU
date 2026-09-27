@@ -10280,6 +10280,17 @@ static void femu_test_pel_set_feature(void *obj, void *data,
                                            &result)), ==, NVME_SUCCESS);
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, 0x80, false, 0, 1,
                                            &result)), ==, NVME_SUCCESS);
+    /* LBA Range Type is NR in the NVM Command Set */
+    {
+        NvmeCmd lrt = { 0 };
+
+        qtest_memset(qts, payload, 0, 4096);
+        lrt.opcode = NVME_ADM_CMD_SET_FEATURES;
+        lrt.nsid = cpu_to_le32(1);
+        lrt.cdw10 = cpu_to_le32(0x03);
+        lrt.dptr.prp1 = cpu_to_le64(payload);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &lrt)), ==, NVME_SUCCESS);
+    }
     qtest_writeq(qts, payload, 123456);
     cmd.cdw10 = cpu_to_le32(0x0e);
     cmd.dptr.prp1 = cpu_to_le64(payload);
