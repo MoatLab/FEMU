@@ -58,6 +58,99 @@ static bool nvme_cmb_iovec_add(FemuCtrl *n, QEMUIOVector *iov, uint64_t addr,
     return true;
 }
 
+/*
+ * A cut waits for the FTL with the BQL held. Pin every RAM span before copying
+ * so payload DMA never calls an MMIO handler or changes its mapping mid-copy.
+ * The CMB is device-owned memory and can also be copied directly.
+ */
+static uint16_t nvme_power_dma(FemuCtrl *n, QEMUSGList *qsg, uint8_t *buf,
+                                bool to_host)
+{
+    typedef struct NvmeRamSpan {
+        void *ptr;
+        hwaddr len;
+        bool ram;
+    } NvmeRamSpan;
+    g_autoptr(GArray) spans = g_array_new(false, false, sizeof(NvmeRamSpan));
+    uint16_t status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+    size_t off = 0;
+    int i;
+
+    for (i = 0; i < qsg->nsg; i++) {
+        hwaddr addr = qsg->sg[i].base;
+        hwaddr left = qsg->sg[i].len;
+
+        if (left && addr > UINT64_MAX - (left - 1)) {
+            goto out;
+        }
+        while (left) {
+            NvmeRamSpan span = { .len = left };
+
+            if (nvme_addr_is_cmb(n, addr, left)) {
+                span.ptr = n->cmbuf + addr - n->ctrl_mem.addr;
+            } else {
+                MemoryRegion *mr;
+                hwaddr xlat;
+
+                RCU_READ_LOCK_GUARD();
+                mr = address_space_translate(qsg->as, addr, &xlat, &span.len,
+                                             to_host, MEMTXATTRS_UNSPECIFIED);
+                if (!span.len || !memory_region_is_ram(mr) ||
+                    !memory_access_is_direct(mr, true,
+                                             MEMTXATTRS_UNSPECIFIED)) {
+                    goto out;
+                }
+                memory_region_ref(mr);
+                span.ptr = (uint8_t *)memory_region_get_ram_ptr(mr) + xlat;
+                span.ram = true;
+            }
+            g_array_append_val(spans, span);
+            addr += span.len;
+            left -= span.len;
+        }
+    }
+
+    for (i = 0; i < spans->len; i++) {
+        NvmeRamSpan *span = &g_array_index(spans, NvmeRamSpan, i);
+
+        if (to_host) {
+            memcpy(span->ptr, buf + off, span->len);
+        } else {
+            memcpy(buf + off, span->ptr, span->len);
+        }
+        off += span->len;
+    }
+    status = NVME_SUCCESS;
+out:
+    for (i = 0; i < spans->len; i++) {
+        NvmeRamSpan *span = &g_array_index(spans, NvmeRamSpan, i);
+
+        if (span->ram) {
+            /* Release the RAM reference and account for guest-memory writes. */
+            address_space_unmap(qsg->as, span->ptr, span->len, to_host,
+                             status == NVME_SUCCESS ? span->len : 0);
+        }
+    }
+    return status;
+}
+
+/* Indirect lists need the same restriction as the payload they describe. */
+static uint16_t nvme_read_list(FemuCtrl *n, hwaddr addr, void *buf, int size)
+{
+    QEMUSGList qsg;
+    uint16_t status;
+
+    if (!n->power_loss) {
+        nvme_addr_read(n, addr, buf, size);
+        return NVME_SUCCESS;
+    }
+    pci_dma_sglist_init(&qsg, &n->parent_obj, 1);
+    qemu_sglist_add(&qsg, addr, size);
+    status = nvme_power_dma(n, &qsg, buf, false);
+    qemu_sglist_destroy(&qsg);
+    return status;
+}
+
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n)
 {
@@ -73,7 +166,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
     /* the first entry may start anywhere in its page, but on a dword */
     if (prp1 & 0x3) {
         return NVME_INVALID_PRP_OFFSET | NVME_DNR;
-    } else if (nvme_addr_is_cmb(n, prp1, 1)) {
+    } else if (!n->power_loss && nvme_addr_is_cmb(n, prp1, 1)) {
         cmb = true;
         qsg->nsg = 0;
         qemu_iovec_init(iov, num_prps);
@@ -110,7 +203,11 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
              */
             nents = (n->page_size - (prp2 & (n->page_size - 1))) >> 3;
             prp_trans = nents * sizeof(uint64_t);
-            nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
+            if (nvme_read_list(n, prp2, prp_list, prp_trans)) {
+                g_free(prp_list);
+                status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+                goto unmap;
+            }
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
@@ -127,8 +224,11 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                     nents = (len + n->page_size - 1) >> n->page_bits;
                     nents = MIN(n->max_prp_ents, nents);
                     prp_trans = nents * sizeof(uint64_t);
-                    nvme_addr_read(n, prp_ent, (void *)prp_list,
-                                   prp_trans);
+                    if (nvme_read_list(n, prp_ent, prp_list, prp_trans)) {
+                        g_free(prp_list);
+                        status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+                        goto unmap;
+                    }
                     prp_ent = le64_to_cpu(prp_list[i]);
                 }
 
@@ -237,7 +337,11 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                 goto inval;
             }
             descs = g_malloc(seg_bytes);
-            nvme_addr_read(n, seg_addr, descs, seg_bytes);
+            if (nvme_read_list(n, seg_addr, descs, seg_bytes)) {
+                g_free(descs);
+                status = NVME_DATA_TRAS_ERROR;
+                goto inval;
+            }
             for (i = 0; i < ndesc && len; i++) {
                 uint8_t dt = NVME_SGL_TYPE(descs[i].type);
                 uint32_t dl = le32_to_cpu(descs[i].len);
@@ -315,12 +419,16 @@ inval:
 }
 
 /* Copy between a buffer and a mapped transfer, then release the mapping. */
-static uint16_t dma_copy(QEMUSGList *qsg, QEMUIOVector *iov, uint8_t *ptr,
+static uint16_t dma_copy(FemuCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
+                         uint8_t *ptr,
                          uint32_t len, bool to_host)
 {
     uint16_t status = NVME_SUCCESS;
 
-    if (qsg->nsg > 0) {
+    if (n->power_loss && qsg->nsg > 0) {
+        status = nvme_power_dma(n, qsg, ptr, to_host);
+        qemu_sglist_destroy(qsg);
+    } else if (qsg->nsg > 0) {
         uint64_t resid = to_host ?
             dma_buf_read(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED) :
             dma_buf_write(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED);
@@ -397,7 +505,7 @@ uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
         return status;
     }
 
-    return dma_copy(&qsg, &iov, ptr, len, false);
+    return dma_copy(n, &qsg, &iov, ptr, len, false);
 }
 
 uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
@@ -411,7 +519,7 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
         return status;
     }
 
-    return dma_copy(&qsg, &iov, ptr, len, true);
+    return dma_copy(n, &qsg, &iov, ptr, len, true);
 }
 
 uint16_t dma_read_prp_fill(FemuCtrl *n, const uint8_t *ptr, uint32_t len,
@@ -496,7 +604,7 @@ uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
         return status;
     }
 
-    return dma_copy(&qsg, &iov, ptr, len, false);
+    return dma_copy(n, &qsg, &iov, ptr, len, false);
 }
 
 /* as dma_read_cmd(), then zeroes up to @xfer */
@@ -531,5 +639,5 @@ uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
         return status;
     }
 
-    return dma_copy(&qsg, &iov, ptr, len, true);
+    return dma_copy(n, &qsg, &iov, ptr, len, true);
 }

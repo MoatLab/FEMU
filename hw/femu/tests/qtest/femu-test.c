@@ -10782,6 +10782,179 @@ static void femu_power_flush(FemuCtrlState *c, uint32_t nsid)
     g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
 }
 
+/* Bound the QMP wait even if the device holds up the main loop. */
+typedef struct FemuPowerDeadline {
+    GMutex lock;
+    GCond cond;
+    bool done;
+} FemuPowerDeadline;
+
+static void *femu_power_deadline(void *opaque)
+{
+    FemuPowerDeadline *d = opaque;
+    gint64 end = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+
+    g_mutex_lock(&d->lock);
+    while (!d->done) {
+        if (!g_cond_wait_until(&d->cond, &d->lock, end)) {
+            g_error("power cut did not return within ten seconds");
+        }
+    }
+    g_mutex_unlock(&d->lock);
+    return NULL;
+}
+
+static void femu_test_power_mmio_cut(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                     .nlb = cpu_to_le16(7),
+                     .dptr.prp1 = cpu_to_le64(0xfed00000) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int cut = 0; cut < 16; cut++) {
+        FemuPowerDeadline d = { 0 };
+        GThread *watchdog;
+
+        femu_power_read(&c, buf, 1, 0, 0);
+        g_mutex_init(&d.lock);
+        g_cond_init(&d.cond);
+        watchdog = g_thread_new("power-cut-timeout", femu_power_deadline, &d);
+        for (int i = 0; i < 14; i++) {
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        femu_power_cut(&c);
+        g_mutex_lock(&d.lock);
+        d.done = true;
+        g_cond_signal(&d.cond);
+        g_mutex_unlock(&d.lock);
+        g_thread_join(watchdog);
+        g_cond_clear(&d.cond);
+        g_mutex_clear(&d.lock);
+        femu_power_read(&c, buf, 1, 0, 0);
+    }
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                   NVME_DATA_TRAS_ERROR);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_dma_pointers(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 12288);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const uint8_t ops[] = { NVME_CMD_WRITE, NVME_CMD_READ, NVME_CMD_COMPARE };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int op = 0; op < ARRAY_SIZE(ops); op++) {
+        for (int kind = 0; kind < 8; kind++) {
+            NvmeRwCmd rw = { .opcode = ops[op], .nsid = cpu_to_le32(1) };
+            NvmeSglDescriptor desc[2] = { 0 };
+            NvmeSglDescriptor seg = { 0 };
+
+            qtest_memset(qts, buf, 0xa5, 12288);
+            rw.dptr.prp1 = cpu_to_le64(0xfed00000);
+            if (kind == 1) {
+                /* A valid first page must not move before PRP2 is checked. */
+                rw.nlb = cpu_to_le16(15);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.dptr.prp2 = cpu_to_le64(0xfed00000);
+            } else if (kind == 2 || kind == 3) {
+                rw.nlb = cpu_to_le16(23);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.dptr.prp2 = cpu_to_le64(0xfed00000);
+                if (kind == 3) {
+                    /* The last entry chains to an MMIO-resident list. */
+                    qtest_writeq(qts, list + 4088, 0xfed00000);
+                    rw.dptr.prp2 = cpu_to_le64(list + 4088);
+                }
+            } else if (kind >= 4) {
+                rw.flags = 1 << 6;
+                seg.addr = cpu_to_le64(0xfed00000);
+                seg.len = cpu_to_le32(512);
+                if (kind == 5) {
+                    rw.nlb = cpu_to_le16(1);
+                    desc[0].addr = cpu_to_le64(buf);
+                    desc[0].len = cpu_to_le32(512);
+                    desc[1] = seg;
+                    qtest_memwrite(qts, list, desc, sizeof(desc));
+                    seg.addr = cpu_to_le64(list);
+                    seg.len = cpu_to_le32(sizeof(desc));
+                    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+                } else if (kind == 6) {
+                    seg.len = cpu_to_le32(sizeof(desc));
+                    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+                } else if (kind == 7) {
+                    /* A single descriptor crosses from RAM into VGA MMIO. */
+                    rw.nlb = cpu_to_le16(1);
+                    seg.addr = cpu_to_le64(0x9fe00);
+                    seg.len = cpu_to_le32(1024);
+                }
+                memcpy(&rw.dptr.sgl, &seg, sizeof(seg));
+            }
+            g_test_message("opcode 0x%x, pointer case %d", ops[op], kind);
+            g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                           NVME_DATA_TRAS_ERROR);
+            if (ops[op] == NVME_CMD_READ) {
+                uint8_t bytes[4096];
+
+                qtest_memread(qts, buf, bytes, sizeof(bytes));
+                for (int i = 0; i < sizeof(bytes); i++) {
+                    g_assert_cmphex(bytes[i], ==, 0xa5);
+                }
+            }
+        }
+    }
+    for (int op = 0; op < 2; op++) {
+        NvmeCmd cmd = { .opcode = op ? FEMU_CMD_COPY : NVME_CMD_DSM,
+                       .nsid = cpu_to_le32(1),
+                       .dptr.prp1 = cpu_to_le64(0xfed00000),
+                       .cdw11 = cpu_to_le32(op ? 0 : FEMU_DSM_AD) };
+
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_DATA_TRAS_ERROR);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_cmb(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QPCIBar cmb;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmb = qpci_iomap(&femu->dev, 2, NULL);
+    femu_power_write(&c, cmb.addr, 1, 0, 8, 0x5a, false);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_COMPARE, 0, cmb.addr), ==,
+                   NVME_SUCCESS);
+    femu_power_read(&c, cmb.addr, 1, 0, 0x5a);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_write(&c, cmb.addr, 1, 0, 8, 0x6b, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, cmb.addr, 1, 0, 0x6b);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_power_loss(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -12992,6 +13165,32 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = g_strdup_printf(
             "femu_mode=4,fdm_size=16,csd_program_dir=%s", femu_csd_dir),
+    });
+    qos_add_test("power-loss-mmio-cut", "femu", femu_test_power_mmio_cut,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "serial=power-mmio-cut,"
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on,oncs=415",
+        .arg = GINT_TO_POINTER(0),
+    });
+    qos_add_test("power-loss-dma-pointers", "femu",
+                 femu_test_power_dma_pointers,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "serial=power-dma-pointers,"
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on,oncs=415,sgl=on",
+    });
+    qos_add_test("power-loss-cmb", "femu", femu_test_power_cmb,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "serial=power-cmb,"
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on,oncs=415,cmbsz=0x400000,cmbloc=2",
     });
     qos_add_test("power-loss-pel", "femu", femu_test_power_log,
                  &(QOSGraphTestOptions) {

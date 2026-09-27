@@ -801,6 +801,14 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_SUCCESS;
     }
 
+    if (n->power_loss) {
+        req->slba = slba;
+        req->nlb = nlb;
+        return dma_read_cmd(n, cmd,
+                            (uint8_t *)n->mbe->logical_space + data_offset,
+                            data_size);
+    }
+
     if (femu_pi_type(ns)) {
         return femu_pi_rw(n, ns, cmd, req);
     }
@@ -1028,6 +1036,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t nr_ranges;
     NvmeDsmRange *ranges = NULL;
     int i;
+    uint16_t status;
 
     // Extract number of ranges from CDW10 (bits 7:0, 0-based)
     nr_ranges = (cdw10 & 0xFF) + 1;
@@ -1062,11 +1071,13 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
-    if (dma_write_cmd(n, cmd, (uint8_t *)ranges, ranges_size)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                                offsetof(NvmeCmd, dptr.prp1), 0, ns->id);
-            g_free(ranges);
-            return NVME_INVALID_FIELD | NVME_DNR;
+    status = dma_write_cmd(n, cmd, (uint8_t *)ranges, ranges_size);
+    if (status) {
+        status = n->power_loss ? status : NVME_INVALID_FIELD | NVME_DNR;
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, status & ~NVME_DNR,
+                            offsetof(NvmeCmd, dptr.prp1), 0, ns->id);
+        g_free(ranges);
+        return status;
     }
     // Validate and process each range
     uint64_t total_blocks = 0;
@@ -1419,6 +1430,20 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (ns->mdata && (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL ||
                       (le64_to_cpu(rw->mptr) & 0x3))) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (n->power_loss) {
+        g_autofree uint8_t *host = g_malloc(data_size);
+        uint16_t status;
+
+        if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+            return NVME_UNRECOVERED_READ | NVME_DNR;
+        }
+        status = dma_write_cmd(n, cmd, host, data_size);
+        if (status) {
+            return status;
+        }
+        return memcmp((uint8_t *)n->mbe->logical_space + offset, host,
+                      data_size) ? NVME_CMP_FAILURE : NVME_SUCCESS;
     }
     if (cmd->psdt) {
         uint16_t sc = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
