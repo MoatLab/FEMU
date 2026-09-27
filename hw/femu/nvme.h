@@ -265,6 +265,11 @@ typedef struct NvmeSubsystem {
     FemuCtrl           *ctrls[NVME_MAX_CONTROLLERS];
     NvmeNamespace      *namespaces[NVME_MAX_NAMESPACES + 1];
     NvmeEnduranceGroup endgrp;
+    bool ns_mgmt;
+    FemuCtrl *storage;
+    QemuMutex ns_lock;
+    bool ns_paused;
+    bool ns_resume[NVME_MAX_CONTROLLERS];
 
     struct {
         char *nqn;
@@ -2066,6 +2071,8 @@ typedef struct FemuCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     bool        ns_mgmt;
+    bool        shared_storage;
+    DECLARE_BITMAP(attached_ns, NVME_MAX_NAMESPACES);
     bool        streams;
     uint16_t    streams_max;
     QemuMutex   streams_lock;
@@ -2331,11 +2338,22 @@ static inline NvmeNamespace *nvme_ns_allocated(FemuCtrl *n, uint32_t nsid)
     return &n->namespaces[nsid - 1];
 }
 
+static inline bool nvme_ns_shared(FemuCtrl *n)
+{
+    return n->subsys && n->subsys->ns_mgmt;
+}
+
+static inline bool nvme_ns_attached(FemuCtrl *n, NvmeNamespace *ns)
+{
+    return nvme_ns_shared(n) ? test_bit(ns->id - 1, n->attached_ns) :
+                               ns->attached;
+}
+
 static inline NvmeNamespace *nvme_ns(FemuCtrl *n, uint32_t nsid)
 {
     NvmeNamespace *ns = nvme_ns_allocated(n, nsid);
 
-    return ns && ns->attached ? ns : NULL;
+    return ns && nvme_ns_attached(n, ns) ? ns : NULL;
 }
 
 #define FEMU_MAX_INF_REQS       (65536)

@@ -7,8 +7,9 @@ copy. Realize the subsystem before its controllers. The first controller
 establishes the pool and boot namespaces; later controllers join that pool with
 no initial attachments. Namespace Attachment selects their active namespaces.
 
-The subsystem retains the first controller's configuration object as the storage
-context, independently of its PCI transport lifetime. Its namespace table and
+The subsystem copies the first controller's properties into an unrealized
+configuration object as its storage context, independently of PCI transport
+lifetime. This context has no queues or workers. Its namespace table and
 backend survive removal of that controller, including removal of every controller.
 They are released at subsystem teardown. Namespace identity and the creation
 sequence belong to this context. Controllers must agree on the storage mode and

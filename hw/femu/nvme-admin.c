@@ -3446,10 +3446,25 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         for (uint32_t i = 1; i <= n->namespace_limit; i++) {
             ns = nvme_ns_allocated(n, i);
             if (ns && (nsid == NVME_NSID_BROADCAST || nsid == i)) {
-                nvme_retire_ns_requests(n, ns);
-                if (ns->attached) {
-                    /* Delete does not notify its issuing controller. */
-                    nvme_ns_changed(n, ns->id, false);
+                if (nvme_ns_shared(n)) {
+                    for (uint32_t c = 0; c < NVME_MAX_CONTROLLERS; c++) {
+                        FemuCtrl *ctrl = nvme_subsys_ctrl(n->subsys, c);
+
+                        if (!ctrl) {
+                            continue;
+                        }
+                        nvme_retire_ns_requests(ctrl, ns);
+                        if (nvme_ns_attached(ctrl, ns)) {
+                            nvme_ns_changed(ctrl, ns->id, ctrl != n);
+                        }
+                        clear_bit(ns->id - 1, ctrl->attached_ns);
+                    }
+                } else {
+                    nvme_retire_ns_requests(n, ns);
+                    if (ns->attached) {
+                        /* Delete does not notify its issuing controller. */
+                        nvme_ns_changed(n, ns->id, false);
+                    }
                 }
                 nvme_ns_destroy(n, ns);
             }
@@ -3490,7 +3505,8 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* Base 2.3 Figure 386 uses Format's Invalid Format status (10Ah). */
         return status;
     }
-    if (id.nmic || id.nvmsetid || id.endgid) {
+    if ((id.nmic & ~(nvme_ns_shared(n) ? 1 : 0)) ||
+        id.nvmsetid || id.endgid) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (ldl_le_p((uint8_t *)&id + 92)) {
@@ -3591,24 +3607,40 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     if (!count || count >= ARRAY_SIZE(list)) {
         return nvme_ns_cmd_error(n, cmd, NVME_CTRL_LIST_INVALID, 0);
     }
-    /* Validate the whole list before changing this controller's private NS. */
+    /* Validate every target before mutating the attachment set. */
     for (uint16_t i = 1; i <= count; i++) {
-        if (le16_to_cpu(list[i]) != n->cntlid ||
-            (i > 1 && le16_to_cpu(list[i]) <= le16_to_cpu(list[i - 1]))) {
+        uint16_t id = le16_to_cpu(list[i]);
+        FemuCtrl *ctrl = nvme_ns_shared(n) ? nvme_subsys_ctrl(n->subsys, id) :
+                         id == n->cntlid ? n : NULL;
+
+        if (!ctrl || (i > 1 && id <= le16_to_cpu(list[i - 1]))) {
             return nvme_ns_cmd_error(n, cmd, NVME_CTRL_LIST_INVALID, 2 * i);
         }
-    }
-    if (ns->attached == !sel) {
-        return nvme_ns_cmd_error(n, cmd,
-                                  sel ? NVME_NS_NOT_ATTACHED :
-                                  NVME_NS_ALREADY_ATTACHED, 2);
+        if (nvme_ns_attached(ctrl, ns) == !sel) {
+            return nvme_ns_cmd_error(n, cmd,
+                                    sel ? NVME_NS_NOT_ATTACHED :
+                                    NVME_NS_ALREADY_ATTACHED, 2 * i);
+        }
     }
     resume = nvme_pause_pollers(n);
-    if (sel) {
-        nvme_retire_ns_requests(n, ns);
+    for (uint16_t i = 1; i <= count; i++) {
+        FemuCtrl *ctrl = nvme_ns_shared(n) ?
+                        nvme_subsys_ctrl(n->subsys, le16_to_cpu(list[i])) : n;
+
+        if (sel) {
+            nvme_retire_ns_requests(ctrl, ns);
+        }
+        if (nvme_ns_shared(n)) {
+            if (sel) {
+                clear_bit(nsid - 1, ctrl->attached_ns);
+            } else {
+                set_bit(nsid - 1, ctrl->attached_ns);
+            }
+        } else {
+            ns->attached = !sel;
+        }
+        nvme_ns_changed(ctrl, ns->id, true);
     }
-    ns->attached = !sel;
-    nvme_ns_changed(n, ns->id, true);
     nvme_resume_pollers(n, resume);
     return NVME_SUCCESS;
 }

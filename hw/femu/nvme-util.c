@@ -104,7 +104,7 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid)
  * Callers run on the vCPU thread, where the admin queue is processed. Returns
  * whether the data plane was running, which nvme_resume_pollers() takes back.
  */
-bool nvme_pause_pollers(FemuCtrl *n)
+static bool nvme_pause_controller(FemuCtrl *n)
 {
     bool was_started = n->dataplane_started;
     int p;
@@ -143,7 +143,7 @@ bool nvme_pause_pollers(FemuCtrl *n)
     return was_started;
 }
 
-void nvme_resume_pollers(FemuCtrl *n, bool was_started)
+static void nvme_resume_controller(FemuCtrl *n, bool was_started)
 {
     if (!was_started) {
         return;
@@ -151,6 +151,44 @@ void nvme_resume_pollers(FemuCtrl *n, bool was_started)
 
     smp_mb();   /* land every change before a poller can observe the flag */
     n->dataplane_started = true;
+}
+
+/* Under BQL, a nested pause must not resume its caller's work. */
+bool nvme_pause_pollers(FemuCtrl *n)
+{
+    NvmeSubsystem *subsys = n->subsys;
+
+    if (!nvme_ns_shared(n)) {
+        return nvme_pause_controller(n);
+    }
+    if (subsys->ns_paused) {
+        return false;
+    }
+    subsys->ns_paused = true;
+    for (uint32_t i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+        FemuCtrl *ctrl = nvme_subsys_ctrl(subsys, i);
+
+        subsys->ns_resume[i] = ctrl && nvme_pause_controller(ctrl);
+    }
+    return true;
+}
+
+void nvme_resume_pollers(FemuCtrl *n, bool was_started)
+{
+    NvmeSubsystem *subsys = n->subsys;
+
+    if (!nvme_ns_shared(n)) {
+        nvme_resume_controller(n, was_started);
+    } else if (was_started) {
+        for (uint32_t i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+            FemuCtrl *ctrl = nvme_subsys_ctrl(subsys, i);
+
+            if (ctrl) {
+                nvme_resume_controller(ctrl, subsys->ns_resume[i]);
+            }
+        }
+        subsys->ns_paused = false;
+    }
 }
 
 /*

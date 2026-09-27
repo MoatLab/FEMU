@@ -2,6 +2,8 @@
 #include "qemu/cutils.h"
 #include "system/qtest.h"
 #include "hw/qdev-properties.h"
+#include "qom/qom-qobject.h"
+#include "qobject/qobject.h"
 
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
@@ -191,15 +193,43 @@ static bool nvme_subsys_setup(NvmeSubsystem *subsys, Error **errp)
     return true;
 }
 
+static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns);
+static FemuCtrl *nvme_subsys_take_storage(FemuCtrl *n);
+
 static void nvme_subsys_realize(DeviceState *dev, Error **errp)
 {
     NvmeSubsystem *subsys = NVME_SUBSYS(dev);
 
+    if (subsys->ns_mgmt && subsys->params.fdp.enabled) {
+        error_setg(errp, "namespace management does not support FDP");
+        return;
+    }
+    qemu_mutex_init(&subsys->ns_lock);
     qbus_init(&subsys->bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
     nvme_subsys_setup(subsys, errp);
 }
 
+static void nvme_subsys_unrealize(DeviceState *dev)
+{
+    NvmeSubsystem *subsys = NVME_SUBSYS(dev);
+    FemuCtrl *storage = subsys->storage;
+
+    if (storage) {
+        for (uint32_t i = 0; i < storage->namespace_limit; i++) {
+            nvme_ns_release(storage, &storage->namespaces[i]);
+        }
+        g_free(storage->namespaces);
+        storage->namespaces = NULL;
+        free_dram_backend(storage->mbe);
+        storage->mbe = NULL;
+        subsys->storage = NULL;
+        object_unref(OBJECT(storage));
+    }
+    qemu_mutex_destroy(&subsys->ns_lock);
+}
+
 static const Property nvme_subsystem_props[] = {
+    DEFINE_PROP_BOOL("ns_mgmt", NvmeSubsystem, ns_mgmt, false),
     DEFINE_PROP_STRING("nqn", NvmeSubsystem, params.nqn),
     DEFINE_PROP_BOOL("fdp", NvmeSubsystem, params.fdp.enabled, false),
     DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs, 0),
@@ -216,6 +246,7 @@ static void nvme_subsys_class_init(ObjectClass *oc, const void *data)
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->realize = nvme_subsys_realize;
+    dc->unrealize = nvme_subsys_unrealize;
     dc->desc = "FEMU NVMe Subsystem (FDP)";
     device_class_set_props(dc, nvme_subsystem_props);
 }
@@ -395,6 +426,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
     NvmeAsyncEvent *event;
     int i;
+    bool resume;
 
     /*
      * Stop the dataplane before anything below runs. Waiting for the pollers
@@ -407,7 +439,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
      * first line without waiting for anything, which is what this call was
      * added to do.
      */
-    nvme_pause_pollers(n);
+    resume = nvme_pause_pollers(n);
 
     /*
      * Drop every Async Event Request the controller was holding, along with any
@@ -481,6 +513,11 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->eis_addr = 0;
     n->eis_addr_hva = 0;
     n->dbbuf_map_len = 0;
+    if (nvme_ns_shared(n)) {
+        n->subsys->ns_resume[n->cntlid] = false;
+        nvme_resume_pollers(n, resume);
+    }
+
 }
 
 /*
@@ -1060,6 +1097,7 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     }
     id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
                            (n->extended << 4);
+    id_ns->nmic          = nvme_ns_shared(n) ? 1 : 0;
     id_ns->mc            = n->mc;
     id_ns->dpc           = n->pi ? (n->meta >= 8 ? 0x1f : 0) : n->dpc;
     id_ns->dps           = n->dps;
@@ -1315,13 +1353,24 @@ static void nvme_set_ctrl_capacity(FemuCtrl *n)
     memset(n->id_ctrl.unvmcap, 0, sizeof(n->id_ctrl.unvmcap));
     stq_le_p(n->id_ctrl.tnvmcap, n->namespace_pool_size);
     stq_le_p(n->id_ctrl.unvmcap, n->namespace_pool_size - total);
+    if (nvme_ns_shared(n)) {
+        for (i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+            FemuCtrl *ctrl = nvme_subsys_ctrl(n->subsys, i);
+
+            if (ctrl) {
+                memcpy(ctrl->id_ctrl.tnvmcap, n->id_ctrl.tnvmcap, 16);
+                memcpy(ctrl->id_ctrl.unvmcap, n->id_ctrl.unvmcap, 16);
+            }
+        }
+    }
 }
 
 bool nvme_ns_mgmt_supported(FemuCtrl *n)
 {
     uint32_t i;
 
-    if (!n->ns_mgmt || (!NOSSD(n) && !BBSSD(n)) || n->dps || n->subsys) {
+    if (!n->ns_mgmt || (!NOSSD(n) && !BBSSD(n)) || n->dps ||
+        (n->subsys && !n->subsys->ns_mgmt)) {
         return false;
     }
     for (i = 0; i < n->namespace_limit; i++) {
@@ -1761,6 +1810,12 @@ static void *femu_ftl_thread(void *arg)
                 continue;
             }
 
+            if (nvme_ns_shared(n)) {
+                qemu_mutex_lock(&n->subsys->ns_lock);
+                if (req->ns && req->ns->ssd) {
+                    req->ns->ssd->n = n;
+                }
+            }
             lat = femu_ftl_process_req(n, req);
             g_clear_pointer(&req->write_data, g_free);
             if (n->power_loss && req->status == NVME_SUCCESS && req->ns) {
@@ -1776,6 +1831,12 @@ static void *femu_ftl_thread(void *arg)
                     ctr->nr_host_rd_cmds++;
                     ctr->nr_host_rd_bytes += bytes;
                 }
+            }
+            if (nvme_ns_shared(n)) {
+                if (req->ns && req->ns->ssd) {
+                    req->ns->ssd->n = n->subsys->storage;
+                }
+                qemu_mutex_unlock(&n->subsys->ns_lock);
             }
             req->reqlat = lat;
             req->expire_time += lat;
@@ -1878,6 +1939,9 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)
 {
+    if (nvme_ns_shared(n)) {
+        n = n->subsys->storage;
+    }
     nvme_ns_release(n, ns);
     nvme_set_ctrl_capacity(n);
 }
@@ -1919,13 +1983,17 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     uint8_t ds;
     uint32_t i;
 
+    if (nvme_ns_shared(n) && n->subsys->storage) {
+        n = n->subsys->storage;
+    }
     if (!nsid || nsid > n->namespace_limit || nvme_ns_allocated(n, nsid)) {
         error_setg(errp, "namespace slot is unavailable");
         return -1;
     }
     if ((mode != FEMU_NOSSD_MODE && mode != FEMU_BBSSD_MODE) ||
         (n->subsys && n->subsys->endgrp.fdp.enabled) || n->dps ||
-        (mode == FEMU_BBSSD_MODE && !n->ftl_thread_running)) {
+        (mode == FEMU_BBSSD_MODE && !nvme_ns_shared(n) &&
+         !n->ftl_thread_running)) {
         error_setg(errp, "namespace lifecycle is unsupported for this mode");
         return -1;
     }
@@ -1994,6 +2062,9 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     }
     ns->creation_generation = ++n->ns_creation_generation;
     ns->attached = attached;
+    if (attached && nvme_ns_shared(n)) {
+        set_bit(nsid - 1, n->attached_ns);
+    }
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);
     return 0;
@@ -2017,7 +2088,9 @@ static void femu_realize_undo(FemuCtrl *n)
      * before touching it, so running them over a controller that got part way
      * is safe, and it has to happen before the namespace array goes.
      */
-    femu_exit_extensions(n);
+    if (!n->shared_storage) {
+        femu_exit_extensions(n);
+    }
 
     if (n->subsys) {
         femu_subsys_unregister_ctrl(n->subsys, n);
@@ -2032,18 +2105,24 @@ static void femu_realize_undo(FemuCtrl *n)
     n->features.int_vector_config = NULL;
     g_free(n->cmbuf);
     n->cmbuf = NULL;
-    femu_free_namespace_bitmaps(n);
+    if (!n->shared_storage) {
+        femu_free_namespace_bitmaps(n);
+    }
     g_free(n->aer_held);
     n->aer_held = NULL;
     g_free(n->elpes);
     n->elpes = NULL;
-    g_free(n->namespaces);
+    if (!n->shared_storage) {
+        g_free(n->namespaces);
+    }
     n->namespaces = NULL;
     g_free(n->cq);
     n->cq = NULL;
     g_free(n->sq);
     n->sq = NULL;
-    free_dram_backend(n->mbe);
+    if (!n->shared_storage) {
+        free_dram_backend(n->mbe);
+    }
     n->mbe = NULL;
 
     /*
@@ -2064,7 +2143,31 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     int64_t bs_size;
     uint64_t nand_cap = 0;
 
-    if (n->ns_mgmt && n->subsys) {
+    if (nvme_ns_shared(n)) {
+        FemuCtrl *storage = n->subsys->storage;
+
+        if (!DEVICE(n->subsys)->realized) {
+            error_setg(errp, "realize the subsystem before its controllers");
+            return;
+        }
+        n->ns_mgmt = true;
+        if ((!NOSSD(n) && !BBSSD(n)) || n->streams || n->dps ||
+            n->namespace_modes) {
+            error_setg(errp, "shared namespaces require homogeneous NoSSD or "
+                       "bbssd without Streams or default protection");
+            return;
+        }
+        if (storage && (n->femu_mode != storage->femu_mode ||
+                        n->meta != storage->meta || n->pi != storage->pi ||
+                        n->mc != storage->mc || n->dpc != storage->dpc ||
+                        n->nlbaf != storage->nlbaf ||
+                        n->vwc != storage->vwc || n->oncs != storage->oncs)) {
+            error_setg(errp, "shared namespace mode and capabilities "
+                       "must match");
+            return;
+        }
+    }
+    if (n->ns_mgmt && n->subsys && !n->subsys->ns_mgmt) {
         error_setg(errp, "ns_mgmt=on does not support subsys; "
                    "use a standalone controller");
         return;
@@ -2092,8 +2195,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         bs_size = nand_cap;
     }
 
-    init_dram_backend(&n->mbe, bs_size);
-    n->mbe->femu_mode = n->femu_mode;
+    if (nvme_ns_shared(n) && n->subsys->storage) {
+        n->mbe = n->subsys->storage->mbe;
+        n->shared_storage = true;
+    } else {
+        init_dram_backend(&n->mbe, bs_size);
+        n->mbe->femu_mode = n->femu_mode;
+    }
 
     /* the host-link model is armed only when a knob asks for it */
     n->pcie_enabled = (n->pcie_bandwidth_mbps || n->pcie_prop_delay_ns);
@@ -2124,7 +2232,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));
     n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
     n->namespace_limit = n->num_namespaces;
-    n->namespaces = g_new0(NvmeNamespace, NVME_MAX_NUM_NAMESPACES);
+    n->namespaces = n->shared_storage ? n->subsys->storage->namespaces :
+                    g_new0(NvmeNamespace, NVME_MAX_NUM_NAMESPACES);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     qemu_spin_init(&n->elp_lock);
     for (int d = 0; d < NVME_DST_RESULTS; d++) {
@@ -2158,7 +2267,14 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * namespaces, and it takes the same Error argument, which must not already
      * carry an error.
      */
-    if (nvme_init_namespaces(n, errp)) {
+    if (n->shared_storage) {
+        n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
+        n->namespace_pool_size = n->subsys->storage->namespace_pool_size;
+        n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
+        n->id_ctrl.oacs |= cpu_to_le16(NVME_OACS_NS_MGMT);
+        n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_NS_ATTR);
+        nvme_set_ctrl_capacity(n);
+    } else if (nvme_init_namespaces(n, errp)) {
         femu_realize_undo(n);
         return;
     }
@@ -2170,7 +2286,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * for its own femu_mode for the admin paths, while each namespace gets the
      * one matching the mode it runs.
      */
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (int i = 0; !n->shared_storage && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         uint8_t idx = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
         uint64_t page_size = (uint64_t)n->bb_params.secsz *
@@ -2198,7 +2314,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     /* Managed devices name boot namespaces once, never during Create. */
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (int i = 0; !n->shared_storage && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
         if (n->ns_mgmt && ns->ext_ops.init_ctrl_name) {
@@ -2210,6 +2326,18 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_pel_init(n, errp)) {
         femu_realize_undo(n);
         return;
+    }
+
+    if (nvme_ns_shared(n)) {
+        if (!n->subsys->storage) {
+            n->subsys->storage = nvme_subsys_take_storage(n);
+            for (uint32_t i = 0; i < n->num_namespaces; i++) {
+                set_bit(i, n->attached_ns);
+            }
+            n->shared_storage = true;
+        } else if (n->ext_ops.init_ctrl_name) {
+            n->ext_ops.init_ctrl_name(n, &n->namespaces[0]);
+        }
     }
 
     /*
@@ -2364,7 +2492,9 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
     femu_pel_exit(n);
-    femu_exit_extensions(n);
+    if (!n->shared_storage) {
+        femu_exit_extensions(n);
+    }
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
@@ -2373,9 +2503,13 @@ static void femu_exit(PCIDevice *pci_dev)
     n->aer_bh = NULL;
     qemu_mutex_destroy(&n->aer_lock);
     qemu_mutex_destroy(&n->streams_lock);
-    free_dram_backend(n->mbe);
+    if (!n->shared_storage) {
+        free_dram_backend(n->mbe);
+    }
 
-    femu_free_namespace_bitmaps(n);
+    if (!n->shared_storage) {
+        femu_free_namespace_bitmaps(n);
+    }
     pthread_spin_destroy(&n->pcie_lock);
     pthread_spin_destroy(&n->fw_cpu_lock);
 
@@ -2384,7 +2518,9 @@ static void femu_exit(PCIDevice *pci_dev)
         femu_subsys_unregister_ctrl(n->subsys, n);
     }
 
-    g_free(n->namespaces);
+    if (!n->shared_storage) {
+        g_free(n->namespaces);
+    }
     g_free(n->cmbuf);   /* the controller memory buffer, if configured */
     g_free(n->features.int_vector_config);
     {
@@ -2593,6 +2729,43 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),
 };
+
+/* A configuration object has no PCI transport, queues or worker threads. */
+static FemuCtrl *nvme_subsys_take_storage(FemuCtrl *n)
+{
+    FemuCtrl *storage = FEMU(object_new(TYPE_NVME));
+
+    for (size_t i = 0; i < ARRAY_SIZE(femu_props); i++) {
+        const char *name = femu_props[i].name;
+        QObject *value = object_property_get_qobject(OBJECT(n), name,
+                                                     &error_abort);
+
+        object_property_set_qobject(OBJECT(storage), name, value, &error_abort);
+        qobject_unref(value);
+    }
+    storage->namespaces = n->namespaces;
+    storage->namespace_limit = n->namespace_limit;
+    storage->namespace_pool_size = n->namespace_pool_size;
+    storage->mbe = n->mbe;
+    storage->id_ctrl = n->id_ctrl;
+    storage->ext_ops = n->ext_ops;
+    memcpy(storage->devname, n->devname, sizeof(storage->devname));
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (!ns->allocated) {
+            continue;
+        }
+        ns->ctrl = storage;
+        if (ns->ssd) {
+            ns->ssd->n = storage;
+            ns->ssd->ssdname = storage->devname;
+            ns->ssd->dataplane_started_ptr = &storage->dataplane_started;
+        }
+    }
+    n->ssd = NULL;
+    return storage;
+}
 
 static const VMStateDescription femu_vmstate = {
     .name = "femu",

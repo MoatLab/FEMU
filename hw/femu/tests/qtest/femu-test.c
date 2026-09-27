@@ -9856,6 +9856,82 @@ static void *femu_ns_subsys_before(GString *cmd_line, void *arg)
     return arg;
 }
 
+static void *femu_shared_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line,
+        " -device femu-subsys,id=shared,ns_mgmt=on ");
+    return arg;
+}
+
+static void femu_shared_add(QTestState *qts, const char *id, int slot,
+                            int mode)
+{
+    QDict *rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':%s,"
+        "'addr':%s,'subsys':'shared','devsz_mb':4,'femu_mode':%d,"
+        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+        "'pls_per_lun':1,'luns_per_ch':1,'nchs':1}}",
+        id, slot == 5 ? "5" : "6", mode);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_shared_lifecycle(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QPCIDevice *pa;
+    QPCIDevice *pb;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+
+    g_test_message("adding controllers");
+    femu_shared_add(qts, "shared-a", 5, 2);
+    femu_shared_add(qts, "shared-b", 6, 2);
+    pa = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    pb = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    g_test_message("enabling controllers");
+    femu_enable(&a, pa, alloc);
+    femu_enable(&b, pb, alloc);
+    g_test_message("creating queues");
+    femu_create_io_queues(&a);
+    femu_create_io_queues(&b);
+    g_assert_cmpint(femu_identify(&b, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_test_message("deleting namespaces");
+    g_assert_cmpint(femu_ns_delete(&a, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&a, buf, 2048, 0, &nsid), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_create(&b, buf, 2048, 0, &nsid), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 2);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0x5a, true);
+    femu_ns_page(&b, buf, 1, 0, 0x5a, false);
+    g_test_message("deleting namespaces");
+    g_assert_cmpint(femu_ns_delete(&a, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&b, 0, 0x10, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpint(femu_identify(&b, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_test_message("disabling controllers");
+    femu_disable(&a);
+    femu_disable(&b);
+    femu_queue_free(&a, &a.io);
+    femu_queue_free(&b, &b.io);
+    g_test_message("removing controllers");
+    qpci_unplug_acpi_device_test(qts, "shared-a", 5);
+    qpci_unplug_acpi_device_test(qts, "shared-b", 6);
+    g_free(pa);
+    g_free(pb);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_subsys(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -13029,6 +13105,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("ns-shared-lifecycle", "femu", femu_test_shared_lifecycle,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {
         .before = femu_ns_subsys_before,

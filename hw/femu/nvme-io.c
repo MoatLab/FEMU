@@ -263,7 +263,13 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         if (n->power_loss && req->ns) {
             status = NVME_SUCCESS;
         } else {
+            if (nvme_ns_shared(n)) {
+                qemu_mutex_lock(&n->subsys->ns_lock);
+            }
             status = nvme_io_cmd(n, &cmd, req);
+            if (nvme_ns_shared(n)) {
+                qemu_mutex_unlock(&n->subsys->ns_lock);
+            }
         }
         req->status = status;
 
