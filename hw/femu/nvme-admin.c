@@ -3009,8 +3009,9 @@ static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks)
 {
     unsigned long *util, *uncorrectable;
 
-    util = bitmap_new(blks);
-    uncorrectable = bitmap_new(blks);
+    /* fallible, so Format and Create refuse rather than abort on no memory */
+    util = bitmap_try_new(blks);
+    uncorrectable = bitmap_try_new(blks);
     if (!util || !uncorrectable) {
         g_free(util);
         g_free(uncorrectable);
