@@ -688,6 +688,8 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_CREATE_CQ      = 0x05,
     NVME_ADM_CMD_NS_MGMT        = 0x0d,
     NVME_ADM_CMD_NS_ATTACHMENT  = 0x15,
+    NVME_ADM_CMD_DIRECTIVE_SEND = 0x19,
+    NVME_ADM_CMD_DIRECTIVE_RECV = 0x1a,
     NVME_ADM_CMD_IDENTIFY       = 0x06,
     NVME_ADM_CMD_ABORT          = 0x08,
     NVME_ADM_CMD_SET_FEATURES   = 0x09,
@@ -1761,6 +1763,8 @@ typedef struct NvmeNamespace {
         uint64_t meta;
     } blk;
 
+    bool streams_enabled;
+
     void *state;
 
     NvmeSubsystem *subsys;
@@ -2054,6 +2058,8 @@ typedef struct FemuCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     bool        ns_mgmt;
+    bool        streams;
+    uint16_t    streams_max;
     uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
     bool        test_ns_fail;
@@ -2445,6 +2451,7 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
+uint16_t nvme_directive(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t

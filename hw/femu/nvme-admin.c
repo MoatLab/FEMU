@@ -2484,6 +2484,10 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         log.acs[NVME_ADM_CMD_NS_ATTACHMENT] = NVME_CMD_EFF_CSUPP |
                                              NVME_CMD_EFF_NIC;
     }
+    if (n->streams) {
+        log.acs[NVME_ADM_CMD_DIRECTIVE_SEND] = NVME_CMD_EFF_CSUPP;
+        log.acs[NVME_ADM_CMD_DIRECTIVE_RECV] = NVME_CMD_EFF_CSUPP;
+    }
     log.acs[NVME_ADM_CMD_SET_DB_MEMORY] = NVME_CMD_EFF_CSUPP;
 
     if (src_iocs) {
@@ -3531,6 +3535,12 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     switch (cmd->opcode) {
+    case NVME_ADM_CMD_DIRECTIVE_SEND:
+    case NVME_ADM_CMD_DIRECTIVE_RECV:
+        if (n->streams) {
+            return nvme_directive(n, cmd, cqe);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_NS_MGMT:
         return nvme_ns_mgmt(n, cmd, cqe);
     case NVME_ADM_CMD_NS_ATTACHMENT:

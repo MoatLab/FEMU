@@ -443,6 +443,11 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->irq_status = 0;
     pci_irq_deassert(&n->parent_obj);
 
+    if (n->streams) {
+        for (i = 0; i < n->namespace_limit; i++) {
+            n->namespaces[i].streams_enabled = false;
+        }
+    }
     n->bar.cc = 0;
     nvme_reset_features(n);
     n->temp_warn_issued = 0;
@@ -985,6 +990,15 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "mpsmax must be in [mpsmin, 15]");
         return false;
     }
+    if (n->streams && (!n->streams_max || n->streams_max > 32)) {
+        error_setg(errp, "streams.max must be between 1 and 32");
+        return false;
+    }
+    if (n->streams && ((!BBSSD(n) && !NOSSD(n)) ||
+        (n->subsys && n->subsys->params.fdp.enabled))) {
+        error_setg(errp, "streams requires bbssd or NoSSD with FDP disabled");
+        return false;
+    }
     if (n->oacs & ~NVME_OACS_FORMAT) {
         error_setg(errp, "oacs may only set Format NVM (0x%x)", NVME_OACS_FORMAT);
         return false;
@@ -1336,6 +1350,13 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
 
     for (i = 0; i < n->num_namespaces; i++) {
+        if (n->streams && ns_modes[i] != FEMU_BBSSD_MODE &&
+            ns_modes[i] != FEMU_NOSSD_MODE) {
+            error_setg(errp, "streams requires NVM namespaces");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
         /*
          * Open-Channel keeps its tables on the controller and cannot be one mode
          * among several, so it stays a single-namespace controller.
@@ -1517,6 +1538,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST |
                                    NVME_OACS_GLSS);
+    if (n->streams) {
+        id->oacs |= cpu_to_le16(NVME_OACS_DIRECTIVES);
+    }
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;
@@ -2362,6 +2386,8 @@ static const Property femu_props[] = {
      * Bound allocated namespaces, including detached ones, before FTL setup.
      */
     DEFINE_PROP_UINT32("bbssd_ns_limit", FemuCtrl, bbssd_ns_limit, 4),
+    DEFINE_PROP_BOOL("streams", FemuCtrl, streams, false),
+    DEFINE_PROP_UINT16("streams.max", FemuCtrl, streams_max, 8),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
     /*
      * Save/Select Feature Support is how a host learns it may use the Select

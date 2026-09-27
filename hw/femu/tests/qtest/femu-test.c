@@ -10285,6 +10285,107 @@ static void femu_test_ns_mgmt_pel(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static uint16_t femu_directive(FemuCtrlState *c, bool receive,
+                               uint32_t nsid, uint32_t dw11, uint32_t dw12,
+                               uint64_t buf, uint32_t bytes, uint32_t *result)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = receive ? 0x1a : 0x19;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(bytes ? bytes / 4 - 1 : 0);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(femu_admin_result(c, &cmd, result));
+}
+
+static void femu_test_streams_identify(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool enabled = GPOINTER_TO_INT(data);
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & 0x20, ==,
+                    enabled ? 0x20 : 0);
+    if (!enabled) {
+        g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL),
+                       ==, NVME_INVALID_OPCODE);
+        g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                       ==, NVME_INVALID_OPCODE);
+    } else {
+        g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL),
+                       ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 3);
+        g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 1);
+        for (i = 64; i < 4096; i++) {
+            g_assert_cmphex(qtest_readb(qts, buf + i), ==, 0);
+        }
+        g_assert_cmphex(femu_directive(&c, false, 1, 1, 1, 0, 0, NULL),
+                       ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                       ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL),
+                       ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 3);
+        g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x100, 0, 0, NULL),
+                       ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4, NULL),
+                       ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_directive(&c, true, 0xffffffff, 1, 0,
+                                     buf, 4096, NULL), ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_directive(&c, true, 0, 1, 0, buf, 4096, NULL),
+                       ==, NVME_INVALID_NSID);
+        g_assert_cmphex(femu_directive(&c, true, 1, 0x201, 0, buf, 4096, NULL),
+                       ==, NVME_INVALID_FIELD);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+static void femu_test_streams_config(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+    int modes[] = { 0, 3, 4, 5 };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(modes); i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'bad-streams','streams':true,"
+                        "'femu_mode':%d,'devsz_mb':64}}", modes[i]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                            "desc"), "streams requires"));
+        qobject_unref(rsp);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'bad-streams','streams':true,"
+                    "'femu_mode':2,'devsz_mb':64,'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                        "desc"), "FDP disabled"));
+    qobject_unref(rsp);
+    for (i = 0; i < 2; i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'bad-streams','streams':true,"
+                        "'femu_mode':2,'devsz_mb':64,'streams.max':%d}}",
+                        i ? 33 : 0);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                            "desc"), "streams.max"));
+        qobject_unref(rsp);
+    }
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -10305,6 +10406,13 @@ static void femu_register_nodes(void)
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
+    qos_add_test("streams-config", "femu", femu_test_streams_config, NULL);
+    qos_add_test("streams-off", "femu", femu_test_streams_identify, NULL);
+    qos_add_test("streams-identify", "femu", femu_test_streams_identify,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts = "streams=on"
+    });
     qos_add_test("io-by-doorbell", "femu", femu_test_io_by_doorbell,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x1f"
