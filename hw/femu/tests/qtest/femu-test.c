@@ -10955,6 +10955,167 @@ static void femu_test_power_cmb(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+static void femu_test_power_no_drain(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+    uint16_t status;
+    uint16_t expected = NVME_SUCCESS;
+    NvmeDsmRange ranges[2] = {
+        { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(8) },
+        { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(UINT64_MAX) },
+    };
+    NvmeCmd cmd = { .nsid = cpu_to_le32(1),
+                    .dptr.prp1 = cpu_to_le64(list) };
+    uint64_t src = 0;
+    uint16_t nlb = 1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x5a, false);
+    switch (action) {
+    case 0:
+        cmd.opcode = 0x7f;
+        expected = NVME_INVALID_OPCODE;
+        status = femu_io(&c, &cmd);
+        break;
+    case 1:
+        status = femu_lba_cmd(&c, NVME_CMD_VERIFY, 0, 8);
+        break;
+    case 2:
+    case 3:
+    case 6:
+    case 9:
+        cmd.opcode = NVME_CMD_DSM;
+        if (action != 2) {
+            cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        }
+        if (action == 3) {
+            ranges[0].nlb = 0;
+        } else if (action == 6) {
+            cmd.cdw10 = cpu_to_le32(1);
+            expected = NVME_LBA_RANGE;
+        } else if (action == 9) {
+            cmd.dptr.prp1 = cpu_to_le64(0xfed00000);
+            expected = NVME_DATA_TRAS_ERROR;
+        }
+        qtest_memwrite(c.pdev->bus->qts, list, ranges, sizeof(ranges));
+        status = femu_io(&c, &cmd);
+        break;
+    case 4:
+    case 5:
+        status = femu_lba_cmd(&c, action == 4 ? NVME_CMD_WRITE_ZEROES :
+                             NVME_CMD_WRITE_UNCOR, UINT64_MAX, 1);
+        expected = NVME_LBA_RANGE;
+        break;
+    case 7:
+    case 8:
+        if (action == 8) {
+            src = UINT64_MAX;
+        }
+        status = femu_copy(&c, list, 0, &src, &nlb, 1, 1, 0);
+        expected = action == 7 ? FEMU_OVERLAP_IO_RANGE : NVME_LBA_RANGE;
+        break;
+    case 10:
+        status = femu_format(&c, 1, 0, 2);
+        expected = NVME_INVALID_FIELD;
+        break;
+    case 11:
+    case 12:
+        status = femu_sanitize(&c, action == 11 ? 1 : 0);
+        expected = action == 11 ? NVME_SUCCESS : NVME_INVALID_FIELD;
+        break;
+    case 13:
+        status = femu_rw(&c, NVME_CMD_COMPARE, 0, buf);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    g_assert_cmphex(FEMU_SC(status), ==, expected);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_mutation(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE_ZEROES,
+                     .nsid = cpu_to_le32(1), .slba = cpu_to_le64(8) };
+    NvmeDsmRange range = { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(8) };
+    NvmeCmd cmd = { .opcode = NVME_CMD_DSM, .nsid = cpu_to_le32(1),
+                    .cdw11 = cpu_to_le32(FEMU_DSM_AD),
+                    .dptr.prp1 = cpu_to_le64(list) };
+    uint64_t src = 0;
+    uint16_t nlb = 1;
+    uint64_t programmed;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x5a, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0x6b, false);
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list, 512, 0), ==,
+                   NVME_SUCCESS);
+    programmed = qtest_readq(c.pdev->bus->qts, list + 24);
+    switch (action) {
+    case 0:
+    case 1:
+    case 2:
+        if (action == 1) {
+            rw.control = cpu_to_le16(1 << 9);
+        } else if (action == 2) {
+            rw.opcode = NVME_CMD_WRITE_UNCOR;
+        }
+        g_assert_cmphex(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+        break;
+    case 3:
+        qtest_memwrite(c.pdev->bus->qts, list, &range, sizeof(range));
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        break;
+    case 4:
+        g_assert_cmphex(femu_copy(&c, list, 8, &src, &nlb, 1, 1, 0), ==,
+                       NVME_SUCCESS);
+        break;
+    case 5:
+        g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+        break;
+    case 6:
+        g_assert_cmphex(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    /* Erase hides the drained bytes; the media counter still proves a drain. */
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list, 512, 0), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(c.pdev->bus->qts, list + 24), >, programmed);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, action >= 5 ? 0 : 0x5a);
+    femu_power_read(&c, buf, 2, 0, 0);
+    if (action == 2) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                       NVME_UNRECOVERED_READ);
+    } else {
+        femu_power_read(&c, buf, 1, 8, action == 4 ? 0x5a : 0);
+    }
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_power_loss(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -13192,6 +13353,49 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on,oncs=415,cmbsz=0x400000,cmbloc=2",
     });
+    {
+        static const char * const no_drain[] = {
+            "invalid-opcode", "verify", "dsm-hint", "dsm-empty",
+            "invalid-zeroes", "invalid-uncor", "invalid-dsm", "copy-overlap",
+            "invalid-copy", "dsm-mmio", "invalid-format", "sanitize-noop",
+            "invalid-sanitize", "compare",
+        };
+        static const char * const mutations[] = {
+            "zeroes", "zeroes-deac", "uncor", "dsm", "copy", "format",
+            "sanitize",
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(no_drain); i++) {
+            g_autofree char *name =
+                g_strdup_printf("power-loss-%s", no_drain[i]);
+            g_autofree char *device_opts = g_strdup_printf(
+                "serial=%s,id=power,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
+                "luns_per_ch=4,nchs=4,buffer_size=4,vwc=1,"
+                "power_loss=on,oncs=415", name);
+
+            qos_add_test(name, "femu", femu_test_power_no_drain,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = device_opts,
+                .arg = GINT_TO_POINTER(i),
+            });
+        }
+        for (int i = 0; i < ARRAY_SIZE(mutations); i++) {
+            g_autofree char *name =
+                g_strdup_printf("power-loss-mutate-%s", mutations[i]);
+            g_autofree char *device_opts = g_strdup_printf(
+                "serial=%s,id=power,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
+                "luns_per_ch=4,nchs=4,buffer_size=4,vwc=1,"
+                "power_loss=on,oncs=415,namespaces=2", name);
+
+            qos_add_test(name, "femu", femu_test_power_mutation,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = device_opts,
+                .arg = GINT_TO_POINTER(i),
+            });
+        }
+    }
     qos_add_test("power-loss-pel", "femu", femu_test_power_log,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

@@ -2558,6 +2558,7 @@ static inline void nvme_note_user_write(FemuCtrl *n)
 void bbssd_deallocate_all(NvmeNamespace *ns);
 void bbssd_power_loss(NvmeNamespace *ns);
 uint16_t bbssd_flush_all(FemuCtrl *n);
+uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat);
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req);
 
 /* Misc */

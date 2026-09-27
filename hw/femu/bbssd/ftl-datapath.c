@@ -255,6 +255,22 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     nvme_mark_written(ns, first >> shift, (end - first) >> shift);
 }
 
+/* The caller is the FTL thread or an admin handler with processing paused. */
+uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat)
+{
+    int64_t elapsed;
+
+    if (!ns->ctrl->power_loss || !ns->ssd) {
+        return NVME_SUCCESS;
+    }
+    elapsed = ssd_buffer_destage(ns->ssd, 0, stime);
+    if (lat) {
+        *lat = MAX(*lat, elapsed);
+    }
+    return ns->ssd->write_buffer_cnt ? NVME_CAP_EXCEEDED | NVME_DNR :
+                                      NVME_SUCCESS;
+}
+
 /* Admin callers hold both pollers and the FTL thread paused. */
 uint16_t bbssd_flush_all(FemuCtrl *n)
 {

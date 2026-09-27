@@ -1688,18 +1688,9 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
         if (req->status != NVME_SUCCESS) {
             return 0;
         }
-        /* Other media mutations first make any older dirty bytes durable. */
-        if (req->cmd.opcode != NVME_CMD_WRITE &&
-            req->cmd.opcode != NVME_CMD_READ &&
-            req->cmd.opcode != NVME_CMD_FLUSH &&
-            req->cmd.opcode != NVME_CMD_COMPARE) {
-            lat = ssd_buffer_destage(ns->ssd, 0, req->stime);
-            if (ns->ssd->write_buffer_cnt) {
-                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
-                return 0;
-            }
-        }
+        req->reqlat = 0;
         req->status = nvme_power_io(n, req);
+        lat = req->reqlat;
     }
 
     if (NS_ZNSSD(ns)) {

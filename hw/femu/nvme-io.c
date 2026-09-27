@@ -1113,6 +1113,16 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         total_blocks += nlb;
     }
 
+    if (n->power_loss && !total_blocks) {
+        g_free(ranges);
+        return NVME_SUCCESS;
+    }
+    status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
+    if (status) {
+        g_free(ranges);
+        return status;
+    }
+
     /*
      * All ranges valid: deallocate each. Clear the util bits and zero the
      * backing store so a later read returns deterministic zeros (DLFEAT
@@ -1326,6 +1336,10 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         src[i].slba = cpu_to_le64(slba);
         src[i].nlb = cpu_to_le32(nlb);
     }
+    status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
+    if (status) {
+        return status;
+    }
     if (mstage) {
         qemu_mutex_lock(&ns->mdata_lock);
     }
@@ -1532,6 +1546,7 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint16_t control = le16_to_cpu(rw->control);
     bool deac = (control & NVME_WZ_DEAC) != 0;
+    uint16_t status;
 
     nvme_note_user_write(n);
 
@@ -1546,6 +1561,11 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (femu_pi_type(ns)) {
         return femu_pi_zeroes(n, ns, cmd);
+    }
+
+    status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
+    if (status) {
+        return status;
     }
 
     /*
@@ -1571,6 +1591,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint16_t status;
 
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
@@ -1579,6 +1600,10 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
+    status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
+    if (status) {
+        return status;
+    }
     nvme_mark_written(ns, slba, nlb);
     bitmap_set(ns->uncorrectable, slba, nlb);
 

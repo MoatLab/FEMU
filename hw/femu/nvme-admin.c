@@ -2799,6 +2799,14 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
 
     resume = nvme_pause_pollers(n);
+    if (n->power_loss) {
+        uint16_t status = bbssd_flush_all(n);
+
+        if (status) {
+            nvme_resume_pollers(n, resume);
+            return status;
+        }
+    }
     if (n->ns_mgmt && n->mbe && n->mbe->logical_space) {
         /* The pool includes deleted extents, but excludes spare capacity. */
         memset(n->mbe->logical_space, 0, n->namespace_pool_size);
@@ -3143,6 +3151,12 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
         if (!mdata) {
             return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
         }
+    }
+    status = bbssd_drain_namespace(ns, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                                    NULL);
+    if (status) {
+        g_free(mdata);
+        return status;
     }
     status = nvme_format_resize(ns, blks);
     if (status != NVME_SUCCESS) {
