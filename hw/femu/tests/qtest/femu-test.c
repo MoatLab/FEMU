@@ -10314,6 +10314,7 @@ static void femu_test_shared_admin(void *obj, void *data,
 
     femu_shared_start(femu, alloc, &a, &b, 1);
     g_assert_cmpint(femu_identify(&a, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 76) & 2, ==, 2);
     qtest_memread(qts, buf + 4, serial, sizeof(serial));
     qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
     g_assert_cmpstr(nqn, ==, "nqn.2019-08.org.qemu:shared");

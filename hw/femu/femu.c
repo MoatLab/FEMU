@@ -1631,7 +1631,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[0]      = 0x00;
     id->ieee[1]      = 0x02;
     id->ieee[2]      = 0xb3;
-    id->cmic         = 0;
+    id->cmic         = nvme_ns_shared(n) ? 2 : 0;
     id->mdts         = n->mdts;
     id->ver          = NVME_SPEC_VER;
 
