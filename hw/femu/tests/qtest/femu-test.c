@@ -10120,7 +10120,7 @@ static void femu_test_pel(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(qtest_readl(qts, buf + 374), ==, 0);   /* new context */
     /* Change Namespace support follows the namespace management opt-in. */
     g_assert_cmpint(qtest_readb(qts, buf + 480), ==, data ? 0xfa : 0xba);
-    g_assert_cmpint(qtest_readb(qts, buf + 481), ==, 0x17);
+    g_assert_cmpint(qtest_readb(qts, buf + 481), ==, 0x1f);
     g_assert_cmpint(femu_pel_event(qts, buf, 0), ==, 0x01);
     g_assert_cmpint(femu_pel_event(qts, buf, 1), ==, 0x04);
     g_assert_cmpint(qtest_readb(qts, buf + 512 + 3) & 3, ==, 3);
@@ -10215,6 +10215,81 @@ static int femu_pel_count(QTestState *qts, uint64_t buf, uint8_t et,
         }
     }
     return count;
+}
+
+/* Successful settings, including repeats, are retained for host diagnosis. */
+static void femu_test_pel_set_feature(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t payload = guest_alloc(alloc, 4096);
+    uint64_t e;
+    uint32_t before;
+    uint32_t timestamps;
+    uint32_t result;
+    uint8_t sent[512] = { 0 };
+    uint8_t logged[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    before = femu_pel_count(qts, buf, 0x0b, 0);
+    timestamps = femu_pel_count(qts, buf, 0x03, 0);
+    g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(data ? FEMU_FEAT_HBS : 0x01);
+    cmd.cdw11 = cpu_to_le32(data ? 0 : 0x12345607);
+    cmd.cdw12 = cpu_to_le32(0x12345678);
+    cmd.cdw13 = cpu_to_le32(0x23456789);
+    cmd.cdw14 = cpu_to_le32(0x3456789a);
+    cmd.cdw15 = cpu_to_le32(0x456789ab);
+    if (data) {
+        sent[0] = 1;
+        sent[4] = 7; /* The log preserves even the ignored input bits. */
+        qtest_memwrite(qts, payload, sent, sizeof(sent));
+        cmd.dptr.prp1 = cpu_to_le64(payload);
+    }
+    for (i = 0; i < 2; i++) {
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_pel_count(qts, buf, 0x0b, 0), ==, before + i + 1);
+        e = femu_pel_at(qts, buf, 0);
+        g_assert_cmpint(qtest_readb(qts, e), ==, 0x0b);
+        g_assert_cmpint(qtest_readb(qts, e + 1), ==, 1);
+        g_assert_cmpuint(qtest_readw(qts, e + 22), ==, data ? 540 : 28);
+        g_assert_cmphex(qtest_readl(qts, e + 24), ==,
+                        6 | (data ? 512 << 16 : 0));
+        qtest_memread(qts, e + 28, logged, 24);
+        g_assert_cmpmem(logged, 24, &cmd.cdw10, 24);
+        if (data) {
+            qtest_memread(qts, e + 52, logged, sizeof(logged));
+            g_assert_cmpmem(logged, sizeof(logged), sent, sizeof(sent));
+        }
+        g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+    }
+    /* Rejected commands and P/NR identifiers must not produce type 0Bh. */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, 0x01, true, 0, 1,
+                                           &result)), !=, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0,
+                                           &result)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1,
+                                           &result)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, 0x80, false, 0, 1,
+                                           &result)), ==, NVME_SUCCESS);
+    qtest_writeq(qts, payload, 123456);
+    cmd.cdw10 = cpu_to_le32(0x0e);
+    cmd.dptr.prp1 = cpu_to_le64(payload);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel_count(qts, buf, 0x0b, 0), ==, before + 2);
+    g_assert_cmpint(femu_pel_count(qts, buf, 0x03, 0), ==, timestamps + 1);
+    guest_free(alloc, payload);
+    guest_free(alloc, buf);
+    femu_disable(&c);
 }
 
 /*
@@ -10313,7 +10388,7 @@ static void femu_test_pel_events(void *obj, void *data,
                                          &result), ==, NVME_SUCCESS);
     }
     g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
-    e = femu_pel_at(qts, buf, 0);
+    e = femu_pel_at(qts, buf, 2);
     g_assert_cmpint(qtest_readb(qts, e), ==, 0x05);
     g_assert_cmpuint(qtest_readw(qts, e + 24), ==, 0x06);
     g_assert_cmpint(qtest_readb(qts, e + 28) & (1 << 1), !=, 0);
@@ -11299,6 +11374,9 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("pel-set-feature", "femu", femu_test_pel_set_feature, NULL);
+    qos_add_test("pel-set-feature-buffer", "femu", femu_test_pel_set_feature,
+                 &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(1) });
     qos_add_test("persistent-event-log-events", "femu", femu_test_pel_events,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"

@@ -1505,11 +1505,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_KV_FEAT_CONFIG: {
         /* the mode that owns the namespace handles this one */
         NvmeNamespace *kv_ns = nvme_ns(n, nsid);
+        uint16_t status;
 
         if (!kv_ns || kv_ns->csi != NVME_CSI_KV) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        return kvssd_set_feature(n, kv_ns, cmd, cqe);
+        status = kvssd_set_feature(n, kv_ns, cmd, cqe);
+        if (status) {
+            return status;
+        }
+        break;
     }
     case NVME_ARBITRATION:
         n->features.arbitration = dw11;
@@ -1530,10 +1535,15 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             NvmeNamespace *rt_ns = &n->namespaces[nsid - 1];
             uint32_t nr = (dw11 & 0x3f) + 1;
 
+            uint16_t len = MIN(sizeof(rt_ns->lba_range), nr * sizeof(*rt));
+            uint16_t status;
+
             rt = rt_ns->lba_range;
-            return dma_write_prp(n, (uint8_t *)rt,
-                    MIN(sizeof(rt_ns->lba_range), nr * sizeof(*rt)),
-                    prp1, prp2);
+            status = dma_write_prp(n, (uint8_t *)rt, len, prp1, prp2);
+            if (!status) {
+                femu_pel_set_feature(n, cmd, rt, len);
+            }
+            return status;
         }
     case NVME_NUMBER_OF_QUEUES: {
         int q;
@@ -1668,9 +1678,11 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
         }
-        hbs[4] &= ~0x3;
         memcpy(n->features.host_behavior, hbs, sizeof(hbs));
-        break;
+        n->features.host_behavior[4] &= ~0x3;
+        /* Preserve the command buffer, including ignored input bits. */
+        femu_pel_set_feature(n, cmd, hbs, sizeof(hbs));
+        return NVME_SUCCESS;
     }
     case NVME_TIMESTAMP: {
         /* Figure 414: 48 bits of milliseconds; bytes 7:6 are reserved */
@@ -1724,7 +1736,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         } else {
             ruh->event_filter &= ~mask;
         }
-        break;
+        femu_pel_set_feature(n, cmd, events, noet);
+        return NVME_SUCCESS;
     }
     case NVME_COMMAND_SET_PROFILE:
         /*
@@ -1740,6 +1753,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    femu_pel_set_feature(n, cmd, NULL, 0);
     return NVME_SUCCESS;
 }
 

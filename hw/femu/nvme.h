@@ -1343,6 +1343,7 @@ enum NvmePelEventType {
     NVME_PEL_FORMAT_COMPLETION  = 0x08,
     NVME_PEL_SANITIZE_START     = 0x09,
     NVME_PEL_SANITIZE_COMPLETION = 0x0a,
+    NVME_PEL_SET_FEATURE        = 0x0b,
     NVME_PEL_TELEMETRY_CREATED  = 0x0c,
 };
 
@@ -2445,6 +2446,8 @@ typedef struct FemuPel FemuPel;
 void femu_pel_init(FemuCtrl *n);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
+void femu_pel_set_feature(FemuCtrl *n, const NvmeCmd *cmd,
+                          const void *buffer, uint16_t len);
 void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
                   uint16_t len);
 void femu_pel_warning(FemuCtrl *n, uint8_t warning);

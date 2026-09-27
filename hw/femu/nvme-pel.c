@@ -36,6 +36,7 @@ static const uint8_t pel_supported[] = {
     NVME_PEL_FORMAT_COMPLETION,
     NVME_PEL_SANITIZE_START,
     NVME_PEL_SANITIZE_COMPLETION,
+    NVME_PEL_SET_FEATURE,
     NVME_PEL_TELEMETRY_CREATED,
 };
 
@@ -112,6 +113,42 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
     pel->used += size;
     pel->nev++;
     qemu_mutex_unlock(&pel->lock);
+}
+
+/* Base Figure 250; unchanged successful settings are logged as permitted. */
+void femu_pel_set_feature(FemuCtrl *n, const NvmeCmd *cmd,
+                          const void *buffer, uint16_t len)
+{
+    g_autofree uint8_t *ev = NULL;
+
+    /* Figure 249 excludes P/NR entries for an I/O controller. */
+    switch (NVME_GETSETFEAT_FID(le32_to_cpu(cmd->cdw10))) {
+    case NVME_ARBITRATION:
+    case NVME_LBA_RANGE_TYPE:
+    case NVME_TEMPERATURE_THRESHOLD:
+    case NVME_ERROR_RECOVERY:
+    case NVME_VOLATILE_WRITE_CACHE:
+    case NVME_NUMBER_OF_QUEUES:
+    case NVME_INTERRUPT_COALESCING:
+    case NVME_INTERRUPT_VECTOR_CONF:
+    case NVME_WRITE_ATOMICITY:
+    case NVME_HOST_BEHAVIOR_SUPPORT:
+    case NVME_COMMAND_SET_PROFILE:
+    case NVME_FDP_MODE:
+    case NVME_FDP_EVENTS:
+    case NVME_KV_FEAT_CONFIG:
+        break;
+    default:
+        return;
+    }
+
+    ev = g_malloc(28 + len);
+    stl_le_p(ev, 6 | ((uint32_t)len << 16));
+    memcpy(ev + 4, &cmd->cdw10, 24);
+    if (len) {
+        memcpy(ev + 28, buffer, len);
+    }
+    femu_pel_log(n, NVME_PEL_SET_FEATURE, 1, ev, 28 + len);
 }
 
 /* Figure 237 with one Figure 238 descriptor: FEMU has one controller */
