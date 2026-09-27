@@ -1748,6 +1748,141 @@ static void femu_test_hybrid_trim(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_hybrid_trace(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t contents[256] = { 0 };
+    unsigned kind = GPOINTER_TO_UINT(data);
+    uint32_t random = 7;
+    unsigned i;
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 96; i++) {
+        unsigned lpn;
+
+        switch (kind) {
+        case 0:
+            lpn = i % 32;
+            break;
+        case 1:
+            random = random * 1664525U + 1013904223U;
+            lpn = (random >> 16) % 96;
+            break;
+        case 2:
+            lpn = 2;
+            break;
+        default:
+            lpn = (i % 24) * 4 + i / 24;
+            break;
+        }
+        contents[lpn] = i + 1;
+        qtest_memset(c.pdev->bus->qts, buf, contents[lpn], 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf), ==,
+                        NVME_SUCCESS);
+        hybrid_oracle_write(&oracle, lpn);
+        femu_hybrid_check(&c, buf, &oracle);
+    }
+
+    /* Merges must preserve the newest payload at every written offset. */
+    for (i = 0; i < G_N_ELEMENTS(contents); i++) {
+        uint8_t page[4096];
+        unsigned j;
+
+        if (!contents[i]) {
+            continue;
+        }
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, page, sizeof(page));
+        for (j = 0; j < sizeof(page); j++) {
+            g_assert_cmphex(page[j], ==, contents[i]);
+        }
+    }
+    g_test_message("programs=%" PRIu64 " copies=%" PRIu64
+                   " switches=%" PRIu64 " full-merges=%" PRIu64,
+                   oracle.programs, oracle.copies, oracle.switches,
+                   oracle.merges);
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_hybrid_flush(FemuCtrlState *c)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t got;
+
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(femu_complete(c, &c->io, &got, NULL), ==, NVME_SUCCESS);
+}
+
+static void femu_test_hybrid_batch(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 8192);
+    bool buffered = GPOINTER_TO_INT(data);
+    NvmeRwCmd rw = { 0 };
+    uint16_t got;
+    unsigned i;
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 3; i++) {
+        qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        if (buffered) {
+            femu_hybrid_flush(&c);
+        }
+        hybrid_oracle_write(&oracle, i);
+        femu_hybrid_check(&c, buf, &oracle);
+    }
+
+    /* The first page fills the log; the second needs a fresh log. */
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, 8192);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.slba = cpu_to_le64(16);
+    rw.nlb = cpu_to_le16(15);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    if (buffered) {
+        femu_hybrid_flush(&c);
+    }
+    hybrid_oracle_write(&oracle, 2);
+    hybrid_oracle_write(&oracle, 3);
+    femu_hybrid_check(&c, buf, &oracle);
+
+    for (i = 0; i < 4; i++) {
+        uint8_t page[4096];
+        unsigned j;
+
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, page, sizeof(page));
+        for (j = 0; j < sizeof(page); j++) {
+            g_assert_cmphex(page[j], ==, i < 2 ? 0x5a : 0xa5);
+        }
+    }
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /*
  * What the health log says a key-value namespace read, and what the most-read
  * block figure says it touched. The size field in a retrieve is the host's
@@ -11426,9 +11561,58 @@ static void femu_register_nodes(void)
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
+    qos_add_test("hybrid-oracle-sequential", "femu", femu_test_hybrid_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(0),
+        .edge.extra_device_opts =
+            "serial=hybrid-oracle-sequential,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("hybrid-oracle-random", "femu", femu_test_hybrid_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "serial=hybrid-oracle-random,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("hybrid-oracle-hot-offset", "femu", femu_test_hybrid_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(2),
+        .edge.extra_device_opts =
+            "serial=hybrid-oracle-hot-offset,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("hybrid-oracle-pool-pressure", "femu", femu_test_hybrid_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(3),
+        .edge.extra_device_opts =
+            "serial=hybrid-oracle-pool-pressure,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("hybrid-batch-occupancy", "femu", femu_test_hybrid_batch,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "serial=hybrid-batch-occupancy,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("hybrid-destage-occupancy", "femu", femu_test_hybrid_batch,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "serial=hybrid-destage-occupancy,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "vwc=1,buffer_size=16"
+    });
     qos_add_test("hybrid-trim-occupancy", "femu", femu_test_hybrid_trim,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=hybrid-trim-occupancy,"
             "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
             "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });

@@ -8,10 +8,10 @@
  * append and merge rules; section 3 describes FAST's shared-log alternative.
  *
  * FEMU routes initial writes as well as overwrites through sixteen logical
- * logs. It merges the fullest log when a log fills or the pool is occupied,
- * breaking ties by slot order. A complete in-order log can switch without
- * copying; a full merge copies each currently mapped page of the logical
- * block once, including surviving data from earlier merges.
+ * logs. After each program it merges the fullest log if a log fills or the
+ * pool is occupied, breaking ties by slot order. An in-order full log switches
+ * without copying; a full merge copies each currently mapped page of the
+ * logical block once, including surviving data from earlier merges.
  *
  * This is a merge-cost model, not physical BAST block placement: LOG and DATA
  * have separate line write pointers, but logical logs share physical lines.
@@ -222,12 +222,11 @@ static uint64_t femu_map_hybrid_reclaim(struct ssd *ssd, int budget)
             }
             h->switch_merges++;
         } else {
-            /* full merge (faithful): physically relocate every valid logical page of
-             * the merge unit from wherever it lives (a log block, via the flat L2P)
-             * into freshly-allocated DATA-class pages, then erase/free the vacated log
-             * line. This is real relocation -- read old page, program a new DATA page,
-             * invalidate old, validate new, update L2P/rmap -- so the NAND traffic and
-             * gc_write_pages reflect genuine merge write-amplification (not an overlay). */
+            /*
+             * Copy each live logical page to DATA-class space. Invalidating
+             * its previous mapping leaves physical reclamation to line GC;
+             * the modeled log slot is released below.
+             */
             for (int off = 0; off < h->pgs_per_blk; off++) {
                 uint64_t lpn = base_lpn + off;
                 struct ppa old = get_maptbl_ent(ssd, lpn);
@@ -316,6 +315,7 @@ static void femu_map_hybrid_exit(struct ssd *ssd)
 const struct femu_mapping_ops femu_mapping_hybrid_ops = {
     .exit           = femu_map_hybrid_exit,
     .uses_log_class = true,
+    .reclaim_per_page = true,
     .name               = "hybrid",
     .uses_cmt           = false,
     .init               = femu_map_hybrid_init,

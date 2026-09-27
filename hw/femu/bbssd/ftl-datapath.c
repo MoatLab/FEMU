@@ -221,6 +221,7 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     struct map_write_plan plan;
     struct nand_cmd swr;
     struct ppa ppa;
+    uint64_t lat;
 
     /* log the overwrite before commit_write invalidates the old mapping */
     if (exp_lpn_watched(lpn)) {
@@ -267,7 +268,15 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     swr.cmd = NAND_WRITE;
     swr.stime = stime;
 
-    return ssd_advance_status(ssd, &ppa, &swr);
+    lat = ssd_advance_status(ssd, &ppa, &swr);
+    /* A full logical log cannot accept another program in this command. */
+    if (ssd->mapping->reclaim_per_page &&
+        ssd->mapping->needs_reclaim(ssd)) {
+        uint64_t merge_lat = ssd->mapping->reclaim(ssd, 1);
+
+        lat = MAX(lat, merge_lat);
+    }
+    return lat;
 }
 
 /*
@@ -339,11 +348,12 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     }
 
     /*
-     * One reclaim per batch, as the direct path does one per request: for a
+     * Schemes without per-page reclaim get one merge per batch: for a
      * log-block scheme that is a merge, and its NAND cost is charged inside
      * reclaim(). page and dftl have no reclaim and skip this.
      */
-    if (done && ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
+    if (done && !ssd->mapping->reclaim_per_page &&
+        ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
         curlat = ssd->mapping->reclaim(ssd, 1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
@@ -592,12 +602,13 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     /*
-     * Let the mapping scheme reclaim its own structures once the writes have
+     * Let schemes without per-page reclaim collect once the writes have
      * committed -- for a log-block scheme that is a merge. The NAND cost is
      * charged inside reclaim(). One reclaim per request bounds the latency a
      * single command can absorb; page and dftl have no reclaim and skip this.
      */
-    if (ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
+    if (!ssd->mapping->reclaim_per_page &&
+        ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
         curlat = ssd->mapping->reclaim(ssd, 1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;

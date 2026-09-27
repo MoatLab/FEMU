@@ -383,6 +383,7 @@ struct femu_mapping_ops {
     const char *name;
     bool uses_cmt;          /* dftl-style demand-cached translation table */
     bool uses_log_class;    /* allocates through the LOG write pointer */
+    bool reclaim_per_page; /* merge before another page can consume log space */
 
     /* allocate and release scheme-private state in ssd->map_priv */
     void (*init)(struct ssd *ssd);
