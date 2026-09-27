@@ -1571,6 +1571,7 @@ typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeCQueue       *cq;
     struct NvmeNamespace    *ns;
+    uint8_t                 *write_data; /* power-loss model, FTL owned */
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
@@ -2101,6 +2102,7 @@ typedef struct FemuCtrl {
     uint8_t     max_cqes;
     uint8_t     meta;
     bool        pi;
+    bool        power_loss;
     uint8_t     vwc;
     uint8_t     mc;
     uint8_t     dpc;
@@ -2552,6 +2554,8 @@ static inline void nvme_note_user_write(FemuCtrl *n)
     }
 }
 void bbssd_deallocate_all(NvmeNamespace *ns);
+void bbssd_power_loss(NvmeNamespace *ns);
+uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req);
 
 /* Misc */
 uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t

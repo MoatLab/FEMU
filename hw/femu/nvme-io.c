@@ -256,7 +256,15 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             femu_debug("%s,cid:%d\n", __func__, cmd.cid);
         }
 
-        status = nvme_io_cmd(n, &cmd, req);
+        req->write_data = NULL;
+        if (n->power_loss) {
+            req->ns = nvme_ns(n, le32_to_cpu(cmd.nsid));
+        }
+        if (n->power_loss && req->ns) {
+            status = NVME_SUCCESS;
+        } else {
+            status = nvme_io_cmd(n, &cmd, req);
+        }
         req->status = status;
 
         /*
@@ -266,7 +274,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * commands that moved host data count, and only when they succeeded.
          * Zone Append is a write that names no LBA, so it is counted as one.
          */
-        if (status == NVME_SUCCESS && req->ns) {
+        if (!n->power_loss && status == NVME_SUCCESS && req->ns) {
             FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
             uint64_t bytes;
 
@@ -778,6 +786,20 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                                  meta_size);
     if (err)
         return err;
+
+    if (n->power_loss && req->is_write) {
+        uint8_t *data = g_malloc(data_size);
+
+        err = dma_write_cmd(n, cmd, data, data_size);
+        if (err) {
+            g_free(data);
+            return err;
+        }
+        req->write_data = data;
+        req->slba = slba;
+        req->nlb = nlb;
+        return NVME_SUCCESS;
+    }
 
     if (femu_pi_type(ns)) {
         return femu_pi_rw(n, ns, cmd, req);
@@ -1941,4 +1963,10 @@ void nvme_post_cqes_io(void *opaque)
     if (processed > 0) {
         nvme_isr_notify_io(cq);
     }
+}
+
+/* The opt-in model accesses payloads on the same thread as its write buffer. */
+uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req)
+{
+    return nvme_io_cmd(n, &req->cmd, req);
 }

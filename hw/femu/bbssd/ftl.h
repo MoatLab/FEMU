@@ -249,6 +249,8 @@ struct line_mgmt {
 
 typedef struct buffer_entry {
     uint64_t lpn;
+    uint8_t *undo;
+    uint8_t *lba_state;
     QTAILQ_ENTRY(buffer_entry) b_entry;
 } buffer_entry;
 

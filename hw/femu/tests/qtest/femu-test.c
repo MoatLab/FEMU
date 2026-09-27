@@ -10728,6 +10728,182 @@ static int femu_pel_count(QTestState *qts, uint64_t buf, uint8_t et,
     return count;
 }
 
+static void femu_power_cut(FemuCtrlState *c)
+{
+    QDict *response = qtest_qmp(c->pdev->bus->qts,
+        "{'execute':'qom-set', 'arguments':{'path':'/machine/peripheral/power',"
+        "'property':'simulate-power-loss', 'value':true}}");
+
+    g_assert_true(qdict_haskey(response, "return"));
+    qobject_unref(response);
+    femu_queue_free(c, &c->io);
+    femu_disable(c);
+    femu_enable(c, c->pdev, c->alloc);
+    femu_create_io_queues(c);
+}
+
+static void femu_power_write(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                              uint64_t lba, uint16_t nlb, uint8_t pattern,
+                              bool fua)
+{
+    NvmeRwCmd rw = { 0 };
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, nlb * 512);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    rw.control = cpu_to_le16(fua ? NVME_RW_FUA : 0);
+    g_assert_cmpint(femu_io(c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+}
+
+static void femu_power_read(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                             uint64_t lba, uint8_t pattern)
+{
+    NvmeRwCmd rw = { 0 };
+    uint8_t bytes[512];
+
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    g_assert_cmpint(femu_io(c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, bytes, sizeof(bytes));
+    for (int i = 0; i < sizeof(bytes); i++) {
+        g_assert_cmphex(bytes[i], ==, pattern);
+    }
+}
+
+static void femu_power_flush(FemuCtrlState *c, uint32_t nsid)
+{
+    NvmeCmd cmd = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(nsid) };
+
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+}
+
+static void femu_test_power_loss(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* Old bytes and untouched neighbors must survive partial overwrites. */
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, true);
+    femu_power_write(&c, buf, 1, 2, 1, 0x5a, false);
+    femu_power_write(&c, buf, 1, 4, 1, 0x6b, false);
+    femu_power_write(&c, buf, 1, 8, 1, 0x7c, false);
+    femu_power_read(&c, buf, 1, 2, 0x5a);
+    femu_power_read(&c, buf, 1, 4, 0x6b);
+    femu_power_cut(&c);
+    for (int i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0x31);
+    }
+    femu_power_read(&c, buf, 1, 8, 0);
+    femu_power_read(&c, buf, 1, 9, 0);
+    /* Recovery may accept another dirty write to the same page. */
+    femu_power_write(&c, buf, 1, 2, 1, 0x8d, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 2, 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_durable(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool fua = GPOINTER_TO_INT(data);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0x42, fua);
+    if (!fua) {
+        femu_power_flush(&c, 1);
+    }
+    /* A write after the durability command must remain independently dirty. */
+    femu_power_write(&c, buf, 1, 9, 1, 0x53, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, fua ? 0 : 0x31);
+    femu_power_read(&c, buf, 1, 8, 0x42);
+    femu_power_read(&c, buf, 1, 9, 0x42);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_destage(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* A one-page cache must program its old page to admit a new page. */
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0x42, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x31);
+    femu_power_read(&c, buf, 1, 8, 0);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_cache_off(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    if (data) {
+        QDict *response = qtest_qmp(c.pdev->bus->qts,
+            "{'execute':'qom-set', 'arguments':{'path':'/machine/peripheral/power',"
+            "'property':'simulate-power-loss', 'value':true}}");
+
+        g_assert_true(qdict_haskey(response, "error"));
+        qobject_unref(response);
+    } else {
+        femu_power_cut(&c);
+    }
+    femu_power_read(&c, buf, 1, 0, 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_namespaces(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0x42, false);
+    femu_power_flush(&c, 2);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_read(&c, buf, 2, 0, 0x42);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* Successful settings, including repeats, are retained for host diagnosis. */
 static void femu_test_pel_set_feature(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -12654,6 +12830,57 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = g_strdup_printf(
             "femu_mode=4,fdm_size=16,csd_program_dir=%s", femu_csd_dir),
+    });
+    qos_add_test("power-loss", "femu", femu_test_power_loss,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+    });
+    qos_add_test("power-loss-flush", "femu", femu_test_power_durable,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+    });
+    qos_add_test("power-loss-fua", "femu", femu_test_power_durable,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(1),
+    });
+    qos_add_test("power-loss-destage", "femu", femu_test_power_destage,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=1,vwc=1,power_loss=on",
+    });
+    qos_add_test("power-loss-vwc-zero", "femu", femu_test_power_cache_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=0,power_loss=on",
+    });
+    qos_add_test("power-loss-off", "femu", femu_test_power_cache_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1",
+        .arg = GINT_TO_POINTER(1),
+    });
+    qos_add_test("power-loss-namespaces", "femu", femu_test_power_namespaces,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on,namespaces=2",
     });
     qos_add_test("buffer-counters", "femu", femu_test_buffer_counters,
                  &(QOSGraphTestOptions) {

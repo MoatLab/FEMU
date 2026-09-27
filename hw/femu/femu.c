@@ -4,6 +4,7 @@
 #include "hw/qdev-properties.h"
 
 #include "./nvme.h"
+#include "./bbssd/ftl.h"
 
 #define NVME_SPEC_VER (0x00010400)
 
@@ -956,6 +957,13 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    NVME_MIN_CQUEUE_ES);
         return false;
     }
+    if (n->power_loss && (n->femu_mode != FEMU_BBSSD_MODE ||
+        n->namespace_modes || n->ns_mgmt || n->subsys || n->meta || n->pi ||
+        n->bb_params.buffer_size <= 0)) {
+        error_setg(errp, "power_loss requires bbssd, buffer_size > 0, "
+                   "and no metadata, namespace management or subsystem");
+        return false;
+    }
     if (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) {
         error_setg(errp, "vwc, intc, cqr and extended are single bits");
         return false;
@@ -1659,16 +1667,32 @@ static void nvme_init_pci(FemuCtrl *n)
 static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
 {
     NvmeNamespace *ns = req->ns;
+    uint64_t lat = 0;
 
     if (!ns) {
         return 0;
+    }
+
+    if (n->power_loss) {
+        /* Other media mutations first make any older dirty bytes durable. */
+        if (req->cmd.opcode != NVME_CMD_WRITE &&
+            req->cmd.opcode != NVME_CMD_READ &&
+            req->cmd.opcode != NVME_CMD_FLUSH &&
+            req->cmd.opcode != NVME_CMD_COMPARE) {
+            lat = ssd_buffer_destage(ns->ssd, 0, req->stime);
+            if (ns->ssd->write_buffer_cnt) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                return 0;
+            }
+        }
+        req->status = nvme_power_io(n, req);
     }
 
     if (NS_ZNSSD(ns)) {
         return zns_ftl_process_req(ns, req);
     }
     if (NS_BBSSD(ns) || NS_CSD(ns)) {
-        return bb_ftl_process_req(n, ns, req);
+        return MAX(lat, bb_ftl_process_req(n, ns, req));
     }
 
     return 0;
@@ -1733,6 +1757,21 @@ static void *femu_ftl_thread(void *arg)
             }
 
             lat = femu_ftl_process_req(n, req);
+            g_clear_pointer(&req->write_data, g_free);
+            if (n->power_loss && req->status == NVME_SUCCESS && req->ns) {
+                FemuPollerCtr *ctr = &n->poller_ctr[i];
+                uint8_t idx = NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas);
+                uint64_t bytes = (uint64_t)req->nlb <<
+                                 req->ns->id_ns.lbaf[idx].lbads;
+
+                if (req->cmd.opcode == NVME_CMD_WRITE) {
+                    ctr->nr_host_wr_cmds++;
+                    ctr->nr_host_wr_bytes += bytes;
+                } else if (req->cmd.opcode == NVME_CMD_READ) {
+                    ctr->nr_host_rd_cmds++;
+                    ctr->nr_host_rd_bytes += bytes;
+                }
+            }
             req->reqlat = lat;
             req->expire_time += lat;
 
@@ -2128,7 +2167,18 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      */
     for (int i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
+        uint8_t idx = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+        uint64_t page_size = (uint64_t)n->bb_params.secsz *
+                            n->bb_params.secs_per_pg;
 
+        if (n->power_loss && (!page_size ||
+            page_size % (1ULL << ns->id_ns.lbaf[idx].lbads) ||
+            ns->backend_offset % page_size || ns->size % page_size)) {
+            error_setg(errp, "power_loss requires page-aligned namespaces "
+                       "and whole LBAs per NAND page");
+            femu_realize_undo(n);
+            return;
+        }
         nvme_register_extensions_ns(n, ns);
         if (ns->ext_ops.init) {
             Error *local_err = NULL;
@@ -2372,6 +2422,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("mdts", FemuCtrl, mdts, 10),
     DEFINE_PROP_UINT8("cqr", FemuCtrl, cqr, 1),
     DEFINE_PROP_UINT8("vwc", FemuCtrl, vwc, 0),
+    DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
     DEFINE_PROP_UINT8("intc", FemuCtrl, intc, 0),
     DEFINE_PROP_UINT8("intc_thresh", FemuCtrl, intc_thresh, 0),
     DEFINE_PROP_UINT8("intc_time", FemuCtrl, intc_time, 0),
@@ -2621,8 +2672,32 @@ static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
     n->test_oc12_clock = value;
 }
 
+/* A cut resets command state; the caller must enable the controller again. */
+static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    if (!n->power_loss || !DEVICE(obj)->realized) {
+        error_setg(errp, "simulated power loss requires a realized "
+                   "power_loss device");
+        return;
+    }
+    if (!value) {
+        return;
+    }
+    nvme_clear_ctrl(n, false);
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        if (n->namespaces[i].allocated) {
+            bbssd_power_loss(&n->namespaces[i]);
+        }
+    }
+    n->bar.csts = 0;
+}
+
 static void femu_instance_init(Object *obj)
 {
+    object_property_add_bool(obj, "simulate-power-loss", NULL,
+                             femu_simulate_power_loss);
     if (qtest_enabled()) {
         object_property_add_bool(obj, "x-oc12-clock", NULL,
                                  femu_test_oc12_clock);

@@ -32,12 +32,13 @@ int comp_buffer(const void *a, const void *b)
  * the same page cost one program rather than several, and the program cost is
  * charged to whichever later event forces the page out.
  *
- * It holds page numbers, not page contents. The host's bytes have already been
- * placed in the backing store by the time the FTL sees the request, so what is
- * buffered here is the obligation to program a page, not the data itself. That
- * is enough to model timing, occupancy, coalescing and the write-back cost; it
- * is not enough to model losing data on power failure, and nothing here should
- * be read as claiming otherwise.
+ * Normally it holds only page numbers. With power_loss enabled, payload
+ * access also runs on the FTL thread. Each dirty entry saves the previous
+ * durable bytes and per-LBA validity before the backend changes. Removing an
+ * entry after programming commits those bytes; a power cut restores them.
+ * This undo log consumes at most buffer_size pages plus their LBA state,
+ * instead of duplicating the entire backend. FUA programs a full NAND page,
+ * so dirty neighboring LBAs in that page become durable too.
  *
  * Everything below runs on the FTL thread, which is the only owner of the
  * buffer, the mapping, the line management and the NAND status. None of it is
@@ -45,7 +46,8 @@ int comp_buffer(const void *a, const void *b)
  */
 static bool buffer_enabled(struct ssd *ssd)
 {
-    if (ssd->sp.buffer_size <= 0 || !ssd->wb_tree) {
+    if ((ssd->n->power_loss && !ssd->n->vwc) ||
+        ssd->sp.buffer_size <= 0 || !ssd->wb_tree) {
         return false;
     }
 
@@ -108,6 +110,8 @@ static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
     *lpn = victim->lpn;
     QTAILQ_REMOVE(&ssd->write_buffer, victim, b_entry);
     g_tree_remove(ssd->wb_tree, victim);
+    g_free(victim->undo);
+    g_free(victim->lba_state);
     g_free(victim);
     ssd->write_buffer_cnt--;
 
@@ -162,6 +166,8 @@ static void buffer_discard(struct ssd *ssd, uint64_t lpn)
 
     QTAILQ_REMOVE(&ssd->write_buffer, held, b_entry);
     g_tree_remove(ssd->wb_tree, held);
+    g_free(held->undo);
+    g_free(held->lba_state);
     g_free(held);
     ssd->write_buffer_cnt--;
 }
@@ -201,12 +207,88 @@ void ssd_free_write_buffer(struct ssd *ssd)
 
     while ((entry = QTAILQ_FIRST(&ssd->write_buffer)) != NULL) {
         QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
+        g_free(entry->undo);
+        g_free(entry->lba_state);
         g_free(entry);
     }
     ssd->write_buffer_cnt = 0;
     if (ssd->wb_tree) {
         g_tree_destroy(ssd->wb_tree);
         ssd->wb_tree = NULL;
+    }
+}
+
+/* Save the last durable bytes once, then apply only this write's LBAs. */
+static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
+                              bool buffered)
+{
+    NvmeNamespace *ns = req->ns;
+    uint32_t page_size = ssd_page_size(ssd);
+    uint8_t idx = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    uint8_t shift = ns->id_ns.lbaf[idx].lbads;
+    uint64_t page_start = lpn * page_size - ns->backend_offset;
+    uint64_t first = MAX(page_start, req->slba << shift);
+    uint64_t end = MIN(page_start + page_size,
+                       (req->slba + req->nlb) << shift);
+    uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+
+    if (!req->write_data) {
+        return;
+    }
+    if (buffered) {
+        struct buffer_entry target = { .lpn = lpn };
+        struct buffer_entry *entry = g_tree_lookup(ssd->wb_tree, &target);
+        uint32_t count = page_size >> shift;
+        uint64_t slba = page_start >> shift;
+
+        if (!entry->undo) {
+            entry->undo = g_memdup2(base + page_start, page_size);
+            entry->lba_state = g_malloc(count);
+            for (uint32_t i = 0; i < count; i++) {
+                entry->lba_state[i] = test_bit(slba + i, ns->util) |
+                    (test_bit(slba + i, ns->uncorrectable) << 1);
+            }
+        }
+    }
+    memcpy(base + first, req->write_data + first - (req->slba << shift),
+           end - first);
+    nvme_mark_written(ns, first >> shift, (end - first) >> shift);
+}
+
+/* Called with the controller stopped; old mappings still name durable pages. */
+void bbssd_power_loss(NvmeNamespace *ns)
+{
+    struct ssd *ssd = ns->ssd;
+    struct buffer_entry *entry;
+    uint32_t page_size = ssd_page_size(ssd);
+    uint8_t idx = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    uint8_t shift = ns->id_ns.lbaf[idx].lbads;
+    uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+
+    QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
+        uint64_t offset = entry->lpn * page_size - ns->backend_offset;
+        uint64_t slba = offset >> shift;
+
+        if (!entry->undo) {
+            continue;
+        }
+        memcpy(base + offset, entry->undo, page_size);
+        for (uint32_t i = 0; i < page_size >> shift; i++) {
+            if (entry->lba_state[i] & 1) {
+                set_bit(slba + i, ns->util);
+            } else {
+                clear_bit(slba + i, ns->util);
+            }
+            if (entry->lba_state[i] & 2) {
+                set_bit(slba + i, ns->uncorrectable);
+            } else {
+                clear_bit(slba + i, ns->uncorrectable);
+            }
+        }
+        rcache_invalidate(ssd, entry->lpn);
+    }
+    while ((entry = QTAILQ_FIRST(&ssd->write_buffer))) {
+        buffer_discard(ssd, entry->lpn);
     }
 }
 
@@ -307,7 +389,7 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
             break;
         }
 
-        if (!buffer_select_victim(ssd, &lpn)) {
+        if (!ssd->n->power_loss && !buffer_select_victim(ssd, &lpn)) {
             break;
         }
 
@@ -333,6 +415,10 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
          * is lost is the timing of a program, not the write.
          */
         if (ssd_out_of_lines(ssd)) {
+            break;
+        }
+
+        if (ssd->n->power_loss && !buffer_select_victim(ssd, &lpn)) {
             break;
         }
 
@@ -515,7 +601,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * one.
      */
     /* Program stream writes directly even when a cache is enabled. */
-    if (buffer_enabled(ssd) && !fua && stream < 0) {
+    if (buffer_enabled(ssd) && !fua && stream < 0 &&
+        (!ssd->n->power_loss || req->write_data)) {
         int batch = buffer_destage_batch(ssd);
 
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -544,6 +631,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             if (buffer_insert(ssd, lpn)) {
                 ssd->sp.write_hit_cnt++;
             }
+            buffer_write_data(ssd, req, lpn, true);
         }
 
         /* accepting into DRAM is not free, even though it is not a program */
@@ -562,7 +650,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      */
     if (ssd->write_buffer_cnt) {
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-            buffer_discard(ssd, lpn);
+            if (!ssd->n->power_loss) {
+                buffer_discard(ssd, lpn);
+            }
         }
         /*
          * A disabled write cache must not keep pages back at all, so drain the
@@ -597,6 +687,10 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             maxlat = (clat > maxlat) ? clat : maxlat;
         }
 
+        if (ssd->n->power_loss) {
+            buffer_discard(ssd, lpn);
+        }
+        buffer_write_data(ssd, req, lpn, false);
         curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }

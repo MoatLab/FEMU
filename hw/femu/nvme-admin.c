@@ -3080,6 +3080,11 @@ static uint16_t nvme_format_check(FemuCtrl *n, const NvmeIdNs *id_ns,
     }
 
     ms = le16_to_cpu(id_ns->lbaf[lba_idx].ms);
+    if (n->power_loss && (ms || pi ||
+        ((uint64_t)n->bb_params.secsz * n->bb_params.secs_per_pg) %
+        (1ULL << id_ns->lbaf[lba_idx].lbads))) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
     if (pi) {
         /* the protection information is eight bytes of the metadata */
         if (!n->pi || pi > DPS_TYPE_3 || ms < 8) {

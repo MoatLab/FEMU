@@ -446,6 +446,9 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          * and then be told a flush succeeded with pages still buffered.
          */
         lat = ssd_buffer_destage(ssd, 0, req->stime);
+        if (n->power_loss && ssd->write_buffer_cnt) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+        }
         break;
     case NVME_CMD_WRITE_ZEROES:
         /* FDP keeps its own reclaim-unit accounting and needs its own path */
