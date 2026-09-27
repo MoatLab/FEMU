@@ -988,6 +988,7 @@ enum NvmeStatusCodes {
     NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
+    NVME_STREAM_RESOURCE_ALLOC_FAILED = 0x017f,
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
     NVME_WRITE_TO_RO            = 0x0182,
@@ -2062,9 +2063,11 @@ typedef struct FemuCtrl {
     bool        streams;
     uint16_t    streams_max;
     QemuMutex   streams_lock;
+    uint64_t    stream_generation;
     struct {
         uint32_t nsid;
         uint16_t sid;
+        uint64_t tag;
     } stream_slots[32];
     uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
@@ -2457,6 +2460,8 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
+int nvme_streams_open(NvmeNamespace *ns, NvmeCmd *cmd);
+char *nvme_streams_test(Object *obj, Error **errp);
 void nvme_streams_release(NvmeNamespace *ns, bool resources);
 uint16_t nvme_directive(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);

@@ -5,6 +5,11 @@
 /* Callers either hold streams_lock or have stopped the dataplane. */
 static void nvme_stream_close(FemuCtrl *n, unsigned slot)
 {
+    NvmeNamespace *ns = nvme_ns_allocated(n, n->stream_slots[slot].nsid);
+
+    if (ns && NS_BBSSD(ns) && ns->ssd) {
+        ssd_release_stream(ns->ssd, slot);
+    }
     n->stream_slots[slot].nsid = 0;
     n->stream_slots[slot].sid = 0;
 }
@@ -53,6 +58,82 @@ static unsigned nvme_streams_count(FemuCtrl *n, NvmeNamespace *ns)
     return count;
 }
 
+/* The FTL and NoSSD call this with streams_lock held after validation. */
+int nvme_streams_open(NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    FemuCtrl *n = ns->ctrl;
+    uint16_t sid = le32_to_cpu(cmd->cdw13) >> 16;
+    unsigned limit;
+    unsigned count;
+    int free_slot = -1;
+    int victim = -1;
+    unsigned i;
+
+    if (!ns->streams_enabled || ((le32_to_cpu(cmd->cdw12) >> 20) & 15) != 1 ||
+        !sid) {
+        return -1;
+    }
+    limit = ns->streams_allocated ? ns->streams_allocated :
+                                   nvme_streams_available(n);
+    if (!limit) {
+        return -1;
+    }
+    count = nvme_streams_count(n, ns->streams_allocated ? ns : NULL);
+    for (i = 0; i < n->streams_max; i++) {
+        NvmeNamespace *owner = nvme_ns_allocated(n, n->stream_slots[i].nsid);
+
+        if (owner == ns && n->stream_slots[i].sid == sid) {
+            return i;
+        }
+        if (!owner) {
+            free_slot = i;
+        } else if (ns->streams_allocated ? owner == ns :
+                                          !owner->streams_allocated) {
+            victim = i;
+        }
+    }
+    if (count >= limit) {
+        free_slot = victim;
+        assert(free_slot >= 0);
+        nvme_stream_close(n, free_slot);
+    }
+    assert(free_slot >= 0);
+    n->stream_slots[free_slot].nsid = ns->id;
+    n->stream_slots[free_slot].sid = sid;
+    n->stream_slots[free_slot].tag = ++n->stream_generation;
+    return free_slot;
+}
+
+/* Read-only physical placement probe, registered only by the qtest machine. */
+char *nvme_streams_test(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    GString *snapshot;
+    struct ppa ppa;
+    unsigned count = 0;
+    unsigned i;
+    bool resume;
+
+    if (!n->streams || !ns || !NS_BBSSD(ns)) {
+        error_setg(errp, "Streams placement probe requires bbssd");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    for (i = 0; i < n->streams_max; i++) {
+        count += ns->ssd->stream_wp[i].curline != NULL;
+    }
+    snapshot = g_string_new(NULL);
+    g_string_append_printf(snapshot, "%u %" PRIu64, count,
+                           ns->ssd->gc_write_pages);
+    for (i = 0; i < MIN(128, ns->ssd->sp.tt_pgs); i++) {
+        ppa = ns->ssd->mapping->translate(ns->ssd, i);
+        g_string_append_printf(snapshot, " %u", (unsigned)ppa.g.blk);
+    }
+    nvme_resume_pollers(n, resume);
+    return g_string_free(snapshot, false);
+}
+
 static uint16_t nvme_streams_receive(FemuCtrl *n, NvmeNamespace *ns,
                                    NvmeCmd *cmd, NvmeCqe *cqe)
 {
@@ -80,9 +161,11 @@ static uint16_t nvme_streams_receive(FemuCtrl *n, NvmeNamespace *ns,
             /* NoSSD accepts Streams but has no physical placement effect. */
             if (NS_BBSSD(ns)) {
                 struct ssdparams *sp = &ns->ssd->sp;
+                uint64_t page_bytes = (uint64_t)sp->secs_per_pg * sp->secsz;
+                uint64_t unit = MAX(page_bytes, 1ULL << ns->lbaf.lbads);
 
-                sws = MAX(1, (sp->secs_per_pg * sp->secsz) >> ns->lbaf.lbads);
-                sgs = sp->pgs_per_line;
+                sws = unit >> ns->lbaf.lbads;
+                sgs = MAX(1, page_bytes * sp->pgs_per_line / unit);
             }
             stl_le_p(params + 16, sws);
             stw_le_p(params + 20, sgs);
@@ -123,7 +206,7 @@ static uint16_t nvme_streams_receive(FemuCtrl *n, NvmeNamespace *ns,
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         if (!available) {
-            return 0x17f;
+            return NVME_STREAM_RESOURCE_ALLOC_FAILED;
         }
         if (requested) {
             nvme_streams_release(ns, false);

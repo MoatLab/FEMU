@@ -219,6 +219,7 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
+    uint64_t stream_tag;
     /* set while the line is being rewritten, so it stays out of the lists */
     bool reclaiming;
 } line;
@@ -439,6 +440,10 @@ struct ssd {
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
+    struct write_pointer stream_wp[32];
+    struct write_pointer stream_gc_wp;
+    uint64_t stream_tags[32];
+    uint64_t stream_gc_tag;
     QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;   /* LRU order */
     GTree *wb_tree;                                         /* lpn lookup */
     int write_buffer_cnt;
@@ -560,6 +565,7 @@ bool femu_mapping_scheme_known(const char *name);
 bool femu_ftl_policy_known(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
+void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_all(struct ssd *ssd);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 

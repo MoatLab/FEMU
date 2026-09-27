@@ -336,6 +336,16 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
         }
     }
 
+    /* Streams resources and frontiers belong to one controller. */
+    for (cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+        FemuCtrl *other = n->subsys->ctrls[cntlid];
+
+        if (other && (n->streams || other->streams)) {
+            error_setg(errp, "a Streams subsystem takes a single controller");
+            return -1;
+        }
+    }
+
     cntlid = femu_subsys_register_ctrl(n);
     if (cntlid < 0) {
         error_setg(errp, "failed to register controller with subsystem");
@@ -2601,6 +2611,7 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 static void femu_instance_init(Object *obj)
 {
     if (qtest_enabled()) {
+        object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
     }
 }

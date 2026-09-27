@@ -215,7 +215,8 @@ void ssd_free_write_buffer(struct ssd *ssd)
  * commit it, and charge the media. Shared by the ordinary write path and by
  * the eviction of a buffered page, so both cost the same.
  */
-static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime)
+static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
+                               int stream)
 {
     struct map_write_plan plan;
     struct nand_cmd swr;
@@ -236,7 +237,12 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime)
     rcache_invalidate(ssd, lpn);
 
     /* allocate from the class the scheme asked for and commit the mapping */
-    ppa = get_new_page_class(ssd, plan.target_class);
+    if (stream >= 0) {
+        ppa = ssd_stream_page(ssd, stream,
+                              ssd->n->stream_slots[stream].tag);
+    } else {
+        ppa = get_new_page_class(ssd, plan.target_class);
+    }
     ssd->mapping->commit_write(ssd, lpn, &ppa);
 
     mark_page_valid(ssd, &ppa);
@@ -250,7 +256,11 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime)
     }
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer_class(ssd, plan.target_class);
+    if (stream >= 0) {
+        ssd_stream_advance(ssd, stream);
+    } else {
+        ssd_advance_write_pointer_class(ssd, plan.target_class);
+    }
 
     swr.type = USER_IO;
     swr.cmd = NAND_WRITE;
@@ -322,7 +332,7 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
             maxlat = (curlat > maxlat) ? curlat : maxlat;
         }
 
-        curlat = ssd_program_lpn(ssd, lpn, stime);
+        curlat = ssd_program_lpn(ssd, lpn, stime, -1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         done++;
     }
@@ -454,6 +464,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t curlat = 0, maxlat = 0;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     bool fua = le16_to_cpu(rw->control) & NVME_RW_FUA;
+    int stream = ssd->n->streams && req->cmd.opcode == NVME_CMD_WRITE ?
+                 nvme_streams_open(req->ns, &req->cmd) : -1;
     int r;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
@@ -491,7 +503,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * below: leaving it there would program the superseded version after this
      * one.
      */
-    if (buffer_enabled(ssd) && !fua) {
+    /* Program stream writes directly even when a cache is enabled. */
+    if (buffer_enabled(ssd) && !fua && stream < 0) {
         int batch = buffer_destage_batch(ssd);
 
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -556,7 +569,13 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          * to put this page. Tell the host instead of programming through a
          * write pointer that no longer addresses anything.
          */
-        if (ssd_out_of_lines(ssd)) {
+        struct ppa target = { .ppa = INVALID_PPA };
+
+        if (stream >= 0) {
+            target = ssd_stream_page(ssd, stream,
+                                     ssd->n->stream_slots[stream].tag);
+        }
+        if (stream >= 0 ? !mapped_ppa(&target) : ssd_out_of_lines(ssd)) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             break;
         }
@@ -567,7 +586,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             maxlat = (clat > maxlat) ? clat : maxlat;
         }
 
-        curlat = ssd_program_lpn(ssd, lpn, req->stime);
+        curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
@@ -708,7 +727,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }
-            curlat = ssd_program_lpn(ssd, lpn, req->stime);
+            curlat = ssd_program_lpn(ssd, lpn, req->stime, -1);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
         }
 

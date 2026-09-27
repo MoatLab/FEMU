@@ -35,6 +35,17 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     reserve_lines = (uint64_t)((1 - p->gc_thres_pcent_high / 100.0) * tt_lines);
     reserve_lines += 1;                      /* the data write pointer */
+    if (n->streams) {
+        reserve_lines += n->streams_max + 1;
+        if (pgs_per_line > UINT16_MAX) {
+            error_setg(errp, "Streams SGS exceeds the 16-bit field");
+            return -1;
+        }
+        if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
+            error_setg(errp, "Streams requires page or dftl mapping");
+            return -1;
+        }
+    }
     if (p->hot_cold_sep) {
         reserve_lines += 1;                  /* the hot write pointer */
     }

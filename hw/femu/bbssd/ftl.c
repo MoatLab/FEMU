@@ -414,6 +414,9 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         return 0;
     }
 
+    if (n->streams) {
+        qemu_mutex_lock(&n->streams_lock);
+    }
     switch (req->cmd.opcode) {
     case NVME_CMD_FLUSH:
         /*
@@ -515,6 +518,9 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         do_gc(ssd, false);
     }
 
+    if (n->streams) {
+        qemu_mutex_unlock(&n->streams_lock);
+    }
     return lat;
 }
 

@@ -180,6 +180,112 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
     }
 }
 
+static struct ppa ssd_stream_pointer_page(struct ssd *ssd,
+                                          struct write_pointer *wp,
+                                          uint64_t tag)
+{
+    struct ppa ppa = { .ppa = INVALID_PPA };
+
+    if (!wp->curline) {
+        wp->curline = get_next_free_line(ssd);
+        if (!wp->curline) {
+            return ppa;
+        }
+        wp->ch = wp->lun = wp->pl = wp->pg = 0;
+        wp->blk = wp->curline->id;
+    }
+    wp->curline->stream_tag = tag;
+    ppa.ppa = 0;
+    ppa.g.ch = wp->ch;
+    ppa.g.lun = wp->lun;
+    ppa.g.pl = wp->pl;
+    ppa.g.pg = wp->pg;
+    ppa.g.blk = wp->blk;
+    return ppa;
+}
+
+static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
+{
+    struct line *line = wp->curline;
+    struct ssdparams *sp = &ssd->sp;
+    struct ppa ppa = { .ppa = 0 };
+    int ch;
+    int lun;
+    int pl;
+    int pg;
+
+    if (!line) {
+        return;
+    }
+    if (!line->vpc && !line->ipc) {
+        line->stream_tag = 0;
+        QTAILQ_INSERT_TAIL(&ssd->lm.free_line_list, line, entry);
+        ssd->lm.free_line_cnt++;
+    } else {
+        /* Seal unused pages so GC can reclaim a partially written line. */
+        ppa.g.blk = line->id;
+        for (ch = 0; ch < sp->nchs; ch++) {
+            ppa.g.ch = ch;
+            for (lun = 0; lun < sp->luns_per_ch; lun++) {
+                ppa.g.lun = lun;
+                for (pl = 0; pl < sp->pls_per_lun; pl++) {
+                    ppa.g.pl = pl;
+                    for (pg = 0; pg < sp->pgs_per_blk; pg++) {
+                        ppa.g.pg = pg;
+                        if (get_pg(ssd, &ppa)->status == PG_FREE) {
+                            get_pg(ssd, &ppa)->status = PG_INVALID;
+                            get_blk(ssd, &ppa)->ipc++;
+                            line->ipc++;
+                        }
+                    }
+                }
+            }
+        }
+        line->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        pqueue_insert(ssd->lm.victim_line_pq, line);
+        ssd->lm.victim_line_cnt++;
+    }
+    memset(wp, 0, sizeof(*wp));
+}
+
+void ssd_release_stream(struct ssd *ssd, unsigned slot)
+{
+    ssd_stream_close_pointer(ssd, &ssd->stream_wp[slot]);
+    ssd->stream_tags[slot] = 0;
+}
+
+struct ppa ssd_stream_page(struct ssd *ssd, unsigned slot, uint64_t tag)
+{
+    ssd->stream_tags[slot] = tag;
+    return ssd_stream_pointer_page(ssd, &ssd->stream_wp[slot], tag);
+}
+
+void ssd_stream_advance(struct ssd *ssd, unsigned slot)
+{
+    ssd_advance_write_pointer_common(ssd, &ssd->stream_wp[slot]);
+    if (ssd->stream_wp[slot].curline) {
+        ssd->stream_wp[slot].curline->stream_tag = ssd->stream_tags[slot];
+    }
+}
+
+static struct write_pointer *ssd_stream_gc_pointer(struct ssd *ssd,
+                                                   uint64_t tag)
+{
+    unsigned i;
+
+    for (i = 0; i < ssd->n->streams_max; i++) {
+        if (ssd->stream_tags[i] == tag) {
+            return &ssd->stream_wp[i];
+        }
+    }
+    /* Released streams retain their identity while their data remains live. */
+    if (ssd->stream_gc_tag != tag) {
+        ssd_stream_close_pointer(ssd, &ssd->stream_gc_wp);
+        ssd->stream_gc_tag = tag;
+    }
+    return &ssd->stream_gc_wp;
+}
+
 /* take a line for a class that allocates one lazily (LOG, HOT) */
 static void ssd_init_class_write_pointer(struct ssd *ssd,
                                          struct write_pointer *wpp,
@@ -407,9 +513,16 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     struct ppa new_ppa;
     struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
+    uint64_t tag = get_line(ssd, old_ppa)->stream_tag;
+    struct write_pointer *stream_wp = NULL;
 
     ftl_assert(valid_lpn(ssd, lpn));
-    new_ppa = get_new_page(ssd);
+    if (tag) {
+        stream_wp = ssd_stream_gc_pointer(ssd, tag);
+        new_ppa = ssd_stream_pointer_page(ssd, stream_wp, tag);
+    } else {
+        new_ppa = get_new_page(ssd);
+    }
     if (!mapped_ppa(&new_ppa)) {
         /*
          * Relocating with nowhere to relocate to used to mark a page valid a
@@ -431,7 +544,14 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     ssd->gc_write_pages++; /* write amplification: a page the device relocated */
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    if (stream_wp) {
+        ssd_advance_write_pointer_common(ssd, stream_wp);
+        if (stream_wp->curline) {
+            stream_wp->curline->stream_tag = tag;
+        }
+    } else {
+        ssd_advance_write_pointer(ssd);
+    }
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -693,6 +813,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     line->ipc = 0;
     line->vpc = 0;
     line->close_time = 0;
+    line->stream_tag = 0;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -757,10 +878,22 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
 
 int do_gc(struct ssd *ssd, bool force)
 {
+    int free_lines = ssd->lm.free_line_cnt;
     struct line *victim_line = ssd->policy->select_victim_line(ssd, force);
 
     if (!victim_line) {
         return -1;
+    }
+
+    if (ssd->n->streams && victim_line->vpc) {
+        if (!ssd->lm.free_line_cnt) {
+            pqueue_insert(ssd->lm.victim_line_pq, victim_line);
+            ssd->lm.victim_line_cnt++;
+            return -1;
+        }
+        if (!victim_line->stream_tag && !ssd->wp.curline) {
+            ssd_stream_pointer_page(ssd, &ssd->wp, 0);
+        }
     }
 
     ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
@@ -769,6 +902,10 @@ int do_gc(struct ssd *ssd, bool force)
 
     reclaim_line(ssd, victim_line);
 
+    /* Distinct retired streams may occupy lines that cannot be combined. */
+    if (ssd->n->streams && ssd->lm.free_line_cnt <= free_lines) {
+        return -1;
+    }
     return 0;
 }
 

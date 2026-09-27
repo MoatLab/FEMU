@@ -198,6 +198,8 @@ static inline int should_gc_high_fdp_style(struct ssd *ssd)
 struct line *get_next_free_line(struct ssd *ssd);
 void ssd_init_lines(struct ssd *ssd);
 void ssd_init_write_pointer(struct ssd *ssd);
+struct ppa ssd_stream_page(struct ssd *ssd, unsigned slot, uint64_t tag);
+void ssd_stream_advance(struct ssd *ssd, unsigned slot);
 void ssd_advance_write_pointer(struct ssd *ssd);
 struct ppa get_new_page(struct ssd *ssd);
 struct ppa get_new_page_class(struct ssd *ssd, int klass);

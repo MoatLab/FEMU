@@ -759,6 +759,11 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         nvme_note_user_write(n);
     }
 
+    if (n->streams && ns->streams_enabled && req->is_write &&
+        ((ctrl >> 4) & 15) > 1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     if (femu_pi_type(ns) && ms == 8 && (ctrl & NVME_RW_PRINFO_PRACT)) {
         extended = false;
     }
