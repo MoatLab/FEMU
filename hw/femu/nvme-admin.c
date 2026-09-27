@@ -1000,7 +1000,8 @@ static uint16_t nvme_identify_ns_descr_list(FemuCtrl *n, NvmeCmd *cmd)
 
     ns_descrs->uuid.hdr.nidt = NVME_NIDT_UUID;
     ns_descrs->uuid.hdr.nidl = NVME_NIDL_UUID;
-    nvme_ns_uuid(n, ns, ns_descrs->uuid.v);
+    nvme_ns_uuid(nvme_ns_shared(n) ? ns->ctrl : n, ns,
+                 ns_descrs->uuid.v);
 
     ns_descrs->csi.hdr.nidt = NVME_NIDT_CSI;
     ns_descrs->csi.hdr.nidl = NVME_NIDL_CSI;
@@ -1044,7 +1045,15 @@ static uint16_t nvme_identify_ctrl_list(FemuCtrl *n, NvmeCmd *cmd,
             return (nvme_nsid_valid(n, nsid) ? NVME_INVALID_FIELD :
                     NVME_INVALID_NSID) | NVME_DNR;
         }
-        if (ns->attached && n->cntlid >= min) {
+        if (nvme_ns_shared(n)) {
+            for (uint32_t i = min; i < NVME_MAX_CONTROLLERS; i++) {
+                FemuCtrl *ctrl = nvme_subsys_ctrl(n->subsys, i);
+
+                if (ctrl && nvme_ns_attached(ctrl, ns)) {
+                    list[++count] = cpu_to_le16(i);
+                }
+            }
+        } else if (ns->attached && n->cntlid >= min) {
             list[++count] = cpu_to_le16(n->cntlid);
         }
     } else if (n->subsys) {
