@@ -12,6 +12,8 @@
 
 /* ========== NVMe Subsystem (femu-subsys) QOM Device ========== */
 
+static void nvme_subsys_release_storage(NvmeSubsystem *subsys);
+
 int femu_subsys_register_ctrl(FemuCtrl *n)
 {
     NvmeSubsystem *subsys = n->subsys;
@@ -46,6 +48,9 @@ void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
      */
     if (n->cntlid < NVME_MAX_CONTROLLERS && subsys->ctrls[n->cntlid] == n) {
         subsys->ctrls[n->cntlid] = NULL;
+    }
+    if (subsys->ns_release_pending) {
+        nvme_subsys_release_storage(subsys);
     }
 }
 
@@ -204,16 +209,26 @@ static void nvme_subsys_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "namespace management does not support FDP");
         return;
     }
+    if (subsys->ns_lock_init) {
+        error_setg(errp, "controllers still reference the subsystem");
+        return;
+    }
     qemu_mutex_init(&subsys->ns_lock);
+    subsys->ns_lock_init = true;
+    subsys->ns_release_pending = false;
     qbus_init(&subsys->bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
     nvme_subsys_setup(subsys, errp);
 }
 
-static void nvme_subsys_unrealize(DeviceState *dev)
+static void nvme_subsys_release_storage(NvmeSubsystem *subsys)
 {
-    NvmeSubsystem *subsys = NVME_SUBSYS(dev);
     FemuCtrl *storage = subsys->storage;
 
+    for (uint32_t i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+        if (nvme_subsys_ctrl(subsys, i)) {
+            return;
+        }
+    }
     if (storage) {
         for (uint32_t i = 0; i < storage->namespace_limit; i++) {
             nvme_ns_release(storage, &storage->namespaces[i]);
@@ -225,7 +240,19 @@ static void nvme_subsys_unrealize(DeviceState *dev)
         subsys->storage = NULL;
         object_unref(OBJECT(storage));
     }
-    qemu_mutex_destroy(&subsys->ns_lock);
+    if (subsys->ns_lock_init) {
+        qemu_mutex_destroy(&subsys->ns_lock);
+        subsys->ns_lock_init = false;
+    }
+}
+
+static void nvme_subsys_unrealize(DeviceState *dev)
+{
+    NvmeSubsystem *subsys = NVME_SUBSYS(dev);
+
+    /* PCI transports may be torn down after their subsystem. */
+    subsys->ns_release_pending = true;
+    nvme_subsys_release_storage(subsys);
 }
 
 static const Property nvme_subsystem_props[] = {
@@ -517,7 +544,6 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         n->subsys->ns_resume[n->cntlid] = false;
         nvme_resume_pollers(n, resume);
     }
-
 }
 
 /*

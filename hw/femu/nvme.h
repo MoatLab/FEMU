@@ -268,6 +268,8 @@ typedef struct NvmeSubsystem {
     bool ns_mgmt;
     FemuCtrl *storage;
     QemuMutex ns_lock;
+    bool ns_lock_init;
+    bool ns_release_pending;
     bool ns_paused;
     bool ns_resume[NVME_MAX_CONTROLLERS];
 

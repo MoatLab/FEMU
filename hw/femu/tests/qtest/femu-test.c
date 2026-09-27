@@ -10342,6 +10342,28 @@ static void femu_test_shared_admin(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_shared_subsys_release(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_shared_start(femu, alloc, &a, &b, 1);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0x57, true);
+    qtest_qmp_assert_success(qts,
+        "{'execute':'qom-set','arguments':{'path':'/machine/peripheral/shared',"
+        "'property':'realized','value':false}}");
+    femu_ns_page(&b, buf, 1, 0, 0x57, false);
+    femu_shared_remove(&a, "shared-a", 5);
+    femu_ns_page(&b, buf, 1, 0, 0x57, false);
+    femu_shared_remove(&b, "shared-b", 6);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_subsys(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -13514,6 +13536,10 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-validation", "femu", femu_test_ns_mgmt_validation,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
+    });
+    qos_add_test("ns-shared-subsys-release", "femu",
+                 femu_test_shared_subsys_release, &(QOSGraphTestOptions) {
+        .before = femu_shared_before,
     });
     qos_add_test("ns-shared-admin", "femu", femu_test_shared_admin,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
