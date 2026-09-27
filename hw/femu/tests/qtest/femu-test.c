@@ -10251,6 +10251,52 @@ static void femu_test_shared_remove(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_test_shared_private(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+
+    femu_shared_start(femu, alloc, &a, &b, 2);
+    g_assert_cmpint(femu_ns_delete(&a, 0xffffffff), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_shared_create(&a, buf, 0, false, &nsid), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&b, 1, 0x11, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 30), ==, 0);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&b, buf, 1, 0, true), ==, NVME_NS_PRIVATE);
+    femu_shared_ctrl_list(&a, buf, 0x12, 0, 1, 1);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&b, buf, 1, 0, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_delete(&a, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_shared_create(&a, buf, 0, true, &nsid), ==,
+                   NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_writew(qts, buf, 2);
+    qtest_writew(qts, buf + 2, 0);
+    qtest_writew(qts, buf + 4, 7);
+    cmd.opcode = 0x15;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmpint(FEMU_SC(femu_admin(&a, &cmd)), ==, 0x11c);
+    femu_shared_ctrl_list(&b, buf, 0x12, 0, 0, 0);
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_writew(qts, buf, 2);
+    qtest_writew(qts, buf + 2, 0);
+    qtest_writew(qts, buf + 4, 1);
+    g_assert_cmpint(femu_admin(&b, &cmd), ==, NVME_SUCCESS);
+    femu_shared_ctrl_list(&b, buf, 0x12, 0, 2, 0);
+    femu_ns_page(&a, buf, 1, 0, 0x39, true);
+    femu_ns_page(&b, buf, 1, 0, 0x39, false);
+    femu_shared_stop(&a, &b);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_subsys(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -13424,6 +13470,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("ns-shared-private", "femu", femu_test_shared_private,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-remove-nossd", "femu", femu_test_shared_remove,
                  &(QOSGraphTestOptions) {
         .before = femu_shared_before, .arg = GINT_TO_POINTER(2),

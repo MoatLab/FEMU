@@ -981,6 +981,7 @@ enum NvmeStatusCodes {
     NVME_NS_INSUFFICIENT_CAP    = 0x0115,
     NVME_NS_ID_UNAVAILABLE      = 0x0116,
     NVME_NS_ALREADY_ATTACHED    = 0x0118,
+    NVME_NS_PRIVATE             = 0x0119,
     NVME_NS_NOT_ATTACHED        = 0x011a,
     NVME_NS_THIN_PROVISION      = 0x011b,
     NVME_CTRL_LIST_INVALID      = 0x011c,

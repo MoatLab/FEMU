@@ -3419,6 +3419,7 @@ static void nvme_pel_ns_change(FemuCtrl *n, NvmeCmd *cmd, const NvmeIdNs *id,
 
 static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
+    FemuCtrl *storage = nvme_ns_shared(n) ? n->subsys->storage : n;
     uint32_t sel = le32_to_cpu(cmd->cdw10) & 0xf;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint32_t allocated = 0;
@@ -3534,7 +3535,8 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     bytes = nsze << caps.lbaf[idx].lbads;
     if (BBSSD(n)) {
-        unit = (uint64_t)n->bb_params.secs_per_pg * n->bb_params.secsz;
+        unit = (uint64_t)storage->bb_params.secs_per_pg *
+               storage->bb_params.secsz;
     }
     if (bytes > UINT64_MAX - (unit - 1)) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -3554,11 +3556,11 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         for (uint32_t i = 0; i < n->namespace_limit; i++) {
             allocated += n->namespaces[i].allocated;
         }
-        if (allocated >= n->bbssd_ns_limit) {
+        if (allocated >= storage->bbssd_ns_limit) {
             return NVME_NS_ID_UNAVAILABLE | NVME_DNR;
         }
         /* A free backend extent may still exceed one FTL's usable capacity. */
-        if (bb_check_capacity(n, &candidate, &err)) {
+        if (bb_check_capacity(storage, &candidate, &err)) {
             error_free(err);
             return nvme_ns_cmd_error(n, cmd, NVME_NS_INSUFFICIENT_CAP, bytes);
         }
@@ -3566,6 +3568,9 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     resume = nvme_pause_pollers(n);
     ret = nvme_ns_create(n, nsid, nsze, id.flbas, n->femu_mode, false,
                          &err);
+    if (!ret && nvme_ns_shared(n)) {
+        nvme_ns_allocated(n, nsid)->id_ns.nmic = id.nmic;
+    }
     if (!ret && n->pi) {
         ns = nvme_ns_allocated(n, nsid);
         status = nvme_format_namespace(ns, idx, id.flbas & 0x10,
@@ -3637,6 +3642,18 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
             return nvme_ns_cmd_error(n, cmd,
                                     sel ? NVME_NS_NOT_ATTACHED :
                                     NVME_NS_ALREADY_ATTACHED, 2 * i);
+        }
+    }
+    if (!sel && nvme_ns_shared(n) && !(ns->id_ns.nmic & 1)) {
+        if (count > 1) {
+            return nvme_ns_cmd_error(n, cmd, NVME_NS_PRIVATE, 2);
+        }
+        for (uint32_t i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+            FemuCtrl *ctrl = nvme_subsys_ctrl(n->subsys, i);
+
+            if (ctrl && nvme_ns_attached(ctrl, ns)) {
+                return nvme_ns_cmd_error(n, cmd, NVME_NS_PRIVATE, 2);
+            }
         }
     }
     resume = nvme_pause_pollers(n);
