@@ -10144,12 +10144,14 @@ static void femu_test_shared_retire(void *obj, void *data,
                    NVME_SUCCESS);
     g_assert_cmpuint(nsid, ==, 1);
     for (int i = 0; i < 2; i++) {
-        g_assert_cmpint(femu_ns_attach(&c[0], buf, 1, i, true), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_ns_attach(&c[0], buf, 1, i, true), ==,
+                       NVME_SUCCESS);
         qtest_memread(qts, c[i].io.cq_addr, after, sizeof(after));
         g_assert_cmpmem(full[i], sizeof(full[i]), after, sizeof(after));
         femu_shared_retired(&c[i]);
         c[i].lba_size = 1024;
-        g_assert_cmpint(femu_rw(&c[i], NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+        g_assert_cmpint(femu_rw(&c[i], NVME_CMD_READ, 0, buf), ==,
+                       NVME_SUCCESS);
         if (!i) {
             for (int j = 0; j < 4096; j++) {
                 g_assert_cmphex(qtest_readb(qts, buf + j), ==, 0);
@@ -10293,6 +10295,49 @@ static void femu_test_shared_private(void *obj, void *data,
     femu_shared_ctrl_list(&b, buf, 0x12, 0, 2, 0);
     femu_ns_page(&a, buf, 1, 0, 0x39, true);
     femu_ns_page(&b, buf, 1, 0, 0x39, false);
+    femu_shared_stop(&a, &b);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_shared_admin(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t serial[20];
+    uint8_t other[20];
+    char nqn[256];
+    uint16_t aer;
+
+    femu_shared_start(femu, alloc, &a, &b, 1);
+    g_assert_cmpint(femu_identify(&a, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, serial, sizeof(serial));
+    qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
+    g_assert_cmpstr(nqn, ==, "nqn.2019-08.org.qemu:shared");
+    g_assert_cmpint(femu_identify(&b, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, other, sizeof(other));
+    g_assert_cmpmem(serial, sizeof(serial), other, sizeof(other));
+    qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
+    g_assert_cmpstr(nqn, ==, "nqn.2019-08.org.qemu:shared");
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_changed_ns_log(&b, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_set_feature(&b, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                     false, 0, 1 << 8, NULL), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0x71, true);
+    aer = femu_aer(&b);
+    g_assert_cmpint(femu_format(&a, 1, 1, 0), ==, NVME_SUCCESS);
+    femu_ns_notice_complete(&b, aer);
+    g_assert_cmpint(femu_changed_ns_log(&b, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    g_assert_cmpint(femu_identify(&b, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 26), ==, 1);
+    b.lba_size = 1024;
+    femu_round_trip(&b, 0x19);
+    g_assert_cmpint(femu_format(&a, 1, 0, 0), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0, false);
     femu_shared_stop(&a, &b);
     guest_free(alloc, buf);
 }
@@ -13470,6 +13515,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("ns-shared-admin", "femu", femu_test_shared_admin,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-private", "femu", femu_test_shared_private,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-remove-nossd", "femu", femu_test_shared_remove,

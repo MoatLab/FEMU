@@ -637,6 +637,21 @@ static void nvme_ns_changed(FemuCtrl *n, uint32_t nsid, bool notify)
 }
 
 /* Acknowledging this log must leave unrelated Notice events alone. */
+static void nvme_ns_format_changed(FemuCtrl *n, NvmeNamespace *ns)
+{
+    if (!nvme_ns_shared(n)) {
+        nvme_ns_changed(n, ns->id, true);
+        return;
+    }
+    for (uint32_t i = 0; i < NVME_MAX_CONTROLLERS; i++) {
+        FemuCtrl *ctrl = nvme_subsys_ctrl(n->subsys, i);
+
+        if (ctrl && nvme_ns_attached(ctrl, ns)) {
+            nvme_ns_changed(ctrl, ns->id, true);
+        }
+    }
+}
+
 static void nvme_clear_ns_notice(FemuCtrl *n)
 {
     NvmeAsyncEvent *event;
@@ -3302,7 +3317,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
             if (status != NVME_SUCCESS) {
                 break;
             }
-            nvme_ns_changed(n, ns->id, true);
+            nvme_ns_format_changed(n, ns);
             modified = true;
         }
     } else {
@@ -3311,7 +3326,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
                                        sec_erase);
         modified = status == NVME_SUCCESS;
         if (modified) {
-            nvme_ns_changed(n, ns->id, true);
+            nvme_ns_format_changed(n, ns);
         }
     }
 

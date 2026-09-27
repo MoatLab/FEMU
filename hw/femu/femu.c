@@ -1812,9 +1812,8 @@ static void *femu_ftl_thread(void *arg)
 
             if (nvme_ns_shared(n)) {
                 qemu_mutex_lock(&n->subsys->ns_lock);
-                if (req->ns && req->ns->ssd) {
-                    req->ns->ssd->n = n;
-                }
+                n->subsys->storage->features.volatile_wc =
+                    n->features.volatile_wc;
             }
             lat = femu_ftl_process_req(n, req);
             g_clear_pointer(&req->write_data, g_free);
@@ -1833,9 +1832,6 @@ static void *femu_ftl_thread(void *arg)
                 }
             }
             if (nvme_ns_shared(n)) {
-                if (req->ns && req->ns->ssd) {
-                    req->ns->ssd->n = n->subsys->storage;
-                }
                 qemu_mutex_unlock(&n->subsys->ns_lock);
             }
             req->reqlat = lat;
@@ -2338,9 +2334,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                 set_bit(i, n->attached_ns);
             }
             n->shared_storage = true;
-        } else if (n->ext_ops.init_ctrl_name) {
-            n->ext_ops.init_ctrl_name(n, &n->namespaces[0]);
         }
+        memcpy(n->id_ctrl.sn, n->subsys->storage->id_ctrl.sn,
+               sizeof(n->id_ctrl.sn));
+        memcpy(n->id_ctrl.mn, n->subsys->storage->id_ctrl.mn,
+               sizeof(n->id_ctrl.mn));
+        memcpy(n->id_ctrl.fr, n->subsys->storage->id_ctrl.fr,
+               sizeof(n->id_ctrl.fr));
+        memcpy(n->id_ctrl.subnqn, n->subsys->subnqn,
+               sizeof(n->id_ctrl.subnqn));
     }
 
     /*
