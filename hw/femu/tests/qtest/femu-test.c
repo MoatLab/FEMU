@@ -7883,6 +7883,26 @@ static void femu_test_oc_sgl_refused(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_oc12_opcodes(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    const uint8_t opcodes[] = { NVME_CMD_READ, NVME_CMD_WRITE, 0x93, 0x94 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmd.nsid = cpu_to_le32(1);
+    for (i = 0; i < G_N_ELEMENTS(opcodes); i++) {
+        cmd.opcode = opcodes[i];
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_OPCODE);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * An Open-Channel 1.2 namespace with sectors smaller than a page: eight
  * sectors fit in one page of the host's buffer, so the transfer maps to one
@@ -11673,6 +11693,10 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
+    });
+    qos_add_test("oc12-opcodes", "femu", femu_test_oc12_opcodes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=1"
     });
     qos_add_test("oc12-small-sectors", "femu", femu_test_oc12_small_sectors,
                  &(QOSGraphTestOptions) {

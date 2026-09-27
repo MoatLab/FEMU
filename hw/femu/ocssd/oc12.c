@@ -1317,13 +1317,6 @@ static void oc12_exit(FemuCtrl *n)
     n->oc12_ctrl = NULL;
 }
 
-static uint16_t oc12_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                             NvmeRequest *req)
-{
-    /* Note: this is not the read/write path for OCSSD */
-    return NVME_DNR;
-}
-
 static uint16_t oc12_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
 {
@@ -1336,7 +1329,7 @@ static uint16_t oc12_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        return oc12_nvme_rw(n, ns, cmd, req);
+        return NVME_INVALID_OPCODE | NVME_DNR;
     case OC12_CMD_READ:
         return oc12_read(n, ns, cmd, req);
     case OC12_CMD_WRITE:
