@@ -3030,7 +3030,8 @@ static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks)
  * anything. Every namespace a command names is put through this before any of
  * them is touched, so a refusal cannot leave some already reformatted.
  */
-static uint16_t nvme_format_check(NvmeNamespace *ns, uint8_t lba_idx,
+static uint16_t nvme_format_check(FemuCtrl *n, const NvmeIdNs *id_ns,
+                                  uint8_t mode, uint8_t lba_idx,
                                   uint8_t meta_loc, uint8_t pil, uint8_t pi)
 {
     uint16_t ms;
@@ -3043,35 +3044,35 @@ static uint16_t nvme_format_check(NvmeNamespace *ns, uint8_t lba_idx,
      * would leave the two disagreeing, or hand the host a size its own address
      * space does not have.
      */
-    if (!NS_BBSSD(ns) && !NS_NOSSD(ns)) {
+    if (mode != FEMU_BBSSD_MODE && mode != FEMU_NOSSD_MODE) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
 
-    if (lba_idx > ns->id_ns.nlbaf) {
+    if (lba_idx > id_ns->nlbaf) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
 
-    ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
+    ms = le16_to_cpu(id_ns->lbaf[lba_idx].ms);
     if (pi) {
         /* the protection information is eight bytes of the metadata */
-        if (!ns->ctrl->pi || pi > DPS_TYPE_3 || ms < 8) {
+        if (!n->pi || pi > DPS_TYPE_3 || ms < 8) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
         /* PIL set puts it in the first eight bytes, clear in the last */
-        if (pil && !NVME_ID_NS_DPC_FIRST_EIGHT(ns->id_ns.dpc)) {
+        if (pil && !NVME_ID_NS_DPC_FIRST_EIGHT(id_ns->dpc)) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
-        if (!pil && !NVME_ID_NS_DPC_LAST_EIGHT(ns->id_ns.dpc)) {
+        if (!pil && !NVME_ID_NS_DPC_LAST_EIGHT(id_ns->dpc)) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
-        if (!((ns->id_ns.dpc & 0x7) & (1 << (pi - 1)))) {
+        if (!((id_ns->dpc & 0x7) & (1 << (pi - 1)))) {
             return NVME_INVALID_FORMAT | NVME_DNR;
         }
     }
-    if (meta_loc && ms && !NVME_ID_NS_MC_EXTENDED(ns->id_ns.mc)) {
+    if (meta_loc && ms && !NVME_ID_NS_MC_EXTENDED(id_ns->mc)) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
-    if (!meta_loc && ms && !NVME_ID_NS_MC_SEPARATE(ns->id_ns.mc)) {
+    if (!meta_loc && ms && !NVME_ID_NS_MC_SEPARATE(id_ns->mc)) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
 
@@ -3193,15 +3194,17 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
             if (!nvme_ns(n, i + 1)) {
                 continue;
             }
-            status = nvme_format_check(&n->namespaces[i], lba_idx, meta_loc,
-                                       pil, pi);
+            status = nvme_format_check(n, &n->namespaces[i].id_ns,
+                                       n->namespaces[i].femu_mode, lba_idx,
+                                       meta_loc, pil, pi);
             if (status != NVME_SUCCESS) {
                 return status;
             }
         }
     } else {
-        status = nvme_format_check(&n->namespaces[nsid - 1], lba_idx, meta_loc,
-                                   pil, pi);
+        status = nvme_format_check(n, &n->namespaces[nsid - 1].id_ns,
+                                   n->namespaces[nsid - 1].femu_mode, lba_idx,
+                                   meta_loc, pil, pi);
         if (status != NVME_SUCCESS) {
             return status;
         }
@@ -3418,10 +3421,15 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     nvme_ns_common_identify(n, &caps);
     idx = NVME_ID_NS_FLBAS_INDEX(id.flbas);
-    if ((id.flbas & 0xe0) || idx > caps.nlbaf || id.dps ||
-        (caps.lbaf[idx].ms &&
-         !(caps.mc & (NVME_ID_NS_FLBAS_EXTENDED(id.flbas) ? 1 : 2)))) {
+    if ((id.flbas & 0xe0) || (id.dps & ~0xf) || (!n->pi && id.dps)) {
         return NVME_INVALID_FORMAT | NVME_DNR;
+    }
+    status = nvme_format_check(n, &caps, n->femu_mode, idx, id.flbas & 0x10,
+                               id.dps & DPS_FIRST_EIGHT,
+                               id.dps & DPS_TYPE_MASK);
+    if (status) {
+        /* Base 2.3 Figure 386 uses Format's Invalid Format status (10Ah). */
+        return status;
     }
     if (id.nmic || id.nvmsetid || id.endgid) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -3466,6 +3474,15 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     resume = nvme_pause_pollers(n);
     ret = nvme_ns_create(n, nsid, nsze, id.flbas, n->femu_mode, false,
                          &err);
+    if (!ret && n->pi) {
+        ns = nvme_ns_allocated(n, nsid);
+        status = nvme_format_namespace(ns, idx, id.flbas & 0x10,
+                                       id.dps & DPS_FIRST_EIGHT,
+                                       id.dps & DPS_TYPE_MASK, 0);
+        if (status) {
+            nvme_ns_destroy(n, ns);
+        }
+    }
     nvme_resume_pollers(n, resume);
     error_free(err);
     if (ret == -ENOSPC) {
@@ -3473,6 +3490,9 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (ret) {
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+    if (status) {
+        return status;
     }
     nvme_pel_ns_change(n, cmd, &id, nsid);
     cqe->n.result = cpu_to_le32(nsid);
