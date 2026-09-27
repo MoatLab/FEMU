@@ -445,6 +445,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 
     if (n->streams) {
         for (i = 0; i < n->namespace_limit; i++) {
+            nvme_streams_release(&n->namespaces[i], true);
             n->namespaces[i].streams_enabled = false;
         }
     }
@@ -1066,6 +1067,7 @@ void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id)
 
 static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
 {
+    nvme_streams_release(ns, true);
     if (ns->ext_ops.ns_exit) {
         ns->ext_ops.ns_exit(n, ns);
     }
@@ -1970,6 +1972,7 @@ static void femu_realize_undo(FemuCtrl *n)
         qemu_bh_delete(n->aer_bh);
         n->aer_bh = NULL;
         qemu_mutex_destroy(&n->aer_lock);
+        qemu_mutex_destroy(&n->streams_lock);
     }
     g_free(n->features.int_vector_config);
     n->features.int_vector_config = NULL;
@@ -2081,6 +2084,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);
+    qemu_mutex_init(&n->streams_lock);
     n->aer_bh = qemu_bh_new_guarded(femu_aer_bh, n,
                                     &DEVICE(n)->mem_reentrancy_guard);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
@@ -2300,6 +2304,7 @@ static void femu_exit(PCIDevice *pci_dev)
     qemu_bh_delete(n->aer_bh);
     n->aer_bh = NULL;
     qemu_mutex_destroy(&n->aer_lock);
+    qemu_mutex_destroy(&n->streams_lock);
     free_dram_backend(n->mbe);
 
     femu_free_namespace_bitmaps(n);

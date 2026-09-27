@@ -3135,6 +3135,8 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
         memset((uint8_t *)n->mbe->logical_space + ns->backend_offset, 0,
                ns->size);
     }
+    nvme_streams_release(ns, false);
+
     /* and the FTL must stop treating the old pages as live */
     if (NS_BBSSD(ns)) {
         bbssd_deallocate_all(ns);

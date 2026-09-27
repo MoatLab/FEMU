@@ -1764,6 +1764,7 @@ typedef struct NvmeNamespace {
     } blk;
 
     bool streams_enabled;
+    uint16_t streams_allocated;
 
     void *state;
 
@@ -2060,6 +2061,11 @@ typedef struct FemuCtrl {
     bool        ns_mgmt;
     bool        streams;
     uint16_t    streams_max;
+    QemuMutex   streams_lock;
+    struct {
+        uint32_t nsid;
+        uint16_t sid;
+    } stream_slots[32];
     uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
     bool        test_ns_fail;
@@ -2451,6 +2457,7 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
+void nvme_streams_release(NvmeNamespace *ns, bool resources);
 uint16_t nvme_directive(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);

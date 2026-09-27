@@ -10349,6 +10349,80 @@ static void femu_test_streams_identify(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_streams_resources(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101,
+                                 0, 0, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 4);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 4);
+    g_assert_cmpuint(qtest_readw(qts, buf + 4), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 6), ==, 0);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, data ? 8 : 1);
+    g_assert_cmpuint(qtest_readw(qts, buf + 20), ==, data ? 128 : 1);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 24), ==, 0);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 3, 0, 0, &result),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 3);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 1, 0, 0, &result),
+                   ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_directive(&c, true, 2, 0x103, 4, 0, 0, &result),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 1);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 3);
+    g_assert_cmphex(femu_directive(&c, true, 0xffffffff, 0x101, 0,
+                                 buf, 32, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 0);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x102, 0, buf, 4, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
+    g_assert_cmphex(femu_directive(&c, false, 1, 0xffff0101, 0, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x102, 0, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x102, 0, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, false, 2, 1, 0x100, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 4);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 4, 0, 0, &result),
+                   ==, NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 4);
+    g_assert_cmphex(femu_directive(&c, false, 2, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 4, 0, 0, &result),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 2, 0x103, 1, 0, 0, &result),
+                   ==, 0x17f);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_streams_config(void *obj, void *data,
                                    QGuestAllocator *alloc)
 {
@@ -10406,6 +10480,18 @@ static void femu_register_nodes(void)
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
+    qos_add_test("streams-resources", "femu", femu_test_streams_resources,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "streams=on,streams.max=4,namespaces=2"
+    });
+    qos_add_test("streams-geometry", "femu", femu_test_streams_resources,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "streams=on,streams.max=4,namespaces=2,femu_mode=1,"
+            "secs_per_pg=8,pgs_per_blk=32,blks_per_pl=128,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
     qos_add_test("streams-config", "femu", femu_test_streams_config, NULL);
     qos_add_test("streams-off", "femu", femu_test_streams_identify, NULL);
     qos_add_test("streams-identify", "femu", femu_test_streams_identify,
