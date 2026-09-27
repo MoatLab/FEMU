@@ -450,19 +450,25 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     int secs_idx = -1;
-    int si = 0;
-    int nb_secs_to_write = 0;
 
     AddrBucket *addr_bucket = g_malloc0(sizeof(AddrBucket) * max_sec_per_rq);
     parse_ppa_list(n, ns, cmd, req, addr_bucket, &secs_idx);
 
     /* Read & Write */
-    assert(opcode == OC12_CMD_READ || opcode == OC12_CMD_WRITE);
-    assert(secs_idx > 0);
     for (i = 0; i < secs_idx; i++) {
-        ppa = ((uint64_t *)(req->slba))[si];
-        nb_secs_to_write = addr_bucket[i].cnt;
-        si += nb_secs_to_write;
+        uint64_t transfer_ns = 0;
+        int64_t chnl_end_ts;
+        int64_t chip_end_ts;
+
+        if (n->oc_params.channel_timing) {
+            uint64_t page_ns = n->bb_params.ch_xfer_lat ?
+                n->bb_params.ch_xfer_lat :
+                nand_flash_timing.chnl_pg_xfer_lat[n->flash_type];
+
+            /* One page per plane; partial pages pay only for their sectors. */
+            transfer_ns = DIV_ROUND_UP(page_ns * addr_bucket[i].cnt,
+                                      ln->params.sec_per_pg);
+        }
 
         ch = addr_bucket[i].ch;
         lun = addr_bucket[i].lun;
@@ -470,17 +476,16 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         lunid = ch * c->num_lun + lun;
 
         io_done_ts = 0;
-        assert(ch < c->num_ch && lun < c->num_lun);
 
-        int64_t chnl_end_ts, chip_end_ts;
         if (req->is_write) {
             /* Write data needs to be transferred through the channel first */
-            chnl_end_ts = advance_channel_timestamp(n, ch, now, opcode);
+            chnl_end_ts = advance_channel_timestamp(n, ch, now, transfer_ns);
             /* Then issue NAND Program to the target flash chip */
             io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, page_type);
         } else {
             chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, page_type);
-            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts, opcode);
+            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts,
+                                                         transfer_ns);
         }
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
@@ -594,7 +599,10 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free;
     }
 
-    /* Timing Model */
+    /* The backend consumed byte offsets; timing needs the validated PPAs. */
+    for (i = 0; i < nlb; i++) {
+        psl[i] = (psl[i] - ns->start_block) >> lbads;
+    }
     oc12_advance_status(n, ns, cmd, req);
 
     g_free(msl);
@@ -714,7 +722,10 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free;
     }
 
-    /* Timing Model */
+    /* The backend consumed byte offsets; timing needs the validated PPAs. */
+    for (i = 0; i < nlb; i++) {
+        psl[i] = (psl[i] - ns->start_block) >> lbads;
+    }
     oc12_advance_status(n, ns, cmd, req);
 
     g_free(msl);

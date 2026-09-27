@@ -7903,6 +7903,175 @@ static void femu_test_oc12_opcodes(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_oc12_clock_start(FemuCtrlState *c, QFemu *femu,
+                                  QGuestAllocator *alloc)
+{
+    QDict *rsp = qtest_qmp(femu->dev.bus->qts,
+                         "{'execute':'qom-set', 'arguments':{"
+                         "'path':'/machine/peripheral/oc12-test',"
+                         "'property':'x-oc12-clock','value':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_enable(c, &femu->dev, alloc);
+    femu_create_io_queues(c);
+}
+
+static void femu_oc12_timed_io(FemuCtrlState *c, uint8_t opcode,
+                               const uint64_t *ppas, unsigned count,
+                               uint64_t duration)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t buf = guest_alloc(c->alloc, 4096);
+    uint64_t list = guest_alloc(c->alloc, 4096);
+    NvmeCmd cmd = { 0 };
+    NvmeCmd fence = { 0 };
+    NvmeCqe cqe;
+    uint16_t want = c->cid;
+    uint16_t got;
+    unsigned i;
+
+    /* Let resources from the preceding case become idle. */
+    qtest_clock_step(qts, 10000000);
+    for (i = 0; i < count; i++) {
+        uint64_t entry = cpu_to_le64(ppas[i]);
+
+        qtest_memwrite(qts, list + i * sizeof(entry), &entry, sizeof(entry));
+    }
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(count == 1 ? ppas[0] : list);
+    cmd.cdw12 = cpu_to_le32(count - 1);
+    femu_submit(c, &c->io, &cmd);
+
+    /* An immediate refusal proves the preceding SQ entry was processed. */
+    fence.opcode = 0x93;
+    fence.nsid = cpu_to_le32(1);
+    femu_submit(c, &c->io, &fence);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_INVALID_OPCODE);
+    g_assert_cmpuint(got, ==, (uint16_t)(want + 1));
+
+    qtest_clock_step(qts, duration - 1);
+    g_usleep(10000);
+    qtest_memread(qts, c->io.cq_addr + c->io.cq_head * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status) & 1, !=, c->io.phase);
+    qtest_clock_step(qts, 1);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(got, ==, want);
+    guest_free(c->alloc, list);
+    guest_free(c->alloc, buf);
+}
+
+static void femu_oc12_channel_pair(FemuCtrlState *c, uint64_t second,
+                                   uint64_t finish)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t buf = guest_alloc(c->alloc, 4096);
+    NvmeCmd cmd = { 0 };
+    NvmeCqe cqe;
+    uint16_t first = c->cid;
+    uint16_t got;
+    uint16_t other;
+
+    qtest_clock_step(qts, 10000000);
+    cmd.opcode = FEMU_OC20_VECT_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    femu_submit(c, &c->io, &cmd);
+    cmd.cdw10 = cpu_to_le32(second);
+    femu_submit(c, &c->io, &cmd);
+    cmd.opcode = 0x93;
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_INVALID_OPCODE);
+    g_assert_cmpuint(got, ==, (uint16_t)(first + 2));
+
+    qtest_clock_step(qts, 147999);
+    g_usleep(10000);
+    qtest_memread(qts, c->io.cq_addr + c->io.cq_head * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status) & 1, !=, c->io.phase);
+    qtest_clock_step(qts, 1);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_true(got == first || got == (uint16_t)(first + 1));
+    if (finish > 148000) {
+        g_assert_cmpuint(got, ==, first);
+        qtest_clock_step(qts, finish - 148001);
+        g_usleep(10000);
+        qtest_memread(qts, c->io.cq_addr + c->io.cq_head * sizeof(cqe),
+                      &cqe, sizeof(cqe));
+        g_assert_cmpuint(le16_to_cpu(cqe.status) & 1, !=, c->io.phase);
+        qtest_clock_step(qts, 1);
+    }
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &other, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_true(other == first || other == (uint16_t)(first + 1));
+    g_assert_cmpuint(other, !=, got);
+    guest_free(c->alloc, buf);
+}
+
+static void femu_test_oc12_channel_timing(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const uint64_t page[] = { 0, 1, 2, 3 };
+    const uint64_t same_channel[] = { 0, 1, 2, 3, 32768, 32769, 32770, 32771 };
+    const uint64_t other_channel[] = { 0, 1, 2, 3, 65536, 65537, 65538, 65539 };
+
+    femu_oc12_clock_start(&c, femu, alloc);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, page, 1, 148000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, page, 4, 448000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, same_channel, 8, 848000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, other_channel, 8, 448000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_WRITE, page, 4, 1250000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_WRITE, same_channel, 8, 1650000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_WRITE, other_channel, 8, 1250000);
+    femu_oc12_channel_pair(&c, 32768, 248000);
+    femu_oc12_channel_pair(&c, 65536, 148000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_oc12_channel_profile(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const uint64_t page[] = { 0, 0, 0, 0 };
+    bool enabled = GPOINTER_TO_UINT(data);
+
+    femu_oc12_clock_start(&c, femu, alloc);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, page, 1,
+                      enabled ? 61109 : 48000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, page, 4,
+                      enabled ? 100433 : 48000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_WRITE, page, 4,
+                      enabled ? 902433 : 850000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_ERASE, page, 1, 3000000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_oc12_ppa_timing(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const uint64_t page[] = { 0, 1, 2, 3 };
+
+    femu_oc12_clock_start(&c, femu, alloc);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_READ, page, 4, 48000);
+    femu_oc12_timed_io(&c, FEMU_OC20_VECT_WRITE, page, 4, 850000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * An Open-Channel 1.2 namespace with sectors smaller than a page: eight
  * sectors fit in one page of the host's buffer, so the transfer maps to one
@@ -11693,6 +11862,32 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
+    });
+    qos_add_test("oc12-channel-timing", "femu", femu_test_oc12_channel_timing,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,oc12_channel_timing=on,"
+            "ch_xfer_lat=400000,lsec_size=512,lsecs_per_pg=4,lnum_pln=1,"
+            "lnum_ch=2,lnum_lun=2,lpgs_per_blk=512"
+    });
+    qos_add_test("oc12-channel-default", "femu", femu_test_oc12_channel_profile,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,oc12_channel_timing=on,"
+            "lsec_size=512,lsecs_per_pg=4,lnum_pln=1,lnum_ch=2,lnum_lun=2"
+    });
+    qos_add_test("oc12-channel-off", "femu", femu_test_oc12_channel_profile,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,ch_xfer_lat=400000,"
+            "lsec_size=512,lsecs_per_pg=4,lnum_pln=1,lnum_ch=2,lnum_lun=2"
+    });
+    qos_add_test("oc12-ppa-timing", "femu", femu_test_oc12_ppa_timing,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,lsec_size=512,"
+            "lsecs_per_pg=4,lnum_pln=1,lnum_ch=2,lnum_lun=2"
     });
     qos_add_test("oc12-opcodes", "femu", femu_test_oc12_opcodes,
                  &(QOSGraphTestOptions) {

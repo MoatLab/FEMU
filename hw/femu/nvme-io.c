@@ -1,6 +1,12 @@
 #include "./nvme.h"
 #include "nvme-pi.h"
 
+static int64_t nvme_io_clock(FemuCtrl *n)
+{
+    return qemu_clock_get_ns(n->test_oc12_clock ? QEMU_CLOCK_VIRTUAL :
+                                                QEMU_CLOCK_REALTIME);
+}
+
 /*
  * Compare, Write Zeroes, Write Uncorrectable and Dataset Management belong to
  * the NVM command set. A key-value namespace does not implement it: these
@@ -241,7 +247,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->fdp_pids = NULL;
         req->nr_fdp_pids = 0;
         /* Coperd: record req->stime at earliest convenience */
-        req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        req->expire_time = req->stime = nvme_io_clock(n);
         req->cqe.cid = cmd.cid;
         req->cmd_opcode = cmd.opcode;
         memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
@@ -481,7 +487,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 
     while ((req = pqueue_peek(pq))) {
-        now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        now = nvme_io_clock(n);
         if (now < req->expire_time) {
             break;
         }

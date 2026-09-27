@@ -1983,6 +1983,7 @@ typedef struct OcCtrlParams {
     uint8_t  num_lun;
     uint8_t  num_pln;
     uint16_t sos;
+    bool channel_timing;
 } OcCtrlParams;
 
 struct FemuCtrl;
@@ -2072,6 +2073,7 @@ typedef struct FemuCtrl {
     } stream_slots[32];
     uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
+    bool        test_oc12_clock;
     bool        test_ns_fail;
     uint32_t    changed_nsids[1024];
     uint16_t    changed_ns_count;

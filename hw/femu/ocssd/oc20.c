@@ -266,12 +266,12 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         int64_t chnl_end_ts, chip_end_ts;
         if (req->is_write) {
             /* Write data needs to be transferred through the channel first */
-            chnl_end_ts = advance_channel_timestamp(n, ch, now, opcode);
+            chnl_end_ts = advance_channel_timestamp(n, ch, now, 0);
             /* Then issue NAND Program to the target flash chip */
             io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, 0);
         } else {
             chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
-            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts, opcode);
+            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts, 0);
         }
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */

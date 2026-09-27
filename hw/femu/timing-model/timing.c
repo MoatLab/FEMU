@@ -63,37 +63,18 @@ void set_latency(FemuCtrl *n)
     }
 }
 
-/*
- * TODO: should be independent from different FEMU modes
- */
-int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now, int opcode)
+/* Reserve one transfer on the channel shared by its LUNs. */
+int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
+                                  uint64_t transfer_ns)
 {
-    uint64_t start_data_xfer_ts;
     uint64_t data_ready_ts;
 
-    /* TODO: Considering channel-level timing */
-    return now;
+    if (!transfer_ns) {
+        return now;
+    }
 
     pthread_spin_lock(&n->chnl_locks[ch]);
-    if (now < n->chnl_next_avail_time[ch]) {
-        start_data_xfer_ts = n->chnl_next_avail_time[ch];
-    } else {
-        start_data_xfer_ts = now;
-    }
-
-    switch (opcode) {
-    case NVME_CMD_OC_READ:
-    case NVME_CMD_OC_WRITE:
-        data_ready_ts = start_data_xfer_ts + n->chnl_pg_xfer_lat_ns * 2;
-        break;
-    case NVME_CMD_OC_ERASE:
-        data_ready_ts = start_data_xfer_ts;
-        break;
-    default:
-        femu_err("opcode=%d\n", opcode);
-        assert(0);
-    }
-
+    data_ready_ts = MAX(now, n->chnl_next_avail_time[ch]) + transfer_ns;
     n->chnl_next_avail_time[ch] = data_ready_ts;
     pthread_spin_unlock(&n->chnl_locks[ch]);
 

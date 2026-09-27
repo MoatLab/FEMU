@@ -2417,6 +2417,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
+    DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,
+                     oc_params.channel_timing, false),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, oc_params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, oc_params.secs_per_pg, 4),
     DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, oc_params.pgs_per_blk, 512),
@@ -2608,9 +2610,22 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     }
 }
 
+static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    if (n->femu_mode != FEMU_OCSSD_MODE || n->lver != 1 || n->sq[0]) {
+        error_setg(errp, "test clock requires a disabled OC 1.2 controller");
+        return;
+    }
+    n->test_oc12_clock = value;
+}
+
 static void femu_instance_init(Object *obj)
 {
     if (qtest_enabled()) {
+        object_property_add_bool(obj, "x-oc12-clock", NULL,
+                                 femu_test_oc12_clock);
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
     }
@@ -2631,6 +2646,9 @@ static void femu_class_init(ObjectClass *oc, const void *data)
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "FEMU Non-Volatile Memory Express";
     device_class_set_props(dc, femu_props);
+    object_class_property_set_description(oc, "oc12_channel_timing",
+        "Account OC 1.2 channel transfers per lsecs_per_pg sectors; "
+        "ch_xfer_lat sets ns per NAND page, zero uses flash_type timing");
     object_class_property_set_description(oc, "streams",
         "Enable Streams; bbssd separates streams per FTL page (SWS), "
         "sub-SWS writes share that page and line; NoSSD has no placement effect");
