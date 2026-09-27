@@ -3448,9 +3448,17 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             id = nvme_ns_allocated(n, nsid)->id_ns;
         }
         resume = nvme_pause_pollers(n);
-        if (qtest_enabled() && n->test_ns_seed) {
-            n->test_ns_seed = false;
-            nvme_qtest_seed_ns_requests(n);
+        if (qtest_enabled()) {
+            for (uint32_t c = 0; c < NVME_MAX_CONTROLLERS; c++) {
+                FemuCtrl *ctrl = nvme_ns_shared(n) ?
+                                nvme_subsys_ctrl(n->subsys, c) :
+                                c == 0 ? n : NULL;
+
+                if (ctrl && ctrl->test_ns_seed) {
+                    ctrl->test_ns_seed = false;
+                    nvme_qtest_seed_ns_requests(ctrl);
+                }
+            }
         }
         for (uint32_t i = 1; i <= n->namespace_limit; i++) {
             ns = nvme_ns_allocated(n, i);
