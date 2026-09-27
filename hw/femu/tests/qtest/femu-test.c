@@ -10854,6 +10854,16 @@ static void femu_test_power_destage(void *obj, void *data,
     femu_power_read(&c, buf, 1, 0, 0x31);
     femu_power_read(&c, buf, 1, 8, 0);
     guest_free(alloc, buf);
+    buf = guest_alloc(alloc, 8192);
+    qtest_memset(c.pdev->bus->qts, buf, 0x53, 8192);
+    /* Admission must also work within a request larger than the cache. */
+    g_assert_cmpint(femu_write_8k(&c, buf, 16, 16), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 16, 0x53);
+    femu_power_read(&c, buf, 1, 23, 0x53);
+    femu_power_read(&c, buf, 1, 24, 0);
+    femu_power_read(&c, buf, 1, 31, 0);
+    guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
@@ -10899,6 +10909,119 @@ static void femu_test_power_namespaces(void *obj, void *data,
     femu_power_cut(&c);
     femu_power_read(&c, buf, 1, 0, 0);
     femu_power_read(&c, buf, 2, 0, 0x42);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_lifecycle(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    if (action == 0) {
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+                                               false, 0, 0, NULL)), ==,
+                       NVME_SUCCESS);
+        /* Disabling the cache must also commit earlier writes. */
+    } else if (action == 1) {
+        uint32_t cc = qpci_io_readl(c.pdev, c.bar, 0x14);
+
+        qpci_io_writel(c.pdev, c.bar, 0x14, cc | (1 << 14));
+        g_assert_cmphex(qpci_io_readl(c.pdev, c.bar, 0x1c) & (3 << 2), ==,
+                       NVME_CSTS_SHST_COMPLETE);
+    } else {
+        /* A controller reset alone neither loses nor commits dirty data. */
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        femu_create_io_queues(&c);
+        femu_power_read(&c, buf, 1, 0, 0x31);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, action == 2 ? 0 : 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_validity(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeDsmRange range = { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(2) };
+    NvmeCmd cmd = { .opcode = NVME_CMD_DSM, .nsid = cpu_to_le32(1),
+                   .cdw11 = cpu_to_le32(FEMU_DSM_AD) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    qtest_memwrite(c.pdev->bus->qts, buf, &range, sizeof(range));
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 2, 1, 0x42, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 1, 0x31);
+    femu_power_read(&c, buf, 1, 2, 0);
+    femu_power_read(&c, buf, 1, 3, 0x31);
+
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_ZEROES, 0, 8), ==,
+                   NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0x53, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8), ==,
+                   NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0x64, false);
+    femu_power_cut(&c);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                   NVME_UNRECOVERED_READ);
+    femu_power_write(&c, buf, 1, 0, 8, 0x75, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x75);
+
+    femu_power_write(&c, buf, 1, 8, 8, 0x86, false);
+    g_assert_cmpint(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_read(&c, buf, 1, 8, 0);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_power_flush_pending(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    qtest_memset(c.pdev->bus->qts, buf, 0x42, 4096);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, &flush);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                       NVME_SUCCESS);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x31);
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -12885,6 +13008,52 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
         .arg = GINT_TO_POINTER(0),
+    });
+    qos_add_test("power-loss-reset", "femu", femu_test_power_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(2),
+    });
+    qos_add_test("power-loss-shutdown", "femu", femu_test_power_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(1),
+    });
+    qos_add_test("power-loss-cache-disable", "femu", femu_test_power_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(0),
+    });
+    qos_add_test("power-loss-dma-error", "femu", femu_test_dma_error,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+    });
+    qos_add_test("power-loss-flush-pending", "femu",
+                 femu_test_power_flush_pending,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+    });
+    qos_add_test("power-loss-validity", "femu", femu_test_power_validity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on,oncs=31",
     });
     qos_add_test("power-loss", "femu", femu_test_power_loss,
                  &(QOSGraphTestOptions) {

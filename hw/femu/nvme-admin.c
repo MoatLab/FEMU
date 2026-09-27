@@ -1628,6 +1628,14 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          * stopped rather than under a request in flight.
          */
         resume = nvme_pause_pollers(n);
+        if (n->power_loss && !(dw11 & 1)) {
+            uint16_t status = bbssd_flush_all(n);
+
+            if (status) {
+                nvme_resume_pollers(n, resume);
+                return status;
+            }
+        }
         n->features.volatile_wc = dw11 & 0x1;
         nvme_resume_pollers(n, resume);
         break;

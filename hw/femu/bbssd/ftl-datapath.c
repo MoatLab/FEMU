@@ -255,6 +255,24 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     nvme_mark_written(ns, first >> shift, (end - first) >> shift);
 }
 
+/* Admin callers hold both pollers and the FTL thread paused. */
+uint16_t bbssd_flush_all(FemuCtrl *n)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ssd) {
+            ssd_buffer_destage(ns->ssd, 0, now);
+            if (ns->ssd->write_buffer_cnt) {
+                return NVME_CAP_EXCEEDED | NVME_DNR;
+            }
+        }
+    }
+    return NVME_SUCCESS;
+}
+
 /* Called with the controller stopped; old mappings still name durable pages. */
 void bbssd_power_loss(NvmeNamespace *ns)
 {

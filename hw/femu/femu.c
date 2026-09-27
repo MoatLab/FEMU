@@ -611,6 +611,17 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
         bool reset = !NVME_CC_EN(data) && NVME_CC_EN(cc);
         bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc);
 
+        if (n->power_loss && shutdown && NVME_CC_SHN(data) == 1) {
+            bool resume = nvme_pause_pollers(n);
+            uint16_t status = bbssd_flush_all(n);
+
+            if (status) {
+                nvme_resume_pollers(n, resume);
+                n->bar.csts |= NVME_CSTS_FAILED;
+                break;
+            }
+        }
+
         /* reserved bits, and CRIME, which CAP.CRMS does not offer */
         data &= 0x00fffff1;
 
@@ -1674,6 +1685,9 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
     }
 
     if (n->power_loss) {
+        if (req->status != NVME_SUCCESS) {
+            return 0;
+        }
         /* Other media mutations first make any older dirty bytes durable. */
         if (req->cmd.opcode != NVME_CMD_WRITE &&
             req->cmd.opcode != NVME_CMD_READ &&
