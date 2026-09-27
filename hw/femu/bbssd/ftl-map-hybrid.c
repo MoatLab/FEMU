@@ -1,23 +1,23 @@
 /*
- * Hybrid log-block L2P mapping (BAST: Block-Associative Sector Translation, Kim 2002),
- * implemented behind the femu_mapping_ops vtable. This is a genuinely-behavioral scheme:
- * it models a small pool of per-data-block log blocks that absorb overwrites, and runs the
- * BAST merge state machine (switch merge vs full merge) whose cost -- extra NAND reads,
- * writes, and erases -- is charged to the timeline (ssd_advance_status) and to the WAF
- * counters (ssd->gc_write_pages), so write amplification is measurable and workload-shaped
- * (sequential overwrites -> cheap switch merges, WAF~1; random overwrites -> full merges,
- * WAF rises). Reference: flashsim FTLs/bast_ftl.cpp (is_sequential->promote / random_merge);
- * wiscsee nkftl2 switch/full merge. Founding paper: Kim et al. 2002 (1:1 log:data block).
+ * Hybrid log-block mapping with BAST's one-log-per-logical-block association.
+ * Each page reaching NAND consumes a fresh log slot, even when its logical
+ * offset was already written. NAND cannot overwrite a programmed page; neither
+ * overwrite invalidation nor trim restores a slot. Only merging resets it.
+ * See Lee et al., "A Log Buffer-Based Flash Translation Layer Using
+ * Fully-Associative Sector Translation", sections 2.2 and 2.4, for BAST's
+ * append and merge rules; section 3 describes FAST's shared-log alternative.
  *
- * Faithful-vs-simplified note (honest): FEMU's data placement goes through one shared
- * write-pointer allocator (get_new_page) over lines, which does not let a scheme pin a
- * write to a specific physical log block. So this scheme is a *merge-cost overlay*: the L2P
- * (maptbl/rmap) and physical page allocation stay exactly as the page scheme's (data is
- * always correct and read-back identical), while the BAST log/merge BEHAVIOR and its WAF
- * cost are modeled on top. A fully-faithful BAST that physically segregates log vs data
- * blocks would need an allocator hook (FEMU_MAP_CLASS_LOG honored by get_new_page); that is
- * a documented future datapath change, not implemented here. The merge accounting is real;
- * the physical block segregation is abstracted.
+ * FEMU routes initial writes as well as overwrites through sixteen logical
+ * logs. It merges the fullest log when a log fills or the pool is occupied,
+ * breaking ties by slot order. A complete in-order log can switch without
+ * copying; a full merge copies each currently mapped page of the logical
+ * block once, including surviving data from earlier merges.
+ *
+ * This is a merge-cost model, not physical BAST block placement: LOG and DATA
+ * have separate line write pointers, but logical logs share physical lines.
+ * Full merges really relocate pages and charge gc_write_pages; switch merges
+ * charge an erase without physically exchanging blocks. Physical line GC is
+ * separate and can add copies. Reads use the flat L2P.
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
@@ -28,7 +28,7 @@
 
 struct hybrid_log {
     int64_t lbn;          /* data block this log serves; -1 = free */
-    int used;             /* pages written into this log block */
+    int used;             /* programs, including invalidated pages */
     int seq;              /* pages still in sequential order (offset i at slot i) */
 };
 
@@ -287,11 +287,9 @@ static void femu_map_hybrid_gc_relocate_commit(struct ssd *ssd, uint64_t lpn,
     set_rmap_ent(ssd, lpn, new_ppa);
 }
 
-/* trim: drop the lpn from the flat L2P and adjust its log model bookkeeping. */
+/* Trim changes logical validity, not the number of programmed log slots. */
 static void femu_map_hybrid_trim(struct ssd *ssd, uint64_t lpn)
 {
-    struct femu_map_hybrid *h = hy(ssd);
-    int64_t lbn = lpn / h->pgs_per_blk;
     struct ppa old = get_maptbl_ent(ssd, lpn);
 
     if (mapped_ppa(&old)) {
@@ -299,9 +297,6 @@ static void femu_map_hybrid_trim(struct ssd *ssd, uint64_t lpn)
         set_rmap_ent(ssd, INVALID_LPN, &old);
         old.ppa = UNMAPPED_PPA;
         set_maptbl_ent(ssd, lpn, &old);
-    }
-    if (h->lbn_to_log[lbn] >= 0 && h->logs[h->lbn_to_log[lbn]].used > 0) {
-        h->logs[h->lbn_to_log[lbn]].used--;
     }
 }
 

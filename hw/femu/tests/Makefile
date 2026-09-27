@@ -21,10 +21,14 @@ test-femu-nand-media: $(TEST_SRC) nand-media.o ../nand/nand-media.h
 nand-media.o: ../nand/nand-media.c ../nand/nand-media.h
 	$(CC) $(CFLAGS_LIB) $(INCLUDES) -c -o $@ ../nand/nand-media.c
 
-check: test-femu-nand-media
+test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
+
+check: test-femu-nand-media test-femu-hybrid-oracle
 	./test-femu-nand-media
+	./test-femu-hybrid-oracle
 
 clean:
-	rm -f test-femu-nand-media nand-media.o
+	rm -f test-femu-nand-media test-femu-hybrid-oracle nand-media.o
 
 .PHONY: check clean

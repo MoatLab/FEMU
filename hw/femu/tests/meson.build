@@ -6,6 +6,7 @@
 # placed after qemuutil is declared because these link against it.
 
 femu_unit_tests = {
+  'test-femu-hybrid-oracle': files('unit/test-hybrid-oracle.c'),
   'test-femu-nand-media': files('unit/test-nand-media.c',
                                 '../nand/nand-media.c'),
   'test-femu-pqueue': files('unit/test-pqueue.c', '../lib/pqueue.c'),

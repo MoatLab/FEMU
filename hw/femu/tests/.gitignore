@@ -1,3 +1,4 @@
 test-femu-nand-media
 test-nand-media
 *.o
+test-femu-hybrid-oracle

@@ -18,6 +18,7 @@
 #include "libqos/pci.h"
 #include "libqos/libqos-malloc.h"
 #include "block/nvme.h"
+#include "hw/femu/tests/unit/hybrid-oracle.h"
 #include "standard-headers/linux/pci_regs.h"
 
 #define FEMU_QSIZE          16
@@ -1688,6 +1689,63 @@ static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
     cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
 
     return femu_admin(c, &cmd);
+}
+
+/* Compare media programs; these short traces never require physical line GC. */
+static void femu_hybrid_check(FemuCtrlState *c, uint64_t buf,
+                              const HybridOracle *o)
+{
+    uint8_t stats[512];
+
+    g_assert_cmpint(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, sizeof(stats),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, stats, sizeof(stats));
+    g_assert_cmpuint(ldq_le_p(stats + 24), ==, o->programs);
+    g_assert_cmpuint(ldq_le_p(stats + 16), ==, o->copies);
+    g_assert_cmpuint(ldq_le_p(stats + 24) + ldq_le_p(stats + 16), ==,
+                     o->programs + o->copies);
+}
+
+static void femu_test_hybrid_trim(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd cmd = { 0 };
+    uint8_t range[16] = { 0 };
+    unsigned i;
+    uint16_t got;
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    hybrid_oracle_write(&oracle, 0);
+
+    stl_le_p(range + 4, 8);
+    qtest_memwrite(c.pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    hybrid_oracle_trim(&oracle, 0);
+
+    /* The trimmed slot is still programmed: three more writes fill the log. */
+    for (i = 1; i < 4; i++) {
+        qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 8, buf), ==,
+                        NVME_SUCCESS);
+        hybrid_oracle_write(&oracle, 1);
+    }
+    femu_hybrid_check(&c, buf, &oracle);
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
 }
 
 /*
@@ -11368,6 +11426,12 @@ static void femu_register_nodes(void)
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
+    qos_add_test("hybrid-trim-occupancy", "femu", femu_test_hybrid_trim,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
     qos_add_test("streams-resources", "femu", femu_test_streams_resources,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "streams=on,streams.max=4,namespaces=2"
