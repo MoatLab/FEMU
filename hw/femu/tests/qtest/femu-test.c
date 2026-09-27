@@ -12996,6 +12996,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-pel", "femu", femu_test_power_log,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power0,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13004,6 +13005,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-smart", "femu", femu_test_power_log,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power1,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13012,6 +13014,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-reset", "femu", femu_test_power_lifecycle,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power2,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13020,6 +13023,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-shutdown", "femu", femu_test_power_lifecycle,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power3,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13028,6 +13032,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-cache-disable", "femu", femu_test_power_lifecycle,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power4,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13036,6 +13041,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-dma-error", "femu", femu_test_dma_error,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power5,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13044,6 +13050,7 @@ static void femu_register_nodes(void)
                  femu_test_power_flush_pending,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power6,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13051,6 +13058,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-validity", "femu", femu_test_power_validity,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power7,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on,oncs=31",
@@ -13058,6 +13066,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss", "femu", femu_test_power_loss,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power8,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13065,6 +13074,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-flush", "femu", femu_test_power_durable,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power9,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13072,6 +13082,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-fua", "femu", femu_test_power_durable,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power10,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on",
@@ -13080,6 +13091,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-destage", "femu", femu_test_power_destage,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power11,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=1,vwc=1,power_loss=on",
@@ -13087,6 +13099,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-vwc-zero", "femu", femu_test_power_cache_off,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power12,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=0,power_loss=on",
@@ -13094,6 +13107,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-off", "femu", femu_test_power_cache_off,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power13,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1",
@@ -13102,6 +13116,7 @@ static void femu_register_nodes(void)
     qos_add_test("power-loss-namespaces", "femu", femu_test_power_namespaces,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
+            "serial=power14,"
             "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "buffer_size=4,vwc=1,power_loss=on,namespaces=2",
