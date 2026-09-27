@@ -10625,6 +10625,36 @@ static void femu_test_streams_churn(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_streams_recovery(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t status;
+    unsigned i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    for (i = 1; i <= 40; i++) {
+        status = femu_stream_write(&c, 1, i * 8, buf, 1, i);
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        g_assert_cmphex(femu_directive(&c, false, 1, (i << 16) | 0x101,
+                                     0, 0, 0, NULL), ==, NVME_SUCCESS);
+    }
+    for (i = 0; i <= 16; i++) {
+        status = femu_stream_write(&c, 1, (64 + i) * 8, buf, 0, 0);
+        g_assert_cmphex(status, ==, i < 16 ? NVME_SUCCESS : NVME_CAP_EXCEEDED);
+    }
+    g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 0, 0), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_streams_config(void *obj, void *data,
                                    QGuestAllocator *alloc)
 {
@@ -10716,6 +10746,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=streams-test,streams=on,streams.max=2,namespaces=2,"
             "femu_mode=1,secs_per_pg=8,pgs_per_blk=32,blks_per_pl=128,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("streams-recovery", "femu", femu_test_streams_recovery,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "streams=on,streams.max=2,devsz_mb=1,femu_mode=1,"
+            "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=24,"
             "pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
     qos_add_test("streams-churn", "femu", femu_test_streams_churn,

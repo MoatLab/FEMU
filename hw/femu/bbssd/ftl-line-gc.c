@@ -204,6 +204,15 @@ static struct ppa ssd_stream_pointer_page(struct ssd *ssd,
     return ppa;
 }
 
+bool ssd_out_of_lines(struct ssd *ssd)
+{
+    /* Format or GC may have freed space since the ordinary frontier filled. */
+    if (ssd->n->streams && !ssd->wp.curline && ssd->lm.free_line_cnt) {
+        ssd_stream_pointer_page(ssd, &ssd->wp, 0);
+    }
+    return ssd->wp.curline == NULL;
+}
+
 static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
 {
     struct line *line = wp->curline;
