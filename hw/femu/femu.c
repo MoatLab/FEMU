@@ -416,7 +416,7 @@ static void nvme_reset_features(FemuCtrl *n)
         n->features.int_vector_config[i] = i | (n->intc << 16);
     }
     for (i = 0; i < n->namespace_limit; i++) {
-        if (n->namespaces[i].allocated) {
+        if (!nvme_ns_shared(n) && n->namespaces[i].allocated) {
             n->namespaces[i].err_rec = 0;
         }
     }
@@ -1858,6 +1858,9 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
 {
     int i;
 
+    if (nvme_ns_shared(n) && BBSSD(n)) {
+        return true;
+    }
     for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 

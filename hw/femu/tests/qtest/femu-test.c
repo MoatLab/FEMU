@@ -10166,6 +10166,91 @@ static void femu_test_shared_retire(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_shared_remove(FemuCtrlState *c, const char *id, int slot)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    femu_disable(c);
+    femu_queue_free(c, &c->io);
+    qpci_unplug_acpi_device_test(qts, id, slot);
+    g_free(c->pdev);
+    memset(c, 0, sizeof(*c));
+}
+
+static void femu_test_shared_remove(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t result;
+    uint32_t nsid;
+    uint8_t uuid[16];
+    uint8_t other[16];
+    int mode = GPOINTER_TO_INT(data);
+    QPCIDevice *pdev;
+
+    femu_shared_start(femu, alloc, &a, &b, mode);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0x5c, true);
+    g_assert_cmpint(femu_identify(&b, 1, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, uuid, sizeof(uuid));
+    g_assert_cmpint(femu_set_feature(&b, NVME_ERROR_RECOVERY, false, 1,
+                                     1 << 16, NULL), ==, NVME_SUCCESS);
+    femu_shared_remove(&a, "shared-a", 5);
+    g_assert_cmpint(femu_get_feature(&b, NVME_ERROR_RECOVERY, 0, 1, 0,
+                                     &result), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 1 << 16);
+    femu_ns_page(&b, buf, 1, 0, 0x5c, false);
+    g_assert_cmpint(femu_identify(&b, 1, 3, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, other, sizeof(other));
+    g_assert_cmpmem(uuid, sizeof(uuid), other, sizeof(other));
+    g_assert_cmpint(femu_ns_attach(&b, buf, 1, 1, false), ==, NVME_SUCCESS);
+    femu_disable(&b);
+    femu_queue_free(&b, &b.io);
+    femu_enable(&b, b.pdev, alloc);
+    femu_create_io_queues(&b);
+    g_assert_cmpint(femu_identify(&b, 0, 2, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpint(femu_ns_attach(&b, buf, 1, 1, true), ==, NVME_SUCCESS);
+    femu_ns_page(&b, buf, 1, 0, 0x5c, false);
+    femu_shared_remove(&b, "shared-b", 6);
+
+    /* Storage outlives all transports, including its first configuration. */
+    femu_shared_add(qts, "shared-a", 5, mode);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&a, pdev, alloc);
+    femu_create_io_queues(&a);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 0, true), ==, NVME_SUCCESS);
+    femu_ns_page(&a, buf, 1, 0, 0x5c, false);
+    g_assert_cmpint(femu_ns_delete(&a, 0xffffffff), ==, NVME_SUCCESS);
+    femu_shared_remove(&a, "shared-a", 5);
+
+    /* An empty bbssd pool must still start a worker for future Create. */
+    femu_shared_add(qts, "shared-a", 5, mode);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&a, pdev, alloc);
+    femu_create_io_queues(&a);
+    g_assert_cmpint(femu_shared_create(&a, buf, 0, true, &nsid), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 0, true), ==, NVME_SUCCESS);
+    femu_ns_page(&a, buf, 1, 0, 0, false);
+    femu_ns_page(&a, buf, 1, 0, 0x93, true);
+    if (mode == 1) {
+        g_assert_cmpint(femu_get_log(&a, FEMU_LOG_FEMU_STATS, buf, 512, 0), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, buf + 24), >, 0);
+    }
+    femu_shared_remove(&a, "shared-a", 5);
+    qtest_qmp_assert_success(qts,
+        "{'execute':'qom-set','arguments':{'path':'/machine/peripheral/shared',"
+        "'property':'realized','value':false}}");
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ns_mgmt_subsys(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -13338,6 +13423,14 @@ static void femu_register_nodes(void)
     qos_add_test("ns-mgmt-validation", "femu", femu_test_ns_mgmt_validation,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
+    });
+    qos_add_test("ns-shared-remove-nossd", "femu", femu_test_shared_remove,
+                 &(QOSGraphTestOptions) {
+        .before = femu_shared_before, .arg = GINT_TO_POINTER(2),
+    });
+    qos_add_test("ns-shared-remove-bbssd", "femu", femu_test_shared_remove,
+                 &(QOSGraphTestOptions) {
+        .before = femu_shared_before, .arg = GINT_TO_POINTER(1),
     });
     qos_add_test("ns-shared-retire-nossd", "femu", femu_test_shared_retire,
                  &(QOSGraphTestOptions) {
