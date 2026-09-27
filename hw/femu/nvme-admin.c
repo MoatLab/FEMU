@@ -1899,6 +1899,9 @@ typedef struct FemuMediaStats {
     uint64_t host_pages, gc_pages, nand_pages;
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
     uint64_t buf_reads, buf_read_hits, buf_writes, buf_write_hits;
+    uint64_t hybrid_switches;
+    uint64_t hybrid_full;
+    uint64_t hybrid_erases;
     uint64_t media_errors;      /* summed over every namespace */
     uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
@@ -1949,6 +1952,8 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->host_pages += ssd_host_write_pages(ns->ssd);
         st->gc_pages   += ssd_gc_write_pages(ns->ssd);
         st->nand_pages += ssd_nand_write_pages(ns->ssd);
+        ssd_hybrid_stats(ns->ssd, &st->hybrid_switches, &st->hybrid_full,
+                         &st->hybrid_erases);
         st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
                             ssd_gc_write_pages(ns->ssd)) *
                            (uint64_t)ssd_page_size(ns->ssd);
@@ -1973,6 +1978,10 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
  * Vendor-specific log page C0h: the emulator's media counters. Read it with
  *   nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b
  * and the fields sit at the offsets FemuStatsLog declares.
+ * Bytes 88, 96 and 104 hold little-endian uint64_t hybrid switch merges,
+ * full merges and charged merge erases, summed over namespaces. Physical
+ * line GC is excluded. Other mappings leave these formerly reserved bytes
+ * zero; existing fields and the 512-byte size are unchanged.
  */
 static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
 {
@@ -2001,6 +2010,9 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.buffer_read_hits = cpu_to_le64(st.buf_read_hits);
     stats.buffer_writes = cpu_to_le64(st.buf_writes);
     stats.buffer_write_hits = cpu_to_le64(st.buf_write_hits);
+    stats.hybrid_switch_merges = cpu_to_le64(st.hybrid_switches);
+    stats.hybrid_full_merges = cpu_to_le64(st.hybrid_full);
+    stats.hybrid_merge_erases = cpu_to_le64(st.hybrid_erases);
     *log = stats;
 }
 

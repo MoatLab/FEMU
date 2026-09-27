@@ -1164,7 +1164,10 @@ typedef struct FemuStatsLog {
     uint64_t    buffer_read_hits; /* of those, the pages it held */
     uint64_t    buffer_writes;    /* host write pages */
     uint64_t    buffer_write_hits; /* of those, the pages it already held */
-    uint8_t     rsvd88[424];
+    uint64_t    hybrid_switch_merges;
+    uint64_t    hybrid_full_merges;
+    uint64_t    hybrid_merge_erases;
+    uint8_t     rsvd112[400];
 } FemuStatsLog;
 
 /*
@@ -2615,6 +2618,8 @@ uint32_t ssd_waf_x1000(struct ssd *ssd);
 uint64_t ssd_host_write_pages(struct ssd *ssd);
 uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
+void ssd_hybrid_stats(struct ssd *ssd, uint64_t *switches,
+                      uint64_t *full, uint64_t *erases);
 uint64_t ssd_max_block_reads(struct ssd *ssd);
 uint64_t ssd_read_reclaims(struct ssd *ssd);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);

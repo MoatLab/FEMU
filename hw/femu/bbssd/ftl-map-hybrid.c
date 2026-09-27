@@ -16,7 +16,10 @@
  * This is a merge-cost model, not physical BAST block placement: LOG and DATA
  * have separate line write pointers, but logical logs share physical lines.
  * Full merges really relocate pages and charge gc_write_pages; switch merges
- * charge an erase without physically exchanging blocks. Physical line GC is
+ * charge an erase without physically exchanging blocks. Retain the data
+ * block's physical erase anchor separately from L2P, replacing it only on a
+ * merge; overwrites and trim must not remove the old block's erase cost.
+ * Initial logs also incur one switch erase. Physical line GC is
  * separate and can add copies. Reads use the flat L2P.
  */
 #include "qemu/osdep.h"
@@ -28,6 +31,7 @@
 
 struct hybrid_log {
     int64_t lbn;          /* data block this log serves; -1 = free */
+    struct ppa anchor;    /* first program, retained even if trimmed */
     int used;             /* programs, including invalidated pages */
     int seq;              /* pages still in sequential order (offset i at slot i) */
 };
@@ -39,9 +43,11 @@ struct femu_map_hybrid {
     /* per-data-block -> index into logs[], or -1 if no open log block */
     int *lbn_to_log;
     int64_t nr_lbns;
+    struct ppa *data_blocks; /* erase identity independent of live L2P */
     /* counters (exposed via ftl_log / debug) */
     uint64_t switch_merges;
     uint64_t full_merges;
+    uint64_t merge_erases;
     uint64_t merge_read_pages;
     uint64_t merge_write_pages;
 };
@@ -64,8 +70,10 @@ static void femu_map_hybrid_init(struct ssd *ssd)
     }
     h->nr_lbns = spp->tt_pgs / spp->pgs_per_blk + 1;
     h->lbn_to_log = g_malloc0(sizeof(int) * h->nr_lbns);
+    h->data_blocks = g_new(struct ppa, h->nr_lbns);
     for (int64_t i = 0; i < h->nr_lbns; i++) {
         h->lbn_to_log[i] = -1;
+        h->data_blocks[i].ppa = UNMAPPED_PPA;
     }
     ssd->map_priv = h;
 }
@@ -152,6 +160,13 @@ static void femu_map_hybrid_commit_write(struct ssd *ssd, uint64_t lpn,
     int li = hybrid_get_log(h, lbn);
     if (li >= 0) {
         struct hybrid_log *lg = &h->logs[li];
+        if (!lg->used) {
+            lg->anchor = *new_ppa;
+        }
+        /* Initial logs also charge one switch erase in this cost model. */
+        if (!mapped_ppa(&h->data_blocks[lbn])) {
+            h->data_blocks[lbn] = *new_ppa;
+        }
         /* sequential iff this write lands at the next in-order slot */
         if (lg->used == off) {
             lg->seq++;
@@ -216,12 +231,14 @@ static uint64_t femu_map_hybrid_reclaim(struct ssd *ssd, int budget)
         if (switch_ok) {
             /* switch merge: log block becomes the data block; old data block erased.
              * cost ~ one block erase, no page copies. */
-            struct ppa anchor = get_maptbl_ent(ssd, base_lpn);
-            if (mapped_ppa(&anchor)) {
-                lat += hybrid_charge(ssd, &anchor, NAND_ERASE);
-            }
+            struct ppa anchor = h->data_blocks[lbn];
+            lat += hybrid_charge(ssd, &anchor, NAND_ERASE);
+            h->merge_erases++;
+            h->data_blocks[lbn] = lg->anchor;
             h->switch_merges++;
         } else {
+            bool have_data = false;
+
             /*
              * Copy each live logical page to DATA-class space. Invalidating
              * its previous mapping leaves physical reclamation to line GC;
@@ -241,6 +258,10 @@ static uint64_t femu_map_hybrid_reclaim(struct ssd *ssd, int budget)
                 struct ppa new = get_new_page_class(ssd, FEMU_MAP_CLASS_DATA);
                 if (!mapped_ppa(&new)) {
                     break;
+                }
+                if (!have_data) {
+                    h->data_blocks[lbn] = new;
+                    have_data = true;
                 }
                 lat += hybrid_charge(ssd, &old, NAND_READ);   /* read valid page */
                 mark_page_invalid(ssd, &old);
@@ -308,6 +329,7 @@ static void femu_map_hybrid_exit(struct ssd *ssd)
     }
     g_free(h->logs);
     g_free(h->lbn_to_log);
+    g_free(h->data_blocks);
     g_free(h);
     ssd->map_priv = NULL;
 }
@@ -327,3 +349,18 @@ const struct femu_mapping_ops femu_mapping_hybrid_ops = {
     .gc_relocate_commit = femu_map_hybrid_gc_relocate_commit,
     .trim               = femu_map_hybrid_trim,
 };
+
+/* Add only hybrid costs; physical line GC is accounted separately. */
+void ssd_hybrid_stats(struct ssd *ssd, uint64_t *switches,
+                      uint64_t *full, uint64_t *erases)
+{
+    struct femu_map_hybrid *h;
+
+    if (ssd->mapping != &femu_mapping_hybrid_ops || !ssd->map_priv) {
+        return;
+    }
+    h = hy(ssd);
+    *switches += h->switch_merges;
+    *full += h->full_merges;
+    *erases += h->merge_erases;
+}

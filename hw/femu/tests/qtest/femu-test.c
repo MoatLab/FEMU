@@ -1717,10 +1717,20 @@ static void femu_test_hybrid_trim(void *obj, void *data,
     uint8_t range[16] = { 0 };
     unsigned i;
     uint16_t got;
+    bool sequential = GPOINTER_TO_INT(data);
 
     hybrid_oracle_init(&oracle, 4, 16, 256);
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    if (sequential) {
+        /* Establish the old data block before opening its replacement log. */
+        for (i = 0; i < 4; i++) {
+            qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+            g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf), ==,
+                            NVME_SUCCESS);
+            hybrid_oracle_write(&oracle, i);
+        }
+    }
     qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
     g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
     hybrid_oracle_write(&oracle, 0);
@@ -1738,11 +1748,21 @@ static void femu_test_hybrid_trim(void *obj, void *data,
     /* The trimmed slot is still programmed: three more writes fill the log. */
     for (i = 1; i < 4; i++) {
         qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
-        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 8, buf), ==,
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE,
+                                 (sequential ? i : 1) * 8, buf), ==,
                         NVME_SUCCESS);
-        hybrid_oracle_write(&oracle, 1);
+        hybrid_oracle_write(&oracle, sequential ? i : 1);
     }
     femu_hybrid_check(&c, buf, &oracle);
+    if (sequential) {
+        uint8_t stats[512];
+
+        g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                     sizeof(stats), 0), ==, NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, stats, sizeof(stats));
+        /* C0h byte 104: LE64 charged hybrid merge erases, excluding line GC. */
+        g_assert_cmpuint(ldq_le_p(stats + 104), ==, 2);
+    }
     hybrid_oracle_destroy(&oracle);
     femu_disable(&c);
     guest_free(alloc, buf);
@@ -11608,6 +11628,14 @@ static void femu_register_nodes(void)
             "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
             "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "vwc=1,buffer_size=16"
+    });
+    qos_add_test("hybrid-switch-trim-erase", "femu", femu_test_hybrid_trim,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "serial=hybrid-switch-trim-erase,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
     qos_add_test("hybrid-trim-occupancy", "femu", femu_test_hybrid_trim,
                  &(QOSGraphTestOptions) {
