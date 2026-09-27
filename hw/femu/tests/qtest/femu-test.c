@@ -7883,6 +7883,26 @@ static void femu_test_oc_sgl_refused(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_oc12_timing_config(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    unsigned field = GPOINTER_TO_UINT(data);
+    QDict *rsp;
+
+    rsp = qtest_qmp(femu->dev.bus->qts,
+                    "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'bad-oc12','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':0,'lver':1,"
+                    "'oc12_channel_timing':true,'flash_type':%u,"
+                    "'lpgs_per_blk':%u,'ch_xfer_lat':%d}}",
+                    field == 0 ? 0 : 2, field == 1 ? 513 : 512,
+                    field == 2 ? -1 : 0);
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
 static void femu_test_oc12_opcodes(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -11889,6 +11909,12 @@ static void femu_register_nodes(void)
             "id=oc12-test,femu_mode=0,lver=1,lsec_size=512,"
             "lsecs_per_pg=4,lnum_pln=1,lnum_ch=2,lnum_lun=2"
     });
+    qos_add_test("oc12-flash-type", "femu", femu_test_oc12_timing_config,
+                 &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(0) });
+    qos_add_test("oc12-page-count", "femu", femu_test_oc12_timing_config,
+                 &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(1) });
+    qos_add_test("oc12-transfer-cost", "femu", femu_test_oc12_timing_config,
+                 &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(2) });
     qos_add_test("oc12-opcodes", "femu", femu_test_oc12_opcodes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=1"

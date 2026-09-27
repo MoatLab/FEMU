@@ -1367,6 +1367,18 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     int i;
 
+    /* Guest page addresses index the selected NAND page-type table. */
+    if (n->flash_type < SLC || n->flash_type > QLC ||
+        n->oc_params.pgs_per_blk > MAX_SUPPORTED_PAGES_PER_BLOCK) {
+        error_setg(errp, "OC 1.2 requires SLC, MLC, TLC or QLC and at most "
+                   "%u pages per block", MAX_SUPPORTED_PAGES_PER_BLOCK);
+        return;
+    }
+    if (n->oc_params.channel_timing && n->bb_params.ch_xfer_lat < 0) {
+        error_setg(errp, "OC 1.2 ch_xfer_lat must be nonnegative");
+        return;
+    }
+
     if (!oc_timing_geometry_ok(n, errp)) {
         return;
     }
