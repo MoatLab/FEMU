@@ -238,6 +238,7 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 
     /* allocate from the class the scheme asked for and commit the mapping */
     if (stream >= 0) {
+        /* Sub-SWS writes share their FTL page and line with its other LBAs. */
         ppa = ssd_stream_page(ssd, stream,
                               ssd->n->stream_slots[stream].tag);
     } else {

@@ -2631,6 +2631,9 @@ static void femu_class_init(ObjectClass *oc, const void *data)
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "FEMU Non-Volatile Memory Express";
     device_class_set_props(dc, femu_props);
+    object_class_property_set_description(oc, "streams",
+        "Enable Streams; bbssd separates streams per FTL page (SWS), "
+        "sub-SWS writes share that page and line; NoSSD has no placement effect");
     dc->vmsd = &femu_vmstate;
 }
 

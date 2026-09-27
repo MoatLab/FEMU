@@ -13,6 +13,7 @@
 #include "qemu/module.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
+#include "qobject/qlist.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "libqos/libqos-malloc.h"
@@ -10600,6 +10601,104 @@ static void femu_test_streams_gc(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_streams_subpage(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    unsigned lines[2];
+    unsigned i;
+    unsigned j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    /* Both LBAs share LPN 0, which follows the most recent stream write. */
+    for (i = 0; i < 2; i++) {
+        NvmeCmd cmd = { 0 };
+        QDict *rsp;
+        unsigned frontiers;
+        uint64_t gc_pages;
+
+        qtest_memset(qts, buf, i ? 0x22 : 0x11, 512);
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(i);
+        cmd.cdw12 = cpu_to_le32(1 << 20);
+        cmd.cdw13 = cpu_to_le32((i ? 99 : 7) << 16);
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)),
+                       ==, NVME_SUCCESS);
+        rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/streams-test',"
+                        "'property':'x-stream-test'}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                              "%u %" SCNu64 " %u",
+                              &frontiers, &gc_pages, &lines[i]), ==, 3);
+        qobject_unref(rsp);
+    }
+    g_assert_cmpuint(lines[0], !=, lines[1]);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    for (j = 0; j < 512; j++) {
+        g_assert_cmphex(qtest_readb(qts, buf + j), ==, 0x11);
+        g_assert_cmphex(qtest_readb(qts, buf + 512 + j), ==, 0x22);
+    }
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_streams_sws(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    unsigned i;
+    QDict *rsp;
+    const QListEntry *entry;
+    bool found = false;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    for (i = 0; i < 2; i++) {
+        unsigned lba_bytes = i ? 4096 : 512;
+
+        g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0,
+                                     buf, 32, NULL), ==, NVME_SUCCESS);
+        /* This fixture has sixteen 512-byte sectors per FTL page. */
+        g_assert_cmpuint(qtest_readl(qts, buf + 16) * lba_bytes, ==, 8192);
+        if (!i) {
+            g_assert_cmphex(femu_format(&c, 1, 3, 0), ==, NVME_SUCCESS);
+        }
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device-list-properties',"
+                    "'arguments':{'typename':'femu'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(rsp, "return"), entry) {
+        QDict *prop = qobject_to(QDict, qlist_entry_obj(entry));
+
+        if (!strcmp(qdict_get_str(prop, "name"), "streams")) {
+            const char *desc = qdict_get_try_str(prop, "description");
+
+            g_assert_nonnull(desc);
+            g_assert_nonnull(strstr(desc, "FTL page (SWS)"));
+            found = true;
+        }
+    }
+    g_assert_true(found);
+    qobject_unref(rsp);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_streams_churn(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
@@ -10753,6 +10852,20 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "streams=on,streams.max=2,devsz_mb=1,femu_mode=1,"
             "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=24,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("streams-subpage", "femu", femu_test_streams_subpage,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=streams-test,streams=on,streams.max=2,devsz_mb=1,"
+            "femu_mode=1,secs_per_pg=8,pgs_per_blk=4,blks_per_pl=24,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("streams-sws", "femu", femu_test_streams_sws,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "streams=on,streams.max=2,devsz_mb=1,femu_mode=1,"
+            "secs_per_pg=16,pgs_per_blk=4,blks_per_pl=24,"
             "pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
     qos_add_test("streams-churn", "femu", femu_test_streams_churn,
