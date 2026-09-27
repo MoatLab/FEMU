@@ -2119,6 +2119,8 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     smart.percentage_used = st.percentage_used;
 
     smart.power_on_hours[0] = cpu_to_le64(nvme_power_on_ms(n) / 3600000);
+    smart.unsafe_shutdowns[0] = cpu_to_le64(n->unsafe_shutdowns[0]);
+    smart.unsafe_shutdowns[1] = cpu_to_le64(n->unsafe_shutdowns[1]);
 
     smart.available_spare_threshold = NVME_SPARE_THRESHOLD;
     if (smart.available_spare <= NVME_SPARE_THRESHOLD) {

@@ -2692,6 +2692,16 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         }
     }
     n->bar.csts = 0;
+    if (n->unsafe_shutdowns[0] != UINT64_MAX ||
+        n->unsafe_shutdowns[1] != UINT64_MAX) {
+        if (++n->unsafe_shutdowns[0] == 0) {
+            n->unsafe_shutdowns[1]++;
+        }
+    }
+    nvme_timestamp_set(n, 0, 0);
+    n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    femu_pel_reset(n);
+    femu_pel_power_loss(n);
 }
 
 static void femu_instance_init(Object *obj)

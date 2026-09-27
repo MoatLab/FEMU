@@ -179,6 +179,18 @@ static void pel_log_hw_error(FemuCtrl *n, uint16_t code, const void *info,
     femu_pel_log(n, NVME_PEL_HW_ERROR, 2, ev, 4 + len);
 }
 
+/* Figures 239-241: code 08h and the 17-byte power-loss information field. */
+void femu_pel_power_loss(FemuCtrl *n)
+{
+    uint8_t ev[21] = { 0 };
+
+    stw_le_p(ev, 0x08);
+    stq_le_p(ev + 4, n->unsafe_shutdowns[0]);
+    stq_le_p(ev + 12, n->unsafe_shutdowns[1]);
+    /* No out-of-band management operation caused this cut. */
+    femu_pel_log(n, NVME_PEL_HW_ERROR, 2, ev, sizeof(ev));
+}
+
 /*
  * A Critical Warning bit that has just come on is an event (code 06h), with
  * the whole warning byte as it now stands. Bits that go off are only noted,

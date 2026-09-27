@@ -2103,6 +2103,7 @@ typedef struct FemuCtrl {
     uint8_t     meta;
     bool        pi;
     bool        power_loss;
+    uint64_t    unsafe_shutdowns[2];
     uint8_t     vwc;
     uint8_t     mc;
     uint8_t     dpc;
@@ -2454,6 +2455,7 @@ typedef struct FemuPel FemuPel;
 void femu_pel_init(FemuCtrl *n);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
+void femu_pel_power_loss(FemuCtrl *n);
 void femu_pel_set_feature(FemuCtrl *n, const NvmeCmd *cmd,
                           const void *buffer, uint16_t len);
 void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,

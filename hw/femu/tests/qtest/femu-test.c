@@ -10904,6 +10904,45 @@ static void femu_test_power_namespaces(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_power_log(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QTestState *qts = femu->dev.bus->qts;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int cut = 1; cut <= 2; cut++) {
+        femu_power_cut(&c);
+        if (!data) {
+            g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO,
+                                               buf, 512, 0)), ==, NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readq(qts, buf + 144), ==, cut);
+            g_assert_cmpuint(qtest_readq(qts, buf + 152), ==, 0);
+        } else {
+            uint64_t e;
+
+            g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+            g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x08), ==, cut);
+            e = femu_pel_at(qts, buf, 0);
+            g_assert_cmphex(qtest_readb(qts, e), ==, 0x05);
+            g_assert_cmpint(qtest_readb(qts, e + 1), ==, 2);
+            g_assert_cmpint(qtest_readb(qts, e + 2), ==, 21);
+            g_assert_cmpint(qtest_readw(qts, e + 22), ==, 21);
+            g_assert_cmphex(qtest_readw(qts, e + 24), ==, 0x08);
+            g_assert_cmphex(qtest_readw(qts, e + 26), ==, 0);
+            g_assert_cmpuint(qtest_readq(qts, e + 28), ==, cut);
+            g_assert_cmpuint(qtest_readq(qts, e + 36), ==, 0);
+            g_assert_cmphex(qtest_readb(qts, e + 44), ==, 0);
+            g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+        }
+    }
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* Successful settings, including repeats, are retained for host diagnosis. */
 static void femu_test_pel_set_feature(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -12830,6 +12869,22 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = g_strdup_printf(
             "femu_mode=4,fdm_size=16,csd_program_dir=%s", femu_csd_dir),
+    });
+    qos_add_test("power-loss-pel", "femu", femu_test_power_log,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(1),
+    });
+    qos_add_test("power-loss-smart", "femu", femu_test_power_log,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "buffer_size=4,vwc=1,power_loss=on",
+        .arg = GINT_TO_POINTER(0),
     });
     qos_add_test("power-loss", "femu", femu_test_power_loss,
                  &(QOSGraphTestOptions) {
