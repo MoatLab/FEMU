@@ -7903,6 +7903,27 @@ static void femu_test_oc12_timing_config(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static void femu_test_oc12_capabilities(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t cap;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cmd.opcode = 0xe2; /* OC 1.2 Identify */
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf + 4, &cap, sizeof(cap));
+    /* Keep bad-block management advertised, without hybrid commands. */
+    g_assert_cmphex(le32_to_cpu(cap), ==, 0x1);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_oc12_opcodes(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -11984,6 +12005,10 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(1) });
     qos_add_test("oc12-transfer-cost", "femu", femu_test_oc12_timing_config,
                  &(QOSGraphTestOptions) { .arg = GUINT_TO_POINTER(2) });
+    qos_add_test("oc12-capabilities", "femu", femu_test_oc12_capabilities,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=1"
+    });
     qos_add_test("oc12-opcodes", "femu", femu_test_oc12_opcodes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=1"

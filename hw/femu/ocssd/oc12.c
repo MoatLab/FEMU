@@ -990,7 +990,8 @@ static void oc12_init_id_ctrl(Oc12Ctrl *ln)
     ln_id->dom = 0;
     ln_id->vmnt = 0;
     ln_id->cgrps = 1;
-    ln_id->cap = cpu_to_le32(0x3);
+    /* Bad-block management is supported; hybrid commands are not. */
+    ln_id->cap = cpu_to_le32(0x1);
 
     /* Addr format: CHANNEL | LUN | BLOCK | PAGE | PLANE | SECTOR */
     ln_id->ppaf.sect_offset = 0;
