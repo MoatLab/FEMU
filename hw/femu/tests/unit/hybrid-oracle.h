@@ -8,13 +8,17 @@
  * Reference for FEMU's simplified BAST policy, independent of its L2P and
  * allocator. Store the actual program history rather than fill/sequence
  * counters. An invalidated program still occupies its slot until a merge.
+ * It shares the implementation's merge policy: this checks conformance to
+ * that policy, not the policy's fidelity to BAST.
  *
  * Every media write enters a dedicated logical-block log, including initial
  * writes. After each program, merge the fullest log if it is full or all logs
  * are occupied; ties use the first slot. A complete ordered history switches;
- * otherwise copy each live logical page once. Physical line GC, allocation
- * failure and buffer coalescing are outside this model. Call write only for
- * pages reaching NAND, not for writes still held in the volatile cache.
+ * otherwise copy each live logical page once. Each switch charges one erase,
+ * including initial logs and logs with trimmed pages. Full merges defer
+ * physical erasure to line GC and charge no merge erase. Physical line GC,
+ * allocation failure and buffer coalescing are outside this model. Call write
+ * only for pages reaching NAND, not writes still held in the volatile cache.
  */
 typedef struct HybridOracle {
     unsigned pages_per_block;
@@ -26,6 +30,7 @@ typedef struct HybridOracle {
     uint64_t copies;
     uint64_t switches;
     uint64_t merges;
+    uint64_t erases;
 } HybridOracle;
 
 static inline void hybrid_oracle_init(HybridOracle *o, unsigned pages,
@@ -113,6 +118,7 @@ static inline void hybrid_oracle_write(HybridOracle *o, unsigned lpn)
     }
     if (ordered) {
         o->switches++;
+        o->erases++;
     } else {
         o->merges++;
         for (slot = 0; slot < pages; slot++) {

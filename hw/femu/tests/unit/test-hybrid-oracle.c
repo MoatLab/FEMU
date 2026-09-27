@@ -29,6 +29,20 @@ int main(void)
     check("trimmed page is not copied", o.copies, 1);
     check("hot rewrite requires a full merge", o.merges, 1);
     check("hot rewrite cannot switch", o.switches, 0);
+    check("full merge defers erasure to line GC", o.erases, 0);
+    hybrid_oracle_destroy(&o);
+    hybrid_oracle_init(&o, 4, 2, 16);
+    for (i = 0; i < 4; i++) {
+        hybrid_oracle_write(&o, i);
+    }
+    hybrid_oracle_write(&o, 0);
+    hybrid_oracle_trim(&o, 0);
+    for (i = 1; i < 4; i++) {
+        hybrid_oracle_write(&o, i);
+    }
+    check("trimmed sequential history still switches", o.switches, 2);
+    check("trim cannot remove a switch erase", o.erases, 2);
+    check("trimmed sequential history needs no copies", o.copies, 0);
     hybrid_oracle_destroy(&o);
     /* Literal four-page examples also distinguish switch from full merges. */
     hybrid_oracle_init(&o, 4, 2, 16);
@@ -39,6 +53,7 @@ int main(void)
     check("sequential passes switch twice", o.switches, 2);
     check("switches copy no pages", o.copies, 0);
     check("sequential passes need no full merge", o.merges, 0);
+    check("each sequential pass charges an erase", o.erases, 2);
     hybrid_oracle_destroy(&o);
 
     hybrid_oracle_init(&o, 4, 2, 16);
@@ -75,6 +90,8 @@ int main(void)
         check("hot logs fill twice", o.merges + o.switches, 2);
         check("one-page log switches, larger hot logs copy", o.copies,
               pages == 1 ? 0 : 2);
+        check("only switches charge merge erases", o.erases,
+              pages == 1 ? 2 : 0);
         hybrid_oracle_destroy(&o);
     }
     printf("1..%u\n", checks);

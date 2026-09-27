@@ -1691,7 +1691,11 @@ static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
     return femu_admin(c, &cmd);
 }
 
-/* Compare media programs; these short traces never require physical line GC. */
+/*
+ * C0h LE64 counters: copies at 16, user programs at 24, hybrid switches at
+ * 88, full merges at 96 and charged merge erases at 104. The merge counters
+ * exclude physical line GC, which these short traces never require.
+ */
 static void femu_hybrid_check(FemuCtrlState *c, uint64_t buf,
                               const HybridOracle *o)
 {
@@ -1702,8 +1706,9 @@ static void femu_hybrid_check(FemuCtrlState *c, uint64_t buf,
     qtest_memread(c->pdev->bus->qts, buf, stats, sizeof(stats));
     g_assert_cmpuint(ldq_le_p(stats + 24), ==, o->programs);
     g_assert_cmpuint(ldq_le_p(stats + 16), ==, o->copies);
-    g_assert_cmpuint(ldq_le_p(stats + 24) + ldq_le_p(stats + 16), ==,
-                     o->programs + o->copies);
+    g_assert_cmpuint(ldq_le_p(stats + 88), ==, o->switches);
+    g_assert_cmpuint(ldq_le_p(stats + 96), ==, o->merges);
+    g_assert_cmpuint(ldq_le_p(stats + 104), ==, o->erases);
 }
 
 static void femu_test_hybrid_trim(void *obj, void *data,
@@ -1825,9 +1830,10 @@ static void femu_test_hybrid_trace(void *obj, void *data,
         }
     }
     g_test_message("programs=%" PRIu64 " copies=%" PRIu64
-                   " switches=%" PRIu64 " full-merges=%" PRIu64,
+                   " switches=%" PRIu64 " full-merges=%" PRIu64
+                   " erases=%" PRIu64,
                    oracle.programs, oracle.copies, oracle.switches,
-                   oracle.merges);
+                   oracle.merges, oracle.erases);
     hybrid_oracle_destroy(&oracle);
     femu_disable(&c);
     guest_free(alloc, buf);
