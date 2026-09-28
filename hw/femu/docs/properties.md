@@ -239,7 +239,7 @@ All properties below belong to `femu-cxl-ssd`, not `femu`.
 | `cache-ways` | uint32 | 16 | Entries per set, 1 through 1024. One means direct mapped (WAY_1). Set to `cache-pages` for a fully associative cache within this limit. |
 | `cache-policy` | string | `fifo` when unset | `fifo`, `lifo`, `clock`, or `s3-fifo`. |
 | `ftl` | bool | on | Charge cache misses and dirty writeback to the current FTL/NAND model. Off keeps memory functionality with no media timing. |
-| `der` | bool | on | Probe public Cylon kernel support once at realize. Unsupported hosts retain MMIO and print one informational line. Remapping is limited to a single endpoint on a host bridge without HDM decoding and a non-interleaved window. |
+| `der` | string | off | `off`: MMIO without probes. `memslot`: QEMU aliases using ordinary KVM. `cylon`: published mapped-SPT interface, requiring shared preallocated hugetlb backing, locking and readable PFNs; unsupported hosts warn once and retain MMIO. See `cxlssd.md` for topology and kernel restrictions. |
 | `read-ns` | uint64 | 40000 | NAND page read time; zero through one second in nanoseconds. |
 | `program-ns` | uint64 | 200000 | NAND page program time; same range. |
 | `erase-ns` | uint64 | 2000000 | NAND block erase time; same range. |
@@ -257,6 +257,9 @@ The following QOM properties are available through `qom-get` / `qom-set` at
 | `cache-misses` | read uint64 | MMIO page lookups that missed, including accesses with no cache. |
 | `cache-inserts` | read uint64 | Resident admissions, across all policies. |
 | `cache-evictions` | read uint64 | Resident removals, including explicit flushes. |
-| `der-probes` | read uint64 | Probe attempts; one per realize with `der=on`, zero with it off. |
+| `der-probes` | read uint64 | Probe attempts; one per realize with `der=cylon`, zero for `off` and `memslot`. |
 | `der-mapped` | read uint64 | Pages currently mapped for direct guest access. |
-| `x-der-test` | write bool, qtest only | Enable/disable the mapping path without a custom kernel to test ownership and revocation. Not exposed in production. |
+| `der-active` | read bool | Whether direct mapping is available. Cylon becomes active after a decoded access installs and validates its slot. |
+| `der-remaps` | read uint64 | Successfully installed direct page mappings. |
+| `der-revocations` | read uint64 | Direct page mappings removed. |
+| `der-fallbacks` | read uint64 | Rejected mapping attempts or device disablements. |
