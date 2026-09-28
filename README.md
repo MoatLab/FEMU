@@ -823,6 +823,10 @@ retained.
 Writes run on the main loop after events and generation changes, with additional
 saves at controller reset, device removal, and normal process exit. Updates use
 a temporary file in the same directory, file fsync, rename, and directory fsync.
+At normal process exit, event collection closes under the log mutex before the
+final snapshot. Events appended before that cutoff are saved; later appends
+are dropped by design, including completions of outstanding I/O. Exit saving
+does not wait for pollers, whose MMIO DMA may need the main thread's lock.
 An abrupt process termination can lose changes still queued for the main loop.
 Runtime write errors are reported to stderr; subsequent events and lifecycle
 saves retry. Use one file per device and only one QEMU writer per file; the file

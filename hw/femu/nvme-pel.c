@@ -60,6 +60,7 @@ struct FemuPel {
     /* guards everything below; taken from the pollers as well as the BQL */
     QemuMutex   lock;
     QEMUBH      *write_bh;
+    bool        closed;        /* exit has ended event collection */
     Notifier    exit_notifier;
     FemuCtrl    *ctrl;
     uint8_t     events[PEL_EVENTS_SIZE];
@@ -239,7 +240,13 @@ static void pel_file_write(void *opaque)
 static void pel_file_exit(Notifier *notifier, void *data)
 {
     FemuPel *pel = container_of(notifier, FemuPel, exit_notifier);
-    /* The log lock protects the snapshot; waiting for DMA can need the BQL. */
+    /*
+     * End collection before the final snapshot. Pollers may still need the
+     * BQL, so do not wait for them; later appends are dropped by design.
+     */
+    qemu_mutex_lock(&pel->lock);
+    pel->closed = true;
+    qemu_mutex_unlock(&pel->lock);
     pel_file_write(pel->ctrl);
 }
 
@@ -261,6 +268,10 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
     }
 
     qemu_mutex_lock(&pel->lock);
+    if (pel->closed) {
+        qemu_mutex_unlock(&pel->lock);
+        return;
+    }
     while (pel->used + size > PEL_EVENTS_SIZE) {
         uint32_t first = pel_event_len(pel->events);
 
