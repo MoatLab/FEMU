@@ -11722,18 +11722,21 @@ static void femu_test_pel_file_invalid(void *obj, void *data,
         case 4:
             bad_len = 12;
             break;
-        case 5: {
+        case 5:
+            stw_le_p(bad + 64 + 22, 0xffff);
+            break;
+        }
+        /* Keep structural corruption independent of checksum validation. */
+        if (i < 3 || i == 5) {
             GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
             gsize digest_len = 32;
 
-            stw_le_p(bad + 64 + 22, 0xffff);
             g_checksum_update(sum, (uint8_t *)bad, 32);
             g_checksum_update(sum, (uint8_t *)bad + 64, len - 64);
             g_checksum_get_digest(sum, (uint8_t *)bad + 32, &digest_len);
             g_checksum_free(sum);
-            break;
         }
-        }
+        g_test_message("PEL corruption case %d", i);
         g_assert_true(g_file_set_contents(path, bad, bad_len, NULL));
         rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                        "'driver':'femu','id':'pel-disk','addr':'5',"
