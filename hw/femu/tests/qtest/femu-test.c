@@ -10179,6 +10179,41 @@ static void femu_shared_remove(FemuCtrlState *c, const char *id, int slot)
     memset(c, 0, sizeof(*c));
 }
 
+static void femu_test_shared_features(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t result;
+
+    femu_shared_start(femu, alloc, &a, &b, 2);
+    g_assert_cmpint(femu_set_feature(&b, NVME_ERROR_RECOVERY, false,
+                                     0xffffffff, 1 << 16, NULL), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_get_feature(&a, NVME_ERROR_RECOVERY, 0, 1, 0,
+                                     &result), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0);
+    femu_ns_page(&a, buf, 1, 0, 0, false);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_set_feature(&b, NVME_ERROR_RECOVERY, false,
+                                     0xffffffff, 1 << 16, NULL), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpint(femu_get_feature(&a, NVME_ERROR_RECOVERY, 0, 1, 0,
+                                     &result), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 1 << 16);
+    g_assert_cmphex(femu_rw_ns(&a, NVME_CMD_READ, 1, 0, buf), ==, 0x287);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_set_feature(&b, NVME_ERROR_RECOVERY, false,
+                                     0xffffffff, 0, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_feature(&a, NVME_ERROR_RECOVERY, 0, 1, 0,
+                                     &result), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 1 << 16);
+    femu_shared_stop(&a, &b);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_shared_remove(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -13542,6 +13577,8 @@ static void femu_register_nodes(void)
                  femu_test_shared_subsys_release, &(QOSGraphTestOptions) {
         .before = femu_shared_before,
     });
+    qos_add_test("ns-shared-features", "femu", femu_test_shared_features,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-admin", "femu", femu_test_shared_admin,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-private", "femu", femu_test_shared_private,

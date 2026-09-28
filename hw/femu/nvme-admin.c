@@ -1630,7 +1630,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 
         if (nsid == NVME_NSID_BROADCAST) {
             for (uint32_t i = 0; i < n->namespace_limit; i++) {
-                if (n->namespaces[i].allocated) {
+                if (n->namespaces[i].allocated &&
+                    (!nvme_ns_shared(n) ||
+                     nvme_ns_attached(n, &n->namespaces[i]))) {
                     n->namespaces[i].err_rec = dw11;
                 }
             }
