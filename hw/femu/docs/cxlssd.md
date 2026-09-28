@@ -44,12 +44,26 @@ library can be built independently of QEMU.
 
 CXL MMIO arrives on vCPU threads under the BQL; qtest and management operations
 also hold it. The BQL protects payload copies, cache membership, counters and
-DER mappings. Each device owns one FTL worker without the BQL. A mutex and
-condition variable protect a single request handoff and its completion; the
-worker alone modifies FTL/NAND state after initialization. The requesting vCPU
-waits for its own stack-resident request. There is no response priority queue
-and no shared-head polling loop. The worker is stopped and joined before its
-state is destroyed.
+DER mappings. A per-device operation gate serializes accesses, cache flushes,
+invalidation and teardown across waits. Gate waiters release the BQL using a
+condition variable. An access holds an object reference until completion;
+teardown marks the device closing, waits for the gate, and prevents new work.
+A waiter rechecks decoder translation and media state before using its DPA.
+
+The requesting thread drops the BQL both while handing work to the FTL worker
+and during the remaining media delay, while retaining the operation gate.
+Other vCPUs can run and access other devices; accesses to this device queue
+behind the current operation. The worker mutex protects the single stack-owned
+request and completion, and is released before reacquiring the BQL. The worker
+alone modifies FTL/NAND state. Cache iterators, entries, payload and access
+latency accounting stay stable because invalidation, flush and teardown wait
+for the gate. The fixed-window dispatcher temporarily releases its I/O recursion guard only
+for a managed memory callback, which owns this serialization and performs no
+recursive guest DMA. The Cylon forwarding region uses the same contract.
+Without this, simultaneous accesses would be rejected before reaching the
+gate. Plain Type-3 callbacks retain their normal guard.
+Read-only QOM counters may show an operation in progress.
+The worker is joined before its state is destroyed.
 
 The worker receives only page numbers, operation types and timestamps. It
 never reads or writes guest memory. Payload copies remain on the vCPU thread.
@@ -60,6 +74,11 @@ existing NVMe poller DMA rules are unchanged.
 
 The `der` string selects `off` (the default), `memslot`, or `cylon`. Other
 values, including the former boolean spelling `on`, fail property validation.
+`der=cylon` additionally requires `cylon-kernel-ack=on` (default off), including
+on hosts where activation would fall back. This acknowledges that the host
+kernel has been reviewed and fixed to set `role.dual_mode` for dual-mode leaf
+pages, including failed concurrent child installation. It is required until
+that host lifetime defect is fixed; the property does not prove a kernel fix.
 `off` performs no probe and prints no DER message. `memslot` uses QEMU RAM
 aliases and the ordinary KVM listener without any Cylon ioctl dependency; qtest
 can exercise these mappings directly. All modes expose read-only QOM
@@ -86,7 +105,7 @@ enabled. No private full-SPTE ioctl is used.
 
 The payload backend must be hugetlbfs (including hugetlb memfd), shared and
 preallocated, with huge-page-aligned address and size. The device locks it
-with `mlock()` and resolves each huge page once through `/proc/self/pagemap`.
+with `mlock()` and resolves each huge page through `/proc/self/pagemap`.
 Nonpresent or zero PFNs, missing CAP_SYS_ADMIN, invalid alignment or addresses,
 and locking failure refuse activation with a reason. There is no contiguous
 `hpa_base`: each 4 KiB payload address uses its own huge page's resolved base
@@ -100,15 +119,25 @@ original CXL window, preserving decoder/media checks. A separate anonymous
 non-THP backing keeps KVM's leaf level at 4 KiB; direct SPTEs point exclusively
 to the verified hugetlb payload, never this faulting backing. The slot must
 cover exactly the window and backend size, and its listener record must match
-both range and backing before GET or any mapping update. vCPUs are stopped
-during initial registration because the published kernel publishes a slot
-before initializing its auxiliary SPT storage.
+both range and backing before GET or any mapping update. The first access
+schedules a main-loop callback; it does not pause vCPUs inside MMIO. That
+callback pauses vCPUs before registration because the published kernel
+publishes a slot before initializing its auxiliary SPT storage. Teardown can
+cancel a pending install even while the callback waits for vCPUs. The callback
+retains its window reference, and detached Cylon state is freed after pending
+installation and RCU flatview readers have finished.
 
-GET receives guarded writable VMAs for the ABI's sixty possible chunks.
+GET receives one untouched `MAP_SHARED | MAP_ANONYMOUS` VMA per used chunk,
+sized exactly to `min(remaining SPT bytes, 4 MiB)`. This matches the published
+x86 Cylon kernel and prototype (`MAX_ORDER=10`, 4 KiB pages); a differently
+configured ABI is unsupported and must be reviewed before acknowledging it.
+A 256 MiB window needs 512 KiB of SPT; a 64 GiB window needs 32 chunks.
+Installation explicitly checks the sixty-entry ioctl limit before slot creation.
 Returned count, pointers, offsets and lengths must describe a contiguous,
-nonoverlapping SPT covering exactly the slot, with no entry outside the VMAs.
-A sentinel detects a failed remap despite the kernel ignoring the remap return
-value. No kernel MAX_ORDER or contiguous host payload layout is assumed.
+nonoverlapping SPT covering exactly the slot. `/proc/self/smaps` must report
+`pf` for each exact VMA; there is no sentinel write or pre-ioctl page fault.
+This detects absent remaps, but the kernel still needs to propagate remap
+errors, including partial failures. SPT areas are unmapped before slot deletion.
 Kernel allocation failures are not propagated
 by its slot-creation routine; userspace cannot fully defend against that kernel
 bug. The supplied checkout has a separate lifetime defect: its dual-slot child
@@ -117,8 +146,8 @@ creation calls `tdp_mmu_init_child_sp()` without setting `role.dual_mode`, while
 page. The slot destructor also frees that storage. The kernel owner must fix
 and validate this ownership path before a Cylon bare-metal run; QEMU cannot
 repair kernel SPT lifetime through these two ioctls. This implementation does
-not modify the host kernel. The harness requires an explicit kernel-review
-acknowledgement before launching Cylon; it is not a runtime proof of a fix.
+not modify the host kernel. Both the device and harness require explicit kernel-review acknowledgement;
+the harness passes `cylon-kernel-ack=on` only for acknowledged Cylon launches.
 
 ### SPTE encoding, dirty tracking and revocation
 
@@ -138,7 +167,13 @@ generation itself. Unit tests check the fixed encodings, the full generation
 range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 
 Each admission checks the window offset, SPT index and resolved physical
-address, writes the direct entry atomically, and invokes SET to flush. An
+address, rechecks that the corresponding huge-page PFN has not changed, then
+compare-and-swaps the observed MMIO entry to a direct entry and invokes SET
+to flush. A lost exchange leaves the page on MMIO. Zero, MMIO and frozen
+`REMOVED_SPTE` entries are KVM revocations: mark the cache entry dirty and drop
+the tracking record without disabling Cylon or overwriting KVM's entry.
+Flush before retiring that record because a kernel zap may precede completion
+of its remote TLB invalidation. An
 unexpected existing mapping, invalid layout or ioctl failure restores saved
 MMIO entries, attempts flushes, removes the listener-owned slot to invalidate
 all remaining translations, conservatively dirties affected cache entries,
@@ -147,9 +182,10 @@ instead of aborting realize. QEMU's existing fatal handling of a failed KVM
 slot deletion is retained because execution cannot safely continue with stale
 translations.
 
-Revocation first clears write permission atomically and flushes writable TLB
-entries. It then samples the hardware dirty bit while restoring the saved
-MMIO SPTE and flushes again. A concurrent kernel replacement makes the page
+Revocation first clears both EPT W and MMU-writable atomically and flushes writable TLB
+entries. It then samples the hardware dirty bit while compare-and-swapping the saved
+MMIO SPTE and flushes again. Exchanges retry hardware dirty-bit changes and
+leave concurrent KVM revocations intact. A concurrent kernel replacement makes the page
 conservatively dirty. Thus clean direct reads need no program, while writes
 and uncertain transitions do. This requires EPT A/D; hosts without it stay
 MMIO rather than guessing that a page is clean.
@@ -160,7 +196,34 @@ reset retains volatile payload and cache/FTL contents but revokes mappings.
 The Cylon slot remains trapping across ordinary invalidation; removal frees
 its mapped SPT VMAs and private faulting backing. The FTL worker is joined
 before its state is destroyed. Payload backing belongs to the host memory
-backend. No per-access pagemap reads or guessed physical addresses are used.
+backend. Direct hits do not enter QEMU or read pagemap.
+
+### Host and guest restrictions
+
+`mlock()` prevents ordinary reclaim; it does **not** pin a hugetlb PFN against
+migration. Memory offline, soft-offline and explicit migration can move it.
+The admission-time pagemap recheck detects movement that already happened and
+falls back, but cannot close the check/use race or detect movement while a
+guest uses an existing direct mapping. Runs must exclude these migration
+operations for their lifetime. A host-side pinning and invalidation protocol
+is needed to remove that restriction; the two Cylon ioctls do not provide one.
+
+KVM's own guest-memory reads/writes use the dual slot's anonymous faulting
+backing, not the payload selected by the direct EPT entry. Emulator page
+walks, instruction fetch and paravirtual structures can therefore see different
+bytes. Do not online this CXL range as general System RAM or put page tables,
+code or PV structures there. Restrict Cylon to controlled data mappings; the
+acknowledgement is not a guarantee that arbitrary guest software is safe.
+Faulting backing can gain RSS up to the window size as KVM resolves faults.
+
+The direct encoding assumes coherent DMA (WB plus ignore-PAT). Non-coherent
+assigned devices are unsupported: KVM otherwise derives the memory type from
+guest MTRRs. Configuration/CCI invalidation remains deliberately conservative;
+every message/write can revoke all cached mappings and incur VM-wide flushes.
+SET's published implementation uses a full-VM flush, even for one page.
+CAS avoids overwriting an already changed entry; it does not serialize with
+all KVM write-lock paths. Kernel-side coordination is still required for a
+complete SPTE concurrency contract.
 
 ## Earlier defects
 
@@ -193,7 +256,7 @@ boot/enumeration and long-running workloads require separate system testing.
 Qtests program actual PCI bridges and HDM registers, then access the CXL fixed
 memory window. They cover all four policies at one and sixteen ways, data
 readback, dirty programming, media timing, invalid configuration, no-FTL mode,
-stock-host fallback, mapping revocation and teardown. Standalone tests cover
+qtest fallback, mapping revocation and teardown. Standalone tests cover
 policy ordering, S3-FIFO promotion and ghost admission, full-width keys,
 repeated clearing and dirty accounting over all policies at one through
 thirty-two ways. The memslot qtests validate QEMU mappings. Cylon is deliberately inert under

@@ -29,7 +29,7 @@ test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h
 	    -o $@ unit/test-cxl-cache.c ../cxlssd/cache.c \
 	    $(shell pkg-config --libs glib-2.0)
 
-test-femu-cxl-spte: unit/test-cxl-spte.c ../cxlssd/spte.h
+test-femu-cxl-spte: unit/test-cxl-spte.c ../cxlssd/spte.h ../cxlssd/spt.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
 check: test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte

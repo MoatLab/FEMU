@@ -656,6 +656,7 @@ struct CXLType3Class {
     void (*invalidate)(CXLType3Dev *ct3d);
 
     /* Optional media model, called after decoder and media-state checks. */
+    /* Callback owns serialization across BQL waits and must not recurse. */
     MemTxResult (*mem_access)(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
                               uint64_t *data, unsigned size, bool write,
                               MemTxAttrs attrs);
@@ -681,6 +682,9 @@ struct CSWMBCCIDev {
 #define TYPE_CXL_SWITCH_MAILBOX_CCI "cxl-switch-mailbox-cci"
 OBJECT_DECLARE_TYPE(CSWMBCCIDev, CSWMBCCIClass, CXL_SWITCH_MAILBOX_CCI)
 
+int cxl_type3_hpa_to_as_and_dpa(CXLType3Dev *ct3d, hwaddr host_addr,
+                               unsigned int size, AddressSpace **as,
+                               uint64_t *dpa_offset);
 MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
                            unsigned size, MemTxAttrs attrs);
 MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,

@@ -3,6 +3,74 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "../cxlssd/spte.h"
+#include "../cxlssd/spt.h"
+#include <stdlib.h>
+#include <unistd.h>
+
+static void test_spt_areas(void)
+{
+    uint64_t bytes = UINT64_C(64) * 1024 * 1024 * 1024 / 512;
+    uint64_t size = cylon_spt_area_size(bytes, 0);
+    unsigned char *resident = calloc(size / 4096, 1);
+    void *area = cylon_spt_area(size);
+    FILE *maps;
+    char line[512];
+    bool found = false;
+    unsigned i;
+
+    assert(area != MAP_FAILED);
+    assert(size == 4 * 1024 * 1024);
+    assert(cylon_spt_area_size(bytes, 31) == size);
+    assert(cylon_spt_area_size(bytes, 32) == 0);
+    assert(cylon_spt_area_size(UINT64_MAX, 60) == 0);
+    assert(cylon_spt_area_size(256 * 1024 * 1024 / 512, 0) == 524288);
+    assert(!mincore(area, size, resident));
+    for (i = 0; i < size / 4096; i++) {
+        assert(!(resident[i] & 1));
+    }
+    maps = fopen("/proc/self/maps", "r");
+    assert(maps);
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long start;
+        unsigned long end;
+        char perms[5];
+
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) == 3 &&
+            start == (uintptr_t)area) {
+            assert(end == start + size);
+            assert(!strcmp(perms, "rw-s"));
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    fclose(maps);
+    assert(!cylon_spt_mapped(area, size));
+    munmap(area, size);
+    free(resident);
+}
+
+static void test_spte_transitions(void)
+{
+    uint64_t direct = cylon_direct_spte(0x200000);
+    uint64_t mmio = cylon_mmio_spte(0x110000000, 7);
+    uint64_t spte = CYLON_REMOVED_SPTE;
+
+    assert(cylon_spte_revoked(0));
+    assert(cylon_spte_revoked(mmio));
+    assert(cylon_spte_revoked(CYLON_REMOVED_SPTE));
+    assert(!cylon_spte_revoked(direct));
+    assert(!cylon_spte_install(&spte, mmio, direct));
+    assert(spte == CYLON_REMOVED_SPTE);
+    spte = mmio;
+    assert(cylon_spte_install(&spte, mmio, direct));
+    assert(spte == direct);
+    spte |= CYLON_EPT_DIRTY;
+    assert(!cylon_spte_install(&spte, direct, mmio));
+    assert(cylon_spte_readonly(spte) & CYLON_EPT_DIRTY);
+    assert(!(cylon_spte_readonly(spte) &
+             (CYLON_EPT_WRITE | CYLON_MMU_WRITABLE)));
+}
 
 int main(void)
 {
@@ -11,6 +79,9 @@ int main(void)
     uint64_t index;
     uint64_t generation;
     uint64_t covered = 0;
+
+    test_spt_areas();
+    test_spte_transitions();
 
     /* spte.h: RWX, WB, IPAT, A, MMU-present, host/MMU writable. */
     assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345977));

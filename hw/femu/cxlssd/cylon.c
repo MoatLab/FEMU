@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "qemu/atomic.h"
+#include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "system/kvm.h"
 #include "system/hostmem.h"
 #include "system/cpus.h"
@@ -14,7 +16,7 @@
 #include <sys/vfs.h>
 #include <sys/mman.h>
 
-#define CYLON_SPT_CHUNKS 60
+#include "spt.h"
 #define CYLON_PAGEMAP_PRESENT (UINT64_C(1) << 63)
 #define CYLON_PAGEMAP_PFN ((UINT64_C(1) << 55) - 1)
 
@@ -47,6 +49,11 @@ typedef struct CylonPage {
 } CylonPage;
 
 struct FemuCylon {
+    struct rcu_head rcu;
+    FemuCxlDer *der;
+    CXLFixedWindow *pending_window;
+    bool detached;
+    int pagemap;
     MemoryRegion io;
     MemoryRegion trap;
     void *trap_ram;
@@ -54,7 +61,7 @@ struct FemuCylon {
     CXLFixedWindow *window;
     CylonGetLinearSpt spt;
     void *areas[CYLON_SPT_CHUNKS];
-    uint64_t area_size;
+    uint64_t area_sizes[CYLON_SPT_CHUNKS];
     uint64_t size;
     uint64_t huge_size;
     uint64_t *huge;
@@ -67,7 +74,7 @@ struct FemuCylon {
 static bool cylon_flush(uint64_t gpa)
 {
     CylonSpteFlag flag = { .gpa = gpa };
-    CPUState *cpu = qemu_get_cpu(0);
+    CPUState *cpu = first_cpu;
 
     return cpu && !kvm_vcpu_ioctl(cpu, CYLON_SET_SPTE_FLAG, &flag);
 }
@@ -84,6 +91,12 @@ static void cylon_release(FemuCylon *c)
 {
     unsigned i;
 
+    for (i = 0; i < CYLON_SPT_CHUNKS; i++) {
+        if (c->areas[i]) {
+            munmap(c->areas[i], c->area_sizes[i]);
+            c->areas[i] = NULL;
+        }
+    }
     if (c->installed) {
         /* Slot removal invalidates all translations even if SET failed. */
         memory_region_del_subregion(&c->window->mr, &c->io);
@@ -94,12 +107,6 @@ static void cylon_release(FemuCylon *c)
         object_unparent(OBJECT(&c->trap));
         munmap(c->trap_ram, c->size);
         c->trap_ram = NULL;
-    }
-    for (i = 0; i < CYLON_SPT_CHUNKS; i++) {
-        if (c->areas[i]) {
-            munmap(c->areas[i], c->area_size);
-            c->areas[i] = NULL;
-        }
     }
 }
 
@@ -139,6 +146,8 @@ FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
         return NULL;
     }
     c = g_new0(FemuCylon, 1);
+    c->pagemap = -1;
+    c->der = der;
     c->size = memory_region_size(mr);
     c->ram = memory_region_get_ram_ptr(mr);
     c->huge_size = host_memory_backend_pagesize(backend);
@@ -180,7 +189,7 @@ FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
             goto fail;
         }
     }
-    close(fd);
+    c->pagemap = fd;
     return c;
 fail:
     if (c->locked) {
@@ -197,6 +206,9 @@ static MemTxResult cylon_read(void *opaque, hwaddr offset, uint64_t *value,
 {
     FemuCylon *c = opaque;
 
+    if (c->detached) {
+        return MEMTX_ERROR;
+    }
     return memory_region_dispatch_read(&c->window->mr, offset, value,
                                        size_memop(size), attrs);
 }
@@ -206,6 +218,9 @@ static MemTxResult cylon_write(void *opaque, hwaddr offset, uint64_t value,
 {
     FemuCylon *c = opaque;
 
+    if (c->detached) {
+        return MEMTX_ERROR;
+    }
     return memory_region_dispatch_write(&c->window->mr, offset, value,
                                         size_memop(size), attrs);
 }
@@ -225,27 +240,21 @@ static bool cylon_install(FemuCxlDer *der, CXLFixedWindow *fw)
     uint64_t covered = 0;
     unsigned i;
 
-    if (fw->size != c->size || kvm_get_free_memslots() < 8) {
+    if (fw->size != c->size || kvm_get_free_memslots() < 8 ||
+        DIV_ROUND_UP(bytes, CYLON_SPT_CHUNK_SIZE) > CYLON_SPT_CHUNKS) {
         return false;
     }
     c->window = fw;
-    c->area_size = bytes + 2 * CYLON_PAGE_SIZE;
-    /* Guarded VMAs prevent merging and avoid assuming kernel MAX_ORDER. */
-    for (i = 0; i < CYLON_SPT_CHUNKS; i++) {
-        void *area = mmap(NULL, c->area_size, PROT_NONE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        uint64_t *spt;
+    for (i = 0; i < DIV_ROUND_UP(bytes, CYLON_SPT_CHUNK_SIZE); i++) {
+        uint64_t length = cylon_spt_area_size(bytes, i);
+        void *area = cylon_spt_area(length);
 
         if (area == MAP_FAILED) {
             return false;
         }
         c->areas[i] = area;
-        spt = area + CYLON_PAGE_SIZE;
-        if (mprotect(spt, bytes, PROT_READ | PROT_WRITE)) {
-            return false;
-        }
-        *spt = UINT64_MAX;
-        c->spt.spt_list[i].spt = spt;
+        c->area_sizes[i] = length;
+        c->spt.spt_list[i].spt = area;
     }
     /* Anonymous, non-THP backing forces KVM's leaf level to 4 KiB. */
     c->trap_ram = mmap(NULL, c->size, PROT_READ | PROT_WRITE,
@@ -261,6 +270,8 @@ static bool cylon_install(FemuCxlDer *der, CXLFixedWindow *fw)
     }
     memory_region_init_io(&c->io, OBJECT(der->dev), &cylon_ops, c,
                           "femu-cxl-cylon", c->size);
+    /* The endpoint gate serializes forwarded accesses across BQL waits. */
+    c->io.disable_reentrancy_guard = true;
     c->io.cylon_backing = &c->trap;
     memory_region_add_subregion_overlap(&fw->mr, 0, &c->io, 1);
     c->installed = true;
@@ -275,9 +286,10 @@ static bool cylon_install(FemuCxlDer *der, CXLFixedWindow *fw)
     for (i = 0; i < c->spt.n; i++) {
         CylonLinearSpt *part = &c->spt.spt_list[i];
 
-        if (part->spt != c->areas[i] + CYLON_PAGE_SIZE ||
+        if (part->spt != c->areas[i] ||
+            (uint64_t)part->npages * CYLON_PAGE_SIZE != c->area_sizes[i] ||
             !cylon_spt_chunk(part->offset, part->npages, bytes, &covered) ||
-            *part->spt == UINT64_MAX) {
+            !cylon_spt_mapped(c->areas[i], c->area_sizes[i])) {
             return false;
         }
     }
@@ -324,7 +336,12 @@ static void cylon_fail(FemuCxlDer *der)
             entry->dirty = true;
         }
         if (page->sptep == cylon_sptep(c, page->lpn)) {
-            qatomic_set(page->sptep, page->mmio);
+            uint64_t old = qatomic_read(page->sptep);
+
+            while (!cylon_spte_revoked(old) &&
+                   !cylon_spte_install(page->sptep, old, page->mmio)) {
+                old = qatomic_read(page->sptep);
+            }
             cylon_flush(c->window->base + page->lpn * CYLON_PAGE_SIZE);
         }
         der->revocations++;
@@ -335,6 +352,56 @@ static void cylon_fail(FemuCxlDer *der)
     c->failed = true;
     cylon_release(c);
     femu_cxl_der_fallback(der, "Cylon slot, SPT bounds or ioctl failure");
+}
+
+/* Slot publication precedes aux initialization in the host kernel. */
+static void cylon_install_bh(void *opaque)
+{
+    FemuCylon *c = opaque;
+
+    pause_all_vcpus();
+    if (!c->detached && !cylon_install(c->der, c->pending_window)) {
+        cylon_fail(c->der);
+    }
+    object_unref(OBJECT(c->pending_window));
+    c->installing = false;
+    resume_all_vcpus();
+    if (c->detached) {
+        g_free_rcu(c, rcu);
+    }
+}
+
+static void cylon_drop(FemuCxlDer *der, CylonPage *page, bool dirty)
+{
+    FemuCxlEntry *entry = g_hash_table_lookup(der->cache->entries,
+                                             &page->lpn);
+
+    if (entry && dirty) {
+        entry->dirty = true;
+    }
+    /* A kernel zap can be visible before its remote flush has completed. */
+    if (dirty && !cylon_flush(der->fast->window->base +
+                              page->lpn * CYLON_PAGE_SIZE)) {
+        cylon_fail(der);
+        return;
+    }
+    g_hash_table_remove(der->maps, &page->lpn);
+    g_free(page);
+    der->mapped--;
+    der->revocations++;
+}
+
+/* Detect migration already visible at admission; this cannot pin a PFN. */
+static bool cylon_pfn_current(FemuCylon *c, uint64_t dpa)
+{
+    uint64_t index = dpa / c->huge_size;
+    uint64_t entry;
+    off_t offset = ((uintptr_t)c->ram + index * c->huge_size) /
+                   CYLON_PAGE_SIZE * sizeof(entry);
+
+    return pread(c->pagemap, &entry, sizeof(entry), offset) == sizeof(entry) &&
+           (entry & CYLON_PAGEMAP_PRESENT) &&
+           (entry & CYLON_PAGEMAP_PFN) * CYLON_PAGE_SIZE == c->huge[index];
 }
 
 bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -357,21 +424,15 @@ bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         cylon_fail(der);
         return false;
     }
+    if (!cylon_pfn_current(c, dpa)) {
+        cylon_fail(der);
+        return false;
+    }
     if (!c->installed) {
-        bool running = runstate_is_running();
-        bool installed;
-
-        /* The Cylon kernel initializes slot->aux after publishing the slot. */
         c->installing = true;
-        pause_all_vcpus();
-        installed = cylon_install(der, fw);
-        if (!installed) {
-            cylon_fail(der);
-        }
-        c->installing = false;
-        if (running) {
-            resume_all_vcpus();
-        }
+        c->pending_window = fw;
+        object_ref(OBJECT(fw));
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), cylon_install_bh, c);
         return false;
     }
     if (c->window != fw || !kvm_cylon_slot(fw->base, c->size, c->trap_ram)) {
@@ -385,6 +446,10 @@ bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     }
     old = qatomic_read(sptep);
     page = g_hash_table_lookup(der->maps, &index);
+    if (page && page->sptep == sptep && cylon_spte_revoked(old)) {
+        cylon_drop(der, page, true);
+        return false;
+    }
     if (page) {
         if (page->sptep != sptep ||
             (old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
@@ -394,11 +459,14 @@ bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         return true;
     }
     /* First access installs the slot; a later KVM fault supplies its SPTE. */
-    if (!old) {
+    if (!old || old == CYLON_REMOVED_SPTE) {
         return false;
     }
     if ((old & 7) != CYLON_MMIO_VALUE || (old & CYLON_MMU_PRESENT)) {
         cylon_fail(der);
+        return false;
+    }
+    if (!cylon_spte_install(sptep, old, cylon_direct_spte(pa))) {
         return false;
     }
     page = g_new0(CylonPage, 1);
@@ -407,7 +475,6 @@ bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     page->sptep = sptep;
     g_hash_table_insert(der->maps, &page->lpn, page);
     der->mapped++;
-    qatomic_set(sptep, cylon_direct_spte(pa));
     if (!cylon_flush(hpa & ~(CYLON_PAGE_SIZE - 1))) {
         cylon_fail(der);
         return false;
@@ -430,20 +497,48 @@ void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
     }
     if (page->sptep != cylon_sptep(c, lpn) ||
         !cylon_page_address(c->huge, c->size / c->huge_size, c->huge_size,
-                            lpn * CYLON_PAGE_SIZE, &pa) ||
-        (qatomic_read(page->sptep) & ~CYLON_EPT_DIRTY) !=
-        cylon_direct_spte(pa)) {
+                            lpn * CYLON_PAGE_SIZE, &pa)) {
+        cylon_fail(der);
+        return;
+    }
+    old = qatomic_read(page->sptep);
+    if (cylon_spte_revoked(old)) {
+        cylon_drop(der, page, true);
+        return;
+    }
+    if ((old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
         cylon_fail(der);
         return;
     }
     gpa = c->window->base + lpn * CYLON_PAGE_SIZE;
-    /* Stop writes, then sample D after all stale writable TLBs are gone. */
-    qatomic_and(page->sptep, ~CYLON_EPT_WRITE);
+    /* Stop hardware and fast-fault writes before sampling D. */
+    while (!cylon_spte_install(page->sptep, old, cylon_spte_readonly(old))) {
+        old = qatomic_read(page->sptep);
+        if (cylon_spte_revoked(old)) {
+            cylon_drop(der, page, true);
+            return;
+        }
+        if ((old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
+            cylon_fail(der);
+            return;
+        }
+    }
     if (!cylon_flush(gpa)) {
         cylon_fail(der);
         return;
     }
-    old = qatomic_xchg(page->sptep, page->mmio);
+    old = qatomic_read(page->sptep);
+    while (!cylon_spte_revoked(old)) {
+        if ((old & ~CYLON_EPT_DIRTY) !=
+            cylon_spte_readonly(cylon_direct_spte(pa))) {
+            cylon_fail(der);
+            return;
+        }
+        if (cylon_spte_install(page->sptep, old, page->mmio)) {
+            break;
+        }
+        old = qatomic_read(page->sptep);
+    }
     entry = g_hash_table_lookup(der->cache->entries, &lpn);
     if (entry && ((old & CYLON_EPT_DIRTY) || !(old & CYLON_MMU_PRESENT))) {
         entry->dirty = true;
@@ -452,10 +547,7 @@ void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
         cylon_fail(der);
         return;
     }
-    g_hash_table_remove(der->maps, &lpn);
-    g_free(page);
-    der->mapped--;
-    der->revocations++;
+    cylon_drop(der, page, false);
 }
 
 void femu_cylon_destroy(FemuCxlDer *der)
@@ -463,12 +555,16 @@ void femu_cylon_destroy(FemuCxlDer *der)
     FemuCylon *c = der->fast;
 
     if (c) {
+        c->detached = true;
         cylon_release(c);
         if (c->locked) {
             munlock(c->ram, c->size);
         }
         g_free(c->huge);
-        g_free(c);
+        close(c->pagemap);
+        if (!c->installing) {
+            g_free_rcu(c, rcu);
+        }
         der->fast = NULL;
     }
 }

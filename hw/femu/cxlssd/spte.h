@@ -26,6 +26,26 @@
     CYLON_EPT_EXEC | CYLON_EPT_WB | CYLON_EPT_IPAT | CYLON_EPT_ACCESSED | \
     CYLON_MMU_PRESENT | CYLON_HOST_WRITABLE | CYLON_MMU_WRITABLE)
 
+#define CYLON_REMOVED_SPTE UINT64_C(0x5a0)
+
+static inline bool cylon_spte_revoked(uint64_t spte)
+{
+    return !spte || spte == CYLON_REMOVED_SPTE ||
+           ((spte & 7) == CYLON_MMIO_VALUE && !(spte & CYLON_MMU_PRESENT));
+}
+
+static inline uint64_t cylon_spte_readonly(uint64_t spte)
+{
+    return spte & ~(CYLON_EPT_WRITE | CYLON_MMU_WRITABLE);
+}
+
+static inline bool cylon_spte_install(uint64_t *sptep, uint64_t old,
+                                      uint64_t value)
+{
+    return __atomic_compare_exchange_n(sptep, &old, value, false,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
 static inline uint64_t cylon_direct_spte(uint64_t pa)
 {
     return pa | CYLON_DIRECT_FLAGS;

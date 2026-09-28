@@ -13431,8 +13431,9 @@ static void femu_test_cxl_der_modes(void *obj, void *data,
     close(fd);
     quoted = g_shell_quote(log);
     args = g_strdup_printf(FEMU_CXL_MACHINE
-        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem%s%s 2>%s",
-        *mode ? ",der=" : "", mode, quoted);
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem%s%s%s 2>%s",
+        *mode ? ",der=" : "", mode,
+        cylon ? ",cylon-kernel-ack=on" : "", quoted);
     qts = qtest_init(args);
     rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
                           "'path':'/machine/peripheral/ssd',"
@@ -13488,6 +13489,98 @@ static void femu_test_cxl_der_invalid(void *obj, void *data,
         qobject_unref(rsp);
     }
     qtest_quit(qts);
+}
+
+static void femu_test_cxl_cylon_ack(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    QDict *rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu-cxl-ssd',"
+        "'id':'bad','bus':'rp0','volatile-memdev':'mem','der':'cylon'}}");
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                        "desc"), "cylon-kernel-ack"));
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
+/* A real vCPU writes CXL while qtest observes RAM under the BQL. */
+static void femu_test_cxl_wait(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    static const uint8_t reset[] = {
+        0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x0f, 0x01, 0x16, 0x00, 0x05, 0x0f, 0x20,
+        0xc0, 0x66, 0x83, 0xc8, 0x01, 0x0f, 0x22, 0xc0, 0x66, 0xea, 0x00, 0x10,
+        0x00, 0x00, 0x08, 0x00,
+    };
+    /* Enable PAE/LME/paging, then jump to the 64-bit code at 0x1100. */
+    static const uint8_t setup[] = {
+        0x0f, 0x20, 0xe0, 0x83, 0xc8, 0x20, 0x0f, 0x22, 0xe0, 0xb8, 0x00, 0x20,
+        0x00, 0x00, 0x0f, 0x22, 0xd8, 0xb9, 0x80, 0x00, 0x00, 0xc0, 0x0f, 0x32,
+        0x0d, 0x00, 0x01, 0x00, 0x00, 0x0f, 0x30, 0x0f, 0x20, 0xc0, 0x0d, 0x00,
+        0x00, 0x00, 0x80, 0x0f, 0x22, 0xc0, 0xea, 0x00, 0x11, 0x00, 0x00, 0x18,
+        0x00,
+    };
+    /* Set RAM marker, write CXL, set completion marker, halt. */
+    static const uint8_t access[] = {
+        0xb8, 0x10, 0x00, 0x00, 0x00, 0x8e, 0xd8, 0x8e, 0xd0, 0x48, 0xb8, 0x00,
+        0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00, 0xc6, 0x04, 0x25, 0x00, 0x60,
+        0x00, 0x00, 0x01, 0xc6, 0x00, 0x5a, 0xc6, 0x04, 0x25, 0x00, 0x60, 0x00,
+        0x00, 0x02, 0xf4, 0xeb, 0xfd,
+    };
+    g_autofree char *rom_path = g_strdup("cxl-wait-rom-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree uint8_t *rom = g_malloc0(65536);
+    int fd = g_mkstemp(rom_path);
+    QTestState *qts;
+    int64_t deadline;
+
+    g_assert_cmpint(fd, >=, 0);
+    memcpy(rom, reset, sizeof(reset));
+    /* Reset vector: far jump to f000:0000. */
+    memcpy(rom + 65520, (uint8_t[]) { 0xea, 0, 0, 0, 0xf0 }, 5);
+    g_assert_cmpint(write(fd, rom, 65536), ==, 65536);
+    close(fd);
+    quoted = g_shell_quote(rom_path);
+    qts = qtest_initf(FEMU_CXL_MACHINE
+        "-accel tcg -S -bios %s "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=0,program-ns=1000000000", quoted);
+    femu_cxl_decode(qts);
+    qtest_writew(qts, 0x500, 31);
+    qtest_writel(qts, 0x502, 0x508);
+    qtest_writeq(qts, 0x508, 0);
+    qtest_writeq(qts, 0x510, 0x00cf9a000000ffffULL);
+    qtest_writeq(qts, 0x518, 0x00cf92000000ffffULL);
+    qtest_writeq(qts, 0x520, 0x00af9a000000ffffULL);
+    qtest_memwrite(qts, 0x1000, setup, sizeof(setup));
+    qtest_memwrite(qts, 0x1100, access, sizeof(access));
+    qtest_writeq(qts, 0x2000, 0x3003);
+    qtest_writeq(qts, 0x3000, 0x4003);
+    qtest_writeq(qts, 0x3020, 0x5003);
+    qtest_writeq(qts, 0x4000, 0x83);
+    qtest_writeq(qts, 0x5400, FEMU_CXL_WINDOW | 0x83);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+    while (!femu_cxl_stat(qts, "media-writes")) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    /* With the BQL held during sleep this can only see completion (2). */
+    g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
+    if (data) {
+        /* A concurrent access must queue, not trip the IO recursion guard. */
+        g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW), ==, 0x5a);
+    }
+    femu_cxl_set(qts, "realized", false);
+    while (qtest_readb(qts, 0x6000) != 2) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    qtest_quit(qts);
+    unlink(rom_path);
 }
 
 static void femu_test_cxl_no_ftl(void *obj, void *data,
@@ -13566,6 +13659,10 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)"cylon" });
     qos_add_test("cxl-der-invalid", "femu", femu_test_cxl_der_invalid, NULL);
     qos_add_test("cxl-der", "femu", femu_test_cxl_der, NULL);
+    qos_add_test("cxl-wait", "femu", femu_test_cxl_wait, NULL);
+    qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
     qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
     qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);
     {

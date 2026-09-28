@@ -3,6 +3,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "qemu/main-loop.h"
 #include "hw/qdev-properties.h"
 #include "hw/cxl/cxl_device.h"
 #include "system/hostmem.h"
@@ -32,6 +33,10 @@ struct FemuCxlSsd {
     char *cache_policy;
     bool ftl;
     char *der;
+    bool cylon_kernel_ack;
+    bool busy;
+    bool closing;
+    QemuCond idle;
     FemuCxlDer direct;
     uint64_t read_ns;
     uint64_t program_ns;
@@ -50,6 +55,28 @@ struct FemuCxlSsd {
 
 static void (*parent_realize)(PCIDevice *dev, Error **errp);
 static void (*parent_exit)(PCIDevice *dev);
+
+/* BQL protects the gate; waiters must let the current operation finish. */
+static void cxl_enter(FemuCxlSsd *s)
+{
+    while (s->busy) {
+        qemu_cond_wait_bql(&s->idle);
+    }
+    s->busy = true;
+}
+
+static void cxl_leave(FemuCxlSsd *s)
+{
+    s->busy = false;
+    qemu_cond_broadcast(&s->idle);
+}
+
+static void cxl_delay(uint64_t ns)
+{
+    bql_unlock();
+    g_usleep(DIV_ROUND_UP(ns, 1000));
+    bql_lock();
+}
 
 /* Only metadata reaches the worker; the vCPU owns all payload access. */
 static void *cxl_worker(void *opaque)
@@ -88,6 +115,7 @@ static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
     if (!s->ftl) {
         return true;
     }
+    bql_unlock();
     qemu_mutex_lock(&s->lock);
     assert(!s->work);
     s->work = &work;
@@ -96,6 +124,7 @@ static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
         qemu_cond_wait(&s->wake, &s->lock);
     }
     qemu_mutex_unlock(&s->lock);
+    bql_lock();
     s->media_ns += work.latency;
     s->access_ns += work.latency;
     if (write) {
@@ -114,9 +143,9 @@ static bool cxl_evict(void *opaque, FemuCxlEntry *e)
     return !e->dirty || cxl_media(s, e->lpn, true);
 }
 
-static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
-                               uint64_t *data, unsigned size, bool write,
-                               MemTxAttrs attrs)
+static MemTxResult cxl_access_locked(CXLType3Dev *ct3d, hwaddr hpa,
+                                    uint64_t dpa, uint64_t *data, unsigned size,
+                                    bool write, MemTxAttrs attrs)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(ct3d);
     uint64_t first = dpa / 4096;
@@ -150,7 +179,7 @@ static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
     remaining = s->access_ns -
                 (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
     if (remaining > 0) {
-        g_usleep(DIV_ROUND_UP(remaining, 1000));
+        cxl_delay(remaining);
     }
     if (write) {
         memcpy((uint8_t *)s->backend.logical_space + dpa, data, size);
@@ -169,29 +198,60 @@ static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
     return MEMTX_OK;
 }
 
+static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
+                               uint64_t *data, unsigned size, bool write,
+                               MemTxAttrs attrs)
+{
+    FemuCxlSsd *s = FEMU_CXL_SSD(ct3d);
+    MemTxResult result = MEMTX_ERROR;
+    AddressSpace *as;
+    uint64_t current_dpa;
+
+    object_ref(OBJECT(s));
+    cxl_enter(s);
+    if (s->started && !s->closing &&
+        !cxl_dev_media_disabled(&ct3d->cxl_dstate) &&
+        !cxl_type3_hpa_to_as_and_dpa(ct3d, hpa, size, &as, &current_dpa) &&
+        current_dpa == dpa) {
+        result = cxl_access_locked(ct3d, hpa, dpa, data, size, write, attrs);
+    }
+    cxl_leave(s);
+    object_unref(OBJECT(s));
+    return result;
+}
+
 static void cxl_invalidate(CXLType3Dev *ct3d)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(ct3d);
 
+    object_ref(OBJECT(s));
+    cxl_enter(s);
     if (s->started) {
         femu_cxl_der_clear(&s->direct);
     }
+    cxl_leave(s);
+    object_unref(OBJECT(s));
 }
 
 static void cxl_flush(Object *obj, bool value, Error **errp)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(obj);
 
-    if (!s->started || !value) {
-        return;
+    object_ref(obj);
+    cxl_enter(s);
+    if (!s->started || s->closing || !value) {
+        goto out;
     }
     s->access_ns = 0;
     if (!femu_cxl_cache_clear(&s->cache, cxl_evict, s)) {
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
     if (s->access_ns) {
-        g_usleep(DIV_ROUND_UP(s->access_ns, 1000));
+        cxl_delay(s->access_ns);
     }
+out:
+    cxl_leave(s);
+    object_unref(obj);
 }
 
 static void cxl_realize(PCIDevice *dev, Error **errp)
@@ -208,6 +268,11 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     if (s->der && strcmp(s->der, "off") && strcmp(s->der, "memslot") &&
         strcmp(s->der, "cylon")) {
         error_setg(errp, "der must be off, memslot or cylon");
+        return;
+    }
+    if (s->der && !strcmp(s->der, "cylon") && !s->cylon_kernel_ack) {
+        error_setg(errp, "der=cylon requires cylon-kernel-ack=on after "
+                   "reviewing the host dual-mode leaf lifetime fix");
         return;
     }
     if (!ct3d->hostvmem || ct3d->hostmem || ct3d->hostpmem ||
@@ -274,6 +339,7 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,
                        QEMU_THREAD_JOINABLE);
     femu_cxl_der_init(&s->direct, ct3d, s->der, &s->cache);
+    s->closing = false;
     s->started = true;
 }
 
@@ -281,6 +347,8 @@ static void cxl_exit(PCIDevice *dev)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(dev);
 
+    s->closing = true;
+    cxl_enter(s);
     femu_cxl_der_destroy(&s->direct);
     qemu_mutex_lock(&s->lock);
     s->stopping = true;
@@ -296,6 +364,7 @@ static void cxl_exit(PCIDevice *dev)
     g_free(s->ctrl);
     parent_exit(dev);
     host_memory_backend_set_mapped(s->parent_obj.hostvmem, false);
+    cxl_leave(s);
 }
 
 static bool cxl_der_active(Object *obj, Error **errp)
@@ -307,6 +376,7 @@ static void cxl_init(Object *obj)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(obj);
 
+    qemu_cond_init(&s->idle);
     s->der = g_strdup("off");
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
     object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
@@ -342,6 +412,7 @@ static const Property cxl_props[] = {
     DEFINE_PROP_STRING("cache-policy", FemuCxlSsd, cache_policy),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, ftl, true),
     DEFINE_PROP_STRING("der", FemuCxlSsd, der),
+    DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd, cylon_kernel_ack, false),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, read_ns, 40000),
     DEFINE_PROP_UINT64("program-ns", FemuCxlSsd, program_ns, 200000),
     DEFINE_PROP_UINT64("erase-ns", FemuCxlSsd, erase_ns, 2000000),
@@ -369,11 +440,17 @@ static void cxl_class_init(ObjectClass *oc, const void *data)
     cc->invalidate = cxl_invalidate;
 }
 
+static void cxl_finalize(Object *obj)
+{
+    qemu_cond_destroy(&FEMU_CXL_SSD(obj)->idle);
+}
+
 static const TypeInfo cxl_info = {
     .name = TYPE_FEMU_CXL_SSD,
     .parent = TYPE_CXL_TYPE3,
     .instance_size = sizeof(FemuCxlSsd),
     .instance_init = cxl_init,
+    .instance_finalize = cxl_finalize,
     .class_init = cxl_class_init,
 };
 
