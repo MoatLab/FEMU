@@ -239,10 +239,8 @@ static void pel_file_write(void *opaque)
 static void pel_file_exit(Notifier *notifier, void *data)
 {
     FemuPel *pel = container_of(notifier, FemuPel, exit_notifier);
-    bool resume = nvme_pause_pollers(pel->ctrl);
-
+    /* The log lock protects the snapshot; waiting for DMA can need the BQL. */
     pel_file_write(pel->ctrl);
-    nvme_resume_pollers(pel->ctrl, resume);
 }
 
 /* Figure 414: the value alone, its top two bytes reserved */

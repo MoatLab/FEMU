@@ -16,6 +16,7 @@
 #include "qobject/qlist.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
+#include "libqos/libqos-pc.h"
 #include "libqos/libqos-malloc.h"
 #include "block/nvme.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
@@ -11595,6 +11596,82 @@ static void femu_test_pel_file(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/* Quit with the controller enabled and pollers still doing MMIO DMA. */
+static void femu_test_pel_file_quit(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pel-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "events", NULL);
+    uint8_t events[4096];
+    uint8_t retained[4096];
+    uint32_t count = 0;
+    uint64_t len = 0;
+    int run;
+
+    for (run = 1; run <= 2; run++) {
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,addr=5,devsz_mb=64,"
+            "femu_mode=2,oncs=134,multipoller_enabled=1,pel_file=%s", path);
+        QTestState *qts = qs->qts;
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+        FemuCtrlState c = { 0 };
+        uint64_t buf = guest_alloc(&qs->alloc, 4096);
+        NvmeCmd cmds[FEMU_QSIZE - 1] = { 0 };
+        int i;
+
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_create_io_queues(&c);
+        if (run == 1) {
+            g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8),
+                           ==, NVME_SUCCESS);
+            for (i = 0; i < 2; i++) {
+                g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                               FEMU_UNRECOVERED_READ);
+            }
+        }
+        g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, buf + 44), ==, run);
+        g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x0a), ==, 2);
+        if (run == 1) {
+            count = qtest_readl(qts, buf + 4);
+            len = qtest_readq(qts, buf + 8) - 512;
+            g_assert_cmpuint(len, <=, sizeof(events));
+            qtest_memread(qts, buf + 512, events, len);
+        } else {
+            g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, count + 2);
+            qtest_memread(qts, femu_pel_at(qts, buf, 2), retained, len);
+            g_assert_cmpmem(retained, len, events, len);
+        }
+
+        /* Leave a batch of writes sourcing HPET MMIO outstanding at quit. */
+        for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+            cmds[i].opcode = NVME_CMD_WRITE;
+            cmds[i].cid = cpu_to_le16(c.cid++);
+            cmds[i].nsid = cpu_to_le32(1);
+            cmds[i].dptr.prp1 = cpu_to_le64(0xfed00000);
+            cmds[i].cdw10 = cpu_to_le32(8);
+            cmds[i].cdw12 = cpu_to_le32(7);
+            qtest_memwrite(qts, c.io.sq_addr +
+                           c.io.sq_tail * sizeof(NvmeCmd),
+                           &cmds[i], sizeof(cmds[i]));
+            c.io.sq_tail = (c.io.sq_tail + 1) % FEMU_QSIZE;
+        }
+        qpci_io_writel(pdev, c.bar, femu_sq_doorbell(&c, c.io.qid),
+                      c.io.sq_tail);
+        qtest_qmp_send(qts, "{'execute':'quit'}");
+        /* libqtest kills a hung child after 30 seconds and fails its status. */
+        qtest_set_expected_status(qts, 0);
+        qtest_wait_qemu(qts);
+        femu_queue_free(&c, &c.io);
+        femu_queue_free(&c, &c.admin);
+        guest_free(&qs->alloc, buf);
+        g_free(pdev);
+        qtest_pc_shutdown(qs);
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
 static void femu_test_pel_file_invalid(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -12813,6 +12890,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "ns_mgmt=on"
     });
+    qos_add_test("pel-file-quit", "femu", femu_test_pel_file_quit, NULL);
     qos_add_test("pel-file-invalid", "femu", femu_test_pel_file_invalid, NULL);
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("pel-file-media", "femu", femu_test_pel_file,
