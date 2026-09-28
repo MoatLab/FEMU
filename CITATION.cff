@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use FEMU in your research, please cite the paper below."
+title: "FEMU: Cheap, Accurate, Scalable and Extensible Flash Emulator"
+repository-code: "https://github.com/MoatLab/FEMU"
+# Same as QEMU: the emulator as a whole is GPL version 2 (see LICENSE).
+license: GPL-2.0-only
+authors:
+  - family-names: Li
+    given-names: Huaicheng
+preferred-citation:
+  type: conference-paper
+  title: "The CASE of FEMU: Cheap, Accurate, Scalable and Extensible Flash Emulator"
+  authors:
+    - family-names: Li
+      given-names: Huaicheng
+    - family-names: Hao
+      given-names: Mingzhe
+    - family-names: Tong
+      given-names: Michael Hao
+    - family-names: Sundararaman
+      given-names: Swaminathan
+    - family-names: Bjørling
+      given-names: Matias
+    - family-names: Gunawi
+      given-names: Haryadi S.
+  collection-title: "16th USENIX Conference on File and Storage Technologies (FAST 18)"
+  year: 2018
