@@ -21,6 +21,7 @@
 #include "libqos/libqos-malloc.h"
 #include "block/nvme.h"
 #include "hw/cxl/cxl_component.h"
+#include "hw/cxl/cxl_device.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
 #include "standard-headers/linux/pci_regs.h"
 
@@ -13358,19 +13359,30 @@ static void femu_test_cxl_der(void *obj, void *data,
 {
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=1,cache-ways=1");
+        "cache-pages=1,cache-ways=1,der=memslot");
     uint64_t hits;
     QDict *rsp;
 
-    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 0);
     femu_cxl_decode(qts);
     qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
-    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
-    /* Exercise mapping ownership on qtest without a custom host kernel. */
-    femu_cxl_set(qts, "x-der-test", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
     g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1);
+    /* PCI configuration and mailbox commands revoke live mappings too. */
+    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1);
+    qtest_writeq(qts, 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET +
+                 A_CXL_DEV_MAILBOX_CMD, 0x4000);
+    qtest_writel(qts, 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET +
+                 A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
     hits = femu_cxl_stat(qts, "cache-hits");
     qtest_writeq(qts, FEMU_CXL_WINDOW, 0xbeef);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
@@ -13389,11 +13401,92 @@ static void femu_test_cxl_der(void *obj, void *data,
     qobject_unref(rsp);
     qtest_qmp_eventwait(qts, "RESET");
     g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
-    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 0);
     femu_cxl_decode(qts);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
     femu_cxl_set(qts, "realized", false);
     g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-remaps"), >=, 4);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-revocations"), ==,
+                     femu_cxl_stat(qts, "der-remaps"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fallbacks"), ==, 0);
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_der_modes(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    const char *mode = data;
+    g_autofree char *log = g_strdup("der-stderr-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree char *stderr_text = NULL;
+    int fd = g_mkstemp(log);
+    bool cylon = !strcmp(mode, "cylon");
+    g_autofree char *args;
+    QTestState *qts;
+    QDict *rsp;
+    const char *warning;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    quoted = g_shell_quote(log);
+    args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem%s%s 2>%s",
+        *mode ? ",der=" : "", mode, quoted);
+    qts = qtest_init(args);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':'der-active'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_false(qdict_get_bool(rsp, "return"));
+    qobject_unref(rsp);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, cylon);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fallbacks"), ==, cylon);
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    femu_cxl_set(qts, "flush-cache", true);
+    femu_cxl_decode(qts);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-remaps"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-revocations"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, cylon);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'der-active','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(log, &stderr_text, NULL, NULL));
+    warning = strstr(stderr_text, "FEMU CXL DER unavailable");
+    if (cylon) {
+        g_assert_nonnull(warning);
+        g_assert_null(strstr(warning + 1, "FEMU CXL DER unavailable"));
+    } else {
+        g_assert_null(warning);
+    }
+    unlink(log);
+}
+
+static void femu_test_cxl_der_invalid(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    const char *values[] = { "on", "unknown", "" };
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(values); i++) {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+            "'driver':'femu-cxl-ssd','id':'bad','bus':'rp0',"
+            "'volatile-memdev':'mem','der':%s}}", values[i]);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                            "desc"), "der must be"));
+        qobject_unref(rsp);
+    }
     qtest_quit(qts);
 }
 
@@ -13465,6 +13558,13 @@ static void femu_register_nodes(void)
     qos_node_create_driver("femu", femu_create);
     qos_add_test("cxl-realize", "femu", femu_test_cxl_realize, NULL);
     qos_add_test("cxl-flush", "femu", femu_test_cxl_flush, NULL);
+    qos_add_test("cxl-der-default", "femu", femu_test_cxl_der_modes,
+                 &(QOSGraphTestOptions) { .arg = (void *)"" });
+    qos_add_test("cxl-der-off", "femu", femu_test_cxl_der_modes,
+                 &(QOSGraphTestOptions) { .arg = (void *)"off" });
+    qos_add_test("cxl-der-cylon", "femu", femu_test_cxl_der_modes,
+                 &(QOSGraphTestOptions) { .arg = (void *)"cylon" });
+    qos_add_test("cxl-der-invalid", "femu", femu_test_cxl_der_invalid, NULL);
     qos_add_test("cxl-der", "femu", femu_test_cxl_der, NULL);
     qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
     qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);

@@ -8,7 +8,7 @@ CXL_SIZE=${CXL_SIZE:-256M}
 CACHE_PAGES=${CACHE_PAGES:-1024}
 CACHE_WAYS=${CACHE_WAYS:-16}
 CACHE_POLICY=${CACHE_POLICY:-fifo}
-DER=${DER:-on}
+DER=${DER:-off}
 CXL_OPTS="femu-cxl-ssd,id=cxlssd,bus=cxl-rp0,volatile-memdev=cxlmem"
 CXL_OPTS+=",cache-pages=$CACHE_PAGES,cache-ways=$CACHE_WAYS"
 CXL_OPTS+=",cache-policy=$CACHE_POLICY,der=$DER"

@@ -3,3 +3,4 @@ test-nand-media
 *.o
 test-femu-hybrid-oracle
 test-femu-cxl-cache
+test-femu-cxl-spte
