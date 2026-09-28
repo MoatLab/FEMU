@@ -13056,6 +13056,82 @@ static void femu_test_streams_recovery(void *obj, void *data,
     femu_disable(&c);
 }
 
+typedef struct FemuPauseDeadline {
+    GMutex lock;
+    GCond cond;
+    bool done;
+} FemuPauseDeadline;
+
+static void *femu_pause_deadline(void *opaque)
+{
+    FemuPauseDeadline *d = opaque;
+    gint64 end = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+
+    g_mutex_lock(&d->lock);
+    while (!d->done) {
+        if (!g_cond_wait_until(&d->cond, &d->lock, end)) {
+            g_error("pause with MMIO DMA did not return within ten seconds");
+        }
+    }
+    g_mutex_unlock(&d->lock);
+    return NULL;
+}
+
+static void femu_test_pause_mmio(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    FemuPauseDeadline d = { 0 };
+    GThread *watchdog;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                     .nlb = cpu_to_le16(7),
+                     .dptr.prp1 = cpu_to_le64(0xfed00000) };
+    int i;
+    int j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_mutex_init(&d.lock);
+    g_cond_init(&d.cond);
+    watchdog = g_thread_new("pause-timeout", femu_pause_deadline, &d);
+    for (i = 0; i < 32; i++) {
+        for (j = 0; j < 14; j++) {
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+        for (j = 0; j < 14; j++) {
+            femu_complete(&c, &c.io, NULL, NULL);
+        }
+    }
+    g_mutex_lock(&d.lock);
+    d.done = true;
+    g_cond_signal(&d.cond);
+    g_mutex_unlock(&d.lock);
+    g_thread_join(watchdog);
+    g_cond_clear(&d.cond);
+    g_mutex_clear(&d.lock);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                   NVME_DATA_TRAS_ERROR);
+    rw.opcode = NVME_CMD_READ;
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                   NVME_DATA_TRAS_ERROR);
+
+    /* a list the bus refuses reads as all ones, never as a register */
+    rw.nlb = cpu_to_le16(23);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(0xfed00000);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), !=, NVME_SUCCESS);
+
+    /* memory pointers are unaffected */
+    rw.nlb = cpu_to_le16(0);
+    rw.dptr.prp2 = 0;
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_streams_config(void *obj, void *data,
                                    QGuestAllocator *alloc)
 {
@@ -13274,6 +13350,7 @@ static void femu_register_nodes(void)
     qos_add_test("admin-queue-refused", "femu", femu_test_admin_queue_refused,
                  NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
+    qos_add_test("pause-mmio", "femu", femu_test_pause_mmio, NULL);
     qos_add_test("cmb-data-buffer", "femu", femu_test_cmb_data_buffer,
                  &(QOSGraphTestOptions) {
         /* four megabytes of controller memory on base address register two */

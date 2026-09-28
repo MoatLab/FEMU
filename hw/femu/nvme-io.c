@@ -843,7 +843,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
             g_autofree uint8_t *dbuf = g_malloc(data_size);
 
             mbuf = g_malloc(meta_size);
-            if (pci_dma_read(&n->parent_obj, mptr, mbuf, meta_size)) {
+            if (femu_dma_read(n, mptr, mbuf, meta_size)) {
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             err = dma_write_cmd(n, cmd, dbuf, data_size);
@@ -912,9 +912,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
             }
 
             if (dma_memory_rw(as, prp1, mb + moff, len0, dir,
-                              MEMTXATTRS_UNSPECIFIED) ||
+                              FEMU_DMA_ATTRS) ||
                 (rem && dma_memory_rw(as, prp2, mb + moff + len0, rem, dir,
-                                      MEMTXATTRS_UNSPECIFIED))) {
+                                      FEMU_DMA_ATTRS))) {
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             if (req->is_write) {
@@ -970,7 +970,7 @@ mapped:
     }
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret && meta_size &&
-        pci_dma_write(&n->parent_obj, mptr, ns->mdata + slba * ms, meta_size)) {
+        femu_dma_write(n, mptr, ns->mdata + slba * ms, meta_size)) {
         ret = -EIO;
     }
     if (meta_size) {
@@ -1526,7 +1526,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_autofree uint8_t *host = g_malloc(mlen);
         uint16_t status = NVME_SUCCESS;
 
-        if (pci_dma_read(&n->parent_obj, le64_to_cpu(rw->mptr), host, mlen)) {
+        if (femu_dma_read(n, le64_to_cpu(rw->mptr), host, mlen)) {
             status = NVME_DATA_TRAS_ERROR | NVME_DNR;
         } else if (memcmp(ns->mdata + slba * ms, host, mlen)) {
             status = NVME_CMP_FAILURE;

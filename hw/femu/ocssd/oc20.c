@@ -875,7 +875,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
 
         for (i = 0; i < npredef; i++) {
             if (dma_memory_set(as, predef_sg[i].base, pattern,
-                               predef_sg[i].len, MEMTXATTRS_UNSPECIFIED)) {
+                               predef_sg[i].len, FEMU_DMA_ATTRS)) {
                 err = NVME_DATA_TRAS_ERROR | NVME_DNR;
                 goto fail_free;
             }

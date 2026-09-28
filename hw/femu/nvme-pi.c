@@ -203,13 +203,13 @@ uint16_t femu_pi_transfer(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!to_host && ms &&
-        pci_dma_read(&n->parent_obj, mptr, meta, (size_t)nlb * ms)) {
+        femu_dma_read(n, mptr, meta, (size_t)nlb * ms)) {
         return NVME_DATA_TRAS_ERROR | NVME_DNR;
     }
     status = to_host ? dma_read_cmd(n, cmd, data, len) :
                        dma_write_cmd(n, cmd, data, len);
     if (!status && to_host && ms &&
-        pci_dma_write(&n->parent_obj, mptr, meta, (size_t)nlb * ms)) {
+        femu_dma_write(n, mptr, meta, (size_t)nlb * ms)) {
         return NVME_DATA_TRAS_ERROR | NVME_DNR;
     }
     return status;

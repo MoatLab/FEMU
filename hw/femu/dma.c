@@ -26,8 +26,9 @@ void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (nvme_addr_is_cmb(n, addr, size)) {
         memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
-    } else {
-        pci_dma_read(&n->parent_obj, addr, buf, size);
+    } else if (femu_dma_read(n, addr, buf, size)) {
+        /* a read the bus refuses returns all ones */
+        memset(buf, 0xff, size);
     }
 }
 
@@ -36,7 +37,7 @@ void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
     if (nvme_addr_is_cmb(n, addr, size)) {
         memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
     } else {
-        pci_dma_write(&n->parent_obj, addr, buf, size);
+        femu_dma_write(n, addr, buf, size);
     }
 }
 
@@ -430,8 +431,8 @@ static uint16_t dma_copy(FemuCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
         qemu_sglist_destroy(qsg);
     } else if (qsg->nsg > 0) {
         uint64_t resid = to_host ?
-            dma_buf_read(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED) :
-            dma_buf_write(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED);
+            dma_buf_read(ptr, len, NULL, qsg, FEMU_DMA_ATTRS) :
+            dma_buf_write(ptr, len, NULL, qsg, FEMU_DMA_ATTRS);
 
         if (resid) {
             status = NVME_DATA_TRAS_ERROR | NVME_DNR;
@@ -481,7 +482,7 @@ static uint16_t dma_copy_fill(QEMUSGList *qsg, QEMUIOVector *iov,
                                        MIN(left, sizeof(zeroes));
 
             if (dma_memory_write(qsg->as, addr, src, n,
-                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+                                 FEMU_DMA_ATTRS) != MEMTX_OK) {
                 status = NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             addr += n;

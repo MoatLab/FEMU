@@ -126,7 +126,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
             return -ERANGE;
         }
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir,
-                          MEMTXATTRS_UNSPECIFIED)) {
+                          FEMU_DMA_ATTRS)) {
             qemu_sglist_destroy(qsg);
             return -EIO;
         }
