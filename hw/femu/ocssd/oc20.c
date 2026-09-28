@@ -870,12 +870,11 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
     }
 
     if (npredef) {
-        AddressSpace *as = pci_get_address_space(&n->parent_obj);
         uint8_t pattern = (ns->id_ns.dlfeat & 0x7) == 0x2 ? 0xff : 0x00;
 
         for (i = 0; i < npredef; i++) {
-            if (dma_memory_set(as, predef_sg[i].base, pattern,
-                               predef_sg[i].len, FEMU_DMA_ATTRS)) {
+            if (femu_dma_set(n, predef_sg[i].base, pattern,
+                             predef_sg[i].len)) {
                 err = NVME_DATA_TRAS_ERROR | NVME_DNR;
                 goto fail_free;
             }

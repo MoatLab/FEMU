@@ -897,9 +897,6 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         /* a misaligned first entry takes the checked path below */
         if (NS_NOSSD(ns) && !meta_size && !(prp1 & 0x3) &&
             (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0))) {
-            DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
-                                             : DMA_DIRECTION_FROM_DEVICE;
-            AddressSpace *as = pci_get_address_space(&n->parent_obj);
             uint8_t *mb = n->mbe->logical_space;
             uint64_t moff = data_offset;
 
@@ -911,10 +908,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                 req->fdp_dtype = (le16_to_cpu(rw->control) >> 4) & 0xF;
             }
 
-            if (dma_memory_rw(as, prp1, mb + moff, len0, dir,
-                              FEMU_DMA_ATTRS) ||
-                (rem && dma_memory_rw(as, prp2, mb + moff + len0, rem, dir,
-                                      FEMU_DMA_ATTRS))) {
+            if (femu_dma_rw(n, prp1, mb + moff, len0, !req->is_write) ||
+                (rem && femu_dma_rw(n, prp2, mb + moff + len0, rem,
+                                    !req->is_write))) {
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             if (req->is_write) {
@@ -1505,7 +1501,14 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * the previous code compared against a zeroed buffer, so any non-zero
          * device data spuriously failed the compare.
          */
-        nvme_addr_read(n, req->qsg.sg[i].base, host, len);
+        if (nvme_addr_read(n, req->qsg.sg[i].base, host, len)) {
+            g_free(host);
+            qemu_sglist_destroy(&req->qsg);
+            if (ns->mdata) {
+                qemu_mutex_unlock(&ns->mdata_lock);
+            }
+            return NVME_DATA_TRAS_ERROR | NVME_DNR;
+        }
         cmp = memcmp(dev, host, len);
         g_free(host);
         if (cmp) {

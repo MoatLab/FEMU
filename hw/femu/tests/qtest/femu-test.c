@@ -13095,7 +13095,10 @@ static void femu_test_pause_mmio(void *obj, void *data, QGuestAllocator *alloc)
     g_mutex_init(&d.lock);
     g_cond_init(&d.cond);
     watchdog = g_thread_new("pause-timeout", femu_pause_deadline, &d);
-    for (i = 0; i < 32; i++) {
+    for (i = 0; i < 64; i++) {
+        /* HPET registers, then a read that would write the BIOS ROM */
+        rw.opcode = i & 1 ? NVME_CMD_READ : NVME_CMD_WRITE;
+        rw.dptr.prp1 = cpu_to_le64(i & 1 ? 0xfffc0000 : 0xfed00000);
         for (j = 0; j < 14; j++) {
             femu_submit(&c, &c.io, (NvmeCmd *)&rw);
         }
@@ -13104,6 +13107,8 @@ static void femu_test_pause_mmio(void *obj, void *data, QGuestAllocator *alloc)
             femu_complete(&c, &c.io, NULL, NULL);
         }
     }
+    rw.opcode = NVME_CMD_WRITE;
+    rw.dptr.prp1 = cpu_to_le64(0xfed00000);
     g_mutex_lock(&d.lock);
     d.done = true;
     g_cond_signal(&d.cond);
@@ -13123,10 +13128,52 @@ static void femu_test_pause_mmio(void *obj, void *data, QGuestAllocator *alloc)
     rw.dptr.prp2 = cpu_to_le64(0xfed00000);
     g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), !=, NVME_SUCCESS);
 
+    /* ROM takes no writes, so a read into it would be served as I/O */
+    rw.nlb = cpu_to_le16(7);
+    rw.dptr.prp1 = cpu_to_le64(0xfffc0000);
+    rw.dptr.prp2 = 0;
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                   NVME_DATA_TRAS_ERROR);
+
     /* memory pointers are unaffected */
     rw.nlb = cpu_to_le16(0);
+    rw.dptr.prp1 = cpu_to_le64(buf);
     rw.dptr.prp2 = 0;
     g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * An SGL entry in the controller memory buffer joins the scatter list. The
+ * device copies it itself; its own handlers would need the BQL on a poller.
+ */
+static void femu_test_cmb_sgl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeSglDescriptor blk = { 0 };
+    uint8_t want[FEMU_DATA_SIZE];
+    uint8_t got[FEMU_DATA_SIZE];
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    QPCIBar cmb;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmb = qpci_iomap(&femu->dev, 2, NULL);
+    memset(want, 0x6c, sizeof(want));
+    qtest_memwrite(qts, cmb.addr, want, sizeof(want));
+
+    blk.addr = cpu_to_le64(cmb.addr);
+    blk.len = cpu_to_le32(FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -13351,6 +13398,10 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
     qos_add_test("pause-mmio", "femu", femu_test_pause_mmio, NULL);
+    qos_add_test("cmb-sgl", "femu", femu_test_cmb_sgl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "sgl=on,cmbsz=0x400000,cmbloc=2"
+    });
     qos_add_test("cmb-data-buffer", "femu", femu_test_cmb_data_buffer,
                  &(QOSGraphTestOptions) {
         /* four megabytes of controller memory on base address register two */

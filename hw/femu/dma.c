@@ -22,23 +22,83 @@ bool nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len)
     return addr >= base && addr - base < size && len <= size - (addr - base);
 }
 
-void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
+/*
+ * Pollers and the FTL thread copy guest data without the BQL, and an access
+ * served by a device's handlers takes it. A pause holds the BQL while it waits
+ * for those threads, so neither side would progress. Only memory the host can
+ * reach directly qualifies: ROM refuses writes and a RAM device is served as
+ * I/O, so both are refused along with registers, as a master abort would be.
+ */
+static bool femu_dma_direct(FemuCtrl *n, dma_addr_t addr, dma_addr_t len,
+                            bool to_host)
 {
-    if (nvme_addr_is_cmb(n, addr, size)) {
-        memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
-    } else if (femu_dma_read(n, addr, buf, size)) {
+    AddressSpace *as = pci_get_address_space(&n->parent_obj);
+
+    if (len && addr > UINT64_MAX - (len - 1)) {
+        return false;
+    }
+    RCU_READ_LOCK_GUARD();
+    while (len) {
+        hwaddr xlat;
+        hwaddr l = len;
+        MemoryRegion *mr = address_space_translate(as, addr, &xlat, &l,
+                                                   to_host, FEMU_DMA_ATTRS);
+
+        if (!l || !memory_access_is_direct(mr, to_host, FEMU_DMA_ATTRS)) {
+            return false;
+        }
+        addr += l;
+        len -= l;
+    }
+    return true;
+}
+
+/* The CMB belongs to this device, so it is copied without dispatch. */
+MemTxResult femu_dma_rw(FemuCtrl *n, dma_addr_t addr, void *buf,
+                        dma_addr_t len, bool to_host)
+{
+    if (nvme_addr_is_cmb(n, addr, len)) {
+        uint8_t *cmb = &n->cmbuf[addr - n->ctrl_mem.addr];
+
+        memcpy(to_host ? cmb : buf, to_host ? buf : cmb, len);
+        return MEMTX_OK;
+    }
+    if (!femu_dma_direct(n, addr, len, to_host)) {
+        return MEMTX_ACCESS_ERROR;
+    }
+    return pci_dma_rw(&n->parent_obj, addr, buf, len,
+                      to_host ? DMA_DIRECTION_FROM_DEVICE :
+                                DMA_DIRECTION_TO_DEVICE, FEMU_DMA_ATTRS);
+}
+
+MemTxResult femu_dma_set(FemuCtrl *n, dma_addr_t addr, uint8_t c,
+                         dma_addr_t len)
+{
+    if (nvme_addr_is_cmb(n, addr, len)) {
+        memset(&n->cmbuf[addr - n->ctrl_mem.addr], c, len);
+        return MEMTX_OK;
+    }
+    if (!femu_dma_direct(n, addr, len, true)) {
+        return MEMTX_ACCESS_ERROR;
+    }
+    return dma_memory_set(pci_get_address_space(&n->parent_obj), addr, c, len,
+                          FEMU_DMA_ATTRS);
+}
+
+MemTxResult nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
+{
+    MemTxResult ret = femu_dma_read(n, addr, buf, size);
+
+    if (ret) {
         /* a read the bus refuses returns all ones */
         memset(buf, 0xff, size);
     }
+    return ret;
 }
 
 void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
-    if (nvme_addr_is_cmb(n, addr, size)) {
-        memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
-    } else {
-        femu_dma_write(n, addr, buf, size);
-    }
+    femu_dma_write(n, addr, buf, size);
 }
 
 /*
@@ -142,8 +202,8 @@ static uint16_t nvme_read_list(FemuCtrl *n, hwaddr addr, void *buf, int size)
     uint16_t status;
 
     if (!n->power_loss) {
-        nvme_addr_read(n, addr, buf, size);
-        return NVME_SUCCESS;
+        return nvme_addr_read(n, addr, buf, size) ?
+               NVME_DATA_TRAS_ERROR | NVME_DNR : NVME_SUCCESS;
     }
     pci_dma_sglist_init(&qsg, &n->parent_obj, 1);
     qemu_sglist_add(&qsg, addr, size);
@@ -430,11 +490,20 @@ static uint16_t dma_copy(FemuCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
         status = nvme_power_dma(n, qsg, ptr, to_host);
         qemu_sglist_destroy(qsg);
     } else if (qsg->nsg > 0) {
-        uint64_t resid = to_host ?
-            dma_buf_read(ptr, len, NULL, qsg, FEMU_DMA_ATTRS) :
-            dma_buf_write(ptr, len, NULL, qsg, FEMU_DMA_ATTRS);
+        uint32_t left = len;
+        int i;
 
-        if (resid) {
+        for (i = 0; i < qsg->nsg && left; i++) {
+            dma_addr_t l = MIN(left, qsg->sg[i].len);
+
+            if (femu_dma_rw(n, qsg->sg[i].base, ptr, l, to_host)) {
+                status = NVME_DATA_TRAS_ERROR | NVME_DNR;
+                break;
+            }
+            ptr += l;
+            left -= l;
+        }
+        if (left && status == NVME_SUCCESS) {
             status = NVME_DATA_TRAS_ERROR | NVME_DNR;
         }
         qemu_sglist_destroy(qsg);

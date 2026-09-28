@@ -125,8 +125,9 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
             qemu_sglist_destroy(qsg);
             return -ERANGE;
         }
-        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir,
-                          FEMU_DMA_ATTRS)) {
+        if (femu_dma_rw(container_of(qsg->dev, FemuCtrl, parent_obj.qdev),
+                        cur_addr, mb + mb_oft, cur_len,
+                        dir == DMA_DIRECTION_FROM_DEVICE)) {
             qemu_sglist_destroy(qsg);
             return -EIO;
         }

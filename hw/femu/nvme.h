@@ -2530,31 +2530,29 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq);
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_clear_virq(FemuCtrl *n);
 
-/*
- * Pollers and the FTL thread copy guest data without the BQL, and an access
- * that resolves to a device register takes it. A pause holds the BQL while it
- * waits for those threads, so neither side would progress. Restrict controller
- * DMA to memory: other targets fail as a master abort would.
- */
+/* Controller DMA reaches memory only; see femu_dma_rw(). */
 #define FEMU_DMA_ATTRS ((MemTxAttrs) { .memory = 1 })
+
+MemTxResult femu_dma_rw(FemuCtrl *n, dma_addr_t addr, void *buf,
+                        dma_addr_t len, bool to_host);
+MemTxResult femu_dma_set(FemuCtrl *n, dma_addr_t addr, uint8_t c,
+                         dma_addr_t len);
 
 static inline MemTxResult femu_dma_read(FemuCtrl *n, dma_addr_t addr,
                                         void *buf, dma_addr_t len)
 {
-    return pci_dma_rw(&n->parent_obj, addr, buf, len,
-                      DMA_DIRECTION_TO_DEVICE, FEMU_DMA_ATTRS);
+    return femu_dma_rw(n, addr, buf, len, false);
 }
 
 static inline MemTxResult femu_dma_write(FemuCtrl *n, dma_addr_t addr,
                                          const void *buf, dma_addr_t len)
 {
-    return pci_dma_rw(&n->parent_obj, addr, (void *)buf, len,
-                      DMA_DIRECTION_FROM_DEVICE, FEMU_DMA_ATTRS);
+    return femu_dma_rw(n, addr, (void *)buf, len, true);
 }
 
 /* Public DMA APIs from dma.c */
 bool     nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len);
-void     nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
+MemTxResult nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void     nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 
 /*
