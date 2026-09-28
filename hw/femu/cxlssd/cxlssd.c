@@ -31,7 +31,7 @@ struct FemuCxlSsd {
     uint32_t cache_ways;
     char *cache_policy;
     bool ftl;
-    bool der;
+    char *der;
     FemuCxlDer direct;
     uint64_t read_ns;
     uint64_t program_ns;
@@ -160,7 +160,8 @@ static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
     if (first == last && s->cache.nsets) {
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
 
-        if (e && femu_cxl_der_map(&s->direct, hpa, dpa)) {
+        if (e && femu_cxl_der_map(&s->direct, hpa, dpa) &&
+            !s->direct.cylon) {
             /* Direct writes cannot update metadata, so charge on eviction. */
             e->dirty = true;
         }
@@ -204,6 +205,11 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     Error *local_err = NULL;
     uint64_t size;
 
+    if (s->der && strcmp(s->der, "off") && strcmp(s->der, "memslot") &&
+        strcmp(s->der, "cylon")) {
+        error_setg(errp, "der must be off, memslot or cylon");
+        return;
+    }
     if (!ct3d->hostvmem || ct3d->hostmem || ct3d->hostpmem ||
         ct3d->dc.num_regions || ct3d->dc.host_dc || ct3d->lsa) {
         error_setg(errp, "femu-cxl-ssd requires only volatile-memdev");
@@ -267,7 +273,7 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     s->stopping = false;
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,
                        QEMU_THREAD_JOINABLE);
-    femu_cxl_der_init(&s->direct, ct3d, s->der);
+    femu_cxl_der_init(&s->direct, ct3d, s->der, &s->cache);
     s->started = true;
 }
 
@@ -292,23 +298,23 @@ static void cxl_exit(PCIDevice *dev)
     host_memory_backend_set_mapped(s->parent_obj.hostvmem, false);
 }
 
-static void cxl_test_der(Object *obj, bool value, Error **errp)
+static bool cxl_der_active(Object *obj, Error **errp)
 {
-    FemuCxlSsd *s = FEMU_CXL_SSD(obj);
-
-    if (s->started) {
-        femu_cxl_der_clear(&s->direct);
-        s->direct.available = value;
-    }
+    return FEMU_CXL_SSD(obj)->direct.available;
 }
 
 static void cxl_init(Object *obj)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(obj);
 
-    if (qtest_enabled()) {
-        object_property_add_bool(obj, "x-der-test", NULL, cxl_test_der);
-    }
+    s->der = g_strdup("off");
+    object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
+    object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-revocations",
+                                   &s->direct.revocations, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "flush-cache", NULL, cxl_flush);
     object_property_add_uint64_ptr(obj, "der-probes", &s->direct.probes,
                                    OBJ_PROP_FLAG_READ);
@@ -335,7 +341,7 @@ static const Property cxl_props[] = {
     DEFINE_PROP_UINT32("cache-ways", FemuCxlSsd, cache_ways, 16),
     DEFINE_PROP_STRING("cache-policy", FemuCxlSsd, cache_policy),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, ftl, true),
-    DEFINE_PROP_BOOL("der", FemuCxlSsd, der, true),
+    DEFINE_PROP_STRING("der", FemuCxlSsd, der),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, read_ns, 40000),
     DEFINE_PROP_UINT64("program-ns", FemuCxlSsd, program_ns, 200000),
     DEFINE_PROP_UINT64("erase-ns", FemuCxlSsd, erase_ns, 2000000),

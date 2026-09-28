@@ -10,71 +10,39 @@
 #include "hw/pci/pci_host.h"
 #include "der.h"
 
-/* Layouts from the public CylonLinux include/linux/kvm_ext.h. */
-#ifdef CONFIG_KVM
-#include <linux/kvm.h>
-
-typedef struct CylonSpteFlag {
-    uint64_t gpa;
-    uint64_t flag;
-    uint64_t lpn;
-} CylonSpteFlag;
-
-typedef struct CylonLinearSpt {
-    uint64_t *spt;
-    int npages;
-    int offset;
-} CylonLinearSpt;
-
-typedef struct CylonGetLinearSpt {
-    CylonLinearSpt spt_list[60];
-    void *backend_ptr;
-    uint64_t gfn;
-    int n;
-} CylonGetLinearSpt;
-
-#define CYLON_SET_SPTE_FLAG _IOW(KVMIO, 0xdd, CylonSpteFlag)
-#define CYLON_GET_LINEAR_SPT _IOWR(KVMIO, 0xde, CylonGetLinearSpt)
-
-static bool der_probe(void)
-{
-    CylonGetLinearSpt spt = { .gfn = UINT64_MAX };
-    CylonSpteFlag flag = { .gpa = UINT64_MAX & ~4095ULL };
-    CPUState *cpu;
-
-    if (!kvm_enabled() || qemu_real_host_page_size() != 4096) {
-        return false;
-    }
-    /* An absent GFN returns before the kernel dereferences slot->aux. */
-    if (kvm_vm_ioctl(kvm_state, CYLON_GET_LINEAR_SPT, &spt) != -EINVAL) {
-        return false;
-    }
-    cpu = qemu_get_cpu(0);
-    return cpu && kvm_vcpu_ioctl(cpu, CYLON_SET_SPTE_FLAG, &flag) == 0;
-}
-#else
-static bool der_probe(void)
-{
-    return false;
-}
-#endif
-
 typedef struct FemuCxlMap {
     uint64_t lpn;
     MemoryRegion mr;
     MemoryRegion *container;
 } FemuCxlMap;
 
-void femu_cxl_der_init(FemuCxlDer *der, CXLType3Dev *dev, bool enabled)
+void femu_cxl_der_fallback(FemuCxlDer *der, const char *reason)
 {
+    der->available = false;
+    der->fallbacks++;
+    if (!der->warned) {
+        der->warned = true;
+        warn_report("FEMU CXL DER unavailable: %s; using MMIO", reason);
+    }
+}
+
+void femu_cxl_der_init(FemuCxlDer *der, CXLType3Dev *dev, const char *mode,
+                       FemuCxlCache *cache)
+{
+    const char *reason = NULL;
+
     der->dev = dev;
+    der->cache = cache;
     der->maps = g_hash_table_new(g_int64_hash, g_int64_equal);
-    if (enabled) {
+    der->cylon = mode && !strcmp(mode, "cylon");
+    if (der->cylon) {
         der->probes++;
-        der->available = der_probe();
-        if (!der->available) {
-            info_report("FEMU CXL DER unavailable; using MMIO");
+        der->fast = femu_cylon_prepare(der, &reason);
+        if (!der->fast) {
+            femu_cxl_der_fallback(der, reason);
         }
+    } else {
+        der->available = mode && !strcmp(mode, "memslot");
     }
 }
 
@@ -126,22 +94,27 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     CXLFixedWindow *fw;
     MemoryRegion *ram;
 
-    if (!der->available || (hpa & 4095) != (dpa & 4095)) {
+    if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
     }
-    if (g_hash_table_contains(der->maps, &lpn)) {
+    if (!der->cylon && g_hash_table_contains(der->maps, &lpn)) {
         return true;
+    }
+    fw = der_window(der, hpa);
+    if (!fw) {
+        der->fallbacks++;
+        return false;
+    }
+    if (der->cylon) {
+        return femu_cylon_map(der, fw, hpa, dpa);
     }
 #ifdef CONFIG_KVM
     /* Leave room for splits in the KVM listener's existing regions. */
     if (kvm_enabled() && kvm_get_free_memslots() < 8) {
+        der->fallbacks++;
         return false;
     }
 #endif
-    fw = der_window(der, hpa);
-    if (!fw) {
-        return false;
-    }
     ram = host_memory_backend_get_memory(der->dev->hostvmem);
     map = g_new0(FemuCxlMap, 1);
     map->lpn = lpn;
@@ -153,6 +126,7 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
                       (hpa & ~4095ULL) - fw->base, &map->mr, 1);
     g_hash_table_insert(der->maps, &map->lpn, map);
     der->mapped++;
+    der->remaps++;
     return true;
 }
 
@@ -160,6 +134,10 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
 {
     FemuCxlMap *map = g_hash_table_lookup(der->maps, &lpn);
 
+    if (der->cylon) {
+        femu_cylon_remove(der, lpn);
+        return;
+    }
     if (!map) {
         return;
     }
@@ -168,6 +146,7 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     object_unparent(OBJECT(&map->mr));
     g_free(map);
     der->mapped--;
+    der->revocations++;
 }
 
 void femu_cxl_der_clear(FemuCxlDer *der)
@@ -185,5 +164,7 @@ void femu_cxl_der_clear(FemuCxlDer *der)
 void femu_cxl_der_destroy(FemuCxlDer *der)
 {
     femu_cxl_der_clear(der);
+    femu_cylon_destroy(der);
+    der->available = false;
     g_hash_table_destroy(der->maps);
 }

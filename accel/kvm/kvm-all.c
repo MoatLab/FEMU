@@ -651,10 +651,13 @@ void kvm_close(void)
  * dirty pages logging control
  */
 
+/* CylonLinux include/linux/kvm_host.h. */
+#define KVM_CYLON_DUAL_MODE (1U << 17)
+
 static int kvm_mem_flags(MemoryRegion *mr)
 {
     bool readonly = mr->readonly || memory_region_is_romd(mr);
-    int flags = 0;
+    int flags = mr->cylon_backing ? KVM_CYLON_DUAL_MODE : 0;
 
     if (memory_region_get_dirty_log_mask(mr) != 0) {
         flags |= KVM_MEM_LOG_DIRTY_PAGES;
@@ -1505,12 +1508,13 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
     KVMSlot *mem;
     int err;
     MemoryRegion *mr = section->mr;
+    MemoryRegion *backing = mr->cylon_backing ? mr->cylon_backing : mr;
     bool writable = !mr->readonly && !mr->rom_device;
     hwaddr start_addr, size, slot_size, mr_offset;
     ram_addr_t ram_start_offset;
     void *ram;
 
-    if (!memory_region_is_ram(mr)) {
+    if (!mr->cylon_backing && !memory_region_is_ram(mr)) {
         if (writable || !kvm_readonly_mem_allowed) {
             return;
         } else if (!mr->romd_mode) {
@@ -1530,8 +1534,8 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
         section->offset_within_address_space;
 
     /* use aligned delta to align the ram address and offset */
-    ram = memory_region_get_ram_ptr(mr) + mr_offset;
-    ram_start_offset = memory_region_get_ram_addr(mr) + mr_offset;
+    ram = memory_region_get_ram_ptr(backing) + mr_offset;
+    ram_start_offset = memory_region_get_ram_addr(backing) + mr_offset;
 
     if (!add) {
         do {
@@ -1594,11 +1598,18 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
         mem->ram_start_offset = ram_start_offset;
         mem->ram = ram;
         mem->flags = kvm_mem_flags(mr);
-        mem->guest_memfd = mr->ram_block->guest_memfd;
-        mem->guest_memfd_offset = (uint8_t*)ram - mr->ram_block->host;
+        mem->guest_memfd = backing->ram_block->guest_memfd;
+        mem->guest_memfd_offset = (uint8_t *)ram - backing->ram_block->host;
 
         kvm_slot_init_dirty_bitmap(mem);
         err = kvm_set_user_memory_region(kml, mem, true);
+        if (err && mr->cylon_backing) {
+            mr->cylon_error = err;
+            mem->memory_size = 0;
+            g_free(mem->dirty_bmap);
+            mem->dirty_bmap = NULL;
+            return;
+        }
         if (err) {
             fprintf(stderr, "%s: error registering slot: %s\n", __func__,
                     strerror(-err));
@@ -3816,6 +3827,24 @@ int kvm_get_one_reg(CPUState *cs, uint64_t id, void *target)
         trace_kvm_failed_reg_get(id, strerror(-r));
     }
     return r;
+}
+
+bool kvm_cylon_slot(hwaddr start, uint64_t size, void *ram)
+{
+    int i;
+
+    for (i = 0; i < kvm_state->nr_as; i++) {
+        KVMMemoryListener *ml = kvm_state->as[i].ml;
+        KVMSlot *slot;
+
+        if (kvm_state->as[i].as != &address_space_memory || !ml) {
+            continue;
+        }
+        slot = kvm_lookup_matching_slot(ml, start, size);
+        return slot && slot->ram == ram &&
+               slot->flags == KVM_CYLON_DUAL_MODE;
+    }
+    return false;
 }
 
 static bool kvm_accel_has_memory(AccelState *accel, AddressSpace *as,

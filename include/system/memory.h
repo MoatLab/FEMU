@@ -843,6 +843,9 @@ struct MemoryRegion {
 
     const MemoryRegionOps *ops;
     void *opaque;
+    /* Optional Cylon dual-mode backing for a trapping I/O region. */
+    MemoryRegion *cylon_backing;
+    int cylon_error;
     MemoryRegion *container;
     int mapped_via_alias; /* Mapped via an alias, container might be NULL */
     Int128 size;
