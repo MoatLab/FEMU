@@ -13,12 +13,14 @@
 #include "qemu/module.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
+#include "qobject/qjson.h"
 #include "qobject/qlist.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "libqos/libqos-pc.h"
 #include "libqos/libqos-malloc.h"
 #include "block/nvme.h"
+#include "hw/cxl/cxl_component.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
 #include "standard-headers/linux/pci_regs.h"
 
@@ -13228,6 +13230,222 @@ static void femu_test_streams_config(void *obj, void *data,
     qobject_unref(rsp);
 }
 
+#define FEMU_CXL_MACHINE \
+    "-machine q35,cxl=on -m 128M " \
+    "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 " \
+    "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M " \
+    "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 " \
+    "-object memory-backend-ram,id=mem,size=256M "
+
+static void femu_test_cxl_realize(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                         "'path':'/machine/peripheral/ssd',"
+                         "'property':'cache-pages'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpuint(qdict_get_int(rsp, "return"), ==, 1024);
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
+static uint64_t femu_cxl_stat(QTestState *qts, const char *name)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':%s}}", name);
+    uint64_t value;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    value = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return value;
+}
+
+static void femu_cxl_config(QTestState *qts, unsigned bus,
+                             unsigned offset, uint32_t value)
+{
+    qtest_outl(qts, 0xcf8, 0x80000000u | (bus << 16) | offset);
+    qtest_outl(qts, 0xcfc, value);
+}
+
+#define FEMU_CXL_WINDOW 0x110000000ULL
+#define FEMU_CXL_REGS   0x90001000ULL
+
+static void femu_cxl_decode(QTestState *qts)
+{
+    femu_cxl_config(qts, 52, PCI_PRIMARY_BUS, 0x00353534);
+    femu_cxl_config(qts, 52, PCI_MEMORY_BASE, 0x90009000);
+    femu_cxl_config(qts, 52, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    femu_cxl_config(qts, 53, 0x10, 0x90000000);
+    femu_cxl_config(qts, 53, 0x14, 0);
+    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_BASE_LO,
+                 FEMU_CXL_WINDOW & 0xffffffff);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_BASE_HI,
+                 FEMU_CXL_WINDOW >> 32);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_HI, 0);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL, 0x200);
+    g_assert_cmphex(qtest_readl(qts,
+                   FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL) & 0x400, ==, 0x400);
+}
+
+static void femu_test_cxl_window(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    const char *options = data;
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,%s", options);
+    QTestState *qts = qtest_init(args);
+    QDict *rsp;
+    unsigned i;
+    uint64_t ns;
+
+    femu_cxl_decode(qts);
+    for (i = 0; i < 32; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, 0x123456780000ULL + i);
+    }
+    for (i = 0; i < 32; i++) {
+        g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + i * 4096), ==,
+                         0x123456780000ULL + i);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), >, 0);
+    ns = femu_cxl_stat(qts, "media-time-ns");
+    g_assert_cmpuint(ns, >=, 200000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), >=, 16);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'flush-cache','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
+static void femu_cxl_set(QTestState *qts, const char *name, bool value)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':%s,'value':%i}}", name, value);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_cxl_flush(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0x1234);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 0);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns"), >=, 200000);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0x1234);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_der(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=1,cache-ways=1");
+    uint64_t hits;
+    QDict *rsp;
+
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 1);
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    /* Exercise mapping ownership on qtest without a custom host kernel. */
+    femu_cxl_set(qts, "x-der-test", true);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1);
+    hits = femu_cxl_stat(qts, "cache-hits");
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xbeef);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-hits"), ==, hits);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 4096, 0xcafe);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
+    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_decode(qts);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
+    rsp = qtest_qmp(qts, "{'execute':'system_reset'}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qtest_qmp_eventwait(qts, "RESET");
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 1);
+    femu_cxl_decode(qts);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xbeef);
+    femu_cxl_set(qts, "realized", false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_no_ftl(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "ftl=off,der=off,cache-pages=0");
+
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 4092, 0x1122334455667788ULL);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 4092), ==,
+                     0x1122334455667788ULL);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-probes"), ==, 0);
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_invalid(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *args;
+        const char *error;
+    } cases[] = {
+        { "'cache-policy':'unknown'", "cache-policy must be" },
+        { "'cache-ways':0", "cache-ways (1..1024)" },
+        { "'cache-pages':17,'cache-ways':16", "divisible" },
+        { "'cache-pages':65537,'cache-ways':1", "fit the media" },
+        { "'program-ns':1000000001", "at most one second" },
+        { "'num-dc-regions':1", "requires only volatile-memdev" },
+    };
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu-cxl-ssd',"
+            "'id':'ssd','bus':'rp0','volatile-memdev':'mem',%s}}",
+            cases[i].args);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), cases[i].error));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -13245,6 +13463,31 @@ static void femu_register_nodes(void)
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_node_create_driver("femu", femu_create);
+    qos_add_test("cxl-realize", "femu", femu_test_cxl_realize, NULL);
+    qos_add_test("cxl-flush", "femu", femu_test_cxl_flush, NULL);
+    qos_add_test("cxl-der", "femu", femu_test_cxl_der, NULL);
+    qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
+    qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);
+    {
+        static const char * const policies[] = {
+            "fifo", "lifo", "clock", "s3-fifo"
+        };
+        unsigned i;
+        unsigned ways;
+
+        for (i = 0; i < G_N_ELEMENTS(policies); i++) {
+            for (ways = 1; ways <= 16; ways *= 16) {
+                char *name = g_strdup_printf("cxl-%s-%u", policies[i], ways);
+                char *options = g_strdup_printf("cache-pages=16,"
+                    "cache-ways=%u,cache-policy=%s", ways, policies[i]);
+
+                qos_add_test(name, "femu", femu_test_cxl_window,
+                             &(QOSGraphTestOptions) { .arg = options });
+                g_free(name);
+            }
+        }
+    }
+
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
