@@ -24,11 +24,17 @@ nand-media.o: ../nand/nand-media.c ../nand/nand-media.h
 test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
-check: test-femu-nand-media test-femu-hybrid-oracle
+test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) $(shell pkg-config --cflags glib-2.0) \
+	    -o $@ unit/test-cxl-cache.c ../cxlssd/cache.c \
+	    $(shell pkg-config --libs glib-2.0)
+
+check: test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache
 	./test-femu-nand-media
 	./test-femu-hybrid-oracle
+	./test-femu-cxl-cache
 
 clean:
-	rm -f test-femu-nand-media test-femu-hybrid-oracle nand-media.o
+	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache nand-media.o
 
 .PHONY: check clean
