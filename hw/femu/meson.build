@@ -18,3 +18,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'))
 system_ss.add(when: 'CONFIG_FEMU_CSD_UBPF', if_true: femu_csd_ubpf)
+system_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
+              if_true: files('cxlssd/cxlssd.c', 'cxlssd/cache.c'))
+specific_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
+                if_true: files('cxlssd/der.c'))

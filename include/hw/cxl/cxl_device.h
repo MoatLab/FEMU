@@ -653,6 +653,13 @@ struct CXLType3Class {
     PCIDeviceClass parent_class;
 
     /* public */
+    void (*invalidate)(CXLType3Dev *ct3d);
+
+    /* Optional media model, called after decoder and media-state checks. */
+    MemTxResult (*mem_access)(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
+                              uint64_t *data, unsigned size, bool write,
+                              MemTxAttrs attrs);
+
     uint64_t (*get_lsa_size)(CXLType3Dev *ct3d);
 
     uint64_t (*get_lsa)(CXLType3Dev *ct3d, void *buf, uint64_t size,

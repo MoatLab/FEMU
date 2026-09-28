@@ -320,6 +320,9 @@ static void ct3d_config_write(PCIDevice *pci_dev, uint32_t addr, uint32_t val,
 {
     CXLType3Dev *ct3d = CXL_TYPE3(pci_dev);
 
+    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
+        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
+    }
     pcie_doe_write_config(&ct3d->doe_cdat, addr, val, size);
     pci_default_write_config(pci_dev, addr, val, size);
     pcie_aer_write_config(pci_dev, addr, val, size);
@@ -515,6 +518,9 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     bool should_uncommit = false;
     int which_hdm = -1;
 
+    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
+        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
+    }
     assert(size == 4);
     g_assert(offset < CXL2_COMPONENT_CM_REGION_SIZE);
 
@@ -1215,6 +1221,11 @@ MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
         return MEMTX_OK;
     }
 
+    if (CXL_TYPE3_GET_CLASS(ct3d)->mem_access) {
+        return CXL_TYPE3_GET_CLASS(ct3d)->mem_access(ct3d, host_addr,
+                    dpa_offset, data, size, false, attrs);
+    }
+
     return address_space_read(as, dpa_offset, attrs, data, size);
 }
 
@@ -1236,6 +1247,11 @@ MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
         return MEMTX_OK;
     }
 
+    if (CXL_TYPE3_GET_CLASS(ct3d)->mem_access) {
+        return CXL_TYPE3_GET_CLASS(ct3d)->mem_access(ct3d, host_addr,
+                    dpa_offset, &data, size, true, attrs);
+    }
+
     return address_space_write(as, dpa_offset, attrs, &data, size);
 }
 
@@ -1245,6 +1261,9 @@ static void ct3d_reset(DeviceState *dev)
     uint32_t *reg_state = ct3d->cxl_cstate.crb.cache_mem_registers;
     uint32_t *write_msk = ct3d->cxl_cstate.crb.cache_mem_regs_write_mask;
 
+    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
+        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
+    }
     pcie_cap_fill_link_ep_usp(PCI_DEVICE(dev), ct3d->width, ct3d->speed);
     cxl_component_register_init_common(reg_state, write_msk, CXL2_TYPE3_DEVICE);
     cxl_device_register_init_t3(ct3d, CXL_T3_MSIX_MBOX);

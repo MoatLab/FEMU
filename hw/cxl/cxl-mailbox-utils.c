@@ -3907,7 +3907,12 @@ int cxl_process_cci_message(CXLCCI *cci, uint8_t set, uint8_t cmd,
 
     /* forbid any selected commands while the media is disabled */
     if (object_dynamic_cast(OBJECT(cci->d), TYPE_CXL_TYPE3)) {
-        cxl_dstate = &CXL_TYPE3(cci->d)->cxl_dstate;
+        CXLType3Dev *ct3d = CXL_TYPE3(cci->d);
+
+        if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
+            CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
+        }
+        cxl_dstate = &ct3d->cxl_dstate;
 
         if (cxl_dev_media_disabled(cxl_dstate)) {
             if (h == cmd_events_get_records ||
