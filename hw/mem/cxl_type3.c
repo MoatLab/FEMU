@@ -1151,7 +1151,7 @@ static bool cxl_type3_dpa(CXLType3Dev *ct3d, hwaddr host_addr, uint64_t *dpa)
     return false;
 }
 
-static int cxl_type3_hpa_to_as_and_dpa(CXLType3Dev *ct3d,
+int cxl_type3_hpa_to_as_and_dpa(CXLType3Dev *ct3d,
                                        hwaddr host_addr,
                                        unsigned int size,
                                        AddressSpace **as,
