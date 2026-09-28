@@ -133,3 +133,5 @@ trace-ust-all.c
 build-femu/
 build/
 *.md
+
+/build-asan/
