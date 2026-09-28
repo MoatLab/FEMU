@@ -220,3 +220,43 @@ supports, so this page can be discovered rather than assumed.
 ---
 
 81 of 136 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
+
+## CXL SSD
+
+`-device femu-cxl-ssd` selects a CXL Type-3 device with a private instance of
+FEMU's current black-box FTL and NAND media. Existing `femu` modes and ordinary
+`cxl-type3` devices keep their existing behavior. Use the inherited
+`volatile-memdev` link with a memory backend sized in multiples of 256 MiB, up
+to 64 GiB. Persistent memory, label storage, and dynamic capacity combinations
+are rejected. See [the design note](cxlssd.md) and
+[femu-scripts/run-cxlssd.sh](../../../femu-scripts/run-cxlssd.sh).
+
+All properties below belong to `femu-cxl-ssd`, not `femu`.
+
+| Property | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `cache-pages` | uint32 | 1024 | Number of 4 KiB resident pages; zero disables the cache. Must fit the media and be divisible by `cache-ways`. |
+| `cache-ways` | uint32 | 16 | Entries per set, 1 through 1024. One means direct mapped (WAY_1). Set to `cache-pages` for a fully associative cache within this limit. |
+| `cache-policy` | string | `fifo` when unset | `fifo`, `lifo`, `clock`, or `s3-fifo`. |
+| `ftl` | bool | on | Charge cache misses and dirty writeback to the current FTL/NAND model. Off keeps memory functionality with no media timing. |
+| `der` | bool | on | Probe public Cylon kernel support once at realize. Unsupported hosts retain MMIO and print one informational line. Remapping is limited to a single endpoint on a host bridge without HDM decoding and a non-interleaved window. |
+| `read-ns` | uint64 | 40000 | NAND page read time; zero through one second in nanoseconds. |
+| `program-ns` | uint64 | 200000 | NAND page program time; same range. |
+| `erase-ns` | uint64 | 2000000 | NAND block erase time; same range. |
+
+The following QOM properties are available through `qom-get` / `qom-set` at
+`/machine/peripheral/<device-id>`:
+
+| Property | Access | Meaning |
+| --- | --- | --- |
+| `flush-cache` | write bool | Setting true revokes direct mappings, programs dirty entries, empties the cache and waits for its modeled media cost. False does nothing. A full NAND reports an error and retains the unwritten entry. |
+| `media-time-ns` | read uint64 | Sum of modeled latency returned by FTL requests, including resource contention. |
+| `media-reads` | read uint64 | Read requests sent to the FTL. Unmapped pages return zeros without a NAND read delay. |
+| `media-writes` | read uint64 | User page programs completed by the shared FTL; excludes GC copying. |
+| `cache-hits` | read uint64 | MMIO page lookups that found a resident entry. Direct accesses are unobserved. |
+| `cache-misses` | read uint64 | MMIO page lookups that missed, including accesses with no cache. |
+| `cache-inserts` | read uint64 | Resident admissions, across all policies. |
+| `cache-evictions` | read uint64 | Resident removals, including explicit flushes. |
+| `der-probes` | read uint64 | Probe attempts; one per realize with `der=on`, zero with it off. |
+| `der-mapped` | read uint64 | Pages currently mapped for direct guest access. |
+| `x-der-test` | write bool, qtest only | Enable/disable the mapping path without a custom kernel to test ownership and revocation. Not exposed in production. |
