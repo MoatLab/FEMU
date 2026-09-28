@@ -256,6 +256,11 @@ typedef struct QEMU_PACKED NvmeEndGrpLog {
     uint8_t rsvd2[352];
 } NvmeEndGrpLog;
 
+typedef struct NvmeSanitizeState {
+    uint16_t sstat;
+    uint32_t cdw10;
+} NvmeSanitizeState;
+
 typedef struct NvmeSubsystem {
     DeviceState parent_obj;
     NvmeBus     bus;
@@ -267,6 +272,7 @@ typedef struct NvmeSubsystem {
     NvmeEnduranceGroup endgrp;
     bool ns_mgmt;
     FemuCtrl *storage;
+    NvmeSanitizeState sanitize;
     QemuMutex ns_lock;
     bool ns_lock_init;
     bool ns_release_pending;
@@ -2151,7 +2157,7 @@ typedef struct FemuCtrl {
     FemuStatsLog    telemetry_data;
     bool            telemetry_captured;
     uint8_t         telemetry_dgn;
-    uint16_t        sanitize_sstat;     /* Sanitize Status log SSTAT */
+    NvmeSanitizeState sanitize;
     /*
      * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set
      * under the BQL, read from the pollers too, hence the sequence lock.
@@ -2164,7 +2170,6 @@ typedef struct FemuCtrl {
     char            *pel_file;
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
-    uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
     uint32_t        aer_queued;    /* events waiting for an outstanding AER */
 
@@ -2572,10 +2577,18 @@ uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);
 /* Sanitize Status SSTAT: Global Data Erased, cleared by any write after it */
 #define NVME_SSTAT_GDE          (1 << 8)
 
+/* Shared storage keeps its sanitize history across controller removal. */
+static inline NvmeSanitizeState *nvme_sanitize_state(FemuCtrl *n)
+{
+    return nvme_ns_shared(n) ? &n->subsys->sanitize : &n->sanitize;
+}
+
 static inline void nvme_note_user_write(FemuCtrl *n)
 {
-    if (unlikely(qatomic_read(&n->sanitize_sstat) & NVME_SSTAT_GDE)) {
-        qatomic_and(&n->sanitize_sstat, (uint16_t)~NVME_SSTAT_GDE);
+    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
+
+    if (unlikely(qatomic_read(&sanitize->sstat) & NVME_SSTAT_GDE)) {
+        qatomic_and(&sanitize->sstat, (uint16_t)~NVME_SSTAT_GDE);
     }
 }
 void bbssd_deallocate_all(NvmeNamespace *ns);

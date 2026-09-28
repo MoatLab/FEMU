@@ -2797,6 +2797,7 @@ static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
 
 static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
 {
+    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint8_t sanact = dw10 & 0x7;
     bool ndas = dw10 & (1 << 9);
@@ -2859,18 +2860,18 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
             bbssd_deallocate_all(ns);
         }
     }
-    n->sanitize_cdw10 = dw10;
+    sanitize->cdw10 = dw10;
     /*
      * Completed, 001b, or 100b when the host asked for no deallocation. Set
      * before the pollers resume: a write clears GDE, and one that ran first
      * would leave the status claiming no data was written since.
      */
-    qatomic_set(&n->sanitize_sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
+    qatomic_set(&sanitize->sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
 
     /* Sanitize Completion (Figure 248): progress FFFFh, done */
     memset(ev, 0, sizeof(ev));
     stw_le_p(ev, 0xffff);
-    stw_le_p(ev + 2, qatomic_read(&n->sanitize_sstat));
+    stw_le_p(ev + 2, qatomic_read(&sanitize->sstat));
     stl_le_p(ev + 8, NVME_NSID_BROADCAST);
     femu_pel_log(n, NVME_PEL_SANITIZE_COMPLETION, 2, ev, 12);
     nvme_resume_pollers(n, resume);
@@ -2882,6 +2883,7 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                                   uint64_t off)
 {
+    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
     uint8_t log[512] = {};
     uint32_t trans_len;
 
@@ -2889,8 +2891,8 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     stw_le_p(log, 0xffff);                      /* SPROG: none in progress */
-    stw_le_p(log + 2, qatomic_read(&n->sanitize_sstat));
-    stl_le_p(log + 4, n->sanitize_cdw10);
+    stw_le_p(log + 2, qatomic_read(&sanitize->sstat));
+    stl_le_p(log + 4, sanitize->cdw10);
     /* the estimated times, not reported */
     for (int i = 8; i < 32; i += 4) {
         stl_le_p(log + i, 0xffffffff);

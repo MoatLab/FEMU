@@ -10214,6 +10214,60 @@ static void femu_test_shared_features(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_check_sanitize(FemuCtrlState *c, uint64_t buf,
+                                uint16_t status, uint32_t cdw10)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmpint(femu_get_log(c, 0x81, buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf), ==, 0xffff);
+    g_assert_cmphex(qtest_readw(qts, buf + 2), ==, status);
+    g_assert_cmphex(qtest_readl(qts, buf + 4), ==, cdw10);
+    for (int i = 8; i < 32; i += 4) {
+        g_assert_cmphex(qtest_readl(qts, buf + i), ==, 0xffffffff);
+    }
+}
+
+static void femu_test_shared_sanitize(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState a = { 0 };
+    FemuCtrlState b = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QPCIDevice *pdev;
+
+    femu_shared_start(femu, alloc, &a, &b, 2);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, true), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_sanitize(&a, 2), ==, NVME_SUCCESS);
+    femu_check_sanitize(&a, buf, 0x101, 2);
+    femu_check_sanitize(&b, buf, 0x101, 2);
+    femu_ns_page(&b, buf, 1, 0, 0x5c, true);
+    femu_ns_page(&a, buf, 1, 0, 0x5c, false);
+    femu_check_sanitize(&a, buf, 1, 2);
+    femu_check_sanitize(&b, buf, 1, 2);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 1, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_sanitize(&b, 0x202), ==, NVME_SUCCESS);
+    femu_ns_page(&a, buf, 1, 0, 0, false);
+    femu_check_sanitize(&a, buf, 0x104, 0x202);
+    femu_check_sanitize(&b, buf, 0x104, 0x202);
+    femu_shared_remove(&a, "shared-a", 5);
+    femu_check_sanitize(&b, buf, 0x104, 0x202);
+    femu_shared_remove(&b, "shared-b", 6);
+    femu_shared_add(qts, "shared-a", 5, 2);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&a, pdev, alloc);
+    femu_create_io_queues(&a);
+    femu_check_sanitize(&a, buf, 0x104, 0x202);
+    g_assert_cmpint(femu_ns_attach(&a, buf, 1, 0, true), ==, NVME_SUCCESS);
+    femu_ns_page(&a, buf, 1, 0, 0, false);
+    femu_ns_page(&a, buf, 1, 0, 0x39, true);
+    femu_check_sanitize(&a, buf, 4, 0x202);
+    femu_shared_remove(&a, "shared-a", 5);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_shared_remove(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -13578,6 +13632,8 @@ static void femu_register_nodes(void)
         .before = femu_shared_before,
     });
     qos_add_test("ns-shared-features", "femu", femu_test_shared_features,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
+    qos_add_test("ns-shared-sanitize", "femu", femu_test_shared_sanitize,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-admin", "femu", femu_test_shared_admin,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });

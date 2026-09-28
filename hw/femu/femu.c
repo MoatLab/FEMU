@@ -2265,7 +2265,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->dst_results[d].status = 0xf;     /* entry is empty */
     }
     /* the backing store starts empty, as if never written */
-    n->sanitize_sstat = NVME_SSTAT_GDE;
+    if (!n->shared_storage) {
+        nvme_sanitize_state(n)->sstat = NVME_SSTAT_GDE;
+        if (nvme_ns_shared(n)) {
+            nvme_sanitize_state(n)->cdw10 = 0;
+        }
+    }
     seqlock_init(&n->ts_seq);
     nvme_timestamp_set(n, 0, 0);
     n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
