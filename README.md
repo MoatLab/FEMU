@@ -18,14 +18,21 @@
 
 **FEMU** is a fast, accurate, scalable, and extensible NVMe SSD emulator based on QEMU/KVM. It enables full-system evaluation of storage systems and supports multiple SSD architectures for systems research.
 
+FEMU is supported by the U.S. National Science Foundation through [NSF POSE award #2550145](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2550145),
+*Toward a Community-Driven Fast Emulator (FEMU) Ecosystem for Next-Generation Storage Systems
+Research and Innovation*.
+
 > **Consolidation in progress (2026).** Features that were previously maintained in separate
 > FEMU-based repositories (for example, CXL SSD emulation) are being ported into this
 > repository, and FEMU is being made easier to configure, script, and drive with AI coding
-> agents. Much of the porting is done with the help of such agents. Every change is built and
-> regression-tested in CI, and a more thorough review is under way in parallel. In the
-> meantime, some existing behavior may change or regress. Please report bugs, regressions,
-> and feature requests through [GitHub Issues](https://github.com/MoatLab/FEMU/issues) or
-> [Discord](https://discord.gg/AgPTUJCw7).
+> agents. Much of this work is AI-assisted. We believe that careful use of AI-assisted coding,
+> with every change built and regression-tested in CI and reviewed by the maintainers, will
+> help FEMU reach a more organized code structure and better efficiency. A more thorough
+> review is under way in parallel; in the meantime, some existing behavior may change or
+> regress. Please report bugs, regressions, and feature requests through
+> [GitHub Issues](https://github.com/MoatLab/FEMU/issues) or
+> [Discord](https://discord.gg/AgPTUJCw7). Contributions made with your own coding agents are
+> welcome too: feel free to submit pull requests.
 
 ---
 
@@ -1359,9 +1366,13 @@ See individual file headers for specific attribution details.
 ### Research Community
 
 FEMU development is supported by:
+- **U.S. National Science Foundation** - [NSF POSE award #2550145](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2550145)
 - **Virginia Tech** - Primary development and maintenance
 - **Research collaborators** - Algorithm contributions and validation
 - **Systems community** - Feedback, bug reports, and improvements
+
+Any opinions, findings, and conclusions or recommendations expressed in this material are
+those of the authors and do not necessarily reflect the views of the National Science Foundation.
 
 ### Technical Foundation
 
