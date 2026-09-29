@@ -94,6 +94,10 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 Flexible Data Placement is not a separate mode: it is BlackBox with `fdp=on`
 set on the subsystem. See `run-blackbox-fdp.sh`.
 
+The CXL SSD is not an NVMe mode either: `femu-cxl-ssd` is a CXL Type-3 memory
+device whose DRAM page cache sits in front of the BlackBox FTL. See
+`hw/femu/docs/cxlssd.md`.
+
 OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 5.15, so this mode has no in-tree driver on a current kernel.
 
@@ -102,26 +106,33 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 ## Architecture
 
 ```
-                        +--------------------+
-                        |    VM / Guest OS   |
-                        |                    |
-                        |                    |
-                        |  NVMe Block Device |
-                        +--------^^----------+
-                                 ||
-                              PCIe/NVMe
-                                 ||
-  +------------------------------vv----------------------------+
-  |  +---------+ +---------+ +---------+ +-----------+ +------+|
-  |  | BlackBox| | WhiteBox| | ZNS-SSD | |  NoSSD    | | ...  ||
-  |  |  (BBSSD)| | (OCSSD) | |(ZNSSD)  | |(Ultra-low)| |      ||
-  |  +---------+ +---------+ +---------+ +-----------+ +------+|
-  |                    FEMU NVMe SSD Controller                |
-  +------------------------------------------------------------+
-  |                          QEMU/KVM                          |
-  +------------------------------------------------------------+
-  |                        Host Linux                          |
-  +------------------------------------------------------------+
+         +----------------------------------------------------------+
+         |                      VM / Guest OS                       |
+         |      NVMe block device             CXL memory            |
+         |      (nvme-cli, fio, ...)          (devdax / kmem)       |
+         +------------^^-----------------------------^^-------------+
+                      ||                             ||
+                  PCIe / NVMe                  CXL.mem (Type 3)
+                      ||                             ||
+  +-------------------vv--------------------+ +------vv-------------+
+  |        FEMU NVMe SSD controller         | |    femu-cxl-ssd     |
+  | +------------+ +----------+ +---------+ | |                     |
+  | |  BlackBox  | | WhiteBox | |   ZNS   | | |  DRAM page cache    |
+  | |  (BBSSD)   | | (OCSSD)  | | (ZNSSD) | | |  (FIFO/LIFO/CLOCK/  |
+  | |  + FDP     | |          | |         | | |   S3-FIFO)          |
+  | +------------+ +----------+ +---------+ | |  + direct mapping   |
+  | +------------+ +----------+ +---------+ | |    into the guest   |
+  | |   NoSSD    | |   CSD    | |  KVSSD  | | |                     |
+  | | (ultra-low | | (compute | |  (key-  | | |  misses and dirty   |
+  | |  latency)  | |  storage)| |  value) | | |  evictions go to    |
+  | +------------+ +----------+ +---------+ | |  the BlackBox FTL   |
+  +-----------------------------------------+ +---------------------+
+  |     FTL and NAND flash timing model (all modes except NoSSD)    |
+  +-----------------------------------------------------------------+
+  |                             QEMU/KVM                            |
+  +-----------------------------------------------------------------+
+  |                            Host Linux                           |
+  +-----------------------------------------------------------------+
 ```
 
 ### Core Components
@@ -783,8 +794,28 @@ random-read IOPS. See `hw/femu/docs/HIOPS.md` and the reproduction harness in
 
 ### Computational Storage Mode (CSD)
 
-Experimental computational storage support derived from CEMU. CSD is selected
-with `femu_mode=4` and keeps CSD-specific code under `hw/femu/csd/`.
+Experimental computational storage support derived from
+[CEMU](https://github.com/cs-qyzhang/CEMU). CSD is selected with `femu_mode=4`
+and keeps CSD-specific code under `hw/femu/csd/`. We thank the CEMU authors,
+Qiuyang Zhang, Jiapin Wang, You Zhou, Peng Xu, Kai Lu, Jiguang Wan, Fei Wu and
+Tao Lu, and Emilio ([@Emilio597](https://github.com/Emilio597)), who ported it to
+FEMU in [#188](https://github.com/MoatLab/FEMU/pull/188). If you use the CSD mode,
+please also cite:
+
+```bibtex
+@inproceedings{Zhang+26-CEMU,
+  author    = {Qiuyang Zhang and Jiapin Wang and You Zhou and Peng Xu and
+               Kai Lu and Jiguang Wan and Fei Wu and Tao Lu},
+  title     = {{CEMU: Enabling Full-System Emulation of Computational Storage
+               Beyond Hardware Limits}},
+  booktitle = {Proceedings of the 31st ACM International Conference on
+               Architectural Support for Programming Languages and Operating
+               Systems (ASPLOS '26), Volume 2},
+  pages     = {323--341},
+  year      = {2026},
+  doi       = {10.1145/3779212.3790137},
+}
+```
 
 ```bash
 ./run-csd.sh
