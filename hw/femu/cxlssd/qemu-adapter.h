@@ -78,6 +78,12 @@ typedef struct FemuCxlMedia {
     bool started;
     bool cca_enabled;
     FemuCxlCca cca;
+    /* A linked NVMe controller and its namespace; BQL. */
+    FemuCtrl *nvme;
+    NvmeNamespace *nvme_ns;
+    Error *nvme_blocker;
+    /* The device went away first and left its FTL to the controller. */
+    bool nvme_owns_ftl;
 } FemuCxlMedia;
 
 void femu_cxl_enter(FemuCxlMedia *s);
@@ -91,5 +97,6 @@ bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);
 void femu_cxl_stop(FemuCxlMedia *s);
+uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
 
 #endif

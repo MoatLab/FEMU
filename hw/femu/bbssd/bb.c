@@ -116,6 +116,15 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd;
 
+    /* A linked CXL medium already built the FTL from its own geometry. */
+    if (n->cxl_ssd) {
+        ns->ssd = n->cxl_ssd;
+        ns->ssd_borrowed = true;
+        n->ssd = ns->ssd;
+        bb_init_ctrl_str(n, ns);
+        return;
+    }
+
     if (bb_check_geometry(n, errp)) {
         return;
     }
@@ -309,6 +318,10 @@ static void bb_ns_exit(FemuCtrl *n, NvmeNamespace *ns)
     }
     if (n->ssd == ns->ssd) {
         n->ssd = NULL;
+    }
+    if (ns->ssd_borrowed) {
+        ns->ssd = NULL;
+        return;
     }
     ssd_free(ns->ssd);
     g_free(ns->ssd);

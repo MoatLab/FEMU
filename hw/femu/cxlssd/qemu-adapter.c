@@ -33,7 +33,6 @@
 #include "system/runstate.h"
 #include "spte.h"
 
-#define TYPE_FEMU_CXL_SSD "femu-cxl-ssd"
 OBJECT_DECLARE_SIMPLE_TYPE(FemuCxlSsd, FEMU_CXL_SSD)
 
 struct FemuCxlSsd {
@@ -1218,7 +1217,10 @@ static void cxl_exit(PCIDevice *dev)
         qemu_mutex_init(&CXL_TYPE3(dev)->cci.bg.lock);
     }
     parent_exit(dev);
-    host_memory_backend_set_mapped(CXL_TYPE3(dev)->hostvmem, false);
+    /* A linked controller keeps using the payload; it releases it. */
+    if (!s->nvme) {
+        host_memory_backend_set_mapped(CXL_TYPE3(dev)->hostvmem, false);
+    }
 }
 
 static bool cxl_der_active(Object *obj, Error **errp)
@@ -1479,9 +1481,91 @@ static const TypeInfo cxl_info = {
     .class_init = cxl_class_init,
 };
 
+/* Lend the medium to a bbssd controller; see "NVMe front end" in cxlssd.md. */
+static bool cxl_nvme_prepare(FemuCtrl *n, Error **errp)
+{
+    FemuCxlSsd *dev = FEMU_CXL_SSD(n->cxl_dev);
+    FemuCxlMedia *s = &dev->media;
+    uint64_t mib = s->backend.size / MiB;
+    const char *id = DEVICE(n)->id ? DEVICE(n)->id : "femu";
+
+    if (!DEVICE(dev)->realized || !s->started || s->closing) {
+        error_setg(errp, "cxl_ssd must name a realized femu-cxl-ssd");
+        return false;
+    }
+    if (!s->ftl) {
+        error_setg(errp, "cxl_ssd requires the femu-cxl-ssd to have ftl=on");
+        return false;
+    }
+    if (s->nvme) {
+        error_setg(errp, "the femu-cxl-ssd already serves an NVMe controller");
+        return false;
+    }
+    /* 1024 is devsz_mb's default; the medium decides the size. */
+    if (n->memsz != 1024 && n->memsz != mib) {
+        error_setg(errp, "devsz_mb must be unset or %" PRIu64 ", the size "
+                   "of the femu-cxl-ssd", mib);
+        return false;
+    }
+    n->memsz = mib;
+    n->mbe = &s->backend;
+    n->cxl_ssd = s->ns.ssd;
+    s->nvme = n;
+    error_setg(&s->nvme_blocker, "femu-cxl-ssd is in use by NVMe "
+               "controller %s", id);
+    qdev_add_unplug_blocker(DEVICE(dev), s->nvme_blocker);
+    return true;
+}
+
+static void cxl_nvme_attach(FemuCtrl *n, NvmeNamespace *ns)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(n->cxl_dev)->media;
+
+    s->nvme_ns = ns;
+    n->cxl_media = s;
+}
+
+/* The controller's threads are stopped; it may never have attached. */
+static void cxl_nvme_detach(FemuCtrl *n)
+{
+    FemuCxlSsd *dev = FEMU_CXL_SSD(n->cxl_dev);
+    FemuCxlMedia *s = &dev->media;
+
+    if (s->nvme != n) {
+        return;
+    }
+    if (s->nvme_owns_ftl) {
+        /* The device went away first and left its FTL to this controller. */
+        n->ssd = NULL;
+        n->namespaces[0].ssd = NULL;
+        ssd_free(s->ns.ssd);
+        g_clear_pointer(&s->ns.ssd, g_free);
+        g_clear_pointer(&s->ctrl, g_free);
+        s->nvme_owns_ftl = false;
+    }
+    /* Unplug left the backend mapped for this controller; release it. */
+    if (s->closing) {
+        host_memory_backend_set_mapped(dev->parent_obj.hostvmem, false);
+    }
+    qdev_del_unplug_blocker(DEVICE(dev), s->nvme_blocker);
+    g_clear_pointer(&s->nvme_blocker, error_free);
+    s->nvme = NULL;
+    s->nvme_ns = NULL;
+    n->cxl_media = NULL;
+    n->cxl_ssd = NULL;
+}
+
+static const FemuCxlNvmeOps cxl_nvme_ops = {
+    .prepare = cxl_nvme_prepare,
+    .attach = cxl_nvme_attach,
+    .detach = cxl_nvme_detach,
+    .ftl = femu_cxl_nvme_ftl,
+};
+
 static void cxl_register_types(void)
 {
     type_register_static(&cxl_info);
+    femu_cxl_nvme_ops = &cxl_nvme_ops;
 }
 
 type_init(cxl_register_types);

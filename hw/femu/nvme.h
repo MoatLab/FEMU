@@ -1812,6 +1812,7 @@ typedef struct NvmeNamespace {
     uint8_t         csi;
     FemuExtCtrlOps  ext_ops;
     struct ssd      *ssd; /* bbssd FTL for this namespace */
+    bool            ssd_borrowed; /* @ssd belongs to a linked CXL medium */
 
     NvmeIdNsZoned   *id_ns_zoned;
     NvmeZone        *zone_array;
@@ -2310,7 +2311,34 @@ typedef struct FemuCtrl {
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
+
+    /*
+     * A femu-cxl-ssd whose backend and FTL namespace 1 shares. @cxl_media is
+     * set while the medium serves requests, and cleared if it goes away
+     * first.
+     */
+    DeviceState     *cxl_dev;
+    struct FemuCxlMedia *cxl_media;
+    struct ssd      *cxl_ssd;
 } FemuCtrl;
+
+#define TYPE_FEMU_CXL_SSD "femu-cxl-ssd"
+
+/*
+ * Set by the CXL SSD when it is built in, so the NVMe side needs no link-time
+ * dependency on it. Only a controller with a cxl_ssd link calls these.
+ */
+typedef struct FemuCxlNvmeOps {
+    /* Validate the medium and lend its backend and FTL to @n. */
+    bool (*prepare)(FemuCtrl *n, Error **errp);
+    /* Start serving @ns; cannot fail. */
+    void (*attach)(FemuCtrl *n, NvmeNamespace *ns);
+    /* Undo prepare and attach once the controller's threads are stopped. */
+    void (*detach)(FemuCtrl *n);
+    uint64_t (*ftl)(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+} FemuCxlNvmeOps;
+
+extern const FemuCxlNvmeOps *femu_cxl_nvme_ops;
 
 typedef struct NvmePollerThreadArgument {
     FemuCtrl        *n;

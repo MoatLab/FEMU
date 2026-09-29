@@ -270,6 +270,23 @@ bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
     return true;
 }
 
+/*
+ * Run a linked NVMe request on the medium's FTL. The medium's worker holds
+ * @lock for each of its requests, so the two never interleave. The pollers'
+ * pause waits for this thread, so it must never need the BQL.
+ */
+uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
+{
+    FemuCxlMedia *s = n->cxl_media;
+    uint64_t lat;
+
+    assert(!bql_locked());
+    qemu_mutex_lock(&s->lock);
+    lat = bb_ftl_process_req(n, ns, req);
+    qemu_mutex_unlock(&s->lock);
+    return lat;
+}
+
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy)
 {
@@ -313,10 +330,21 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
 
 void femu_cxl_stop(FemuCxlMedia *s)
 {
+    FemuCtrl *nvme = s->nvme;
+    bool resume = false;
+
     if (!s->ftl) {
         s->started = false;
         femu_cxl_cache_destroy(&s->cache);
         return;
+    }
+    /*
+     * A guest can power the slot off without asking management, which
+     * skips the unplug blocker. Quiesce a linked controller so nothing is
+     * in the FTL, then leave the FTL and payload to it.
+     */
+    if (nvme) {
+        resume = nvme_pause_pollers(nvme);
     }
     qemu_mutex_lock(&s->lock);
     s->stopping = true;
@@ -327,6 +355,13 @@ void femu_cxl_stop(FemuCxlMedia *s)
     qemu_mutex_destroy(&s->lock);
     s->started = false;
     femu_cxl_cache_destroy(&s->cache);
+    if (nvme) {
+        nvme->cxl_media = NULL;
+        s->nvme_ns = NULL;
+        s->nvme_owns_ftl = true;
+        nvme_resume_pollers(nvme, resume);
+        return;
+    }
     ssd_free(s->ns.ssd);
     g_free(s->ns.ssd);
     g_free(s->ctrl);

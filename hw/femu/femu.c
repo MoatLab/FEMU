@@ -1759,6 +1759,11 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
         return 0;
     }
 
+    /* The medium's own worker uses the same FTL; it serializes both. */
+    if (n->cxl_media && ns->ssd_borrowed) {
+        return femu_cxl_nvme_ops->ftl(n, ns, req);
+    }
+
     if (n->power_loss) {
         if (req->status != NVME_SUCCESS) {
             return 0;
@@ -2099,6 +2104,38 @@ fail:
     return -1;
 }
 
+const FemuCxlNvmeOps *femu_cxl_nvme_ops;
+
+/*
+ * The linked medium supplies the FTL and its geometry, so only a plain
+ * single-namespace bbssd controller can front it.
+ */
+static bool femu_cxl_link_check(FemuCtrl *n, Error **errp)
+{
+    const char *why = NULL;
+
+    if (!femu_cxl_nvme_ops) {
+        why = "a build with the CXL SSD";
+    } else if (!BBSSD(n)) {
+        why = "femu_mode=1";
+    } else if (n->num_namespaces != 1 || n->namespace_modes ||
+               n->namespace_sizes) {
+        why = "a single bbssd namespace";
+    } else if (n->ns_mgmt || n->subsys) {
+        why = "no namespace management or subsystem";
+    } else if (n->streams || n->power_loss || n->bb_params.buffer_size ||
+               n->op_pcent) {
+        why = "no streams, power_loss, buffer_size or op_pcent";
+    } else if (n->meta || n->pi || n->dps) {
+        why = "no metadata or protection information";
+    }
+    if (why) {
+        error_setg(errp, "cxl_ssd requires %s", why);
+        return false;
+    }
+    return true;
+}
+
 /*
  * Give back what realize has taken. QEMU does not call the exit callback for a
  * device that never realized, and a device_add that fails validation is an
@@ -2113,6 +2150,9 @@ static void femu_realize_undo(FemuCtrl *n)
      * before touching it, so running them over a controller that got part way
      * is safe, and it has to happen before the namespace array goes.
      */
+    if (n->cxl_dev && femu_cxl_nvme_ops) {
+        femu_cxl_nvme_ops->detach(n);
+    }
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -2145,7 +2185,7 @@ static void femu_realize_undo(FemuCtrl *n)
     n->cq = NULL;
     g_free(n->sq);
     n->sq = NULL;
-    if (!n->shared_storage) {
+    if (!n->shared_storage && !n->cxl_dev) {
         free_dram_backend(n->mbe);
     }
     n->mbe = NULL;
@@ -2204,6 +2244,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
+    /* Format and Sanitize would rewrite the whole medium under its cache. */
+    if (n->cxl_dev) {
+        if (!femu_cxl_link_check(n, errp) ||
+            !femu_cxl_nvme_ops->prepare(n, errp)) {
+            return;
+        }
+        n->oacs &= ~NVME_OACS_FORMAT;
+    }
+
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
     /*
@@ -2223,6 +2272,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (nvme_ns_shared(n) && n->subsys->storage) {
         n->mbe = n->subsys->storage->mbe;
         n->shared_storage = true;
+    } else if (n->cxl_dev) {
+        /* prepare() lent the medium's backend */
     } else {
         init_dram_backend(&n->mbe, bs_size);
         n->mbe->femu_mode = n->femu_mode;
@@ -2381,6 +2432,10 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * all namespaces are built, so it never runs against half-initialized state,
      * and only once every geometry check has passed.
      */
+    if (n->cxl_dev) {
+        femu_cxl_nvme_ops->attach(n, &n->namespaces[0]);
+    }
+
     n->use_ftl_thread = femu_needs_ftl_thread(n);
     if (n->use_ftl_thread) {
         qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
@@ -2528,6 +2583,9 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
     femu_pel_exit(n);
+    if (n->cxl_dev) {
+        femu_cxl_nvme_ops->detach(n);
+    }
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -2539,7 +2597,7 @@ static void femu_exit(PCIDevice *pci_dev)
     n->aer_bh = NULL;
     qemu_mutex_destroy(&n->aer_lock);
     qemu_mutex_destroy(&n->streams_lock);
-    if (!n->shared_storage) {
+    if (!n->shared_storage && !n->cxl_dev) {
         free_dram_backend(n->mbe);
     }
 
@@ -2753,6 +2811,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
+    DEFINE_PROP_LINK("cxl_ssd", FemuCtrl, cxl_dev, TYPE_FEMU_CXL_SSD,
+                     DeviceState *),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
                      NvmeSubsystem *),
     /* pages held in the DRAM write buffer; 0 programs every write directly */

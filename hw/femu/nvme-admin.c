@@ -787,6 +787,10 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
  */
 static bool nvme_can_sanitize(FemuCtrl *n)
 {
+    /* The medium is shared with a CXL cache that a sanitize would bypass. */
+    if (n->cxl_dev) {
+        return false;
+    }
     for (int i = 0; i < n->namespace_limit; i++) {
         if (!n->namespaces[i].allocated) {
             continue;
