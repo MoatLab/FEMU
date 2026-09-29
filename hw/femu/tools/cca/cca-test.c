@@ -74,19 +74,34 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
 
-/* One load from memory, not from the CPU cache. */
-static uint64_t load_ns(const void *p)
+/*
+ * Where KVM emulates the access (no direct mapping), CLFLUSH reads its
+ * operand from the device, so flushing a dropped page already misses.
+ */
+static void flush_line(const void *p)
+{
+    __builtin_ia32_clflush(p);
+    __builtin_ia32_mfence();
+}
+
+/* One timed load; the caller has flushed the line from the CPU cache. */
+static uint64_t timed_load_ns(const void *p)
 {
     uint64_t start;
     uint64_t value;
 
-    __builtin_ia32_clflush(p);
-    __builtin_ia32_mfence();
     start = now_ns();
     value = __atomic_load_n((const uint64_t *)p, __ATOMIC_RELAXED);
     __builtin_ia32_mfence();
     (void)value;
     return now_ns() - start;
+}
+
+/* One load from memory, not from the CPU cache. */
+static uint64_t load_ns(const void *p)
+{
+    flush_line(p);
+    return timed_load_ns(p);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -215,6 +230,10 @@ static int case_thrash(void)
           cca_strerror(r.status));
     poke(p, 1);
     poke(q, 2);
+    /* Program the control, so every sample reads a mapped NAND page. */
+    CHECK(!cca_invalidate_addr(dev, q, PAGE, 0, &r), "%s",
+          cca_strerror(r.status));
+    CHECK(r.pages == 1, "control not written back: pages %" PRIu64, r.pages);
     CHECK(!cca_pin_addr(dev, p, PAGE, &r), "%s", cca_strerror(r.status));
     for (off = 2 * PAGE; off < stream + 2 * PAGE; off += PAGE) {
         peek(map + off);
@@ -224,11 +243,16 @@ static int case_thrash(void)
           " pinned %" PRIu64, r.resident, r.pinned);
     for (i = 0; i < SAMPLES; i++) {
         pinned[i] = load_ns(p);
-        /* Evict the control every time so each sample is a miss. */
+        /*
+         * Evict the control every time so each sample is a miss. Flush
+         * first: the flush of a dropped page would take the miss itself.
+         */
+        flush_line(q);
         CHECK(!cca_invalidate_addr(dev, q, PAGE, 0, &r), "%s",
               cca_strerror(r.status));
-        missed[i] = load_ns(q);
+        missed[i] = timed_load_ns(q);
     }
+    CHECK(peek(q) == 2, "control read 0x%" PRIx64, peek(q));
     mp = median(pinned, SAMPLES);
     mq = median(missed, SAMPLES);
     printf("  median load: pinned %" PRIu64 " ns, invalidated control %"
