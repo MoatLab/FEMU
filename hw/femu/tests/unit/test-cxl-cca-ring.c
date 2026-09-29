@@ -25,6 +25,8 @@
 } while (0)
 
 #define NOPS 1000000u
+/* Enough resets that a missed race is very unlikely to go unseen. */
+#define RACE_NOPS 400000u
 
 static uint8_t *bar;
 static CcaRingHost host;
@@ -32,6 +34,10 @@ static pthread_t host_thread;
 static int host_stop;
 static int host_paused;
 static int host_idle;
+/* Reset the rings instead of answering every Nth command; 0 never. */
+static unsigned host_reset_every;
+static unsigned host_popped;
+static unsigned host_resets;
 
 static uint32_t *reg(unsigned off)
 {
@@ -81,6 +87,18 @@ static void *host_main(void *opaque)
                 .tag = cmd.tag,
             };
 
+            /*
+             * The device formats and bumps the epoch under the BQL, which a
+             * trapped EPOCH read also takes: whoever sees a formatted ring
+             * then reads the new epoch. Publishing the epoch first gives
+             * the same guarantee here.
+             */
+            if (host_reset_every && ++host_popped % host_reset_every == 0) {
+                __atomic_add_fetch(reg(CCA_REG_EPOCH), 1, __ATOMIC_SEQ_CST);
+                host_format();
+                __atomic_add_fetch(&host_resets, 1, __ATOMIC_SEQ_CST);
+                break;
+            }
             if (!cca_ring_complete(&host, slot, &resp)) {
                 break;
             }
@@ -245,6 +263,38 @@ static void device_reset(struct cca_dev *d)
     pause_host(0);
     CHECK(cca_nop(d) == 0);
     CHECK(ring(CCA_REQ_RING_OFFSET)->head == 1);
+}
+
+/*
+ * A reset can land between the library's epoch check and its read of the
+ * response ring. That is a cancelled command, never a protocol error.
+ */
+static void reset_race(struct cca_dev *d)
+{
+    unsigned cancelled = 0;
+    unsigned i;
+
+    pause_host(1);
+    host_reset_every = 4;
+    pause_host(0);
+    for (i = 0; i < RACE_NOPS; i++) {
+        int rc = cca_nop(d);
+
+        if (rc && rc != -ECANCELED) {
+            fprintf(stderr, "command %u: %s\n", i, strerror(-rc));
+        }
+        CHECK(rc == 0 || rc == -ECANCELED);
+        cancelled += rc == -ECANCELED;
+        /* Nor does a trapped register write run before the reset is done. */
+        while (__atomic_load_n(&host_resets, __ATOMIC_SEQ_CST) < cancelled) {
+            sched_yield();
+        }
+    }
+    pause_host(1);
+    host_reset_every = 0;
+    pause_host(0);
+    CHECK(cancelled == RACE_NOPS / 4);
+    CHECK(cca_nop(d) == 0);
 }
 
 static void fatal_ring(struct cca_dev *d)
@@ -431,6 +481,7 @@ int main(void)
     all_slots(d);
     statuses(d);
     device_reset(d);
+    reset_race(d);
     fatal_ring(d);
     fatal_slot(d);
     fatal_response(d);

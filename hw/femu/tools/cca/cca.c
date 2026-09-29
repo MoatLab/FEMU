@@ -201,8 +201,12 @@ static int reap_locked(struct cca_dev *d)
     }
     head = __atomic_load_n(&d->resp->head, __ATOMIC_ACQUIRE);
 
+    /*
+     * A reset between the epoch check and here formats the ring under us;
+     * check again before calling the device broken.
+     */
     if (head - d->resp_tail > N) {
-        return -EPROTO;
+        return resync_locked(d) ? 0 : -EPROTO;
     }
     while (d->resp_tail != head) {
         uint32_t slot = __atomic_load_n(&d->resp->entries[d->resp_tail % N],
@@ -210,7 +214,7 @@ static int reap_locked(struct cca_dev *d)
         struct cca_ctrl_resp_s resp;
 
         if (slot >= N) {
-            return -EPROTO;
+            return resync_locked(d) ? 0 : -EPROTO;
         }
         memcpy(&resp, &d->slots[slot].resp, sizeof(resp));
         d->resp_tail++;
@@ -238,7 +242,16 @@ static int reap_locked(struct cca_dev *d)
         }
         n++;
     }
+    /* What a reset during the drain formatted is no response; drop it. */
+    if (resync_locked(d)) {
+        return 0;
+    }
     __atomic_store_n(&d->resp->tail, d->resp_tail, __ATOMIC_RELEASE);
+    /* A reset since the check above formatted the tail just stored. */
+    if (resync_locked(d)) {
+        __atomic_store_n(&d->resp->tail, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
     return n;
 }
 
