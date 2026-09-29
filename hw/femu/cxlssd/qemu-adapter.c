@@ -1428,6 +1428,7 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     GSList *it;
     CXLFixedWindow *fw = NULL;
     uint64_t lpn;
+    uint64_t mapped_end = 0;
     uint64_t pages = s->backend.size / 4096;
 
     switch (ratio) {
@@ -1509,10 +1510,26 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
             g_hash_table_insert(der->maps, &map->lpn, map);
             der->mapped += map->pages;
             der->remaps += map->pages;
+            mapped_end = end;
             lpn = end - 1;
         }
     }
 out:
+    if (mapped_end) {
+        GHashTableIter entries;
+        gpointer value;
+
+        g_hash_table_iter_init(&entries, s->cache.entries);
+        while (g_hash_table_iter_next(&entries, NULL, &value)) {
+            FemuCxlEntry *entry = value;
+
+            if (entry->lpn < mapped_end &&
+                femu_cxl_ratio_selected(ratio, entry->lpn)) {
+                /* Alias writes cannot notify the resident cache metadata. */
+                entry->dirty = true;
+            }
+        }
+    }
     femu_cxl_leave(s);
     object_unref(OBJECT(dev));
 }

@@ -14314,6 +14314,24 @@ static void femu_test_cxl_lsa_bounds(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_ratio_dirty(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot");
+
+    femu_cxl_decode(qts);
+    qtest_readq(qts, FEMU_CXL_WINDOW + 4092);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_number(qts, "der-ratio", 100, true);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 2);
+    g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 42);
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14337,6 +14355,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
+    qos_add_test("cxl-ratio-dirty", "femu", femu_test_cxl_ratio_dirty, NULL);
     qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
     qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
