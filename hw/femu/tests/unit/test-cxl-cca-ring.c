@@ -310,10 +310,14 @@ static void reset_race(struct cca_dev *d)
         }
         CHECK(rc == 0 || rc == -ECANCELED);
         cancelled += rc == -ECANCELED;
-        /* Nor does a trapped register write run before the reset is done. */
+        /*
+         * Nor does a trapped register access run before the reset is done;
+         * the library also writes RESET when a post raced one.
+         */
         while (__atomic_load_n(&host_resets, __ATOMIC_SEQ_CST) < cancelled) {
             sched_yield();
         }
+        settle();
     }
     pause_host(1);
     host_reset_every = 0;

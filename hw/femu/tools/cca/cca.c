@@ -198,6 +198,15 @@ static bool resync_locked(struct cca_dev *d)
     return true;
 }
 
+/* The device formats the rings before the RESET write completes. */
+static void reset_locked(struct cca_dev *d, uint32_t kind)
+{
+    reg_write(d, CCA_REG_RESET, kind);
+    slots_reset(d);
+    d->dev_epoch = reg32(d, CCA_REG_EPOCH);
+    d->epoch++;
+}
+
 /* Drain the response ring; the device is trusted no further than here. */
 static int reap_locked(struct cca_dev *d)
 {
@@ -280,6 +289,16 @@ static int post_locked(struct cca_dev *d, const struct cca_ctrl_cmd_s *cmd,
     __atomic_store_n(&d->req->entries[d->req_head % N], i, __ATOMIC_RELAXED);
     d->req_head++;
     __atomic_store_n(&d->req->head, d->req_head, __ATOMIC_RELEASE);
+    /*
+     * A reset since the check above formatted the ring, so the device may
+     * read this head as a bad index or run the zeroed entries below it as
+     * NOPs, completing into slots handed out again. Format the rings once
+     * more; the command was in flight across a reset, so it is cancelled.
+     */
+    if (resync_locked(d)) {
+        reset_locked(d, CCA_RESET_RINGS);
+        return -ECANCELED;
+    }
     *slot = i;
     return 0;
 }
@@ -346,6 +365,9 @@ int cca_call_raw(struct cca_dev *d, const struct cca_ctrl_cmd_s *cmd,
         pthread_mutex_unlock(&d->lock);
         backoff(&b);
         pthread_mutex_lock(&d->lock);
+    }
+    if (rc) {
+        goto out;
     }
     /* Posting may have resynchronized after a device reset. */
     epoch = d->epoch;
@@ -460,6 +482,10 @@ int cca_submit(struct cca_dev *d, uint32_t cmd, unsigned flags, uint64_t lpn,
     if (rc == -EAGAIN && reap_locked(d) > 0) {
         rc = post_locked(d, &c, SLOT_ASYNC, &slot);
     }
+    /* Like any command in flight at a reset, it ends with no completion. */
+    if (rc == -ECANCELED) {
+        rc = 0;
+    }
     pthread_mutex_unlock(&d->lock);
     if (!rc && !(flags & CCA_SUBMIT_DEFER)) {
         cca_kick(d);
@@ -516,11 +542,7 @@ int cca_reset(struct cca_dev *d, int all)
     int rc;
 
     pthread_mutex_lock(&d->lock);
-    reg_write(d, CCA_REG_RESET, all ? CCA_RESET_ALL : CCA_RESET_RINGS);
-    /* The device empties the rings before the write completes. */
-    slots_reset(d);
-    d->dev_epoch = reg32(d, CCA_REG_EPOCH);
-    d->epoch++;
+    reset_locked(d, all ? CCA_RESET_ALL : CCA_RESET_RINGS);
     rc = wait_ready(d, d->timeout_ms < 0 ? -1 : 1000 + d->timeout_ms);
     pthread_mutex_unlock(&d->lock);
     return rc;

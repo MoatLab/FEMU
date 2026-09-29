@@ -430,7 +430,11 @@ Device reset reformats the rings and zeroes every slot under the BQL, so
 entries posted against stale indices run as NOPs, bumps EPOCH, clears READY
 and asks the
 thread to unpin everything and end every uncached range under the gate; READY returns when
-it has. A command in flight notices the new epoch at its next chunk and is
+it has. An index stored just after a reset can still read as too far ahead,
+or complete zeroed NOPs into slots the guest hands out again, so the library
+reads EPOCH again after each index it stores: a changed epoch after a tail
+store rewinds the tail, and after a head store makes it reset the rings once
+more and fail the command with `-ECANCELED`. A command in flight notices the new epoch at its next chunk and is
 dropped without a completion, as is a command still running at unplug (the
 design's `-ESHUTDOWN` has no ring left to carry it). Unplug does not wait either: the thread holds
 a reference to the device, like an access in flight; unplug sets its stop
