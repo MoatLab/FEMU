@@ -393,6 +393,11 @@ tracefs named by `tracefs-dir`, without invoking a shell: 91 empties its
 QEMU trace events, which are global and belong to the `-trace` configuration;
 use the per-access log for this device's accesses. Unlike Cylon, 81 does not
 append the trace to a result file; read `trace` directly.
+`cxlssd-stats.log` holds what Cylon writes to `cxlssd_buffer.txt`: command 1
+appends the `NAND size: ... == TAG ==`, `Entry cnt`, `Buffer read` and `Buffer
+write` lines followed by FEMU's one-line `tag=` summary, and commands 3, 5 and
+7 append Cylon's `[Set way]`, `[Set degree]` and `[Set stride]` lines. Ways
+print as configured, where Cylon prints 32 for fully associative.
 `log-dir` selects the directory for `cxlssd-stats.log`, `cxlssd-io-N.log` and
 `cxlssd-spt.log`; it defaults to the working directory. An unavailable output
 warns once per file and the device continues. I/O logs contain realtime

@@ -774,6 +774,50 @@ static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
     return file;
 }
 
+static const char *cxl_policy_name(FemuCxlPolicy policy)
+{
+    static const char *const names[] = {
+        [FEMU_CXL_FIFO] = "FIFO",
+        [FEMU_CXL_LIFO] = "LIFO",
+        [FEMU_CXL_CLOCK] = "CLOCK",
+        [FEMU_CXL_S3FIFO] = "S3FIFO",
+    };
+
+    return names[policy];
+}
+
+/* Cylon's cxlssd_buffer.txt header, so its parsers read FEMU output too. */
+static void cxl_stats_header(FemuCxlMedia *s, FILE *file, uint64_t tag)
+{
+    fprintf(file, "NAND size: %" PRIu64 " MB, Buffer size: %u MB, "
+            "eviction: %s, prefetch: %u, way: %u, == %" PRIu64 " ==\n",
+            s->backend.size / MiB, s->cache_pages / 256,
+            cxl_policy_name(s->cache.policy), s->prefetch_degree,
+            s->cache_ways, tag);
+}
+
+/* Record a Cylon settings change in the statistics file. */
+static void cxl_stats_note(Object *obj, uint64_t command, uint64_t argument)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FILE *file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
+
+    if (!file) {
+        return;
+    }
+    if (command == 3) {
+        fprintf(file, "[Set way] eviction: %s, prefetch: %u, way: %u\n",
+                cxl_policy_name(s->cache.policy), s->prefetch_degree,
+                s->cache_ways);
+    } else {
+        /* Cylon's exact bytes, including the space before the newline. */
+        fprintf(file, "[Set %s]\x20\n\t",
+                command == 5 ? "degree" : "stride");
+        cxl_stats_header(s, file, argument);
+    }
+    fclose(file);
+}
+
 /* Cylon's buffer_clear drops these counters along with the cache. */
 static void cxl_counters_clear(Object *obj)
 {
@@ -815,12 +859,15 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
                                     argument == 5 ? s->cache_pages :
                                     1 << argument, errp)) {
             cxl_counters_clear(obj);
+            cxl_stats_note(obj, command, argument);
         }
         return;
     case 5:
     case 7:
-        object_property_set_int(obj, command == 5 ? "prefetch-degree" :
-                                "prefetch-stride", argument, errp);
+        if (object_property_set_int(obj, command == 5 ? "prefetch-degree" :
+                                    "prefetch-stride", argument, errp)) {
+            cxl_stats_note(obj, command, argument);
+        }
         return;
     case 80:
     case 90:
@@ -835,6 +882,13 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     case 1:
         file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
         if (file) {
+            cxl_stats_header(s, file, argument);
+            fprintf(file, "Entry cnt: %" PRIu64 "/%u\n", s->cache_entries,
+                    s->cache_pages);
+            fprintf(file, "Buffer read: %" PRIu64 " hit/ %" PRIu64 " miss\n",
+                    s->read_hits, s->read_misses);
+            fprintf(file, "Buffer write: %" PRIu64 " hit/ %" PRIu64 " miss\n",
+                    s->write_hits, s->write_misses);
             fprintf(file, "tag=%" PRIu64 " read=%" PRIu64 "/%" PRIu64
                     " write=%" PRIu64 "/%" PRIu64 " insert=%" PRIu64
                     " evict=%" PRIu64 " entries=%" PRIu64

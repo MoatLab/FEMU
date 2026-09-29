@@ -14260,6 +14260,14 @@ static void femu_test_cxl_control(void *obj, void *data,
     path = g_build_filename(dir, "cxlssd-stats.log", NULL);
     g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
     g_assert_nonnull(strstr(contents, "write=0/1"));
+    /* Cylon's cxlssd_buffer.txt lines precede FEMU's summary. */
+    g_assert_nonnull(strstr(contents, "NAND size: 256 MB, Buffer size: 4 MB, "
+                            "eviction: FIFO, prefetch: 3, way: 1024, "
+                            "== 42 ==\nEntry cnt: "));
+    g_assert_nonnull(strstr(contents, "Buffer write: 0 hit/ 1 miss\n"));
+    g_assert_nonnull(strstr(contents, "[Set degree]\x20\n\tNAND size: "));
+    g_assert_nonnull(strstr(contents, "[Set way] eviction: FIFO, prefetch: 3, "
+                            "way: 1024\n"));
     g_clear_pointer(&path, g_free);
     g_clear_pointer(&contents, g_free);
     path = g_build_filename(dir, "tracing_on", NULL);
