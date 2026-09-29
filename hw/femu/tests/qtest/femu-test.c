@@ -15744,6 +15744,37 @@ static void femu_test_cca_disable_abandon(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/* Replacement displaces the oldest alias of a page that is not pinned. */
+static void femu_test_cca_der_replace(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    uint64_t hot = FEMU_CXL_WINDOW + 2000ULL * 4096;
+    const char *mtree;
+    QDict *rsp;
+    FemuCca c;
+    unsigned i;
+
+    femu_cca_start(&c, "", "der=memslot,cache-pages=4096,ftl=off,"
+                   "der-replace-rate=1000");
+    for (i = 0; i < 1024; i++) {
+        qtest_writeq(c.qts, femu_cca_page(i), i + 100);
+    }
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-mapped"), ==, 1024);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    qtest_writeq(c.qts, hot, 7);
+    for (i = 0; i < 300; i++) {
+        g_assert_cmphex(qtest_readq(c.qts, hot), ==, 7);
+    }
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-replacements"), ==, 1);
+    rsp = qtest_qmp(c.qts, "{'execute':'human-monitor-command',"
+                    "'arguments':{'command-line':'info mtree'}}");
+    mtree = qdict_get_str(rsp, "return");
+    g_assert_nonnull(strstr(mtree, "femu-cxl-hit-0 @"));
+    g_assert_null(strstr(mtree, "femu-cxl-hit-1 @"));
+    qobject_unref(rsp);
+    femu_cca_quit(&c);
+}
+
 /* Commands that touch the cache refuse while media is disabled. */
 static void femu_test_cca_media(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -16451,6 +16482,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-errors", "femu", femu_test_cca_errors, NULL);
     qos_add_test("cxl-cca-reset", "femu", femu_test_cca_reset, NULL);
     qos_add_test("cxl-cca-der", "femu", femu_test_cca_der, NULL);
+    qos_add_test("cxl-cca-der-replace", "femu", femu_test_cca_der_replace,
+                 NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
     qos_add_test("cxl-cca-disable-abandon", "femu",

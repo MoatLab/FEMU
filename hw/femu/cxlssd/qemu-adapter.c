@@ -1782,6 +1782,22 @@ static bool der_replace_due(FemuCxlDer *der, FemuCxlEntry *e)
                                       der->replace_backoff;
 }
 
+/* The oldest cache alias whose page is not pinned; CCA pins stay direct. */
+static FemuCxlMap *der_replace_victim(FemuCxlDer *der)
+{
+    GList *link;
+
+    for (link = der->installed.head; link; link = link->next) {
+        FemuCxlMap *map = link->data;
+        FemuCxlEntry *e = g_hash_table_lookup(der->cache->entries, &map->lpn);
+
+        if (!e || e->queue != FEMU_CXL_PINNED) {
+            return map;
+        }
+    }
+    return NULL;
+}
+
 /* A hot set larger than the budget only rotates; back off when it does. */
 static void der_displace(FemuCxlDer *der, FemuCxlMap *victim, FemuCxlEntry *e)
 {
@@ -1838,11 +1854,11 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
     }
     /* A full budget is the common refusal; decide it before the window. */
     if (!der->cylon && !der_alias_budget()) {
-        if (!der_replace_due(der, e)) {
+        victim = der_replace_due(der, e) ? der_replace_victim(der) : NULL;
+        if (!victim) {
             der->fallbacks++;
             return false;
         }
-        victim = g_queue_peek_head(&der->installed);
     }
     fw = der_window(der, hpa);
     if (!fw) {
