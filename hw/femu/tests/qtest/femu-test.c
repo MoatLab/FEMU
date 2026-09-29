@@ -14294,6 +14294,26 @@ static void femu_test_cxl_ratio_fallback(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_lsa_bounds(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "lsa-control=on");
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 1ULL << 44);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_CMD) >> 16,
+                     ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "control-status"), ==, 1);
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14316,6 +14336,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-lsa-normal", "femu", femu_test_cxl_lsa_normal, NULL);
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
+    qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
     qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
     qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });

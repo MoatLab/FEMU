@@ -342,7 +342,9 @@ unplug. With control off, an optional ordinary `lsa` memory backend uses the
 parent's normal label semantics. Reads with control on return the requested
 length, with byte zero reporting success (0) or an invalid command/argument
 (1); `control-status` reports the same result over QOM. Mailbox bounds errors
-still use the standard CXL status. Get-LSA on the primary mailbox leaves DER
+still use the standard CXL status. Reads exceeding the active transport's
+payload capacity return no data and set `control-status=1`, protecting the
+mailbox output buffer. Get-LSA on the primary mailbox leaves DER
 intact so inspecting statistics does not destroy experiment mappings; other
 CCI commands/transports retain conservative invalidation.
 

@@ -44,6 +44,7 @@ struct FemuCxlSsd {
     Notifier machine_done;
     bool attached;
     bool test_change_dpa;
+    size_t lsa_limit;
 };
 
 static void (*parent_realize)(PCIDevice *dev, Error **errp);
@@ -569,10 +570,12 @@ static void adapter_pre_command(void *opaque)
 
     if (cci == &dev->cci && FEMU_CXL_SSD(dev)->media.lsa_control &&
         (command & 0xffff) == 0x4102) {
+        FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
         return;
     }
     object_ref(OBJECT(dev));
     cxl_invalidate(dev);
+    FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
     object_unref(OBJECT(dev));
 }
 
@@ -902,6 +905,10 @@ static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
     Error *err = NULL;
 
+    if (size > FEMU_CXL_SSD(dev)->lsa_limit) {
+        s->control_status = 1;
+        return 0;
+    }
     if (!size) {
         return 0;
     }
@@ -1124,6 +1131,7 @@ static void cxl_init(Object *obj)
         object_property_add_bool(obj, "test-slot-reservation",
                                  adapter_reservation_test, NULL);
     }
+    FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
     qemu_cond_init(&s->idle);
     s->der = g_strdup("off");
     object_property_add(obj, "der-ratio", "uint64", cxl_control_get,
