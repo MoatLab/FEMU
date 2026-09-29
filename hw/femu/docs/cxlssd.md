@@ -376,15 +376,17 @@ host controls work with `lsa-control=off` too.
 | 5 | Set prefetch degree |
 | 7 | Set prefetch stride |
 | 9, 11 | Flush/clear the cache, as in Cylon; keep the configured DER mode |
-| 13, 15 | Start a new per-access log / close it |
+| 13, 15 | Start a new per-access log / close it; names cycle through 64 files |
 | 17 | Dump current tracked direct mappings and Cylon SPTE values |
 | 90, 80 | Set direct ratio / revoke and reset it; a nonzero ratio needs `der=memslot` or `der=cylon` |
-| 91, 81 | Enable / disable QEMU memory-region read/write trace events |
+| 91, 81 | Clear the host trace buffer and start tracing / stop tracing, in `tracefs-dir` |
 
-The trace command numbering follows Cylon's implementation (91 starts,
-81 stops). The QEMU events are global and use the configured trace backend;
-`-D FILE` selects the log-backend destination. If `tracefs-dir` is set,
-commands also write its `tracing_on` file without invoking a shell.
+The trace commands follow Cylon (91 starts, 81 stops) and act only on the host
+tracefs named by `tracefs-dir`, without invoking a shell: 91 empties its
+`trace` file and writes 1 to `tracing_on`, and 81 writes 0. They do not touch
+QEMU trace events, which are global and belong to the `-trace` configuration;
+use the per-access log for this device's accesses. Unlike Cylon, 81 does not
+append the trace to a result file; read `trace` directly.
 `log-dir` selects the directory for `cxlssd-stats.log`, `cxlssd-io-N.log` and
 `cxlssd-spt.log`; it defaults to the working directory. An unavailable output
 warns once per file and the device continues. I/O logs contain realtime

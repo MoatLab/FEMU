@@ -32,7 +32,6 @@
 #include "system/cpus.h"
 #include "system/runstate.h"
 #include "spte.h"
-#include "trace/control.h"
 
 #define TYPE_FEMU_CXL_SSD "femu-cxl-ssd"
 OBJECT_DECLARE_SIMPLE_TYPE(FemuCxlSsd, FEMU_CXL_SSD)
@@ -60,6 +59,7 @@ static void cylon_ratio_revoke(FemuCxlDer *der);
 static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 
 #define FEMU_CXL_LSA_SIZE (128 * MiB)
+#define FEMU_CXL_IO_LOGS 64
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -821,8 +821,9 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
             fclose(s->io_log);
         }
         {
+            /* Reuse a bounded set of names so runs cannot fill a disk. */
             g_autofree char *name = g_strdup_printf("cxlssd-io-%u.log",
-                                                     ++s->log_sequence);
+                                s->log_sequence++ % FEMU_CXL_IO_LOGS + 1);
 
             s->io_log = cxl_log_open(s, s->log_dir, name, "w");
         }
@@ -842,12 +843,18 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
         break;
     case 81:
     case 91:
+        /*
+         * As in Cylon, drive only the host tracefs; QEMU trace events are
+         * global and belong to the -trace configuration.
+         */
         s->tracing = command == 91;
-        trace_event_set_state_dynamic(
-            trace_event_name("memory_region_ops_read"), s->tracing);
-        trace_event_set_state_dynamic(
-            trace_event_name("memory_region_ops_write"), s->tracing);
         if (s->tracefs_dir && *s->tracefs_dir) {
+            if (s->tracing) {
+                file = cxl_log_open(s, s->tracefs_dir, "trace", "w");
+                if (file) {
+                    fclose(file);
+                }
+            }
             file = cxl_log_open(s, s->tracefs_dir, "tracing_on", "w");
             if (file) {
                 fprintf(file, "%u\n", s->tracing);

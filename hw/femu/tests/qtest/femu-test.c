@@ -14176,6 +14176,9 @@ static void femu_test_cxl_control(void *obj, void *data,
     g_autofree char *path = NULL;
     GDir *files;
     const char *name;
+    unsigned io_logs = 0;
+    unsigned i;
+    QDict *rsp;
 
     femu_cxl_decode(qts);
     femu_cxl_config(qts, 53, 0x18, 0x90010000);
@@ -14204,7 +14207,20 @@ static void femu_test_cxl_control(void *obj, void *data,
     femu_cxl_command(qts, lsa, 17, 0);
     femu_cxl_command(qts, lsa, 80, 0);
     g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    path = g_build_filename(dir, "trace", NULL);
+    g_assert_true(g_file_set_contents(path, "stale", -1, NULL));
     femu_cxl_command(qts, lsa, 91, 0);
+    /* 91 clears the host trace buffer and leaves QEMU trace events alone. */
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    g_assert_cmpstr(contents, ==, "");
+    g_clear_pointer(&path, g_free);
+    g_clear_pointer(&contents, g_free);
+    rsp = qtest_qmp(qts, "{'execute':'trace-event-get-state','arguments':"
+                    "{'name':'memory_region_ops_read'}}");
+    g_assert_cmpstr(qdict_get_str(qobject_to(QDict, qlist_peek(
+                    qdict_get_qlist(rsp, "return"))), "state"), ==,
+                    "disabled");
+    qobject_unref(rsp);
     femu_cxl_command(qts, lsa, 81, 0);
     femu_cxl_number(qts, "control-command", 1234, false);
     femu_cxl_number(qts, "control-argument", 6, true);
@@ -14231,15 +14247,22 @@ static void femu_test_cxl_control(void *obj, void *data,
     path = g_build_filename(dir, "tracing_on", NULL);
     g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
     g_assert_cmpstr(contents, ==, "0\n");
+    /* I/O logs reuse a bounded set of names. */
+    for (i = 0; i < 65; i++) {
+        femu_cxl_command(qts, lsa, 13, 0);
+    }
+    femu_cxl_command(qts, lsa, 15, 0);
     qtest_quit(qts);
     files = g_dir_open(dir, 0, NULL);
     while ((name = g_dir_read_name(files))) {
         g_autofree char *file = g_build_filename(dir, name, NULL);
 
+        io_logs += g_str_has_prefix(name, "cxlssd-io-");
         unlink(file);
     }
     g_dir_close(files);
     rmdir(dir);
+    g_assert_cmpuint(io_logs, ==, 64);
 }
 
 static void femu_test_cxl_geometry_bounds(void *obj, void *data,
