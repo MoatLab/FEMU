@@ -19,6 +19,8 @@
 #include "libqos/pci.h"
 #include "libqos/libqos-pc.h"
 #include "libqos/libqos-malloc.h"
+#include "libqos/malloc-pc.h"
+#include "libqos/pci-pc.h"
 #include "block/nvme.h"
 #include "hw/cxl/cxl_component.h"
 #include "hw/cxl/cxl_device.h"
@@ -15440,6 +15442,534 @@ static void femu_test_cca_media(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/*
+ * A bbssd controller linked to the medium with cxl_ssd: both front ends
+ * share one payload and one FTL.
+ */
+#define FEMU_LINK_SLOT  0x10
+#define FEMU_LINK_HOTPLUG \
+    "-global cxl-rp.power_controller_present=on " \
+    "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
+
+typedef struct FemuLink {
+    QTestState *qts;
+    QGuestAllocator alloc;
+    QPCIBus *bus;
+    QPCIDevice *pdev;
+    FemuCtrlState c;
+    uint64_t buf;
+} FemuLink;
+
+/* @cxl and @nvme are extra options, each empty or starting with a comma. */
+static void femu_link_start(FemuLink *l, const char *extra, const char *cxl,
+                            const char *nvme)
+{
+    memset(l, 0, sizeof(*l));
+    /* qtest_pc_boot() would intercept the IOAPIC, which leaks on q35. */
+    l->qts = qtest_initf(FEMU_CXL_MACHINE "%s"
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem%s "
+        "-device femu,id=nvme,bus=pcie.0,addr=0x%x,femu_mode=1,cxl_ssd=ssd,"
+        "oncs=0x10c%s",
+        extra, cxl, FEMU_LINK_SLOT, nvme);
+    pc_alloc_init(&l->alloc, l->qts, ALLOC_NO_FLAGS);
+    l->bus = qpci_new_pc(l->qts, &l->alloc);
+    femu_cxl_decode(l->qts);
+    l->pdev = qpci_device_find(l->bus, QPCI_DEVFN(FEMU_LINK_SLOT, 0));
+    g_assert_nonnull(l->pdev);
+    femu_enable(&l->c, l->pdev, &l->alloc);
+    femu_create_io_queues(&l->c);
+    l->buf = guest_alloc(&l->alloc, FEMU_DATA_SIZE);
+}
+
+static void femu_link_quit(FemuLink *l)
+{
+    guest_free(&l->alloc, l->buf);
+    femu_queue_free(&l->c, &l->c.io);
+    femu_queue_free(&l->c, &l->c.admin);
+    g_free(l->pdev);
+    qpci_free_pc(l->bus);
+    alloc_destroy(&l->alloc);
+    qtest_quit(l->qts);
+}
+
+static uint64_t femu_link_lba(FemuLink *l, uint64_t page)
+{
+    return page * 4096 / l->c.lba_size;
+}
+
+/* Write one page of @seed's pattern through NVMe and return the pattern. */
+static void femu_link_write(FemuLink *l, uint64_t page, uint8_t seed,
+                            uint8_t *pattern)
+{
+    int i;
+
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        pattern[i] = (uint8_t)(seed + i * 13);
+    }
+    qtest_memwrite(l->qts, l->buf, pattern, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&l->c, NVME_CMD_WRITE,
+                                    femu_link_lba(l, page), l->buf)), ==,
+                    NVME_SUCCESS);
+}
+
+static uint16_t femu_link_read(FemuLink *l, uint64_t page, uint8_t *out)
+{
+    uint16_t status;
+
+    qtest_memset(l->qts, l->buf, 0xee, FEMU_DATA_SIZE);
+    status = FEMU_SC(femu_rw(&l->c, NVME_CMD_READ, femu_link_lba(l, page),
+                             l->buf));
+    qtest_memread(l->qts, l->buf, out, FEMU_DATA_SIZE);
+    return status;
+}
+
+static uint16_t femu_link_dsm(FemuLink *l, uint64_t slba, uint32_t nlb)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t desc[16] = { 0 };
+
+    stl_le_p(desc + 4, nlb);
+    stq_le_p(desc + 8, slba);
+    qtest_memwrite(l->qts, l->buf, desc, sizeof(desc));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(l->buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    return femu_io(&l->c, &cmd);
+}
+
+/* Copy @nlb blocks from @src to @dst with one format-0 source range. */
+static uint16_t femu_link_copy(FemuLink *l, uint64_t src, uint64_t dst,
+                               uint32_t nlb)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t desc[32] = { 0 };
+
+    stq_le_p(desc + 8, src);
+    stw_le_p(desc + 16, nlb - 1);
+    qtest_memwrite(l->qts, l->buf, desc, sizeof(desc));
+    cmd.opcode = NVME_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(l->buf);
+    cmd.cdw10 = cpu_to_le32(dst);
+    cmd.cdw11 = cpu_to_le32(dst >> 32);
+    return femu_io(&l->c, &cmd);
+}
+
+static void femu_link_flip(FemuLink *l, uint32_t code)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = 0xef;
+    cmd.cdw10 = cpu_to_le32(code);
+    g_assert_cmpint(FEMU_SC(femu_admin(&l->c, &cmd)), ==, NVME_SUCCESS);
+}
+
+/* Whether a completion is waiting, without consuming it. */
+static bool femu_cq_ready(FemuCtrlState *c, FemuQueue *q)
+{
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, q->cq_addr + q->cq_head * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    return (le16_to_cpu(cqe.status) & 1) == q->phase;
+}
+
+static void femu_link_expect_error(QTestState *qts, const char *args,
+                                   const char *message)
+{
+    g_autofree char *cmd = g_strdup_printf("{'execute':'device_add',"
+        "'arguments':{'driver':'femu','id':'bad','bus':'hp1',%s}}", args);
+    QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    if (message) {
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), message));
+    }
+    qobject_unref(rsp);
+}
+
+/* Every configuration the link cannot serve is refused with its reason. */
+static void femu_test_cxl_nvme_link(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-object memory-backend-ram,id=mem2,size=256M "
+        "-device cxl-rp,id=rp1,bus=cxl.0,chassis=0,slot=1 "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem "
+        "-device femu-cxl-ssd,id=noftl,bus=rp1,volatile-memdev=mem2,ftl=off "
+        "-device pcie-root-port,id=hp0,bus=pcie.0,chassis=5,slot=5 "
+        "-device pcie-root-port,id=hp1,bus=pcie.0,chassis=6,slot=6");
+    QDict *rsp;
+
+    femu_link_expect_error(qts, "'femu_mode':2,'cxl_ssd':'ssd'",
+                           "femu_mode=1");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'namespaces':2", "single bbssd namespace");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'noftl'",
+                           "ftl=on");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'streams':true", "streams");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'buffer_size':16", "buffer_size");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'meta':8,'mc':2", "protection information");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'devsz_mb':512", "devsz_mb must be unset or 256");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'rp0'", NULL);
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'later'", NULL);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'n1','bus':'hp0','femu_mode':1,"
+                    "'cxl_ssd':'ssd','devsz_mb':256}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd'",
+                           "already serves");
+    rsp = qtest_qmp(qts, "{'execute':'device_del','arguments':{'id':'ssd'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"),
+                            "in use by NVMe controller n1"));
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
+/* Both front ends read what the other wrote, at either block size. */
+static void femu_test_cxl_nvme_data(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    bool large = data != NULL;
+    uint8_t want[FEMU_DATA_SIZE];
+    uint8_t got[FEMU_DATA_SIZE];
+    FemuLink l;
+    int i;
+
+    femu_link_start(&l, "", ",der=memslot",
+                    large ? ",lba_index=3" : "");
+    l.c.lba_size = large ? 4096 : 512;
+    femu_link_write(&l, 5, 1, want);
+    qtest_memread(l.qts, FEMU_CXL_WINDOW + 5 * 4096, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
+    /* A dirty cached page, then a page behind a direct mapping. */
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        want[i] = (uint8_t)(0x3c ^ i);
+    }
+    qtest_memwrite(l.qts, FEMU_CXL_WINDOW + 9 * 4096, want, sizeof(want));
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), >=, 2);
+    g_assert_cmpint(femu_link_read(&l, 9, got), ==, NVME_SUCCESS);
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 11 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-mapped"), >=, 1);
+    want[0] ^= 0xff;
+    qtest_memwrite(l.qts, FEMU_CXL_WINDOW + 11 * 4096, want, sizeof(want));
+    g_assert_cmpint(femu_link_read(&l, 11, got), ==, NVME_SUCCESS);
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), >=, 1);
+    femu_link_quit(&l);
+}
+
+enum {
+    FEMU_LINK_WRITE,
+    FEMU_LINK_ZEROES,
+    FEMU_LINK_COPY,
+};
+
+/*
+ * A page NVMe replaces leaves the cache and loses its direct mapping before
+ * the command completes, and is not written back again later.
+ */
+static void femu_test_cxl_nvme_invalidate(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    uintptr_t op = (uintptr_t)data;
+    uint8_t pattern[FEMU_DATA_SIZE];
+    uint64_t revoked;
+    uint64_t writes;
+    FemuLink l;
+
+    femu_link_start(&l, "", ",der=memslot", "");
+    if (op == FEMU_LINK_COPY) {
+        femu_link_write(&l, 40, 7, pattern);
+    }
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-mapped"), ==, 1);
+    revoked = femu_cxl_stat(l.qts, "der-revocations");
+    writes = femu_cxl_stat(l.qts, "media-writes");
+    switch (op) {
+    case FEMU_LINK_WRITE:
+        femu_link_write(&l, 3, 2, pattern);
+        break;
+    case FEMU_LINK_ZEROES:
+        g_assert_cmpint(femu_lba_cmd(&l.c, NVME_CMD_WRITE_ZEROES, 24, 8), ==,
+                        NVME_SUCCESS);
+        break;
+    default:
+        g_assert_cmpint(femu_link_copy(&l, 320, 24, 8), ==, NVME_SUCCESS);
+        break;
+    }
+    /* Checked right after the completion: it waited for the drop. */
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-revocations"), ==,
+                     revoked + 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "nvme-drops"), ==, 1);
+    if (op != FEMU_LINK_ZEROES) {
+        g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), ==,
+                         writes + 1);
+    }
+    writes = femu_cxl_stat(l.qts, "media-writes");
+    femu_cxl_set(l.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), ==, writes);
+    if (op == FEMU_LINK_COPY) {
+        uint8_t got[FEMU_DATA_SIZE];
+
+        qtest_memread(l.qts, FEMU_CXL_WINDOW + 3 * 4096, got, sizeof(got));
+        g_assert_cmpmem(got, sizeof(got), pattern, sizeof(pattern));
+    }
+    femu_link_quit(&l);
+}
+
+/* A deallocated page must not come back when its dirty copy is dropped. */
+static void femu_test_cxl_nvme_deallocate(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    uint8_t pattern[FEMU_DATA_SIZE];
+    uint8_t zero[FEMU_DATA_SIZE] = { 0 };
+    uint8_t got[FEMU_DATA_SIZE];
+    uint64_t writes;
+    uint64_t ns;
+    FemuLink l;
+
+    femu_link_start(&l, "", "", "");
+    femu_link_write(&l, 6, 3, pattern);
+    qtest_writeq(l.qts, FEMU_CXL_WINDOW + 6 * 4096, 0x1122334455667788ULL);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 1);
+    g_assert_cmpint(femu_link_dsm(&l, 48, 8), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "nvme-drops"), ==, 1);
+    writes = femu_cxl_stat(l.qts, "media-writes");
+    femu_cxl_set(l.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), ==, writes);
+    g_assert_cmpint(femu_link_read(&l, 6, got), ==, NVME_SUCCESS);
+    g_assert_cmpmem(got, sizeof(got), zero, sizeof(zero));
+    /* An unmapped page costs no NAND read on the next miss. */
+    ns = femu_cxl_stat(l.qts, "media-time-ns");
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 6 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-time-ns"), ==, ns);
+    femu_link_quit(&l);
+}
+
+/* With DULBE on, blocks CXL wrote read as written through NVMe. */
+static void femu_test_cxl_nvme_dulbe(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    uint8_t pattern[FEMU_DATA_SIZE];
+    uint8_t got[FEMU_DATA_SIZE];
+    FemuLink l;
+
+    memset(pattern, 0x5a, sizeof(pattern));
+    femu_link_start(&l, "", ",der=memslot", "");
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&l.c, NVME_ERROR_RECOVERY,
+                            false, 1, 1 << 16, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_link_read(&l, 20, got), ==, NVME_DULB);
+    qtest_memwrite(l.qts, FEMU_CXL_WINDOW + 21 * 4096, pattern,
+                   sizeof(pattern));
+    g_assert_cmpint(femu_link_read(&l, 21, got), ==, NVME_SUCCESS);
+    g_assert_cmpmem(got, sizeof(got), pattern, sizeof(pattern));
+    /* A read installs a writable mapping, so its page counts as written. */
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 22 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-mapped"), >=, 1);
+    g_assert_cmpint(femu_link_read(&l, 22, got), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_link_read(&l, 23, got), ==, NVME_DULB);
+    femu_link_quit(&l);
+}
+
+/* Flips on the controller change the medium's shared timing. */
+static void femu_test_cxl_nvme_flip(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    FemuLink l;
+    uint64_t ns;
+
+    femu_link_start(&l, "", ",cache-pages=0,read-ns=30000,program-ns=1000,"
+                    "erase-ns=1000", "");
+    qtest_writeq(l.qts, FEMU_CXL_WINDOW + 3 * 4096, 1);
+    femu_link_flip(&l, 4);
+    ns = femu_cxl_stat(l.qts, "media-time-ns");
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-time-ns"), ==, ns);
+    /* Restores this device's read-ns, not the compile-time default. */
+    femu_link_flip(&l, 3);
+    ns = femu_cxl_stat(l.qts, "media-time-ns");
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-time-ns"), ==, ns + 30000);
+    femu_link_quit(&l);
+}
+
+/* NVMe writes to a pinned page keep it resident and pinned, but clean. */
+static void femu_test_cxl_nvme_pin(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    uint8_t pattern[FEMU_DATA_SIZE];
+    uint64_t writes;
+    FemuCca cca;
+    FemuLink l;
+
+    femu_link_start(&l, "", ",cca=on,cache-pages=64,cache-ways=64", "");
+    cca.qts = l.qts;
+    cca.slot = 0;
+    femu_cca_map(&cca);
+    qtest_writeq(l.qts, femu_cca_page(7), 0x77);
+    femu_cca_expect(&cca, CCA_CTRL_PIN, 0, 7, 1, 0, 1);
+    writes = femu_cxl_stat(l.qts, "media-writes");
+    femu_link_write(&l, 7, 4, pattern);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cca-pinned"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "nvme-drops"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), ==, writes + 1);
+    femu_cxl_set(l.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), ==, writes + 1);
+    g_assert_cmphex(qtest_readb(l.qts, femu_cca_page(7)), ==, pattern[0]);
+    femu_link_quit(&l);
+}
+
+/* Power the slot of rp0 off, as a guest may without asking management. */
+static void femu_cxl_slot_off(QTestState *qts)
+{
+    uint8_t cap;
+
+    qtest_outl(qts, 0xcf8, 0x80340000 | PCI_CAPABILITY_LIST);
+    cap = qtest_inb(qts, 0xcfc);
+    while (cap) {
+        qtest_outl(qts, 0xcf8, 0x80340000 | cap);
+        if (qtest_inb(qts, 0xcfc) == PCI_CAP_ID_EXP) {
+            break;
+        }
+        cap = qtest_inb(qts, 0xcfd);
+    }
+    g_assert_cmpuint(cap, !=, 0);
+    femu_cxl_config(qts, 52, cap + PCI_EXP_SLTCTL,
+                    PCI_EXP_SLTCTL_PCC | PCI_EXP_SLTCTL_PWR_IND_OFF);
+}
+
+static void femu_link_unrealize(FemuLink *l)
+{
+    qtest_qmp_assert_success(l->qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/nvme',"
+                             "'property':'realized','value':false}}");
+}
+
+/*
+ * Management cannot remove a linked medium. A guest can, by powering the
+ * slot off; the controller then keeps the FTL and payload to itself.
+ */
+static void femu_test_cxl_nvme_unplug(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    bool guest = data != NULL;
+    uint8_t want[FEMU_DATA_SIZE];
+    uint8_t got[FEMU_DATA_SIZE];
+    FemuLink l;
+    QDict *rsp;
+
+    femu_link_start(&l, FEMU_LINK_HOTPLUG, "", "");
+    femu_link_write(&l, 2, 5, want);
+    qtest_writeq(l.qts, FEMU_CXL_WINDOW + 4 * 4096, 0xabcdef);
+    if (!guest) {
+        rsp = qtest_qmp(l.qts, "{'execute':'device_del',"
+                        "'arguments':{'id':'ssd'}}");
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+        g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 4 * 4096), ==,
+                        0xabcdef);
+        femu_link_unrealize(&l);
+        femu_cxl_unplug(l.qts);
+    } else {
+        femu_cxl_slot_off(l.qts);
+        rsp = qtest_qmp(l.qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/ssd',"
+                        "'property':'realized'}}");
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+        g_assert_cmpint(femu_link_read(&l, 4, got), ==, NVME_SUCCESS);
+        g_assert_cmphex(ldq_le_p(got), ==, 0xabcdef);
+        g_assert_cmpint(femu_link_read(&l, 2, got), ==, NVME_SUCCESS);
+        g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+        femu_link_write(&l, 8, 6, want);
+        g_assert_cmpint(femu_link_read(&l, 8, got), ==, NVME_SUCCESS);
+        g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+        femu_link_unrealize(&l);
+    }
+    femu_link_quit(&l);
+}
+
+/*
+ * While a long caching-API command holds the gate, a linked write's
+ * completion waits for the invalidation that follows it. With the
+ * controller removed meanwhile, the invalidation still runs later.
+ *
+ * Eight writebacks of 100 ms each hold the gate for about 800 ms but
+ * occupy only eight of the sixteen LUNs, so the NVMe write itself, on the
+ * next LUN, is due after about 100 ms.
+ */
+static void femu_test_cxl_nvme_gate(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    bool unplug = data != NULL;
+    uint8_t pattern[FEMU_DATA_SIZE];
+    FemuCcaResp r;
+    NvmeRwCmd rw = { 0 };
+    FemuCca cca;
+    FemuLink l;
+    gint64 until;
+    unsigned lpn;
+
+    femu_link_start(&l, "", ",cca=on,cache-pages=128,cache-ways=128,"
+                    "program-ns=100000000", "");
+    cca.qts = l.qts;
+    cca.slot = 0;
+    femu_cca_map(&cca);
+    for (lpn = 0; lpn < 8; lpn++) {
+        qtest_writeq(l.qts, femu_cca_page(lpn), lpn);
+    }
+    g_assert_cmphex(qtest_readq(l.qts, femu_cca_page(100)), ==, 0);
+    femu_cca_post_raw(&cca, cca.slot++, CCA_CTRL_INVALIDATE, 0, 0, 8, 0);
+    femu_cca_kick(&cca);
+    femu_cca_poll_stat(l.qts, "cca-writebacks", 8);
+
+    memset(pattern, 0x42, sizeof(pattern));
+    qtest_memwrite(l.qts, l.buf, pattern, sizeof(pattern));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(l.buf);
+    rw.slba = cpu_to_le64(100 * 8);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&l.c, &l.c.io, (NvmeCmd *)&rw);
+    until = g_get_monotonic_time() + 400 * 1000;
+    while (g_get_monotonic_time() < until) {
+        g_assert_false(femu_cq_ready(&l.c, &l.c.io));
+        g_usleep(5000);
+    }
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "nvme-drops"), ==, 0);
+    if (unplug) {
+        femu_link_unrealize(&l);
+    }
+    femu_cca_reap(&cca, &r);
+    g_assert_cmpint(r.status, ==, 0);
+    if (!unplug) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&l.c, &l.c.io, NULL, NULL)),
+                        ==, NVME_SUCCESS);
+    }
+    femu_cca_poll_stat(l.qts, "nvme-drops", 1);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 0);
+    g_assert_cmphex(qtest_readb(l.qts, femu_cca_page(100)), ==, 0x42);
+    femu_link_quit(&l);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -15538,6 +16068,28 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
     qos_add_test("cxl-cca-interleave", "femu", femu_test_cca_interleave,
                  NULL);
+    qos_add_test("cxl-nvme-link", "femu", femu_test_cxl_nvme_link, NULL);
+    qos_add_test("cxl-nvme-data", "femu", femu_test_cxl_nvme_data, NULL);
+    qos_add_test("cxl-nvme-data-4k", "femu", femu_test_cxl_nvme_data,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-nvme-write", "femu", femu_test_cxl_nvme_invalidate,
+                 &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_WRITE });
+    qos_add_test("cxl-nvme-write-zeroes", "femu",
+                 femu_test_cxl_nvme_invalidate,
+                 &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_ZEROES });
+    qos_add_test("cxl-nvme-copy", "femu", femu_test_cxl_nvme_invalidate,
+                 &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_COPY });
+    qos_add_test("cxl-nvme-deallocate", "femu",
+                 femu_test_cxl_nvme_deallocate, NULL);
+    qos_add_test("cxl-nvme-dulbe", "femu", femu_test_cxl_nvme_dulbe, NULL);
+    qos_add_test("cxl-nvme-flip", "femu", femu_test_cxl_nvme_flip, NULL);
+    qos_add_test("cxl-nvme-pin", "femu", femu_test_cxl_nvme_pin, NULL);
+    qos_add_test("cxl-nvme-unplug", "femu", femu_test_cxl_nvme_unplug, NULL);
+    qos_add_test("cxl-nvme-slot-off", "femu", femu_test_cxl_nvme_unplug,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-nvme-gate", "femu", femu_test_cxl_nvme_gate, NULL);
+    qos_add_test("cxl-nvme-gate-unplug", "femu", femu_test_cxl_nvme_gate,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
     {
         static const char * const policies[] = {
             "fifo", "lifo", "clock", "s3-fifo"
