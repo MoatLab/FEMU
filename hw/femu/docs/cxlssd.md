@@ -14,12 +14,14 @@ explicitly blocked because the FTL and cache do not have migration state.
 
 The payload resides in the supplied host memory backend. The cache holds
 page numbers, dirty state and eviction metadata. A miss reads the corresponding
-page through `bb_ftl_process_req()`. An unmapped page initially contains zeros
-and has no read cost. Writes to resident pages become dirty. Dirty eviction or
-`flush-cache=true` issues a real FTL write; without a cache, each write goes
-straight to the FTL. The guest access waits for the returned media completion
-cost using a sleep, not a busy loop. This is volatile memory, not a persistence
-contract for guest CPU cache flush instructions.
+page through `bb_ftl_process_req()`. An unmapped page has no read cost, but
+its contents come from the backend and are not cleared: they read as zero only
+when the backend is zero-filled, as a fresh `memory-backend-ram` is. Writes to
+resident pages become dirty. Dirty eviction or `flush-cache=true` issues a
+real FTL write; without a cache, each write goes straight to the FTL. The guest
+access waits for the returned media completion cost using a sleep, not a busy
+loop. This is volatile memory, not a persistence contract for guest CPU cache
+flush instructions.
 
 `ssd_init()`, `bb_ftl_process_req()`, `ssd_free()` and the shared NAND media are
 reused directly. There is no renamed copy of the old FTL. Master supplies
