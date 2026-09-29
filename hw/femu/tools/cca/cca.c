@@ -179,7 +179,15 @@ static void to_result(const struct cca_ctrl_resp_s *resp, struct cca_result *r)
  */
 static bool resync_locked(struct cca_dev *d)
 {
-    uint32_t epoch = reg32(d, CCA_REG_EPOCH);
+    uint32_t epoch;
+
+    /*
+     * Callers check again after storing a ring index; without the fence
+     * the read may complete before that store is visible, so a store into
+     * a ring the device has since formatted would go unnoticed.
+     */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    epoch = reg32(d, CCA_REG_EPOCH);
 
     if (epoch == d->dev_epoch) {
         return false;
