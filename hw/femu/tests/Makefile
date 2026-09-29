@@ -14,6 +14,14 @@ ROOT = ../../..
 TEST_SRC = unit/test-nand-media.c
 # the stub directory first, so qemu/osdep.h resolves here and not in QEMU
 INCLUDES = -I. -I$(ROOT) -I../nand
+PKG_CONFIG ?= pkg-config
+# The CXL cache test needs GLib; CI runs this before installing it, then again
+# after, so the test is skipped only in the first pass.
+HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
+UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte
+ifeq ($(HAVE_GLIB),1)
+UNIT_TESTS += test-femu-cxl-cache
+endif
 
 test-femu-nand-media: $(TEST_SRC) nand-media.o ../nand/nand-media.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $(TEST_SRC) nand-media.o
@@ -25,18 +33,18 @@ test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
 test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h
-	$(CC) $(CFLAGS_TEST) $(INCLUDES) $(shell pkg-config --cflags glib-2.0) \
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) $(shell $(PKG_CONFIG) --cflags glib-2.0) \
 	    -o $@ unit/test-cxl-cache.c ../cxlssd/cache.c \
-	    $(shell pkg-config --libs glib-2.0)
+	    $(shell $(PKG_CONFIG) --libs glib-2.0)
 
 test-femu-cxl-spte: unit/test-cxl-spte.c ../cxlssd/spte.h ../cxlssd/spt.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
-check: test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte
-	./test-femu-nand-media
-	./test-femu-hybrid-oracle
-	./test-femu-cxl-cache
-	./test-femu-cxl-spte
+check: $(UNIT_TESTS)
+	@for t in $(UNIT_TESTS); do ./$$t || exit 1; done
+ifneq ($(HAVE_GLIB),1)
+	@echo "SKIP test-femu-cxl-cache: glib-2.0 not found"
+endif
 
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte nand-media.o

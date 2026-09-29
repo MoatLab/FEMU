@@ -44,6 +44,12 @@ jobs:
           uuid-dev libcap-dev libxml2-dev libmount-dev \
           liburing-dev flex bison
 
+
+    - name: Unit tests needing GLib
+      run: |
+        # The first pass ran before GLib was installed and skipped these.
+        make -C hw/femu/tests clean check
+
     - name: Setup FEMU build environment
       run: |
         mkdir build-femu
