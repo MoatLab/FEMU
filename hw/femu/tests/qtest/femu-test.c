@@ -23,6 +23,7 @@
 #include "hw/cxl/cxl_component.h"
 #include "hw/cxl/cxl_device.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
+#include "hw/femu/cxlssd/cca-abi.h"
 #include "standard-headers/linux/pci_regs.h"
 
 #define FEMU_QSIZE          16
@@ -14590,6 +14591,820 @@ static void femu_test_cxl_ratio_dirty(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/* The caching API on BAR5, driven through its rings as a guest would. */
+#define FEMU_CCA_BAR    0x90080000ULL
+#define FEMU_CCA_SHM    (FEMU_CCA_BAR + CCA_SHM_OFFSET)
+#define FEMU_CCA_REQ    (FEMU_CCA_SHM + CCA_REQ_RING_OFFSET)
+#define FEMU_CCA_RESP   (FEMU_CCA_SHM + CCA_RESP_RING_OFFSET)
+#define FEMU_CCA_SLOTS  (FEMU_CCA_SHM + CCA_SLOT_POOL_OFFSET)
+#define FEMU_CCA_DEVICE "-device femu-cxl-ssd,id=ssd,bus=rp0," \
+                        "volatile-memdev=mem,cca=on,"
+
+typedef struct FemuCca {
+    QTestState *qts;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t slot;
+} FemuCca;
+
+typedef struct FemuCcaResp {
+    int32_t status;
+    uint64_t count;
+    uint64_t tag;
+    uint64_t resident;
+    uint64_t dirty;
+    uint64_t pinned;
+    uint64_t bypassed;
+} FemuCcaResp;
+
+static uint32_t femu_cxl_config_read(QTestState *qts, unsigned bus,
+                                     unsigned offset)
+{
+    qtest_outl(qts, 0xcf8, 0x80000000u | (bus << 16) | offset);
+    return qtest_inl(qts, 0xcfc);
+}
+
+static uint32_t femu_cca_reg(FemuCca *c, unsigned offset)
+{
+    return qtest_readl(c->qts, FEMU_CCA_BAR + offset);
+}
+
+static void femu_cca_wait_status(FemuCca *c, uint32_t mask, uint32_t value)
+{
+    gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+    while ((femu_cca_reg(c, CCA_REG_STATUS) & mask) != value) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
+/* Route the window and BAR5; the rings start empty after realize. */
+static void femu_cca_map(FemuCca *c)
+{
+    femu_cxl_decode(c->qts);
+    femu_cxl_config(c->qts, 53, 0x24, FEMU_CCA_BAR);
+    femu_cca_wait_status(c, CCA_STATUS_READY, CCA_STATUS_READY);
+    c->head = 0;
+    c->tail = 0;
+}
+
+static void femu_cca_start(FemuCca *c, const char *extra, const char *options)
+{
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE "%s"
+                                            FEMU_CCA_DEVICE "%s", extra,
+                                            options);
+
+    c->qts = qtest_init(args);
+    c->slot = 0;
+    femu_cca_map(c);
+}
+
+static void femu_cca_post_raw(FemuCca *c, uint32_t slot, uint32_t cmd,
+                              uint32_t flags, uint64_t start, uint64_t count,
+                              uint64_t rsvd)
+{
+    uint64_t base = FEMU_CCA_SLOTS + (uint64_t)slot * CCA_SLOT_SIZE;
+    unsigned i;
+
+    qtest_writel(c->qts, base, cmd);
+    qtest_writel(c->qts, base + 4, flags);
+    qtest_writeq(c->qts, base + 8, start);
+    qtest_writeq(c->qts, base + 16, count);
+    qtest_writeq(c->qts, base + 24, c->head);
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(c->qts, base + 32 + i * 8, i ? 0 : rsvd);
+    }
+    qtest_writel(c->qts, FEMU_CCA_REQ + offsetof(struct cca_ring, entries) +
+                 (c->head % CCA_RING_COUNT) * 4, slot);
+    c->head++;
+    qtest_writel(c->qts, FEMU_CCA_REQ + offsetof(struct cca_ring, head),
+                 c->head);
+}
+
+static void femu_cca_kick(FemuCca *c)
+{
+    qtest_writel(c->qts, FEMU_CCA_BAR + CCA_REG_DOORBELL, 1);
+}
+
+/* Commands run on a device thread in real time, so poll with a deadline. */
+static void femu_cca_reap(FemuCca *c, FemuCcaResp *r)
+{
+    gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    uint64_t base;
+    uint32_t slot;
+
+    while (qtest_readl(c->qts, FEMU_CCA_RESP +
+                       offsetof(struct cca_ring, head)) == c->tail) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    slot = qtest_readl(c->qts, FEMU_CCA_RESP +
+                       offsetof(struct cca_ring, entries) +
+                       (c->tail % CCA_RING_COUNT) * 4);
+    g_assert_cmpuint(slot, <, CCA_RING_COUNT);
+    base = FEMU_CCA_SLOTS + (uint64_t)slot * CCA_SLOT_SIZE + 64;
+    r->status = (int32_t)qtest_readl(c->qts, base);
+    r->count = qtest_readq(c->qts, base + 16);
+    r->tag = qtest_readq(c->qts, base + 24);
+    r->resident = qtest_readq(c->qts, base + 32);
+    r->dirty = qtest_readq(c->qts, base + 40);
+    r->pinned = qtest_readq(c->qts, base + 48);
+    r->bypassed = qtest_readq(c->qts, base + 56);
+    c->tail++;
+    qtest_writel(c->qts, FEMU_CCA_RESP + offsetof(struct cca_ring, tail),
+                 c->tail);
+}
+
+static int femu_cca_raw(FemuCca *c, uint32_t cmd, uint32_t flags,
+                        uint64_t start, uint64_t count, uint64_t rsvd,
+                        FemuCcaResp *out)
+{
+    FemuCcaResp r;
+    uint64_t tag = c->head;
+
+    femu_cca_post_raw(c, c->slot++ % CCA_RING_COUNT, cmd, flags, start,
+                      count, rsvd);
+    femu_cca_kick(c);
+    femu_cca_reap(c, &r);
+    g_assert_cmpuint(r.tag, ==, tag);
+    if (out) {
+        *out = r;
+    }
+    return r.status;
+}
+
+static int femu_cca_cmd(FemuCca *c, uint32_t cmd, uint32_t flags,
+                        uint64_t start, uint64_t count, FemuCcaResp *out)
+{
+    return femu_cca_raw(c, cmd, flags, start, count, 0, out);
+}
+
+/* Expect @status and, when it is 0, @count pages acted on. */
+static void femu_cca_expect(FemuCca *c, uint32_t cmd, uint32_t flags,
+                            uint64_t start, uint64_t count, int status,
+                            uint64_t acted)
+{
+    FemuCcaResp r;
+
+    g_assert_cmpint(femu_cca_cmd(c, cmd, flags, start, count, &r), ==,
+                    status);
+    if (!status) {
+        g_assert_cmpuint(r.count, ==, acted);
+    }
+}
+
+static uint64_t femu_cca_page(uint64_t lpn)
+{
+    return FEMU_CXL_WINDOW + lpn * 4096;
+}
+
+static void femu_cca_quit(FemuCca *c)
+{
+    qtest_quit(c->qts);
+}
+
+static void femu_test_cca_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+    FemuCca c;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x24, 0xffffffff);
+    g_assert_cmphex(femu_cxl_config_read(qts, 53, 0x24), ==, 0);
+    g_assert_cmpuint(femu_cxl_mtree_count(qts, "femu-cxl-cca"), ==, 0);
+    qtest_quit(qts);
+
+    /* The same probe sees a 512 KiB 32-bit memory BAR when enabled. */
+    femu_cca_start(&c, "", "");
+    femu_cxl_config(c.qts, 53, 0x24, 0xffffffff);
+    g_assert_cmphex(femu_cxl_config_read(c.qts, 53, 0x24), ==,
+                    (uint32_t)~(CCA_BAR_SIZE - 1));
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_layout(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    FemuCca c;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    g_assert_cmphex(femu_cca_reg(&c, CCA_REG_MAGIC), ==, CCA_SHMEM_MAGIC);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_VERSION), ==, 2);
+    g_assert_cmphex(femu_cca_reg(&c, CCA_REG_STATUS), ==,
+                    CCA_STATUS_READY | CCA_STATUS_CACHE);
+    g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_BAR + CCA_REG_MEDIA_PAGES),
+                     ==, 256 * 256);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_CACHE_PAGES), ==, 4);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_CACHE_WAYS), ==, 2);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_PIN_LIMIT), ==, 2);
+    g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_BAR + CCA_REG_COMPLETED),
+                     ==, 0);
+    /* Other widths read as zero. */
+    g_assert_cmpuint(qtest_readw(c.qts, FEMU_CCA_BAR + CCA_REG_MAGIC), ==, 0);
+    g_assert_cmphex(qtest_readl(c.qts, FEMU_CCA_SHM), ==, CCA_SHMEM_MAGIC);
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_SHM + 4), ==, 2);
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_SHM + 8), ==,
+                     CCA_RING_COUNT);
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_SHM + 12), ==, 128);
+    g_assert_cmphex(qtest_readq(c.qts, FEMU_CCA_SHM + 16), ==, 0x100);
+    g_assert_cmphex(qtest_readq(c.qts, FEMU_CCA_SHM + 24), ==, 0x2200);
+    g_assert_cmphex(qtest_readq(c.qts, FEMU_CCA_SHM + 32), ==, 0x5000);
+    for (unsigned off = 40; off < 80; off += 8) {
+        g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_SHM + off), ==, 0);
+    }
+    femu_cca_quit(&c);
+}
+
+/* Slot 0 must complete; cylon-v9.0.1 dropped it as a NULL entry. */
+static void femu_test_cca_nop(void *obj, void *data, QGuestAllocator *alloc)
+{
+    FemuCca c;
+    FemuCcaResp r;
+    unsigned batch;
+    unsigned i;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    c.slot = 0;
+    femu_cca_expect(&c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
+    c.slot = CCA_RING_COUNT - 1;
+    femu_cca_expect(&c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
+    for (batch = 0; batch < 3; batch++) {
+        uint64_t first = c.head;
+
+        for (i = 0; i < 1000; i++) {
+            femu_cca_post_raw(&c, (batch * 1000 + i) % CCA_RING_COUNT,
+                              CCA_CTRL_NOP, 0, 0, 0, 0);
+        }
+        femu_cca_kick(&c);
+        for (i = 0; i < 1000; i++) {
+            femu_cca_reap(&c, &r);
+            g_assert_cmpint(r.status, ==, 0);
+            g_assert_cmpuint(r.tag, ==, first + i);
+        }
+    }
+    g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_BAR + CCA_REG_COMPLETED),
+                     ==, 3002);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-commands"), ==, 3002);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-errors"), ==, 0);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_pin(void *obj, void *data, QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t writes;
+    uint64_t misses;
+    uint64_t reads;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xa0);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pin-fills"), ==, 0);
+    /* Stream the rest of set 0 past it. */
+    for (lpn = 2; lpn <= 8; lpn += 2) {
+        qtest_readq(c.qts, femu_cca_page(lpn));
+    }
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 2);
+    misses = femu_cxl_stat(c.qts, "read-misses");
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xa0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes);
+    /* Pinning a page that is not resident fills it like a miss would. */
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 1, 1, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pin-fills"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 2);
+    /* Pinning again counts the page as acted on and changes nothing. */
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 2, 0, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 2);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_budget(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    FemuCca c;
+    FemuCcaResp r;
+    uint64_t entries;
+    uint64_t reads;
+    uint64_t writes;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 2, 1, 0, 1);
+    entries = femu_cxl_stat(c.qts, "cache-entries");
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 4, 1, -ENOSPC, 0);
+    /* All or nothing: page 5 has room in set 1 but is not pinned either. */
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 4, 3, -ENOSPC, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, entries);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 5, 1, &r), ==, 0);
+    g_assert_cmpuint(r.resident, ==, 0);
+
+    /* Misses to a fully pinned set are served from the media, uncached. */
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    qtest_writeq(c.qts, femu_cca_page(4), 0x44);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(4)), ==, 0x44);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned-set-misses"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, entries);
+    femu_cca_quit(&c);
+
+    femu_cca_start(&c, "", "cache-pages=0");
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, -EOPNOTSUPP, 0);
+    femu_cca_expect(&c, CCA_CTRL_UNPIN, 0, 0, 1, -EOPNOTSUPP, 0);
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, 0, 0, 1, 0, 0);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_PIN_LIMIT), ==, 0);
+    femu_cca_quit(&c);
+
+    /* Direct mapped: the one way of a set can be pinned. */
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=1");
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_PIN_LIMIT), ==, 1);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 4, 1, -ENOSPC, 0);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 1, 3, 0, 3);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_unpin(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t writes;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xb0);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_UNPIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_UNPIN, 0, 0, 1, 0, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 0);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    for (lpn = 2; lpn <= 8; lpn += 2) {
+        qtest_readq(c.qts, femu_cca_page(lpn));
+    }
+    /* Still dirty after unpinning, so its eviction programs it. */
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xb0);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_invalidate(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t writes;
+    uint64_t ns;
+    uint64_t misses;
+    uint64_t dropped;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0x70);
+    qtest_writeq(c.qts, femu_cca_page(1), 0x71);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 2);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    ns = femu_cxl_stat(c.qts, "media-time-ns");
+    misses = femu_cxl_stat(c.qts, "read-misses");
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, 0, 0, 2, 0, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-time-ns"), >=, ns + 400000);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-writebacks"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-dropped"), ==, 2);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0x70);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(1)), ==, 0x71);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses + 2);
+
+    /* Clean pages are dropped without a program. */
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    dropped = femu_cxl_stat(c.qts, "cca-dropped");
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-dropped"), ==, dropped + 2);
+
+    /* Pinned pages need FORCE, which unpins and writes them back. */
+    qtest_writeq(c.qts, femu_cca_page(0), 0x72);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, 0, 0, 1, -EBUSY, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes);
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, CCA_F_FORCE, 0, 1, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_bypass(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t reads;
+    uint64_t writes;
+    uint64_t misses;
+    uint64_t inserts;
+    unsigned i;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xc0);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 1);
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    misses = femu_cxl_stat(c.qts, "read-misses");
+    inserts = femu_cxl_stat(c.qts, "cache-inserts");
+    for (i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xc0);
+    }
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads + 3);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses + 3);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xc1);
+    qtest_writeq(c.qts, femu_cca_page(0), 0xc2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-inserts"), ==, inserts);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned-set-misses"), ==, 0);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 0);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, -EBUSY, 0);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_ENABLE, 0, 0, 2, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xc2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-inserts"), ==, inserts + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_prefetch(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    FemuCca c;
+    FemuCcaResp r;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2,prefetch-degree=2");
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 1, 1, 0, 1);
+    qtest_readq(c.qts, femu_cca_page(0));
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "prefetch-inserts"), ==, 1);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 0, 3, &r), ==, 0);
+    g_assert_cmpuint(r.resident, ==, 2);
+    g_assert_cmpuint(r.bypassed, ==, 1);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 1, 1, &r), ==, 0);
+    g_assert_cmpuint(r.resident, ==, 0);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_flush(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t writes;
+    uint64_t misses;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xd0);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    femu_cxl_set(c.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
+    misses = femu_cxl_stat(c.qts, "read-misses");
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xd0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses);
+    /* A clean pinned page is not programmed again. */
+    femu_cxl_set(c.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    /* Cylon's buffer clear (command 2) keeps pins the same way. */
+    qtest_writeq(c.qts, femu_cca_page(0), 0xd1);
+    femu_cxl_command(c.qts, false, 2, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_ways(void *obj, void *data, QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t writes;
+    uint64_t misses;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=4");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xe0);
+    qtest_readq(c.qts, femu_cca_page(4));
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 4, 1, 0, 1);
+    /* Four direct-mapped sets would put both pins in set 0: refused. */
+    writes = femu_cxl_stat(c.qts, "media-writes");
+    femu_cxl_number(c.qts, "cache-ways", 1, false);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-ways"), ==, 4);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes);
+    /* Two ways fit both; the dirty pin is written back, then kept. */
+    femu_cxl_number(c.qts, "cache-ways", 2, true);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_CACHE_WAYS), ==, 2);
+    misses = femu_cxl_stat(c.qts, "read-misses");
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xe0);
+    qtest_readq(c.qts, femu_cca_page(4));
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "read-misses"), ==, misses);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 2, 1, -ENOSPC, 0);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_ratio(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+    QDict *rsp;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2,der=memslot");
+    femu_cxl_number(c.qts, "der-ratio", 100, true);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, -EBUSY, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    femu_cxl_number(c.qts, "der-ratio", 0, true);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 1);
+    rsp = qtest_qmp(c.qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'der-ratio','value':100}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                        "desc"), "bypass"));
+    qobject_unref(rsp);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-ratio"), ==, 0);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_ENABLE, CCA_F_ALL, 0, 0, 0, 1);
+    femu_cxl_number(c.qts, "der-ratio", 100, true);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_query(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+    FemuCcaResp r;
+    unsigned all;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 1);
+    qtest_readq(c.qts, femu_cca_page(1));
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 1, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 3, 1, 0, 1);
+    for (all = 0; all < 2; all++) {
+        g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY,
+                                     all ? CCA_F_ALL : 0, 0, all ? 0 : 4,
+                                     &r), ==, 0);
+        g_assert_cmpuint(r.count, ==, all ? 256 * 256 : 4);
+        g_assert_cmpuint(r.resident, ==,
+                         femu_cxl_stat(c.qts, "cache-entries"));
+        g_assert_cmpuint(r.resident, ==, 2);
+        g_assert_cmpuint(r.dirty, ==, 1);
+        g_assert_cmpuint(r.pinned, ==, femu_cxl_stat(c.qts, "cca-pinned"));
+        g_assert_cmpuint(r.pinned, ==, 1);
+        g_assert_cmpuint(r.bypassed, ==,
+                         femu_cxl_stat(c.qts, "cca-bypassed"));
+        g_assert_cmpuint(r.bypassed, ==, 1);
+    }
+    femu_cca_quit(&c);
+}
+
+static void femu_cca_expect_fatal(FemuCca *c, uint32_t reason)
+{
+    femu_cca_kick(c);
+    femu_cca_wait_status(c, CCA_STATUS_FATAL, CCA_STATUS_FATAL);
+    g_assert_cmpuint(femu_cca_reg(c, CCA_REG_FATAL_REASON), ==, reason);
+    /* Doorbells do nothing until RESET. */
+    femu_cca_kick(c);
+    qtest_writel(c->qts, FEMU_CCA_BAR + CCA_REG_RESET, CCA_RESET_RINGS);
+    g_assert_cmphex(femu_cca_reg(c, CCA_REG_STATUS) & CCA_STATUS_FATAL, ==, 0);
+    femu_cca_wait_status(c, CCA_STATUS_READY, CCA_STATUS_READY);
+    g_assert_cmpuint(femu_cca_reg(c, CCA_REG_FATAL_REASON), ==, 0);
+    c->head = 0;
+    c->tail = 0;
+    femu_cca_expect(c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
+    g_assert_cmpuint(qtest_readq(c->qts, FEMU_CCA_BAR + CCA_REG_COMPLETED),
+                     ==, 1);
+}
+
+static void femu_test_cca_errors(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t pages = 256 * 256;
+    uint32_t i;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_MAX, 0, 0, 1, NULL), ==,
+                    -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_PIN, 1u << 5, 0, 1, NULL), ==,
+                    -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_PIN, CCA_F_FORCE, 0, 1, NULL),
+                    ==, -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_NOP, CCA_F_ALL, 0, 0, NULL), ==,
+                    -EINVAL);
+    g_assert_cmpint(femu_cca_raw(&c, CCA_CTRL_QUERY, 0, 0, 1, 1, NULL), ==,
+                    -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, CCA_F_ALL, 1, 0, NULL),
+                    ==, -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 0, 0, NULL), ==,
+                    -EINVAL);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, pages, 1, NULL), ==,
+                    -ERANGE);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, pages - 1, 2, NULL),
+                    ==, -ERANGE);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 1, UINT64_MAX, NULL),
+                    ==, -ERANGE);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-errors"), ==, 10);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-commands"), ==, 10);
+
+    /* A head beyond the ring, a slot beyond the pool, a full response ring. */
+    qtest_writel(c.qts, FEMU_CCA_REQ + offsetof(struct cca_ring, head),
+                 c.head + CCA_RING_COUNT + 1);
+    femu_cca_expect_fatal(&c, CCA_FATAL_RING);
+    qtest_writel(c.qts, FEMU_CCA_REQ + offsetof(struct cca_ring, entries) +
+                 (c.head % CCA_RING_COUNT) * 4, 0xffffffff);
+    qtest_writel(c.qts, FEMU_CCA_REQ + offsetof(struct cca_ring, head),
+                 c.head + 1);
+    femu_cca_expect_fatal(&c, CCA_FATAL_SLOT);
+    /* Every response unreaped, then one more request. */
+    for (i = 0; i < CCA_RING_COUNT; i++) {
+        femu_cca_post_raw(&c, i, CCA_CTRL_NOP, 0, 0, 0, 0);
+    }
+    femu_cca_kick(&c);
+    {
+        gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+        while (qtest_readl(c.qts, FEMU_CCA_RESP +
+                           offsetof(struct cca_ring, head)) - c.tail !=
+               CCA_RING_COUNT) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+    }
+    femu_cca_post_raw(&c, 0, CCA_CTRL_NOP, 0, 0, 0, 0);
+    femu_cca_expect_fatal(&c, CCA_FATAL_RESPONSE);
+    femu_cca_quit(&c);
+}
+
+static void femu_cca_poll_stat(QTestState *qts, const char *name,
+                               uint64_t value)
+{
+    gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+    while (femu_cxl_stat(qts, name) != value) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
+static void femu_test_cca_reset(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t entries;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0xf0);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 3, 1, 0, 1);
+    entries = femu_cxl_stat(c.qts, "cache-entries");
+    qtest_qmp_assert_success(c.qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(c.qts, "RESET");
+    femu_cca_poll_stat(c.qts, "cca-pinned", 0);
+    femu_cca_poll_stat(c.qts, "cca-bypassed", 0);
+    /* Reset keeps cached contents; only CCA state goes. */
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, entries);
+    femu_cca_map(&c);
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_REQ), ==, 0);
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_RESP), ==, 0);
+    g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_BAR + CCA_REG_COMPLETED),
+                     ==, 0);
+    femu_cca_expect(&c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
+    femu_cca_expect(&c, CCA_CTRL_UNPIN, CCA_F_ALL, 0, 0, 0, 0);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xf0);
+    femu_cca_quit(&c);
+}
+
+static void femu_test_cca_der(void *obj, void *data, QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t revocations;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2,der=memslot");
+    qtest_writeq(c.qts, femu_cca_page(0), 0x18);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0x18);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-mapped"), ==, 1);
+    revocations = femu_cxl_stat(c.qts, "der-revocations");
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, CCA_F_FORCE, 0, 1, 0, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-revocations"), ==,
+                     revocations + 1);
+    /* Memslot pages are conservatively dirty, so it was programmed. */
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-writebacks"), ==, 1);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0x18);
+    femu_cca_quit(&c);
+}
+
+/* Count this QEMU's threads named @name; needs -name debug-threads=on. */
+static unsigned femu_cca_threads(QTestState *qts, const char *name)
+{
+    g_autofree char *dir = g_strdup_printf("/proc/%d/task", qtest_pid(qts));
+    GDir *tasks = g_dir_open(dir, 0, NULL);
+    const char *task;
+    unsigned count = 0;
+
+    g_assert_nonnull(tasks);
+    while ((task = g_dir_read_name(tasks))) {
+        g_autofree char *path = g_strdup_printf("%s/%s/comm", dir, task);
+        g_autofree char *comm = NULL;
+
+        if (g_file_get_contents(path, &comm, NULL, NULL) &&
+            g_str_has_prefix(comm, name)) {
+            count++;
+        }
+    }
+    g_dir_close(tasks);
+    return count;
+}
+
+/*
+ * Unplug while a command sleeps through a minute of modeled programs:
+ * device_del must not wait, and the thread must still finish promptly
+ * and release the media.
+ */
+static void femu_test_cca_unplug(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    FemuCca c;
+    gint64 start;
+    gint64 deadline;
+    unsigned lpn;
+
+    femu_cca_start(&c, "-name debug-threads=on "
+                   "-global cxl-rp.power_controller_present=on "
+                   "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off ",
+                   "cache-pages=64,cache-ways=64,program-ns=1000000000");
+    for (lpn = 0; lpn < 64; lpn++) {
+        qtest_writeq(c.qts, femu_cca_page(lpn), lpn);
+    }
+    femu_cca_post_raw(&c, 0, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0);
+    femu_cca_kick(&c);
+    /* All 64 programs are charged before the chunk's delay begins. */
+    femu_cca_poll_stat(c.qts, "cca-writebacks", 64);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_STATUS) & CCA_STATUS_BUSY, ==,
+                     CCA_STATUS_BUSY);
+    g_assert_cmpuint(femu_cca_threads(c.qts, "femu-cxl-cca"), ==, 1);
+    g_assert_cmpuint(femu_cca_threads(c.qts, "femu-cxl-ftl"), ==, 1);
+    start = g_get_monotonic_time();
+    femu_cxl_unplug(c.qts);
+    g_assert_cmpint(g_get_monotonic_time() - start, <, 5 * G_USEC_PER_SEC);
+    deadline = start + 5 * G_USEC_PER_SEC;
+    while (femu_cca_threads(c.qts, "femu-cxl-cca") ||
+           femu_cca_threads(c.qts, "femu-cxl-ftl")) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(10000);
+    }
+    femu_cca_quit(&c);
+}
+
+/* Commands that touch the cache refuse while media is disabled. */
+static void femu_test_cca_media(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    FemuCca c;
+
+    femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
+    qtest_writeq(c.qts, femu_cca_page(0), 0x20);
+    femu_cxl_set(c.qts, "test-media-disabled", true);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, -ENODEV, 0);
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, 0, 0, 1, -ENODEV, 0);
+    femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, -ENODEV, 0);
+    femu_cca_expect(&c, CCA_CTRL_QUERY, 0, 0, 1, -ENODEV, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
+    femu_cca_expect(&c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
+    femu_cxl_set(c.qts, "test-media-disabled", false);
+    femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
+    femu_cca_quit(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14667,6 +15482,25 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
     qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
     qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);
+    qos_add_test("cxl-cca-off", "femu", femu_test_cca_off, NULL);
+    qos_add_test("cxl-cca-layout", "femu", femu_test_cca_layout, NULL);
+    qos_add_test("cxl-cca-nop", "femu", femu_test_cca_nop, NULL);
+    qos_add_test("cxl-cca-pin", "femu", femu_test_cca_pin, NULL);
+    qos_add_test("cxl-cca-budget", "femu", femu_test_cca_budget, NULL);
+    qos_add_test("cxl-cca-unpin", "femu", femu_test_cca_unpin, NULL);
+    qos_add_test("cxl-cca-invalidate", "femu", femu_test_cca_invalidate,
+                 NULL);
+    qos_add_test("cxl-cca-bypass", "femu", femu_test_cca_bypass, NULL);
+    qos_add_test("cxl-cca-prefetch", "femu", femu_test_cca_prefetch, NULL);
+    qos_add_test("cxl-cca-flush", "femu", femu_test_cca_flush, NULL);
+    qos_add_test("cxl-cca-ways", "femu", femu_test_cca_ways, NULL);
+    qos_add_test("cxl-cca-ratio", "femu", femu_test_cca_ratio, NULL);
+    qos_add_test("cxl-cca-query", "femu", femu_test_cca_query, NULL);
+    qos_add_test("cxl-cca-errors", "femu", femu_test_cca_errors, NULL);
+    qos_add_test("cxl-cca-reset", "femu", femu_test_cca_reset, NULL);
+    qos_add_test("cxl-cca-der", "femu", femu_test_cca_der, NULL);
+    qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
+    qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
     {
         static const char * const policies[] = {
             "fifo", "lifo", "clock", "s3-fifo"
