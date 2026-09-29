@@ -152,7 +152,7 @@ static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
         !femu_cxl_der_map(&s->direct, hpa, dpa)) {
         return false;
     }
-    /* Stores through the mapping bypass this device entirely. */
+    /* Stores through the mapping never reach this device. */
     femu_cxl_nvme_mark(s, dpa & ~4095ULL, 4096);
     return true;
 }
@@ -393,7 +393,9 @@ static void cxl_nvme_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
         return;
     }
     last = MIN(last, pages - 1);
-    clear = last - first + 1 > FEMU_CXL_NVME_CLEAR && s->direct.mapped;
+    /* A clear would also revoke ratio mappings, which rule 1 keeps. */
+    clear = last - first + 1 > FEMU_CXL_NVME_CLEAR && s->direct.mapped &&
+            !s->direct.ratio;
     if (clear) {
         femu_cxl_der_clear(&s->direct);
     }

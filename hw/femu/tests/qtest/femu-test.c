@@ -15732,6 +15732,27 @@ static void femu_test_cxl_nvme_invalidate(void *obj, void *data,
     femu_link_quit(&l);
 }
 
+/* A long linked write keeps a direct ratio mapped, as eviction does. */
+static void femu_test_cxl_nvme_ratio(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    uint64_t mapped;
+    FemuLink l;
+
+    femu_link_start(&l, "", ",der=memslot", "");
+    g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 0);
+    qtest_qmp_assert_success(l.qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/ssd',"
+                             "'property':'der-ratio','value':100}}");
+    mapped = femu_cxl_stat(l.qts, "der-mapped");
+    g_assert_cmpuint(mapped, >=, 65536);
+    g_assert_cmpint(femu_lba_cmd(&l.c, NVME_CMD_WRITE_ZEROES, 0, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "der-mapped"), ==, mapped);
+    femu_link_quit(&l);
+}
+
 /* A deallocated page must not come back when its dirty copy is dropped. */
 static void femu_test_cxl_nvme_deallocate(void *obj, void *data,
                                           QGuestAllocator *alloc)
@@ -16079,6 +16100,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_ZEROES });
     qos_add_test("cxl-nvme-copy", "femu", femu_test_cxl_nvme_invalidate,
                  &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_COPY });
+    qos_add_test("cxl-nvme-ratio", "femu", femu_test_cxl_nvme_ratio, NULL);
     qos_add_test("cxl-nvme-deallocate", "femu",
                  femu_test_cxl_nvme_deallocate, NULL);
     qos_add_test("cxl-nvme-dulbe", "femu", femu_test_cxl_nvme_dulbe, NULL);

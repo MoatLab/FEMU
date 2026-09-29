@@ -500,7 +500,8 @@ does not post a completion whose sequence is not yet published; it retries on
 its next sweep, and completions due after it on that poller wait too. The
 host therefore sees a write complete only after the cache reflects it. A range
 over 64 pages clears every direct mapping at once rather than revoking page by
-page, because Cylon revocation flushes the VM twice per page.
+page, because Cylon revocation flushes the VM twice per page; with a direct
+ratio set it revokes page by page, since a clear would drop the ratio too.
 
 Lock order is BQL, gate, worker mutex. A long gate holder (a flush, a way
 change, a caching-API chunk) delays linked write completions for as long as
@@ -524,7 +525,8 @@ it borrowed outlives an unplug. A CXL reset or disabled media leaves the NVMe
 path working on the same payload.
 
 Qtests cover link refusals, data in both directions at 512-byte and 4 KiB
-blocks and through a memslot mapping, each dropping command, deallocation
+blocks and through a memslot mapping, each dropping command, a long write
+under a direct ratio, deallocation
 without resurrection, DULBE after CXL stores and mappings, flips, pinned
 pages, both unplug orders and the slot power-off, and a completion held while
 a caching-API chunk owns the gate, with and without the controller removed
