@@ -2046,22 +2046,10 @@ static void cylon_install_bh(void *opaque)
     object_unref(OBJECT(c->pending_window));
     c->installing = false;
     /* Disabled media must keep trapping, so map nothing until re-enabled. */
-    if (!c->detached && c->installed &&
+    /* Cached pages map lazily on their next access; only a ratio is eager. */
+    if (!c->detached && c->installed && c->der->ratio &&
         !cxl_dev_media_disabled(&c->der->dev->parent_obj.cxl_dstate)) {
-        if (c->der->ratio) {
-            cylon_ratio_apply(c->der, c->window);
-        } else {
-            GHashTableIter it;
-            gpointer key;
-
-            g_hash_table_iter_init(&it, c->der->cache->entries);
-            while (c->installed && g_hash_table_iter_next(&it, &key, NULL)) {
-                uint64_t lpn = *(uint64_t *)key;
-
-                femu_cylon_map(c->der, c->window,
-                               c->window->base + lpn * 4096, lpn * 4096);
-            }
-        }
+        cylon_ratio_apply(c->der, c->window);
     }
     resume_all_vcpus();
     if (c->detached) {
@@ -2210,7 +2198,11 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw)
     }
 }
 
-static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn)
+/*
+ * With @flush false the caller deletes the slot next, which flushes every
+ * translation, so the flush after restoring MMIO would be redundant.
+ */
+static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
 {
     CylonPage *page = g_hash_table_lookup(der->maps, &lpn);
     FemuCylon *c = der->fast;
@@ -2270,7 +2262,7 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn)
     if (entry && ((old & CYLON_EPT_DIRTY) || !(old & CYLON_MMU_PRESENT))) {
         entry->dirty = true;
     }
-    if (!cylon_flush(gpa)) {
+    if (flush && !cylon_flush(gpa)) {
         cylon_fail(der);
         return;
     }
@@ -2285,7 +2277,7 @@ static void cylon_ratio_revoke(FemuCxlDer *der)
 
         g_hash_table_iter_init(&it, der->maps);
         g_hash_table_iter_next(&it, &key, NULL);
-        cylon_remove_page(der, *(uint64_t *)key);
+        cylon_remove_page(der, *(uint64_t *)key, true);
     }
 }
 
@@ -2302,14 +2294,17 @@ static void femu_cylon_clear(FemuCxlDer *der)
 
         g_hash_table_iter_init(&it, der->maps);
         g_hash_table_iter_next(&it, &key, NULL);
-        cylon_remove_page(der, *(uint64_t *)key);
+        cylon_remove_page(der, *(uint64_t *)key, false);
     }
     cylon_release(c);
 }
 
+/* Evict one page and keep the slot, so other direct pages stay mapped. */
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
 {
-    femu_cylon_clear(der);
+    if (der->fast && der->fast->installed) {
+        cylon_remove_page(der, lpn, true);
+    }
 }
 
 /* Only map changes over the installed window can expose overlapping RAM. */

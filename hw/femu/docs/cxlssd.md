@@ -258,8 +258,13 @@ MMIO rather than guessing that a page is clean.
 Both modes revoke before eviction programming, explicit cache flush,
 decoder/configuration writes, reset, CCI commands and device removal. Warm
 reset retains volatile payload and cache/FTL contents but revokes mappings.
-Cylon deletes its slot on every invalidation and cache-page revocation,
-sampling tracked dirty state first. Later eligible accesses can reinstall it.
+Cylon deletes its slot on every invalidation, sampling tracked dirty state
+first; later eligible accesses reinstall it and cached pages map again lazily
+on their next access. Evicting a cache page revokes only that page's entry
+with the protocol above (two single-GFN flushes) and keeps the slot. The flush
+ioctl covers one GFN, so revocations cannot share a flush; a whole-slot clear
+omits each page's final flush because the slot deletion that follows flushes
+every translation. Cylon itself rewrites the evicted entry without any flush.
 Failure and teardown also delete the slot and release its mapped SPT VMAs. The FTL worker is joined
 before its state is destroyed. Payload backing belongs to the host memory
 backend. Direct hits do not enter QEMU or read pagemap.
