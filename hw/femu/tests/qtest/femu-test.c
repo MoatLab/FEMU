@@ -13253,6 +13253,71 @@ static void femu_test_cxl_realize(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/* Add a device on rp0; Type-3 also maps persistent and DC backends. */
+static QDict *femu_cxl_add(QTestState *qts, bool type3, const char *id,
+                           const char *cdat, unsigned dc_regions)
+{
+    QDict *args = qdict_new();
+
+    qdict_put_str(args, "driver", type3 ? "cxl-type3" : "femu-cxl-ssd");
+    qdict_put_str(args, "id", id);
+    qdict_put_str(args, "bus", "rp0");
+    qdict_put_str(args, "volatile-memdev", "mem");
+    if (cdat) {
+        qdict_put_str(args, "cdat", cdat);
+    }
+    if (type3) {
+        qdict_put_str(args, "persistent-memdev", "pmem");
+        qdict_put_str(args, "lsa", "lsa");
+        qdict_put_str(args, "volatile-dc-memdev", "dc");
+        qdict_put_int(args, "num-dc-regions", dc_regions);
+    }
+    return qtest_qmp(qts, "{'execute':'device_add','arguments':%p}", args);
+}
+
+static void femu_test_cxl_realize_retry(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    bool type3 = data;
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-object memory-backend-ram,id=pmem,size=256M "
+        "-object memory-backend-ram,id=lsa,size=1M "
+        "-object memory-backend-ram,id=dc,size=256M "
+        "-device cxl-rp,id=rp1,bus=cxl.0,chassis=0,slot=1");
+    QDict *rsp;
+    g_autofree char *cdat = NULL;
+    int fd = g_file_open_tmp("femu-cdat-XXXXXX", &cdat, NULL);
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    if (type3) {
+        /* Three DC regions do not divide the backend: fails after mapping. */
+        rsp = femu_cxl_add(qts, true, "bad", NULL, 3);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    /* An empty CDAT file fails after the backends have been acquired. */
+    rsp = femu_cxl_add(qts, type3, "bad", cdat, 1);
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = femu_cxl_add(qts, type3, "ssd", NULL, 1);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    /* A failed second owner must not release the first owner's backend. */
+    for (int i = 0; i < 2; i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                       "'driver':%s,'id':'other','bus':'rp1',"
+                       "'volatile-memdev':'mem'}}",
+                       type3 ? "cxl-type3" : "femu-cxl-ssd");
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                            "desc"), "multiple times"));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+    unlink(cdat);
+}
+
 static uint64_t femu_cxl_stat(QTestState *qts, const char *name)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
@@ -13755,6 +13820,10 @@ static void femu_register_nodes(void)
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_node_create_driver("femu", femu_create);
+    qos_add_test("cxl-realize-retry", "femu", femu_test_cxl_realize_retry,
+                 NULL);
+    qos_add_test("cxl-type3-realize-retry", "femu", femu_test_cxl_realize_retry,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-bg-unplug", "femu", femu_test_cxl_bg_unplug,
                  NULL);
     qos_add_test("cxl-type3-bg-unplug", "femu", femu_test_cxl_bg_unplug,
