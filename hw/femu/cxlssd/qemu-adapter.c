@@ -392,9 +392,9 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
 
         if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
             return write ? memory_region_dispatch_write(&w->fw->mr, offset,
-                                *data, size_memop(size), attrs) :
+                                *data, size_memop(size) | MO_LE, attrs) :
                            memory_region_dispatch_read(&w->fw->mr, offset,
-                                data, size_memop(size), attrs);
+                                data, size_memop(size) | MO_LE, attrs);
         }
         ct3d = CXL_TYPE3(dev);
         s = &FEMU_CXL_SSD(dev)->media;
@@ -537,8 +537,8 @@ static MemTxResult adapter_component_read(void *opaque, hwaddr offset,
 {
     CXLType3Dev *dev = CXL_TYPE3(opaque);
 
-    return memory_region_dispatch_read(&dev->cxl_cstate.crb.cache_mem,
-                                       offset, data, size_memop(size), attrs);
+    return memory_region_dispatch_read(&dev->cxl_cstate.crb.cache_mem, offset,
+                                       data, size_memop(size) | MO_LE, attrs);
 }
 
 static MemTxResult adapter_component_write(void *opaque, hwaddr offset,
@@ -548,8 +548,8 @@ static MemTxResult adapter_component_write(void *opaque, hwaddr offset,
     CXLType3Dev *dev = CXL_TYPE3(opaque);
 
     cxl_invalidate(dev);
-    return memory_region_dispatch_write(&dev->cxl_cstate.crb.cache_mem,
-                                        offset, data, size_memop(size), attrs);
+    return memory_region_dispatch_write(&dev->cxl_cstate.crb.cache_mem, offset,
+                                        data, size_memop(size) | MO_LE, attrs);
 }
 
 static const MemoryRegionOps adapter_component_ops = {
