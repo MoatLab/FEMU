@@ -303,6 +303,121 @@ CAS avoids overwriting an already changed entry; it does not serialize with
 all KVM write-lock paths. Kernel-side coordination is still required for a
 complete SPTE concurrency contract.
 
+## Caching API (CCA)
+
+`cca=on` (default off) lets a guest control the cache: pin and unpin pages,
+write back and drop ranges, bypass the cache per page and query residency.
+With it off the device registers no BAR5 and behaves exactly as without the
+feature. The guest library, `ccactl` and the self-test are in
+`hw/femu/tools/cca/`.
+
+### Transport and layout
+
+The API lives on a 512 KiB 32-bit memory BAR5 of the Type-3 function, which
+the parent leaves free (BAR0/1 and BAR2/3 are 64-bit, BAR4 is MSI-X). The
+first 4 KiB are registers; the rest is RAM holding a header, a request ring,
+a response ring and 2048 command slots of 128 bytes. `cxlssd/cca-abi.h` is
+the single definition, compiled by both the device and the guest library.
+It keeps cylon-v9.0.1's magic (`CCA1`), command numbers, 2048-entry rings,
+slot pool and header field order, as layout version 2. Cylon kept DPDK
+rings inside the shared memory, so a guest could rewrite their size and
+mask and move QEMU's accesses outside the region; here the rings are plain
+arrays of slot indices whose size is a constant. The device keeps its own
+cursors, reads each shared index once, copies a command before validating
+it, and on a head too far ahead, a slot index out of range or a response
+ring the guest never drains sets STATUS.FATAL with a reason and stops until
+RESET. Every slot, including slot 0, completes. The data rings stay zero in
+the header, as in Cylon.
+
+| Register | Meaning |
+| --- | --- |
+| 0x00 MAGIC, 0x04 VERSION | `0x43434131`, 2 |
+| 0x08 STATUS | READY, FATAL, CACHE (cache-pages > 0), BUSY |
+| 0x0c DOORBELL | Any write: requests may be pending |
+| 0x10 RESET | 1 rings only; 2 also unpins everything and ends bypass |
+| 0x14 FATAL_REASON | 1 bad head, 2 bad slot, 3 response overflow |
+| 0x18 MEDIA_PAGES | 64-bit media size in 4 KiB pages |
+| 0x20, 0x24, 0x28 | cache-pages, cache-ways, pins allowed per set |
+| 0x30 COMPLETED | 64-bit count since the last reset |
+
+Registers take 4- and 8-byte accesses; others read as zero. Both rings are
+single producer, single consumer; the library serializes its threads and
+`flock()`s `resource5` against other processes.
+
+### Execution and locking
+
+A doorbell sets a flag under the CCA mutex and signals the `femu-cxl-cca`
+thread; it never waits, like any invalidation. Nothing takes the BQL while
+holding that mutex. The thread takes the BQL, drains the request ring and
+executes commands one at a time in submission order. Each command runs in
+chunks of up to 256 pages of work (4096 lookups), and each chunk holds the
+operation gate and then waits out its accumulated media time with the BQL
+released, exactly as a guest access does. Guest accesses therefore run
+between chunks, a long invalidation never keeps a vCPU in an MMIO exit, and
+the main loop is never blocked. The worst stall a chunk adds to an access
+is about 256 programs. Cache membership still changes only under the gate.
+
+Device reset reformats the rings under the BQL, clears READY and asks the
+thread to unpin everything and end bypass under the gate; READY returns when
+it has. A command in flight notices the new epoch at its next chunk and is
+dropped without a completion. Unplug does not wait either: the thread holds
+a reference to the device, like an access in flight; unplug sets its stop
+flag, the thread cuts its media delay short, frees the media as the gate
+holder if unplug deferred that, and exits, dropping the reference.
+
+### Commands
+
+Ranges are 4 KiB device pages (DPA / 4096); `CCA_F_ALL` selects the whole
+media. Validation precedes any change: unknown commands or flags, nonzero
+reserved fields and empty ranges are `-EINVAL`, ranges past the media
+`-ERANGE`. With media disabled every command but NOP is `-ENODEV`. The
+response's page count is the number of pages acted on, or the progress
+made before an error. Pages are handled atomically per chunk; a guest that
+needs a range to stay non-resident must stop accessing it.
+
+| Command | Semantics |
+| --- | --- |
+| NOP | Status 0 |
+| PIN | All or nothing. Resident pages are pinned; others are filled as a miss would be (a media read, counted in `media-reads` and `cca-pin-fills` but not as a guest miss), possibly evicting an unpinned page, then pinned. `-ENOSPC` if a set lacks room, `-EBUSY` on a bypassed page, `-EOPNOTSUPP` without a cache. A way change between chunks rechecks the rest (`-EAGAIN`) |
+| UNPIN | Returns pinned pages to the queue a fresh insert would use: main for S3-FIFO with more than one way, else small, so under LIFO the page is the next victim. Dirty state is kept |
+| INVALIDATE | Writes dirty pages back through the eviction path (revoking direct mappings first) and drops them without ghost history; pinned pages need `CCA_F_FORCE`, else `-EBUSY` with nothing changed. `-EIO` if NAND refuses the write, leaving the page resident |
+| CACHE_DISABLE | Marks pages bypassed, then drops resident ones as INVALIDATE does. Accesses to bypassed pages go to the media every time (a read, or a program per write), with no insert, prefetch or direct mapping. `-EBUSY` while a direct ratio is set, or for pinned pages without `CCA_F_FORCE` |
+| CACHE_ENABLE | Clears bypass; the next access inserts normally |
+| QUERY | Resident, dirty, pinned and bypassed counts; dirty reflects metadata, not unsampled EPT dirty bits |
+
+Every way of a set may be pinned, because Cylon's default cache is direct
+mapped. A miss to a set whose ways are all pinned is served uncached, like a
+bypassed page, and counted in `cca-pinned-set-misses`, so the performance
+cliff is visible.
+
+### Interactions
+
+Pinned pages leave the eviction queues, so eviction and prefetch never see
+them, and prefetch skips bypassed pages and fully pinned sets. Flushes
+(`flush-cache` and commands 2, 9 and 11) write dirty pinned pages back and
+keep them resident and pinned. A way change first checks that the pins fit
+the new geometry and refuses before flushing anything if they do not;
+otherwise the pinned pages return, clean, with no media cost. `der-ratio`
+and bypass exclude each other. Configuration, decoder and CCI invalidation
+revoke mappings only and keep pins and bypass; device reset clears them as
+described above. `stats-reset` clears the CCA event counters and keeps
+the gauges. `ftl=off` makes writeback metadata-only.
+
+QOM exposes `cca-commands`, `cca-errors`, `cca-pin-fills`, `cca-writebacks`,
+`cca-dropped` and `cca-pinned-set-misses` (events) and `cca-pinned` and
+`cca-bypassed` (gauges).
+
+Qtests drive the rings through BAR5 and check every command against the
+cache and media counters, the fatal states, reset, direct mappings,
+media disable and unplug during a long command; each has a mutation of the
+device that turns it red. A standalone test runs the guest library against
+the device's ring consumer and fuzzes every guest-writable index under a
+sanitizer. Guest enumeration of BAR5 under `pxb-cxl`, `resource5` mapping
+and the latency effects of pinning need a guest run (`run-guest-tests.sh`).
+In this QEMU, `cxl_dev_media_disabled()` reads a mailbox register that
+sanitize never sets, so the qtest reaches the `-ENODEV` path through a
+qtest-only property.
+
 ## Earlier defects
 
 The nine items in the earlier summary are covered as follows:
@@ -327,7 +442,7 @@ include a mutation restoring the no-op and demonstrate the missing program.
 
 ## Scope and validation limits
 
-The Cylon Caching API, its ivshmem device and control ring are omitted.
+The caching API's data rings (see below) are not implemented.
 Concurrent NVMe access to the same medium, persistent CXL storage,
 dynamic capacity and migration are outside this implementation. Guest kernel
 boot/enumeration and long-running workloads require separate system testing.
