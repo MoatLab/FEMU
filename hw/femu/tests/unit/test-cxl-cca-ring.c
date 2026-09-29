@@ -38,10 +38,17 @@ static int host_idle;
 static unsigned host_reset_every;
 static unsigned host_popped;
 static unsigned host_resets;
+/* Set while the host thread applies a RESET register write. */
+static int host_in_reset;
 
 static uint32_t *reg(unsigned off)
 {
     return (uint32_t *)(bar + off);
+}
+
+static uint32_t reg_read(unsigned off)
+{
+    return __atomic_load_n(reg(off), __ATOMIC_SEQ_CST);
 }
 
 static uint8_t *shm(void)
@@ -72,13 +79,19 @@ static void *host_main(void *opaque)
         uint32_t slot;
         int rc;
 
-        if (__atomic_exchange_n(reg(CCA_REG_RESET), 0, __ATOMIC_SEQ_CST)) {
-            host_format();
-        }
         if (__atomic_load_n(&host_paused, __ATOMIC_ACQUIRE)) {
             __atomic_store_n(&host_idle, 1, __ATOMIC_RELEASE);
             sched_yield();
             continue;
+        }
+        /* As the device does in the trapped write: new epoch, empty rings. */
+        if (__atomic_load_n(reg(CCA_REG_RESET), __ATOMIC_SEQ_CST)) {
+            __atomic_store_n(&host_in_reset, 1, __ATOMIC_SEQ_CST);
+            if (__atomic_exchange_n(reg(CCA_REG_RESET), 0, __ATOMIC_SEQ_CST)) {
+                __atomic_add_fetch(reg(CCA_REG_EPOCH), 1, __ATOMIC_SEQ_CST);
+                host_format();
+            }
+            __atomic_store_n(&host_in_reset, 0, __ATOMIC_SEQ_CST);
         }
         while ((rc = cca_ring_pop(&host, &slot, &cmd)) == 1) {
             struct cca_ctrl_resp_s resp = {
@@ -118,7 +131,10 @@ static void *host_main(void *opaque)
     return NULL;
 }
 
-/* Returns once the host thread has come round and seen the pause. */
+/*
+ * Returns once the host thread has come round and seen the pause. A paused
+ * host does nothing at all, not even apply a RESET write.
+ */
 static void pause_host(int paused)
 {
     __atomic_store_n(&host_idle, 0, __ATOMIC_SEQ_CST);
@@ -130,13 +146,22 @@ static void pause_host(int paused)
 
 /*
  * The device applies RESET inside the register write; this page cannot
- * trap it, so let the host thread go round once before continuing.
+ * trap it, so after any library call that may write RESET, wait until the
+ * host thread has applied it. One pass of its loop is not enough: the
+ * pass may have read RESET before the library wrote it.
  */
+static void settle(void)
+{
+    while (__atomic_load_n(reg(CCA_REG_RESET), __ATOMIC_SEQ_CST) ||
+           __atomic_load_n(&host_in_reset, __ATOMIC_SEQ_CST)) {
+        sched_yield();
+    }
+}
+
 static void ring_reset(struct cca_dev *d)
 {
     CHECK(cca_reset(d, 0) == 0);
-    pause_host(1);
-    pause_host(0);
+    settle();
 }
 
 static void wait_fatal(uint32_t reason)
@@ -145,7 +170,7 @@ static void wait_fatal(uint32_t reason)
              CCA_STATUS_FATAL)) {
         sched_yield();
     }
-    CHECK(*reg(CCA_REG_FATAL_REASON) == reason);
+    CHECK(reg_read(CCA_REG_FATAL_REASON) == reason);
 }
 
 static uint64_t completed(void)
@@ -308,7 +333,7 @@ static void fatal_ring(struct cca_dev *d)
     wait_fatal(CCA_FATAL_RING);
     CHECK(cca_nop(d) == -EPROTO);
     ring_reset(d);
-    CHECK(!(*reg(CCA_REG_STATUS) & CCA_STATUS_FATAL));
+    CHECK(!(reg_read(CCA_REG_STATUS) & CCA_STATUS_FATAL));
     CHECK(cca_nop(d) == 0);
 }
 
@@ -458,7 +483,12 @@ static void open_path(void)
     CHECK(cca_nop(d) == 0);
     CHECK(cca_open(path, &other) == -EBUSY);
     cca_close(d);
+    /* The first owner's indices make the second open reset the rings. */
+    pause_host(1);
     CHECK(cca_open(path, &d) == 0);
+    CHECK(reg_read(CCA_REG_RESET) == CCA_RESET_RINGS);
+    pause_host(0);
+    settle();
     CHECK(cca_nop(d) == 0);
     cca_close(d);
     CHECK(cca_open("/nonexistent/resource5", &d) < 0);
@@ -492,8 +522,10 @@ int main(void)
     pause_host(1);
     ring(CCA_REQ_RING_OFFSET)->head = 3;
     ring(CCA_REQ_RING_OFFSET)->tail = 3;
-    pause_host(0);
     CHECK(cca_open_map(bar, &d) == 0);
+    CHECK(reg_read(CCA_REG_RESET) == CCA_RESET_RINGS);
+    pause_host(0);
+    settle();
     pause_host(1);
     CHECK(ring(CCA_REQ_RING_OFFSET)->head == 0);
     pause_host(0);
