@@ -18,7 +18,8 @@ PKG_CONFIG ?= pkg-config
 # The CXL cache test needs GLib; CI runs this before installing it, then again
 # after, so the test is skipped only in the first pass.
 HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
-UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte
+UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte \
+             test-femu-cxl-cca-ring
 ifeq ($(HAVE_GLIB),1)
 UNIT_TESTS += test-femu-cxl-cache
 endif
@@ -41,6 +42,14 @@ test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h \
 test-femu-cxl-spte: unit/test-cxl-spte.c ../cxlssd/spte.h ../cxlssd/spt.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
+# The guest library and the device's ring consumer, in one process.
+test-femu-cxl-cca-ring: unit/test-cxl-cca-ring.c ../cxlssd/cca-ring.c \
+                        ../cxlssd/cca-ring.h ../cxlssd/cca-abi.h \
+                        ../tools/cca/cca.c ../tools/cca/cca.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -I../cxlssd -I../tools/cca -pthread \
+	    -o $@ unit/test-cxl-cca-ring.c ../cxlssd/cca-ring.c \
+	    ../tools/cca/cca.c
+
 check: $(UNIT_TESTS)
 	@for t in $(UNIT_TESTS); do ./$$t || exit 1; done
 ifneq ($(HAVE_GLIB),1)
@@ -48,6 +57,7 @@ ifneq ($(HAVE_GLIB),1)
 endif
 
 clean:
-	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte nand-media.o
+	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
+	      test-femu-cxl-cca-ring nand-media.o
 
 .PHONY: check clean

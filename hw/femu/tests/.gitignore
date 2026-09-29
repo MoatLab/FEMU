@@ -4,3 +4,4 @@ test-nand-media
 test-femu-hybrid-oracle
 test-femu-cxl-cache
 test-femu-cxl-spte
+test-femu-cxl-cca-ring
