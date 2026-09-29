@@ -232,8 +232,11 @@ of its remote TLB invalidation. An
 unexpected existing mapping, invalid layout or ioctl failure restores saved
 MMIO entries, attempts flushes, deletes the external slot to invalidate
 all remaining translations, conservatively dirties affected cache entries,
-disables Cylon for the device and logs once. Failed registration remains MMIO
-instead of aborting realize. Fatal handling of a failed KVM
+disables Cylon until the next device reset and logs once; reset retries
+unless global dirty logging is still active. A decoder with a DPA skip or a
+base above the window start is valid but cannot use the identity slot, so
+those accesses stay on MMIO without disabling Cylon. Failed registration
+remains MMIO instead of aborting realize. Fatal handling of a failed KVM
 slot deletion is retained because execution cannot safely continue with stale
 translations.
 

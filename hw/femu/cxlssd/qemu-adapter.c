@@ -67,6 +67,7 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn);
 static void femu_cylon_destroy(FemuCxlDer *der);
 static void femu_cylon_clear(FemuCxlDer *der);
+static void femu_cylon_reset(FemuCxlDer *der);
 
 
 /* Resolve targets before machine-init-done has linked the fixed windows. */
@@ -604,6 +605,7 @@ static void adapter_reset_hold(Object *obj, ResetType type)
     CXLType3Dev *dev = CXL_TYPE3(obj);
 
     cxl_invalidate(dev);
+    femu_cylon_reset(&FEMU_CXL_SSD(dev)->media.direct);
     adapter_cci_dispose(&dev->cci, false);
     adapter_cci_dispose(&dev->vdm_fm_owned_ld_mctp_cci, false);
     adapter_cci_dispose(&dev->ld0_cci, false);
@@ -1633,12 +1635,14 @@ struct FemuCylon {
     bool installed;
     bool locked;
     bool failed;
+    bool logging;
     bool batch;
 };
 
 static void cylon_listener_begin(MemoryListener *listener);
 static void cylon_listener_commit(MemoryListener *listener);
 static bool cylon_log_start(MemoryListener *listener, Error **errp);
+static void cylon_log_stop(MemoryListener *listener);
 
 static bool cylon_coverage(FemuCylon *c, CXLFixedWindow *fw)
 {
@@ -1797,6 +1801,7 @@ static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
     c->listener.begin = cylon_listener_begin;
     c->listener.commit = cylon_listener_commit;
     c->listener.log_global_start = cylon_log_start;
+    c->listener.log_global_stop = cylon_log_stop;
     c->listener.name = "femu-cxl-external-slot";
     c->listener.priority = 20;
     der->fast = c;
@@ -2012,8 +2017,12 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     if (!c || c->failed || c->installing) {
         return false;
     }
-    if (hpa < fw->base || hpa - fw->base != dpa ||
-        !cylon_page_index(dpa, c->size, c->size / CYLON_PAGE_SIZE, &index) ||
+    /* A DPA skip or offset base is valid but cannot use the identity slot. */
+    if (hpa < fw->base || hpa - fw->base != dpa) {
+        der->fallbacks++;
+        return false;
+    }
+    if (!cylon_page_index(dpa, c->size, c->size / CYLON_PAGE_SIZE, &index) ||
         !cylon_page_address(c->huge, c->size / c->huge_size, c->huge_size,
                             index * CYLON_PAGE_SIZE, &pa)) {
         cylon_fail(der);
@@ -2231,8 +2240,26 @@ static bool cylon_log_start(MemoryListener *listener, Error **errp)
 
     femu_cylon_clear(c->der);
     c->failed = true;
+    c->logging = true;
     femu_cxl_der_fallback(c->der, "external slots cannot track dirty logging");
     return true;
+}
+
+static void cylon_log_stop(MemoryListener *listener)
+{
+    FemuCylon *c = container_of(listener, FemuCylon, listener);
+
+    c->logging = false;
+}
+
+/* Retry after reset; the slot is gone, so no stale translation survives. */
+static void femu_cylon_reset(FemuCxlDer *der)
+{
+    FemuCylon *c = der->fast;
+
+    if (c && c->failed && !c->logging && !c->installed) {
+        c->failed = false;
+    }
 }
 
 static void femu_cylon_destroy(FemuCxlDer *der)
@@ -2286,6 +2313,10 @@ static void femu_cylon_destroy(FemuCxlDer *der)
 {
 }
 static void femu_cylon_clear(FemuCxlDer *der)
+{
+}
+
+static void femu_cylon_reset(FemuCxlDer *der)
 {
 }
 #endif
