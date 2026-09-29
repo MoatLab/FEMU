@@ -36,6 +36,7 @@ struct FemuCxlSsd {
     bool cylon_kernel_ack;
     bool busy;
     bool closing;
+    uint64_t invalidation_waiters;
     QemuCond idle;
     FemuCxlDer direct;
     uint64_t read_ns;
@@ -224,13 +225,23 @@ static void cxl_invalidate(CXLType3Dev *ct3d)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(ct3d);
 
-    object_ref(OBJECT(s));
-    cxl_enter(s);
-    if (s->started) {
-        femu_cxl_der_clear(&s->direct);
+    /*
+     * The caller touches PCI state after this returns, so teardown waits for
+     * waiters; once it starts, stop waiting for the operation it drains.
+     */
+    s->invalidation_waiters++;
+    while (s->busy && !s->closing) {
+        qemu_cond_wait_bql(&s->idle);
     }
-    cxl_leave(s);
-    object_unref(OBJECT(s));
+    if (!s->busy) {
+        s->busy = true;
+        if (s->started) {
+            femu_cxl_der_clear(&s->direct);
+        }
+        s->busy = false;
+    }
+    s->invalidation_waiters--;
+    qemu_cond_broadcast(&s->idle);
 }
 
 static void cxl_flush(Object *obj, bool value, Error **errp)
@@ -347,8 +358,13 @@ static void cxl_exit(PCIDevice *dev)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(dev);
 
+    /* Callers of cxl_invalidate() finish under the BQL before we proceed. */
     s->closing = true;
-    cxl_enter(s);
+    qemu_cond_broadcast(&s->idle);
+    while (s->busy || s->invalidation_waiters) {
+        qemu_cond_wait_bql(&s->idle);
+    }
+    s->busy = true;
     femu_cxl_der_destroy(&s->direct);
     qemu_mutex_lock(&s->lock);
     s->stopping = true;
@@ -378,6 +394,9 @@ static void cxl_init(Object *obj)
 
     qemu_cond_init(&s->idle);
     s->der = g_strdup("off");
+    object_property_add_uint64_ptr(obj, "invalidation-waiters",
+                                   &s->invalidation_waiters,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
     object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
                                    OBJ_PROP_FLAG_READ);
