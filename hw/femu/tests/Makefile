@@ -42,11 +42,12 @@ test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h \
 test-femu-cxl-spte: unit/test-cxl-spte.c ../cxlssd/spte.h ../cxlssd/spt.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
-# The guest library and the device's ring consumer, in one process.
+# The guest library and the device's ring consumer, in one process. The
+# library directory comes first: the device has its own cca.h.
 test-femu-cxl-cca-ring: unit/test-cxl-cca-ring.c ../cxlssd/cca-ring.c \
                         ../cxlssd/cca-ring.h ../cxlssd/cca-abi.h \
                         ../tools/cca/cca.c ../tools/cca/cca.h
-	$(CC) $(CFLAGS_TEST) $(INCLUDES) -I../cxlssd -I../tools/cca -pthread \
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -I../tools/cca -I../cxlssd -pthread \
 	    -o $@ unit/test-cxl-cca-ring.c ../cxlssd/cca-ring.c \
 	    ../tools/cca/cca.c
 

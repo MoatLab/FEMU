@@ -5,11 +5,13 @@
  * size so a sanitizer build catches any access outside it.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include "cca-ring.h"
 #include "cca.h"
@@ -348,6 +350,55 @@ static void fuzz(void)
     free(mem);
 }
 
+static void host_start(void)
+{
+    *reg(CCA_REG_MAGIC) = CCA_SHMEM_MAGIC;
+    *reg(CCA_REG_VERSION) = CCA_LAYOUT_VERSION;
+    host_format();
+    __atomic_store_n(&host_stop, 0, __ATOMIC_RELEASE);
+    CHECK(pthread_create(&host_thread, NULL, host_main, NULL) == 0);
+}
+
+static void host_end(void)
+{
+    __atomic_store_n(&host_stop, 1, __ATOMIC_RELEASE);
+    pthread_join(host_thread, NULL);
+}
+
+/*
+ * cca_open() on a path, with a shared file standing in for resource5:
+ * the lock keeps a second owner out until the first closes.
+ */
+static void open_path(void)
+{
+    const char *tmp = getenv("TMPDIR");
+    char path[4096];
+    struct cca_dev *d;
+    struct cca_dev *other;
+    int fd;
+
+    snprintf(path, sizeof(path), "%s/femu-cca-XXXXXX", tmp ? tmp : "/tmp");
+    fd = mkstemp(path);
+    CHECK(fd >= 0);
+    CHECK(ftruncate(fd, CCA_BAR_SIZE) == 0);
+    bar = mmap(NULL, CCA_BAR_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(bar != MAP_FAILED);
+    close(fd);
+    CHECK(cca_open(path, &d) == -ENODEV);
+    host_start();
+    CHECK(cca_open(path, &d) == 0);
+    CHECK(cca_nop(d) == 0);
+    CHECK(cca_open(path, &other) == -EBUSY);
+    cca_close(d);
+    CHECK(cca_open(path, &d) == 0);
+    CHECK(cca_nop(d) == 0);
+    cca_close(d);
+    CHECK(cca_open("/nonexistent/resource5", &d) < 0);
+    host_end();
+    munmap(bar, CCA_BAR_SIZE);
+    unlink(path);
+}
+
 int main(void)
 {
     struct cca_dev *d;
@@ -355,10 +406,7 @@ int main(void)
     bar = malloc(CCA_BAR_SIZE);
     CHECK(bar);
     memset(bar, 0, CCA_BAR_SIZE);
-    *reg(CCA_REG_MAGIC) = CCA_SHMEM_MAGIC;
-    *reg(CCA_REG_VERSION) = CCA_LAYOUT_VERSION;
-    host_format();
-    CHECK(pthread_create(&host_thread, NULL, host_main, NULL) == 0);
+    host_start();
 
     CHECK(cca_open_map(bar, &d) == 0);
     nops(d);
@@ -382,10 +430,11 @@ int main(void)
     CHECK(cca_nop(d) == 0);
     cca_close(d);
 
-    __atomic_store_n(&host_stop, 1, __ATOMIC_RELEASE);
-    pthread_join(host_thread, NULL);
+    host_end();
     fuzz();
     free(bar);
-    puts("CXL CCA ring: 1M NOPs, all slots, fatal reasons, reset, fuzz PASS");
+    open_path();
+    puts("CXL CCA ring: 1M NOPs, all slots, fatal reasons, reset, fuzz, "
+         "open and lock PASS");
     return 0;
 }
