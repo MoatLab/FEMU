@@ -119,6 +119,7 @@ void femu_cxl_stop(FemuCxlMedia *s);
 uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
 void femu_cxl_nvme_bh(void *opaque);
 void femu_cxl_nvme_mark(FemuCxlMedia *s, uint64_t dpa, uint64_t len);
+void femu_cxl_nvme_mark_ratio(FemuCxlMedia *s, uint64_t first, uint64_t last);
 void femu_cxl_nvme_flip(FemuCtrl *n, int64_t cdw10);
 
 #endif

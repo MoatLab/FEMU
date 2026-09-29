@@ -16133,6 +16133,34 @@ static void femu_test_cxl_nvme_dulbe(void *obj, void *data,
     femu_link_quit(&l);
 }
 
+/*
+ * Stores through a direct ratio never trap, so a Deallocate must leave the
+ * selected pages marked written or DULBE would hide data CXL wrote later.
+ */
+static void femu_test_cxl_nvme_ratio_dulbe(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    uint8_t pattern[FEMU_DATA_SIZE];
+    uint8_t got[FEMU_DATA_SIZE];
+    FemuLink l;
+
+    memset(pattern, 0xa5, sizeof(pattern));
+    femu_link_start(&l, "", ",der=memslot", "");
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&l.c, NVME_ERROR_RECOVERY,
+                            false, 1, 1 << 16, NULL)), ==, NVME_SUCCESS);
+    qtest_qmp_assert_success(l.qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/ssd',"
+                             "'property':'der-ratio','value':999}}");
+    /* Ratio 999 leaves every 1000th page, such as 1000, on MMIO. */
+    g_assert_cmpint(femu_link_dsm(&l, 1000 * 8, 16), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_link_read(&l, 1000, got), ==, NVME_DULB);
+    qtest_memwrite(l.qts, FEMU_CXL_WINDOW + 1001 * 4096, pattern,
+                   sizeof(pattern));
+    g_assert_cmpint(femu_link_read(&l, 1001, got), ==, NVME_SUCCESS);
+    g_assert_cmpmem(got, sizeof(got), pattern, sizeof(pattern));
+    femu_link_quit(&l);
+}
+
 /* Flips on the controller change the medium's shared timing. */
 static void femu_test_cxl_nvme_flip(void *obj, void *data,
                                     QGuestAllocator *alloc)
@@ -16444,6 +16472,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-nvme-deallocate", "femu",
                  femu_test_cxl_nvme_deallocate, NULL);
     qos_add_test("cxl-nvme-dulbe", "femu", femu_test_cxl_nvme_dulbe, NULL);
+    qos_add_test("cxl-nvme-ratio-dulbe", "femu",
+                 femu_test_cxl_nvme_ratio_dulbe, NULL);
     qos_add_test("cxl-nvme-flip", "femu", femu_test_cxl_nvme_flip, NULL);
     qos_add_test("cxl-nvme-pin", "femu", femu_test_cxl_nvme_pin, NULL);
     qos_add_test("cxl-nvme-unplug", "femu", femu_test_cxl_nvme_unplug, NULL);

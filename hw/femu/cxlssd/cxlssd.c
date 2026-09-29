@@ -139,8 +139,29 @@ void femu_cxl_nvme_mark(FemuCxlMedia *s, uint64_t dpa, uint64_t len)
     }
     lba = dpa >> ns->lbaf.lbads;
     end = MIN((dpa + len - 1) >> ns->lbaf.lbads, ns->ns_blks - 1);
-    for (; lba <= end; lba++) {
-        set_bit_atomic(lba, ns->util);
+    if (lba <= end) {
+        bitmap_set_atomic(ns->util, lba, end - lba + 1);
+    }
+}
+
+/* Mark the ratio-selected pages in [first, last], one run at a time. */
+void femu_cxl_nvme_mark_ratio(FemuCxlMedia *s, uint64_t first, uint64_t last)
+{
+    uint64_t period = femu_cxl_ratio_period(s->direct.ratio);
+    uint64_t lpn = first;
+
+    while (period && s->nvme_ns && lpn <= last) {
+        uint64_t end = last;
+
+        if (period != 1) {
+            if (lpn % period == 0) {
+                lpn++;
+                continue;
+            }
+            end = MIN(last, lpn - lpn % period + period - 1);
+        }
+        femu_cxl_nvme_mark(s, lpn * 4096, (end - lpn + 1) * 4096);
+        lpn = end + 1;
     }
 }
 
@@ -419,6 +440,11 @@ static void cxl_nvme_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
             }
         }
     }
+    /*
+     * Stores through a ratio alias never trap, so a Deallocate cannot learn
+     * that selected pages are written again; keep them marked written.
+     */
+    femu_cxl_nvme_mark_ratio(s, first, last);
     for (i = 0; i < victims->len; i++) {
         e = g_ptr_array_index(victims, i);
         if (!clear && !femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {

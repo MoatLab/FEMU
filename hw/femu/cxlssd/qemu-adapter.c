@@ -1993,15 +1993,9 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     der->ratio = ratio;
     if (!cxl_ratio_map(dev, errp)) {
         der->ratio = 0;
-    } else if (s->nvme_ns) {
+    } else {
         /* Stores to selected pages never reach this device. */
-        uint64_t lpn;
-
-        for (lpn = 0; lpn < s->backend.size / 4096; lpn++) {
-            if (femu_cxl_ratio_selected(ratio, lpn)) {
-                femu_cxl_nvme_mark(s, lpn * 4096, 4096);
-            }
-        }
+        femu_cxl_nvme_mark_ratio(s, 0, s->backend.size / 4096 - 1);
     }
 out:
     femu_cxl_leave(s);
