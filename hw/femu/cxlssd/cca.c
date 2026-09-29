@@ -15,9 +15,11 @@
 #include "hw/pci/pci.h"
 #include "qemu-adapter.h"
 
-/* Pages acted on, and pages looked up, per hold of the gate. */
+/* Pages acted on, and pages looked up, per hold of the gate and the BQL. */
 #define CCA_CHUNK       256
 #define CCA_SCAN        4096
+/* Above this many candidates, revoke every direct mapping at once. */
+#define CCA_CLEAR       64
 /* Longest sleep between checks for reset or unplug during a delay. */
 #define CCA_NAP_US      10000
 /* Commands per pass before the thread lets go of the BQL. */
@@ -26,6 +28,8 @@
 
 typedef struct CcaOp CcaOp;
 typedef int (*CcaPage)(CcaOp *op, uint64_t lpn);
+
+static int cca_drop_batch(CcaOp *op);
 
 struct CcaOp {
     FemuCxlMedia *s;
@@ -40,6 +44,8 @@ struct CcaOp {
     uint64_t pos;
     GArray *list;
     guint index;
+    /* Resident pages a chunk of INVALIDATE or CACHE_DISABLE will drop. */
+    GArray *batch;
     uint64_t resident;
     uint64_t dirty;
     uint64_t pinned;
@@ -72,8 +78,8 @@ static void cca_delay(FemuCxlMedia *s, uint32_t epoch)
 }
 
 /*
- * The thread holds the BQL across chunks, so a waiter woken by the last
- * leave could never take the gate first. Let one go ahead before retaking.
+ * A waiter woken by the last leave may not get the BQL before this thread
+ * takes it back; let one take the gate first.
  */
 static void cca_yield(FemuCxlMedia *s, uint32_t epoch)
 {
@@ -102,6 +108,14 @@ static bool cca_enter(CcaOp *op)
     return true;
 }
 
+/* Let vCPUs and the main loop have the BQL between bounded pieces of work. */
+static void cca_breathe(void)
+{
+    bql_unlock();
+    sched_yield();
+    bql_lock();
+}
+
 static void cca_leave(CcaOp *op)
 {
     FemuCxlMedia *s = op->s;
@@ -111,6 +125,7 @@ static void cca_leave(CcaOp *op)
     }
     s->cache_entries = g_hash_table_size(s->cache.entries);
     femu_cxl_leave(s);
+    cca_breathe();
 }
 
 static gint cca_compare(gconstpointer a, gconstpointer b)
@@ -197,6 +212,14 @@ static bool cca_walk(CcaOp *op, CcaPage page, int *status)
                 cca_leave(op);
                 return false;
             }
+        }
+        if (!*status && op->batch && op->batch->len) {
+            *status = cca_drop_batch(op);
+            done |= *status != 0;
+        }
+        if (cca_abandoned(op->s, op->epoch)) {
+            cca_leave(op);
+            return false;
         }
         cca_leave(op);
         if (done) {
@@ -323,26 +346,60 @@ static int cca_unpin_page(CcaOp *op, uint64_t lpn)
     return 0;
 }
 
-/* Write back if dirty and drop; used by INVALIDATE and CACHE_DISABLE. */
+/* INVALIDATE and CACHE_DISABLE: collect resident pages for the chunk. */
 static int cca_drop_page(CcaOp *op, uint64_t lpn)
+{
+    if (g_hash_table_contains(op->s->cache.entries, &lpn)) {
+        g_array_append_val(op->batch, lpn);
+        op->work++;
+    }
+    return 0;
+}
+
+/*
+ * Revoke the chunk's direct mappings in one memory transaction, then write
+ * back if dirty and drop. Writeback can drop the BQL, which must not happen
+ * with a transaction open.
+ */
+static int cca_drop_batch(CcaOp *op)
 {
     FemuCxlMedia *s = op->s;
     FemuCxlCache *c = &s->cache;
-    FemuCxlEntry *e = g_hash_table_lookup(c->entries, &lpn);
+    int status = 0;
+    guint i;
 
-    if (!e) {
-        return 0;
+    if (!s->direct.cylon) {
+        memory_region_transaction_begin();
     }
-    op->work++;
-    if (!femu_cxl_cache_remove(c, e, cca_evict, s)) {
-        /* NAND refused the write; the page stays resident, dirty, pinned. */
-        return -EIO;
+    for (i = 0; i < op->batch->len; i++) {
+        uint64_t lpn = g_array_index(op->batch, uint64_t, i);
+
+        if (!femu_cxl_ratio_selected(s->direct.ratio, lpn)) {
+            femu_cxl_der_remove(&s->direct, lpn);
+        }
     }
-    s->cca.dropped++;
-    if (op->cmd.cmd == CCA_CTRL_INVALIDATE) {
-        op->acted++;
+    if (!s->direct.cylon) {
+        memory_region_transaction_commit();
     }
-    return 0;
+    for (i = 0; i < op->batch->len && !cca_abandoned(s, op->epoch); i++) {
+        uint64_t lpn = g_array_index(op->batch, uint64_t, i);
+        FemuCxlEntry *e = g_hash_table_lookup(c->entries, &lpn);
+
+        if (!e) {
+            continue;
+        }
+        if (!femu_cxl_cache_remove(c, e, cca_evict, s)) {
+            /* NAND refused the write; the page stays resident, dirty, pinned. */
+            status = -EIO;
+            break;
+        }
+        s->cca.dropped++;
+        if (op->cmd.cmd == CCA_CTRL_INVALIDATE) {
+            op->acted++;
+        }
+    }
+    g_array_set_size(op->batch, 0);
+    return status;
 }
 
 static int cca_query_page(CcaOp *op, uint64_t lpn)
@@ -453,6 +510,7 @@ static int cca_prepare(CcaOp *op)
             cca_any_pinned(s, op->start, op->end)) {
             return -EBUSY;
         }
+        op->batch = g_array_new(false, false, sizeof(uint64_t));
         if (op->cmd.cmd == CCA_CTRL_CACHE_DISABLE) {
             if (!cca->uncached_map) {
                 cca->uncached_map = bitmap_new(s->backend.size / 4096);
@@ -464,6 +522,14 @@ static int cca_prepare(CcaOp *op)
             cca->uncached += op->acted;
         }
         cca_candidates(op, false);
+        /*
+         * Page by page, Cylon flushes the whole VM twice per page. Many
+         * pages revoke everything at once; later accesses map again.
+         */
+        if ((op->list ? op->list->len : op->end - op->start) > CCA_CLEAR &&
+            s->direct.mapped) {
+            femu_cxl_der_clear(&s->direct);
+        }
         return 0;
     case CCA_CTRL_CACHE_ENABLE:
         before = cca_uncached_count(cca, op->start, op->end);
@@ -622,6 +688,9 @@ static bool cca_run(FemuCxlMedia *s)
         if (n == CCA_BATCH) {
             return true;
         }
+        if (n) {
+            cca_breathe();
+        }
         if (cca->reset_pending) {
             cca_apply_reset(s);
             continue;
@@ -643,6 +712,9 @@ static bool cca_run(FemuCxlMedia *s)
         cca->status &= ~CCA_STATUS_BUSY;
         if (op.list) {
             g_array_free(op.list, true);
+        }
+        if (op.batch) {
+            g_array_free(op.batch, true);
         }
         /* A reset reformatted the rings while the command ran. */
         if (!complete || cca->epoch != op.epoch) {

@@ -15977,6 +15977,46 @@ static void femu_test_cca_lsa_busy(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/*
+ * A command with no media cost that revokes a full alias budget must not
+ * hold the BQL for all of it: every other device and vCPU waits on it.
+ */
+static void femu_test_cca_bql(void *obj, void *data, QGuestAllocator *alloc)
+{
+    gint64 worst = 0;
+    gint64 start;
+    FemuCca c;
+    FemuCcaResp r;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "der=memslot,cache-pages=4096,ftl=off");
+    for (lpn = 0; lpn < 1024; lpn++) {
+        qtest_writeq(c.qts, femu_cca_page(lpn), lpn);
+    }
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-mapped"), ==, 1024);
+    start = g_get_monotonic_time();
+    femu_cca_post_raw(&c, 0, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0);
+    femu_cca_kick(&c);
+    for (;;) {
+        gint64 t = g_get_monotonic_time();
+        bool done = qtest_readl(c.qts, FEMU_CCA_RESP) != 0;
+
+        worst = MAX(worst, g_get_monotonic_time() - t);
+        if (done) {
+            break;
+        }
+    }
+    g_test_message("invalidate %" G_GINT64_FORMAT " us, longest ring "
+                   "poll %" G_GINT64_FORMAT " us",
+                   g_get_monotonic_time() - start, worst);
+    femu_cca_reap(&c, &r);
+    g_assert_cmpint(r.status, ==, 0);
+    g_assert_cmpuint(r.count, ==, 1024);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-mapped"), ==, 0);
+    g_assert_cmpint(worst, <, G_USEC_PER_SEC / 10);
+    femu_cca_quit(&c);
+}
+
 /* Commands that touch the cache refuse while media is disabled. */
 static void femu_test_cca_media(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -16692,6 +16732,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
+    qos_add_test("cxl-cca-bql", "femu", femu_test_cca_bql, NULL);
     qos_add_test("cxl-cca-lsa-busy", "femu", femu_test_cca_lsa_busy, NULL);
     qos_add_test("cxl-cca-disable-abandon", "femu",
                  femu_test_cca_disable_abandon, NULL);
