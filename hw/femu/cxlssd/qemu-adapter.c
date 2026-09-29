@@ -664,7 +664,7 @@ static void adapter_reset_hold(Object *obj, ResetType type)
 
     cxl_invalidate(dev);
     femu_cylon_reset(&FEMU_CXL_SSD(dev)->media.direct);
-    /* A guest reboot loses the library state behind pins and uncached ranges. */
+    /* A reboot loses the library state behind pins and uncached ranges. */
     femu_cxl_cca_reset(&FEMU_CXL_SSD(dev)->media, CCA_RESET_ALL);
     adapter_cci_dispose(&dev->cci, false);
     adapter_cci_dispose(&dev->vdm_fm_owned_ld_mctp_cci, false);

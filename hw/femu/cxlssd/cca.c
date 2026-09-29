@@ -389,7 +389,7 @@ static int cca_drop_batch(CcaOp *op)
             continue;
         }
         if (!femu_cxl_cache_remove(c, e, cca_evict, s)) {
-            /* NAND refused the write; the page stays resident, dirty, pinned. */
+            /* NAND refused the write; it stays resident, dirty and pinned. */
             status = -EIO;
             break;
         }
@@ -414,10 +414,12 @@ static int cca_query_page(CcaOp *op, uint64_t lpn)
     return 0;
 }
 
-static uint64_t cca_uncached_count(FemuCxlCca *cca, uint64_t start, uint64_t end)
+static uint64_t cca_uncached_count(FemuCxlCca *cca, uint64_t start,
+                                   uint64_t end)
 {
     return cca->uncached_map ?
-           bitmap_count_one_with_offset(cca->uncached_map, start, end - start) : 0;
+           bitmap_count_one_with_offset(cca->uncached_map, start,
+                                        end - start) : 0;
 }
 
 static int cca_validate(FemuCxlMedia *s, CcaOp *op)
@@ -483,8 +485,8 @@ static int cca_prepare(CcaOp *op)
         if (!c->nsets) {
             return -EOPNOTSUPP;
         }
-        if (cca->uncached_map && find_next_bit(cca->uncached_map, op->end, op->start) <
-                           op->end) {
+        if (cca->uncached_map &&
+            find_next_bit(cca->uncached_map, op->end, op->start) < op->end) {
             return -EBUSY;
         }
         if (!cca_pins_fit(s, op->start, op->end)) {
@@ -538,7 +540,8 @@ static int cca_prepare(CcaOp *op)
             cca->uncached -= before;
         }
         op->acted = before;
-        if (cca->uncached_map && (!cca->uncached || (op->cmd.flags & CCA_F_ALL))) {
+        if (cca->uncached_map &&
+            (!cca->uncached || (op->cmd.flags & CCA_F_ALL))) {
             g_clear_pointer(&cca->uncached_map, g_free);
             cca->uncached = 0;
         }
