@@ -14343,6 +14343,68 @@ static void femu_cxl_command(QTestState *qts, bool lsa, unsigned command,
     g_assert_cmpuint(femu_cxl_stat(qts, "control-status"), ==, 0);
 }
 
+static uint64_t femu_cxl_file_size(const char *dir, const char *name)
+{
+    g_autofree char *path = g_build_filename(dir, name, NULL);
+    struct stat st;
+
+    g_assert_cmpint(stat(path, &st), ==, 0);
+    return st.st_size;
+}
+
+/* A guest drives every CXL log file; none may grow past log-limit. */
+static void femu_test_cxl_log_limit(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cxl-log-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "der=memslot,log-dir=%s,log-limit=4096", dir);
+    g_autofree char *spt = NULL;
+    QTestState *qts;
+    uint64_t dropped;
+    unsigned i;
+
+    g_assert_nonnull(dir);
+    qts = qtest_init(args);
+    femu_cxl_decode(qts);
+    femu_cxl_command(qts, false, 13, 0);
+    for (i = 0; i < 400; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 4096, i);
+    }
+    g_assert_cmpuint(femu_cxl_file_size(dir, "cxlssd-io-1.log"), <, 4096 + 64);
+    dropped = femu_cxl_stat(qts, "log-dropped");
+    g_assert_cmpuint(dropped, ==, 1);
+    /* Statistics appends are rate limited as well as capped. */
+    for (i = 0; i < 100; i++) {
+        femu_cxl_command(qts, false, 1, i);
+    }
+    g_assert_cmpuint(femu_cxl_file_size(dir, "cxlssd-stats.log"), <,
+                     4096 + 512);
+    g_assert_cmpuint(femu_cxl_stat(qts, "log-dropped"), >, dropped);
+    /* 400 one-page aliases would need about 7 KiB. */
+    femu_cxl_command(qts, false, 17, 0);
+    g_assert_cmpuint(femu_cxl_file_size(dir, "cxlssd-spt.log"), <, 4096 + 64);
+    spt = g_build_filename(dir, "cxlssd-spt.log", NULL);
+    {
+        g_autofree char *text = NULL;
+
+        g_assert_true(g_file_get_contents(spt, &text, NULL, NULL));
+        g_assert_nonnull(strstr(text, "truncated"));
+    }
+    qtest_quit(qts);
+    {
+        g_autofree char *io = g_build_filename(dir, "cxlssd-io-1.log", NULL);
+        g_autofree char *stats = g_build_filename(dir, "cxlssd-stats.log",
+                                                  NULL);
+
+        unlink(io);
+        unlink(stats);
+    }
+    unlink(spt);
+    rmdir(dir);
+}
+
 static void femu_test_cxl_control(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
@@ -16469,6 +16531,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-prefetch-clamp", "femu", femu_test_cxl_prefetch_clamp,
                  NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);
+    qos_add_test("cxl-log-limit", "femu", femu_test_cxl_log_limit, NULL);
     qos_node_create_driver("femu", femu_create);
     qos_add_test("cxl-stale-translation", "femu",
                  femu_test_cxl_stale_translation, NULL);

@@ -295,8 +295,17 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
     }
     if (s->io_log) {
-        fprintf(s->io_log, "%" PRId64 ",%c,%" PRIu64 ",%u,%" PRIu64 "\n",
-                start, write ? 'W' : 'R', dpa, size, s->access_ns);
+        int n = fprintf(s->io_log, "%" PRId64 ",%c,%" PRIu64 ",%u,%" PRIu64
+                        "\n", start, write ? 'W' : 'R', dpa, size,
+                        s->access_ns);
+
+        s->io_log_bytes += MAX(n, 0);
+        /* Close at the limit; the guest can open a new file. */
+        if (s->io_log_bytes >= s->log_limit) {
+            fclose(s->io_log);
+            s->io_log = NULL;
+            s->log_dropped++;
+        }
     }
     return MEMTX_OK;
 }

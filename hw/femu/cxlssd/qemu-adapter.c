@@ -53,7 +53,7 @@ static ResettablePhases parent_reset;
 static uint64_t (*parent_lsa_size)(CXLType3Dev *);
 static uint64_t (*parent_get_lsa)(CXLType3Dev *, void *, uint64_t, uint64_t);
 static void (*parent_set_lsa)(CXLType3Dev *, const void *, uint64_t, uint64_t);
-static void cxl_dump_spt(FemuCxlDer *der, FILE *file);
+static void cxl_dump_spt(FemuCxlDer *der, FILE *file, uint64_t limit);
 static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp);
 static void cxl_ratio_restore(FemuCxlSsd *dev, Error **errp);
 static void cylon_ratio_revoke(FemuCxlDer *der);
@@ -61,6 +61,8 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 
 #define FEMU_CXL_LSA_SIZE (128 * MiB)
 #define FEMU_CXL_IO_LOGS 64
+/* Statistics appends a guest can cause per second. */
+#define FEMU_CXL_STATS_RATE 100
 /*
  * Each alias and the MMIO gap beside it are separate sections, and a
  * dispatch map holds fewer than 4096 sections for the whole address space.
@@ -805,6 +807,35 @@ static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
     return file;
 }
 
+/*
+ * Open the statistics log for one append, or refuse and count it when the
+ * guest appends faster than FEMU_CXL_STATS_RATE or the file is at its limit.
+ */
+static FILE *cxl_stats_open(FemuCxlMedia *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    FILE *file;
+    long size;
+
+    if (s->stats_last &&
+        now - s->stats_last < NANOSECONDS_PER_SECOND / FEMU_CXL_STATS_RATE) {
+        s->log_dropped++;
+        return NULL;
+    }
+    file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
+    if (!file) {
+        return NULL;
+    }
+    size = fseek(file, 0, SEEK_END) ? -1 : ftell(file);
+    if (size < 0 || size >= s->log_limit) {
+        fclose(file);
+        s->log_dropped++;
+        return NULL;
+    }
+    s->stats_last = now;
+    return file;
+}
+
 static const char *cxl_policy_name(FemuCxlPolicy policy)
 {
     static const char *const names[] = {
@@ -831,7 +862,7 @@ static void cxl_stats_header(FemuCxlMedia *s, FILE *file, uint64_t tag)
 static void cxl_stats_note(Object *obj, uint64_t command, uint64_t argument)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
-    FILE *file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
+    FILE *file = cxl_stats_open(s);
 
     if (!file) {
         return;
@@ -919,7 +950,7 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     }
     switch (command) {
     case 1:
-        file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
+        file = cxl_stats_open(s);
         if (file) {
             cxl_stats_header(s, file, argument);
             fprintf(file, "Entry cnt: %" PRIu64 "/%u\n", s->cache_entries,
@@ -946,11 +977,20 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
             fclose(s->io_log);
         }
         {
-            /* Reuse a bounded set of names so runs cannot fill a disk. */
+            /*
+             * Reuse a bounded set of names, each capped at log-limit, so
+             * runs cannot fill a disk.
+             */
             g_autofree char *name = g_strdup_printf("cxlssd-io-%u.log",
                                 s->log_sequence++ % FEMU_CXL_IO_LOGS + 1);
 
-            s->io_log = cxl_log_open(s, s->log_dir, name, "w");
+            s->io_log = NULL;
+            s->io_log_bytes = 0;
+            if (s->log_limit) {
+                s->io_log = cxl_log_open(s, s->log_dir, name, "w");
+            } else {
+                s->log_dropped++;
+            }
         }
         break;
     case 15:
@@ -962,7 +1002,7 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     case 17:
         file = cxl_log_open(s, s->log_dir, "cxlssd-spt.log", "w");
         if (file) {
-            cxl_dump_spt(&s->direct, file);
+            cxl_dump_spt(&s->direct, file, s->log_limit);
             fclose(file);
         }
         break;
@@ -1385,6 +1425,8 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "nvme-drops", &s->nvme_drops,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "log-dropped", &s->log_dropped,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
     object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
                                    OBJ_PROP_FLAG_READ);
@@ -1438,6 +1480,7 @@ static const Property cxl_props[] = {
     DEFINE_PROP_BOOL("lsa-control", FemuCxlSsd, media.lsa_control, false),
     DEFINE_PROP_STRING("log-dir", FemuCxlSsd, media.log_dir),
     DEFINE_PROP_STRING("tracefs-dir", FemuCxlSsd, media.tracefs_dir),
+    DEFINE_PROP_SIZE("log-limit", FemuCxlSsd, media.log_limit, 64 * MiB),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, media.ftl, true),
     DEFINE_PROP_BOOL("cylon-first-touch-program", FemuCxlSsd,
                      media.first_touch_program, false),
@@ -2919,28 +2962,41 @@ static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn)
 }
 #endif
 
-static void cxl_dump_spt(FemuCxlDer *der, FILE *file)
+/*
+ * A Cylon ratio maps up to one entry per media page, so stop at @limit
+ * bytes: the dump runs under the BQL.
+ */
+static void cxl_dump_spt(FemuCxlDer *der, FILE *file, uint64_t limit)
 {
     GHashTableIter it;
     gpointer value;
+    uint64_t bytes;
+    int n;
 
-    fprintf(file, "mode=%s ratio=%" PRIu64 " mapped=%" PRIu64 "\n",
-            der->cylon ? "cylon" : "memslot", der->ratio, der->mapped);
+    n = fprintf(file, "mode=%s ratio=%" PRIu64 " mapped=%" PRIu64 "\n",
+                der->cylon ? "cylon" : "memslot", der->ratio, der->mapped);
+    bytes = MAX(n, 0);
     g_hash_table_iter_init(&it, der->maps);
     while (g_hash_table_iter_next(&it, NULL, &value)) {
+        if (bytes >= limit) {
+            fprintf(file, "truncated at log-limit\n");
+            der->dev->media.log_dropped++;
+            return;
+        }
 #ifdef CONFIG_KVM
         if (der->cylon) {
             CylonPage *page = value;
 
-            fprintf(file, "lpn=%" PRIu64 " spte=%016" PRIx64 "\n",
-                    page->lpn, qatomic_read(page->sptep));
+            n = fprintf(file, "lpn=%" PRIu64 " spte=%016" PRIx64 "\n",
+                        page->lpn, qatomic_read(page->sptep));
         } else
 #endif
         {
             FemuCxlMap *map = value;
 
-            fprintf(file, "lpn=%" PRIu64 " pages=%" PRIu64 "\n",
-                    map->lpn, map->pages);
+            n = fprintf(file, "lpn=%" PRIu64 " pages=%" PRIu64 "\n",
+                        map->lpn, map->pages);
         }
+        bytes += MAX(n, 0);
     }
 }

@@ -40,6 +40,11 @@ typedef struct FemuCxlMedia {
     char *log_dir;
     char *tracefs_dir;
     FILE *io_log;
+    /* Guests drive the log files: bytes each may reach, and what was cut. */
+    uint64_t log_limit;
+    uint64_t io_log_bytes;
+    uint64_t log_dropped;
+    int64_t stats_last;
     GHashTable *log_warned;
     uint32_t log_sequence;
     uint64_t control_argument;
