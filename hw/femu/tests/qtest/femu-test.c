@@ -13480,13 +13480,17 @@ static void femu_test_cxl_stale_translation(void *obj, void *data,
     femu_cxl_decode(qts);
     qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
     g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 1);
-    /* Change to another valid DPA between translation and revalidation. */
+    /*
+     * A decoder change while the access waits must not fail it: it completes
+     * at the DPA the decoder now selects, as an unqueued access would.
+     */
     femu_cxl_set(qts, "test-change-dpa", true);
-    qtest_readq(qts, FEMU_CXL_WINDOW);
-    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 1);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 2);
     g_assert_cmpuint(femu_cxl_stat(qts, "cache-hits"), ==, 0);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0);
     g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-hits"), ==, 1);
     qtest_quit(qts);
 }
 

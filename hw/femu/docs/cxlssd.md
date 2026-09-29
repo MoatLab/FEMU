@@ -87,7 +87,9 @@ would refuse unrelated accesses from other vCPUs. It revokes DER mappings at
 once and bumps the read-only `invalidations` generation; an access in flight
 does not install a mapping when the generation moved during its media delay. An access holds an object reference until completion;
 teardown marks the device closing, waits for the gate, and prevents new work.
-A waiter rechecks decoder translation and media state before using its DPA.
+A waiter re-routes and re-translates after entering the gate and completes at
+the current DPA, or with random data when media became disabled, as the parent
+Type-3 device would; only an address that no longer decodes fails.
 
 The requesting thread drops the BQL both while handing work to the FTL worker
 and during the remaining media delay, while retaining the operation gate.

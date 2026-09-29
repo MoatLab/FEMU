@@ -381,50 +381,62 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
                                    uint64_t *data, unsigned size, bool write,
                                    MemTxAttrs attrs)
 {
-    PCIDevice *dev = adapter_route(w->fw, offset);
-    FemuCxlMedia *s;
-    CXLType3Dev *ct3d;
     uint64_t hpa = w->fw->base + offset;
-    uint64_t dpa;
-    uint64_t current_dpa;
-    MemTxResult result = MEMTX_ERROR;
 
-    if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
-        return write ? memory_region_dispatch_write(&w->fw->mr, offset,
-                            *data, size_memop(size), attrs) :
-                       memory_region_dispatch_read(&w->fw->mr, offset,
-                            data, size_memop(size), attrs);
-    }
-    ct3d = CXL_TYPE3(dev);
-    s = &FEMU_CXL_SSD(dev)->media;
-    if (!adapter_translate(ct3d, hpa, size, &dpa)) {
-        return MEMTX_ERROR;
-    }
-    if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
-        if (!write) {
-            qemu_guest_getrandom_nofail(data, size);
+    for (;;) {
+        PCIDevice *dev = adapter_route(w->fw, offset);
+        FemuCxlMedia *s;
+        CXLType3Dev *ct3d;
+        uint64_t dpa;
+        MemTxResult result;
+
+        if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
+            return write ? memory_region_dispatch_write(&w->fw->mr, offset,
+                                *data, size_memop(size), attrs) :
+                           memory_region_dispatch_read(&w->fw->mr, offset,
+                                data, size_memop(size), attrs);
         }
-        return MEMTX_OK;
-    }
-    /* Inject a decoder change between the two translation snapshots. */
-    if (FEMU_CXL_SSD(dev)->test_change_dpa) {
-        uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
+        ct3d = CXL_TYPE3(dev);
+        s = &FEMU_CXL_SSD(dev)->media;
+        if (!adapter_translate(ct3d, hpa, size, &dpa)) {
+            return MEMTX_ERROR;
+        }
+        if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+            if (!write) {
+                qemu_guest_getrandom_nofail(data, size);
+            }
+            return MEMTX_OK;
+        }
+        /* Inject a decoder change while this access waits for the gate. */
+        if (FEMU_CXL_SSD(dev)->test_change_dpa) {
+            uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
 
-        FEMU_CXL_SSD(dev)->test_change_dpa = false;
-        stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
+            FEMU_CXL_SSD(dev)->test_change_dpa = false;
+            stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
+        }
+        object_ref(OBJECT(dev));
+        femu_cxl_enter(s);
+        /* Decoders may have changed while waiting; complete as they are now. */
+        if (adapter_route(w->fw, offset) != dev) {
+            femu_cxl_leave(s);
+            object_unref(OBJECT(dev));
+            continue;
+        }
+        if (!s->started || s->closing ||
+            !adapter_translate(ct3d, hpa, size, &dpa)) {
+            result = MEMTX_ERROR;
+        } else if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+            if (!write) {
+                qemu_guest_getrandom_nofail(data, size);
+            }
+            result = MEMTX_OK;
+        } else {
+            result = femu_cxl_access(s, hpa, dpa, data, size, write);
+        }
+        femu_cxl_leave(s);
+        object_unref(OBJECT(dev));
+        return result;
     }
-    object_ref(OBJECT(dev));
-    femu_cxl_enter(s);
-    if (s->started && !s->closing && hpa == w->fw->base + offset &&
-        adapter_route(w->fw, offset) == dev &&
-        !cxl_dev_media_disabled(&ct3d->cxl_dstate) &&
-        adapter_translate(ct3d, hpa, size, &current_dpa) &&
-        current_dpa == dpa) {
-        result = femu_cxl_access(s, hpa, dpa, data, size, write);
-    }
-    femu_cxl_leave(s);
-    object_unref(OBJECT(dev));
-    return result;
 }
 
 static MemTxResult adapter_read(void *opaque, hwaddr offset, uint64_t *data,
