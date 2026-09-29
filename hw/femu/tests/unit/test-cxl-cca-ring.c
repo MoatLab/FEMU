@@ -204,6 +204,12 @@ static void all_slots(struct cca_dev *d)
     }
     CHECK(seen[0] && seen[CCA_RING_COUNT - 1]);
     pause_host(0);
+    /* Unreaped completions still count against the ring. */
+    while (__atomic_load_n(&ring(CCA_RESP_RING_OFFSET)->head,
+                           __ATOMIC_ACQUIRE) != CCA_RING_COUNT) {
+        sched_yield();
+    }
+    CHECK(cca_submit(d, CCA_CTRL_NOP, 0, 0, 0, 9999) == -EAGAIN);
     memset(seen, 0, sizeof(seen));
     while (got < CCA_RING_COUNT) {
         int n = cca_reap(d, done, CCA_RING_COUNT, 5000);
@@ -227,6 +233,18 @@ static void statuses(struct cca_dev *d)
     CHECK(cca_call_raw(d, &cmd, &r) == -EINVAL && r.status == -EINVAL);
     CHECK(cca_pin(d, 1, CCA_WHOLE, &r) == -EINVAL);
     CHECK(cca_submit(d, CCA_CTRL_NOP, 0x8000, 0, 0, 0) == -EINVAL);
+}
+
+/* A device-side reset empties the rings under an open handle. */
+static void device_reset(struct cca_dev *d)
+{
+    CHECK(cca_nop(d) == 0);
+    pause_host(1);
+    host_format();
+    __atomic_add_fetch(reg(CCA_REG_EPOCH), 1, __ATOMIC_SEQ_CST);
+    pause_host(0);
+    CHECK(cca_nop(d) == 0);
+    CHECK(ring(CCA_REQ_RING_OFFSET)->head == 1);
 }
 
 static void fatal_ring(struct cca_dev *d)
@@ -412,6 +430,7 @@ int main(void)
     nops(d);
     all_slots(d);
     statuses(d);
+    device_reset(d);
     fatal_ring(d);
     fatal_slot(d);
     fatal_response(d);

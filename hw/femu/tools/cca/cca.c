@@ -42,7 +42,9 @@ struct cca_dev {
     pthread_mutex_t lock;
     uint32_t req_head;
     uint32_t resp_tail;
-    uint64_t epoch;                     /* bumped by cca_reset() */
+    uint64_t epoch;                     /* bumped whenever the rings reset */
+    uint32_t dev_epoch;                 /* CCA_REG_EPOCH the rings belong to */
+    uint32_t async;                     /* asynchronous commands in flight */
     int timeout_ms;
     uint32_t nfree;
     uint16_t free_list[N];
@@ -142,6 +144,7 @@ static void slots_reset(struct cca_dev *d)
 {
     uint32_t i;
 
+    d->async = 0;
     d->req_head = 0;
     d->resp_tail = 0;
     d->park_head = 0;
@@ -170,11 +173,33 @@ static void to_result(const struct cca_ctrl_resp_s *resp, struct cca_result *r)
     r->bypassed = resp->bypassed;
 }
 
+/*
+ * A device reset (guest PCI reset, reboot of a VM that kept us running)
+ * empties the rings under us; start over rather than post stale indices.
+ */
+static bool resync_locked(struct cca_dev *d)
+{
+    uint32_t epoch = reg32(d, CCA_REG_EPOCH);
+
+    if (epoch == d->dev_epoch) {
+        return false;
+    }
+    d->dev_epoch = epoch;
+    slots_reset(d);
+    d->epoch++;
+    return true;
+}
+
 /* Drain the response ring; the device is trusted no further than here. */
 static int reap_locked(struct cca_dev *d)
 {
-    uint32_t head = __atomic_load_n(&d->resp->head, __ATOMIC_ACQUIRE);
+    uint32_t head;
     int n = 0;
+
+    if (resync_locked(d)) {
+        return 0;
+    }
+    head = __atomic_load_n(&d->resp->head, __ATOMIC_ACQUIRE);
 
     if (head - d->resp_tail > N) {
         return -EPROTO;
@@ -201,6 +226,7 @@ static int reap_locked(struct cca_dev *d)
             c->tag = resp.tag;
             to_result(&resp, &c->r);
             d->park_len++;
+            d->async--;
             slot_free(d, slot);
             break;
         }
@@ -221,9 +247,12 @@ static int post_locked(struct cca_dev *d, const struct cca_ctrl_cmd_s *cmd,
 {
     uint32_t i;
 
-    if (!d->nfree) {
+    resync_locked(d);
+    /* Parked completions hold no slot; keep them within the park queue. */
+    if (!d->nfree || (state == SLOT_ASYNC && d->async + d->park_len >= N)) {
         return -EAGAIN;
     }
+    d->async += state == SLOT_ASYNC;
     i = d->free_list[--d->nfree];
     memcpy(&d->slots[i].cmd, cmd, sizeof(*cmd));
     d->state[i] = state;
@@ -285,7 +314,11 @@ int cca_call_raw(struct cca_dev *d, const struct cca_ctrl_cmd_s *cmd,
             rc = -EPROTO;
             goto out;
         }
-        if (expired(deadline) || d->epoch != epoch) {
+        if (d->epoch != epoch) {
+            rc = -ECANCELED;
+            goto out;
+        }
+        if (expired(deadline)) {
             rc = -ETIMEDOUT;
             goto out;
         }
@@ -293,6 +326,8 @@ int cca_call_raw(struct cca_dev *d, const struct cca_ctrl_cmd_s *cmd,
         backoff(&b);
         pthread_mutex_lock(&d->lock);
     }
+    /* Posting may have resynchronized after a device reset. */
+    epoch = d->epoch;
     reg_write(d, CCA_REG_DOORBELL, 1);
     b = (struct backoff){ 0, 0 };
     for (;;) {
@@ -463,6 +498,7 @@ int cca_reset(struct cca_dev *d, int all)
     reg_write(d, CCA_REG_RESET, all ? CCA_RESET_ALL : CCA_RESET_RINGS);
     /* The device empties the rings before the write completes. */
     slots_reset(d);
+    d->dev_epoch = reg32(d, CCA_REG_EPOCH);
     d->epoch++;
     rc = wait_ready(d, d->timeout_ms < 0 ? -1 : 1000 + d->timeout_ms);
     pthread_mutex_unlock(&d->lock);
@@ -504,6 +540,7 @@ static int attach(struct cca_dev *d, void *bar)
     if (rc) {
         return rc;
     }
+    d->dev_epoch = reg32(d, CCA_REG_EPOCH);
     /* A previous owner left work behind, or the header was overwritten. */
     if (!header_ok(d) || d->req->head || d->req->tail || d->resp->head ||
         d->resp->tail || dev_fatal(d)) {
@@ -512,6 +549,7 @@ static int attach(struct cca_dev *d, void *bar)
         if (rc) {
             return rc;
         }
+        d->dev_epoch = reg32(d, CCA_REG_EPOCH);
     }
     return header_ok(d) ? 0 : -EPROTO;
 }
