@@ -15,16 +15,19 @@
  * error when the host has enabled it via the Error Recovery feature (DULBE bit):
  * a read overlapping any deallocated block is aborted with NVME_DULB. When DULBE
  * is not enabled the read simply returns the zeros already in the backend.
+ *
+ * Several pollers can update one namespace's bitmaps at once, so they use
+ * the atomic helpers.
  */
 
 /* Mark written blocks allocated and clear their invalid status. */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
     if (ns->util) {
-        bitmap_set(ns->util, slba, nlb);
+        bitmap_set_atomic(ns->util, slba, nlb);
     }
     if (ns->uncorrectable) {
-        bitmap_clear(ns->uncorrectable, slba, nlb);
+        bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
     }
 }
 
@@ -45,7 +48,7 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
         qemu_mutex_lock(&ns->mdata_lock);
     }
     if (ns->util) {
-        bitmap_clear(ns->util, slba, nlb);
+        bitmap_test_and_clear_atomic(ns->util, slba, nlb);
     }
     if (n->mbe && n->mbe->logical_space) {
         uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);

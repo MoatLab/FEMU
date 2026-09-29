@@ -1614,7 +1614,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
     nvme_mark_written(ns, slba, nlb);
-    bitmap_set(ns->uncorrectable, slba, nlb);
+    bitmap_set_atomic(ns->uncorrectable, slba, nlb);
 
     return NVME_SUCCESS;
 }
