@@ -46,21 +46,29 @@ library can be built independently of QEMU.
 
 CXL MMIO arrives on vCPU threads under the BQL; qtest and management operations
 also hold it. The BQL protects payload copies, cache membership, counters and
-DER mappings. A per-device operation gate serializes accesses, cache flushes,
-invalidation and teardown across waits. Gate waiters release the BQL using a
-condition variable. An access holds an object reference until completion;
-teardown marks the device closing, waits for the gate, and prevents new work.
-A waiter rechecks decoder translation and media state before using its DPA.
+DER mappings. A per-device operation gate is shared by accesses and taken
+alone by cache flushes, invalidation and teardown; those wait for the accesses
+in progress, and new accesses wait for them. Gate waiters release the BQL
+using a condition variable. An access holds an object reference until
+completion; teardown marks the device closing, waits for the gate, and
+prevents new work. A waiter rechecks decoder translation and media state
+before using its DPA.
 
 The requesting thread drops the BQL both while handing work to the FTL worker
-and during the remaining media delay, while retaining the operation gate.
-Other vCPUs can run and access other devices; accesses to this device queue
-behind the current operation. The worker mutex protects the single stack-owned
-request and completion, and is released before reacquiring the BQL. The worker
-alone modifies FTL/NAND state. Cache iterators, entries, payload and access
-latency accounting stay stable because invalidation, flush and teardown wait
-for the gate. The fixed-window dispatcher temporarily releases its I/O recursion guard only
-for a managed memory callback, which owns this serialization and performs no
+and during the remaining media delay, while keeping its share of the gate.
+An access holds the pages it touches, in ascending order, until it completes:
+accesses to one page stay ordered, a second miss to a page waits for the first
+fill instead of repeating it, and misses to different pages wait for the
+media together. Eviction leaves a held page resident, and the access that
+needed the room bypasses the cache; a dirty victim is held while its
+write-back drops the BQL. The worker mutex protects the queue of stack-owned
+requests and their completions, and is released before reacquiring the BQL.
+The worker alone modifies FTL/NAND state and takes requests in arrival order;
+the NAND model overlaps them where they reach different LUNs. Cache
+iterators, entries, payload and access latency accounting stay stable because
+invalidation, flush and teardown wait for the gate. The fixed-window
+dispatcher temporarily releases its I/O recursion guard only for a managed
+memory callback, which owns this serialization and performs no
 recursive guest DMA. The Cylon forwarding region uses the same contract.
 Without this, simultaneous accesses would be rejected before reaching the
 gate. Plain Type-3 callbacks retain their normal guard.

@@ -20,7 +20,15 @@ typedef struct FemuCxlWork {
     NvmeRequest req;
     uint64_t latency;
     bool done;
+    QSIMPLEQ_ENTRY(FemuCxlWork) next;
 } FemuCxlWork;
+
+/* One access, flush or eviction chain: the media time it has accumulated. */
+typedef struct FemuCxlOp {
+    struct FemuCxlSsd *s;
+    uint64_t ns;
+    bool held;
+} FemuCxlOp;
 
 struct FemuCxlSsd {
     CXLType3Dev parent_obj;
@@ -36,7 +44,10 @@ struct FemuCxlSsd {
     bool cylon_kernel_ack;
     bool busy;
     bool closing;
+    uint64_t accesses;
+    uint64_t exclusive_waiters;
     uint64_t invalidation_waiters;
+    GHashTable *pages;
     QemuCond idle;
     FemuCxlDer direct;
     uint64_t read_ns;
@@ -45,11 +56,10 @@ struct FemuCxlSsd {
     uint64_t media_ns;
     uint64_t media_reads;
     uint64_t media_writes;
-    uint64_t access_ns;
     QemuMutex lock;
     QemuCond wake;
     QemuThread worker;
-    FemuCxlWork *work;
+    QSIMPLEQ_HEAD(, FemuCxlWork) work;
     bool stopping;
     bool started;
 };
@@ -57,18 +67,38 @@ struct FemuCxlSsd {
 static void (*parent_realize)(PCIDevice *dev, Error **errp);
 static void (*parent_exit)(PCIDevice *dev);
 
-/* BQL protects the gate; waiters must let the current operation finish. */
+/*
+ * BQL protects the gate. Accesses share it, so misses to different pages
+ * wait for the media together; flush, invalidation and teardown take it
+ * alone, after the accesses in progress, and new accesses wait for them.
+ */
 static void cxl_enter(FemuCxlSsd *s)
 {
-    while (s->busy) {
+    s->exclusive_waiters++;
+    while (s->busy || s->accesses) {
         qemu_cond_wait_bql(&s->idle);
     }
+    s->exclusive_waiters--;
     s->busy = true;
 }
 
 static void cxl_leave(FemuCxlSsd *s)
 {
     s->busy = false;
+    qemu_cond_broadcast(&s->idle);
+}
+
+static void cxl_enter_access(FemuCxlSsd *s)
+{
+    while (s->busy || s->exclusive_waiters) {
+        qemu_cond_wait_bql(&s->idle);
+    }
+    s->accesses++;
+}
+
+static void cxl_leave_access(FemuCxlSsd *s)
+{
+    s->accesses--;
     qemu_cond_broadcast(&s->idle);
 }
 
@@ -86,30 +116,35 @@ static void *cxl_worker(void *opaque)
 
     qemu_mutex_lock(&s->lock);
     while (!s->stopping) {
-        FemuCxlWork *work = s->work;
+        FemuCxlWork *work = QSIMPLEQ_FIRST(&s->work);
 
         if (!work) {
             qemu_cond_wait(&s->wake, &s->lock);
             continue;
         }
+        QSIMPLEQ_REMOVE_HEAD(&s->work, next);
         work->latency = bb_ftl_process_req(s->ctrl, &s->ns, &work->req);
         work->done = true;
-        s->work = NULL;
         qemu_cond_broadcast(&s->wake);
     }
     qemu_mutex_unlock(&s->lock);
     return NULL;
 }
 
-static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
+/*
+ * Requests from different accesses queue for the worker in arrival order; the
+ * NAND model overlaps them where they reach different LUNs.
+ */
+static bool cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
 {
+    FemuCxlSsd *s = op->s;
     FemuCxlWork work = {
         .req = {
             .cmd.opcode = write ? NVME_CMD_WRITE : NVME_CMD_READ,
             .ns = &s->ns,
             .slba = lpn * 8,
             .nlb = 8,
-            .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s->access_ns,
+            .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + op->ns,
         },
     };
 
@@ -118,8 +153,7 @@ static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
     }
     bql_unlock();
     qemu_mutex_lock(&s->lock);
-    assert(!s->work);
-    s->work = &work;
+    QSIMPLEQ_INSERT_TAIL(&s->work, &work, next);
     qemu_cond_broadcast(&s->wake);
     while (!work.done) {
         qemu_cond_wait(&s->wake, &s->lock);
@@ -127,7 +161,7 @@ static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
     qemu_mutex_unlock(&s->lock);
     bql_lock();
     s->media_ns += work.latency;
-    s->access_ns += work.latency;
+    op->ns += work.latency;
     if (write) {
         s->media_writes = ssd_nand_write_pages(s->ns.ssd);
     } else {
@@ -138,10 +172,25 @@ static bool cxl_media(FemuCxlSsd *s, uint64_t lpn, bool write)
 
 static bool cxl_evict(void *opaque, FemuCxlEntry *e)
 {
-    FemuCxlSsd *s = opaque;
+    FemuCxlOp *op = opaque;
+    FemuCxlSsd *s = op->s;
+    bool ok;
 
+    /* Another access holds the page; keep it and let the caller go uncached. */
+    if (g_hash_table_contains(s->pages, &e->lpn)) {
+        op->held = true;
+        return false;
+    }
     femu_cxl_der_remove(&s->direct, e->lpn);
-    return !e->dirty || cxl_media(s, e->lpn, true);
+    if (!e->dirty) {
+        return true;
+    }
+    /* The write-back drops the BQL; accesses to the page wait until it ends. */
+    g_hash_table_add(s->pages, &e->lpn);
+    ok = cxl_media(op, e->lpn, true);
+    g_hash_table_remove(s->pages, &e->lpn);
+    qemu_cond_broadcast(&s->idle);
+    return ok;
 }
 
 static MemTxResult cxl_access_locked(CXLType3Dev *ct3d, hwaddr hpa,
@@ -149,36 +198,55 @@ static MemTxResult cxl_access_locked(CXLType3Dev *ct3d, hwaddr hpa,
                                     bool write, MemTxAttrs attrs)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(ct3d);
+    FemuCxlOp op = { .s = s };
+    MemTxResult result = MEMTX_ERROR;
+    uint64_t pages[2];
     uint64_t first = dpa / 4096;
     uint64_t last;
     uint64_t lpn;
     int64_t start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t remaining;
+    unsigned n = 0;
+    unsigned i;
 
     if (!size || size > sizeof(*data) || dpa >= s->backend.size ||
         size > s->backend.size - dpa) {
         return MEMTX_ERROR;
     }
     last = (dpa + size - 1) / 4096;
-    s->access_ns = 0;
+    /*
+     * Hold the pages, in ascending order, so accesses to a page stay ordered
+     * and a second miss to it waits for the first fill instead of repeating it.
+     */
+    for (lpn = first; lpn <= last; lpn++) {
+        pages[n] = lpn;
+        while (g_hash_table_contains(s->pages, &pages[n])) {
+            qemu_cond_wait_bql(&s->idle);
+        }
+        g_hash_table_add(s->pages, &pages[n++]);
+    }
     for (lpn = first; lpn <= last; lpn++) {
         FemuCxlEntry *e = femu_cxl_cache_find(&s->cache, lpn);
 
         if (!e) {
-            if (!cxl_media(s, lpn, write && !s->cache.nsets)) {
-                return MEMTX_ERROR;
+            if (!cxl_media(&op, lpn, write && !s->cache.nsets)) {
+                goto out;
             }
-            e = femu_cxl_cache_insert(&s->cache, lpn, cxl_evict, s);
-            if (s->cache.nsets && !e) {
-                return MEMTX_ERROR;
+            op.held = false;
+            e = femu_cxl_cache_insert(&s->cache, lpn, cxl_evict, &op);
+            if (s->cache.nsets && !e && !op.held) {
+                goto out;
+            }
+            /* The victim was held: this access bypasses the cache. */
+            if (!e && op.held && write && !cxl_media(&op, lpn, true)) {
+                goto out;
             }
         }
         if (e && write) {
             e->dirty = true;
         }
     }
-    remaining = s->access_ns -
-                (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
+    remaining = op.ns - (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
     if (remaining > 0) {
         cxl_delay(remaining);
     }
@@ -196,7 +264,13 @@ static MemTxResult cxl_access_locked(CXLType3Dev *ct3d, hwaddr hpa,
             e->dirty = true;
         }
     }
-    return MEMTX_OK;
+    result = MEMTX_OK;
+out:
+    for (i = 0; i < n; i++) {
+        g_hash_table_remove(s->pages, &pages[i]);
+    }
+    qemu_cond_broadcast(&s->idle);
+    return result;
 }
 
 static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
@@ -209,14 +283,14 @@ static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
     uint64_t current_dpa;
 
     object_ref(OBJECT(s));
-    cxl_enter(s);
+    cxl_enter_access(s);
     if (s->started && !s->closing &&
         !cxl_dev_media_disabled(&ct3d->cxl_dstate) &&
         !cxl_type3_hpa_to_as_and_dpa(ct3d, hpa, size, &as, &current_dpa) &&
         current_dpa == dpa) {
         result = cxl_access_locked(ct3d, hpa, dpa, data, size, write, attrs);
     }
-    cxl_leave(s);
+    cxl_leave_access(s);
     object_unref(OBJECT(s));
     return result;
 }
@@ -230,10 +304,12 @@ static void cxl_invalidate(CXLType3Dev *ct3d)
      * waiters; once it starts, stop waiting for the operation it drains.
      */
     s->invalidation_waiters++;
-    while (s->busy && !s->closing) {
+    s->exclusive_waiters++;
+    while ((s->busy || s->accesses) && !s->closing) {
         qemu_cond_wait_bql(&s->idle);
     }
-    if (!s->busy) {
+    s->exclusive_waiters--;
+    if (!s->busy && !s->accesses) {
         s->busy = true;
         if (s->started) {
             femu_cxl_der_clear(&s->direct);
@@ -247,18 +323,18 @@ static void cxl_invalidate(CXLType3Dev *ct3d)
 static void cxl_flush(Object *obj, bool value, Error **errp)
 {
     FemuCxlSsd *s = FEMU_CXL_SSD(obj);
+    FemuCxlOp op = { .s = s };
 
     object_ref(obj);
     cxl_enter(s);
     if (!s->started || s->closing || !value) {
         goto out;
     }
-    s->access_ns = 0;
-    if (!femu_cxl_cache_clear(&s->cache, cxl_evict, s)) {
+    if (!femu_cxl_cache_clear(&s->cache, cxl_evict, &op)) {
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
-    if (s->access_ns) {
-        cxl_delay(s->access_ns);
+    if (op.ns) {
+        cxl_delay(op.ns);
     }
 out:
     cxl_leave(s);
@@ -346,6 +422,7 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     ssd_init(n, &s->ns);
     qemu_mutex_init(&s->lock);
     qemu_cond_init(&s->wake);
+    QSIMPLEQ_INIT(&s->work);
     s->stopping = false;
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,
                        QEMU_THREAD_JOINABLE);
@@ -361,7 +438,7 @@ static void cxl_exit(PCIDevice *dev)
     /* Callers of cxl_invalidate() finish under the BQL before we proceed. */
     s->closing = true;
     qemu_cond_broadcast(&s->idle);
-    while (s->busy || s->invalidation_waiters) {
+    while (s->busy || s->accesses || s->invalidation_waiters) {
         qemu_cond_wait_bql(&s->idle);
     }
     s->busy = true;
@@ -393,6 +470,7 @@ static void cxl_init(Object *obj)
     FemuCxlSsd *s = FEMU_CXL_SSD(obj);
 
     qemu_cond_init(&s->idle);
+    s->pages = g_hash_table_new(g_int64_hash, g_int64_equal);
     s->der = g_strdup("off");
     object_property_add_uint64_ptr(obj, "invalidation-waiters",
                                    &s->invalidation_waiters,
@@ -461,7 +539,10 @@ static void cxl_class_init(ObjectClass *oc, const void *data)
 
 static void cxl_finalize(Object *obj)
 {
-    qemu_cond_destroy(&FEMU_CXL_SSD(obj)->idle);
+    FemuCxlSsd *s = FEMU_CXL_SSD(obj);
+
+    g_hash_table_destroy(s->pages);
+    qemu_cond_destroy(&s->idle);
 }
 
 static const TypeInfo cxl_info = {
