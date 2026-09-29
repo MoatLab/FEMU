@@ -15114,6 +15114,36 @@ static void femu_test_cca_invalidate(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/*
+ * A miss on a programmed page costs one NAND read and waits for it in real
+ * time. The read is long enough that the qtest round trip cannot hide it.
+ */
+static void femu_test_cca_miss_time(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t reads;
+    uint64_t media;
+    int64_t took;
+
+    femu_cca_start(&c, "", "read-ns=5000000");
+    qtest_writeq(c.qts, femu_cca_page(1), 0xd1);
+    femu_cxl_set(c.qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, 1);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(1)), ==, 0xd1);
+    femu_cca_expect(&c, CCA_CTRL_INVALIDATE, 0, 1, 1, 0, 1);
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    media = femu_cxl_stat(c.qts, "media-time-ns");
+    took = g_get_monotonic_time();
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(1)), ==, 0xd1);
+    took = g_get_monotonic_time() - took;
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads + 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-time-ns"), ==,
+                     media + 5000000);
+    g_assert_cmpint(took, >=, 5000000 / 1000 * 8 / 10);
+    femu_cca_quit(&c);
+}
+
 static void femu_test_cca_bypass(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
@@ -16186,6 +16216,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-budget", "femu", femu_test_cca_budget, NULL);
     qos_add_test("cxl-cca-unpin", "femu", femu_test_cca_unpin, NULL);
     qos_add_test("cxl-cca-invalidate", "femu", femu_test_cca_invalidate,
+                 NULL);
+    qos_add_test("cxl-cca-miss-time", "femu", femu_test_cca_miss_time,
                  NULL);
     qos_add_test("cxl-cca-bypass", "femu", femu_test_cca_bypass, NULL);
     qos_add_test("cxl-cca-prefetch", "femu", femu_test_cca_prefetch, NULL);
