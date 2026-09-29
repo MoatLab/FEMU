@@ -13624,6 +13624,35 @@ static void femu_test_cxl_forward(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/*
+ * A host bridge decoder can be programmed with more interleave ways than
+ * its eight-entry target list holds; such an address must decode to
+ * nothing instead of asserting.
+ */
+static void femu_test_cxl_target_bound(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem "
+        "-device cxl-rp,id=rp1,bus=cxl.0,chassis=0,slot=1,port=1,addr=1");
+    uint64_t host = 0x100001000ULL;
+
+    femu_cxl_decode(qts);
+    qtest_writel(qts, host + A_CXL_HDM_DECODER0_BASE_LO,
+                 FEMU_CXL_WINDOW & 0xffffffff);
+    qtest_writel(qts, host + A_CXL_HDM_DECODER0_BASE_HI, FEMU_CXL_WINDOW >> 32);
+    qtest_writel(qts, host + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
+    qtest_writel(qts, host + A_CXL_HDM_DECODER0_TARGET_LIST_LO, 0);
+    /* Commit with sixteen ways at 256-byte granularity. */
+    qtest_writel(qts, host + A_CXL_HDM_DECODER0_CTRL, 0x240);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8 * 256), ==, 0);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 15 * 256, 1);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_slot_reservation(void *obj, void *data,
                                            QGuestAllocator *alloc)
 {
@@ -16176,6 +16205,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-stale-translation", "femu",
                  femu_test_cxl_stale_translation, NULL);
     qos_add_test("cxl-forward", "femu", femu_test_cxl_forward, NULL);
+    qos_add_test("cxl-target-bound", "femu", femu_test_cxl_target_bound,
+                 NULL);
     qos_add_test("cxl-local-overlay", "femu", femu_test_cxl_local_overlay,
                  NULL);
     qos_add_test("cxl-topology", "femu", femu_test_cxl_topology, NULL);

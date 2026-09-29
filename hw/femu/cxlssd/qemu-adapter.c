@@ -139,6 +139,10 @@ static bool adapter_hdm_find_target(uint32_t *cache_mem, hwaddr addr,
         ig_enc = FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, IG);
         iw_enc = FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, IW);
         target_idx = (addr / cxl_decode_ig(ig_enc)) % (1 << iw_enc);
+        /* The list holds eight targets; a guest can program more ways. */
+        if (target_idx >= 8) {
+            return false;
+        }
 
         if (target_idx < 4) {
             uint32_t val = ldl_le_p(cache_mem +
@@ -410,7 +414,17 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
         uint64_t dpa;
         MemTxResult result;
 
-        if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
+        /*
+         * Nothing decodes the address: answer as the window would, without
+         * letting its own router see decoder values that make it assert.
+         */
+        if (!dev) {
+            if (!write) {
+                *data = 0;
+            }
+            return write ? MEMTX_OK : MEMTX_ERROR;
+        }
+        if (!object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
             return write ? memory_region_dispatch_write(&w->fw->mr, offset,
                                 *data, size_memop(size) | MO_LE, attrs) :
                            memory_region_dispatch_read(&w->fw->mr, offset,
