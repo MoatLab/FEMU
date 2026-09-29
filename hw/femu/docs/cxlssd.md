@@ -377,11 +377,11 @@ host controls work with `lsa-control=off` too.
 | Size/command | Argument and effect |
 | --- | --- |
 | 1 | Append a statistics snapshot tagged with the argument, then reset cache counters |
-| 2 | Revoke mappings and flush/clear cached pages |
-| 3 | Cylon ways selector: 0..4 means 1, 2, 4, 8, 16 ways; 5 means fully associative |
+| 2 | Revoke mappings, flush/clear cached pages and reset cache event counters, as Cylon's `buffer_clear` |
+| 3 | Cylon ways selector: 0..4 means 1, 2, 4, 8, 16 ways; 5 means fully associative; resets cache event counters |
 | 5 | Set prefetch degree |
 | 7 | Set prefetch stride |
-| 9, 11 | Flush/clear the cache, as in Cylon; keep the configured DER mode |
+| 9, 11 | Flush/clear the cache and reset its event counters, as in Cylon; keep the configured DER mode |
 | 13, 15 | Start a new per-access log / close it; names cycle through 64 files |
 | 17 | Dump current tracked direct mappings and Cylon SPTE values |
 | 90, 80 | Set direct ratio (0 selects every page) / revoke and reset it; a ratio needs `der=memslot` or `der=cylon` |

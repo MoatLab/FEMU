@@ -14198,8 +14198,12 @@ static void femu_test_cxl_control(void *obj, void *data,
     femu_cxl_command(qts, lsa, 7, 2);
     g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-degree"), ==, 3);
     g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-stride"), ==, 2);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 8 * 4096, 1);
     femu_cxl_command(qts, lsa, 3, 5);
     g_assert_cmpuint(femu_cxl_stat(qts, "cache-ways"), ==, 1024);
+    /* Like Cylon's buffer_clear, a way change drops the event counters. */
+    g_assert_cmpuint(femu_cxl_stat(qts, "write-misses"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 0);
     femu_cxl_command(qts, lsa, 13, 0);
     qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
     g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 4);
@@ -14207,8 +14211,11 @@ static void femu_test_cxl_control(void *obj, void *data,
     femu_cxl_command(qts, lsa, 1, 42);
     g_assert_cmpuint(femu_cxl_stat(qts, "last-write-misses"), ==, 1);
     g_assert_cmpuint(femu_cxl_stat(qts, "write-misses"), ==, 0);
+    qtest_readq(qts, FEMU_CXL_WINDOW + 8 * 4096);
     femu_cxl_command(qts, lsa, 2, 0);
     g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), ==, 0);
     femu_cxl_command(qts, lsa, 9, 0);
     femu_cxl_command(qts, lsa, 11, 0);
     femu_cxl_command(qts, lsa, 90, 100);

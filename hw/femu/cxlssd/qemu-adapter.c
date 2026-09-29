@@ -774,6 +774,21 @@ static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
     return file;
 }
 
+/* Cylon's buffer_clear drops these counters along with the cache. */
+static void cxl_counters_clear(Object *obj)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+
+    object_ref(obj);
+    femu_cxl_enter(s);
+    s->read_hits = s->read_misses = 0;
+    s->write_hits = s->write_misses = 0;
+    s->cache.hits = s->cache.misses = 0;
+    s->cache.inserts = s->cache.evictions = 0;
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
 static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
                          Error **errp)
 {
@@ -789,15 +804,18 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     case 9:
     case 11:
         cxl_flush(obj, true, errp);
+        cxl_counters_clear(obj);
         return;
     case 3:
         if (argument > 5) {
             error_setg(errp, "Cylon ways selector must be 0..5");
             return;
         }
-        object_property_set_int(obj, "cache-ways",
-                                argument == 5 ? s->cache_pages : 1 << argument,
-                                errp);
+        if (object_property_set_int(obj, "cache-ways",
+                                    argument == 5 ? s->cache_pages :
+                                    1 << argument, errp)) {
+            cxl_counters_clear(obj);
+        }
         return;
     case 5:
     case 7:
