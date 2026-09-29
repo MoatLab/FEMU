@@ -30,17 +30,33 @@ which the `*_addr` calls accept virtual addresses in the mapping.
 
 ## ccactl
 
-    ccactl [-d mem0] info
-    ccactl [-d mem0] pin 0 16          # pin device pages 0..15
-    ccactl [-d mem0] query all         # whole-device census
-    ccactl [-d mem0] -f invalidate all # unpin, write back and drop all
-    ccactl [-d mem0] disable 100 8     # leave 8 pages uncached
-    ccactl [-d mem0] enable all
-    ccactl [-d mem0] reset all         # rings, pins and uncached ranges
+    ccactl [-d DEV] [-f] [-t MS] COMMAND [LPN COUNT | all]
+
+    ccactl -d mem0 info
+    ccactl -d mem0 nop
+    ccactl -d mem0 pin 0 16            # pin device pages 0..15
+    ccactl -d mem0 query all           # whole-device census
+    ccactl -d mem0 -f invalidate all   # unpin, write back and drop all
+    ccactl -d mem0 disable 100 8       # leave pages 100..107 uncached
+    ccactl -d mem0 enable all
+    ccactl -d mem0 reset               # rings only
+    ccactl -d mem0 reset all           # rings, pins and uncached ranges
 
 `-d` accepts a memdev name, a PCI address or a `resource5` path; without it
-the only CCA device is used. The exit status is 0 when the device returned
-status 0.
+the only CCA device is used. `-f` sets FORCE, which lets `invalidate` and
+`disable` unpin pinned pages. `-t` sets the command timeout in
+milliseconds (default 10000); a negative value waits forever, and a
+non-numeric or out-of-range value is a usage error. `pin`, `unpin`,
+`invalidate`, `disable`, `enable` and `query` need a range: a start page and
+a count, decimal or `0x` hexadecimal, or `all` for the whole media.
+
+`info` prints `version`, `media_pages`, `cache_pages`, `cache_ways`,
+`pin_limit` and `completed`, one per line. `nop` prints `status N (text)`.
+The range commands print `status N (text)` and `pages N`, the pages acted on;
+a successful `query` adds `resident`, `dirty`, `pinned` and `uncached`.
+`reset` prints `reset rings: text` or `reset all: text`. The exit status is
+0 on device status 0 (always for `info`), 1 on an error status or when the
+device cannot be opened, and 2 on a usage error.
 
 ## Library
 
@@ -56,9 +72,19 @@ rings.
 Device statuses: `-EINVAL` malformed command, `-ERANGE` range beyond the
 media, `-ENOSPC` a set has no way left to pin, `-EBUSY` pinned pages without
 FORCE or a direct ratio in the way, `-EOPNOTSUPP` pin or unpin without a
-cache, `-ENODEV` media disabled, `-EIO` the media refused a write,
-`-EAGAIN` a way change during PIN left no room. A fatal ring error makes
-every call return `-EPROTO` until `cca_reset()`.
+cache, `-ENODEV` media disabled, `-EIO` the media refused a read or write,
+`-EAGAIN` a way change during PIN left no room. `-EBUSY` also answers a PIN
+over an uncached page. A CACHE_DISABLE that fails with `-EIO` clears the
+uncached mark of the pages it could not drop, so an uncached page is never
+resident.
+
+The library adds its own: `-ETIMEDOUT` when the device does not answer
+within the timeout (`cca_set_timeout()`, default 10 s), and `-ECANCELED`
+when a device reset cancels a command while it waits to be posted or to
+complete, including a reset seen in the middle of reaping responses. A fatal
+ring error makes every call return `-EPROTO` until `cca_reset()`; a reset
+that races a post can itself leave the device fatal, and `cca_reset(d, 0)`
+(rings only) recovers it, as does the next `cca_open()`.
 
 ## Guest tests
 
@@ -68,8 +94,17 @@ memdev and runs `cca-test`:
 
     ./run-guest-tests.sh [-d mem0] [-x dax0.0] [-o LOG] [CASE...]
 
+`-d` defaults to `mem0`, `-x` to the devdax device found, and `-o` to
+`cca-guest-<date>-<time>.log` in the current directory. With no case, every
+case but the reboot pair runs; the script needs root and runs on any bash
+version. `cca-test [-d mem0] [-x dax0.0] [CASE...]` can also be run by hand.
+It prints `PASS`, `FAIL` or `SKIP` per case and exits 1 if any failed.
+
 Create the region first, for example with `cxl create-region -t ram -m mem0
--d decoder0.0`, and keep it in devdax mode (no `dax_kmem`). The cases are:
+-d decoder0.0`, and keep it in devdax mode (no `dax_kmem`). The cases
+`query`, `thrash`, `invalidate` and `disable` map the devdax device and are
+skipped without one of at least 2 MiB; the tests map at most 1 GiB of it.
+The cases are:
 
 | Case | Checks |
 | --- | --- |

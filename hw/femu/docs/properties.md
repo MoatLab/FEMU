@@ -228,9 +228,13 @@ supports, so this page can be discovered rather than assumed.
 FEMU's current black-box FTL and NAND media. Existing `femu` modes and ordinary
 `cxl-type3` devices keep their existing behavior. Use the inherited
 `volatile-memdev` link with a memory backend sized in multiples of 256 MiB, up
-to 64 GiB. Persistent memory, label storage, and dynamic capacity combinations
-are rejected. See [the design note](cxlssd.md) and
-[femu-scripts/run-cxlssd.sh](../../../femu-scripts/run-cxlssd.sh).
+to 120 GiB. Realize rejects persistent memory (`persistent-memdev`), the
+legacy `memdev` link, dynamic capacity, and an `lsa` label backend together
+with `lsa-control=on`; with `lsa-control=off` an `lsa` backend keeps the
+parent's label semantics. The device realizes in any topology a plain
+`cxl-type3` accepts; the direct modes map pages only in the one topology
+described under `der`. See [the design note](cxlssd.md) and
+[scripts/run-cxlssd.sh](../scripts/run-cxlssd.sh).
 
 A bbssd `femu` controller with `cxl_ssd=<id>` serves the same medium as an
 NVMe namespace: one payload and one FTL behind both. List the `femu-cxl-ssd`
@@ -238,37 +242,81 @@ first; the controller takes its size and geometry from it. Writing the
 namespace changes CXL-resident data, so do not put a filesystem on it while
 the range is in use as memory. See "NVMe front end" in the design note.
 
-All properties below belong to `femu-cxl-ssd`, not `femu`.
+All properties below belong to `femu-cxl-ssd`, not `femu`. They are set with
+`-device femu-cxl-ssd,...`; the ones marked runtime can also be changed later
+with `qom-set`.
 
 | Property | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `cache-pages` | uint32 | 1024 | Number of 4 KiB resident pages; zero disables the cache. Must fit the media and be divisible by `cache-ways`. |
-| `cache-ways` | uint32 | 16 | Entries per set, 1 through 1024. One means direct mapped (WAY_1). Set to `cache-pages` for a fully associative cache within this limit. |
+| `cache-pages` | uint32 | 1024 | Number of 4 KiB resident pages; zero disables the cache and sends every access to the media. At most the media page count, and divisible by `cache-ways`. |
+| `cache-ways` | uint32 | 16 | Entries per set, runtime. Nonzero, and must divide `cache-pages` (with no cache, at most the media page count); there is no other upper bound. One means direct mapped (WAY_1); `cache-pages` means fully associative. A runtime change first checks that pinned pages fit the new geometry, then revokes direct mappings, writes dirty entries back, rebuilds the cache with the pinned pages still resident, maps a direct ratio again and waits for the modeled media cost. |
 | `cache-policy` | string | `fifo` when unset | `fifo`, `lifo`, `clock`, or `s3-fifo`. |
-| `ftl` | bool | on | Charge cache misses and dirty writeback to the current FTL/NAND model. Off keeps memory functionality with no media timing. |
-| `der` | string | off | `off`: MMIO without probes. `memslot`: QEMU aliases using ordinary KVM. `cylon`: published mapped-SPT interface, requiring shared preallocated hugetlb backing, locking and readable PFNs; unsupported hosts warn once and retain MMIO. See `cxlssd.md` for topology and kernel restrictions. |
-| `cylon-kernel-ack` | bool | off | Required with `der=cylon`: states that the host runs a Cylon kernel with the dual-slot fixes (see `cxlssd.md`, "Host kernel"). Not verified by the device. |
+| `prefetch-degree` | uint32 | 0 | Pages inserted after each demand miss, runtime. At most the media page count; one access prefetches at most `cache-pages` pages. Prefetch performs no NAND read. |
+| `prefetch-stride` | uint32 | 1 | Distance from the missed page to the first prefetched page, runtime. At most the media page count. |
+| `ftl` | bool | on | Charge cache misses and dirty writeback to the current FTL/NAND model. Off keeps memory functionality with no media timing, leaves the media counters at zero and cannot be linked to an NVMe controller. |
+| `channels` | uint32 | 4 | NAND channels, 1 through 4096. |
+| `luns-per-channel` | uint32 | 4 | LUNs per channel, 1 through 128. There is one plane per LUN. |
+| `pages-per-block` | uint32 | 256 | 4 KiB pages per block, 1 through 65536. |
+| `blocks-per-plane` | uint32 | 0 | Blocks per plane, 2 through 65536. Zero sizes it to cover 5/4 of the media plus four more blocks per plane, room for GC. An explicit value must cover the media, and total sectors must fit the FTL's signed 32-bit counts. |
+| `gc-threshold` | uint32 | 75 | Percent of lines in use at which background GC starts, 1 through 100. |
+| `gc-threshold-high` | uint32 | 95 | Percent at which GC is forced, from `gc-threshold` through 100. |
 | `read-ns` | uint64 | 40000 | NAND page read time; zero through one second in nanoseconds. |
 | `program-ns` | uint64 | 200000 | NAND page program time; same range. |
 | `erase-ns` | uint64 | 2000000 | NAND block erase time; same range. |
+| `channel-ns` | uint64 | 0 | Channel transfer time per page; same range. |
+| `cylon-first-touch-program` | bool | off | Charge a NAND program instead of a free read when a read reaches a page the FTL has never mapped, as in Cylon's experiments. The program maps the page and counts in `media-writes`, not `media-reads`. |
+| `cylon-free-writeback` | bool | off | Write dirty pages back on eviction and flush with no NAND program and no media time, as in Cylon's experiments. |
+| `der` | string | off | `off`: MMIO without probes. `memslot`: QEMU aliases using ordinary KVM. `cylon`: published mapped-SPT interface, requiring shared preallocated hugetlb backing, locking and readable PFNs; unsupported hosts warn once and retain MMIO. Other values fail realize. The direct modes map pages only for a single endpoint directly below the one root port of a host bridge without HDM decoders, in a single-target window, with non-interleaved endpoint decoders; elsewhere they stay on MMIO and count `der-fallbacks`. See `cxlssd.md` for kernel restrictions. |
+| `cylon-kernel-ack` | bool | off | Required with `der=cylon`: states that the host runs a Cylon kernel with the dual-slot fixes (see `cxlssd.md`, "Host kernel"). Not verified by the device. |
+| `der-replace-rate` | uint32 | 64 | With `der=memslot` and the shared 1024-alias budget full, the most cache aliases per second that a hot page may displace; zero disables replacement. |
+| `cca` | bool | off | Register BAR5 with the caching API (pin, unpin, invalidate, uncached ranges, query). See "Caching API" in `cxlssd.md` and `hw/femu/tools/cca/`. |
+| `lsa-control` | bool | off | Accept Cylon's control commands through Get LSA (`cxl read-labels mem0 -s COMMAND -O ARGUMENT`) on an internal 128 MiB label area. See "Experiment controls" in `cxlssd.md`. |
+| `log-dir` | string | working directory | Directory for `cxlssd-stats.log`, `cxlssd-io-N.log` and `cxlssd-spt.log`. |
+| `tracefs-dir` | string | unset | Host tracefs directory that commands 91 and 81 start and stop; unset, they change nothing on the host. |
+| `log-limit` | size | 64M | Cap on each log file. An I/O log closes when it reaches the limit, the statistics log takes no more appends once it reaches it, and the SPT dump stops there with a final `truncated at log-limit` line. Zero makes command 13 open no file and the statistics log take no appends. |
 
 The following QOM properties are available through `qom-get` / `qom-set` at
-`/machine/peripheral/<device-id>`:
+`/machine/peripheral/<device-id>`, besides the runtime ones above. Counters
+marked "event" are cleared by `stats-reset`; the rest keep counting.
 
 | Property | Access | Meaning |
 | --- | --- | --- |
-| `flush-cache` | write bool | Setting true revokes direct mappings, programs dirty entries, empties the cache and waits for its modeled media cost. False does nothing. A full NAND reports an error and retains the unwritten entry. |
+| `flush-cache` | write bool | Setting true revokes direct mappings, writes dirty entries back, drops unpinned entries, maps a direct ratio again and waits for the modeled media cost. Pinned pages are written back but stay resident and pinned. False does nothing. A full NAND reports an error and retains the unwritten entry. A memslot ratio that no longer fits the alias budget also reports an error; it stays configured and maps again on a later access once there is room. |
+| `stats-reset` | write bool | Setting true copies the current values into the `last-*` properties, then clears the event counters and the CCA event counters. Membership, gauges, media totals and DER totals are kept. |
+| `der-ratio` | read/write uint64 | Direct ratio: 0 (off), 50, 75, 90, 95, 97, 98, 99, 995, 999 or 100. Needs `der=memslot` or `der=cylon` and no CCA uncached range. Same as commands 90 and 80; see "Direct ratios" in `cxlssd.md`. |
+| `control-argument` | read/write uint64 | Argument for the next `control-command`. |
+| `control-command` | read/write uint64 | Writing runs that experiment control command with `control-argument` before `qom-set` returns and reports its error; reading returns the last command. The commands are listed under "Experiment controls" in `cxlssd.md`. |
+| `control-status` | read uint64 | Result of the last control command, from QOM or Get LSA: 0 success, 1 error, 2 a Get LSA command still queued. |
 | `media-time-ns` | read uint64 | Sum of modeled latency returned by FTL requests, including resource contention. |
-| `media-reads` | read uint64 | Read requests sent to the FTL. Unmapped pages return zeros without a NAND read delay. |
-| `media-writes` | read uint64 | User page programs completed by the shared FTL; excludes GC copying. |
-| `cache-hits` | read uint64 | MMIO page lookups that found a resident entry. Direct accesses are unobserved. |
-| `cache-misses` | read uint64 | MMIO page lookups that missed, including accesses with no cache. |
-| `cache-inserts` | read uint64 | Resident admissions, across all policies. |
-| `cache-evictions` | read uint64 | Resident removals, including explicit flushes. |
+| `media-reads` | read uint64 | Read requests sent to the FTL: every miss that fills the cache (a write miss reads the page first), every read with no cache or of an uncached page, and PIN fills. A page the FTL has never mapped costs no NAND read time; its contents come from the memory backend and read as zero only when the backend is zero-filled. |
+| `media-writes` | read uint64 | User page programs completed by the shared FTL, including those of a linked NVMe controller; excludes GC copying. |
+| `cache-entries` | read uint64 | Resident pages, pinned ones included. |
+| `cache-hits` | read uint64 | Event. MMIO page lookups that found a resident entry, reads and writes together. Direct accesses are unobserved. |
+| `cache-misses` | read uint64 | Event. MMIO page lookups that missed, including accesses with no cache. |
+| `read-hits`, `read-misses` | read uint64 | Event. `cache-hits` and `cache-misses` for reads only, as Cylon counts them. |
+| `write-hits`, `write-misses` | read uint64 | Event. The same for writes. |
+| `cache-inserts` | read uint64 | Event. Resident admissions by demand misses, prefetches and PIN fills, across all policies. |
+| `cache-evictions` | read uint64 | Event. Entries the replacement policy removed, including the unpinned entries a flush or way change writes back and drops. Pages dropped by CCA INVALIDATE or CACHE_DISABLE, or by a linked NVMe command, are not counted here. |
+| `prefetch-inserts` | read uint64 | Event. Pages inserted by prefetch. |
+| `last-read-hits`, `last-read-misses`, `last-write-hits`, `last-write-misses`, `last-inserts`, `last-evictions`, `last-entries`, `last-prefetch-inserts` | read uint64 | `read-hits`, `read-misses`, `write-hits`, `write-misses`, `cache-inserts`, `cache-evictions`, `cache-entries` and `prefetch-inserts` as they were at the last `stats-reset` or command 1. |
+| `invalidations` | read uint64 | Generation bumped by every PCI configuration write, component register write, reset and CCI command (except Get LSA on the primary mailbox with `lsa-control=on`); each revokes all direct mappings. |
+| `nvme-drops` | read uint64 | Resident pages a linked NVMe write, copy or deallocate dropped or, if pinned, cleaned. |
+| `log-dropped` | read uint64 | Statistics appends refused by the rate limit or the size limit, I/O logs closed at `log-limit` (and command 13 with `log-limit=0`), and SPT dumps truncated at `log-limit`. |
 | `der-probes` | read uint64 | Probe attempts; one per realize with `der=cylon`, zero for `off` and `memslot`. |
+| `der-active` | read bool | Whether direct mapping is available. Memslot is active from realize; Cylon becomes active after a decoded access installs and validates its slot. |
 | `der-mapped` | read uint64 | Pages currently mapped for direct guest access. |
-| `der-active` | read bool | Whether direct mapping is available. Cylon becomes active after a decoded access installs and validates its slot. |
 | `der-remaps` | read uint64 | Successfully installed direct page mappings. |
 | `der-revocations` | read uint64 | Direct page mappings removed. |
-| `der-fallbacks` | read uint64 | Rejected mapping attempts or device disablements. |
-| `nvme-drops` | read uint64 | Resident pages a linked NVMe write, copy or deallocate dropped or, if pinned, cleaned. |
+| `der-replacements` | read uint64 | Memslot cache aliases displaced by a hotter page; each is also one remap and one revocation. |
+| `der-fallbacks` | read uint64 | Refused mapping attempts and device disablements: a full alias budget, a page whose HPA does not decode to that DPA, no eligible window, and a direct ratio that does not fit the budget, including each retry of one waiting to be mapped again. |
+| `cca-commands` | read uint64 | Event. Caching API commands completed, whatever their status. |
+| `cca-errors` | read uint64 | Event. Completed commands with a nonzero status. |
+| `cca-pin-fills` | read uint64 | Event. Pages PIN read from the media to make them resident. |
+| `cca-writebacks` | read uint64 | Event. Dirty pages programmed by caching API commands, both drops and evictions caused by PIN fills. |
+| `cca-dropped` | read uint64 | Event. Resident pages INVALIDATE and CACHE_DISABLE dropped. |
+| `cca-pinned-set-misses` | read uint64 | Event. Misses served from the media because every way of the set is pinned. |
+| `cca-pinned` | read uint64 | Pages currently pinned. |
+| `cca-uncached` | read uint64 | Pages currently in CCA uncached ranges. |
+
+`test-change-dpa`, `test-slot-reservation` and `test-media-disabled` exist
+only under qtest, for the device's own tests.

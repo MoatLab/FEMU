@@ -18,19 +18,30 @@ CXL device layout, fixed windows, routing, decoders, CCI state and KVM ioctls.
 `cxlssd.c` owns the media worker and cache/FTL access through the FEMU interface
 in `qemu-adapter.h`; the cache and SPTE helpers remain independent libraries.
 
-A fixed window gets one shared FEMU I/O overlay when its single target host
-bridge carries a FEMU endpoint; other windows keep their own dispatch untouched.
-Overlays stay until the last FEMU endpoint leaves. Installation runs at
-machine-init-done, or immediately for later realization. Routing uses the
-windows' linked host bridges once machine-init-done has linked them.
-The overlay remains installed through reset and decoder changes. Routing uses
-the host bridge's live decoder state before endpoint translation. A selected
-non-FEMU endpoint is forwarded by direct dispatch to the original window.
-Only the FEMU overlay disables its reentrancy guard. FEMU realization rejects
-multi-target windows and endpoints behind switches. Endpoint translation
-accepts non-interleaved volatile decoders, including DPA skip and decoder
-ordering; unsupported live decoder settings return a transaction error.
-Disabled-media reads return random bytes and writes are discarded successfully.
+A fixed window gets one shared FEMU I/O overlay when one of its target host
+bridges is above a FEMU endpoint, directly or across a switch; other windows
+keep their own dispatch untouched. Overlays stay until the last FEMU endpoint
+leaves. Installation runs at machine-init-done, or immediately for later
+realization. Routing uses the windows' linked host bridges once
+machine-init-done has linked them. The overlay remains installed through
+reset and decoder changes. Routing follows the window's interleave, the host
+bridge's live HDM decoders (or its one root port when it has none) and one
+level of switch decoders before endpoint translation, as QEMU's own window
+router does. A selected non-FEMU endpoint is forwarded by direct dispatch to
+the original window. A host-bridge or switch decoder whose target index falls
+past its eight-entry target list decodes to nothing, like an address no
+decoder claims: reads return zero with a transaction error and writes are
+dropped. Only the FEMU overlay disables its reentrancy guard.
+
+The device realizes wherever a plain `cxl-type3` would: behind interleaved
+windows and host bridges, on host bridges with HDM decoders and several root
+ports, below a CXL switch, and at any devfn (as for `cxl-type3`, window
+traffic reaches only function 0 below a port). Endpoint translation follows
+`cxl_type3_dpa()`, including interleave, DPA skip and decoder ordering; an
+invalid interleave-ways encoding fails the access with a transaction error
+instead of exiting QEMU. Disabled-media reads return random bytes and writes
+are discarded successfully. Only the direct modes are limited to one topology
+(see "Direct Endpoint Remapping").
 
 Only two generic hooks remain outside `hw/femu/`: an opaque KVM memslot
 reservation, protected by the slot lock and excluded from listener allocation
@@ -57,20 +68,24 @@ its contents come from the backend and are not cleared: they read as zero only
 when the backend is zero-filled, as a fresh `memory-backend-ram` is. Writes to
 resident pages become dirty. Dirty eviction or `flush-cache=true` issues a
 real FTL write; without a cache, each write goes straight to the FTL. The guest
-access waits for the returned media completion cost by spinning on the realtime clock with the BQL released. This is volatile memory, not a persistence contract for guest CPU cache
-flush instructions.
+access waits out the returned media completion cost with the BQL released: it
+sleeps until 100 us before the deadline and spins on the realtime clock only
+for that tail. This is volatile memory, not a persistence contract for guest
+CPU cache flush instructions.
 
 `ssd_init()`, `bb_ftl_process_req()`, `ssd_free()` and the shared NAND media are
 reused directly. There is no renamed copy of the old FTL. Master supplies
 mapping, allocation, GC, media accounting, and its current timing fixes. The
 private controller context has no PCI queues or enabled optional NVMe features.
 The CXL cache replaces the need for a second enabled bbssd write buffer. NAND
-geometry is 512-byte sectors, eight sectors per page, 256 pages per block, four
-channels, four LUNs per channel and one plane per LUN. Blocks per plane are
-`(size / 16 MiB) * 5 / 4 + 4`; the extra space reserves room for GC. Timings are
-configurable. Current bbssd request processing supplies background and forced
-GC. NAND type-specific and advanced NVMe experiment properties are not exposed
-through this device.
+sectors are 512 bytes, eight per page, with one plane per LUN. Channels, LUNs
+per channel, pages per block, blocks per plane, GC thresholds and timings are
+properties (see "Geometry and timing compatibility"); the defaults are four
+channels, four LUNs per channel and 256 pages per block, and
+`blocks-per-plane=0` sizes the planes to 5/4 of the media plus four more
+blocks each, which leaves GC room. Current bbssd request processing supplies
+background and forced GC. NAND type-specific and advanced NVMe experiment
+properties are not exposed through this device.
 
 FIFO removes the oldest entry; LIFO removes the newest. CLOCK rotates entries
 until it finds an entry without a reference. S3-FIFO has small, main and bounded
@@ -123,7 +138,7 @@ existing NVMe poller DMA rules are unchanged.
 ## Direct Endpoint Remapping
 
 The `der` string selects `off` (the default), `memslot`, or `cylon`. Other
-values, including the former boolean spelling `on`, fail property validation.
+values, including `on`, fail realize.
 `der=cylon` additionally requires `cylon-kernel-ack=on` (default off), including
 on hosts where activation would fall back. It states that the host runs a Cylon
 kernel with the dual-slot fixes described under "Host kernel" below; the device
@@ -136,12 +151,19 @@ can exercise these mappings directly. All modes expose read-only QOM
 page operations; fallbacks count rejected mapping attempts or device disablement.
 For Cylon, active becomes true only after installing and validating the slot.
 
-Both direct modes require non-interleaved pages in a single-target CXL window,
-with the endpoint directly below a root port on a host bridge without HDM
-decoding. Beyond the alias budget, additional pages stay on MMIO without reducing
-cache capacity. Every memslot-mapped entry is conservatively dirty because
-alias writes cannot notify cache metadata. Direct hits in either mode do not
-update CLOCK/S3-FIFO reference metadata or MMIO hit counters.
+The device realizes in any topology, but both direct modes (cache mappings,
+prefetch mappings and direct ratios) map pages only for a single endpoint
+directly below the one root port of a host bridge without HDM decoders, in a
+single-target window, with non-interleaved endpoint decoders. Elsewhere, and
+for pages beyond the alias budget, accesses stay on MMIO without reducing
+cache capacity and count in `der-fallbacks`. Every mapping's HPA is checked
+against the endpoint decoders before it is installed: a page reached by
+derivation rather than by its own access, such as a prefetch, is not mapped
+when several decoders or a DPA skip put that HPA at another DPA or at none.
+Uncached pages of the caching API are never mapped. Every memslot-mapped
+entry is conservatively dirty because alias writes cannot notify cache
+metadata; Cylon samples EPT dirty bits instead. Direct hits in either mode do
+not update CLOCK/S3-FIFO reference metadata or MMIO hit counters.
 
 ### Memslot mapping limit
 
@@ -157,9 +179,12 @@ that increments `der-fallbacks`.
 When the hot set moves, the aliases installed earlier may now hold cold
 pages. A cached page that has taken 256 MMIO hits while the budget was full
 replaces this device's oldest one-page cache alias, in one memory
-transaction. Accesses through an alias never reach QEMU, so installation
-order is the only recency available. `der-replace-rate` (default 64) caps
-replacements per second, and 0 disables them. When a displaced page comes
+transaction. The alias of a page pinned through the caching API is never
+displaced: the oldest unpinned alias goes instead, and when every alias holds
+a pinned page the hot page stays on MMIO. Accesses through an alias never
+reach QEMU, so installation order is the only recency available.
+`der-replace-rate` (default 64) caps replacements per second, and 0 disables
+them. When a displaced page comes
 back hot, the hot set is larger than the budget and replacement only rotates
 it, so each such return doubles the interval, up to 256 times, and eight
 promotions of new pages halve it again. Ratio runs are never replaced.
@@ -268,9 +293,11 @@ range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 Each admission checks the window offset, SPT index and resolved physical
 address, rechecks that the corresponding huge-page PFN has not changed, then
 compare-and-swaps the observed empty or MMIO entry to a direct entry and invokes SET
-to flush. A lost exchange leaves the page on MMIO. Zero, MMIO and frozen
-`REMOVED_SPTE` entries are KVM revocations: mark the cache entry dirty and drop
-the tracking record without disabling Cylon or overwriting KVM's entry.
+to flush. A ratio application reads each huge page's frame from pagemap once,
+not once per 4 KiB page. A lost exchange leaves the page on MMIO. Zero, MMIO
+and frozen `REMOVED_SPTE` entries are KVM revocations: mark the cache entry
+dirty and drop the tracking record without disabling Cylon or overwriting
+KVM's entry.
 Flush before retiring that record because a kernel zap may precede completion
 of its remote TLB invalidation. An
 unexpected existing mapping, invalid layout or ioctl failure restores saved
@@ -380,17 +407,21 @@ single producer, single consumer; the library serializes its threads and
 A doorbell sets a flag under the CCA mutex and signals the `femu-cxl-cca`
 thread; it never waits, like any invalidation. Nothing takes the BQL while
 holding that mutex. The thread takes the BQL, drains the request ring and
-executes commands one at a time in submission order, at most 64 per pass
-before it releases the BQL, so a guest that keeps the ring full cannot hold
-it. Each command runs in chunks of up to 256 pages of work (4096 lookups),
-and each chunk holds the operation gate and then waits out its accumulated
-media time with the BQL released, exactly as a guest access does. Because
-the thread holds the BQL between chunks, a woken gate waiter could never
-win the gate back from it; before each chunk the thread therefore lets one
-waiting access take the gate first. Guest accesses thus run between chunks,
-a long invalidation never keeps a vCPU in an MMIO exit, and the main loop
-is never blocked. The worst stall a chunk adds to an access is about 256
-programs. The checks that must precede any change (the PIN budget, pinned
+executes commands one at a time in submission order. It releases the BQL
+between commands and after every chunk, and after 64 commands it gives the
+BQL up and wakes itself again, so a guest that keeps the ring full cannot
+hold it. Each command runs in chunks of at most 256 pages of work and 4096
+lookups, and each chunk holds the operation gate and then waits out its
+accumulated media time with the BQL released, as a guest access does. A gate
+waiter woken as a chunk ends can still lose the BQL to the thread, so before
+each chunk the thread lets one waiting access take the gate first. Guest
+accesses thus run between chunks, a long invalidation never keeps a vCPU in
+an MMIO exit, and the main loop is never blocked. INVALIDATE and
+CACHE_DISABLE revoke a chunk's direct mappings in one memory transaction
+before writing its pages back; a command with more than 64 candidate pages
+revokes every direct mapping once up front when any exist, and they map again
+lazily on later accesses. The worst stall a chunk adds to an access is about
+256 programs. The checks that must precede any change (the PIN budget, pinned
 pages in an INVALIDATE or CACHE_DISABLE range, the candidate snapshot) run
 in one gate hold without media time; they are bounded by the cache size,
 as a flush is. Cache membership still changes only under the gate.
@@ -421,13 +452,13 @@ needs a range to stay non-resident must stop accessing it.
 | NOP | Status 0 |
 | PIN | All or nothing. Resident pages are pinned; others are filled as a miss would be (a media read, counted in `media-reads` and `cca-pin-fills` but not as a guest miss), possibly evicting an unpinned page, then pinned. `-ENOSPC` if a set lacks room, `-EBUSY` on an uncached page, `-EOPNOTSUPP` without a cache. A way change between chunks rechecks the rest (`-EAGAIN`) |
 | UNPIN | Returns pinned pages to the queue a fresh insert would use: main for S3-FIFO with more than one way, else small, so under LIFO the page is the next victim. Dirty state is kept |
-| INVALIDATE | Writes dirty pages back through the eviction path (revoking direct mappings first) and drops them without ghost history; pinned pages need `CCA_F_FORCE`, else `-EBUSY` with nothing changed. `-EIO` if NAND refuses the write, leaving the page resident |
-| CACHE_DISABLE | Marks pages uncached, then drops resident ones as INVALIDATE does. Accesses to uncached pages go to the media every time (a read, or a program per write), with no insert, prefetch or direct mapping. `-EBUSY` while a direct ratio is set, or for pinned pages without `CCA_F_FORCE` |
+| INVALIDATE | Revokes the direct mappings of the chunk's resident pages (ratio-selected pages keep their ratio mapping), then writes dirty pages back through the eviction path and drops them without ghost history; pinned pages need `CCA_F_FORCE`, else `-EBUSY` with nothing changed. `-EIO` if NAND refuses the write, leaving that page and the rest of the range resident |
+| CACHE_DISABLE | Marks pages uncached, then drops resident ones as INVALIDATE does. Accesses to uncached pages go to the media every time (a read, or a program per write), with no insert, prefetch or direct mapping. `-EBUSY` while a direct ratio is set, or for pinned pages without `CCA_F_FORCE`. On `-EIO`, or when a reset abandons the command, the pages it could not drop lose their uncached mark, so an uncached page is never resident |
 | CACHE_ENABLE | Ends the uncached range; the next access inserts normally |
 | QUERY | Resident, dirty, pinned and uncached counts; dirty reflects metadata, not unsampled EPT dirty bits |
 
 Every way of a set may be pinned, because Cylon's default cache is direct
-mapped. A miss to a set whose ways are all pinned is served uncached, like a
+mapped. A miss to a set whose ways are all pinned is served uncached, like an
 uncached page, and counted in `cca-pinned-set-misses`, so the performance
 cliff is visible.
 
@@ -468,8 +499,9 @@ one mapping table. The `femu-cxl-ssd` must come first on the command line and
 have `ftl=on`; one controller may link to a medium. The controller needs one
 namespace and none of namespace management, a subsystem, streams,
 `power_loss`, `buffer_size`, `op_pcent`, metadata or protection information.
-`devsz_mb` must be unset or equal the medium's size. The medium's geometry and
-timings govern; the controller's own geometry and timing properties are
+`devsz_mb` must be unset, 1024 (its default, so it cannot be told from
+unset) or the medium's size; the medium's size is used. The medium's geometry
+and timings govern; the controller's own geometry and timing properties are
 ignored. Format NVM is not advertised and Sanitize is refused, since both
 would rewrite the whole medium behind the cache. SMART, log page C0h and
 write amplification report the combined FTL; CXL traffic does not count as
@@ -508,7 +540,9 @@ The model state follows these rules:
    stores are invisible. Deallocated-or-unwritten errors (DULBE) and LBA
    status thus see CXL writes. Setting a direct ratio marks its pages; at link
    time every block is marked if the medium was already accessed or has a
-   ratio.
+   ratio. Stores through a ratio never trap, so a Deallocate leaves the
+   ratio-selected pages it covers marked written, and DULBE and Get LBA
+   Status report them as written.
 5. NVMe Flush does not flush the cache; the medium is volatile memory.
 6. Flips 1 to 4 change the shared timings, so they affect CXL misses too.
    Flip 3 restores the medium's `read-ns`, `program-ns`, `erase-ns` and
@@ -588,7 +622,8 @@ include a mutation restoring the no-op and demonstrate the missing program.
 
 ## Scope and validation limits
 
-The caching API's data rings (see below) are not implemented.
+The caching API's data rings are not implemented; their header fields stay
+zero (see "Caching API").
 Persistent CXL storage, dynamic capacity and migration are outside this
 implementation. Guest kernel
 boot/enumeration and long-running workloads require separate system testing.
@@ -596,10 +631,12 @@ boot/enumeration and long-running workloads require separate system testing.
 Qtests program actual PCI bridges and HDM registers, then access the CXL fixed
 memory window. They cover all four policies at one and sixteen ways, data
 readback, dirty programming, media timing, invalid configuration, no-FTL mode,
-qtest fallback, mapping revocation, mixed-window forwarding, topology
-refusal, overlay ownership and teardown. A stock-KVM qtest exercises reserved
-slot exclusion, capacity accounting and reuse after release. Standalone tests cover
-policy ordering, S3-FIFO promotion and ghost admission, full-width keys,
+qtest fallback, mapping revocation, mixed-window forwarding, interleaved,
+switched and multi-root-port topologies, target indexes past the target list,
+decoder checks of derived mappings, overlay ownership and teardown. A
+stock-KVM qtest exercises reserved slot exclusion, capacity accounting and
+reuse after release. Standalone tests cover policy ordering, S3-FIFO promotion
+and ghost admission, full-width keys,
 repeated clearing and dirty accounting over all policies at one through
 thirty-two ways. The memslot qtests validate QEMU mappings. Cylon is deliberately inert under
 qtest, so they cannot validate custom-kernel compatibility.
@@ -629,28 +666,40 @@ needed or accepted. This accommodates every supported page-count argument
 at the maximum capacity. The buffer is volatile and loses its contents at
 unplug. With control off, an optional ordinary `lsa` memory backend uses the
 parent's normal label semantics. Reads with control on return the requested
-length, with byte zero reporting success (0) or an invalid command/argument
-(1); `control-status` reports the same result over QOM. Mailbox bounds errors
-still use the standard CXL status. Reads exceeding the active transport's
-payload capacity return no data and set `control-status=1`, protecting the
-mailbox output buffer. Get-LSA on the primary mailbox leaves DER
-intact so inspecting statistics does not destroy experiment mappings; other
-CCI commands/transports retain conservative invalidation.
+length, with byte zero reporting success (0), an invalid command or argument
+(1), or a queued command (2); `control-status` reports the same result over
+QOM. Mailbox bounds errors (an offset plus length past 128 MiB) still use the
+standard CXL status. Reads exceeding the active transport's payload capacity
+return no data and set `control-status=1`, protecting the mailbox output
+buffer. With control on, Get LSA on the primary mailbox leaves DER intact so
+inspecting statistics does not destroy experiment mappings; other CCI
+commands and transports keep the conservative invalidation.
+
+The mailbox handler runs with the device's re-entrancy guard held, and
+another vCPU's MSI-X, mailbox or component access would be refused while it
+waited, so a Get LSA command never waits there. Commands 1, 5, 7, 13, 15, 17,
+80, 81, 90 and 91 run inline, taking effect before the read returns, when the
+device's operation gate is free and no earlier command is queued. Otherwise,
+and always for the flushes and the way change (2, 3, 9, 11) and for unknown
+commands, the command joins an ordered queue that a main-loop bottom half
+runs, and byte zero is 2. `control-status` reads 2 until the queue drains,
+then 0 or 1 for the last command run.
 
 Every command is also available through QOM: set `control-argument`, then
-set `control-command`. QOM errors report invalid arguments directly. These
-host controls work with `lsa-control=off` too.
+set `control-command`. The command runs synchronously, before `qom-set`
+returns, and QOM errors report invalid arguments directly. These host
+controls work with `lsa-control=off` too.
 
 | Size/command | Argument and effect |
 | --- | --- |
-| 1 | Append a statistics snapshot tagged with the argument, then reset cache counters |
-| 2 | Revoke mappings, flush/clear cached pages and reset cache event counters, as Cylon's `buffer_clear` |
-| 3 | Cylon ways selector: 0..4 means 1, 2, 4, 8, 16 ways; 5 means fully associative; resets cache event counters |
+| 1 | Append a statistics snapshot tagged with the argument to `cxlssd-stats.log`, then do what `stats-reset=true` does |
+| 2 | Revoke mappings, write dirty pages back, drop unpinned pages (pinned pages stay resident, clean), map a direct ratio again and reset cache event counters, as Cylon's `buffer_clear` |
+| 3 | Cylon ways selector: 0..4 means 1, 2, 4, 8, 16 ways; 5 means fully associative; other values fail. Resets cache event counters |
 | 5 | Set prefetch degree |
 | 7 | Set prefetch stride |
 | 9, 11 | Flush/clear the cache and reset its event counters, as in Cylon; keep the configured DER mode |
-| 13, 15 | Start a new per-access log / close it; names cycle through 64 files |
-| 17 | Dump current tracked direct mappings and Cylon SPTE values |
+| 13, 15 | Start a new per-access log / close it; names cycle through 64 files, and each file closes at `log-limit`. With `log-limit=0`, 13 opens no file |
+| 17 | Dump current tracked direct mappings and Cylon SPTE values to `cxlssd-spt.log`, stopping at `log-limit` with a final `truncated at log-limit` line |
 | 90, 80 | Set direct ratio (0 selects every page) / revoke and reset it; a ratio needs `der=memslot` or `der=cylon` |
 | 91, 81 | Clear the host trace buffer and start tracing / stop tracing, in `tracefs-dir` |
 
@@ -671,13 +720,26 @@ warns once per file and the device continues. I/O logs contain realtime
 start timestamp, R/W, byte DPA, byte length and modeled media nanoseconds.
 Direct CPU hits do not enter QEMU and cannot appear in these logs.
 
+A guest can issue these commands at any rate, so the files are bounded.
+`log-limit` (default 64M) caps each one: an I/O log closes when it reaches
+the limit and the guest can open the next with command 13, the statistics
+log takes no appends once it has reached the limit, and the SPT dump stops at
+it. Statistics appends (commands 1, 3, 5 and 7) also pass a token bucket of
+64 appends refilled at 100 per second; the command itself still takes effect
+when its append is refused. Refused appends, truncated dumps and I/O logs
+closed at the limit (or not opened, with `log-limit=0`) count in the QOM
+counter `log-dropped`.
+
 QOM exposes `read-hits`, `read-misses`, `write-hits`, `write-misses`,
 `cache-entries` and `prefetch-inserts`, alongside existing aggregate/cache,
 media and DER counters. `stats-reset=true` resets cache and prefetch event
-counters, preserving membership, media totals and DER totals. The previous
-snapshot remains in `last-read-hits`, `last-read-misses`, `last-write-hits`,
-`last-write-misses`, `last-inserts`, `last-evictions`, `last-entries` and
-`last-prefetch-inserts`. Runtime way changes preserve event totals.
+counters and the caching API event counters, preserving membership, media
+totals and DER totals. The previous snapshot remains in `last-read-hits`,
+`last-read-misses`, `last-write-hits`, `last-write-misses`, `last-inserts`,
+`last-evictions`, `last-entries` and `last-prefetch-inserts`. Commands 2, 3,
+9 and 11 clear the read, write and cache event counters without a snapshot
+and keep `prefetch-inserts`. Way changes through `qom-set` preserve event
+totals.
 
 `prefetch-degree` defaults to zero and `prefetch-stride` to one. Both are
 runtime QOM properties bounded by media page count; an access prefetches at
@@ -689,13 +751,16 @@ pages. Prefetch performs no NAND read. Dirty victims still follow the chosen
 writeback policy. Prefetched pages are eligible for DER. A small cache may
 evict the demanded page during prefetch, matching the insertion order.
 
-`cache-ways` is a runtime QOM property with no 1024-way cap. It must divide
-`cache-pages`; set it equal to `cache-pages` for fully associative operation.
-Changing it drains accesses, revokes mappings, flushes dirty pages and rebuilds
-the cache. All policies support one way. Resident and ghost membership use
-hash tables, queue-end removal is constant time, and CLOCK/S3-FIFO eviction
-is amortized constant time rather than a scan proportional to associativity
-on every operation. The large standalone test uses 1,258,291 entries.
+`cache-ways` is a runtime QOM property, bounded only by `cache-pages`: it must
+be nonzero and divide `cache-pages`; set it equal to `cache-pages` for fully
+associative operation. Changing it drains accesses, refuses before flushing
+anything if the pinned pages do not fit the new geometry, then revokes
+mappings, flushes dirty pages, rebuilds the cache with the pinned pages still
+resident and maps a direct ratio again. All policies support one way. Resident
+and ghost membership use hash tables, queue-end removal is constant time, and
+CLOCK/S3-FIFO eviction is amortized constant time rather than a scan
+proportional to associativity on every operation. The large standalone test
+uses 1,258,291 entries.
 
 ## Geometry and timing compatibility
 
@@ -754,27 +819,63 @@ preallocated 4 KiB leaf ownership is required for this operation.
 
 Ratio mappings are independent of cache residency; cache eviction does not
 remove a selected ratio mapping. As in Cylon the ratio adds to cache-driven
-mappings: a cached page outside the selection is also direct until evicted. Direct accesses have no NAND timing and
-uncached direct writes have no modeled NAND writeback, matching this Cylon
-experiment mode. A cache flush (commands 2, 9 and 11) or a way change revokes
-the mappings and maps the ratio again afterwards; if it can no longer be
-mapped the ratio resets to zero and the command reports an error. Reset,
-configuration, decoder and CCI invalidation revoke mappings but keep the
-ratio: memslot mode maps it again on the next FEMU access, and Cylon mode when
-it reinstalls its slot. A selected page never gets a one-page alias of its own. DER off refuses a nonzero ratio; with DER
-unavailable the ratio remains queryable but mappings stay inactive. `der-mapped`, not the requested ratio, is the activation evidence.
+mappings: a cached page outside the selection is also direct until evicted.
+Direct accesses have no NAND timing, and a write through the ratio to a page
+that is not resident has no modeled NAND program, matching this Cylon
+experiment mode. A resident ratio-selected page is charged when it is
+evicted. Memslot cannot observe alias writes, so it keeps such entries dirty,
+and marks them dirty again every time it maps the ratio. Cylon samples and
+clears the page's EPT dirty bit when the entry is evicted, keeping the page
+mapped, so writes through the ratio are charged in both modes.
+
+A cache flush (commands 2, 9 and 11, `flush-cache`) or a way change revokes
+the mappings and maps the ratio again afterwards. Reset, configuration,
+decoder and CCI invalidation revoke mappings but keep the ratio: memslot mode
+maps it again on the next FEMU access, and Cylon mode when it reinstalls its
+slot. A memslot ratio whose restore finds no room in the shared 1024-alias
+budget stays configured: its pages use MMIO, a flush or way change reports
+the error, the first failure on an access warns once, each retry counts in
+`der-fallbacks`, and a later access maps it again once there is room. A
+selected page never gets a one-page alias of its own. DER off refuses a
+nonzero ratio, and so does an existing CCA uncached range; with DER
+unavailable the ratio remains queryable but mappings stay inactive.
+`der-mapped`, not the requested ratio, is the activation evidence.
 Custom-kernel ratio installation, zero-leaf restoration and dirty revocation
 still require guest validation.
 
-`hw/femu/scripts/run-cxlssd.sh` exposes size, cache, ways, policy, prefetch,
-geometry, timings, GC, control/logging and compatibility switches through
-environment variables. Its defaults follow Cylon's launch script: a cache of
-`(size_mb / 20) * 256` pages, one way (Cylon's default `buffer_way=0`, direct
-mapped; `CACHE_WAYS=full` selects fully associative), 8 channels by 8 LUNs,
-and for the 48 and 96 GiB presets 768 and 1536 blocks per plane, which leave
-no over-provisioning as in Cylon. Other sizes let FEMU size the blocks with
-over-provisioning. For example, use `CXL_SIZE=96G CACHE_POLICY=clock
-PREFETCH_DEGREE=3` and supply guest boot arguments. `DRY_RUN=1` prints the command. `CXL_BACKEND` can supply a
-shared/preallocated hugetlb backend configuration for Cylon; explicitly set
-`CYLON_KERNEL_ACK=on` only on the fixed host kernel. The script changes no
-host tuning, allocates no huge pages itself and never invokes sudo.
+`hw/femu/scripts/run-cxlssd.sh` builds a one-device command line (a
+`pxb-cxl` host bridge, one `cxl-rp` root port, the `femu-cxl-ssd` and a
+single-target window) from environment variables. Its defaults follow
+Cylon's launch script and differ from the device's own property defaults:
+one cache way instead of 16, 8 channels by 8 LUNs instead of 4 by 4, and
+`lsa-control=on` instead of off, because Cylon's scripts use Get LSA
+commands 1 and 5.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `QEMU` | `./qemu-system-x86_64` | QEMU executable |
+| `CXL_SIZE` | `256M` | Media size, an integer with an `M` or `G` suffix |
+| `CACHE_PAGES` | `(size_mb / 20) * 256` | `cache-pages`, a cache of size/20 MiB as in Cylon |
+| `CACHE_WAYS` | 1 | `cache-ways`, direct mapped as Cylon's default `buffer_way=0`; `full` means `cache-pages` |
+| `BLOCKS_PER_PLANE` | 768 for `48G`, 1536 for `96G`, else 0 | `blocks-per-plane`; the presets leave no over-provisioning as in Cylon, and 0 lets FEMU size it |
+| `CACHE_POLICY` | `fifo` | `cache-policy` |
+| `DER` | `off` | `der` |
+| `CYLON_KERNEL_ACK` | `off` | `cylon-kernel-ack`; set `on` only on the fixed host kernel |
+| `PREFETCH_DEGREE`, `PREFETCH_STRIDE` | 0, 1 | `prefetch-degree`, `prefetch-stride` |
+| `CHANNELS`, `LUNS_PER_CHANNEL`, `PAGES_PER_BLOCK` | 8, 8, 256 | NAND geometry |
+| `READ_NS`, `PROGRAM_NS`, `ERASE_NS`, `CHANNEL_NS` | 40000, 200000, 2000000, 0 | NAND timings |
+| `GC_THRESHOLD`, `GC_THRESHOLD_HIGH` | 75, 95 | GC thresholds |
+| `FTL` | `on` | `ftl` |
+| `LSA_CONTROL` | `on` | `lsa-control` |
+| `CYLON_FIRST_TOUCH_PROGRAM`, `CYLON_FREE_WRITEBACK` | `off`, `off` | Cylon media compatibility switches |
+| `LOG_DIR` | `.` | `log-dir` |
+| `LOG_LIMIT` | `64M` | `log-limit` |
+| `TRACEFS_DIR` | unset | `tracefs-dir`, passed only when set |
+| `CXL_BACKEND` | `memory-backend-ram` | Backend type and options for the media, for example a shared preallocated hugetlb backend for Cylon |
+| `ACCEL`, `CPU`, `CPUS`, `RAM` | `kvm`, `host`, 4, `4G` | Accelerator, CPU model, vCPUs and guest RAM |
+| `DRY_RUN` | 0 | 1 prints the command instead of running it |
+
+For example, use `CXL_SIZE=96G CACHE_POLICY=clock PREFETCH_DEGREE=3` and
+supply guest boot arguments after the script name; they are passed to QEMU.
+The script changes no host tuning, allocates no huge pages itself and never
+invokes sudo.
