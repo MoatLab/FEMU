@@ -225,7 +225,8 @@ memslot-generation fields (bits 3..10 and 52..62). The prototype's `0x586`
 contains generation 0xb0; it is not a timeless MMIO mask. For a populated leaf, the implementation saves the exact kernel-created
 MMIO entry, including runtime generation and host reserved-address mitigation
 bits. It restores that entry on revocation; the kernel refreshes a stale MMIO
-generation itself. Empty leaves are admitted by CAS and restored to zero. Unit tests check the fixed encodings, the full generation
+generation itself. Ratio application admits empty leaves by CAS and restores
+them to zero. Unit tests check the fixed encodings, the full generation
 range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 
 Each admission checks the window offset, SPT index and resolved physical
@@ -469,8 +470,10 @@ aborts once an address space needs 4096. A ratio that needs more runs than
 the budget, such as 50 or 75 on a 256 MiB device, is rejected with nothing
 mapped and `der-fallbacks` incremented; use `der=cylon` for dense ratios on
 large devices. A prefetch or access inside a mapped run reuses it. Cylon mode installs the dual slot asynchronously if necessary
-and applies the selection to its leaves. An empty leaf can be installed with
-CAS and restored to zero on revocation without inventing an MMIO generation;
+and applies the selection to its leaves. Only this ratio application installs
+into an empty leaf, with CAS, restoring zero on revocation without inventing an
+MMIO generation; ordinary cache mappings wait for KVM's first fault to create
+the MMIO entry;
 existing MMIO leaves retain their exact kernel encoding. The fixed kernel's
 preallocated 4 KiB leaf ownership is required for this operation.
 

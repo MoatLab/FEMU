@@ -2148,8 +2148,12 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         }
         return true;
     }
-    /* Empty leaves can be restored to zero without guessing a generation. */
-    if (old == CYLON_REMOVED_SPTE) {
+    /*
+     * Only a ratio pre-maps pages the guest never touched. An empty leaf can
+     * be restored to zero without guessing a generation; elsewhere let KVM's
+     * first fault create the MMIO entry, as before ratios existed.
+     */
+    if (old == CYLON_REMOVED_SPTE || (!old && !c->batch)) {
         return false;
     }
     if (old && ((old & 7) != CYLON_MMIO_VALUE ||
