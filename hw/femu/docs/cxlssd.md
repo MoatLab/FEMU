@@ -10,6 +10,40 @@ capacity reporting, CDAT construction, and media-disable checks. It introduces
 no additional NVMe controller and changes no existing FEMU mode. Migration is
 explicitly blocked because the FTL and cache do not have migration state.
 
+## QEMU integration
+
+`cxlssd/qemu-adapter.c` owns the QOM subclass and all dependencies on QEMU's
+CXL device layout, fixed windows, routing, decoders, CCI state and KVM ioctls.
+`cxlssd.c` owns the media worker and cache/FTL access through the FEMU interface
+in `qemu-adapter.h`; the cache and SPTE helpers remain independent libraries.
+
+Each fixed window has one shared FEMU I/O overlay while FEMU endpoints exist.
+Installation runs at machine-init-done, or immediately for later realization.
+The overlay remains installed through reset and decoder changes. Routing uses
+the host bridge's live decoder state before endpoint translation. A selected
+non-FEMU endpoint is forwarded by direct dispatch to the original window.
+Only the FEMU overlay disables its reentrancy guard. FEMU realization rejects
+multi-target windows and endpoints behind switches. Endpoint translation
+accepts non-interleaved volatile decoders, including DPA skip and decoder
+ordering; unsupported live decoder settings return a transaction error.
+Disabled-media reads return random bytes and writes are discarded successfully.
+
+Only two generic hooks remain outside `hw/femu/`: an opaque KVM memslot
+reservation, protected by the slot lock and excluded from listener allocation
+and free capacity; and a per-CCI pre-command callback. The CCI callback runs
+for every transport without replacing command handlers or changing the
+handler-identity checks. PCI configuration writes chain the inherited method,
+component writes forward through an overlay, and reset chains the parent's
+Resettable hold phase while preserving the legacy-reset trampoline.
+
+FEMU drains and revokes before these parent operations. It frees all three
+CCI background timers and pending sanitize state before reset or unplug,
+leaving the primary mutex to the parent's exit method. Restricted volatile
+backend validation and explicit ownership let failed realization release its
+mapped flag without repeating the parent's address-space destruction. The
+upstream Type-3 timer and general realize-unwind fixes are not retained;
+these protections apply to FEMU only.
+
 ## Media and cache
 
 The payload resides in the supplied host memory backend. The cache holds
@@ -59,11 +93,10 @@ behind the current operation. The worker mutex protects the single stack-owned
 request and completion, and is released before reacquiring the BQL. The worker
 alone modifies FTL/NAND state. Cache iterators, entries, payload and access
 latency accounting stay stable because invalidation, flush and teardown wait
-for the gate. The fixed-window dispatcher temporarily releases its I/O recursion guard only
-for a managed memory callback, which owns this serialization and performs no
-recursive guest DMA. The Cylon forwarding region uses the same contract.
-Without this, simultaneous accesses would be rejected before reaching the
-gate. Plain Type-3 callbacks retain their normal guard.
+for the gate. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
+It dispatches FEMU media directly, so no parent window guard remains engaged
+across a BQL wait. The component-register overlay drains before entering the
+parent register callback. Plain Type-3 callbacks retain their normal guard.
 Read-only QOM counters may show an operation in progress.
 The worker is joined before its state is destroyed.
 
@@ -112,21 +145,29 @@ and locking failure refuse activation with a reason. There is no contiguous
 `hpa_base`: each 4 KiB payload address uses its own huge page's resolved base
 plus its offset within that page. The backend remains locked until teardown.
 
-The first decoded access installs a dedicated trapping I/O region over the
-whole window. QEMU's existing KVM listener assigns and owns its slot, including
-zero-size removal and TLB invalidation. Its flag is CylonLinux's
-`KVM_MEMSLOT_DUAL_MODE` (bit 17). The I/O region forwards QEMU accesses to the
-original CXL window, preserving decoder/media checks. A separate anonymous
-non-THP backing keeps KVM's leaf level at 4 KiB; direct SPTEs point exclusively
-to the verified hugetlb payload, never this faulting backing. The slot must
-cover exactly the window and backend size, and its listener record must match
-both range and backing before GET or any mapping update. The first access
-schedules a main-loop callback; it does not pause vCPUs inside MMIO. That
-callback pauses vCPUs before registration, because the published kernel
-publishes a slot before allocating its SPT storage. Teardown can
-cancel a pending install even while the callback waits for vCPUs. The callback
-retains its window reference, and detached Cylon state is freed after pending
-installation and RCU flatview readers have finished.
+The first eligible decoded access schedules a main-loop callback to register
+a dual-mode slot with `KVM_SET_USER_MEMORY_REGION`. FEMU reserves its slot ID
+through the generic KVM reservation API. The slot's host address is the payload
+backend itself; no separate faulting allocation exists. Its flag is
+CylonLinux's `KVM_MEMSLOT_DUAL_MODE` (bit 17). The fixed host kernel must enforce
+4 KiB leaves even though the payload uses huge pages.
+
+Before registration, FEMU checks complete writable I/O coverage of the window,
+the selected endpoint, and linear translation across every decoder boundary.
+The slot covers exactly the window and backend size. Reservation ownership and
+registered state are checked before SPT access. Cylon and ordinary RAM-alias
+DER are mutually exclusive. A FEMU memory listener deletes the external slot
+in `begin()` before any map update can expose overlapping RAM; re-admission
+requires fresh coverage and routing checks after commit. Dirty-ring logging
+refuses activation, and global dirty-log start revokes and disables Cylon.
+
+Installation pauses vCPUs before registration because the published kernel
+publishes a slot before allocating its SPT storage. Pending installation holds
+a window reference and a generation; invalidation or teardown cancels stale
+work even while the callback waits for vCPUs. Detached state is freed after
+pending installation and RCU readers finish. Slot deletion precedes SPT unmap,
+backing unlock and reservation release. Failed deletion terminates QEMU rather
+than releasing an ID or payload that the kernel might still use.
 
 GET receives one untouched `MAP_SHARED | MAP_ANONYMOUS` VMA per used chunk,
 sized exactly to `min(remaining SPT bytes, 4 MiB)`. This matches the published
@@ -137,7 +178,7 @@ Installation explicitly checks the sixty-entry ioctl limit before slot creation.
 Returned count, pointers, offsets and lengths must describe a contiguous,
 nonoverlapping SPT covering exactly the slot. `/proc/self/smaps` must report
 `pf` for each exact VMA; there is no sentinel write or pre-ioctl page fault.
-This detects absent remaps. SPT areas are unmapped before slot deletion.
+This detects absent remaps. SPT areas are unmapped after successful slot deletion.
 
 #### Host kernel
 
@@ -185,10 +226,10 @@ the tracking record without disabling Cylon or overwriting KVM's entry.
 Flush before retiring that record because a kernel zap may precede completion
 of its remote TLB invalidation. An
 unexpected existing mapping, invalid layout or ioctl failure restores saved
-MMIO entries, attempts flushes, removes the listener-owned slot to invalidate
+MMIO entries, attempts flushes, deletes the external slot to invalidate
 all remaining translations, conservatively dirties affected cache entries,
 disables Cylon for the device and logs once. Failed registration remains MMIO
-instead of aborting realize. QEMU's existing fatal handling of a failed KVM
+instead of aborting realize. Fatal handling of a failed KVM
 slot deletion is retained because execution cannot safely continue with stale
 translations.
 
@@ -203,8 +244,9 @@ MMIO rather than guessing that a page is clean.
 Both modes revoke before eviction programming, explicit cache flush,
 decoder/configuration writes, reset, CCI commands and device removal. Warm
 reset retains volatile payload and cache/FTL contents but revokes mappings.
-The Cylon slot remains trapping across ordinary invalidation; removal frees
-its mapped SPT VMAs and private faulting backing. The FTL worker is joined
+Cylon deletes its slot on every invalidation and cache-page revocation,
+sampling tracked dirty state first. Later eligible accesses can reinstall it.
+Failure and teardown also delete the slot and release its mapped SPT VMAs. The FTL worker is joined
 before its state is destroyed. Payload backing belongs to the host memory
 backend. Direct hits do not enter QEMU or read pagemap.
 
@@ -218,13 +260,13 @@ guest uses an existing direct mapping. Runs must exclude these migration
 operations for their lifetime. A host-side pinning and invalidation protocol
 is needed to remove that restriction; the two Cylon ioctls do not provide one.
 
-KVM's own guest-memory reads/writes use the dual slot's anonymous faulting
-backing, not the payload selected by the direct EPT entry. Emulator page
-walks, instruction fetch and paravirtual structures can therefore see different
-bytes. Do not online this CXL range as general System RAM or put page tables,
-code or PV structures there. Restrict Cylon to controlled data mappings; the
-acknowledgement is not a guarantee that arbitrary guest software is safe.
-Faulting backing can gain RSS up to the window size as KVM resolves faults.
+KVM's own guest-memory reads/writes use the payload backing, so emulator
+page walks, instruction fetch and paravirtual structures see the same bytes
+as direct EPT accesses. These KVM-internal accesses do not enter FEMU's cache
+or timing model and may not update its dirty metadata. The payload correction
+removes the separate-backing data-consistency restriction on system RAM;
+system-RAM guest operation still needs end-to-end validation. Direct hits also
+remain outside the per-access timing model.
 
 The direct encoding assumes coherent DMA (WB plus ignore-PAT). Non-coherent
 assigned devices are unsupported: KVM otherwise derives the memory type from
@@ -241,7 +283,8 @@ The nine items in the earlier summary are covered as follows:
 
 1. Full-width hash keys avoid the old GTree comparator overflow, including the
    second defective comparator in the old FTL initialization path.
-2. QEMU owns KVM slot deletion, including zero-size deletion and invalidation.
+2. FEMU owns external slot deletion and reservation release; ordinary DER
+   aliases continue to use QEMU listener allocation and deletion.
 3. Clearing frees entries and ghost history; destruction frees the hash and
    every queue. No tree is abandoned or recreated.
 4. Admission and eviction counters are centralized for every policy.
@@ -266,11 +309,21 @@ boot/enumeration and long-running workloads require separate system testing.
 Qtests program actual PCI bridges and HDM registers, then access the CXL fixed
 memory window. They cover all four policies at one and sixteen ways, data
 readback, dirty programming, media timing, invalid configuration, no-FTL mode,
-qtest fallback, mapping revocation and teardown. Standalone tests cover
+qtest fallback, mapping revocation, mixed-window forwarding, topology
+refusal, overlay ownership and teardown. A stock-KVM qtest exercises reserved
+slot exclusion, capacity accounting and reuse after release. Standalone tests cover
 policy ordering, S3-FIFO promotion and ghost admission, full-width keys,
 repeated clearing and dirty accounting over all policies at one through
 thirty-two ways. The memslot qtests validate QEMU mappings. Cylon is deliberately inert under
 qtest, so they cannot validate custom-kernel compatibility.
+
+The full FEMU qtest group also contains `cxl-type3-realize-retry` and
+`cxl-type3-bg-unplug`. These plain Type-3 lifecycle regressions require the
+reverted upstream fixes and fail with localization alone. The corresponding
+FEMU tests, including background reset followed by unplug, exercise the local
+protections. Stock-KVM reservation testing does not validate Cylon's custom
+slot flag, SPT mappings, memory-map revocation or guest system-RAM operation;
+those still require a fixed Cylon host and guest runs.
 
 With the fixed kernel, a nested run under KASAN (18 guest lifetimes, region
 teardown and re-creation, 1 and 4 vCPUs) reported nothing, and a bare-metal run
