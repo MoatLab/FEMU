@@ -14043,6 +14043,9 @@ static void femu_test_cxl_wait(void *obj, void *data,
     uint64_t invalidations;
     bool invalidate = data == (void *)2;
     bool unplug = data == (void *)3;
+    bool other = data == (void *)4 || data == (void *)5;
+    /* 5: a one-page cache, whose only entry the media write's access holds. */
+    bool cached = data == (void *)5;
 
     g_assert_cmpint(fd, >=, 0);
     memcpy(rom, reset, sizeof(reset));
@@ -14054,9 +14057,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
     qts = qtest_initf(FEMU_CXL_MACHINE
         "-accel tcg,thread=multi -S -bios %s -smp %u %s"
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=0,program-ns=1000000000", quoted, invalidate ? 2 : 1,
+        "cache-pages=%s,program-ns=1000000000", quoted, invalidate ? 2 : 1,
         unplug ? "-global cxl-rp.power_controller_present=on "
-        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off " : "");
+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off " : "",
+        cached ? "1,cache-ways=1" : "0");
     femu_cxl_decode(qts);
     qtest_writew(qts, 0x500, 31);
     qtest_writel(qts, 0x502, 0x508);
@@ -14078,6 +14082,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
         qtest_writeb(qts, 0x1000 + sizeof(setup) - 5, 0x12);
         qtest_memwrite(qts, 0x1200, sipi, sizeof(sipi));
         qtest_memwrite(qts, 0x7000, ap, sizeof(ap));
+    }
+    if (cached) {
+        /* The vCPU's miss must then evict this dirty page: a 1 s program. */
+        qtest_writeb(qts, FEMU_CXL_WINDOW + 2 * 4096, 0x77);
     }
     qtest_qmp_assert_success(qts, "{'execute':'cont'}");
     deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
@@ -14116,6 +14124,18 @@ static void femu_test_cxl_wait(void *obj, void *data,
         femu_cxl_unplug(qts);
         g_assert_cmpint(g_get_monotonic_time() - start, <,
                         G_TIME_SPAN_SECOND / 2);
+    } else if (other) {
+        /*
+         * An access to another page must not wait for the media write: it
+         * returns while the write still sleeps, so its marker is still 1.
+         * With the cache, the held page is not evicted; the access goes
+         * uncached.
+         */
+        g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW + 4096), ==, 0);
+        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
+        if (cached) {
+            g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), ==, 1);
+        }
     } else if (data) {
         /* A concurrent access must queue, not trip the IO recursion guard. */
         g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW), ==, 0x5a);
@@ -16902,6 +16922,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-wait", "femu", femu_test_cxl_wait, NULL);
     qos_add_test("cxl-wait-unplug", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)3 });
+    qos_add_test("cxl-wait-other-page", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)4 });
+    qos_add_test("cxl-wait-held-victim", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)5 });
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);

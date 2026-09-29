@@ -98,32 +98,39 @@ library can be built independently of QEMU.
 
 CXL MMIO arrives on vCPU threads under the BQL; qtest and management operations
 also hold it. The BQL protects payload copies, cache membership, counters and
-DER mappings. A per-device operation gate serializes accesses, cache flushes
-and teardown across waits. Gate waiters release the BQL using a condition
-variable. Invalidation never waits: configuration writes, component writes and
+DER mappings. A per-device operation gate is shared by accesses and taken
+alone by cache flushes, CCA commands, linked-NVMe drops and way changes; those
+wait for the accesses in progress, and new accesses wait for them. Gate
+waiters release the BQL using a condition variable. Invalidation never waits: configuration writes, component writes and
 CCI commands run inside another owner's re-entrancy guard, and blocking there
 would refuse unrelated accesses from other vCPUs. It revokes DER mappings at
 once and bumps the read-only `invalidations` generation; an access in flight
 does not install a mapping when the generation moved during its media delay. An access holds an object reference until completion;
 teardown marks the device closing and prevents new work. It never waits for
 the gate either: a guest unplug arrives inside the host bridge's dispatch
-guard. If an operation holds the gate, teardown revokes and disables DER,
-finishes the PCI teardown, and leaves the media (DER state, FTL worker, labels
-and I/O log) to be freed by that operation as it leaves the gate; the
-operation then skips its payload copy and reports a transaction error.
+guard. If an operation or any access holds the gate, teardown revokes and
+disables DER, finishes the PCI teardown, and leaves the media (DER state, FTL
+worker, labels and I/O log) to be freed by the last one to leave the gate;
+those operations then skip their payload copy and report a transaction error.
 A waiter re-routes and re-translates after entering the gate and completes at
 the current DPA, or with random data when media became disabled, as the parent
 Type-3 device would; only an address that no longer decodes fails.
 
 The requesting thread drops the BQL both while handing work to the FTL worker
-and during the remaining media delay, while retaining the operation gate.
-Other vCPUs can run and access other devices; accesses to this device queue
-behind the current operation. The worker mutex protects the single stack-owned
-request and completion, and is released before reacquiring the BQL. The worker
-alone modifies FTL/NAND state. Cache iterators, entries, payload and access
-latency accounting stay stable because flush waits for the gate, teardown
-defers freeing them to the gate holder, and invalidation touches only DER
-mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
+and during the remaining media delay, while keeping its share of the gate.
+An access holds the pages it touches, in ascending order, until it completes:
+accesses to one page stay ordered, a second miss to a page waits for the first
+fill instead of repeating it, and misses to different pages wait for the
+media together. Eviction leaves a held page
+resident, and the access that needed the room goes uncached; a dirty victim
+is held while its write-back drops the BQL. The worker mutex protects the
+queue of stack-owned requests and their completions, and is released before
+reacquiring the BQL. The worker alone modifies FTL/NAND state and takes
+requests in arrival order; the NAND model overlaps them where they reach
+different LUNs. Each access, flush, way change and CCA chunk accumulates its
+own media time. Cache iterators, entries and payload stay stable because
+flush waits for the gate, teardown defers freeing them to the last holder,
+and invalidation touches only DER mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
 It dispatches FEMU media directly, so no parent window guard remains engaged
 across a BQL wait. The component-register overlay revokes and then enters the
 parent register callback without waiting. Plain Type-3 callbacks retain their normal guard.

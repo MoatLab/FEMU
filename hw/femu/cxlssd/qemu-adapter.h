@@ -11,7 +11,18 @@ typedef struct FemuCxlWork {
     NvmeRequest req;
     uint64_t latency;
     bool done;
+    QSIMPLEQ_ENTRY(FemuCxlWork) next;
 } FemuCxlWork;
+
+/* One access, flush or eviction chain: the media time it has accumulated. */
+typedef struct FemuCxlOp {
+    FemuCxlMedia *s;
+    uint64_t ns;
+    bool held;
+    /* Pages this operation holds itself; its prefetch may evict them. */
+    const uint64_t *own;
+    unsigned nown;
+} FemuCxlOp;
 
 /* Pages a linked NVMe command replaced. */
 typedef struct FemuCxlRange {
@@ -19,7 +30,7 @@ typedef struct FemuCxlRange {
     uint64_t last;
 } FemuCxlRange;
 
-typedef struct FemuCxlMedia {
+struct FemuCxlMedia {
     FemuCtrl *ctrl;
     NvmeNamespace ns;
     SsdDramBackend backend;
@@ -66,6 +77,11 @@ typedef struct FemuCxlMedia {
     char *der;
     bool cylon_kernel_ack;
     bool busy;
+    /* Accesses sharing the gate, and operations waiting to take it alone. */
+    uint64_t accesses;
+    uint64_t exclusive_waiters;
+    /* Pages held by accesses and write-backs in progress. */
+    GHashTable *pages;
     /* Threads waiting for the gate, and how often it has been taken. */
     uint32_t waiters;
     uint64_t entries;
@@ -82,11 +98,10 @@ typedef struct FemuCxlMedia {
     uint64_t media_reads;
     uint64_t media_writes;
     uint64_t media_full;
-    uint64_t access_ns;
     QemuMutex lock;
     QemuCond wake;
     QemuThread worker;
-    FemuCxlWork *work;
+    QSIMPLEQ_HEAD(, FemuCxlWork) work;
     bool stopping;
     bool started;
     bool cca_enabled;
@@ -110,12 +125,14 @@ typedef struct FemuCxlMedia {
     /* The device went away first and left its FTL to the controller. */
     bool nvme_owns_ftl;
     uint64_t nvme_drops;
-} FemuCxlMedia;
+};
 
 void femu_cxl_enter(FemuCxlMedia *s);
 void femu_cxl_leave(FemuCxlMedia *s);
+void femu_cxl_enter_access(FemuCxlMedia *s);
+void femu_cxl_leave_access(FemuCxlMedia *s);
 void femu_cxl_delay(uint64_t ns);
-bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write);
+bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);

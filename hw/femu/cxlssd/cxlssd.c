@@ -5,25 +5,33 @@
 #include "qemu/error-report.h"
 #include "qemu-adapter.h"
 
-/* BQL protects the gate; waiters must let the current operation finish. */
+/*
+ * BQL protects the gate. Accesses share it, so misses to different pages
+ * wait for the media together; flush, invalidation and teardown take it
+ * alone, after the accesses in progress, and new accesses wait for them.
+ */
 void femu_cxl_enter(FemuCxlMedia *s)
 {
     s->waiters++;
-    while (s->busy) {
+    s->exclusive_waiters++;
+    while (s->busy || s->accesses) {
         qemu_cond_wait_bql(&s->idle);
     }
+    s->exclusive_waiters--;
     s->waiters--;
     s->entries++;
     s->busy = true;
 }
 
-void femu_cxl_leave(FemuCxlMedia *s)
+/* The last one out of the gate runs what was deferred to it. */
+static void cxl_gate_idle(FemuCxlMedia *s)
 {
     /* Teardown deferred by an unplug runs while the gate is still held. */
     if (s->release) {
         void (*release)(FemuCxlMedia *) = s->release;
 
         s->release = NULL;
+        s->busy = true;
         release(s);
     }
     s->busy = false;
@@ -31,6 +39,30 @@ void femu_cxl_leave(FemuCxlMedia *s)
     if (s->nvme_kick && s->nvme_bh) {
         s->nvme_kick = false;
         qemu_bh_schedule(s->nvme_bh);
+    }
+}
+
+void femu_cxl_leave(FemuCxlMedia *s)
+{
+    cxl_gate_idle(s);
+    qemu_cond_broadcast(&s->idle);
+}
+
+void femu_cxl_enter_access(FemuCxlMedia *s)
+{
+    s->waiters++;
+    while (s->busy || s->exclusive_waiters) {
+        qemu_cond_wait_bql(&s->idle);
+    }
+    s->waiters--;
+    s->entries++;
+    s->accesses++;
+}
+
+void femu_cxl_leave_access(FemuCxlMedia *s)
+{
+    if (!--s->accesses) {
+        cxl_gate_idle(s);
     }
     qemu_cond_broadcast(&s->idle);
 }
@@ -61,12 +93,13 @@ static void *cxl_worker(void *opaque)
 
     qemu_mutex_lock(&s->lock);
     while (!s->stopping) {
-        FemuCxlWork *work = s->work;
+        FemuCxlWork *work = QSIMPLEQ_FIRST(&s->work);
 
         if (!work) {
             qemu_cond_wait(&s->wake, &s->lock);
             continue;
         }
+        QSIMPLEQ_REMOVE_HEAD(&s->work, next);
         if (s->first_touch_program &&
             work->req.cmd.opcode == NVME_CMD_READ &&
             s->ns.ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
@@ -74,22 +107,26 @@ static void *cxl_worker(void *opaque)
         }
         work->latency = bb_ftl_process_req(s->ctrl, &s->ns, &work->req);
         work->done = true;
-        s->work = NULL;
         qemu_cond_broadcast(&s->wake);
     }
     qemu_mutex_unlock(&s->lock);
     return NULL;
 }
 
-bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
+/*
+ * Requests from different accesses queue for the worker in arrival order; the
+ * NAND model overlaps them where they reach different LUNs.
+ */
+bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
 {
+    FemuCxlMedia *s = op->s;
     FemuCxlWork work = {
         .req = {
             .cmd.opcode = write ? NVME_CMD_WRITE : NVME_CMD_READ,
             .ns = &s->ns,
             .slba = lpn * 8,
             .nlb = 8,
-            .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s->access_ns,
+            .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + op->ns,
         },
     };
     uint64_t writes;
@@ -99,8 +136,7 @@ bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
     }
     bql_unlock();
     qemu_mutex_lock(&s->lock);
-    assert(!s->work);
-    s->work = &work;
+    QSIMPLEQ_INSERT_TAIL(&s->work, &work, next);
     qemu_cond_broadcast(&s->wake);
     while (!work.done) {
         qemu_cond_wait(&s->wake, &s->lock);
@@ -110,7 +146,7 @@ bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
     qemu_mutex_unlock(&s->lock);
     bql_lock();
     s->media_ns += work.latency;
-    s->access_ns += work.latency;
+    op->ns += work.latency;
     s->media_writes = writes;
     if (work.req.cmd.opcode == NVME_CMD_READ) {
         s->media_reads++;
@@ -118,17 +154,48 @@ bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
     return work.req.status == NVME_SUCCESS;
 }
 
+static bool cxl_op_holds(FemuCxlOp *op, uint64_t lpn)
+{
+    unsigned i;
+
+    for (i = 0; i < op->nown; i++) {
+        if (op->own[i] == lpn) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 {
-    FemuCxlMedia *s = opaque;
+    FemuCxlOp *op = opaque;
+    FemuCxlMedia *s = op->s;
+    bool own = cxl_op_holds(op, e->lpn);
+    bool ok;
 
+    /* Another access holds the page; keep it and let the caller go uncached. */
+    if (!own && g_hash_table_contains(s->pages, &e->lpn)) {
+        op->held = true;
+        return false;
+    }
     if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
         femu_cxl_der_remove(&s->direct, e->lpn);
     } else if (femu_cxl_der_sample(&s->direct, e->lpn)) {
         /* The ratio keeps the page mapped; charge writes made through it. */
         e->dirty = true;
     }
-    return !e->dirty || s->free_writeback || femu_cxl_media(s, e->lpn, true);
+    if (!e->dirty || s->free_writeback) {
+        return true;
+    }
+    /* The write-back drops the BQL; accesses to the page wait until it ends. */
+    if (own) {
+        return femu_cxl_media(op, e->lpn, true);
+    }
+    g_hash_table_add(s->pages, &e->lpn);
+    ok = femu_cxl_media(op, e->lpn, true);
+    g_hash_table_remove(s->pages, &e->lpn);
+    qemu_cond_broadcast(&s->idle);
+    return ok;
 }
 
 /*
@@ -201,19 +268,36 @@ static void cxl_media_full(FemuCxlMedia *s)
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write)
 {
+    FemuCxlOp op = { .s = s };
+    MemTxResult result = MEMTX_ERROR;
     uint64_t generation = s->invalidations;
+    uint64_t pages[2];
     uint64_t first = dpa / 4096;
     uint64_t last;
     uint64_t lpn;
     int64_t start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t remaining;
+    unsigned holds = 0;
+    unsigned i;
 
     if (!size || size > sizeof(*data) || dpa >= s->backend.size ||
         size > s->backend.size - dpa) {
         return MEMTX_ERROR;
     }
     last = (dpa + size - 1) / 4096;
-    s->access_ns = 0;
+    /*
+     * Hold the pages, in ascending order, so accesses to a page stay ordered
+     * and a second miss to it waits for the first fill instead of repeating it.
+     */
+    for (lpn = first; lpn <= last; lpn++) {
+        pages[holds] = lpn;
+        while (g_hash_table_contains(s->pages, &pages[holds])) {
+            qemu_cond_wait_bql(&s->idle);
+        }
+        g_hash_table_add(s->pages, &pages[holds++]);
+    }
+    op.own = pages;
+    op.nown = holds;
     for (lpn = first; lpn <= last; lpn++) {
         FemuCxlEntry *e = femu_cxl_cache_find(&s->cache, lpn);
 
@@ -238,16 +322,22 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             if (s->cache.nsets && to_media && !uncached) {
                 s->cca.pinned_set_misses++;
             }
-            if (!femu_cxl_media(s, lpn, write && to_media)) {
+            if (!femu_cxl_media(&op, lpn, write && to_media)) {
                 /* Report failed reads; a failed program only loses timing. */
                 if (!(write && to_media)) {
-                    return MEMTX_ERROR;
+                    goto out;
                 }
                 cxl_media_full(s);
             }
             if (!to_media) {
-                e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, s);
-                if (!e) {
+                op.held = false;
+                e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, &op);
+                /* The victim was held: this access goes uncached. */
+                if (!e && op.held) {
+                    if (write && !femu_cxl_media(&op, lpn, true)) {
+                        cxl_media_full(s);
+                    }
+                } else if (!e) {
                     cxl_media_full(s);
                 }
             }
@@ -272,7 +362,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     continue;
                 }
                 prefetched = femu_cxl_cache_insert(&s->cache, next,
-                                                   femu_cxl_evict, s);
+                                                   femu_cxl_evict, &op);
                 /* A prefetch is optional; never fail the demand access. */
                 if (!prefetched) {
                     break;
@@ -286,14 +376,13 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
         s->cache_entries = g_hash_table_size(s->cache.entries);
     }
-    remaining = s->access_ns -
-                (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
+    remaining = op.ns - (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
     if (remaining > 0) {
         femu_cxl_delay(remaining);
     }
     /* Unplugged during the wait: the backend may already serve a new device. */
     if (s->closing) {
-        return MEMTX_ERROR;
+        goto out;
     }
     if (write) {
         memcpy((uint8_t *)s->backend.logical_space + dpa, data, size);
@@ -314,8 +403,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     if (s->io_log) {
         int n = fprintf(s->io_log, "%" PRId64 ",%c,%" PRIu64 ",%u,%" PRIu64
-                        "\n", start, write ? 'W' : 'R', dpa, size,
-                        s->access_ns);
+                        "\n", start, write ? 'W' : 'R', dpa, size, op.ns);
 
         s->io_log_bytes += MAX(n, 0);
         /* Close at the limit; the guest can open a new file. */
@@ -325,7 +413,13 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             s->log_dropped++;
         }
     }
-    return MEMTX_OK;
+    result = MEMTX_OK;
+out:
+    for (i = 0; i < holds; i++) {
+        g_hash_table_remove(s->pages, &pages[i]);
+    }
+    qemu_cond_broadcast(&s->idle);
+    return result;
 }
 
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
@@ -503,7 +597,7 @@ void femu_cxl_nvme_bh(void *opaque)
     uint64_t done;
     guint i;
 
-    if (s->busy) {
+    if (s->busy || s->accesses) {
         s->nvme_kick = true;
         return;
     }
@@ -606,6 +700,7 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     ssd_init(n, &s->ns);
     qemu_mutex_init(&s->lock);
     qemu_cond_init(&s->wake);
+    QSIMPLEQ_INIT(&s->work);
     s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
     s->stopping = false;
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,

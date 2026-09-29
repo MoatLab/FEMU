@@ -33,6 +33,8 @@ static int cca_drop_batch(CcaOp *op);
 
 struct CcaOp {
     FemuCxlMedia *s;
+    /* Media time of the chunk under way. */
+    FemuCxlOp media;
     struct cca_ctrl_cmd_s cmd;
     uint64_t start;
     uint64_t end;
@@ -59,9 +61,9 @@ static bool cca_abandoned(FemuCxlMedia *s, uint32_t epoch)
 }
 
 /* The media delay of a chunk, cut short once the command is abandoned. */
-static void cca_delay(FemuCxlMedia *s, uint32_t epoch)
+static void cca_delay(FemuCxlMedia *s, uint64_t ns, uint32_t epoch)
 {
-    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s->access_ns;
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
     int64_t remaining;
 
     bql_unlock();
@@ -104,7 +106,7 @@ static bool cca_enter(CcaOp *op)
         femu_cxl_leave(s);
         return false;
     }
-    s->access_ns = 0;
+    op->media = (FemuCxlOp) { .s = s };
     return true;
 }
 
@@ -120,8 +122,8 @@ static void cca_leave(CcaOp *op)
 {
     FemuCxlMedia *s = op->s;
 
-    if (s->access_ns) {
-        cca_delay(s, op->epoch);
+    if (op->media.ns) {
+        cca_delay(s, op->media.ns, op->epoch);
     }
     s->cache_entries = g_hash_table_size(s->cache.entries);
     femu_cxl_leave(s);
@@ -291,9 +293,10 @@ static bool cca_pins_fit(FemuCxlMedia *s, uint64_t start, uint64_t end)
 /* Eviction that also counts the programs it issues. */
 static bool cca_evict(void *opaque, FemuCxlEntry *e)
 {
-    FemuCxlMedia *s = opaque;
+    FemuCxlOp *op = opaque;
+    FemuCxlMedia *s = op->s;
 
-    if (!femu_cxl_evict(s, e)) {
+    if (!femu_cxl_evict(op, e)) {
         return false;
     }
     /* femu_cxl_evict samples direct-mapped dirty state before programming. */
@@ -319,10 +322,10 @@ static int cca_pin_page(CcaOp *op, uint64_t lpn)
     e = g_hash_table_lookup(c->entries, &lpn);
     if (!e) {
         /* Fill as a demand miss would, without counting a guest miss. */
-        if (!femu_cxl_media(s, lpn, false)) {
+        if (!femu_cxl_media(&op->media, lpn, false)) {
             return -EIO;
         }
-        e = femu_cxl_cache_insert(c, lpn, cca_evict, s);
+        e = femu_cxl_cache_insert(c, lpn, cca_evict, &op->media);
         if (!e) {
             return -EIO;
         }
@@ -388,7 +391,7 @@ static int cca_drop_batch(CcaOp *op)
         if (!e) {
             continue;
         }
-        if (!femu_cxl_cache_remove(c, e, cca_evict, s)) {
+        if (!femu_cxl_cache_remove(c, e, cca_evict, &op->media)) {
             /* NAND refused the write; it stays resident, dirty and pinned. */
             status = -EIO;
             break;
