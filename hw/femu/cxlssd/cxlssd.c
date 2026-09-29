@@ -91,6 +91,7 @@ bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
             .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s->access_ns,
         },
     };
+    uint64_t writes;
 
     if (!s->ftl) {
         return true;
@@ -103,11 +104,13 @@ bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
     while (!work.done) {
         qemu_cond_wait(&s->wake, &s->lock);
     }
+    /* A linked controller's FTL thread updates this under @lock. */
+    writes = ssd_nand_write_pages(s->ns.ssd);
     qemu_mutex_unlock(&s->lock);
     bql_lock();
     s->media_ns += work.latency;
     s->access_ns += work.latency;
-    s->media_writes = ssd_nand_write_pages(s->ns.ssd);
+    s->media_writes = writes;
     if (work.req.cmd.opcode == NVME_CMD_READ) {
         s->media_reads++;
     }
@@ -496,7 +499,9 @@ void femu_cxl_nvme_bh(void *opaque)
     }
     g_array_free(ranges, true);
     s->cache_entries = g_hash_table_size(s->cache.entries);
+    qemu_mutex_lock(&s->lock);
     s->media_writes = ssd_nand_write_pages(s->ns.ssd);
+    qemu_mutex_unlock(&s->lock);
     qatomic_store_release(&s->nvme_done, done);
     femu_cxl_leave(s);
 }
