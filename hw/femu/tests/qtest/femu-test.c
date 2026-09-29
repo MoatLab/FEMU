@@ -13614,6 +13614,45 @@ static void femu_test_cxl_topology(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/*
+ * Two decoders leave a hole in HPA: the page after the first decoder's last
+ * DPA lives 256 MiB further up. A prefetch must not map it at the HPA
+ * right after the demand page.
+ */
+static void femu_test_cxl_prefetch_decoders(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(
+        "-machine q35,cxl=on -m 128M "
+        "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+        "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=1G "
+        "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+        "-object memory-backend-ram,id=mem,size=512M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "prefetch-degree=1");
+    uint64_t regs = FEMU_CXL_REGS;
+    uint64_t hole = FEMU_CXL_WINDOW + 0x10000000;
+    uint64_t upper = FEMU_CXL_WINDOW + 0x20000000;
+
+    femu_cxl_decode(qts);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER1_BASE_LO, upper & 0xffffffff);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER1_BASE_HI, upper >> 32);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER1_SIZE_LO, 0x10000000);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER1_SIZE_HI, 0);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER1_CTRL, 0x200);
+    g_assert_cmphex(qtest_readl(qts, regs + A_CXL_HDM_DECODER1_CTRL) & 0x400,
+                    ==, 0x400);
+    /* The last page of decoder 0 prefetches DPA 256 MiB. */
+    g_assert_cmphex(qtest_readq(qts, hole - 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-inserts"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1);
+    qtest_writeq(qts, upper, 0xabc);
+    g_assert_cmphex(qtest_readq(qts, upper), ==, 0xabc);
+    /* Nothing decodes the hole, so it must not show that data. */
+    g_assert_cmphex(qtest_readq(qts, hole), ==, 0);
+    qtest_quit(qts);
+}
+
 /* A femu-cxl-ssd below a CXL switch, routed by the upstream port decoder. */
 static void femu_test_cxl_switch(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -16297,6 +16336,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-topology-memslot", "femu", femu_test_cxl_topology,
                  &(QOSGraphTestOptions) { .arg = (void *)"memslot" });
     qos_add_test("cxl-switch", "femu", femu_test_cxl_switch, NULL);
+    qos_add_test("cxl-prefetch-decoders", "femu",
+                 femu_test_cxl_prefetch_decoders, NULL);
     qos_add_test("cxl-overlay-scope", "femu", femu_test_cxl_overlay_scope,
                  NULL);
     qos_add_test("cxl-slot-reservation", "femu",

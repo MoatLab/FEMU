@@ -1814,9 +1814,19 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
     FemuCxlMap *map;
     FemuCxlMap *victim = NULL;
     CXLFixedWindow *fw;
+    uint64_t check;
 
     /* As in Cylon, a ratio adds to cached mappings instead of limiting them. */
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
+        return false;
+    }
+    /*
+     * Callers derive @hpa for pages they did not access, such as prefetches;
+     * several decoders or a DPA skip can put that page elsewhere or nowhere.
+     */
+    if (!adapter_translate(&der->dev->parent_obj, hpa & ~4095ULL, 4096,
+                           &check) || check != (dpa & ~4095ULL)) {
+        der->fallbacks++;
         return false;
     }
     if (!der->cylon && g_hash_table_contains(der->maps, &lpn)) {
