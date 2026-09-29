@@ -53,8 +53,7 @@ its contents come from the backend and are not cleared: they read as zero only
 when the backend is zero-filled, as a fresh `memory-backend-ram` is. Writes to
 resident pages become dirty. Dirty eviction or `flush-cache=true` issues a
 real FTL write; without a cache, each write goes straight to the FTL. The guest
-access waits for the returned media completion cost using a sleep, not a busy
-loop. This is volatile memory, not a persistence contract for guest CPU cache
+access waits for the returned media completion cost by spinning on the realtime clock with the BQL released. This is volatile memory, not a persistence contract for guest CPU cache
 flush instructions.
 
 `ssd_init()`, `bb_ftl_process_req()`, `ssd_free()` and the shared NAND media are
@@ -185,7 +184,7 @@ This detects absent remaps. SPT areas are unmapped after successful slot deletio
 The published CylonLinux 6.4.6 corrupts host memory with this interface: slot
 tables were freed with their shadow pages and again by the slot destructor,
 allocation failures were ignored, and the ioctl could remap over live PTEs.
-The fixes are on the `fix/dualslot-lifetime` branch of MoatLab/Cylon. Besides
+The fixes are on MoatLab/Cylon `master`. Besides
 ownership (one shadow page per slot table under a per-slot lock, headers freed
 after RCU, 4 KiB leaves only, tables allocated while the slot is prepared),
 two fixes are needed for DER to work at all: the first access to a page is
@@ -210,16 +209,15 @@ address mask covers bits 12 through 51. All fields have named constants.
 
 EPT MMIO has W/X without R (binary 110), the guest page address and split
 memslot-generation fields (bits 3..10 and 52..62). The prototype's `0x586`
-contains generation 0xb0; it is not a timeless MMIO mask. The implementation
-waits for a KVM fault to populate a leaf and saves that exact kernel-created
+contains generation 0xb0; it is not a timeless MMIO mask. For a populated leaf, the implementation saves the exact kernel-created
 MMIO entry, including runtime generation and host reserved-address mitigation
 bits. It restores that entry on revocation; the kernel refreshes a stale MMIO
-generation itself. Unit tests check the fixed encodings, the full generation
+generation itself. Empty leaves are admitted by CAS and restored to zero. Unit tests check the fixed encodings, the full generation
 range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 
 Each admission checks the window offset, SPT index and resolved physical
 address, rechecks that the corresponding huge-page PFN has not changed, then
-compare-and-swaps the observed MMIO entry to a direct entry and invokes SET
+compare-and-swaps the observed empty or MMIO entry to a direct entry and invokes SET
 to flush. A lost exchange leaves the page on MMIO. Zero, MMIO and frozen
 `REMOVED_SPTE` entries are KVM revocations: mark the cache entry dirty and drop
 the tracking record without disabling Cylon or overwriting KVM's entry.
@@ -302,7 +300,7 @@ include a mutation restoring the no-op and demonstrate the missing program.
 ## Scope and validation limits
 
 The Cylon Caching API, its ivshmem device and control ring are omitted.
-Prefetching, concurrent NVMe access to the same medium, persistent CXL storage,
+Concurrent NVMe access to the same medium, persistent CXL storage,
 dynamic capacity and migration are outside this implementation. Guest kernel
 boot/enumeration and long-running workloads require separate system testing.
 
@@ -317,11 +315,9 @@ repeated clearing and dirty accounting over all policies at one through
 thirty-two ways. The memslot qtests validate QEMU mappings. Cylon is deliberately inert under
 qtest, so they cannot validate custom-kernel compatibility.
 
-The full FEMU qtest group also contains `cxl-type3-realize-retry` and
-`cxl-type3-bg-unplug`. These plain Type-3 lifecycle regressions require the
-reverted upstream fixes and fail with localization alone. The corresponding
-FEMU tests, including background reset followed by unplug, exercise the local
-protections. Stock-KVM reservation testing does not validate Cylon's custom
+The FEMU lifecycle tests, including background reset followed by unplug,
+exercise the local protections. Plain Type-3 lifecycle fixes remain outside
+this implementation. Stock-KVM reservation testing does not validate Cylon's custom
 slot flag, SPT mappings, memory-map revocation or guest system-RAM operation;
 those still require a fixed Cylon host and guest runs.
 
@@ -334,3 +330,134 @@ load latency on a cached page was about 3.0 us with `der=off`, 105 ns with
 2.5 MiB/s, 345 MiB/s and 2.4 GiB/s. With `cylon`, EPT dirty bits kept media
 writes to the pages actually written. Not covered: long workloads, hugetlb
 migration during a run, and guests that online the range as system RAM.
+
+## Experiment controls
+
+`lsa-control=on` enables the Cylon guest command convention:
+`cxl read-labels mem0 -s COMMAND -O ARGUMENT`. It defaults off. With it on,
+FEMU supplies a zero-initialized internal 128 MiB LSA; no label memdev is
+needed or accepted. This accommodates every supported page-count argument
+at the maximum capacity. The buffer is volatile and loses its contents at
+unplug. With control off, an optional ordinary `lsa` memory backend uses the
+parent's normal label semantics. Reads with control on return the requested
+length, with byte zero reporting success (0) or an invalid command/argument
+(1); `control-status` reports the same result over QOM. Mailbox bounds errors
+still use the standard CXL status. Get-LSA on the primary mailbox leaves DER
+intact so inspecting statistics does not destroy experiment mappings; other
+CCI commands/transports retain conservative invalidation.
+
+Every command is also available through QOM: set `control-argument`, then
+set `control-command`. QOM errors report invalid arguments directly. These
+host controls work with `lsa-control=off` too.
+
+| Size/command | Argument and effect |
+| --- | --- |
+| 1 | Append a statistics snapshot tagged with the argument, then reset cache counters |
+| 2 | Revoke mappings and flush/clear cached pages |
+| 3 | Cylon ways selector: 0..4 means 1, 2, 4, 8, 16 ways; 5 means fully associative |
+| 5 | Set prefetch degree |
+| 7 | Set prefetch stride |
+| 9, 11 | Flush/clear the cache, as in Cylon; keep the configured DER mode |
+| 13, 15 | Start a new per-access log / close it |
+| 17 | Dump current tracked direct mappings and Cylon SPTE values |
+| 90, 80 | Set direct ratio / revoke and reset it |
+| 91, 81 | Enable / disable QEMU memory-region read/write trace events |
+
+The trace command numbering follows Cylon's implementation (91 starts,
+81 stops). The QEMU events are global and use the configured trace backend;
+`-D FILE` selects the log-backend destination. If `tracefs-dir` is set,
+commands also write its `tracing_on` file without invoking a shell.
+`log-dir` selects the directory for `cxlssd-stats.log`, `cxlssd-io-N.log` and
+`cxlssd-spt.log`; it defaults to the working directory. An unavailable output
+warns once per device and the device continues. I/O logs contain realtime
+start timestamp, R/W, byte DPA, byte length and modeled media nanoseconds.
+Direct CPU hits do not enter QEMU and cannot appear in these logs.
+
+QOM exposes `read-hits`, `read-misses`, `write-hits`, `write-misses`,
+`cache-entries` and `prefetch-inserts`, alongside existing aggregate/cache,
+media and DER counters. `stats-reset=true` resets cache and prefetch event
+counters, preserving membership, media totals and DER totals. The previous
+snapshot remains in `last-read-hits`, `last-read-misses`, `last-write-hits`,
+`last-write-misses`, `last-inserts`, `last-evictions`, `last-entries` and
+`last-prefetch-inserts`. Runtime way changes preserve event totals.
+
+`prefetch-degree` defaults to zero and `prefetch-stride` to one. Both are
+runtime QOM properties bounded by media page count. Only a miss triggers
+prefetch, after inserting the demanded page: insert the interval
+`[lpn + stride, lpn + stride + degree)`, skipping resident and out-of-range
+pages. Prefetch performs no NAND read. Dirty victims still follow the chosen
+writeback policy. Prefetched pages are eligible for DER. A small cache may
+evict the demanded page during prefetch, matching the insertion order.
+
+`cache-ways` is a runtime QOM property with no 1024-way cap. It must divide
+`cache-pages`; set it equal to `cache-pages` for fully associative operation.
+Changing it drains accesses, revokes mappings, flushes dirty pages and rebuilds
+the cache. All policies support one way. Resident and ghost membership use
+hash tables, queue-end removal is constant time, and CLOCK/S3-FIFO eviction
+is amortized constant time rather than a scan proportional to associativity
+on every operation. The large standalone test uses 1,258,291 entries.
+
+## Geometry and timing compatibility
+
+Capacity may be 256 MiB through 120 GiB in 256 MiB increments. The upper limit
+comes from sixty 4 MiB SPT chunks at eight bytes per 4 KiB media page, and
+includes Cylon's 48/96 GiB configurations. `ftl=off` avoids allocating an
+unused NAND model. With the FTL on, payload and NAND metadata both consume
+host memory; capacity acceptance is not a claim of tested sustained operation
+at those sizes.
+
+The following realize-time properties feed the existing bbssd FTL:
+`channels` (4), `luns-per-channel` (4), `pages-per-block` (256),
+`blocks-per-plane` (0 = automatic overprovisioning), `channel-ns` (0),
+`gc-threshold` (75) and `gc-threshold-high` (95). Sectors remain 512 bytes,
+eight per page, with one plane per LUN. Axis limits follow the FTL's PPA
+fields; aggregate sectors must fit its signed integer totals. Explicit NAND
+capacity must cover media capacity. Thresholds must lie in 1..100, with the
+high threshold at least the low threshold. Geometry without spare space can
+run out of writable pages; automatic geometry reserves extra space.
+
+`cylon-first-touch-program=on` charges a NAND program instead of a read on
+first access to an unmapped page. `cylon-free-writeback=on` suppresses NAND
+programming on dirty cache eviction/flush. Both default off and exist to
+reproduce Cylon paper experiments; enabling them changes the media model.
+The default continues to program dirty eviction and reads unmapped pages
+without a NAND operation. Media waits spin on the realtime clock outside
+the BQL and retain the device operation gate. This removes sleep timer slack
+but consumes a host CPU while waiting. The virtual clock cannot measure this
+host wait; qtests validate modeled timing and BQL release independently.
+
+## Direct ratios
+
+`der-ratio` is a runtime QOM property equivalent to commands 90/80. Zero resets
+it. Values 50, 75, 90, 95, 97, 98, 99, 995 and 999 match Cylon's periodic
+selection (exclude each 2nd, 4th, 10th, 20th, 33rd, 50th, 100th, 200th or
+1000th page, starting with page zero); 100 selects every page. In particular,
+97 means 32/33, and 995/999 mean 99.5/99.9 percent. Other values are rejected.
+This selection spans the entire device independently of cache membership.
+Memslot mode coalesces adjacent selected pages into aliases; slot pressure
+can leave part of the selection on MMIO, reflected in `der-mapped` and
+`der-fallbacks`. Cylon mode installs the dual slot asynchronously if necessary
+and applies the selection to its leaves. An empty leaf can be installed with
+CAS and restored to zero on revocation without inventing an MMIO generation;
+existing MMIO leaves retain their exact kernel encoding. The fixed kernel's
+preallocated 4 KiB leaf ownership is required for this operation.
+
+Ratio mappings are independent of cache residency; cache eviction does not
+remove a selected ratio mapping. Direct accesses have no NAND timing and
+uncached direct writes have no modeled NAND writeback, matching this Cylon
+experiment mode. Reset, decoder changes, flush and teardown revoke mappings;
+reapply a ratio after those operations to restore its entire selection.
+With DER off or unavailable, the ratio remains queryable but mappings stay
+inactive. `der-mapped`, not the requested ratio, is the activation evidence.
+Custom-kernel ratio installation, zero-leaf restoration and dirty revocation
+still require guest validation.
+
+`hw/femu/scripts/run-cxlssd.sh` exposes size, a default five-percent cache,
+fully associative or explicit ways, policy, prefetch, geometry, timings,
+GC, control/logging and compatibility switches through environment variables.
+For example, use `CXL_SIZE=96G CHANNELS=8 LUNS_PER_CHANNEL=8
+BLOCKS_PER_PLANE=1536 CACHE_POLICY=clock PREFETCH_DEGREE=3` and supply guest
+boot arguments. `DRY_RUN=1` prints the command. `CXL_BACKEND` can supply a
+shared/preallocated hugetlb backend configuration for Cylon; explicitly set
+`CYLON_KERNEL_ACK=on` only on the fixed host kernel. The script changes no
+host tuning, allocates no huge pages itself and never invokes sudo.
