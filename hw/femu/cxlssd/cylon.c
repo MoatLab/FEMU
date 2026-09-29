@@ -475,10 +475,10 @@ bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     page->sptep = sptep;
     g_hash_table_insert(der->maps, &page->lpn, page);
     der->mapped++;
-    if (!cylon_flush(hpa & ~(CYLON_PAGE_SIZE - 1))) {
-        cylon_fail(der);
-        return false;
-    }
+    /*
+     * No flush: the replaced MMIO entry is not present, so no TLB holds a
+     * translation from it. KVM does not flush when a fault fills such an entry.
+     */
     der->remaps++;
     return true;
 }

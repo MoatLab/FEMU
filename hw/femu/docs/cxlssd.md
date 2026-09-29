@@ -178,8 +178,10 @@ range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 
 Each admission checks the window offset, SPT index and resolved physical
 address, rechecks that the corresponding huge-page PFN has not changed, then
-compare-and-swaps the observed MMIO entry to a direct entry and invokes SET
-to flush. A lost exchange leaves the page on MMIO. Zero, MMIO and frozen
+compare-and-swaps the observed MMIO entry to a direct entry. That entry is
+not present, so no TLB holds a translation from it and nothing is flushed, as
+KVM does not flush when a fault fills a non-present entry. A lost exchange
+leaves the page on MMIO. Zero, MMIO and frozen
 `REMOVED_SPTE` entries are KVM revocations: mark the cache entry dirty and drop
 the tracking record without disabling Cylon or overwriting KVM's entry.
 Flush before retiring that record because a kernel zap may precede completion
