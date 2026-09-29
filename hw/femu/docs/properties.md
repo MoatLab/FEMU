@@ -309,6 +309,7 @@ marked "event" are cleared by `stats-reset`; the rest keep counting.
 | `der-mapped` | read uint64 | Pages currently mapped for direct guest access. |
 | `der-remaps` | read uint64 | Successfully installed direct page mappings. |
 | `der-revocations` | read uint64 | Direct page mappings removed. |
+| `der-quiet-revocations` | read uint64 | Cylon revocations of entries whose accessed bit was still clear, done without a TLB flush. |
 | `der-replacements` | read uint64 | Memslot cache aliases displaced by a hotter page; each is also one remap and one revocation. |
 | `der-fallbacks` | read uint64 | Refused mapping attempts and device disablements: a full alias budget, a page whose HPA does not decode to that DPA, no eligible window, and a direct ratio that does not fit the budget, including each retry of one waiting to be mapped again. |
 | `cca-commands` | read uint64 | Event. Caching API commands completed, whatever their status. |

@@ -23,8 +23,10 @@
 #define CYLON_MMIO_GEN_LOW UINT64_C(0xff)
 #define CYLON_MMIO_GEN_HIGH UINT64_C(0x7ff00)
 #define CYLON_MMIO_VALUE (CYLON_EPT_WRITE | CYLON_EPT_EXEC)
+#define CYLON_EPT_AD (CYLON_EPT_ACCESSED | CYLON_EPT_DIRTY)
+/* A and D start clear and are the CPU's to set. */
 #define CYLON_DIRECT_FLAGS (CYLON_EPT_READ | CYLON_EPT_WRITE | \
-    CYLON_EPT_EXEC | CYLON_EPT_WB | CYLON_EPT_IPAT | CYLON_EPT_ACCESSED | \
+    CYLON_EPT_EXEC | CYLON_EPT_WB | CYLON_EPT_IPAT | \
     CYLON_MMU_PRESENT | CYLON_HOST_WRITABLE | CYLON_MMU_WRITABLE)
 
 #define CYLON_REMOVED_SPTE UINT64_C(0x5a0)
@@ -60,7 +62,8 @@ static inline bool cylon_spte_take_dirty(uint64_t *sptep, uint64_t direct,
     uint64_t old = __atomic_load_n(sptep, __ATOMIC_SEQ_CST);
 
     for (;;) {
-        if ((old & ~CYLON_EPT_DIRTY) != direct) {
+        /* The CPU may have set A since the entry was installed. */
+        if ((old & ~CYLON_EPT_AD) != direct) {
             return false;
         }
         if (!(old & CYLON_EPT_DIRTY)) {
@@ -79,6 +82,17 @@ static inline bool cylon_spte_take_dirty(uint64_t *sptep, uint64_t direct,
 static inline uint64_t cylon_direct_spte(uint64_t pa)
 {
     return pa | CYLON_DIRECT_FLAGS;
+}
+
+/* Whether @spte is our direct entry for @pa, whatever A and D the CPU set. */
+static inline bool cylon_spte_is_direct(uint64_t spte, uint64_t pa)
+{
+    return (spte & ~CYLON_EPT_AD) == cylon_direct_spte(pa);
+}
+
+static inline bool cylon_spte_is_readonly_direct(uint64_t spte, uint64_t pa)
+{
+    return (spte & ~CYLON_EPT_AD) == cylon_spte_readonly(cylon_direct_spte(pa));
 }
 
 static inline uint64_t cylon_mmio_spte(uint64_t gpa, uint64_t generation)

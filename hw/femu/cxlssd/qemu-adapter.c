@@ -1545,6 +1545,9 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-revocations",
                                    &s->direct.revocations, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-quiet-revocations",
+                                   &s->direct.quiet_revocations,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-replacements",
@@ -2748,8 +2751,7 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         return false;
     }
     if (page) {
-        if (page->sptep != sptep ||
-            (old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
+        if (page->sptep != sptep || !cylon_spte_is_direct(old, pa)) {
             cylon_fail(der);
             return false;
         }
@@ -2837,8 +2839,20 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
         cylon_drop(der, page, true);
         return;
     }
-    if ((old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
+    if (!cylon_spte_is_direct(old, pa)) {
         cylon_fail(der);
+        return;
+    }
+    /*
+     * A clear: no page walk has used the entry since it was installed, so no
+     * TLB holds a translation from it, and D is clear too. Swap in the MMIO
+     * entry without flushing; if the CPU sets A first, the exchange fails and
+     * the full revocation below runs.
+     */
+    if (!(old & CYLON_EPT_ACCESSED) &&
+        cylon_spte_install(page->sptep, old, page->mmio)) {
+        der->quiet_revocations++;
+        cylon_drop(der, page, false);
         return;
     }
     gpa = c->window->base + lpn * CYLON_PAGE_SIZE;
@@ -2849,7 +2863,7 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
             cylon_drop(der, page, true);
             return;
         }
-        if ((old & ~CYLON_EPT_DIRTY) != cylon_direct_spte(pa)) {
+        if (!cylon_spte_is_direct(old, pa)) {
             cylon_fail(der);
             return;
         }
@@ -2860,8 +2874,7 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
     }
     old = qatomic_read(page->sptep);
     while (!cylon_spte_revoked(old)) {
-        if ((old & ~CYLON_EPT_DIRTY) !=
-            cylon_spte_readonly(cylon_direct_spte(pa))) {
+        if (!cylon_spte_is_readonly_direct(old, pa)) {
             cylon_fail(der);
             return;
         }

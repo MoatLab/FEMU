@@ -31,6 +31,7 @@ typedef struct FemuCxlDer {
     uint64_t replacements;
     uint64_t remaps;
     uint64_t revocations;
+    uint64_t quiet_revocations;
     uint64_t fallbacks;
     uint64_t probes;
     uint64_t mapped;

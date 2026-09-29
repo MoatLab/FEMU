@@ -66,7 +66,18 @@ static void test_spte_transitions(void)
     spte = mmio;
     assert(cylon_spte_install(&spte, mmio, direct));
     assert(spte == direct);
+    /* A clear: revocation swaps the entry back without a flush. */
+    assert(!(spte & CYLON_EPT_ACCESSED));
+    assert(cylon_spte_install(&spte, direct, mmio));
+    assert(spte == mmio);
+    spte = direct | CYLON_EPT_ACCESSED;
+    assert(cylon_spte_is_direct(spte, 0x200000));
+    assert(!cylon_spte_install(&spte, direct, mmio));
     spte |= CYLON_EPT_DIRTY;
+    assert(cylon_spte_is_direct(spte, 0x200000));
+    assert(!cylon_spte_is_direct(spte, 0x400000));
+    assert(cylon_spte_is_readonly_direct(cylon_spte_readonly(spte), 0x200000));
+    assert(!cylon_spte_is_readonly_direct(spte, 0x200000));
     assert(!cylon_spte_install(&spte, direct, mmio));
     assert(cylon_spte_readonly(spte) & CYLON_EPT_DIRTY);
     assert(!(cylon_spte_readonly(spte) &
@@ -86,6 +97,10 @@ static void test_spte_take_dirty(void)
     assert(cylon_spte_take_dirty(&spte, direct, &dirty) && dirty);
     assert(spte == direct);
     assert(cylon_spte_take_dirty(&spte, direct, &dirty) && !dirty);
+    /* The CPU sets A on first use; the entry is still ours and keeps A. */
+    spte = direct | CYLON_EPT_AD;
+    assert(cylon_spte_take_dirty(&spte, direct, &dirty) && dirty);
+    assert(spte == (direct | CYLON_EPT_ACCESSED));
     /* Revoked, or another page's mapping: nothing is changed. */
     spte = CYLON_REMOVED_SPTE;
     assert(!cylon_spte_take_dirty(&spte, direct, &dirty));
@@ -189,10 +204,10 @@ int main(void)
     test_spte_take_dirty();
     test_pfn_current();
 
-    /* spte.h: RWX, WB, IPAT, A, MMU-present, host/MMU writable. */
-    assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345977));
-    assert(!(cylon_direct_spte(0x12345000) & CYLON_EPT_DIRTY));
-    assert((cylon_direct_spte(0x12345000) | CYLON_EPT_DIRTY) ==
+    /* spte.h: RWX, WB, IPAT, MMU-present, host/MMU writable; A, D clear. */
+    assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345877));
+    assert(!(cylon_direct_spte(0x12345000) & CYLON_EPT_AD));
+    assert((cylon_direct_spte(0x12345000) | CYLON_EPT_AD) ==
            UINT64_C(0x600000012345b77));
     /* The prototype's 0x586 encodes generation 0xb0, not a fixed mask. */
     assert(cylon_mmio_spte(0x110001000, 0xb0) == UINT64_C(0x110001586));
