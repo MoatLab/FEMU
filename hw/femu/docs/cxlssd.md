@@ -75,10 +75,9 @@ existing NVMe poller DMA rules are unchanged.
 The `der` string selects `off` (the default), `memslot`, or `cylon`. Other
 values, including the former boolean spelling `on`, fail property validation.
 `der=cylon` additionally requires `cylon-kernel-ack=on` (default off), including
-on hosts where activation would fall back. This acknowledges that the host
-kernel has been reviewed and fixed to set `role.dual_mode` for dual-mode leaf
-pages, including failed concurrent child installation. It is required until
-that host lifetime defect is fixed; the property does not prove a kernel fix.
+on hosts where activation would fall back. It states that the host runs a Cylon
+kernel with the dual-slot fixes described under "Host kernel" below; the device
+cannot verify that, and the published kernel is unsafe without them.
 `off` performs no probe and prints no DER message. `memslot` uses QEMU RAM
 aliases and the ordinary KVM listener without any Cylon ioctl dependency; qtest
 can exercise these mappings directly. All modes expose read-only QOM
@@ -121,8 +120,8 @@ to the verified hugetlb payload, never this faulting backing. The slot must
 cover exactly the window and backend size, and its listener record must match
 both range and backing before GET or any mapping update. The first access
 schedules a main-loop callback; it does not pause vCPUs inside MMIO. That
-callback pauses vCPUs before registration because the published kernel
-publishes a slot before initializing its auxiliary SPT storage. Teardown can
+callback pauses vCPUs before registration, because the published kernel
+publishes a slot before allocating its SPT storage. Teardown can
 cancel a pending install even while the callback waits for vCPUs. The callback
 retains its window reference, and detached Cylon state is freed after pending
 installation and RCU flatview readers have finished.
@@ -136,18 +135,27 @@ Installation explicitly checks the sixty-entry ioctl limit before slot creation.
 Returned count, pointers, offsets and lengths must describe a contiguous,
 nonoverlapping SPT covering exactly the slot. `/proc/self/smaps` must report
 `pf` for each exact VMA; there is no sentinel write or pre-ioctl page fault.
-This detects absent remaps, but the kernel still needs to propagate remap
-errors, including partial failures. SPT areas are unmapped before slot deletion.
-Kernel allocation failures are not propagated
-by its slot-creation routine; userspace cannot fully defend against that kernel
-bug. The supplied checkout has a separate lifetime defect: its dual-slot child
-creation calls `tdp_mmu_init_child_sp()` without setting `role.dual_mode`, while
-`tdp_mmu_free_sp()` uses that bit to decide whether to free the slot-owned SPT
-page. The slot destructor also frees that storage. The kernel owner must fix
-and validate this ownership path before a Cylon bare-metal run; QEMU cannot
-repair kernel SPT lifetime through these two ioctls. This implementation does
-not modify the host kernel. Both the device and harness require explicit kernel-review acknowledgement;
-the harness passes `cylon-kernel-ack=on` only for acknowledged Cylon launches.
+This detects absent remaps. SPT areas are unmapped before slot deletion.
+
+#### Host kernel
+
+The published CylonLinux 6.4.6 corrupts host memory with this interface: slot
+tables were freed with their shadow pages and again by the slot destructor,
+allocation failures were ignored, and the ioctl could remap over live PTEs.
+The fixes are on the `fix/dualslot-lifetime` branch of MoatLab/Cylon. Besides
+ownership (one shadow page per slot table under a per-slot lock, headers freed
+after RCU, 4 KiB leaves only, tables allocated while the slot is prepared),
+two fixes are needed for DER to work at all: the first access to a page is
+treated as MMIO (otherwise KVM's emulator writes the slot's backing instead of
+exiting), and existing tables are dropped when the slot is created (otherwise
+ordinary tables from before the slot stay linked and direct entries are never
+used). Nonzero `KVM_SET_SPTE_FLAG` operations are refused; only the flush
+remains.
+
+The fixed kernel still requires, and does not check: SMM disabled
+(`-machine smm=off`), identical CPUID on every vCPU (one TDP root role), and
+no move or flag change of the dual slot. Tables that were mapped to userspace
+are never freed: about 8 bytes per 4 KiB page of the window per slot.
 
 ### SPTE encoding, dirty tracking and revocation
 
@@ -262,8 +270,12 @@ repeated clearing and dirty accounting over all policies at one through
 thirty-two ways. The memslot qtests validate QEMU mappings. Cylon is deliberately inert under
 qtest, so they cannot validate custom-kernel compatibility.
 
-Bare-metal validation is still required on the public Cylon host kernel for
-ioctl compatibility, direct multi-vCPU traffic, TLB revocation, memslot
-pressure and performance. The listener integration, anonymous faulting slot, mapped SPT lifetime,
-permission/dirty transitions and multi-vCPU behavior still require validation
-on that host. Qtests and arithmetic unit tests do not establish those results.
+With the fixed kernel, a nested run under KASAN (18 guest lifetimes, region
+teardown and re-creation, 1 and 4 vCPUs) reported nothing, and a bare-metal run
+on a Xeon Gold 6548Y+ with a 256 MiB window and a 1024-page cache passed
+page-stride write/readback across two eviction cycles in every mode. Median
+load latency on a cached page was about 3.0 us with `der=off`, 105 ns with
+`memslot` and 105 ns with `cylon`; sequential reads of cached data ran at
+2.5 MiB/s, 345 MiB/s and 2.4 GiB/s. With `cylon`, EPT dirty bits kept media
+writes to the pages actually written. Not covered: long workloads, hugetlb
+migration during a run, and guests that online the range as system RAM.
