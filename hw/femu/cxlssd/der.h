@@ -20,6 +20,13 @@ typedef struct FemuCxlDer {
     GPtrArray *windows;
     uint64_t windows_generation;
     bool windows_valid;
+    /* One-page cache aliases, oldest first, for budget replacement. */
+    GQueue installed;
+    uint32_t replace_rate;
+    unsigned replace_backoff;
+    unsigned replace_clean;
+    int64_t replace_last;
+    uint64_t replacements;
     uint64_t remaps;
     uint64_t revocations;
     uint64_t fallbacks;
@@ -68,7 +75,8 @@ static inline bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn)
 
 void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
                        FemuCxlCache *cache);
-bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa);
+bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
+                      FemuCxlEntry *e);
 void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn);
 void femu_cxl_der_clear(FemuCxlDer *der);
 void femu_cxl_der_disable(FemuCxlDer *der);

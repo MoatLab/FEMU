@@ -146,10 +146,10 @@ void femu_cxl_nvme_mark(FemuCxlMedia *s, uint64_t dpa, uint64_t len)
 
 /* The media delay drops the BQL, so a decoder change may have intervened. */
 static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
-                    uint64_t dpa)
+                    uint64_t dpa, FemuCxlEntry *e)
 {
     if (s->invalidations != generation || s->closing ||
-        !femu_cxl_der_map(&s->direct, hpa, dpa)) {
+        !femu_cxl_der_map(&s->direct, hpa, dpa, e)) {
         return false;
     }
     /* Stores through the mapping never reach this device. */
@@ -233,7 +233,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     break;
                 }
                 s->prefetch_inserts++;
-                if (cxl_map(s, generation, next_hpa, next * 4096) &&
+                if (cxl_map(s, generation, next_hpa, next * 4096, NULL) &&
                     !s->direct.cylon) {
                     prefetched->dirty = true;
                 }
@@ -260,7 +260,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
 
         if ((e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
-            cxl_map(s, generation, hpa, dpa) &&
+            cxl_map(s, generation, hpa, dpa, e) &&
             !s->direct.cylon && e) {
             /* Direct writes cannot update metadata, so charge on eviction. */
             e->dirty = true;

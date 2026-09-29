@@ -14487,12 +14487,15 @@ static void femu_test_cxl_der_budget(void *obj, void *data,
     qtest_quit(qts);
 }
 
-/* Cached-hit MMIO accesses per second on pages that hold no alias. */
-static double femu_cxl_hit_rate(const char *der)
+/* Cached-hit accesses per second on pages that held no alias at first. */
+static double femu_cxl_hit_rate(const char *der, unsigned rate,
+                                uint64_t replacements)
 {
     QTestState *qts = qtest_initf(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=%s,"
-        "cache-pages=4096,cache-ways=1,ftl=off", der);
+        "cache-pages=4096,cache-ways=1,ftl=off,der-replace-rate=%u",
+        der, rate);
+    gint64 deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
     size_t len = 64 * 4096;
     g_autofree uint8_t *buf = g_malloc(len);
     uint64_t base = FEMU_CXL_WINDOW + 1100ULL * 4096;
@@ -14505,6 +14508,16 @@ static double femu_cxl_hit_rate(const char *der)
     for (i = 0; i < 1164; i++) {
         qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 4096, i);
     }
+    if (!strcmp(der, "memslot")) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1024);
+    }
+    /* Let the hot pages displace the oldest aliases before timing. */
+    while (femu_cxl_stat(qts, "der-replacements") < replacements) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        qtest_memread(qts, base, buf, len);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-replacements"), ==,
+                     replacements);
     if (!strcmp(der, "memslot")) {
         g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1024);
     }
@@ -14523,13 +14536,61 @@ static double femu_cxl_hit_rate(const char *der)
 static void femu_test_cxl_der_budget_rate(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
-    double off = femu_cxl_hit_rate("off");
-    double full = femu_cxl_hit_rate("memslot");
+    double off = femu_cxl_hit_rate("off", 0, 0);
+    double full = femu_cxl_hit_rate("memslot", 0, 0);
 
     g_test_message("hits/s: der=off %.0f, der=memslot with full budget %.0f",
                    off, full);
     /* A full budget must not make unmapped hits slower than plain MMIO. */
     g_assert_cmpfloat(full, >=, off * 0.8);
+}
+
+static void femu_test_cxl_der_replace_rate(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    double full = femu_cxl_hit_rate("memslot", 0, 0);
+    double replaced = femu_cxl_hit_rate("memslot", 1000, 64);
+
+    g_test_message("hits/s on a new hot set: kept aliases %.0f, "
+                   "replaced %.0f", full, replaced);
+    /* qtest's own overhead caps the gain, most of all under ASan. */
+    g_assert_cmpfloat(replaced, >, full * 1.25);
+}
+
+static void femu_test_cxl_der_replace(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "cache-pages=4096,ftl=off,der-replace-rate=1000");
+    uint64_t hot = FEMU_CXL_WINDOW + 2000ULL * 4096;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    for (i = 0; i < 1024; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 4096, i + 100);
+    }
+    qtest_writeq(qts, hot, 7);
+    /* Occasional misses on the direct path never displace a mapping. */
+    for (i = 0; i < 200; i++) {
+        g_assert_cmphex(qtest_readq(qts, hot), ==, 7);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-replacements"), ==, 0);
+    for (i = 0; i < 100; i++) {
+        qtest_readq(qts, hot);
+    }
+    /* The oldest alias made room; the budget itself never grows. */
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-replacements"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1024);
+    /* A store through the new alias survives its revocation... */
+    qtest_writeq(qts, hot, 8);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, hot), ==, 8);
+    /* ...and the displaced page kept what was written through it. */
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 100);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 4096), ==, 101);
+    qtest_quit(qts);
 }
 
 static uint64_t femu_cxl_stat_of(QTestState *qts, const char *id,
@@ -16061,6 +16122,9 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-der-budget", "femu", femu_test_cxl_der_budget, NULL);
     qos_add_test("cxl-der-budget-rate", "femu",
                  femu_test_cxl_der_budget_rate, NULL);
+    qos_add_test("cxl-der-replace", "femu", femu_test_cxl_der_replace, NULL);
+    qos_add_test("cxl-der-replace-rate", "femu",
+                 femu_test_cxl_der_replace_rate, NULL);
     qos_add_test("cxl-der-budget-shared", "femu",
                  femu_test_cxl_der_budget_shared, NULL);
     qos_add_test("cxl-ratio-restore", "femu", femu_test_cxl_ratio_restore,

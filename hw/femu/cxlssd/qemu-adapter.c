@@ -66,6 +66,18 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
  * dispatch map holds fewer than 4096 sections for the whole address space.
  */
 #define FEMU_CXL_DER_ALIASES 1024
+/*
+ * An alias add or removal rebuilds the flat view, about a millisecond with
+ * a full budget, and a KVM slot deletion kicks every vCPU. A page must have
+ * spent that much in MMIO exits before it may displace a mapping.
+ */
+#define FEMU_CXL_DER_HOT 256
+/*
+ * A displaced page coming back means churn and doubles the interval, up to
+ * 256 times; it halves again only after a run of new hot pages.
+ */
+#define FEMU_CXL_DER_BACKOFF 8
+#define FEMU_CXL_DER_CLEAN 8
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -1366,6 +1378,8 @@ static void cxl_init(Object *obj)
                                    &s->direct.revocations, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-replacements",
+                                   &s->direct.replacements, OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "flush-cache", NULL, cxl_flush);
     object_property_add_uint64_ptr(obj, "der-probes", &s->direct.probes,
                                    OBJ_PROP_FLAG_READ);
@@ -1427,6 +1441,8 @@ static const Property cxl_props[] = {
                        media.gc_threshold_high, 95),
     DEFINE_PROP_UINT64("channel-ns", FemuCxlSsd, media.channel_ns, 0),
     DEFINE_PROP_STRING("der", FemuCxlSsd, media.der),
+    DEFINE_PROP_UINT32("der-replace-rate", FemuCxlSsd,
+                       media.direct.replace_rate, 64),
     DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd,
                      media.cylon_kernel_ack, false),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),
@@ -1587,6 +1603,8 @@ typedef struct FemuCxlMap {
     uint64_t pages;
     MemoryRegion mr;
     MemoryRegion *container;
+    /* Node in FemuCxlDer.installed; data is NULL for ratio runs. */
+    GList link;
 } FemuCxlMap;
 
 void femu_cxl_der_fallback(FemuCxlDer *der, const char *reason)
@@ -1608,6 +1626,7 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
     der->cache = cache;
     der->maps = g_hash_table_new(g_int64_hash, g_int64_equal);
     der->windows = g_ptr_array_new();
+    g_queue_init(&der->installed);
     der->cylon = mode && !strcmp(mode, "cylon");
     if (der->cylon) {
         der->probes++;
@@ -1703,12 +1722,83 @@ static uint64_t der_alias_budget(void)
     return budget;
 }
 
-bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
+/* A unique name lets QOM add the child without probing indexes. */
+static FemuCxlMap *der_alias(FemuCxlDer *der, MemoryRegion *container,
+                             uint64_t offset, const char *kind, uint64_t lpn,
+                             uint64_t pages)
+{
+    MemoryRegion *ram =
+        host_memory_backend_get_memory(der->dev->parent_obj.hostvmem);
+    g_autofree char *name = g_strdup_printf("%s-%" PRIx64, kind, lpn);
+    FemuCxlMap *map = g_new0(FemuCxlMap, 1);
+
+    map->lpn = lpn;
+    map->pages = pages;
+    map->container = container;
+    memory_region_init_alias(&map->mr, OBJECT(der->dev), name, ram,
+                             lpn * 4096, pages * 4096);
+    /* QEMU owns slot allocation, revocation and TLB invalidation. */
+    memory_region_add_subregion_overlap(container, offset, &map->mr, 1);
+    g_hash_table_insert(der->maps, &map->lpn, map);
+    der_aliases++;
+    der->mapped += pages;
+    der->remaps += pages;
+    return map;
+}
+
+/*
+ * With the budget full, let a page that keeps missing the direct path
+ * displace the oldest cache alias of this device, at a bounded rate.
+ * Accesses through an alias never reach QEMU, so installation order is
+ * the only recency available.
+ */
+static bool der_replace_due(FemuCxlDer *der, FemuCxlEntry *e)
+{
+    int64_t now;
+
+    if (!e || !der->replace_rate || ++e->der_hits < FEMU_CXL_DER_HOT ||
+        g_queue_is_empty(&der->installed)) {
+        return false;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    return !der->replace_last ||
+           now - der->replace_last >= (NANOSECONDS_PER_SECOND /
+                                       der->replace_rate) <<
+                                      der->replace_backoff;
+}
+
+/* A hot set larger than the budget only rotates; back off when it does. */
+static void der_displace(FemuCxlDer *der, FemuCxlMap *victim, FemuCxlEntry *e)
+{
+    /* A lookup, not an access: leave the hit counters and recency alone. */
+    FemuCxlEntry *old = g_hash_table_lookup(der->cache->entries, &victim->lpn);
+
+    if (e->der_displaced) {
+        der->replace_backoff = MIN(der->replace_backoff + 1,
+                                   FEMU_CXL_DER_BACKOFF);
+        der->replace_clean = 0;
+    } else if (der->replace_backoff &&
+               ++der->replace_clean == FEMU_CXL_DER_CLEAN) {
+        der->replace_backoff--;
+        der->replace_clean = 0;
+    }
+    e->der_displaced = false;
+    if (old) {
+        old->der_displaced = true;
+        old->der_hits = 0;
+    }
+    femu_cxl_der_remove(der, victim->lpn);
+    der->replace_last = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    der->replacements++;
+}
+
+bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
+                      FemuCxlEntry *e)
 {
     uint64_t lpn = dpa / 4096;
     FemuCxlMap *map;
+    FemuCxlMap *victim = NULL;
     CXLFixedWindow *fw;
-    MemoryRegion *ram;
 
     /* As in Cylon, a ratio adds to cached mappings instead of limiting them. */
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
@@ -1723,8 +1813,11 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     }
     /* A full budget is the common refusal; decide it before the window. */
     if (!der->cylon && !der_alias_budget()) {
-        der->fallbacks++;
-        return false;
+        if (!der_replace_due(der, e)) {
+            der->fallbacks++;
+            return false;
+        }
+        victim = g_queue_peek_head(&der->installed);
     }
     fw = der_window(der, hpa);
     if (!fw) {
@@ -1734,20 +1827,16 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     if (der->cylon) {
         return femu_cylon_map(der, fw, hpa, dpa);
     }
-    ram = host_memory_backend_get_memory(der->dev->parent_obj.hostvmem);
-    map = g_new0(FemuCxlMap, 1);
-    map->lpn = lpn;
-    map->pages = 1;
-    map->container = &fw->mr;
-    memory_region_init_alias(&map->mr, OBJECT(der->dev), "femu-cxl-hit",
-                              ram, lpn * 4096, 4096);
-    /* QEMU owns slot allocation, revocation and TLB invalidation. */
-    memory_region_add_subregion_overlap(map->container,
-                      (hpa & ~4095ULL) - fw->base, &map->mr, 1);
-    g_hash_table_insert(der->maps, &map->lpn, map);
-    der_aliases++;
-    der->mapped++;
-    der->remaps++;
+    /* One transaction, so the swap rebuilds the flat view once. */
+    memory_region_transaction_begin();
+    if (victim) {
+        der_displace(der, victim, e);
+    }
+    map = der_alias(der, &fw->mr, (hpa & ~4095ULL) - fw->base,
+                    "femu-cxl-hit", lpn, 1);
+    memory_region_transaction_commit();
+    map->link.data = map;
+    g_queue_push_tail_link(&der->installed, &map->link);
     return true;
 }
 
@@ -1764,8 +1853,6 @@ static uint64_t der_ratio_runs(uint64_t period, uint64_t pages)
 static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
 {
     FemuCxlDer *der = &dev->media.direct;
-    HostMemoryBackend *backend = dev->parent_obj.hostvmem;
-    MemoryRegion *ram = host_memory_backend_get_memory(backend);
     uint64_t pages = dev->media.backend.size / 4096;
     uint64_t period = femu_cxl_ratio_period(der->ratio);
     uint64_t runs = der_ratio_runs(period, pages);
@@ -1784,18 +1871,8 @@ static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
     for (run = 0; run < runs; run++) {
         uint64_t lpn = period == 1 ? 0 : run * period + 1;
         uint64_t end = period == 1 ? pages : MIN((run + 1) * period, pages);
-        FemuCxlMap *map = g_new0(FemuCxlMap, 1);
 
-        map->lpn = lpn;
-        map->pages = end - lpn;
-        map->container = &fw->mr;
-        memory_region_init_alias(&map->mr, OBJECT(dev), "femu-cxl-ratio",
-                                  ram, lpn * 4096, map->pages * 4096);
-        memory_region_add_subregion_overlap(&fw->mr, lpn * 4096, &map->mr, 1);
-        g_hash_table_insert(der->maps, &map->lpn, map);
-        der_aliases++;
-        der->mapped += map->pages;
-        der->remaps += map->pages;
+        der_alias(der, &fw->mr, lpn * 4096, "femu-cxl-ratio", lpn, end - lpn);
     }
     memory_region_transaction_commit();
     der->ratio_end = pages;
@@ -1916,6 +1993,9 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     }
     if (!map) {
         return;
+    }
+    if (map->link.data) {
+        g_queue_unlink(&der->installed, &map->link);
     }
     memory_region_del_subregion(map->container, &map->mr);
     g_hash_table_remove(der->maps, &lpn);

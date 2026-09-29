@@ -23,6 +23,10 @@ typedef struct FemuCxlEntry {
     uint64_t lpn;
     bool dirty;
     unsigned freq;
+    /* Hits served by MMIO while the direct-mapping budget was full. */
+    unsigned der_hits;
+    /* The page lost its direct mapping to a hotter one while cached. */
+    bool der_displaced;
     /* The entry's own node in the queue @queue, for O(1) removal. */
     GList *link;
     FemuCxlQueue queue;

@@ -131,8 +131,8 @@ cannot verify that, and the published kernel is unsafe without them.
 `off` performs no probe and prints no DER message. `memslot` uses QEMU RAM
 aliases and the ordinary KVM listener without any Cylon ioctl dependency; qtest
 can exercise these mappings directly. All modes expose read-only QOM
-`der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations` and
-`der-fallbacks`. Mapped is a current gauge; remaps and revocations count completed
+`der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations`,
+`der-replacements` and `der-fallbacks`. Mapped is a current gauge; remaps and revocations count completed
 page operations; fallbacks count rejected mapping attempts or device disablement.
 For Cylon, active becomes true only after installing and validating the slot.
 
@@ -142,6 +142,35 @@ decoding. Beyond the alias budget, additional pages stay on MMIO without reducin
 cache capacity. Every memslot-mapped entry is conservatively dirty because
 alias writes cannot notify cache metadata. Direct hits in either mode do not
 update CLOCK/S3-FIFO reference metadata or MMIO hit counters.
+
+### Memslot mapping limit
+
+Memslot mode maps at most 1024 pages at once as one-page aliases (4 MiB),
+shared by every FEMU CXL device and by ratio runs, and fewer under KVM when free
+memory slots run short (see "Direct ratios"). Each alias add or removal
+rebuilds the flat view of the whole address space, which costs about a
+millisecond when the budget is nearly full, and a KVM slot deletion kicks
+every vCPU. Once the budget is full, a cached page without an alias is served
+by MMIO at the same cost as with `der=off`; the refusal is a counter check
+that increments `der-fallbacks`.
+
+When the hot set moves, the aliases installed earlier may now hold cold
+pages. A cached page that has taken 256 MMIO hits while the budget was full
+replaces this device's oldest one-page cache alias, in one memory
+transaction. Accesses through an alias never reach QEMU, so installation
+order is the only recency available. `der-replace-rate` (default 64) caps
+replacements per second, and 0 disables them. When a displaced page comes
+back hot, the hot set is larger than the budget and replacement only rotates
+it, so each such return doubles the interval, up to 256 times, and eight
+promotions of new pages halve it again. Ratio runs are never replaced.
+`der-replacements` counts replacements; each is also one remap and one
+revocation. Revocation, dirty marking and NVMe link marking are the same as
+for any other alias.
+
+Prefer `der=cylon` when the pages that should be direct exceed about 1024:
+caches or hot sets larger than 4 MiB, and dense ratios on large devices. Its
+leaf mappings have no per-alias section cost. Memslot mode suits small hot
+sets and hosts without the fixed Cylon kernel.
 
 ### Cylon interface and memory ownership
 
