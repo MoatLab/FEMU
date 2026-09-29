@@ -32,6 +32,7 @@
 #include "system/cpus.h"
 #include "system/runstate.h"
 #include "spte.h"
+#include "trace/control.h"
 
 #define TYPE_FEMU_CXL_SSD "femu-cxl-ssd"
 OBJECT_DECLARE_SIMPLE_TYPE(FemuCxlSsd, FEMU_CXL_SSD)
@@ -49,6 +50,15 @@ static void (*parent_realize)(PCIDevice *dev, Error **errp);
 static void (*parent_exit)(PCIDevice *dev);
 static void (*parent_config_write)(PCIDevice *, uint32_t, uint32_t, int);
 static ResettablePhases parent_reset;
+static uint64_t (*parent_lsa_size)(CXLType3Dev *);
+static uint64_t (*parent_get_lsa)(CXLType3Dev *, void *, uint64_t, uint64_t);
+static void (*parent_set_lsa)(CXLType3Dev *, const void *, uint64_t, uint64_t);
+static void cxl_dump_spt(FemuCxlDer *der, FILE *file);
+static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp);
+static void cylon_ratio_revoke(FemuCxlDer *der);
+static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
+
+#define FEMU_CXL_LSA_SIZE (128 * MiB)
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -553,8 +563,14 @@ static const MemoryRegionOps adapter_component_ops = {
 
 static void adapter_pre_command(void *opaque)
 {
-    CXLType3Dev *dev = opaque;
+    CXLCCI *cci = opaque;
+    CXLType3Dev *dev = CXL_TYPE3(cci->d);
+    uint64_t command = dev->cxl_dstate.mbox_reg_state64[R_CXL_DEV_MAILBOX_CMD];
 
+    if (cci == &dev->cci && FEMU_CXL_SSD(dev)->media.lsa_control &&
+        (command & 0xffff) == 0x4102) {
+        return;
+    }
     object_ref(OBJECT(dev));
     cxl_invalidate(dev);
     object_unref(OBJECT(dev));
@@ -563,7 +579,7 @@ static void adapter_pre_command(void *opaque)
 static void adapter_cci_hook(CXLCCI *cci, CXLType3Dev *dev)
 {
     cci->pre_command = adapter_pre_command;
-    cci->pre_command_opaque = dev;
+    cci->pre_command_opaque = cci;
 }
 
 /* The upstream parent destroys only the primary mutex on exit. */
@@ -612,6 +628,7 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
         goto out;
     }
     s->access_ns = 0;
+    femu_cxl_der_clear(&s->direct);
     if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
@@ -628,8 +645,17 @@ static void cxl_stats_reset(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
 
+    object_ref(obj);
     femu_cxl_enter(s);
     if (value) {
+        s->snapshot[0] = s->read_hits;
+        s->snapshot[1] = s->read_misses;
+        s->snapshot[2] = s->write_hits;
+        s->snapshot[3] = s->write_misses;
+        s->snapshot[4] = s->cache.inserts;
+        s->snapshot[5] = s->cache.evictions;
+        s->snapshot[6] = s->cache_entries;
+        s->snapshot[7] = s->prefetch_inserts;
         s->read_hits = s->read_misses = 0;
         s->write_hits = s->write_misses = 0;
         s->cache.hits = s->cache.misses = 0;
@@ -637,6 +663,7 @@ static void cxl_stats_reset(Object *obj, bool value, Error **errp)
         s->prefetch_inserts = 0;
     }
     femu_cxl_leave(s);
+    object_unref(obj);
 }
 
 static void cxl_runtime_get(Object *obj, Visitor *v, const char *name,
@@ -662,7 +689,7 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
     object_ref(obj);
     femu_cxl_enter(s);
     if (!strcmp(name, "cache-ways")) {
-        if (!value || (s->cache_pages &&
+        if (!value || (s->started && s->cache_pages &&
                        (value > s->cache_pages || s->cache_pages % value))) {
             error_setg(errp, "cache-ways must divide cache-pages");
             goto out;
@@ -672,6 +699,7 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
             FemuCxlCache previous;
 
             s->access_ns = 0;
+            femu_cxl_der_clear(&s->direct);
             if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
                 error_setg(errp, "CXL cache cannot rebuild: NAND is full");
                 goto out;
@@ -708,6 +736,207 @@ out:
     object_unref(obj);
 }
 
+static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
+                          const char *name, const char *mode)
+{
+    g_autofree char *path = g_build_filename(dir && *dir ? dir : ".",
+                                            name, NULL);
+    FILE *file = fopen(path, mode);
+
+    if (!file && !s->log_warned) {
+        warn_report("CXL cannot open %s: %s", path, strerror(errno));
+        s->log_warned = true;
+    }
+    return file;
+}
+
+static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
+                         Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FILE *file;
+
+    if (!s->started || s->closing) {
+        error_setg(errp, "CXL control requires a realized device");
+        return;
+    }
+    switch (command) {
+    case 2:
+    case 9:
+    case 11:
+        cxl_flush(obj, true, errp);
+        return;
+    case 3:
+        if (argument > 5) {
+            error_setg(errp, "Cylon ways selector must be 0..5");
+            return;
+        }
+        object_property_set_int(obj, "cache-ways",
+                                argument == 5 ? s->cache_pages : 1 << argument,
+                                errp);
+        return;
+    case 5:
+    case 7:
+        object_property_set_int(obj, command == 5 ? "prefetch-degree" :
+                                "prefetch-stride", argument, errp);
+        return;
+    case 80:
+    case 90:
+        cxl_ratio(FEMU_CXL_SSD(obj), command == 80 ? 0 : argument, errp);
+        return;
+    }
+    object_ref(obj);
+    femu_cxl_enter(s);
+    switch (command) {
+    case 1:
+        file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
+        if (file) {
+            fprintf(file, "tag=%" PRIu64 " read=%" PRIu64 "/%" PRIu64
+                    " write=%" PRIu64 "/%" PRIu64 " insert=%" PRIu64
+                    " evict=%" PRIu64 " entries=%" PRIu64
+                    " prefetch=%" PRIu64 "\n", argument,
+                    s->read_hits, s->read_misses, s->write_hits,
+                    s->write_misses, s->cache.inserts, s->cache.evictions,
+                    s->cache_entries, s->prefetch_inserts);
+            fclose(file);
+        }
+        femu_cxl_leave(s);
+        cxl_stats_reset(obj, true, errp);
+        object_unref(obj);
+        return;
+    case 13:
+        if (s->io_log) {
+            fclose(s->io_log);
+        }
+        {
+            g_autofree char *name = g_strdup_printf("cxlssd-io-%u.log",
+                                                     ++s->log_sequence);
+
+            s->io_log = cxl_log_open(s, s->log_dir, name, "w");
+        }
+        break;
+    case 15:
+        if (s->io_log) {
+            fclose(s->io_log);
+            s->io_log = NULL;
+        }
+        break;
+    case 17:
+        file = cxl_log_open(s, s->log_dir, "cxlssd-spt.log", "w");
+        if (file) {
+            cxl_dump_spt(&s->direct, file);
+            fclose(file);
+        }
+        break;
+    case 81:
+    case 91:
+        s->tracing = command == 91;
+        trace_event_set_state_dynamic(
+            trace_event_name("memory_region_ops_read"), s->tracing);
+        trace_event_set_state_dynamic(
+            trace_event_name("memory_region_ops_write"), s->tracing);
+        if (s->tracefs_dir && *s->tracefs_dir) {
+            file = cxl_log_open(s, s->tracefs_dir, "tracing_on", "w");
+            if (file) {
+                fprintf(file, "%u\n", s->tracing);
+                fclose(file);
+            }
+        }
+        break;
+    default:
+        error_setg(errp, "unknown CXL control command %" PRIu64, command);
+        break;
+    }
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
+static void cxl_control_get(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint64_t value = !strcmp(name, "der-ratio") ? s->direct.ratio :
+                     !strcmp(name, "control-command") ? s->control_command :
+                                                        s->control_argument;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void cxl_control_set(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint64_t value;
+    Error *local_err = NULL;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    if (!strcmp(name, "der-ratio")) {
+        if (!s->started || s->closing) {
+            error_setg(errp, "der-ratio requires a realized device");
+            return;
+        }
+        cxl_ratio(FEMU_CXL_SSD(obj), value, errp);
+        return;
+    }
+    if (!strcmp(name, "control-argument")) {
+        s->control_argument = value;
+        return;
+    }
+    s->control_command = value;
+    cxl_command(obj, value, s->control_argument, &local_err);
+    s->control_status = local_err != NULL;
+    error_propagate(errp, local_err);
+}
+
+static uint64_t cxl_lsa_size(CXLType3Dev *dev)
+{
+    return FEMU_CXL_SSD(dev)->media.lsa_control ? FEMU_CXL_LSA_SIZE :
+                                               parent_lsa_size(dev);
+}
+
+static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
+                           uint64_t offset)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+    Error *err = NULL;
+
+    if (!size) {
+        return 0;
+    }
+    if (!s->lsa_control) {
+        return parent_get_lsa(dev, buf, size, offset);
+    }
+    if (!size || offset >= FEMU_CXL_LSA_SIZE ||
+        size > FEMU_CXL_LSA_SIZE - offset) {
+        return 0;
+    }
+    s->control_command = size;
+    s->control_argument = offset;
+    cxl_command(OBJECT(dev), size, offset, &err);
+    s->control_status = err != NULL;
+    error_free(err);
+    memcpy(buf, s->labels + offset, size);
+    ((uint8_t *)buf)[0] = s->control_status;
+    return size;
+}
+
+static void cxl_set_lsa(CXLType3Dev *dev, const void *buf, uint64_t size,
+                       uint64_t offset)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+
+    if (!s->lsa_control) {
+        if (size) {
+            parent_set_lsa(dev, buf, size, offset);
+        }
+    } else if (offset < FEMU_CXL_LSA_SIZE &&
+               size <= FEMU_CXL_LSA_SIZE - offset) {
+        memcpy(s->labels + offset, buf, size);
+    }
+}
+
 static void cxl_realize(PCIDevice *dev, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
@@ -728,7 +957,8 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         return;
     }
     if (!ct3d->hostvmem || ct3d->hostmem || ct3d->hostpmem ||
-        ct3d->dc.num_regions || ct3d->dc.host_dc || ct3d->lsa) {
+        ct3d->dc.num_regions || ct3d->dc.host_dc ||
+        (ct3d->lsa && s->lsa_control)) {
         error_setg(errp, "femu-cxl-ssd requires only volatile-memdev");
         return;
     }
@@ -742,6 +972,11 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     if (!size || size % (256 * MiB) || size > 120 * GiB) {
         error_setg(errp, "CXL media size must be a multiple of 256 MiB, "
                    "at most 120 GiB");
+        return;
+    }
+    if (s->prefetch_degree > size / 4096 ||
+        s->prefetch_stride > size / 4096) {
+        error_setg(errp, "prefetch value exceeds media pages");
         return;
     }
     if (!s->cache_ways || s->cache_ways > size / 4096 ||
@@ -771,6 +1006,9 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         error_propagate(errp, local_err);
         return;
     }
+    if (s->lsa_control) {
+        s->labels = g_malloc0(FEMU_CXL_LSA_SIZE);
+    }
     femu_cxl_start(s, memory_region_get_ram_ptr(mr), size, policy);
     femu_cxl_der_init(&s->direct, FEMU_CXL_SSD(dev), s->der, &s->cache);
     s->closing = false;
@@ -799,6 +1037,11 @@ static void cxl_exit(PCIDevice *dev)
     s->busy = true;
     femu_cxl_der_destroy(&s->direct);
     femu_cxl_stop(s);
+    g_clear_pointer(&s->labels, g_free);
+    if (s->io_log) {
+        fclose(s->io_log);
+        s->io_log = NULL;
+    }
     adapter_detach(FEMU_CXL_SSD(dev));
     memory_region_del_subregion(&CXL_TYPE3(dev)->cxl_cstate.crb.cache_mem,
                                 &FEMU_CXL_SSD(dev)->component_overlay);
@@ -883,6 +1126,31 @@ static void cxl_init(Object *obj)
     }
     qemu_cond_init(&s->idle);
     s->der = g_strdup("off");
+    object_property_add(obj, "der-ratio", "uint64", cxl_control_get,
+                        cxl_control_set, NULL, NULL);
+    object_property_add(obj, "control-command", "uint64", cxl_control_get,
+                        cxl_control_set, NULL, NULL);
+    object_property_add(obj, "control-argument", "uint64", cxl_control_get,
+                        cxl_control_set, NULL, NULL);
+    object_property_add_uint64_ptr(obj, "control-status", &s->control_status,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-read-hits", &s->snapshot[0],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-read-misses", &s->snapshot[1],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-write-hits", &s->snapshot[2],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-write-misses", &s->snapshot[3],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-inserts", &s->snapshot[4],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-evictions", &s->snapshot[5],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-entries", &s->snapshot[6],
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "last-prefetch-inserts",
+                                   &s->snapshot[7],
+                                   OBJ_PROP_FLAG_READ);
     s->cache_ways = 16;
     s->prefetch_stride = 1;
     object_property_add(obj, "cache-ways", "uint32", cxl_runtime_get,
@@ -892,7 +1160,8 @@ static void cxl_init(Object *obj)
     object_property_add(obj, "prefetch-stride", "uint32", cxl_runtime_get,
                         cxl_runtime_set, NULL, NULL);
     object_property_add_bool(obj, "stats-reset", NULL, cxl_stats_reset);
-    object_property_add_uint64_ptr(obj, "prefetch-inserts", &s->prefetch_inserts,
+    object_property_add_uint64_ptr(obj, "prefetch-inserts",
+                                   &s->prefetch_inserts,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cache-entries", &s->cache_entries,
                                    OBJ_PROP_FLAG_READ);
@@ -938,6 +1207,9 @@ static void cxl_init(Object *obj)
 static const Property cxl_props[] = {
     DEFINE_PROP_UINT32("cache-pages", FemuCxlSsd, media.cache_pages, 1024),
     DEFINE_PROP_STRING("cache-policy", FemuCxlSsd, media.cache_policy),
+    DEFINE_PROP_BOOL("lsa-control", FemuCxlSsd, media.lsa_control, false),
+    DEFINE_PROP_STRING("log-dir", FemuCxlSsd, media.log_dir),
+    DEFINE_PROP_STRING("tracefs-dir", FemuCxlSsd, media.tracefs_dir),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, media.ftl, true),
     DEFINE_PROP_BOOL("cylon-first-touch-program", FemuCxlSsd,
                      media.first_touch_program, false),
@@ -969,10 +1241,17 @@ static const VMStateDescription cxl_vmstate = {
 
 static void cxl_class_init(ObjectClass *oc, const void *data)
 {
+    CXLType3Class *cvc = CXL_TYPE3_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    parent_lsa_size = cvc->get_lsa_size;
+    parent_get_lsa = cvc->get_lsa;
+    parent_set_lsa = cvc->set_lsa;
+    cvc->get_lsa_size = cxl_lsa_size;
+    cvc->get_lsa = cxl_get_lsa;
+    cvc->set_lsa = cxl_set_lsa;
     parent_realize = pc->realize;
     parent_exit = pc->exit;
     pc->realize = cxl_realize;
@@ -1009,6 +1288,7 @@ type_init(cxl_register_types);
 
 typedef struct FemuCxlMap {
     uint64_t lpn;
+    uint64_t pages;
     MemoryRegion mr;
     MemoryRegion *container;
 } FemuCxlMap;
@@ -1092,6 +1372,9 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     CXLFixedWindow *fw;
     MemoryRegion *ram;
 
+    if (der->ratio && !femu_cxl_ratio_selected(der->ratio, lpn)) {
+        return false;
+    }
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
     }
@@ -1116,6 +1399,7 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     ram = host_memory_backend_get_memory(der->dev->parent_obj.hostvmem);
     map = g_new0(FemuCxlMap, 1);
     map->lpn = lpn;
+    map->pages = 1;
     map->container = &fw->mr;
     memory_region_init_alias(&map->mr, OBJECT(der->dev), "femu-cxl-hit",
                               ram, lpn * 4096, 4096);
@@ -1126,6 +1410,143 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     der->mapped++;
     der->remaps++;
     return true;
+}
+
+bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn)
+{
+    unsigned period;
+
+    switch (ratio) {
+    case 0:
+        return false;
+    case 50:
+        period = 2;
+        break;
+    case 75:
+        period = 4;
+        break;
+    case 90:
+        period = 10;
+        break;
+    case 95:
+        period = 20;
+        break;
+    case 97:
+        period = 33;
+        break;
+    case 98:
+        period = 50;
+        break;
+    case 99:
+        period = 100;
+        break;
+    case 995:
+        period = 200;
+        break;
+    case 999:
+        period = 1000;
+        break;
+    default:
+        return true;
+    }
+    return lpn % period != 0;
+}
+
+static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
+{
+    FemuCxlMedia *s = &dev->media;
+    FemuCxlDer *der = &s->direct;
+    GSList *windows;
+    GSList *it;
+    CXLFixedWindow *fw = NULL;
+    uint64_t lpn;
+    uint64_t pages = s->backend.size / 4096;
+
+    switch (ratio) {
+    case 0:
+    case 50:
+    case 75:
+    case 90:
+    case 95:
+    case 97:
+    case 98:
+    case 99:
+    case 100:
+    case 995:
+    case 999:
+        break;
+    default:
+        error_setg(errp, "unsupported Cylon direct ratio");
+        return;
+    }
+    object_ref(OBJECT(dev));
+    femu_cxl_enter(s);
+    if (der->cylon) {
+        cylon_ratio_revoke(der);
+    } else {
+        femu_cxl_der_clear(der);
+    }
+    der->ratio = ratio;
+    if (!ratio || (!der->available && !der->fast)) {
+        goto out;
+    }
+    windows = cxl_fmws_get_all_sorted();
+    for (it = windows; it; it = it->next) {
+        CXLFixedWindow *candidate = CXL_FMW(it->data);
+
+        if (der_window(der, candidate->base) == candidate &&
+            adapter_linear(&dev->parent_obj, candidate->base,
+                           s->backend.size)) {
+            fw = candidate;
+            break;
+        }
+    }
+    g_slist_free(windows);
+    if (!fw) {
+        error_setg(errp, "DER ratio requires a decoded linear window");
+        der->ratio = 0;
+        goto out;
+    }
+    if (der->cylon) {
+        cylon_ratio_apply(der, fw);
+        goto out;
+    }
+    for (lpn = 0; lpn < pages; lpn++) {
+        if (!femu_cxl_ratio_selected(ratio, lpn)) {
+            continue;
+        }
+        {
+            uint64_t end = lpn + 1;
+            FemuCxlMap *map;
+            MemoryRegion *ram;
+
+#ifdef CONFIG_KVM
+            if (kvm_enabled() && kvm_get_free_memslots() < 8) {
+                der->fallbacks++;
+                break;
+            }
+#endif
+            while (end < pages && femu_cxl_ratio_selected(ratio, end)) {
+                end++;
+            }
+            ram = host_memory_backend_get_memory(dev->parent_obj.hostvmem);
+            map = g_new0(FemuCxlMap, 1);
+            map->lpn = lpn;
+            map->pages = end - lpn;
+            map->container = &fw->mr;
+            memory_region_init_alias(&map->mr, OBJECT(dev), "femu-cxl-ratio",
+                                      ram, lpn * 4096, map->pages * 4096);
+            memory_region_add_subregion_overlap(&fw->mr, lpn * 4096,
+                                                 &map->mr, 1);
+            g_hash_table_insert(der->maps, &map->lpn, map);
+            der->mapped += map->pages;
+            der->remaps += map->pages;
+            lpn = end - 1;
+        }
+    }
+out:
+    femu_cxl_leave(s);
+    object_unref(OBJECT(dev));
 }
 
 void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
@@ -1142,9 +1563,9 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     memory_region_del_subregion(map->container, &map->mr);
     g_hash_table_remove(der->maps, &lpn);
     object_unparent(OBJECT(&map->mr));
+    der->mapped -= map->pages;
+    der->revocations += map->pages;
     g_free(map);
-    der->mapped--;
-    der->revocations++;
 }
 
 void femu_cxl_der_clear(FemuCxlDer *der)
@@ -1232,6 +1653,7 @@ struct FemuCylon {
     bool installed;
     bool locked;
     bool failed;
+    bool batch;
 };
 
 static void cylon_listener_begin(MemoryListener *listener);
@@ -1542,6 +1964,22 @@ static void cylon_install_bh(void *opaque)
     }
     object_unref(OBJECT(c->pending_window));
     c->installing = false;
+    if (!c->detached && c->installed) {
+        if (c->der->ratio) {
+            cylon_ratio_apply(c->der, c->window);
+        } else {
+            GHashTableIter it;
+            gpointer key;
+
+            g_hash_table_iter_init(&it, c->der->cache->entries);
+            while (c->installed && g_hash_table_iter_next(&it, &key, NULL)) {
+                uint64_t lpn = *(uint64_t *)key;
+
+                femu_cylon_map(c->der, c->window,
+                               c->window->base + lpn * 4096, lpn * 4096);
+            }
+        }
+    }
     resume_all_vcpus();
     if (c->detached) {
         g_free_rcu(c, rcu);
@@ -1636,11 +2074,12 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         }
         return true;
     }
-    /* First access installs the slot; a later KVM fault supplies its SPTE. */
-    if (!old || old == CYLON_REMOVED_SPTE) {
+    /* Empty leaves can be restored to zero without guessing a generation. */
+    if (old == CYLON_REMOVED_SPTE) {
         return false;
     }
-    if ((old & 7) != CYLON_MMIO_VALUE || (old & CYLON_MMU_PRESENT)) {
+    if (old && ((old & 7) != CYLON_MMIO_VALUE ||
+                (old & CYLON_MMU_PRESENT))) {
         cylon_fail(der);
         return false;
     }
@@ -1653,12 +2092,36 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     page->sptep = sptep;
     g_hash_table_insert(der->maps, &page->lpn, page);
     der->mapped++;
-    if (!cylon_flush(hpa & ~(CYLON_PAGE_SIZE - 1))) {
+    if (!c->batch && !cylon_flush(hpa & ~(CYLON_PAGE_SIZE - 1))) {
         cylon_fail(der);
         return false;
     }
     der->remaps++;
     return true;
+}
+
+static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw)
+{
+    FemuCylon *c = der->fast;
+    uint64_t lpn;
+
+    if (!c || c->failed) {
+        return;
+    }
+    if (!c->installed) {
+        femu_cylon_map(der, fw, fw->base, 0);
+        return;
+    }
+    c->batch = true;
+    for (lpn = 0; c->installed && lpn < c->size / 4096; lpn++) {
+        if (femu_cxl_ratio_selected(der->ratio, lpn)) {
+            femu_cylon_map(der, fw, fw->base + lpn * 4096, lpn * 4096);
+        }
+    }
+    c->batch = false;
+    if (c->installed && !cylon_flush(fw->base)) {
+        cylon_fail(der);
+    }
 }
 
 static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn)
@@ -1726,6 +2189,18 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn)
         return;
     }
     cylon_drop(der, page, false);
+}
+
+static void cylon_ratio_revoke(FemuCxlDer *der)
+{
+    while (g_hash_table_size(der->maps)) {
+        GHashTableIter it;
+        gpointer key;
+
+        g_hash_table_iter_init(&it, der->maps);
+        g_hash_table_iter_next(&it, &key, NULL);
+        cylon_remove_page(der, *(uint64_t *)key);
+    }
 }
 
 static void femu_cylon_clear(FemuCxlDer *der)
@@ -1803,6 +2278,14 @@ static void femu_cylon_destroy(FemuCxlDer *der)
     }
 }
 #else
+static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw)
+{
+}
+
+static void cylon_ratio_revoke(FemuCxlDer *der)
+{
+}
+
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
 {
     *reason = "Cylon requires KVM";
@@ -1826,3 +2309,29 @@ static void femu_cylon_clear(FemuCxlDer *der)
 {
 }
 #endif
+
+static void cxl_dump_spt(FemuCxlDer *der, FILE *file)
+{
+    GHashTableIter it;
+    gpointer value;
+
+    fprintf(file, "mode=%s ratio=%" PRIu64 " mapped=%" PRIu64 "\n",
+            der->cylon ? "cylon" : "memslot", der->ratio, der->mapped);
+    g_hash_table_iter_init(&it, der->maps);
+    while (g_hash_table_iter_next(&it, NULL, &value)) {
+#ifdef CONFIG_KVM
+        if (der->cylon) {
+            CylonPage *page = value;
+
+            fprintf(file, "lpn=%" PRIu64 " spte=%016" PRIx64 "\n",
+                    page->lpn, qatomic_read(page->sptep));
+        } else
+#endif
+        {
+            FemuCxlMap *map = value;
+
+            fprintf(file, "lpn=%" PRIu64 " pages=%" PRIu64 "\n",
+                    map->lpn, map->pages);
+        }
+    }
+}

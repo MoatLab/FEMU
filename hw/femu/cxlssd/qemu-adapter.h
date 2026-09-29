@@ -28,6 +28,18 @@ typedef struct FemuCxlMedia {
     uint64_t write_hits;
     uint64_t write_misses;
     uint64_t cache_entries;
+    bool lsa_control;
+    uint8_t *labels;
+    char *log_dir;
+    char *tracefs_dir;
+    FILE *io_log;
+    bool log_warned;
+    uint32_t log_sequence;
+    uint64_t control_argument;
+    uint64_t control_status;
+    uint64_t control_command;
+    bool tracing;
+    uint64_t snapshot[8];
     bool ftl;
     bool first_touch_program;
     bool free_writeback;

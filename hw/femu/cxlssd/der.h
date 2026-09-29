@@ -9,6 +9,7 @@ typedef struct FemuCxlSsd FemuCxlSsd;
 typedef struct FemuCxlDer {
     FemuCxlSsd *dev;
     GHashTable *maps;
+    uint64_t ratio;
     bool available;
     bool warned;
     bool cylon;
@@ -21,6 +22,7 @@ typedef struct FemuCxlDer {
     uint64_t mapped;
 } FemuCxlDer;
 
+bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn);
 void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
                        FemuCxlCache *cache);
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa);

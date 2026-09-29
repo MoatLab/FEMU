@@ -95,7 +95,9 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 {
     FemuCxlMedia *s = opaque;
 
-    femu_cxl_der_remove(&s->direct, e->lpn);
+    if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
+        femu_cxl_der_remove(&s->direct, e->lpn);
+    }
     return !e->dirty || s->free_writeback || cxl_media(s, e->lpn, true);
 }
 
@@ -174,14 +176,19 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     } else {
         memcpy(data, (uint8_t *)s->backend.logical_space + dpa, size);
     }
-    if (first == last && s->cache.nsets) {
+    if (first == last && (s->cache.nsets || s->direct.ratio)) {
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
 
-        if (e && femu_cxl_der_map(&s->direct, hpa, dpa) &&
-            !s->direct.cylon) {
+        if ((e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
+            femu_cxl_der_map(&s->direct, hpa, dpa) &&
+            !s->direct.cylon && e) {
             /* Direct writes cannot update metadata, so charge on eviction. */
             e->dirty = true;
         }
+    }
+    if (s->io_log) {
+        fprintf(s->io_log, "%" PRId64 ",%c,%" PRIu64 ",%u,%" PRIu64 "\n",
+                start, write ? 'W' : 'R', dpa, size, s->access_ns);
     }
     return MEMTX_OK;
 }

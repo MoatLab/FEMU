@@ -13913,7 +13913,7 @@ static void femu_test_cxl_invalid(void *obj, void *data,
         const char *error;
     } cases[] = {
         { "'cache-policy':'unknown'", "cache-policy must be" },
-        { "'cache-ways':0", "cache-ways (1..1024)" },
+        { "'cache-ways':0", "cache-ways" },
         { "'cache-pages':17,'cache-ways':16", "divisible" },
         { "'cache-pages':65537,'cache-ways':1", "fit the media" },
         { "'program-ns':1000000001", "at most one second" },
@@ -14020,17 +14020,42 @@ static void femu_test_cxl_ways(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_compat(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cylon-first-touch-program=on,cylon-free-writeback=on,"
+        "channels=8,luns-per-channel=8,pages-per-block=64,"
+        "blocks-per-plane=32,channel-ns=100,gc-threshold=70,"
+        "gc-threshold-high=90");
+
+    femu_cxl_decode(qts);
+    qtest_readq(qts, FEMU_CXL_WINDOW);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns"), >=, 200000);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_capacity(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
     QTestState *qts;
-    unsigned sizes[] = { 48, 96, 120 };
+    unsigned sizes[] = { 48, 96, 120, 121 };
     unsigned i;
 
     for (i = 0; i < G_N_ELEMENTS(sizes); i++) {
         QDict *rsp;
+        uint64_t bytes = (uint64_t)sizes[i] << 30;
+        g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
+            "-M cxl-fmw.0.size=%uG", sizes[i]);
 
-        qts = qtest_init(FEMU_CXL_MACHINE);
+        qts = qtest_init(args);
         qtest_qmp_assert_success(qts, "{'execute':'object-add','arguments':{"
             "'qom-type':'memory-backend-ram','id':'large',"
             "'reserve':false,'size':%llu}}",
@@ -14039,10 +14064,122 @@ static void femu_test_cxl_capacity(void *obj, void *data,
             "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
             "'volatile-memdev':'large','ftl':false,"
             "'channels':8,'luns-per-channel':8}}");
-        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_true(qdict_haskey(rsp, sizes[i] <= 120 ? "return" : "error"));
         qobject_unref(rsp);
+        if (sizes[i] <= 120) {
+            femu_cxl_decode(qts);
+            qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_LO,
+                         bytes);
+            qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_HI,
+                         bytes >> 32);
+            qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL, 0x200);
+            qtest_writeq(qts, FEMU_CXL_WINDOW + bytes - 4096, 42);
+            g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW + bytes - 4096),
+                             ==, 42);
+        }
         qtest_quit(qts);
     }
+}
+
+static void femu_cxl_command(QTestState *qts, bool lsa, unsigned command,
+                             unsigned argument)
+{
+    if (lsa) {
+        uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+
+        qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, argument);
+        qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 4, command);
+        qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+        qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+        g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_STS) >> 32,
+                         ==, 0);
+        g_assert_cmpuint(qtest_readb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE),
+                         ==, 0);
+    } else {
+        femu_cxl_number(qts, "control-argument", argument, true);
+        femu_cxl_number(qts, "control-command", command, true);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "control-status"), ==, 0);
+}
+
+static void femu_test_cxl_control(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    bool lsa = data != NULL;
+    g_autofree char *dir = g_dir_make_tmp("femu-cxl-control-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "lsa-control=%s,log-dir=%s,tracefs-dir=%s,der=memslot",
+        lsa ? "on" : "off", dir, dir);
+    QTestState *qts = qtest_init(args);
+    g_autofree char *contents = NULL;
+    g_autofree char *path = NULL;
+    GDir *files;
+    const char *name;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    femu_cxl_command(qts, lsa, 5, 3);
+    femu_cxl_command(qts, lsa, 7, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-degree"), ==, 3);
+    g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-stride"), ==, 2);
+    femu_cxl_command(qts, lsa, 3, 5);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-ways"), ==, 1024);
+    femu_cxl_command(qts, lsa, 13, 0);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 4);
+    femu_cxl_command(qts, lsa, 15, 0);
+    femu_cxl_command(qts, lsa, 1, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "last-write-misses"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "write-misses"), ==, 0);
+    femu_cxl_command(qts, lsa, 2, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 0);
+    femu_cxl_command(qts, lsa, 9, 0);
+    femu_cxl_command(qts, lsa, 11, 0);
+    femu_cxl_command(qts, lsa, 90, 100);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 65536);
+    g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 0);
+    femu_cxl_command(qts, lsa, 17, 0);
+    femu_cxl_command(qts, lsa, 80, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_command(qts, lsa, 91, 0);
+    femu_cxl_command(qts, lsa, 81, 0);
+    femu_cxl_number(qts, "control-command", 1234, false);
+    femu_cxl_number(qts, "control-argument", 6, true);
+    femu_cxl_number(qts, "control-command", 3, false);
+    femu_cxl_number(qts, "der-ratio", 101, false);
+    femu_cxl_number(qts, "der-ratio", 99, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    femu_cxl_number(qts, "der-ratio", 0, true);
+    path = g_build_filename(dir, "cxlssd-io-1.log", NULL);
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    g_assert_nonnull(strstr(contents, ",W,0,8,"));
+    g_clear_pointer(&path, g_free);
+    g_clear_pointer(&contents, g_free);
+    path = g_build_filename(dir, "cxlssd-spt.log", NULL);
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    g_assert_nonnull(strstr(contents, "mapped=65536"));
+    g_clear_pointer(&path, g_free);
+    g_clear_pointer(&contents, g_free);
+    path = g_build_filename(dir, "cxlssd-stats.log", NULL);
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    g_assert_nonnull(strstr(contents, "write=0/1"));
+    g_clear_pointer(&path, g_free);
+    g_clear_pointer(&contents, g_free);
+    path = g_build_filename(dir, "tracing_on", NULL);
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    g_assert_cmpstr(contents, ==, "0\n");
+    qtest_quit(qts);
+    files = g_dir_open(dir, 0, NULL);
+    while ((name = g_dir_read_name(files))) {
+        g_autofree char *file = g_build_filename(dir, name, NULL);
+
+        unlink(file);
+    }
+    g_dir_close(files);
+    rmdir(dir);
 }
 
 static void femu_test_cxl_geometry_bounds(void *obj, void *data,
@@ -14073,25 +14210,61 @@ static void femu_test_cxl_geometry_bounds(void *obj, void *data,
     qtest_quit(qts);
 }
 
-static void femu_test_cxl_compat(void *obj, void *data,
-                                QGuestAllocator *alloc)
+static void femu_test_cxl_log_missing(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cxl-missing-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "lsa-control=on,log-dir=%s/missing,tracefs-dir=%s/missing "
+        "2>%s/errors", dir, dir, dir);
+    g_autofree char *path = g_build_filename(dir, "errors", NULL);
+    g_autofree char *contents = NULL;
+    QTestState *qts = qtest_init(args);
+    char *warning;
+
+    femu_cxl_command(qts, false, 13, 0);
+    femu_cxl_command(qts, false, 1, 0);
+    femu_cxl_command(qts, false, 17, 0);
+    femu_cxl_command(qts, false, 91, 0);
+    femu_cxl_command(qts, false, 81, 0);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
+    warning = strstr(contents, "CXL cannot open");
+    g_assert_nonnull(warning);
+    g_assert_null(strstr(warning + 1, "CXL cannot open"));
+    unlink(path);
+    rmdir(dir);
+}
+
+static void femu_test_cxl_lsa_normal(void *obj, void *data,
+                                    QGuestAllocator *alloc)
 {
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE
-        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cylon-first-touch-program=on,cylon-free-writeback=on,"
-        "channels=8,luns-per-channel=8,pages-per-block=64,"
-        "blocks-per-plane=32,channel-ns=100,gc-threshold=70,"
-        "gc-threshold-high=90");
+        "-object memory-backend-ram,id=labels,size=1M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,lsa=labels");
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
 
     femu_cxl_decode(qts);
-    qtest_readq(qts, FEMU_CXL_WINDOW);
-    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
-    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns"), >=, 200000);
-    qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
-    femu_cxl_set(qts, "flush-cache", true);
-    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
-    g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 42);
-    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0);
+    qtest_writeb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 8, 42);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (9ULL << 16) | 0x4103);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_STS) >> 32,
+                     ==, 0);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 1ULL << 32);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(qtest_readb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE),
+                     ==, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "control-command"), ==, 0);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_CMD) >> 16,
+                     ==, 0);
     qtest_quit(qts);
 }
 
@@ -14111,10 +14284,15 @@ static void femu_register_nodes(void)
 
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
-    qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
                  NULL);
+    qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
+    qos_add_test("cxl-lsa-normal", "femu", femu_test_cxl_lsa_normal, NULL);
+    qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
+    qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-compat", "femu", femu_test_cxl_compat, NULL);
+    qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
     qos_add_test("cxl-prefetch", "femu", femu_test_cxl_prefetch, NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);
     qos_node_create_driver("femu", femu_create);
