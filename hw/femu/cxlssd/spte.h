@@ -46,6 +46,33 @@ static inline bool cylon_spte_install(uint64_t *sptep, uint64_t old,
                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
+/*
+ * Clear the dirty bit of the direct SPTE for @direct and report in @dirty
+ * whether it was set. Hardware only ever sets it, so retry until the clear
+ * lands. False if the entry is no longer that direct mapping.
+ */
+static inline bool cylon_spte_take_dirty(uint64_t *sptep, uint64_t direct,
+                                         bool *dirty)
+{
+    uint64_t old = __atomic_load_n(sptep, __ATOMIC_SEQ_CST);
+
+    for (;;) {
+        if ((old & ~CYLON_EPT_DIRTY) != direct) {
+            return false;
+        }
+        if (!(old & CYLON_EPT_DIRTY)) {
+            *dirty = false;
+            return true;
+        }
+        if (__atomic_compare_exchange_n(sptep, &old, old & ~CYLON_EPT_DIRTY,
+                                        false, __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST)) {
+            *dirty = true;
+            return true;
+        }
+    }
+}
+
 static inline uint64_t cylon_direct_spte(uint64_t pa)
 {
     return pa | CYLON_DIRECT_FLAGS;

@@ -120,6 +120,9 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 
     if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
         femu_cxl_der_remove(&s->direct, e->lpn);
+    } else if (femu_cxl_der_sample(&s->direct, e->lpn)) {
+        /* The ratio keeps the page mapped; charge writes made through it. */
+        e->dirty = true;
     }
     return !e->dirty || s->free_writeback || femu_cxl_media(s, e->lpn, true);
 }

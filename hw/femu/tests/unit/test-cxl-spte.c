@@ -72,6 +72,28 @@ static void test_spte_transitions(void)
              (CYLON_EPT_WRITE | CYLON_MMU_WRITABLE)));
 }
 
+/* Sampling a mapped page's dirty bit keeps it mapped and writable. */
+static void test_spte_take_dirty(void)
+{
+    uint64_t direct = cylon_direct_spte(0x200000);
+    uint64_t spte = direct;
+    bool dirty = true;
+
+    assert(cylon_spte_take_dirty(&spte, direct, &dirty) && !dirty);
+    assert(spte == direct);
+    spte |= CYLON_EPT_DIRTY;
+    assert(cylon_spte_take_dirty(&spte, direct, &dirty) && dirty);
+    assert(spte == direct);
+    assert(cylon_spte_take_dirty(&spte, direct, &dirty) && !dirty);
+    /* Revoked, or another page's mapping: nothing is changed. */
+    spte = CYLON_REMOVED_SPTE;
+    assert(!cylon_spte_take_dirty(&spte, direct, &dirty));
+    assert(spte == CYLON_REMOVED_SPTE);
+    spte = cylon_direct_spte(0x400000) | CYLON_EPT_DIRTY;
+    assert(!cylon_spte_take_dirty(&spte, direct, &dirty));
+    assert(spte == (cylon_direct_spte(0x400000) | CYLON_EPT_DIRTY));
+}
+
 int main(void)
 {
     uint64_t huge[] = { 0x200000, 0x1000000, 0x600000 };
@@ -82,6 +104,7 @@ int main(void)
 
     test_spt_areas();
     test_spte_transitions();
+    test_spte_take_dirty();
 
     /* spte.h: RWX, WB, IPAT, A, MMU-present, host/MMU writable. */
     assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345977));

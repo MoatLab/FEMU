@@ -86,6 +86,7 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn);
 static void femu_cylon_destroy(FemuCxlDer *der);
 static void femu_cylon_clear(FemuCxlDer *der);
 static void femu_cylon_reset(FemuCxlDer *der);
+static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn);
 
 
 /* Resolve by path only until machine-init-done has linked the targets. */
@@ -2042,6 +2043,16 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     g_free_rcu(map, rcu);
 }
 
+/*
+ * Whether a direct ratio page was written since the last sample. Memslot
+ * cannot tell and keeps such entries dirty; Cylon reads the EPT dirty bit
+ * and keeps the page mapped.
+ */
+bool femu_cxl_der_sample(FemuCxlDer *der, uint64_t lpn)
+{
+    return der->cylon && femu_cylon_sample(der, lpn);
+}
+
 void femu_cxl_der_clear(FemuCxlDer *der)
 {
     GHashTableIter it;
@@ -2732,6 +2743,42 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
     }
 }
 
+static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn)
+{
+    FemuCylon *c = der->fast;
+    CylonPage *page;
+    bool dirty;
+    uint64_t pa;
+
+    if (!c || !c->installed) {
+        return false;
+    }
+    page = g_hash_table_lookup(der->maps, &lpn);
+    if (!page) {
+        return false;
+    }
+    if (page->sptep != cylon_sptep(c, lpn) ||
+        !cylon_page_address(c->huge, c->size / c->huge_size, c->huge_size,
+                            lpn * CYLON_PAGE_SIZE, &pa)) {
+        cylon_fail(der);
+        return false;
+    }
+    if (!cylon_spte_take_dirty(page->sptep, cylon_direct_spte(pa), &dirty)) {
+        /* KVM revoked it, which counts as dirty; anything else is fatal. */
+        if (cylon_spte_revoked(qatomic_read(page->sptep))) {
+            cylon_drop(der, page, true);
+        } else {
+            cylon_fail(der);
+        }
+        return false;
+    }
+    /* A TLB entry that already has D set would not set it again. */
+    if (dirty && !cylon_flush(c->window->base + lpn * CYLON_PAGE_SIZE)) {
+        cylon_fail(der);
+    }
+    return dirty;
+}
+
 /* Only map changes over the installed window can expose overlapping RAM. */
 static void cylon_region_change(MemoryListener *listener,
                                 MemoryRegionSection *section)
@@ -2841,6 +2888,11 @@ static void femu_cylon_clear(FemuCxlDer *der)
 
 static void femu_cylon_reset(FemuCxlDer *der)
 {
+}
+
+static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn)
+{
+    return false;
 }
 #endif
 
