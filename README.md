@@ -18,6 +18,15 @@
 
 **FEMU** is a fast, accurate, scalable, and extensible NVMe SSD emulator based on QEMU/KVM. It enables full-system evaluation of storage systems and supports multiple SSD architectures for systems research.
 
+> **Consolidation in progress (2026).** Features that were previously maintained in separate
+> FEMU-based repositories (for example, CXL SSD emulation) are being ported into this
+> repository, and FEMU is being made easier to configure, script, and drive with AI coding
+> agents. Much of the porting is done with the help of such agents. Every change is built and
+> regression-tested in CI, and a more thorough review is under way in parallel. In the
+> meantime, some existing behavior may change or regress. Please report bugs, regressions,
+> and feature requests through [GitHub Issues](https://github.com/MoatLab/FEMU/issues) or
+> [Discord](https://discord.gg/AgPTUJCw7).
+
 ---
 
 ## Table of Contents
