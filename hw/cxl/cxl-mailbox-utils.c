@@ -4067,6 +4067,15 @@ void cxl_init_cci(CXLCCI *cci, size_t payload_max)
 
 void cxl_destroy_cci(CXLCCI *cci)
 {
+    if (!cci->initialized) {
+        return;
+    }
+    /* Cancel a pending background command so it cannot complete later. */
+    timer_free(cci->bg.timer);
+    cci->bg.timer = NULL;
+    if (cci->bg.runtime && cci->bg.opcode == 0x4402) {
+        g_clear_pointer(&CXL_TYPE3(cci->d)->media_op_sanitize, g_free);
+    }
     qemu_mutex_destroy(&cci->bg.lock);
     cci->initialized = false;
 }
