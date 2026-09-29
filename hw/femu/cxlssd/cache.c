@@ -284,7 +284,10 @@ bool femu_cxl_cache_remove(FemuCxlCache *c, FemuCxlEntry *e,
     return true;
 }
 
-/* Write back pinned entries; they stay resident and pinned. */
+/*
+ * Write back dirty pinned entries; they stay resident and pinned. Callers
+ * revoke direct mappings first, so the dirty bit is current here.
+ */
 bool femu_cxl_cache_clean_pinned(FemuCxlCache *c, FemuCxlEvict wb,
                                  void *opaque)
 {
@@ -296,6 +299,9 @@ bool femu_cxl_cache_clean_pinned(FemuCxlCache *c, FemuCxlEvict wb,
         for (l = c->sets[i].pinned.head; l; l = l->next) {
             FemuCxlEntry *e = l->data;
 
+            if (!e->dirty) {
+                continue;
+            }
             if (wb && !wb(opaque, e)) {
                 return false;
             }
