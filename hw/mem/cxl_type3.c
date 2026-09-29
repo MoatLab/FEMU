@@ -887,7 +887,7 @@ static void ct3_realize(PCIDevice *pci_dev, Error **errp)
     QTAILQ_INIT(&ct3d->error_list);
 
     if (!cxl_setup_memory(ct3d, errp)) {
-        return;
+        goto err_unmap_memory;
     }
 
     pci_config_set_prog_interface(pci_conf, 0x10);
@@ -980,13 +980,20 @@ err_free_special_ops:
     g_free(regs->special_ops);
     if (ct3d->dc.host_dc) {
         cxl_destroy_dc_regions(ct3d);
+    }
+err_unmap_memory:
+    /* An address space exists only for a backend this realize mapped. */
+    if (ct3d->dc.host_dc_as.root) {
         address_space_destroy(&ct3d->dc.host_dc_as);
+        host_memory_backend_set_mapped(ct3d->dc.host_dc, false);
     }
-    if (ct3d->hostpmem) {
+    if (ct3d->hostpmem_as.root) {
         address_space_destroy(&ct3d->hostpmem_as);
+        host_memory_backend_set_mapped(ct3d->hostpmem, false);
     }
-    if (ct3d->hostvmem) {
+    if (ct3d->hostvmem_as.root) {
         address_space_destroy(&ct3d->hostvmem_as);
+        host_memory_backend_set_mapped(ct3d->hostvmem, false);
     }
 }
 
