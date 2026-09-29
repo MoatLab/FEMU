@@ -14045,27 +14045,21 @@ static void femu_test_cxl_compat(void *obj, void *data,
 static void femu_test_cxl_capacity(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
-    QTestState *qts;
     unsigned sizes[] = { 48, 96, 120, 121 };
     unsigned i;
 
     for (i = 0; i < G_N_ELEMENTS(sizes); i++) {
-        QDict *rsp;
         uint64_t bytes = (uint64_t)sizes[i] << 30;
-        g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
-            "-M cxl-fmw.0.size=%uG", sizes[i]);
+        g_auto(GStrv) parts = g_strsplit(FEMU_CXL_MACHINE,
+                                         "cxl-fmw.0.size=256M", 2);
+        g_autofree char *args = g_strdup_printf(
+            "%scxl-fmw.0.size=%uG%s "
+            "-object memory-backend-ram,id=large,reserve=off,size=%uG %s",
+            parts[0], sizes[i], parts[1], sizes[i], sizes[i] <= 120 ?
+            "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=large,"
+            "ftl=off,channels=8,luns-per-channel=8" : "");
+        QTestState *qts = qtest_init(args);
 
-        qts = qtest_init(args);
-        qtest_qmp_assert_success(qts, "{'execute':'object-add','arguments':{"
-            "'qom-type':'memory-backend-ram','id':'large',"
-            "'reserve':false,'size':%llu}}",
-            (unsigned long long)sizes[i] * (1ULL << 30));
-        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
-            "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
-            "'volatile-memdev':'large','ftl':false,"
-            "'channels':8,'luns-per-channel':8}}");
-        g_assert_true(qdict_haskey(rsp, sizes[i] <= 120 ? "return" : "error"));
-        qobject_unref(rsp);
         if (sizes[i] <= 120) {
             femu_cxl_decode(qts);
             qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_LO,
@@ -14076,6 +14070,16 @@ static void femu_test_cxl_capacity(void *obj, void *data,
             qtest_writeq(qts, FEMU_CXL_WINDOW + bytes - 4096, 42);
             g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW + bytes - 4096),
                              ==, 42);
+        } else {
+            QDict *rsp = qtest_qmp(qts,
+                "{'execute':'device_add','arguments':{"
+                "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
+                "'volatile-memdev':'large','ftl':false}}");
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                                 "desc"), "120 GiB"));
+            qobject_unref(rsp);
         }
         qtest_quit(qts);
     }
