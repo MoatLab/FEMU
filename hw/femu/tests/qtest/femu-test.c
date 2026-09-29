@@ -13323,23 +13323,34 @@ static void femu_cxl_config(QTestState *qts, unsigned bus,
 #define FEMU_CXL_WINDOW 0x110000000ULL
 #define FEMU_CXL_REGS   0x90001000ULL
 
+/*
+ * Route the root port on @bus to a 1 MiB register window at @bar and commit
+ * the endpoint's first decoder over the 256 MiB fixed window at @window.
+ */
+static void femu_cxl_decode_at(QTestState *qts, unsigned bus, uint32_t bar,
+                               uint64_t window)
+{
+    uint64_t regs = bar + 0x1000;
+
+    femu_cxl_config(qts, bus, PCI_PRIMARY_BUS,
+                    bus | (bus + 1) << 8 | (bus + 1) << 16);
+    femu_cxl_config(qts, bus, PCI_MEMORY_BASE, bar >> 16 | (bar & ~0xfffffu));
+    femu_cxl_config(qts, bus, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    femu_cxl_config(qts, bus + 1, 0x10, bar);
+    femu_cxl_config(qts, bus + 1, 0x14, 0);
+    femu_cxl_config(qts, bus + 1, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_BASE_LO, window & 0xffffffff);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_BASE_HI, window >> 32);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_SIZE_HI, 0);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_CTRL, 0x200);
+    g_assert_cmphex(qtest_readl(qts, regs + A_CXL_HDM_DECODER0_CTRL) & 0x400,
+                    ==, 0x400);
+}
+
 static void femu_cxl_decode(QTestState *qts)
 {
-    femu_cxl_config(qts, 52, PCI_PRIMARY_BUS, 0x00353534);
-    femu_cxl_config(qts, 52, PCI_MEMORY_BASE, 0x90009000);
-    femu_cxl_config(qts, 52, PCI_COMMAND, PCI_COMMAND_MEMORY);
-    femu_cxl_config(qts, 53, 0x10, 0x90000000);
-    femu_cxl_config(qts, 53, 0x14, 0);
-    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
-    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_BASE_LO,
-                 FEMU_CXL_WINDOW & 0xffffffff);
-    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_BASE_HI,
-                 FEMU_CXL_WINDOW >> 32);
-    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
-    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_SIZE_HI, 0);
-    qtest_writel(qts, FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL, 0x200);
-    g_assert_cmphex(qtest_readl(qts,
-                   FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL) & 0x400, ==, 0x400);
+    femu_cxl_decode_at(qts, 52, FEMU_CXL_REGS - 0x1000, FEMU_CXL_WINDOW);
 }
 
 static void femu_cxl_unplug(QTestState *qts)
@@ -14396,6 +14407,92 @@ static void femu_test_cxl_ratio_off(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_ratio_runs(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot");
+
+    femu_cxl_decode(qts);
+    /* 32768 one-page runs would overflow the dispatch map; map nothing. */
+    femu_cxl_number(qts, "der-ratio", 50, false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    /* A prefetch inside a mapped run must not add a second alias. */
+    femu_cxl_number(qts, "der-ratio", 99, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    femu_cxl_number(qts, "prefetch-degree", 3, true);
+    qtest_readq(qts, FEMU_CXL_WINDOW + 100 * 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-inserts"), ==, 3);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_der_budget(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "cache-pages=4096,ftl=off");
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    /* More cached pages than aliases fit must fall back, not abort QEMU. */
+    for (i = 0; i < 2100; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 2 * 4096, i);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1024);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fallbacks"), >, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 2099ULL * 2 * 4096),
+                    ==, 2099);
+    qtest_quit(qts);
+}
+
+static uint64_t femu_cxl_stat_of(QTestState *qts, const char *id,
+                                 const char *name)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                          "'path':%s,'property':%s}}", path, name);
+    uint64_t value = qdict_get_int(rsp, "return");
+
+    qobject_unref(rsp);
+    return value;
+}
+
+static void femu_test_cxl_der_budget_shared(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(
+        "-machine q35,cxl=on -m 128M "
+        "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+        "-device pxb-cxl,id=cxl.1,bus=pcie.0,bus_nr=60 "
+        "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M,"
+        "cxl-fmw.1.targets.0=cxl.1,cxl-fmw.1.size=256M "
+        "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+        "-device cxl-rp,id=rp1,bus=cxl.1,chassis=1,slot=0 "
+        "-object memory-backend-ram,id=mem,size=256M "
+        "-object memory-backend-ram,id=mem1,size=256M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "cache-pages=4096,ftl=off "
+        "-device femu-cxl-ssd,id=ssd1,bus=rp1,volatile-memdev=mem1,"
+        "der=memslot,cache-pages=4096,ftl=off");
+    uint64_t second = FEMU_CXL_WINDOW + 256 * 1024 * 1024;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    femu_cxl_decode_at(qts, 60, 0x90100000, second);
+    /* Both windows live in one address space and share its section limit. */
+    for (i = 0; i < 1100; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 2 * 4096, i);
+        qtest_writeq(qts, second + (uint64_t)i * 2 * 4096, i);
+    }
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "der-mapped") +
+                     femu_cxl_stat_of(qts, "ssd1", "der-mapped"), ==, 1024);
+    g_assert_cmphex(qtest_readq(qts, second + 1099ULL * 2 * 4096), ==, 1099);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_lsa_bounds(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -14455,6 +14552,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
     qos_add_test("cxl-lsa-normal", "femu", femu_test_cxl_lsa_normal, NULL);
     qos_add_test("cxl-ratio-off", "femu", femu_test_cxl_ratio_off, NULL);
+    qos_add_test("cxl-ratio-runs", "femu", femu_test_cxl_ratio_runs, NULL);
+    qos_add_test("cxl-der-budget", "femu", femu_test_cxl_der_budget, NULL);
+    qos_add_test("cxl-der-budget-shared", "femu",
+                 femu_test_cxl_der_budget_shared, NULL);
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);

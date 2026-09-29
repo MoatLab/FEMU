@@ -60,6 +60,11 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 
 #define FEMU_CXL_LSA_SIZE (128 * MiB)
 #define FEMU_CXL_IO_LOGS 64
+/*
+ * Each alias and the MMIO gap beside it are separate sections, and a
+ * dispatch map holds fewer than 4096 sections for the whole address space.
+ */
+#define FEMU_CXL_DER_ALIASES 1024
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -1392,6 +1397,25 @@ out:
     return found;
 }
 
+/* Every device's aliases share address_space_memory's section limit. */
+static uint64_t der_aliases;
+
+static uint64_t der_alias_budget(void)
+{
+    uint64_t budget = der_aliases < FEMU_CXL_DER_ALIASES ?
+                      FEMU_CXL_DER_ALIASES - der_aliases : 0;
+
+#ifdef CONFIG_KVM
+    /* Each alias is a KVM slot; keep room for splits of existing regions. */
+    if (kvm_enabled()) {
+        unsigned free = kvm_get_free_memslots();
+
+        budget = MIN(budget, free > 8 ? free - 8 : 0);
+    }
+#endif
+    return budget;
+}
+
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
 {
     uint64_t lpn = dpa / 4096;
@@ -1405,7 +1429,9 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
     }
-    if (!der->cylon && g_hash_table_contains(der->maps, &lpn)) {
+    if (!der->cylon && (g_hash_table_contains(der->maps, &lpn) ||
+                        (lpn < der->ratio_end &&
+                         femu_cxl_ratio_selected(der->ratio, lpn)))) {
         return true;
     }
     fw = der_window(der, hpa);
@@ -1416,13 +1442,10 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     if (der->cylon) {
         return femu_cylon_map(der, fw, hpa, dpa);
     }
-#ifdef CONFIG_KVM
-    /* Leave room for splits in the KVM listener's existing regions. */
-    if (kvm_enabled() && kvm_get_free_memslots() < 8) {
+    if (!der_alias_budget()) {
         der->fallbacks++;
         return false;
     }
-#endif
     ram = host_memory_backend_get_memory(der->dev->parent_obj.hostvmem);
     map = g_new0(FemuCxlMap, 1);
     map->lpn = lpn;
@@ -1434,53 +1457,72 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     memory_region_add_subregion_overlap(map->container,
                       (hpa & ~4095ULL) - fw->base, &map->mr, 1);
     g_hash_table_insert(der->maps, &map->lpn, map);
+    der_aliases++;
     der->mapped++;
     der->remaps++;
     return true;
 }
 
-static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
+/* Runs are the gaps between multiples of the period, or one whole run. */
+static uint64_t der_ratio_runs(uint64_t period, uint64_t pages)
+{
+    if (period == 1) {
+        return pages ? 1 : 0;
+    }
+    return pages > 1 ? DIV_ROUND_UP(pages - 1, period) : 0;
+}
+
+/* Map every run in one transaction, or nothing when the runs cannot fit. */
+static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
+{
+    FemuCxlDer *der = &dev->media.direct;
+    HostMemoryBackend *backend = dev->parent_obj.hostvmem;
+    MemoryRegion *ram = host_memory_backend_get_memory(backend);
+    uint64_t pages = dev->media.backend.size / 4096;
+    uint64_t period = femu_cxl_ratio_period(der->ratio);
+    uint64_t runs = der_ratio_runs(period, pages);
+    uint64_t budget = der_alias_budget();
+    uint64_t run;
+
+    if (runs > budget) {
+        der->fallbacks++;
+        error_setg(errp, "DER ratio needs %" PRIu64 " mappings, at most %"
+                   PRIu64 " are available", runs, budget);
+        return false;
+    }
+    memory_region_transaction_begin();
+    for (run = 0; run < runs; run++) {
+        uint64_t lpn = period == 1 ? 0 : run * period + 1;
+        uint64_t end = period == 1 ? pages : MIN((run + 1) * period, pages);
+        FemuCxlMap *map = g_new0(FemuCxlMap, 1);
+
+        map->lpn = lpn;
+        map->pages = end - lpn;
+        map->container = &fw->mr;
+        memory_region_init_alias(&map->mr, OBJECT(dev), "femu-cxl-ratio",
+                                  ram, lpn * 4096, map->pages * 4096);
+        memory_region_add_subregion_overlap(&fw->mr, lpn * 4096, &map->mr, 1);
+        g_hash_table_insert(der->maps, &map->lpn, map);
+        der_aliases++;
+        der->mapped += map->pages;
+        der->remaps += map->pages;
+    }
+    memory_region_transaction_commit();
+    der->ratio_end = pages;
+    return true;
+}
+
+/* Map the current ratio; the caller holds the gate and revoked everything. */
+static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
 {
     FemuCxlMedia *s = &dev->media;
     FemuCxlDer *der = &s->direct;
     GSList *windows;
     GSList *it;
     CXLFixedWindow *fw = NULL;
-    uint64_t lpn;
-    uint64_t mapped_end = 0;
-    uint64_t pages = s->backend.size / 4096;
 
-    switch (ratio) {
-    case 0:
-    case 50:
-    case 75:
-    case 90:
-    case 95:
-    case 97:
-    case 98:
-    case 99:
-    case 100:
-    case 995:
-    case 999:
-        break;
-    default:
-        error_setg(errp, "unsupported Cylon direct ratio");
-        return;
-    }
-    if (ratio && (!s->der || !strcmp(s->der, "off"))) {
-        error_setg(errp, "a direct ratio requires der=memslot or der=cylon");
-        return;
-    }
-    object_ref(OBJECT(dev));
-    femu_cxl_enter(s);
-    if (der->cylon) {
-        cylon_ratio_revoke(der);
-    } else {
-        femu_cxl_der_clear(der);
-    }
-    der->ratio = ratio;
-    if (!ratio || (!der->available && !der->fast)) {
-        goto out;
+    if (!der->ratio || (!der->available && !der->fast)) {
+        return true;
     }
     windows = cxl_fmws_get_all_sorted();
     for (it = windows; it; it = it->next) {
@@ -1496,49 +1538,45 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     g_slist_free(windows);
     if (!fw) {
         error_setg(errp, "DER ratio requires a decoded linear window");
-        der->ratio = 0;
-        goto out;
+        return false;
     }
     if (der->cylon) {
         cylon_ratio_apply(der, fw);
+        return true;
+    }
+    return der_ratio_apply(dev, fw, errp);
+}
+
+static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
+{
+    FemuCxlMedia *s = &dev->media;
+    FemuCxlDer *der = &s->direct;
+
+    if (ratio != 100 && femu_cxl_ratio_period(ratio) == 1) {
+        error_setg(errp, "unsupported Cylon direct ratio");
+        return;
+    }
+    if (ratio && (!s->der || !strcmp(s->der, "off"))) {
+        error_setg(errp, "a direct ratio requires der=memslot or der=cylon");
+        return;
+    }
+    object_ref(OBJECT(dev));
+    femu_cxl_enter(s);
+    if (!s->started || s->closing) {
+        error_setg(errp, "der-ratio requires a realized device");
         goto out;
     }
-    for (lpn = 0; lpn < pages; lpn++) {
-        if (!femu_cxl_ratio_selected(ratio, lpn)) {
-            continue;
-        }
-        {
-            uint64_t end = lpn + 1;
-            FemuCxlMap *map;
-            MemoryRegion *ram;
-
-#ifdef CONFIG_KVM
-            if (kvm_enabled() && kvm_get_free_memslots() < 8) {
-                der->fallbacks++;
-                break;
-            }
-#endif
-            while (end < pages && femu_cxl_ratio_selected(ratio, end)) {
-                end++;
-            }
-            ram = host_memory_backend_get_memory(dev->parent_obj.hostvmem);
-            map = g_new0(FemuCxlMap, 1);
-            map->lpn = lpn;
-            map->pages = end - lpn;
-            map->container = &fw->mr;
-            memory_region_init_alias(&map->mr, OBJECT(dev), "femu-cxl-ratio",
-                                      ram, lpn * 4096, map->pages * 4096);
-            memory_region_add_subregion_overlap(&fw->mr, lpn * 4096,
-                                                 &map->mr, 1);
-            g_hash_table_insert(der->maps, &map->lpn, map);
-            der->mapped += map->pages;
-            der->remaps += map->pages;
-            mapped_end = end;
-            lpn = end - 1;
-        }
+    if (der->cylon) {
+        cylon_ratio_revoke(der);
+    } else {
+        femu_cxl_der_clear(der);
     }
-out:
-    if (mapped_end) {
+    der->ratio = ratio;
+    if (!cxl_ratio_map(dev, errp)) {
+        der->ratio = 0;
+        goto out;
+    }
+    if (der->ratio_end) {
         GHashTableIter entries;
         gpointer value;
 
@@ -1546,13 +1584,13 @@ out:
         while (g_hash_table_iter_next(&entries, NULL, &value)) {
             FemuCxlEntry *entry = value;
 
-            if (entry->lpn < mapped_end &&
-                femu_cxl_ratio_selected(ratio, entry->lpn)) {
+            if (femu_cxl_ratio_selected(ratio, entry->lpn)) {
                 /* Alias writes cannot notify the resident cache metadata. */
                 entry->dirty = true;
             }
         }
     }
+out:
     femu_cxl_leave(s);
     object_unref(OBJECT(dev));
 }
@@ -1570,6 +1608,7 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     }
     memory_region_del_subregion(map->container, &map->mr);
     g_hash_table_remove(der->maps, &lpn);
+    der_aliases--;
     object_unparent(OBJECT(&map->mr));
     der->mapped -= map->pages;
     der->revocations += map->pages;
@@ -1585,11 +1624,14 @@ void femu_cxl_der_clear(FemuCxlDer *der)
         femu_cylon_clear(der);
         return;
     }
+    der->ratio_end = 0;
+    memory_region_transaction_begin();
     while (g_hash_table_size(der->maps)) {
         g_hash_table_iter_init(&it, der->maps);
         g_hash_table_iter_next(&it, &key, NULL);
         femu_cxl_der_remove(der, *(uint64_t *)key);
     }
+    memory_region_transaction_commit();
 }
 
 void femu_cxl_der_destroy(FemuCxlDer *der)

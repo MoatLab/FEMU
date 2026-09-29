@@ -10,6 +10,7 @@ typedef struct FemuCxlDer {
     FemuCxlSsd *dev;
     GHashTable *maps;
     uint64_t ratio;
+    uint64_t ratio_end;
     bool available;
     bool warned;
     bool cylon;
@@ -22,44 +23,43 @@ typedef struct FemuCxlDer {
     uint64_t mapped;
 } FemuCxlDer;
 
-static inline bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn)
+/*
+ * Cylon's direct ratios leave every period-th page on MMIO; zero means no
+ * ratio and one means every page.
+ */
+static inline uint64_t femu_cxl_ratio_period(uint64_t ratio)
 {
-    unsigned period;
-
     switch (ratio) {
     case 0:
-        return false;
+        return 0;
     case 50:
-        period = 2;
-        break;
+        return 2;
     case 75:
-        period = 4;
-        break;
+        return 4;
     case 90:
-        period = 10;
-        break;
+        return 10;
     case 95:
-        period = 20;
-        break;
+        return 20;
     case 97:
-        period = 33;
-        break;
+        return 33;
     case 98:
-        period = 50;
-        break;
+        return 50;
     case 99:
-        period = 100;
-        break;
+        return 100;
     case 995:
-        period = 200;
-        break;
+        return 200;
     case 999:
-        period = 1000;
-        break;
+        return 1000;
     default:
-        return true;
+        return 1;
     }
-    return lpn % period != 0;
+}
+
+static inline bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn)
+{
+    uint64_t period = femu_cxl_ratio_period(ratio);
+
+    return period == 1 || (period && lpn % period != 0);
 }
 
 void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,

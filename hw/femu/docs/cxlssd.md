@@ -131,7 +131,7 @@ For Cylon, active becomes true only after installing and validating the slot.
 
 Both direct modes require non-interleaved pages in a single-target CXL window,
 with the endpoint directly below a root port on a host bridge without HDM
-decoding. Memslot pressure leaves additional pages on MMIO without reducing
+decoding. Beyond the alias budget, additional pages stay on MMIO without reducing
 cache capacity. Every memslot-mapped entry is conservatively dirty because
 alias writes cannot notify cache metadata. Direct hits in either mode do not
 update CLOCK/S3-FIFO reference metadata or MMIO hit counters.
@@ -456,9 +456,14 @@ selection (exclude each 2nd, 4th, 10th, 20th, 33rd, 50th, 100th, 200th or
 1000th page, starting with page zero); 100 selects every page. In particular,
 97 means 32/33, and 995/999 mean 99.5/99.9 percent. Other values are rejected.
 This selection spans the entire device independently of cache membership.
-Memslot mode coalesces adjacent selected pages into aliases; slot pressure
-can leave part of the selection on MMIO, reflected in `der-mapped` and
-`der-fallbacks`. Cylon mode installs the dual slot asynchronously if necessary
+Memslot mode coalesces adjacent selected pages into aliases and adds them in
+one memory transaction. All memslot aliases of every FEMU CXL device, ratio
+runs and cached pages alike, share one budget of 1024 (fewer under KVM when
+free slots run short), since all windows live in the system address space: each alias and the MMIO gap beside it are separate sections, and QEMU
+aborts once an address space needs 4096. A ratio that needs more runs than
+the budget, such as 50 or 75 on a 256 MiB device, is rejected with nothing
+mapped and `der-fallbacks` incremented; use `der=cylon` for dense ratios on
+large devices. A prefetch or access inside a mapped run reuses it. Cylon mode installs the dual slot asynchronously if necessary
 and applies the selection to its leaves. An empty leaf can be installed with
 CAS and restored to zero on revocation without inventing an MMIO generation;
 existing MMIO leaves retain their exact kernel encoding. The fixed kernel's
