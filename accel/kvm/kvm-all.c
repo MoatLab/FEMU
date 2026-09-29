@@ -307,6 +307,9 @@ KVMSlotReservation *kvm_reserve_memslot(void)
     KVMSlotReservation *r = NULL;
     int i;
 
+    if (!kvm_state) {
+        return NULL;
+    }
     kvm_slots_lock();
     for (i = 0; i < kvm_state->nr_as; i++) {
         KVMMemoryListener *kml = kvm_state->as[i].ml;
