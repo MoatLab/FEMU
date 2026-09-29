@@ -159,8 +159,10 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
         if (e && miss) {
             uint64_t next;
+            /* More than the cache holds only evicts what was just fetched. */
+            uint64_t degree = MIN(s->prefetch_degree, s->cache_pages);
             uint64_t end = MIN(s->backend.size / 4096,
-                              lpn + s->prefetch_stride + s->prefetch_degree);
+                              lpn + s->prefetch_stride + degree);
 
             for (next = lpn + s->prefetch_stride; next < end; next++) {
                 FemuCxlEntry *prefetched;
@@ -171,8 +173,9 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 }
                 prefetched = femu_cxl_cache_insert(&s->cache, next,
                                                    femu_cxl_evict, s);
+                /* A prefetch is optional; never fail the demand access. */
                 if (!prefetched) {
-                    return MEMTX_ERROR;
+                    break;
                 }
                 s->prefetch_inserts++;
                 if (cxl_map(s, generation, next_hpa, next * 4096) &&

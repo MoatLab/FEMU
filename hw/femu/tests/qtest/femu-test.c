@@ -14014,6 +14014,22 @@ static void femu_test_cxl_prefetch(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_prefetch_clamp(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16");
+
+    femu_cxl_decode(qts);
+    /* A degree beyond the cache would only evict what it just fetched. */
+    femu_cxl_number(qts, "prefetch-degree", 1000, true);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-inserts"), ==, 16);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_stats(void *obj, void *data,
                                QGuestAllocator *alloc)
 {
@@ -14402,6 +14418,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-compat", "femu", femu_test_cxl_compat, NULL);
     qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
     qos_add_test("cxl-prefetch", "femu", femu_test_cxl_prefetch, NULL);
+    qos_add_test("cxl-prefetch-clamp", "femu", femu_test_cxl_prefetch_clamp,
+                 NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);
     qos_node_create_driver("femu", femu_create);
     qos_add_test("cxl-stale-translation", "femu",

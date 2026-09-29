@@ -400,7 +400,9 @@ snapshot remains in `last-read-hits`, `last-read-misses`, `last-write-hits`,
 `last-prefetch-inserts`. Runtime way changes preserve event totals.
 
 `prefetch-degree` defaults to zero and `prefetch-stride` to one. Both are
-runtime QOM properties bounded by media page count. Only a miss triggers
+runtime QOM properties bounded by media page count; an access prefetches at
+most `cache-pages` pages whatever the degree. A prefetch insert that cannot
+evict stops prefetching for that access without failing it. Only a miss triggers
 prefetch, after inserting the demanded page: insert the interval
 `[lpn + stride, lpn + stride + degree)`, skipping resident and out-of-range
 pages. Prefetch performs no NAND read. Dirty victims still follow the chosen
