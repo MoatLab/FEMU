@@ -61,7 +61,8 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 
 #define FEMU_CXL_LSA_SIZE (128 * MiB)
 #define FEMU_CXL_IO_LOGS 64
-/* Statistics appends a guest can cause per second. */
+/* Statistics appends a guest can cause: a burst, then this many a second. */
+#define FEMU_CXL_STATS_BURST 64
 #define FEMU_CXL_STATS_RATE 100
 /*
  * Each alias and the MMIO gap beside it are separate sections, and a
@@ -809,16 +810,26 @@ static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
 
 /*
  * Open the statistics log for one append, or refuse and count it when the
- * guest appends faster than FEMU_CXL_STATS_RATE or the file is at its limit.
+ * guest has used up its token bucket or the file is at its limit.
  */
 static FILE *cxl_stats_open(FemuCxlMedia *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t refill;
     FILE *file;
     long size;
 
-    if (s->stats_last &&
-        now - s->stats_last < NANOSECONDS_PER_SECOND / FEMU_CXL_STATS_RATE) {
+    if (!s->stats_last) {
+        s->stats_tokens = FEMU_CXL_STATS_BURST;
+        s->stats_last = now;
+    }
+    refill = (now - s->stats_last) * FEMU_CXL_STATS_RATE /
+             NANOSECONDS_PER_SECOND;
+    if (refill) {
+        s->stats_tokens = MIN(s->stats_tokens + refill, FEMU_CXL_STATS_BURST);
+        s->stats_last = now;
+    }
+    if (!s->stats_tokens) {
         s->log_dropped++;
         return NULL;
     }
@@ -832,7 +843,7 @@ static FILE *cxl_stats_open(FemuCxlMedia *s)
         s->log_dropped++;
         return NULL;
     }
-    s->stats_last = now;
+    s->stats_tokens--;
     return file;
 }
 

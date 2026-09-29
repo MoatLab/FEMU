@@ -45,6 +45,7 @@ typedef struct FemuCxlMedia {
     uint64_t io_log_bytes;
     uint64_t log_dropped;
     int64_t stats_last;
+    uint64_t stats_tokens;
     GHashTable *log_warned;
     uint32_t log_sequence;
     uint64_t control_argument;
