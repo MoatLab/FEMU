@@ -72,7 +72,7 @@ static void *cxl_worker(void *opaque)
     return NULL;
 }
 
-static bool cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
+bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
 {
     FemuCxlWork work = {
         .req = {
@@ -113,7 +113,7 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
         femu_cxl_der_remove(&s->direct, e->lpn);
     }
-    return !e->dirty || s->free_writeback || cxl_media(s, e->lpn, true);
+    return !e->dirty || s->free_writeback || femu_cxl_media(s, e->lpn, true);
 }
 
 /* The media delay drops the BQL, so a decoder change may have intervened. */
@@ -153,12 +153,25 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             s->read_misses += miss;
         }
         if (!e) {
-            if (!cxl_media(s, lpn, write && !s->cache.nsets)) {
+            /*
+             * Without a cache, for a bypassed page, or when every way of
+             * the set is pinned, each access goes to the media.
+             */
+            bool bypassed = femu_cxl_cca_bypassed(&s->cca, lpn);
+            bool uncached = !s->cache.nsets || bypassed ||
+                            femu_cxl_cache_all_pinned(&s->cache, lpn);
+
+            if (s->cache.nsets && uncached && !bypassed) {
+                s->cca.pinned_set_misses++;
+            }
+            if (!femu_cxl_media(s, lpn, write && uncached)) {
                 return MEMTX_ERROR;
             }
-            e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, s);
-            if (s->cache.nsets && !e) {
-                return MEMTX_ERROR;
+            if (!uncached) {
+                e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, s);
+                if (!e) {
+                    return MEMTX_ERROR;
+                }
             }
         }
         if (e && write) {
@@ -175,7 +188,9 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 FemuCxlEntry *prefetched;
                 uint64_t next_hpa = hpa - dpa + next * 4096;
 
-                if (g_hash_table_contains(s->cache.entries, &next)) {
+                if (g_hash_table_contains(s->cache.entries, &next) ||
+                    femu_cxl_cca_bypassed(&s->cca, next) ||
+                    femu_cxl_cache_all_pinned(&s->cache, next)) {
                     continue;
                 }
                 prefetched = femu_cxl_cache_insert(&s->cache, next,

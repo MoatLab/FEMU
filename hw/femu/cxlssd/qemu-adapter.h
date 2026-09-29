@@ -5,6 +5,7 @@
 #include "../bbssd/ftl.h"
 #include "cache.h"
 #include "der.h"
+#include "cca.h"
 
 typedef struct FemuCxlWork {
     NvmeRequest req;
@@ -72,11 +73,14 @@ typedef struct FemuCxlMedia {
     FemuCxlWork *work;
     bool stopping;
     bool started;
+    bool cca_enabled;
+    FemuCxlCca cca;
 } FemuCxlMedia;
 
 void femu_cxl_enter(FemuCxlMedia *s);
 void femu_cxl_leave(FemuCxlMedia *s);
 void femu_cxl_delay(uint64_t ns);
+bool femu_cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);

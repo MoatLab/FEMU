@@ -43,6 +43,7 @@ struct FemuCxlSsd {
     Notifier machine_done;
     bool attached;
     bool test_change_dpa;
+    bool test_media_disabled;
     size_t lsa_limit;
 };
 
@@ -623,6 +624,8 @@ static void adapter_reset_hold(Object *obj, ResetType type)
 
     cxl_invalidate(dev);
     femu_cylon_reset(&FEMU_CXL_SSD(dev)->media.direct);
+    /* A guest reboot loses the library state that pins and bypass serve. */
+    femu_cxl_cca_reset(&FEMU_CXL_SSD(dev)->media, CCA_RESET_ALL);
     adapter_cci_dispose(&dev->cci, false);
     adapter_cci_dispose(&dev->vdm_fm_owned_ld_mctp_cci, false);
     adapter_cci_dispose(&dev->ld0_cci, false);
@@ -645,7 +648,9 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
     }
     s->access_ns = 0;
     femu_cxl_der_clear(&s->direct);
-    if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
+    /* Pinned pages are written back but stay resident. */
+    if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s) ||
+        !femu_cxl_cache_clean_pinned(&s->cache, femu_cxl_evict, s)) {
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
     s->cache_entries = g_hash_table_size(s->cache.entries);
@@ -678,6 +683,7 @@ static void cxl_stats_reset(Object *obj, bool value, Error **errp)
         s->cache.hits = s->cache.misses = 0;
         s->cache.inserts = s->cache.evictions = 0;
         s->prefetch_inserts = 0;
+        femu_cxl_cca_stats_reset(&s->cca);
     }
     femu_cxl_leave(s);
     object_unref(obj);
@@ -712,23 +718,22 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
             goto out;
         }
         if (s->started && !s->closing) {
-            FemuCxlPolicy policy = s->cache.policy;
-            FemuCxlCache previous;
-
+            /* Refuse before anything is flushed if pins cannot follow. */
+            if (!femu_cxl_cache_pins_fit(&s->cache, s->cache_pages, value)) {
+                error_setg(errp, "pinned pages do not fit %u cache ways",
+                           value);
+                goto out;
+            }
             s->access_ns = 0;
             femu_cxl_der_clear(&s->direct);
-            if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
+            if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s) ||
+                !femu_cxl_cache_clean_pinned(&s->cache, femu_cxl_evict, s)) {
                 error_setg(errp, "CXL cache cannot rebuild: NAND is full");
                 goto out;
             }
-            previous = s->cache;
-            femu_cxl_cache_destroy(&s->cache);
-            femu_cxl_cache_init(&s->cache, s->cache_pages, value, policy);
-            s->cache.hits = previous.hits;
-            s->cache.misses = previous.misses;
-            s->cache.inserts = previous.inserts;
-            s->cache.evictions = previous.evictions;
-            s->cache_entries = 0;
+            /* Pinned pages never left DRAM; they return without media cost. */
+            femu_cxl_cache_rebuild(&s->cache, s->cache_pages, value);
+            s->cache_entries = g_hash_table_size(s->cache.entries);
             cxl_ratio_restore(FEMU_CXL_SSD(obj), errp);
             if (s->access_ns) {
                 femu_cxl_delay(s->access_ns);
@@ -1065,6 +1070,14 @@ static void cxl_set_lsa(CXLType3Dev *dev, const void *buf, uint64_t size,
     }
 }
 
+static bool adapter_media_enabled(FemuCxlMedia *s)
+{
+    FemuCxlSsd *dev = container_of(s, FemuCxlSsd, media);
+
+    return !dev->test_media_disabled &&
+           !cxl_dev_media_disabled(&dev->parent_obj.cxl_dstate);
+}
+
 static void cxl_realize(PCIDevice *dev, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
@@ -1128,8 +1141,14 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         !adapter_topology(dev, errp)) {
         return;
     }
+    if (s->cca_enabled && !femu_cxl_cca_alloc(s, OBJECT(dev), errp)) {
+        return;
+    }
     parent_realize(dev, &local_err);
     if (local_err) {
+        if (s->cca_enabled) {
+            object_unparent(OBJECT(&s->cca.shm));
+        }
         host_memory_backend_set_mapped(ct3d->hostvmem, false);
         error_propagate(errp, local_err);
         return;
@@ -1150,6 +1169,10 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     adapter_cci_hook(&ct3d->cci, ct3d);
     FEMU_CXL_SSD(dev)->machine_done.notify = adapter_machine_done;
     qemu_add_machine_init_done_notifier(&FEMU_CXL_SSD(dev)->machine_done);
+    /* The thread starts last: nothing after it can fail. */
+    if (s->cca_enabled) {
+        femu_cxl_cca_start(s, dev, OBJECT(dev), adapter_media_enabled);
+    }
 }
 
 /* Free the media once no operation holds the gate. */
@@ -1168,6 +1191,7 @@ static void cxl_exit(PCIDevice *dev)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
 
+    femu_cxl_cca_stop(s);
     /*
      * A guest unplug arrives inside the host bridge's dispatch guard, so do
      * not wait for an access sleeping in its media delay. Revoke now; that
@@ -1257,6 +1281,15 @@ static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
     FEMU_CXL_SSD(obj)->test_change_dpa = value;
 }
 
+/*
+ * cxl_dev_media_disabled() reads a mailbox register that sanitize never
+ * sets, so no command can disable media here; let tests do it for CCA.
+ */
+static void adapter_test_media_disabled(Object *obj, bool value, Error **errp)
+{
+    FEMU_CXL_SSD(obj)->test_media_disabled = value;
+}
+
 static void cxl_init(Object *obj)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
@@ -1266,9 +1299,12 @@ static void cxl_init(Object *obj)
                                  adapter_test_change_dpa);
         object_property_add_bool(obj, "test-slot-reservation",
                                  adapter_reservation_test, NULL);
+        object_property_add_bool(obj, "test-media-disabled", NULL,
+                                 adapter_test_media_disabled);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
     qemu_cond_init(&s->idle);
+    femu_cxl_cca_init(&s->cca);
     s->der = g_strdup("off");
     object_property_add(obj, "der-ratio", "uint64", cxl_control_get,
                         cxl_control_set, NULL, NULL);
@@ -1345,6 +1381,23 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cache-evictions", &s->cache.evictions,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-commands", &s->cca.commands,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-errors", &s->cca.errors,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-pinned", &s->cache.pinned,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-bypassed", &s->cca.bypassed,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-pin-fills", &s->cca.pin_fills,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-writebacks", &s->cca.writebacks,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-dropped", &s->cca.dropped,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cca-pinned-set-misses",
+                                   &s->cca.pinned_set_misses,
+                                   OBJ_PROP_FLAG_READ);
 }
 
 static const Property cxl_props[] = {
@@ -1375,6 +1428,7 @@ static const Property cxl_props[] = {
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),
     DEFINE_PROP_UINT64("program-ns", FemuCxlSsd, media.program_ns, 200000),
     DEFINE_PROP_UINT64("erase-ns", FemuCxlSsd, media.erase_ns, 2000000),
+    DEFINE_PROP_BOOL("cca", FemuCxlSsd, media.cca_enabled, false),
 };
 
 static const VMStateDescription cxl_vmstate = {
@@ -1413,6 +1467,7 @@ static void cxl_finalize(Object *obj)
     g_clear_pointer(&FEMU_CXL_SSD(obj)->media.log_warned,
                     g_hash_table_destroy);
     qemu_cond_destroy(&FEMU_CXL_SSD(obj)->media.idle);
+    femu_cxl_cca_finalize(&FEMU_CXL_SSD(obj)->media.cca);
 }
 
 static const TypeInfo cxl_info = {
@@ -1700,6 +1755,12 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     femu_cxl_enter(s);
     if (!s->started || s->closing) {
         error_setg(errp, "der-ratio requires a realized device");
+        goto out;
+    }
+    /* A ratio mapping would serve a bypassed page at DRAM speed. */
+    if (ratio && s->cca.bypassed) {
+        error_setg(errp, "a direct ratio cannot be set while CCA bypass "
+                   "ranges exist");
         goto out;
     }
     if (der->cylon) {
