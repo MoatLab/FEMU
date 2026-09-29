@@ -1713,6 +1713,15 @@ static void cylon_release(FemuCylon *c)
     memset(&c->spt, 0, sizeof(c->spt));
 }
 
+/* The kernel slot is already deleted, so give the ID back to QEMU. */
+static void cylon_unreserve(FemuCylon *c)
+{
+    if (c->reservation) {
+        kvm_release_memslot(c->reservation);
+        c->reservation = NULL;
+    }
+}
+
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
 {
     CylonGetLinearSpt probe = { .gfn = UINT64_MAX };
@@ -1932,6 +1941,7 @@ static void cylon_fail(FemuCxlDer *der)
     der->mapped = 0;
     c->failed = true;
     cylon_release(c);
+    cylon_unreserve(c);
     femu_cxl_der_fallback(der, "Cylon slot, SPT bounds or ioctl failure");
 }
 
@@ -2239,6 +2249,7 @@ static bool cylon_log_start(MemoryListener *listener, Error **errp)
     FemuCylon *c = container_of(listener, FemuCylon, listener);
 
     femu_cylon_clear(c->der);
+    cylon_unreserve(c);
     c->failed = true;
     c->logging = true;
     femu_cxl_der_fallback(c->der, "external slots cannot track dirty logging");
@@ -2270,9 +2281,7 @@ static void femu_cylon_destroy(FemuCxlDer *der)
         c->detached = true;
         memory_listener_unregister(&c->listener);
         cylon_release(c);
-        if (c->reservation) {
-            kvm_release_memslot(c->reservation);
-        }
+        cylon_unreserve(c);
         if (c->locked) {
             munlock(c->ram, c->size);
         }

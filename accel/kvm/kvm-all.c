@@ -337,7 +337,6 @@ unsigned int kvm_reserved_memslot_id(const KVMSlotReservation *r)
 void kvm_release_memslot(KVMSlotReservation *r)
 {
     kvm_slots_lock();
-    assert(!r->listener->slots[r->id].memory_size);
     r->listener->nr_slots_used--;
     QLIST_REMOVE(r, next);
     kvm_slots_unlock();
