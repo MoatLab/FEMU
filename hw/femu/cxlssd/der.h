@@ -11,6 +11,8 @@ typedef struct FemuCxlDer {
     GHashTable *maps;
     uint64_t ratio;
     uint64_t ratio_end;
+    /* A restore failed and was reported; cleared once it maps again. */
+    bool ratio_warned;
     bool available;
     bool warned;
     bool cylon;

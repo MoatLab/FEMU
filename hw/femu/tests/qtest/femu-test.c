@@ -14813,6 +14813,54 @@ static void femu_test_cxl_ratio_restore(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/*
+ * Another device can take the shared alias budget while a ratio is revoked.
+ * The ratio must stay configured and map again once there is room.
+ */
+static void femu_test_cxl_ratio_budget(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(
+        "-machine q35,cxl=on -m 128M "
+        "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+        "-device pxb-cxl,id=cxl.1,bus=pcie.0,bus_nr=60 "
+        "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M,"
+        "cxl-fmw.1.targets.0=cxl.1,cxl-fmw.1.size=256M "
+        "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+        "-device cxl-rp,id=rp1,bus=cxl.1,chassis=1,slot=0 "
+        "-object memory-backend-ram,id=mem,size=256M "
+        "-object memory-backend-ram,id=mem1,size=256M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "ftl=off "
+        "-device femu-cxl-ssd,id=ssd1,bus=rp1,volatile-memdev=mem1,"
+        "der=memslot,cache-pages=4096,ftl=off");
+    uint64_t second = FEMU_CXL_WINDOW + 256 * 1024 * 1024;
+    QDict *rsp;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    femu_cxl_decode_at(qts, 60, 0x90100000, second);
+    femu_cxl_number(qts, "der-ratio", 99, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    /* A config write revokes the ratio; ssd1 then fills the budget. */
+    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    for (i = 0; i < 1100; i++) {
+        qtest_writeq(qts, second + (uint64_t)i * 4096, i);
+    }
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd1", "der-mapped"), ==, 1024);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 5 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 99);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd1',"
+                    "'property':'flush-cache','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 5 * 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), >=, 64880);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_lsa_bounds(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -16404,6 +16452,8 @@ static void femu_register_nodes(void)
                  femu_test_cxl_der_replace_rate, NULL);
     qos_add_test("cxl-der-budget-shared", "femu",
                  femu_test_cxl_der_budget_shared, NULL);
+    qos_add_test("cxl-ratio-budget", "femu", femu_test_cxl_ratio_budget,
+                 NULL);
     qos_add_test("cxl-ratio-restore", "femu", femu_test_cxl_ratio_restore,
                  NULL);
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,

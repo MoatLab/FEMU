@@ -1943,6 +1943,19 @@ static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
     if (!der->ratio || s->closing || (!der->available && !der->fast)) {
         return true;
     }
+    /* Refuse on the count first: a retry on every access must stay cheap. */
+    if (!der->cylon) {
+        uint64_t runs = der_ratio_runs(femu_cxl_ratio_period(der->ratio),
+                                       s->backend.size / 4096);
+        uint64_t budget = der_alias_budget();
+
+        if (runs > budget) {
+            der->fallbacks++;
+            error_setg(errp, "DER ratio needs %" PRIu64 " mappings, at most %"
+                       PRIu64 " are available", runs, budget);
+            return false;
+        }
+    }
     windows = cxl_fmws_get_all_sorted();
     for (it = windows; it; it = it->next) {
         CXLFixedWindow *candidate = CXL_FMW(it->data);
@@ -1966,14 +1979,24 @@ static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
     return der_ratio_apply(dev, fw, errp);
 }
 
-/* Re-map a ratio that a flush or cache rebuild revoked. */
+/*
+ * Re-map a ratio that a flush, cache rebuild or invalidation revoked. The
+ * shared budget may be taken meanwhile; keep the ratio configured, serve
+ * its pages by MMIO, and let the next access try again.
+ */
 static void cxl_ratio_restore(FemuCxlSsd *dev, Error **errp)
 {
+    FemuCxlDer *der = &dev->media.direct;
     Error *err = NULL;
 
     if (!cxl_ratio_map(dev, &err)) {
-        dev->media.direct.ratio = 0;
+        if (!errp && !der->ratio_warned) {
+            der->ratio_warned = true;
+            warn_report_err(error_copy(err));
+        }
         error_propagate(errp, err);
+    } else {
+        der->ratio_warned = false;
     }
 }
 
