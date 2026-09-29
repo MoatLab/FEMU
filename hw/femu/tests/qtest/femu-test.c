@@ -13330,8 +13330,18 @@ static void femu_cxl_config(QTestState *qts, unsigned bus,
  * Route the root port on @bus to a 1 MiB register window at @bar and commit
  * the endpoint's first decoder over the 256 MiB fixed window at @window.
  */
+static void femu_cxl_decode_ways(QTestState *qts, unsigned bus, uint32_t bar,
+                                 uint64_t window, uint32_t size, uint32_t ctrl);
+
 static void femu_cxl_decode_at(QTestState *qts, unsigned bus, uint32_t bar,
                                uint64_t window)
+{
+    femu_cxl_decode_ways(qts, bus, bar, window, 0x10000000, 0x200);
+}
+
+/* As femu_cxl_decode_at(), with a decoder size and control word. */
+static void femu_cxl_decode_ways(QTestState *qts, unsigned bus, uint32_t bar,
+                                 uint64_t window, uint32_t size, uint32_t ctrl)
 {
     uint64_t regs = bar + 0x1000;
 
@@ -13344,9 +13354,9 @@ static void femu_cxl_decode_at(QTestState *qts, unsigned bus, uint32_t bar,
     femu_cxl_config(qts, bus + 1, PCI_COMMAND, PCI_COMMAND_MEMORY);
     qtest_writel(qts, regs + A_CXL_HDM_DECODER0_BASE_LO, window & 0xffffffff);
     qtest_writel(qts, regs + A_CXL_HDM_DECODER0_BASE_HI, window >> 32);
-    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_SIZE_LO, size);
     qtest_writel(qts, regs + A_CXL_HDM_DECODER0_SIZE_HI, 0);
-    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_CTRL, 0x200);
+    qtest_writel(qts, regs + A_CXL_HDM_DECODER0_CTRL, ctrl);
     g_assert_cmphex(qtest_readl(qts, regs + A_CXL_HDM_DECODER0_CTRL) & 0x400,
                     ==, 0x400);
 }
@@ -13548,23 +13558,97 @@ static void femu_test_cxl_stale_translation(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static uint64_t femu_cxl_stat_of(QTestState *qts, const char *id,
+                                 const char *name);
+
+/*
+ * A window interleaved over two host bridges, one femu-cxl-ssd under each,
+ * as a plain Type-3 setup would be. Direct modes stay on MMIO here.
+ */
 static void femu_test_cxl_topology(void *obj, void *data,
                                    QGuestAllocator *alloc)
 {
-    QTestState *qts = qtest_init(
+    const char *der = data ? data : "off";
+    g_autofree char *args = g_strdup_printf(
         "-machine q35,cxl=on -m 128M "
         "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
         "-device pxb-cxl,id=cxl.1,bus=pcie.0,bus_nr=60 "
         "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.targets.1=cxl.1,"
-        "cxl-fmw.0.size=256M "
+        "cxl-fmw.0.size=512M "
         "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
-        "-object memory-backend-ram,id=mem,size=256M");
-    QDict *rsp = femu_cxl_add(qts, "ssd", NULL);
+        "-device cxl-rp,id=rp1,bus=cxl.1,chassis=0,slot=1 "
+        "-object memory-backend-ram,id=mem,size=256M "
+        "-object memory-backend-ram,id=mem1,size=256M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=%s "
+        "-device femu-cxl-ssd,id=ssd1,bus=rp1,volatile-memdev=mem1,der=%s",
+        der, der);
+    QTestState *qts = qtest_init(args);
+    unsigned i;
 
-    g_assert_true(qdict_haskey(rsp, "error"));
-    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
-                                        "desc"), "single-target"));
-    qobject_unref(rsp);
+    /* Two ways at 256 bytes: even granules go to ssd, odd ones to ssd1. */
+    femu_cxl_decode_ways(qts, 52, 0x90000000, FEMU_CXL_WINDOW, 0x20000000,
+                         0x210);
+    femu_cxl_decode_ways(qts, 60, 0x90400000, FEMU_CXL_WINDOW, 0x20000000,
+                         0x210);
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 256, 0x1000 + i);
+    }
+    /* Granule 32 of ssd's half is its DPA 4096, a second page. */
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 8192, 0x2000);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + i * 256), ==,
+                        0x1000 + i);
+    }
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8192), ==, 0x2000);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8192 + 256), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "cache-inserts"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "write-misses"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "write-hits"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd1", "cache-inserts"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "der-mapped"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd1", "der-mapped"), ==, 0);
+    if (data) {
+        g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd", "der-fallbacks"), >,
+                         0);
+    }
+    qtest_quit(qts);
+}
+
+/* A femu-cxl-ssd below a CXL switch, routed by the upstream port decoder. */
+static void femu_test_cxl_switch(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device cxl-upstream,bus=rp0,id=us0 "
+        "-device cxl-downstream,port=0,bus=us0,id=swport0,chassis=0,slot=4 "
+        "-device femu-cxl-ssd,id=ssd,bus=swport0,volatile-memdev=mem");
+    uint64_t usp = 0x90000000 + 0x1000;
+
+    /* Root port 52 -> upstream port 53 -> downstream port 54 -> ssd 55. */
+    femu_cxl_config(qts, 52, PCI_PRIMARY_BUS, 52 | 53 << 8 | 55 << 16);
+    femu_cxl_config(qts, 52, PCI_MEMORY_BASE, 0x90209000);
+    femu_cxl_config(qts, 52, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    femu_cxl_config(qts, 53, 0x10, 0x90000000);
+    femu_cxl_config(qts, 53, 0x14, 0);
+    femu_cxl_config(qts, 53, PCI_PRIMARY_BUS, 53 | 54 << 8 | 55 << 16);
+    femu_cxl_config(qts, 53, PCI_MEMORY_BASE, 0x90209010);
+    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    qtest_writel(qts, usp + A_CXL_HDM_DECODER0_BASE_LO,
+                 FEMU_CXL_WINDOW & 0xffffffff);
+    qtest_writel(qts, usp + A_CXL_HDM_DECODER0_BASE_HI, FEMU_CXL_WINDOW >> 32);
+    qtest_writel(qts, usp + A_CXL_HDM_DECODER0_SIZE_LO, 0x10000000);
+    qtest_writel(qts, usp + A_CXL_HDM_DECODER0_TARGET_LIST_LO, 0);
+    qtest_writel(qts, usp + A_CXL_HDM_DECODER0_CTRL, 0x200);
+    g_assert_cmphex(qtest_readl(qts, usp + A_CXL_HDM_DECODER0_CTRL) & 0x400,
+                    ==, 0x400);
+    femu_cxl_decode_ways(qts, 54, 0x90100000, FEMU_CXL_WINDOW, 0x10000000,
+                         0x200);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 4096, 0xbeef);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0xfeed);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 4096), ==, 0xbeef);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-hits"), ==, 2);
     qtest_quit(qts);
 }
 
@@ -16210,6 +16294,9 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-local-overlay", "femu", femu_test_cxl_local_overlay,
                  NULL);
     qos_add_test("cxl-topology", "femu", femu_test_cxl_topology, NULL);
+    qos_add_test("cxl-topology-memslot", "femu", femu_test_cxl_topology,
+                 &(QOSGraphTestOptions) { .arg = (void *)"memslot" });
+    qos_add_test("cxl-switch", "femu", femu_test_cxl_switch, NULL);
     qos_add_test("cxl-overlay-scope", "femu", femu_test_cxl_overlay_scope,
                  NULL);
     qos_add_test("cxl-slot-reservation", "femu",

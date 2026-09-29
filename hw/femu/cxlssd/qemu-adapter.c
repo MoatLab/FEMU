@@ -270,41 +270,30 @@ static PCIDevice *adapter_target(CXLFixedWindow *fw)
     return rp ? pci_bridge_get_sec_bus(PCI_BRIDGE(rp))->devices[0] : NULL;
 }
 
-static bool adapter_topology(PCIDevice *dev, Error **errp)
+/* Whether a target host bridge of @fw is above @dev, even across a switch. */
+static bool adapter_reaches(CXLFixedWindow *fw, PCIDevice *dev)
 {
-    PCIBus *bus = pci_get_bus(dev);
-    PCIDevice *rp = bus->parent_dev;
-    GSList *windows = cxl_fmws_get_all_sorted();
-    GSList *it;
-    bool found = false;
-    bool valid = rp && object_dynamic_cast(OBJECT(rp), "cxl-rp");
+    unsigned i;
 
-    for (it = windows; valid && it; it = it->next) {
-        CXLFixedWindow *fw = CXL_FMW(it->data);
-        unsigned i;
+    for (i = 0; i < fw->num_targets; i++) {
+        PCIHostState *hb = adapter_host(fw, i);
+        PCIBus *bus = pci_get_bus(dev);
 
-        for (i = 0; i < fw->num_targets; i++) {
-            PCIHostState *hb = adapter_host(fw, i);
-
-            if (hb && hb->bus == pci_get_bus(rp)) {
-                found = true;
-                valid = fw->num_targets == 1 && dev->devfn == 0;
-                if (!valid) {
-                    break;
-                }
+        while (hb && bus) {
+            if (bus == hb->bus) {
+                return true;
             }
+            bus = bus->parent_dev ? pci_get_bus(bus->parent_dev) : NULL;
         }
     }
-    g_slist_free(windows);
-    if (!valid || !found) {
-        error_setg(errp, "FEMU requires a single-target window and an endpoint "
-                   "directly below a CXL root port");
-        return false;
-    }
-    return true;
+    return false;
 }
 
-/* FEMU accepts volatile media and non-interleaved endpoint decoders only. */
+/*
+ * HPA to DPA through the endpoint decoders, including interleave, as
+ * cxl_type3_dpa() does; an invalid way encoding fails the access instead
+ * of exiting. The whole access must fall inside the volatile capacity.
+ */
 static bool adapter_translate(CXLType3Dev *dev, uint64_t hpa,
                                unsigned size, uint64_t *dpa)
 {
@@ -326,28 +315,41 @@ static bool adapter_translate(CXLType3Dev *dev, uint64_t hpa,
                             R_CXL_HDM_DECODER0_DPA_SKIP_HI) << 32 |
                        (ldl_le_p(r + R_CXL_HDM_DECODER0_DPA_SKIP_LO) &
                         0xf0000000);
+        unsigned iw = FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, IW);
+        unsigned ig = FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, IG);
+        int ways = cxl_interleave_ways_dec(iw, NULL);
+        uint64_t capacity = dev->cxl_dstate.vmem_size;
+        uint64_t offset;
+        uint64_t local;
 
-        if (!FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, COMMITTED) ||
-            FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, IW) ||
+        if (!FIELD_EX32(ctrl, CXL_HDM_DECODER0_CTRL, COMMITTED) || !ways ||
             skip > UINT64_MAX - base) {
             return false;
         }
         base += skip;
-        if (hpa >= start && hpa - start < length) {
-            uint64_t offset = hpa - start;
-            uint64_t capacity = dev->cxl_dstate.vmem_size;
-
-            if (offset > UINT64_MAX - base || base + offset >= capacity ||
-                size > capacity - (base + offset)) {
+        if (hpa < start || hpa - start >= length) {
+            if (length / ways > UINT64_MAX - base) {
                 return false;
             }
-            *dpa = base + offset;
-            return true;
+            base += length / ways;
+            continue;
         }
-        if (length > UINT64_MAX - base) {
+        offset = hpa - start;
+        if (iw < 8) {
+            local = (offset & MAKE_64BIT_MASK(0, 8 + ig)) |
+                    ((offset & MAKE_64BIT_MASK(8 + ig + iw,
+                                               64 - 8 - ig - iw)) >> iw);
+        } else {
+            local = (offset & MAKE_64BIT_MASK(0, 8 + ig)) |
+                    ((((offset & MAKE_64BIT_MASK(ig + iw, 64 - ig - iw)) >>
+                       (ig + iw)) / 3) << (ig + 8));
+        }
+        if (local > UINT64_MAX - base || base + local >= capacity ||
+            size > capacity - (base + local)) {
             return false;
         }
-        base += length;
+        *dpa = base + local;
+        return true;
     }
     return false;
 }
@@ -500,7 +502,6 @@ static const MemoryRegionOps adapter_ops = {
 static void adapter_machine_done(Notifier *notifier, void *opaque)
 {
     FemuCxlSsd *dev = container_of(notifier, FemuCxlSsd, machine_done);
-    PCIDevice *rp = pci_get_bus(PCI_DEVICE(dev))->parent_dev;
     GSList *windows = cxl_fmws_get_all_sorted();
     GSList *it;
 
@@ -508,12 +509,11 @@ static void adapter_machine_done(Notifier *notifier, void *opaque)
     adapter_users++;
     for (it = windows; it; it = it->next) {
         CXLFixedWindow *fw = CXL_FMW(it->data);
-        PCIHostState *hb = adapter_host(fw, 0);
         FemuCxlWindow *w;
         bool found = false;
 
         /* Other windows never route here; leave their accesses untouched. */
-        if (fw->num_targets != 1 || !hb || hb->bus != pci_get_bus(rp)) {
+        if (!adapter_reaches(fw, PCI_DEVICE(dev))) {
             continue;
         }
         QLIST_FOREACH(w, &adapter_windows, next) {
@@ -1162,8 +1162,7 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         error_setg(errp, "NAND timing must be at most one second");
         return;
     }
-    if (!femu_cxl_geometry(s, size, errp) ||
-        !adapter_topology(dev, errp)) {
+    if (!femu_cxl_geometry(s, size, errp)) {
         return;
     }
     if (s->cca_enabled && !femu_cxl_cca_alloc(s, OBJECT(dev), errp)) {
