@@ -749,9 +749,15 @@ static FILE *cxl_log_open(FemuCxlMedia *s, const char *dir,
                                             name, NULL);
     FILE *file = fopen(path, mode);
 
-    if (!file && !s->log_warned) {
-        warn_report("CXL cannot open %s: %s", path, strerror(errno));
-        s->log_warned = true;
+    /* Warn once per file so one bad path does not hide another. */
+    if (!file) {
+        if (!s->log_warned) {
+            s->log_warned = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                  g_free, NULL);
+        }
+        if (g_hash_table_add(s->log_warned, g_strdup(path))) {
+            warn_report("CXL cannot open %s: %s", path, strerror(errno));
+        }
     }
     return file;
 }
@@ -1279,6 +1285,8 @@ static void cxl_class_init(ObjectClass *oc, const void *data)
 
 static void cxl_finalize(Object *obj)
 {
+    g_clear_pointer(&FEMU_CXL_SSD(obj)->media.log_warned,
+                    g_hash_table_destroy);
     qemu_cond_destroy(&FEMU_CXL_SSD(obj)->media.idle);
 }
 

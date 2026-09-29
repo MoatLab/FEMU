@@ -33,7 +33,7 @@ typedef struct FemuCxlMedia {
     char *log_dir;
     char *tracefs_dir;
     FILE *io_log;
-    bool log_warned;
+    GHashTable *log_warned;
     uint32_t log_sequence;
     uint64_t control_argument;
     uint64_t control_status;

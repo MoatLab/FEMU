@@ -387,7 +387,7 @@ The trace command numbering follows Cylon's implementation (91 starts,
 commands also write its `tracing_on` file without invoking a shell.
 `log-dir` selects the directory for `cxlssd-stats.log`, `cxlssd-io-N.log` and
 `cxlssd-spt.log`; it defaults to the working directory. An unavailable output
-warns once per device and the device continues. I/O logs contain realtime
+warns once per file and the device continues. I/O logs contain realtime
 start timestamp, R/W, byte DPA, byte length and modeled media nanoseconds.
 Direct CPU hits do not enter QEMU and cannot appear in these logs.
 

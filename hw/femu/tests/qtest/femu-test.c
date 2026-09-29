@@ -14281,18 +14281,28 @@ static void femu_test_cxl_log_missing(void *obj, void *data,
     g_autofree char *path = g_build_filename(dir, "errors", NULL);
     g_autofree char *contents = NULL;
     QTestState *qts = qtest_init(args);
-    char *warning;
+    static const char *const names[] = {
+        "cxlssd-io-1.log", "cxlssd-stats.log", "cxlssd-spt.log", "tracing_on",
+    };
+    unsigned i;
 
     femu_cxl_command(qts, false, 13, 0);
-    femu_cxl_command(qts, false, 1, 0);
-    femu_cxl_command(qts, false, 17, 0);
-    femu_cxl_command(qts, false, 91, 0);
-    femu_cxl_command(qts, false, 81, 0);
+    for (i = 0; i < 2; i++) {
+        femu_cxl_command(qts, false, 1, 0);
+        femu_cxl_command(qts, false, 17, 0);
+        femu_cxl_command(qts, false, 91, 0);
+        femu_cxl_command(qts, false, 81, 0);
+    }
     qtest_quit(qts);
     g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
-    warning = strstr(contents, "CXL cannot open");
-    g_assert_nonnull(warning);
-    g_assert_null(strstr(warning + 1, "CXL cannot open"));
+    /* Each unavailable file warns exactly once, however often it is used. */
+    for (i = 0; i < G_N_ELEMENTS(names); i++) {
+        g_autofree char *needle = g_strdup_printf("/missing/%s:", names[i]);
+        char *warning = strstr(contents, needle);
+
+        g_assert_nonnull(warning);
+        g_assert_null(strstr(warning + 1, needle));
+    }
     unlink(path);
     rmdir(dir);
 }
