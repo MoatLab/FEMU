@@ -1607,6 +1607,7 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
     der->dev = dev;
     der->cache = cache;
     der->maps = g_hash_table_new(g_int64_hash, g_int64_equal);
+    der->windows = g_ptr_array_new();
     der->cylon = mode && !strcmp(mode, "cylon");
     if (der->cylon) {
         der->probes++;
@@ -1620,16 +1621,16 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
 }
 
 /* Limit direct mappings to a single endpoint on a decoderless host bridge. */
-static CXLFixedWindow *der_window(FemuCxlDer *der, uint64_t hpa)
+static void der_windows_scan(FemuCxlDer *der)
 {
     GSList *windows = cxl_fmws_get_all_sorted();
     GSList *it;
-    CXLFixedWindow *found = NULL;
     PCIBus *bus = pci_get_bus(PCI_DEVICE(der->dev));
     PCIDevice *rp = bus->parent_dev;
     uint32_t *regs = der->dev->parent_obj.cxl_cstate.crb.cache_mem_registers;
     unsigned i;
 
+    g_ptr_array_set_size(der->windows, 0);
     for (i = 0; i < CXL_HDM_DECODER_COUNT; i++) {
         uint32_t ctrl = ldl_le_p(regs + R_CXL_HDM_DECODER0_CTRL + i * 8);
 
@@ -1645,20 +1646,42 @@ static CXLFixedWindow *der_window(FemuCxlDer *der, uint64_t hpa)
         CXLFixedWindow *fw = CXL_FMW(it->data);
         PCIHostState *hb;
 
-        if (fw->num_targets != 1 || hpa < fw->base ||
-            hpa - fw->base >= fw->size) {
+        if (fw->num_targets != 1) {
             continue;
         }
         hb = PCI_HOST_BRIDGE(fw->target_hbs[0]->cxl_host_bridge);
         if (hb->bus == pci_get_bus(rp) && cxl_get_hb_passthrough(hb) &&
             adapter_target(fw) == PCI_DEVICE(der->dev)) {
-            found = fw;
-            break;
+            g_ptr_array_add(der->windows, fw);
         }
     }
 out:
     g_slist_free(windows);
-    return found;
+}
+
+/*
+ * Finding the windows walks the whole QOM tree, far too slow for every
+ * access. Windows and topology are fixed once the machine is built, and
+ * every decoder, config, CCI or reset write bumps the generation.
+ */
+static CXLFixedWindow *der_window(FemuCxlDer *der, uint64_t hpa)
+{
+    uint64_t generation = der->dev->media.invalidations;
+    unsigned i;
+
+    if (!der->windows_valid || der->windows_generation != generation) {
+        der_windows_scan(der);
+        der->windows_generation = generation;
+        der->windows_valid = true;
+    }
+    for (i = 0; i < der->windows->len; i++) {
+        CXLFixedWindow *fw = g_ptr_array_index(der->windows, i);
+
+        if (hpa >= fw->base && hpa - fw->base < fw->size) {
+            return fw;
+        }
+    }
+    return NULL;
 }
 
 /* Every device's aliases share address_space_memory's section limit. */
@@ -1698,6 +1721,11 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     if (!der->cylon && femu_cxl_ratio_selected(der->ratio, lpn)) {
         return lpn < der->ratio_end;
     }
+    /* A full budget is the common refusal; decide it before the window. */
+    if (!der->cylon && !der_alias_budget()) {
+        der->fallbacks++;
+        return false;
+    }
     fw = der_window(der, hpa);
     if (!fw) {
         der->fallbacks++;
@@ -1705,10 +1733,6 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     }
     if (der->cylon) {
         return femu_cylon_map(der, fw, hpa, dpa);
-    }
-    if (!der_alias_budget()) {
-        der->fallbacks++;
-        return false;
     }
     ram = host_memory_backend_get_memory(der->dev->parent_obj.hostvmem);
     map = g_new0(FemuCxlMap, 1);
@@ -1936,6 +1960,7 @@ void femu_cxl_der_destroy(FemuCxlDer *der)
     femu_cylon_destroy(der);
     der->available = false;
     g_hash_table_destroy(der->maps);
+    g_ptr_array_free(der->windows, true);
 }
 
 #ifdef CONFIG_KVM

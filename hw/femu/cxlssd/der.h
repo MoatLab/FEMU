@@ -16,6 +16,10 @@ typedef struct FemuCxlDer {
     bool cylon;
     FemuCylon *fast;
     FemuCxlCache *cache;
+    /* Windows that route here, valid for one invalidation generation. */
+    GPtrArray *windows;
+    uint64_t windows_generation;
+    bool windows_valid;
     uint64_t remaps;
     uint64_t revocations;
     uint64_t fallbacks;

@@ -14487,6 +14487,51 @@ static void femu_test_cxl_der_budget(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/* Cached-hit MMIO accesses per second on pages that hold no alias. */
+static double femu_cxl_hit_rate(const char *der)
+{
+    QTestState *qts = qtest_initf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=%s,"
+        "cache-pages=4096,cache-ways=1,ftl=off", der);
+    size_t len = 64 * 4096;
+    g_autofree uint8_t *buf = g_malloc(len);
+    uint64_t base = FEMU_CXL_WINDOW + 1100ULL * 4096;
+    uint64_t accesses = 0;
+    gint64 start;
+    gint64 elapsed;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    for (i = 0; i < 1164; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + (uint64_t)i * 4096, i);
+    }
+    if (!strcmp(der, "memslot")) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 1024);
+    }
+    /* One memread is split into 8-byte accesses inside QEMU. */
+    start = g_get_monotonic_time();
+    do {
+        qtest_memread(qts, base, buf, len);
+        accesses += len / 8;
+        elapsed = g_get_monotonic_time() - start;
+    } while (elapsed < G_USEC_PER_SEC / 2);
+    g_assert_cmphex(ldq_le_p(buf + 63 * 4096), ==, 1163);
+    qtest_quit(qts);
+    return accesses * (double)G_USEC_PER_SEC / elapsed;
+}
+
+static void femu_test_cxl_der_budget_rate(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    double off = femu_cxl_hit_rate("off");
+    double full = femu_cxl_hit_rate("memslot");
+
+    g_test_message("hits/s: der=off %.0f, der=memslot with full budget %.0f",
+                   off, full);
+    /* A full budget must not make unmapped hits slower than plain MMIO. */
+    g_assert_cmpfloat(full, >=, off * 0.8);
+}
+
 static uint64_t femu_cxl_stat_of(QTestState *qts, const char *id,
                                  const char *name)
 {
@@ -16014,6 +16059,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-ratio-off", "femu", femu_test_cxl_ratio_off, NULL);
     qos_add_test("cxl-ratio-runs", "femu", femu_test_cxl_ratio_runs, NULL);
     qos_add_test("cxl-der-budget", "femu", femu_test_cxl_der_budget, NULL);
+    qos_add_test("cxl-der-budget-rate", "femu",
+                 femu_test_cxl_der_budget_rate, NULL);
     qos_add_test("cxl-der-budget-shared", "femu",
                  femu_test_cxl_der_budget_shared, NULL);
     qos_add_test("cxl-ratio-restore", "femu", femu_test_cxl_ratio_restore,
