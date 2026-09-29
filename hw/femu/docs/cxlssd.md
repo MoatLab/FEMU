@@ -454,9 +454,10 @@ first access to an unmapped page. `cylon-free-writeback=on` suppresses NAND
 programming on dirty cache eviction/flush. Both default off and exist to
 reproduce Cylon paper experiments; enabling them changes the media model.
 The default continues to program dirty eviction and reads unmapped pages
-without a NAND operation. Media waits spin on the realtime clock outside
-the BQL and retain the device operation gate. This removes sleep timer slack
-but consumes a host CPU while waiting. The virtual clock cannot measure this
+without a NAND operation. Media waits run outside the BQL and
+retain the device operation gate. They sleep until 100 us before the deadline
+and spin on the realtime clock only for that tail, which absorbs sleep timer
+slack without holding a host CPU for long waits such as a cache flush. The virtual clock cannot measure this
 host wait; qtests validate modeled timing and BQL release independently.
 
 ## Direct ratios
