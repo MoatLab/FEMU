@@ -2,12 +2,12 @@
 #ifndef FEMU_CXL_DER_H
 #define FEMU_CXL_DER_H
 
-#include "hw/cxl/cxl_device.h"
 #include "cache.h"
-#include "cylon.h"
+typedef struct FemuCylon FemuCylon;
+typedef struct FemuCxlSsd FemuCxlSsd;
 
 typedef struct FemuCxlDer {
-    CXLType3Dev *dev;
+    FemuCxlSsd *dev;
     GHashTable *maps;
     bool available;
     bool warned;
@@ -21,7 +21,7 @@ typedef struct FemuCxlDer {
     uint64_t mapped;
 } FemuCxlDer;
 
-void femu_cxl_der_init(FemuCxlDer *der, CXLType3Dev *dev, const char *mode,
+void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
                        FemuCxlCache *cache);
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa);
 void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn);

@@ -320,9 +320,6 @@ static void ct3d_config_write(PCIDevice *pci_dev, uint32_t addr, uint32_t val,
 {
     CXLType3Dev *ct3d = CXL_TYPE3(pci_dev);
 
-    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
-        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
-    }
     pcie_doe_write_config(&ct3d->doe_cdat, addr, val, size);
     pci_default_write_config(pci_dev, addr, val, size);
     pcie_aer_write_config(pci_dev, addr, val, size);
@@ -518,9 +515,6 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     bool should_uncommit = false;
     int which_hdm = -1;
 
-    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
-        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
-    }
     assert(size == 4);
     g_assert(offset < CXL2_COMPONENT_CM_REGION_SIZE);
 
@@ -887,7 +881,7 @@ static void ct3_realize(PCIDevice *pci_dev, Error **errp)
     QTAILQ_INIT(&ct3d->error_list);
 
     if (!cxl_setup_memory(ct3d, errp)) {
-        goto err_unmap_memory;
+        return;
     }
 
     pci_config_set_prog_interface(pci_conf, 0x10);
@@ -980,20 +974,13 @@ err_free_special_ops:
     g_free(regs->special_ops);
     if (ct3d->dc.host_dc) {
         cxl_destroy_dc_regions(ct3d);
-    }
-err_unmap_memory:
-    /* An address space exists only for a backend this realize mapped. */
-    if (ct3d->dc.host_dc_as.root) {
         address_space_destroy(&ct3d->dc.host_dc_as);
-        host_memory_backend_set_mapped(ct3d->dc.host_dc, false);
     }
-    if (ct3d->hostpmem_as.root) {
+    if (ct3d->hostpmem) {
         address_space_destroy(&ct3d->hostpmem_as);
-        host_memory_backend_set_mapped(ct3d->hostpmem, false);
     }
-    if (ct3d->hostvmem_as.root) {
+    if (ct3d->hostvmem) {
         address_space_destroy(&ct3d->hostvmem_as);
-        host_memory_backend_set_mapped(ct3d->hostvmem, false);
     }
 }
 
@@ -1158,7 +1145,7 @@ static bool cxl_type3_dpa(CXLType3Dev *ct3d, hwaddr host_addr, uint64_t *dpa)
     return false;
 }
 
-int cxl_type3_hpa_to_as_and_dpa(CXLType3Dev *ct3d,
+static int cxl_type3_hpa_to_as_and_dpa(CXLType3Dev *ct3d,
                                        hwaddr host_addr,
                                        unsigned int size,
                                        AddressSpace **as,
@@ -1228,11 +1215,6 @@ MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
         return MEMTX_OK;
     }
 
-    if (CXL_TYPE3_GET_CLASS(ct3d)->mem_access) {
-        return CXL_TYPE3_GET_CLASS(ct3d)->mem_access(ct3d, host_addr,
-                    dpa_offset, data, size, false, attrs);
-    }
-
     return address_space_read(as, dpa_offset, attrs, data, size);
 }
 
@@ -1254,11 +1236,6 @@ MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
         return MEMTX_OK;
     }
 
-    if (CXL_TYPE3_GET_CLASS(ct3d)->mem_access) {
-        return CXL_TYPE3_GET_CLASS(ct3d)->mem_access(ct3d, host_addr,
-                    dpa_offset, &data, size, true, attrs);
-    }
-
     return address_space_write(as, dpa_offset, attrs, &data, size);
 }
 
@@ -1268,9 +1245,6 @@ static void ct3d_reset(DeviceState *dev)
     uint32_t *reg_state = ct3d->cxl_cstate.crb.cache_mem_registers;
     uint32_t *write_msk = ct3d->cxl_cstate.crb.cache_mem_regs_write_mask;
 
-    if (CXL_TYPE3_GET_CLASS(ct3d)->invalidate) {
-        CXL_TYPE3_GET_CLASS(ct3d)->invalidate(ct3d);
-    }
     pcie_cap_fill_link_ep_usp(PCI_DEVICE(dev), ct3d->width, ct3d->speed);
     cxl_component_register_init_common(reg_state, write_msk, CXL2_TYPE3_DEVICE);
     cxl_device_register_init_t3(ct3d, CXL_T3_MSIX_MBOX);

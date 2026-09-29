@@ -247,46 +247,36 @@ static PCIDevice *cxl_cfmws_find_device(CXLFixedWindow *fw, hwaddr addr)
     return d;
 }
 
-static MemTxResult cxl_access_cfmws(CXLFixedWindow *fw, hwaddr addr,
-                                    uint64_t *data, unsigned size,
-                                    MemTxAttrs attrs, bool write)
-{
-    PCIDevice *d = cxl_cfmws_find_device(fw, addr);
-    DeviceState *owner = DEVICE(fw);
-    bool managed;
-    bool engaged;
-    MemTxResult result;
-
-    if (!d) {
-        /* Reads to invalid addresses return poison; writes are silent. */
-        *data = 0;
-        return write ? MEMTX_OK : MEMTX_ERROR;
-    }
-    managed = CXL_TYPE3_GET_CLASS(d)->mem_access != NULL;
-    engaged = owner->mem_reentrancy_guard.engaged_in_io;
-    if (managed) {
-        /* The callback serializes accesses and may wait without the BQL. */
-        owner->mem_reentrancy_guard.engaged_in_io = false;
-    }
-    result = write ? cxl_type3_write(d, addr + fw->base, *data, size, attrs) :
-                     cxl_type3_read(d, addr + fw->base, data, size, attrs);
-    if (managed) {
-        owner->mem_reentrancy_guard.engaged_in_io = engaged;
-    }
-    return result;
-}
-
 static MemTxResult cxl_read_cfmws(void *opaque, hwaddr addr, uint64_t *data,
                                   unsigned size, MemTxAttrs attrs)
 {
-    return cxl_access_cfmws(opaque, addr, data, size, attrs, false);
+    CXLFixedWindow *fw = opaque;
+    PCIDevice *d;
+
+    d = cxl_cfmws_find_device(fw, addr);
+    if (d == NULL) {
+        *data = 0;
+        /* Reads to invalid address return poison */
+        return MEMTX_ERROR;
+    }
+
+    return cxl_type3_read(d, addr + fw->base, data, size, attrs);
 }
 
 static MemTxResult cxl_write_cfmws(void *opaque, hwaddr addr,
                                    uint64_t data, unsigned size,
                                    MemTxAttrs attrs)
 {
-    return cxl_access_cfmws(opaque, addr, &data, size, attrs, true);
+    CXLFixedWindow *fw = opaque;
+    PCIDevice *d;
+
+    d = cxl_cfmws_find_device(fw, addr);
+    if (d == NULL) {
+        /* Writes to invalid address are silent */
+        return MEMTX_OK;
+    }
+
+    return cxl_type3_write(d, addr + fw->base, data, size, attrs);
 }
 
 const MemoryRegionOps cfmws_ops = {

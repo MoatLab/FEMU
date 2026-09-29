@@ -201,8 +201,6 @@ void kvm_release_memslot(KVMSlotReservation *reservation);
 
 unsigned int kvm_get_max_memslots(void);
 unsigned int kvm_get_free_memslots(void);
-/* Validate an exact listener-owned Cylon slot before mapping its SPT. */
-bool kvm_cylon_slot(hwaddr start, uint64_t size, void *ram);
 bool kvm_has_sync_mmu(void);
 int kvm_has_vcpu_events(void);
 int kvm_max_nested_state_length(void);
