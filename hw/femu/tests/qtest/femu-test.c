@@ -13530,12 +13530,33 @@ static void femu_test_cxl_wait(void *obj, void *data,
         0x00, 0x00, 0x01, 0xc6, 0x00, 0x5a, 0xc6, 0x04, 0x25, 0x00, 0x60, 0x00,
         0x00, 0x02, 0xf4, 0xeb, 0xfd,
     };
+    /*
+     * Wait for the test and write PCI_COMMAND. Spin for 2^25 iterations so
+     * the media write, if already released, has marked completion; then copy
+     * its marker to 0x6003 and mark completion.
+     */
+    static const uint8_t ap[] = {
+        0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0xc6, 0x06, 0x01, 0x60, 0x01, 0x80, 0x3e,
+        0x02, 0x60, 0x01, 0x75, 0xf9, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x04, 0x00,
+        0x35, 0x80, 0x66, 0xef, 0xba, 0xfc, 0x0c, 0x66, 0xb8, 0x02, 0x00, 0x00,
+        0x00, 0x66, 0xef, 0x66, 0xb9, 0x00, 0x00, 0x00, 0x02, 0x66, 0x49, 0x75,
+        0xfc, 0xa0, 0x00, 0x60, 0xa2, 0x03, 0x60, 0xc6, 0x06, 0x01, 0x60, 0x02,
+        0xf4, 0xeb, 0xfd,
+    };
+    /* Start AP at 0x7000, then jump to the media write at 0x1100. */
+    static const uint8_t sipi[] = {
+        0xbb, 0x00, 0x00, 0xe0, 0xfe, 0xc7, 0x83, 0x10, 0x03, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0xc7, 0x83, 0x00, 0x03, 0x00, 0x00, 0x00, 0xc5, 0x00,
+        0x00, 0xc7, 0x83, 0x00, 0x03, 0x00, 0x00, 0x07, 0x06, 0x00, 0x00, 0xe9,
+        0xd8, 0xfe, 0xff, 0xff,
+    };
     g_autofree char *rom_path = g_strdup("cxl-wait-rom-XXXXXX");
     g_autofree char *quoted = NULL;
     g_autofree uint8_t *rom = g_malloc0(65536);
     int fd = g_mkstemp(rom_path);
     QTestState *qts;
     int64_t deadline;
+    bool invalidate = data == (void *)2;
 
     g_assert_cmpint(fd, >=, 0);
     memcpy(rom, reset, sizeof(reset));
@@ -13545,9 +13566,9 @@ static void femu_test_cxl_wait(void *obj, void *data,
     close(fd);
     quoted = g_shell_quote(rom_path);
     qts = qtest_initf(FEMU_CXL_MACHINE
-        "-accel tcg -S -bios %s "
+        "-accel tcg,thread=multi -S -bios %s -smp %u "
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=0,program-ns=1000000000", quoted);
+        "cache-pages=0,program-ns=1000000000", quoted, invalidate ? 2 : 1);
     femu_cxl_decode(qts);
     qtest_writew(qts, 0x500, 31);
     qtest_writel(qts, 0x502, 0x508);
@@ -13562,6 +13583,14 @@ static void femu_test_cxl_wait(void *obj, void *data,
     qtest_writeq(qts, 0x3020, 0x5003);
     qtest_writeq(qts, 0x4000, 0x83);
     qtest_writeq(qts, 0x5400, FEMU_CXL_WINDOW | 0x83);
+    if (invalidate) {
+        /* Map the local APIC and redirect the long-mode entry to INIT/SIPI. */
+        qtest_writeq(qts, 0x3018, 0x8003);
+        qtest_writeq(qts, 0x8fb8, 0xfee00083);
+        qtest_writeb(qts, 0x1000 + sizeof(setup) - 5, 0x12);
+        qtest_memwrite(qts, 0x1200, sipi, sizeof(sipi));
+        qtest_memwrite(qts, 0x7000, ap, sizeof(ap));
+    }
     qtest_qmp_assert_success(qts, "{'execute':'cont'}");
     deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
     while (!femu_cxl_stat(qts, "media-writes")) {
@@ -13570,11 +13599,36 @@ static void femu_test_cxl_wait(void *obj, void *data,
     }
     /* With the BQL held during sleep this can only see completion (2). */
     g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
-    if (data) {
+    if (invalidate) {
+        /* The AP may still be starting while the media write sleeps. */
+        while (qtest_readb(qts, 0x6001) != 1) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+        qtest_writeb(qts, 0x6002, 1);
+        while (!femu_cxl_stat(qts, "invalidation-waiters")) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
+        g_assert_cmpuint(qtest_readb(qts, 0x6001), ==, 1);
+        /*
+         * Unrealize must release the blocked config write and let it finish
+         * before PCI teardown, while the media write still holds the gate.
+         */
+        femu_cxl_set(qts, "realized", false);
+        while (qtest_readb(qts, 0x6001) != 2) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+        g_assert_cmpuint(qtest_readb(qts, 0x6003), ==, 1);
+    } else if (data) {
         /* A concurrent access must queue, not trip the IO recursion guard. */
         g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW), ==, 0x5a);
     }
-    femu_cxl_set(qts, "realized", false);
+    if (!invalidate) {
+        femu_cxl_set(qts, "realized", false);
+    }
     while (qtest_readb(qts, 0x6000) != 2) {
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
         g_usleep(1000);
@@ -13659,6 +13713,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)"cylon" });
     qos_add_test("cxl-der-invalid", "femu", femu_test_cxl_der_invalid, NULL);
     qos_add_test("cxl-der", "femu", femu_test_cxl_der, NULL);
+    qos_add_test("cxl-wait-invalidate", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)2 });
     qos_add_test("cxl-wait", "femu", femu_test_cxl_wait, NULL);
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
