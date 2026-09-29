@@ -469,6 +469,37 @@ void femu_cxl_nvme_bh(void *opaque)
     femu_cxl_leave(s);
 }
 
+/*
+ * Flip from the linked controller. The timings are shared with the medium's
+ * worker, which reads them under @lock. Restoring delays uses the values this
+ * device was configured with, not the compile-time defaults.
+ */
+void femu_cxl_nvme_flip(FemuCtrl *n, int64_t cdw10)
+{
+    FemuCxlMedia *s = n->cxl_media;
+    struct ssdparams *sp = &s->ns.ssd->sp;
+    bool zero = cdw10 == FEMU_DISABLE_DELAY_EMU;
+
+    qemu_mutex_lock(&s->lock);
+    switch (cdw10) {
+    case FEMU_ENABLE_GC_DELAY:
+    case FEMU_DISABLE_GC_DELAY:
+        sp->enable_gc_delay = cdw10 == FEMU_ENABLE_GC_DELAY;
+        break;
+    case FEMU_ENABLE_DELAY_EMU:
+    case FEMU_DISABLE_DELAY_EMU:
+        sp->pg_rd_lat = zero ? 0 : s->read_ns;
+        sp->pg_wr_lat = zero ? 0 : s->program_ns;
+        sp->blk_er_lat = zero ? 0 : s->erase_ns;
+        sp->ch_xfer_lat = zero ? 0 : s->channel_ns;
+        bb_nand_media_refresh_timing(s->ns.ssd);
+        break;
+    default:
+        break;
+    }
+    qemu_mutex_unlock(&s->lock);
+}
+
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy)
 {

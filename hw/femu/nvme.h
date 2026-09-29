@@ -2344,6 +2344,7 @@ typedef struct FemuCxlNvmeOps {
     /* Undo prepare and attach once the controller's threads are stopped. */
     void (*detach)(FemuCtrl *n);
     uint64_t (*ftl)(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+    void (*flip)(FemuCtrl *n, int64_t cdw10);
 } FemuCxlNvmeOps;
 
 extern const FemuCxlNvmeOps *femu_cxl_nvme_ops;

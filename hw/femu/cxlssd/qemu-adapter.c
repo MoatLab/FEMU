@@ -1571,6 +1571,7 @@ static const FemuCxlNvmeOps cxl_nvme_ops = {
     .attach = cxl_nvme_attach,
     .detach = cxl_nvme_detach,
     .ftl = femu_cxl_nvme_ftl,
+    .flip = femu_cxl_nvme_flip,
 };
 
 static void cxl_register_types(void)

@@ -213,6 +213,13 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
      */
     resume = nvme_pause_pollers(n);
 
+    /* The medium's worker shares these timings; it applies them locked. */
+    if (n->cxl_media) {
+        femu_cxl_nvme_ops->flip(n, cdw10);
+        nvme_resume_pollers(n, resume);
+        return;
+    }
+
     for (i = 0; i < n->namespace_limit; i++) {
         struct ssd *ssd = n->namespaces[i].ssd;
 
