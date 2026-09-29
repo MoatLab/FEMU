@@ -13466,6 +13466,46 @@ static void femu_test_cxl_local_overlay(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static unsigned femu_cxl_mtree_count(QTestState *qts, const char *name)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'human-monitor-command',"
+                           "'arguments':{'command-line':'info mtree'}}");
+    const char *p = qdict_get_str(rsp, "return");
+    unsigned count = 0;
+
+    while ((p = strstr(p, name))) {
+        count++;
+        p += strlen(name);
+    }
+    qobject_unref(rsp);
+    return count;
+}
+
+static void femu_test_cxl_overlay_scope(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(
+        "-machine q35,cxl=on -m 128M "
+        "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+        "-device pxb-cxl,id=cxl.1,bus=pcie.0,bus_nr=60 "
+        "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M,"
+        "cxl-fmw.1.targets.0=cxl.1,cxl-fmw.1.size=256M "
+        "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+        "-object memory-backend-ram,id=mem,size=256M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+    unsigned windows = femu_cxl_mtree_count(qts, "cxl-fixed-memory-region");
+
+    /* Only the window whose host bridge carries the device is overlaid. */
+    g_assert_cmpuint(windows, >, 0);
+    g_assert_cmpuint(windows % 2, ==, 0);
+    g_assert_cmpuint(femu_cxl_mtree_count(qts, "femu-cxl-media"), ==,
+                     windows / 2);
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0x12345678);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0x12345678);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_stale_translation(void *obj, void *data,
                                             QGuestAllocator *alloc)
 {
@@ -14370,6 +14410,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-local-overlay", "femu", femu_test_cxl_local_overlay,
                  NULL);
     qos_add_test("cxl-topology", "femu", femu_test_cxl_topology, NULL);
+    qos_add_test("cxl-overlay-scope", "femu", femu_test_cxl_overlay_scope,
+                 NULL);
     qos_add_test("cxl-slot-reservation", "femu",
                  femu_test_cxl_slot_reservation, NULL);
     qos_add_test("cxl-realize-retry", "femu", femu_test_cxl_realize_retry,

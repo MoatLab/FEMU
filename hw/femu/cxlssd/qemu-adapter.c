@@ -70,11 +70,12 @@ static void femu_cylon_clear(FemuCxlDer *der);
 static void femu_cylon_reset(FemuCxlDer *der);
 
 
-/* Resolve targets before machine-init-done has linked the fixed windows. */
+/* Resolve by path only until machine-init-done has linked the targets. */
 static PCIHostState *adapter_host(CXLFixedWindow *fw, unsigned index)
 {
-    Object *obj = object_resolve_path_type(fw->targets[index],
-                                          TYPE_PXB_CXL_DEV, NULL);
+    Object *obj = fw->target_hbs[index] ? OBJECT(fw->target_hbs[index]) :
+                  object_resolve_path_type(fw->targets[index],
+                                           TYPE_PXB_CXL_DEV, NULL);
 
     return obj ? PCI_HOST_BRIDGE(PXB_CXL_DEV(obj)->cxl_host_bridge) : NULL;
 }
@@ -463,6 +464,7 @@ static const MemoryRegionOps adapter_ops = {
 static void adapter_machine_done(Notifier *notifier, void *opaque)
 {
     FemuCxlSsd *dev = container_of(notifier, FemuCxlSsd, machine_done);
+    PCIDevice *rp = pci_get_bus(PCI_DEVICE(dev))->parent_dev;
     GSList *windows = cxl_fmws_get_all_sorted();
     GSList *it;
 
@@ -470,9 +472,14 @@ static void adapter_machine_done(Notifier *notifier, void *opaque)
     adapter_users++;
     for (it = windows; it; it = it->next) {
         CXLFixedWindow *fw = CXL_FMW(it->data);
+        PCIHostState *hb = adapter_host(fw, 0);
         FemuCxlWindow *w;
         bool found = false;
 
+        /* Other windows never route here; leave their accesses untouched. */
+        if (fw->num_targets != 1 || !hb || hb->bus != pci_get_bus(rp)) {
+            continue;
+        }
         QLIST_FOREACH(w, &adapter_windows, next) {
             if (w->fw == fw) {
                 found = true;

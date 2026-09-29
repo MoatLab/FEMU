@@ -17,8 +17,11 @@ CXL device layout, fixed windows, routing, decoders, CCI state and KVM ioctls.
 `cxlssd.c` owns the media worker and cache/FTL access through the FEMU interface
 in `qemu-adapter.h`; the cache and SPTE helpers remain independent libraries.
 
-Each fixed window has one shared FEMU I/O overlay while FEMU endpoints exist.
-Installation runs at machine-init-done, or immediately for later realization.
+A fixed window gets one shared FEMU I/O overlay when its single target host
+bridge carries a FEMU endpoint; other windows keep their own dispatch untouched.
+Overlays stay until the last FEMU endpoint leaves. Installation runs at
+machine-init-done, or immediately for later realization. Routing uses the
+windows' linked host bridges once machine-init-done has linked them.
 The overlay remains installed through reset and decoder changes. Routing uses
 the host bridge's live decoder state before endpoint translation. A selected
 non-FEMU endpoint is forwarded by direct dispatch to the original window.
