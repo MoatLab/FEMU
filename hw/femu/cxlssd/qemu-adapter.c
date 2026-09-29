@@ -1048,6 +1048,10 @@ static void cxl_exit(PCIDevice *dev)
     adapter_cci_dispose(&CXL_TYPE3(dev)->cci, true);
     adapter_cci_dispose(&CXL_TYPE3(dev)->vdm_fm_owned_ld_mctp_cci, false);
     adapter_cci_dispose(&CXL_TYPE3(dev)->ld0_cci, false);
+    /* The parent destroys this lock even if no reset initialized it. */
+    if (!CXL_TYPE3(dev)->cci.initialized) {
+        qemu_mutex_init(&CXL_TYPE3(dev)->cci.bg.lock);
+    }
     parent_exit(dev);
     host_memory_backend_set_mapped(CXL_TYPE3(dev)->hostvmem, false);
     femu_cxl_leave(s);
