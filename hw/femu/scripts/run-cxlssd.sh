@@ -14,11 +14,19 @@ else
     echo 'CXL_SIZE must be an integer followed by M or G' >&2
     exit 1
 fi
-CACHE_PAGES=${CACHE_PAGES:-$((size_mb * 256 / 20))}
-CACHE_WAYS=${CACHE_WAYS:-full}
+# Match Cylon's launch script: a buffer of size/20 MiB, direct mapped.
+CACHE_PAGES=${CACHE_PAGES:-$(((size_mb / 20) * 256))}
+CACHE_WAYS=${CACHE_WAYS:-1}
 if [[ $CACHE_WAYS == full ]]; then
     CACHE_WAYS=$CACHE_PAGES
 fi
+# Cylon's 48/96 GiB presets use no over-provisioning; 0 lets FEMU size it.
+case $size_mb in
+49152) default_blocks=768 ;;
+98304) default_blocks=1536 ;;
+*) default_blocks=0 ;;
+esac
+BLOCKS_PER_PLANE=${BLOCKS_PER_PLANE:-$default_blocks}
 CACHE_POLICY=${CACHE_POLICY:-fifo}
 DER=${DER:-off}
 LOG_DIR=${LOG_DIR:-.}
@@ -30,7 +38,7 @@ CXL_OPTS+=",cylon-kernel-ack=${CYLON_KERNEL_ACK:-off}"
 CXL_OPTS+=",prefetch-degree=${PREFETCH_DEGREE:-0}"
 CXL_OPTS+=",prefetch-stride=${PREFETCH_STRIDE:-1}"
 CXL_OPTS+=",channels=${CHANNELS:-8},luns-per-channel=${LUNS_PER_CHANNEL:-8}"
-CXL_OPTS+=",blocks-per-plane=${BLOCKS_PER_PLANE:-0}"
+CXL_OPTS+=",blocks-per-plane=$BLOCKS_PER_PLANE"
 CXL_OPTS+=",pages-per-block=${PAGES_PER_BLOCK:-256}"
 CXL_OPTS+=",read-ns=${READ_NS:-40000},program-ns=${PROGRAM_NS:-200000}"
 CXL_OPTS+=",erase-ns=${ERASE_NS:-2000000},channel-ns=${CHANNEL_NS:-0}"

@@ -490,12 +490,15 @@ unavailable the ratio remains queryable but mappings stay inactive. `der-mapped`
 Custom-kernel ratio installation, zero-leaf restoration and dirty revocation
 still require guest validation.
 
-`hw/femu/scripts/run-cxlssd.sh` exposes size, a default five-percent cache,
-fully associative or explicit ways, policy, prefetch, geometry, timings,
-GC, control/logging and compatibility switches through environment variables.
-For example, use `CXL_SIZE=96G CHANNELS=8 LUNS_PER_CHANNEL=8
-BLOCKS_PER_PLANE=1536 CACHE_POLICY=clock PREFETCH_DEGREE=3` and supply guest
-boot arguments. `DRY_RUN=1` prints the command. `CXL_BACKEND` can supply a
+`hw/femu/scripts/run-cxlssd.sh` exposes size, cache, ways, policy, prefetch,
+geometry, timings, GC, control/logging and compatibility switches through
+environment variables. Its defaults follow Cylon's launch script: a cache of
+`(size_mb / 20) * 256` pages, one way (Cylon's default `buffer_way=0`, direct
+mapped; `CACHE_WAYS=full` selects fully associative), 8 channels by 8 LUNs,
+and for the 48 and 96 GiB presets 768 and 1536 blocks per plane, which leave
+no over-provisioning as in Cylon. Other sizes let FEMU size the blocks with
+over-provisioning. For example, use `CXL_SIZE=96G CACHE_POLICY=clock
+PREFETCH_DEGREE=3` and supply guest boot arguments. `DRY_RUN=1` prints the command. `CXL_BACKEND` can supply a
 shared/preallocated hugetlb backend configuration for Cylon; explicitly set
 `CYLON_KERNEL_ACK=on` only on the fixed host kernel. The script changes no
 host tuning, allocates no huge pages itself and never invokes sudo.
