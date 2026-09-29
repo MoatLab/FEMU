@@ -384,7 +384,7 @@ host controls work with `lsa-control=off` too.
 | 9, 11 | Flush/clear the cache, as in Cylon; keep the configured DER mode |
 | 13, 15 | Start a new per-access log / close it; names cycle through 64 files |
 | 17 | Dump current tracked direct mappings and Cylon SPTE values |
-| 90, 80 | Set direct ratio / revoke and reset it; a nonzero ratio needs `der=memslot` or `der=cylon` |
+| 90, 80 | Set direct ratio (0 selects every page) / revoke and reset it; a ratio needs `der=memslot` or `der=cylon` |
 | 91, 81 | Clear the host trace buffer and start tracing / stop tracing, in `tracefs-dir` |
 
 The trace commands follow Cylon (91 starts, 81 stops) and act only on the host
@@ -460,7 +460,9 @@ host wait; qtests validate modeled timing and BQL release independently.
 it. Values 50, 75, 90, 95, 97, 98, 99, 995 and 999 match Cylon's periodic
 selection (exclude each 2nd, 4th, 10th, 20th, 33rd, 50th, 100th, 200th or
 1000th page, starting with page zero); 100 selects every page. In particular,
-97 means 32/33, and 995/999 mean 99.5/99.9 percent. Other values are rejected.
+97 means 32/33, and 995/999 mean 99.5/99.9 percent. As in Cylon, command 90
+with argument zero selects every page; `der-ratio=0` and command 80 turn the
+ratio off. Other values are rejected, where Cylon would map every page.
 This selection spans the entire device independently of cache membership.
 Memslot mode coalesces adjacent selected pages into aliases and adds them in
 one memory transaction. All memslot aliases of every FEMU CXL device, ratio
@@ -478,7 +480,8 @@ existing MMIO leaves retain their exact kernel encoding. The fixed kernel's
 preallocated 4 KiB leaf ownership is required for this operation.
 
 Ratio mappings are independent of cache residency; cache eviction does not
-remove a selected ratio mapping. Direct accesses have no NAND timing and
+remove a selected ratio mapping. As in Cylon the ratio adds to cache-driven
+mappings: a cached page outside the selection is also direct until evicted. Direct accesses have no NAND timing and
 uncached direct writes have no modeled NAND writeback, matching this Cylon
 experiment mode. A cache flush (commands 2, 9 and 11) or a way change revokes
 the mappings and maps the ratio again afterwards; if it can no longer be

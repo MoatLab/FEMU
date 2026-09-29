@@ -14424,7 +14424,13 @@ static void femu_test_cxl_ratio_runs(void *obj, void *data,
     femu_cxl_number(qts, "prefetch-degree", 3, true);
     qtest_readq(qts, FEMU_CXL_WINDOW + 100 * 4096);
     g_assert_cmpuint(femu_cxl_stat(qts, "prefetch-inserts"), ==, 3);
-    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    /* The cached page outside the selection is direct too, as in Cylon. */
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64881);
+    /* Command 90 with argument zero selects every page. */
+    femu_cxl_number(qts, "control-argument", 0, true);
+    femu_cxl_number(qts, "control-command", 90, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 100);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 65536);
     qtest_quit(qts);
 }
 

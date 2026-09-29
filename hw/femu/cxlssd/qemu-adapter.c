@@ -806,7 +806,9 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
         return;
     case 80:
     case 90:
-        cxl_ratio(FEMU_CXL_SSD(obj), command == 80 ? 0 : argument, errp);
+        /* Cylon's command 90 maps every page for argument zero. */
+        cxl_ratio(FEMU_CXL_SSD(obj),
+                  command == 80 ? 0 : argument ? argument : 100, errp);
         return;
     }
     object_ref(obj);
@@ -1430,9 +1432,7 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     CXLFixedWindow *fw;
     MemoryRegion *ram;
 
-    if (der->ratio && !femu_cxl_ratio_selected(der->ratio, lpn)) {
-        return false;
-    }
+    /* As in Cylon, a ratio adds to cached mappings instead of limiting them. */
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
     }
