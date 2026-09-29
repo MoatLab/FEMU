@@ -406,6 +406,7 @@ void cxl_device_register_init_t3(CXLType3Dev *ct3d, int msi_n)
         CXL_MEM_DEV_STATUS_VERSION);
     memdev_reg_init_common(cxl_dstate);
 
+    cxl_destroy_cci(&ct3d->cci);
     cxl_initialize_mailbox_t3(&ct3d->cci, DEVICE(ct3d),
                               CXL_MAILBOX_MAX_PAYLOAD_SIZE);
 }

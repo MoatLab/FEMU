@@ -13295,6 +13295,58 @@ static void femu_cxl_decode(QTestState *qts)
                    FEMU_CXL_REGS + A_CXL_HDM_DECODER0_CTRL) & 0x400, ==, 0x400);
 }
 
+static void femu_cxl_unplug(QTestState *qts)
+{
+    uint8_t cap;
+    QDict *rsp;
+
+    qtest_outl(qts, 0xcf8, 0x80340000 | PCI_CAPABILITY_LIST);
+    cap = qtest_inb(qts, 0xcfc);
+    while (cap) {
+        qtest_outl(qts, 0xcf8, 0x80340000 | cap);
+        if (qtest_inb(qts, 0xcfc) == PCI_CAP_ID_EXP) {
+            break;
+        }
+        cap = qtest_inb(qts, 0xcfd);
+    }
+    g_assert_cmpuint(cap, !=, 0);
+    qtest_qmp_assert_success(qts, "{'execute':'device_del',"
+                            "'arguments':{'id':'ssd'}}");
+    /* Acknowledge removal by switching off the root port slot. */
+    femu_cxl_config(qts, 52, cap + PCI_EXP_SLTCTL,
+                    PCI_EXP_SLTCTL_PCC | PCI_EXP_SLTCTL_PWR_IND_OFF);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                   "'path':'/machine/peripheral/ssd','property':'realized'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_cxl_bg_unplug(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    const char *driver = data ? "cxl-type3" : "femu-cxl-ssd";
+    QTestState *qts = qtest_initf(FEMU_CXL_MACHINE
+        "-global cxl-rp.power_controller_present=on "
+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
+        "-device %s,id=ssd,bus=rp0,volatile-memdev=mem", driver);
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    /* Sanitize one range, leaving command-owned state pending at unplug. */
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0x100000001ULL);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 8, 0);
+    qtest_writeq(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 16, 0x10000000);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (24ULL << 16) | 0x4402);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmphex(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_STS) >> 32,
+                    ==, CXL_MBOX_BG_STARTED);
+    femu_cxl_unplug(qts);
+    qtest_clock_step(qts, 60 * NANOSECONDS_PER_SECOND);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_window(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
@@ -13703,6 +13755,10 @@ static void femu_register_nodes(void)
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_node_create_driver("femu", femu_create);
+    qos_add_test("cxl-bg-unplug", "femu", femu_test_cxl_bg_unplug,
+                 NULL);
+    qos_add_test("cxl-type3-bg-unplug", "femu", femu_test_cxl_bg_unplug,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-realize", "femu", femu_test_cxl_realize, NULL);
     qos_add_test("cxl-flush", "femu", femu_test_cxl_flush, NULL);
     qos_add_test("cxl-der-default", "femu", femu_test_cxl_der_modes,
