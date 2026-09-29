@@ -48,6 +48,20 @@ void femu_cxl_leave(FemuCxlMedia *s)
     qemu_cond_broadcast(&s->idle);
 }
 
+/*
+ * With der=off a guest's lock-prefixed read-modify-write reaches the device as
+ * a read and a separate write, so it is never atomic. Serializing accesses
+ * keeps other vCPUs out from between the two most of the time; overlapping
+ * misses make it common. A direct mode resolves the write on the mapped page,
+ * where KVM exchanges and retries, so by default misses overlap only while
+ * direct mapping is active.
+ */
+bool femu_cxl_concurrent(FemuCxlMedia *s)
+{
+    return s->concurrent == ON_OFF_AUTO_ON ||
+           (s->concurrent == ON_OFF_AUTO_AUTO && s->direct.available);
+}
+
 void femu_cxl_enter_access(FemuCxlMedia *s)
 {
     s->waiters++;

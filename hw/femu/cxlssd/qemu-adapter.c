@@ -431,6 +431,7 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
         CXLType3Dev *ct3d;
         uint64_t dpa;
         MemTxResult result;
+        bool shared;
 
         /*
          * Nothing decodes the address: answer as the window would, without
@@ -467,10 +468,19 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
         }
         object_ref(OBJECT(dev));
-        femu_cxl_enter_access(s);
+        shared = femu_cxl_concurrent(s);
+        if (shared) {
+            femu_cxl_enter_access(s);
+        } else {
+            femu_cxl_enter(s);
+        }
         /* Decoders may have changed while waiting; complete as they are now. */
         if (adapter_route(w->fw, offset) != dev) {
-            femu_cxl_leave_access(s);
+            if (shared) {
+                femu_cxl_leave_access(s);
+            } else {
+                femu_cxl_leave(s);
+            }
             object_unref(OBJECT(dev));
             continue;
         }
@@ -489,7 +499,11 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             }
             result = femu_cxl_access(s, hpa, dpa, data, size, write);
         }
-        femu_cxl_leave_access(s);
+        if (shared) {
+            femu_cxl_leave_access(s);
+        } else {
+            femu_cxl_leave(s);
+        }
         object_unref(OBJECT(dev));
         return result;
     }
@@ -1603,6 +1617,8 @@ static const Property cxl_props[] = {
                        media.direct.replace_rate, 64),
     DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd,
                      media.cylon_kernel_ack, false),
+    DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
+                            ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),
     DEFINE_PROP_UINT64("program-ns", FemuCxlSsd, media.program_ns, 200000),
     DEFINE_PROP_UINT64("erase-ns", FemuCxlSsd, media.erase_ns, 2000000),

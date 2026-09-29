@@ -14046,6 +14046,8 @@ static void femu_test_cxl_wait(void *obj, void *data,
     bool other = data == (void *)4 || data == (void *)5;
     /* 5: a one-page cache, whose only entry the media write's access holds. */
     bool cached = data == (void *)5;
+    /* 6: the default, which keeps der=off accesses in one line. */
+    bool serial = data == (void *)6;
 
     g_assert_cmpint(fd, >=, 0);
     memcpy(rom, reset, sizeof(reset));
@@ -14057,10 +14059,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
     qts = qtest_initf(FEMU_CXL_MACHINE
         "-accel tcg,thread=multi -S -bios %s -smp %u %s"
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=%s,program-ns=1000000000", quoted, invalidate ? 2 : 1,
+        "cache-pages=%s,program-ns=1000000000%s", quoted, invalidate ? 2 : 1,
         unplug ? "-global cxl-rp.power_controller_present=on "
         "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off " : "",
-        cached ? "1,cache-ways=1" : "0");
+        cached ? "1,cache-ways=1" : "0", other ? ",concurrent-misses=on" : "");
     femu_cxl_decode(qts);
     qtest_writew(qts, 0x500, 31);
     qtest_writel(qts, 0x502, 0x508);
@@ -14124,6 +14126,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
         femu_cxl_unplug(qts);
         g_assert_cmpint(g_get_monotonic_time() - start, <,
                         G_TIME_SPAN_SECOND / 2);
+    } else if (serial) {
+        /* Another page waits for the media write too, as before. */
+        g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW + 4096), ==, 0);
+        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 2);
     } else if (other) {
         /*
          * An access to another page must not wait for the media write: it
@@ -16926,6 +16932,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)4 });
     qos_add_test("cxl-wait-held-victim", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)5 });
+    qos_add_test("cxl-wait-other-page-serial", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)6 });
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);

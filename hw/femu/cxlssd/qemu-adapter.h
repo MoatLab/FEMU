@@ -2,6 +2,7 @@
 #ifndef FEMU_CXL_QEMU_ADAPTER_H
 #define FEMU_CXL_QEMU_ADAPTER_H
 
+#include "qapi/qapi-types-common.h"
 #include "../bbssd/ftl.h"
 #include "cache.h"
 #include "der.h"
@@ -76,6 +77,7 @@ struct FemuCxlMedia {
     uint64_t channel_ns;
     char *der;
     bool cylon_kernel_ack;
+    OnOffAuto concurrent;
     bool busy;
     /* Accesses sharing the gate, and operations waiting to take it alone. */
     uint64_t accesses;
@@ -129,6 +131,7 @@ struct FemuCxlMedia {
 
 void femu_cxl_enter(FemuCxlMedia *s);
 void femu_cxl_leave(FemuCxlMedia *s);
+bool femu_cxl_concurrent(FemuCxlMedia *s);
 void femu_cxl_enter_access(FemuCxlMedia *s);
 void femu_cxl_leave_access(FemuCxlMedia *s);
 void femu_cxl_delay(uint64_t ns);
