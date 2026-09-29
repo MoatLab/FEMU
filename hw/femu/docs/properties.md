@@ -8,7 +8,7 @@ here until this is regenerated, and an edit here will be overwritten.
 
 Every property FEMU accepts, read from the source so this page cannot drift from the emulator it documents.
 
-There are 135 of them. Most have a default that leaves the feature off, so a working configuration names only the handful it needs.
+There are 136 of them. Most have a default that leaves the feature off, so a working configuration names only the handful it needs.
 
 ## Device and capacity
 
@@ -110,6 +110,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `acl` | uint8 | `3` | _undocumented_ | set on `-device femu,...` |
 | `aerl` | uint8 | `3` | _undocumented_ | set on `-device femu,...` |
 | `cmbloc` | uint32 | `0` | _undocumented_ | set on `-device femu,...` |
+| `cxl_ssd` | link | `--` | A `femu-cxl-ssd` whose memory and FTL a bbssd controller's one namespace shares; see the CXL SSD section. | set on `-device femu,...` |
 | `cmbsz` | uint32 | `0` | _undocumented_ | set on `-device femu,...` |
 | `context_switch_time` | uint64 | `200` | this port, so they have no effect | set on `-device femu,...` |
 | `cqr` | uint8 | `1` | _undocumented_ | set on `-device femu,...` |
@@ -219,7 +220,7 @@ supports, so this page can be discovered rather than assumed.
 
 ---
 
-81 of 136 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
+82 of 137 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
 
 ## CXL SSD
 
@@ -230,6 +231,12 @@ FEMU's current black-box FTL and NAND media. Existing `femu` modes and ordinary
 to 64 GiB. Persistent memory, label storage, and dynamic capacity combinations
 are rejected. See [the design note](cxlssd.md) and
 [femu-scripts/run-cxlssd.sh](../../../femu-scripts/run-cxlssd.sh).
+
+A bbssd `femu` controller with `cxl_ssd=<id>` serves the same medium as an
+NVMe namespace: one payload and one FTL behind both. List the `femu-cxl-ssd`
+first; the controller takes its size and geometry from it. Writing the
+namespace changes CXL-resident data, so do not put a filesystem on it while
+the range is in use as memory. See "NVMe front end" in the design note.
 
 All properties below belong to `femu-cxl-ssd`, not `femu`.
 
@@ -264,3 +271,4 @@ The following QOM properties are available through `qom-get` / `qom-set` at
 | `der-remaps` | read uint64 | Successfully installed direct page mappings. |
 | `der-revocations` | read uint64 | Direct page mappings removed. |
 | `der-fallbacks` | read uint64 | Rejected mapping attempts or device disablements. |
+| `nvme-drops` | read uint64 | Resident pages a linked NVMe write, copy or deallocate dropped or, if pinned, cleaned. |

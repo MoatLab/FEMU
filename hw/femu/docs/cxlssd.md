@@ -6,9 +6,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 The opt-in `femu-cxl-ssd` device subclasses QEMU's CXL Type-3 device. It takes
 an ordinary volatile memory backend, preserving standard decoder translation,
-capacity reporting, CDAT construction, and media-disable checks. It introduces
-no additional NVMe controller and changes no existing FEMU mode. Migration is
-explicitly blocked because the FTL and cache do not have migration state.
+capacity reporting, CDAT construction, and media-disable checks. It has no
+NVMe controller of its own and changes no existing FEMU mode; a bbssd `femu`
+controller can optionally share its medium (see "NVMe front end"). Migration
+is explicitly blocked because the FTL and cache do not have migration state.
 
 ## QEMU integration
 
@@ -429,6 +430,109 @@ In this QEMU, `cxl_dev_media_disabled()` reads a mailbox register that
 sanitize never sets, so the qtest reaches the `-ENODEV` path through a
 qtest-only property.
 
+## NVMe front end
+
+`-device femu,femu_mode=1,cxl_ssd=<id>` puts a bbssd NVMe controller in front
+of the medium. Its one namespace uses the device's memory backend as payload
+and the device's FTL as its own, so both front ends see one set of bytes and
+one mapping table. The `femu-cxl-ssd` must come first on the command line and
+have `ftl=on`; one controller may link to a medium. The controller needs one
+namespace and none of namespace management, a subsystem, streams,
+`power_loss`, `buffer_size`, `op_pcent`, metadata or protection information.
+`devsz_mb` must be unset or equal the medium's size. The medium's geometry and
+timings govern; the controller's own geometry and timing properties are
+ignored. Format NVM is not advertised and Sanitize is refused, since both
+would rewrite the whole medium behind the cache. SMART, log page C0h and
+write amplification report the combined FTL; CXL traffic does not count as
+NVMe host I/O.
+
+The guest sees one medium as a block device and as memory. A filesystem on
+the namespace corrupts CXL-resident data, and kernel memory when the range is
+onlined as System RAM. Use one view at a time unless the workload coordinates
+them.
+
+### Coherence
+
+The payload needs no code. An NVMe command copies its data on the poller at
+submission, and CXL accesses, direct mappings and NVMe DMA all touch the same
+host memory. An NVMe read returns the latest CXL store whether the page is
+clean, dirty in the cache or direct-mapped, and a CXL access after an NVMe
+completion sees the NVMe data. Overlapping accesses without guest
+synchronization have no defined order, as on hardware.
+
+The model state follows these rules:
+
+1. Write, Write Zeroes, Copy (its destination) and Deallocate make each page
+   they cover non-resident before the command completes. Direct mappings are
+   revoked first, discarding a Cylon dirty sample, and the entry is dropped
+   without a writeback: the command already programmed or unmapped the page,
+   so a writeback would program it twice or map a deallocated page again.
+   Partly covered pages are dropped too; the payload holds the merged page.
+   Ratio mappings stay, as on eviction.
+2. A page pinned through the caching API stays resident and pinned but
+   becomes clean, since the command programmed or unmapped it; its mapping
+   returns on the next access. Bypassed pages are never resident.
+3. NVMe reads leave the cache alone and charge a NAND read even for resident
+   pages, as in Cylon.
+4. A CXL store marks the namespace's written-block bitmap for the bytes it
+   covers, and installing a direct mapping marks its whole page, since direct
+   stores are invisible. Deallocated-or-unwritten errors (DULBE) and LBA
+   status thus see CXL writes. Setting a direct ratio marks its pages; at link
+   time every block is marked if the medium was already accessed or has a
+   ratio.
+5. NVMe Flush does not flush the cache; the medium is volatile memory.
+6. Flips 1 to 4 change the shared timings, so they affect CXL misses too.
+   Flip 3 restores the medium's `read-ns`, `program-ns`, `erase-ns` and
+   `channel-ns`, not the compile-time defaults. Flips 5 to 7 stay NVMe-only.
+
+### Threads
+
+The NVMe FTL thread runs each request on the medium's FTL holding the worker
+mutex, which the medium's worker holds for each of its own, so the two
+clients serialize without another thread. It never takes the BQL, because
+`nvme_pause_pollers()` waits for it under the BQL. For each command in rule 1
+it appends the page ranges and a sequence number under that mutex and
+schedules a main-loop bottom half. Like any invalidation, the bottom half
+never waits for the gate: when the gate is held it sets a flag and the holder
+reschedules it on leaving. Otherwise it takes the gate, applies the ranges in
+one memory transaction, and publishes the last sequence applied. A poller
+does not post a completion whose sequence is not yet published; it retries on
+its next sweep, and completions due after it on that poller wait too. The
+host therefore sees a write complete only after the cache reflects it. A range
+over 64 pages clears every direct mapping at once rather than revoking page by
+page, because Cylon revocation flushes the VM twice per page.
+
+Lock order is BQL, gate, worker mutex. A long gate holder (a flush, a way
+change, a caching-API chunk) delays linked write completions for as long as
+it holds the gate; reads never wait. Between the NVMe program and the bottom
+half, a CXL eviction of the same dirty page can program it once more, and a
+direct store can be discarded with the entry; both affect only accounting,
+and only for racing guests.
+
+### Lifetime
+
+While linked, `device_del` of the medium fails with "in use by NVMe controller
+<id>". A guest can still remove the medium by powering its root port slot
+off, which QEMU does without consulting unplug blockers. The medium then
+pauses the controller's pollers, stops its worker and leaves its FTL and its
+payload, still marked mapped, to the controller. The controller carries on as
+a plain bbssd over the same bytes until it is removed; the cache and pending
+invalidations go with the device. Removing the controller first unlinks it
+without waiting for the gate, and ranges it left pending are applied later.
+The controller's link holds a reference on the medium object, so the backend
+it borrowed outlives an unplug. A CXL reset or disabled media leaves the NVMe
+path working on the same payload.
+
+Qtests cover link refusals, data in both directions at 512-byte and 4 KiB
+blocks and through a memslot mapping, each dropping command, deallocation
+without resurrection, DULBE after CXL stores and mappings, flips, pinned
+pages, both unplug orders and the slot power-off, and a completion held while
+a caching-API chunk owns the gate, with and without the controller removed
+meanwhile. Each has a mutation of the device that turns it red. A guest run
+with fio on the namespace next to devdax traffic on the window, in every DER
+mode and with checksums on both paths, is still needed, as is sustained
+traffic past the GC threshold.
+
 ## Earlier defects
 
 The nine items in the earlier summary are covered as follows:
@@ -454,8 +558,8 @@ include a mutation restoring the no-op and demonstrate the missing program.
 ## Scope and validation limits
 
 The caching API's data rings (see below) are not implemented.
-Concurrent NVMe access to the same medium, persistent CXL storage,
-dynamic capacity and migration are outside this implementation. Guest kernel
+Persistent CXL storage, dynamic capacity and migration are outside this
+implementation. Guest kernel
 boot/enumeration and long-running workloads require separate system testing.
 
 Qtests program actual PCI bridges and HDM registers, then access the CXL fixed
