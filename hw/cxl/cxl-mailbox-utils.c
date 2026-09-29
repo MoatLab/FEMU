@@ -3906,7 +3906,7 @@ int cxl_process_cci_message(CXLCCI *cci, uint8_t set, uint8_t cmd,
     }
 
     if (cci->pre_command) {
-        cci->pre_command(cci->pre_command_opaque);
+        cci->pre_command(cci->pre_command_opaque, set, cmd);
     }
 
     /* forbid any selected commands while the media is disabled */

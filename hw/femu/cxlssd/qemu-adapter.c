@@ -590,14 +590,14 @@ static const MemoryRegionOps adapter_component_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 8 },
 };
 
-static void adapter_pre_command(void *opaque)
+static void adapter_pre_command(void *opaque, uint8_t set, uint8_t cmd)
 {
     CXLCCI *cci = opaque;
     CXLType3Dev *dev = CXL_TYPE3(cci->d);
-    uint64_t command = dev->cxl_dstate.mbox_reg_state64[R_CXL_DEV_MAILBOX_CMD];
 
+    /* Get LSA carries a control command, not a configuration change. */
     if (cci == &dev->cci && FEMU_CXL_SSD(dev)->media.lsa_control &&
-        (command & 0xffff) == 0x4102) {
+        (set << 8 | cmd) == 0x4102) {
         FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
         return;
     }

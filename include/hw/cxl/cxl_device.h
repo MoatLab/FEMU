@@ -173,7 +173,8 @@ typedef struct CXLEventLog {
 } CXLEventLog;
 
 typedef struct CXLCCI {
-    void (*pre_command)(void *opaque);
+    /* Called before each command, with its command set and opcode. */
+    void (*pre_command)(void *opaque, uint8_t set, uint8_t cmd);
     void *pre_command_opaque;
 
     struct cxl_cmd cxl_cmd_set[256][256];
