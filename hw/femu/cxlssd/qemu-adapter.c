@@ -55,6 +55,7 @@ static uint64_t (*parent_get_lsa)(CXLType3Dev *, void *, uint64_t, uint64_t);
 static void (*parent_set_lsa)(CXLType3Dev *, const void *, uint64_t, uint64_t);
 static void cxl_dump_spt(FemuCxlDer *der, FILE *file);
 static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp);
+static void cxl_ratio_restore(FemuCxlSsd *dev, Error **errp);
 static void cylon_ratio_revoke(FemuCxlDer *der);
 static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 
@@ -438,6 +439,10 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             }
             result = MEMTX_OK;
         } else {
+            /* Invalidation revoked a memslot ratio; map it again first. */
+            if (s->direct.ratio && !s->direct.cylon && !s->direct.ratio_end) {
+                cxl_ratio_restore(FEMU_CXL_SSD(dev), NULL);
+            }
             result = femu_cxl_access(s, hpa, dpa, data, size, write);
         }
         femu_cxl_leave(s);
@@ -644,6 +649,7 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
     s->cache_entries = g_hash_table_size(s->cache.entries);
+    cxl_ratio_restore(FEMU_CXL_SSD(obj), errp);
     if (s->access_ns) {
         femu_cxl_delay(s->access_ns);
     }
@@ -723,6 +729,7 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
             s->cache.inserts = previous.inserts;
             s->cache.evictions = previous.evictions;
             s->cache_entries = 0;
+            cxl_ratio_restore(FEMU_CXL_SSD(obj), errp);
             if (s->access_ns) {
                 femu_cxl_delay(s->access_ns);
             }
@@ -1429,10 +1436,12 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa)
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
     }
-    if (!der->cylon && (g_hash_table_contains(der->maps, &lpn) ||
-                        (lpn < der->ratio_end &&
-                         femu_cxl_ratio_selected(der->ratio, lpn)))) {
+    if (!der->cylon && g_hash_table_contains(der->maps, &lpn)) {
         return true;
+    }
+    /* A ratio run covers selected pages; never add one-page aliases there. */
+    if (!der->cylon && femu_cxl_ratio_selected(der->ratio, lpn)) {
+        return lpn < der->ratio_end;
     }
     fw = der_window(der, hpa);
     if (!fw) {
@@ -1483,6 +1492,8 @@ static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
     uint64_t runs = der_ratio_runs(period, pages);
     uint64_t budget = der_alias_budget();
     uint64_t run;
+    GHashTableIter entries;
+    gpointer value;
 
     if (runs > budget) {
         der->fallbacks++;
@@ -1509,6 +1520,15 @@ static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
     }
     memory_region_transaction_commit();
     der->ratio_end = pages;
+    g_hash_table_iter_init(&entries, dev->media.cache.entries);
+    while (g_hash_table_iter_next(&entries, NULL, &value)) {
+        FemuCxlEntry *entry = value;
+
+        if (femu_cxl_ratio_selected(der->ratio, entry->lpn)) {
+            /* Alias writes cannot notify the resident cache metadata. */
+            entry->dirty = true;
+        }
+    }
     return true;
 }
 
@@ -1547,6 +1567,17 @@ static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
     return der_ratio_apply(dev, fw, errp);
 }
 
+/* Re-map a ratio that a flush or cache rebuild revoked. */
+static void cxl_ratio_restore(FemuCxlSsd *dev, Error **errp)
+{
+    Error *err = NULL;
+
+    if (!cxl_ratio_map(dev, &err)) {
+        dev->media.direct.ratio = 0;
+        error_propagate(errp, err);
+    }
+}
+
 static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
 {
     FemuCxlMedia *s = &dev->media;
@@ -1574,21 +1605,6 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     der->ratio = ratio;
     if (!cxl_ratio_map(dev, errp)) {
         der->ratio = 0;
-        goto out;
-    }
-    if (der->ratio_end) {
-        GHashTableIter entries;
-        gpointer value;
-
-        g_hash_table_iter_init(&entries, s->cache.entries);
-        while (g_hash_table_iter_next(&entries, NULL, &value)) {
-            FemuCxlEntry *entry = value;
-
-            if (femu_cxl_ratio_selected(ratio, entry->lpn)) {
-                /* Alias writes cannot notify the resident cache metadata. */
-                entry->dirty = true;
-            }
-        }
     }
 out:
     femu_cxl_leave(s);

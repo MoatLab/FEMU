@@ -472,10 +472,13 @@ preallocated 4 KiB leaf ownership is required for this operation.
 Ratio mappings are independent of cache residency; cache eviction does not
 remove a selected ratio mapping. Direct accesses have no NAND timing and
 uncached direct writes have no modeled NAND writeback, matching this Cylon
-experiment mode. Reset, decoder changes, flush and teardown revoke mappings;
-reapply a ratio after those operations to restore its entire selection.
-With DER off or unavailable, the ratio remains queryable but mappings stay
-inactive. `der-mapped`, not the requested ratio, is the activation evidence.
+experiment mode. A cache flush (commands 2, 9 and 11) or a way change revokes
+the mappings and maps the ratio again afterwards; if it can no longer be
+mapped the ratio resets to zero and the command reports an error. Reset,
+configuration, decoder and CCI invalidation revoke mappings but keep the
+ratio: memslot mode maps it again on the next FEMU access, and Cylon mode when
+it reinstalls its slot. A selected page never gets a one-page alias of its own. DER off refuses a nonzero ratio; with DER
+unavailable the ratio remains queryable but mappings stay inactive. `der-mapped`, not the requested ratio, is the activation evidence.
 Custom-kernel ratio installation, zero-leaf restoration and dirty revocation
 still require guest validation.
 

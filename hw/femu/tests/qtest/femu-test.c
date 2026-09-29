@@ -14493,6 +14493,29 @@ static void femu_test_cxl_der_budget_shared(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_ratio_restore(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot");
+
+    femu_cxl_decode(qts);
+    femu_cxl_number(qts, "der-ratio", 99, true);
+    /* Flushing or rebuilding the cache keeps the configured ratio mapped. */
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 99);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    femu_cxl_number(qts, "cache-ways", 8, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64880);
+    /* A config write revokes; the next access maps the whole ratio again. */
+    femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    qtest_readq(qts, FEMU_CXL_WINDOW + 100 * 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 99);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 64881);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_lsa_bounds(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -14556,6 +14579,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-der-budget", "femu", femu_test_cxl_der_budget, NULL);
     qos_add_test("cxl-der-budget-shared", "femu",
                  femu_test_cxl_der_budget_shared, NULL);
+    qos_add_test("cxl-ratio-restore", "femu", femu_test_cxl_ratio_restore,
+                 NULL);
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
