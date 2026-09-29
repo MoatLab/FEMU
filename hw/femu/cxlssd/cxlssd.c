@@ -402,6 +402,9 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-revocations",
                                    &s->direct.revocations, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-quiet-revocations",
+                                   &s->direct.quiet_revocations,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "flush-cache", NULL, cxl_flush);

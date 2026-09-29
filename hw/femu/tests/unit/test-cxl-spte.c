@@ -65,7 +65,18 @@ static void test_spte_transitions(void)
     spte = mmio;
     assert(cylon_spte_install(&spte, mmio, direct));
     assert(spte == direct);
+    /* A clear: revocation swaps the entry back without a flush. */
+    assert(!(spte & CYLON_EPT_ACCESSED));
+    assert(cylon_spte_install(&spte, direct, mmio));
+    assert(spte == mmio);
+    spte = direct | CYLON_EPT_ACCESSED;
+    assert(cylon_spte_is_direct(spte, 0x200000));
+    assert(!cylon_spte_install(&spte, direct, mmio));
     spte |= CYLON_EPT_DIRTY;
+    assert(cylon_spte_is_direct(spte, 0x200000));
+    assert(!cylon_spte_is_direct(spte, 0x400000));
+    assert(cylon_spte_is_readonly_direct(cylon_spte_readonly(spte), 0x200000));
+    assert(!cylon_spte_is_readonly_direct(spte, 0x200000));
     assert(!cylon_spte_install(&spte, direct, mmio));
     assert(cylon_spte_readonly(spte) & CYLON_EPT_DIRTY);
     assert(!(cylon_spte_readonly(spte) &
@@ -83,10 +94,10 @@ int main(void)
     test_spt_areas();
     test_spte_transitions();
 
-    /* spte.h: RWX, WB, IPAT, A, MMU-present, host/MMU writable. */
-    assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345977));
-    assert(!(cylon_direct_spte(0x12345000) & CYLON_EPT_DIRTY));
-    assert((cylon_direct_spte(0x12345000) | CYLON_EPT_DIRTY) ==
+    /* spte.h: RWX, WB, IPAT, MMU-present, host/MMU writable; A, D clear. */
+    assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345877));
+    assert(!(cylon_direct_spte(0x12345000) & CYLON_EPT_AD));
+    assert((cylon_direct_spte(0x12345000) | CYLON_EPT_AD) ==
            UINT64_C(0x600000012345b77));
     /* The prototype's 0x586 encodes generation 0xb0, not a fixed mask. */
     assert(cylon_mmio_spte(0x110001000, 0xb0) == UINT64_C(0x110001586));

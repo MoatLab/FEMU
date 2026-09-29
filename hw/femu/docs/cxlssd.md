@@ -83,9 +83,10 @@ cannot verify that, and the published kernel is unsafe without them.
 `off` performs no probe and prints no DER message. `memslot` uses QEMU RAM
 aliases and the ordinary KVM listener without any Cylon ioctl dependency; qtest
 can exercise these mappings directly. All modes expose read-only QOM
-`der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations` and
-`der-fallbacks`. Mapped is a current gauge; remaps and revocations count completed
-page operations; fallbacks count rejected mapping attempts or device disablement.
+`der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations`,
+`der-quiet-revocations` and `der-fallbacks`. Mapped is a current gauge; remaps
+and revocations count completed page operations; fallbacks count rejected
+mapping attempts or device disablement.
 For Cylon, active becomes true only after installing and validating the slot.
 
 Both direct modes require non-interleaved pages in a single-target CXL window,
@@ -163,8 +164,9 @@ are never freed: about 8 bytes per 4 KiB page of the window per slot.
 
 The formats come from CylonLinux `arch/x86/kvm/mmu/spte.h`, `spte.c`, `mmu.c`
 and `tdp_mmu.c`, and the Intel EPT definitions used there. Direct entries have
-RWX permissions, WB memory type, ignore-PAT, accessed, MMU-present and the
-host/MMU-writable software bits (57 and 58). Dirty (bit 9) starts clear. The
+RWX permissions, WB memory type, ignore-PAT, MMU-present and the
+host/MMU-writable software bits (57 and 58). Accessed (bit 8) and dirty
+(bit 9) start clear and are left to the CPU. The
 address mask covers bits 12 through 51. All fields have named constants.
 
 EPT MMIO has W/X without R (binary 110), the guest page address and split
@@ -194,13 +196,22 @@ instead of aborting realize. QEMU's existing fatal handling of a failed KVM
 slot deletion is retained because execution cannot safely continue with stale
 translations.
 
-Revocation first clears both EPT W and MMU-writable atomically and flushes writable TLB
-entries. It then samples the hardware dirty bit while compare-and-swapping the saved
-MMIO SPTE and flushes again. Exchanges retry hardware dirty-bit changes and
-leave concurrent KVM revocations intact. A concurrent kernel replacement makes the page
-conservatively dirty. Thus clean direct reads need no program, while writes
-and uncertain transitions do. This requires EPT A/D; hosts without it stay
-MMIO rather than guessing that a page is clean.
+An entry whose accessed bit is still clear at revocation has not been used by
+a page walk since it was installed, so no TLB holds a translation from it and
+its dirty bit is clear too: it is swapped for the saved MMIO SPTE without a
+flush, and counted in `der-quiet-revocations`. If the CPU sets the bit first,
+the exchange fails and the full revocation runs. The miss that installs an
+entry completes in QEMU, so an entry is used only if the guest returns to the
+page before it is evicted.
+
+Otherwise revocation first clears both EPT W and MMU-writable atomically and
+flushes writable TLB entries. It then samples the hardware dirty bit while
+compare-and-swapping the saved MMIO SPTE and flushes again. Exchanges retry
+hardware dirty-bit changes and leave concurrent KVM revocations intact. A
+concurrent kernel replacement makes the page conservatively dirty. Thus clean
+direct reads need no program, while writes and uncertain transitions do. This
+requires EPT A/D; hosts without it stay MMIO rather than guessing that a page
+is clean.
 
 Both modes revoke before eviction programming, explicit cache flush,
 decoder/configuration writes, reset, CCI commands and device removal. Warm
@@ -219,6 +230,15 @@ falls back, but cannot close the check/use race or detect movement while a
 guest uses an existing direct mapping. Runs must exclude these migration
 operations for their lifetime. A host-side pinning and invalidation protocol
 is needed to remove that restriction; the two Cylon ioctls do not provide one.
+
+The flush-free revocation relies on nothing clearing EPT accessed bits without
+a flush. KVM clears them when the kernel ages the slot's host pages: reclaim
+does so through `clear_flush_young`, which flushes before returning, but idle
+page tracking (`/sys/kernel/mm/page_idle`) and DAMON use `clear_young`, which
+does not. Do not run either on the QEMU process. Reclaim still leaves a short
+window between clearing A and its flush; a guest write through a stale
+translation in that window lands in the payload but may not be charged as a
+program.
 
 KVM's own guest-memory reads/writes use the dual slot's anonymous faulting
 backing, not the payload selected by the direct EPT entry. Emulator page

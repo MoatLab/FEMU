@@ -263,4 +263,5 @@ The following QOM properties are available through `qom-get` / `qom-set` at
 | `der-active` | read bool | Whether direct mapping is available. Cylon becomes active after a decoded access installs and validates its slot. |
 | `der-remaps` | read uint64 | Successfully installed direct page mappings. |
 | `der-revocations` | read uint64 | Direct page mappings removed. |
+| `der-quiet-revocations` | read uint64 | Cylon revocations of entries whose accessed bit was still clear, done without a TLB flush. |
 | `der-fallbacks` | read uint64 | Rejected mapping attempts or device disablements. |
