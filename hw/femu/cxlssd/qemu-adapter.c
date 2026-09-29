@@ -848,7 +848,9 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     case 9:
     case 11:
         cxl_flush(obj, true, errp);
-        cxl_counters_clear(obj);
+        if (!s->closing) {
+            cxl_counters_clear(obj);
+        }
         return;
     case 3:
         if (argument > 5) {
@@ -857,7 +859,7 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
         }
         if (object_property_set_int(obj, "cache-ways",
                                     argument == 5 ? s->cache_pages :
-                                    1 << argument, errp)) {
+                                    1 << argument, errp) && !s->closing) {
             cxl_counters_clear(obj);
             cxl_stats_note(obj, command, argument);
         }
@@ -878,6 +880,12 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
     }
     object_ref(obj);
     femu_cxl_enter(s);
+    if (!s->started || s->closing) {
+        error_setg(errp, "CXL control requires a realized device");
+        femu_cxl_leave(s);
+        object_unref(obj);
+        return;
+    }
     switch (command) {
     case 1:
         file = cxl_log_open(s, s->log_dir, "cxlssd-stats.log", "a");
@@ -989,10 +997,13 @@ static void cxl_control_set(Object *obj, Visitor *v, const char *name,
         s->control_argument = value;
         return;
     }
+    /* A command may sleep through an unplug; keep the object until done. */
+    object_ref(obj);
     s->control_command = value;
     cxl_command(obj, value, s->control_argument, &local_err);
     s->control_status = local_err != NULL;
     error_propagate(errp, local_err);
+    object_unref(obj);
 }
 
 static uint64_t cxl_lsa_size(CXLType3Dev *dev)
@@ -1021,13 +1032,21 @@ static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
         size > FEMU_CXL_LSA_SIZE - offset) {
         return 0;
     }
+    object_ref(OBJECT(dev));
     s->control_command = size;
     s->control_argument = offset;
     cxl_command(OBJECT(dev), size, offset, &err);
     s->control_status = err != NULL;
     error_free(err);
-    memcpy(buf, s->labels + offset, size);
-    ((uint8_t *)buf)[0] = s->control_status;
+    /* An unplug while the command slept has freed the label buffer. */
+    if (!s->labels) {
+        s->control_status = 1;
+        size = 0;
+    } else {
+        memcpy(buf, s->labels + offset, size);
+        ((uint8_t *)buf)[0] = s->control_status;
+    }
+    object_unref(OBJECT(dev));
     return size;
 }
 
@@ -1133,21 +1152,35 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     qemu_add_machine_init_done_notifier(&FEMU_CXL_SSD(dev)->machine_done);
 }
 
-static void cxl_exit(PCIDevice *dev)
+/* Free the media once no operation holds the gate. */
+static void cxl_media_release(FemuCxlMedia *s)
 {
-    FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
-
-    s->closing = true;
-    while (s->busy) {
-        qemu_cond_wait_bql(&s->idle);
-    }
-    s->busy = true;
     femu_cxl_der_destroy(&s->direct);
     femu_cxl_stop(s);
     g_clear_pointer(&s->labels, g_free);
     if (s->io_log) {
         fclose(s->io_log);
         s->io_log = NULL;
+    }
+}
+
+static void cxl_exit(PCIDevice *dev)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+
+    /*
+     * A guest unplug arrives inside the host bridge's dispatch guard, so do
+     * not wait for an access sleeping in its media delay. Revoke now; that
+     * access holds a reference and frees the media as it leaves the gate.
+     */
+    s->closing = true;
+    if (s->busy) {
+        femu_cxl_der_disable(&s->direct);
+        s->release = cxl_media_release;
+    } else {
+        s->busy = true;
+        cxl_media_release(s);
+        femu_cxl_leave(s);
     }
     adapter_detach(FEMU_CXL_SSD(dev));
     memory_region_del_subregion(&CXL_TYPE3(dev)->cxl_cstate.crb.cache_mem,
@@ -1162,7 +1195,6 @@ static void cxl_exit(PCIDevice *dev)
     }
     parent_exit(dev);
     host_memory_backend_set_mapped(CXL_TYPE3(dev)->hostvmem, false);
-    femu_cxl_leave(s);
 }
 
 static bool cxl_der_active(Object *obj, Error **errp)
@@ -1613,7 +1645,8 @@ static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
     GSList *it;
     CXLFixedWindow *fw = NULL;
 
-    if (!der->ratio || (!der->available && !der->fast)) {
+    /* After unplug the device has no bus to route a window through. */
+    if (!der->ratio || s->closing || (!der->available && !der->fast)) {
         return true;
     }
     windows = cxl_fmws_get_all_sorted();
@@ -1720,6 +1753,15 @@ void femu_cxl_der_clear(FemuCxlDer *der)
         femu_cxl_der_remove(der, *(uint64_t *)key);
     }
     memory_region_transaction_commit();
+}
+
+/* Revoke everything and refuse new mappings, keeping state for teardown. */
+void femu_cxl_der_disable(FemuCxlDer *der)
+{
+    femu_cxl_der_clear(der);
+    der->available = false;
+    /* Unlock the backing now; a new device may reuse and lock it. */
+    femu_cylon_destroy(der);
 }
 
 void femu_cxl_der_destroy(FemuCxlDer *der)

@@ -67,6 +67,7 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa);
 void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn);
 void femu_cxl_der_clear(FemuCxlDer *der);
+void femu_cxl_der_disable(FemuCxlDer *der);
 void femu_cxl_der_fallback(FemuCxlDer *der, const char *reason);
 void femu_cxl_der_destroy(FemuCxlDer *der);
 

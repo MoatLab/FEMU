@@ -13862,8 +13862,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
     int fd = g_mkstemp(rom_path);
     QTestState *qts;
     int64_t deadline;
+    int64_t start;
     uint64_t invalidations;
     bool invalidate = data == (void *)2;
+    bool unplug = data == (void *)3;
 
     g_assert_cmpint(fd, >=, 0);
     memcpy(rom, reset, sizeof(reset));
@@ -13873,9 +13875,11 @@ static void femu_test_cxl_wait(void *obj, void *data,
     close(fd);
     quoted = g_shell_quote(rom_path);
     qts = qtest_initf(FEMU_CXL_MACHINE
-        "-accel tcg,thread=multi -S -bios %s -smp %u "
+        "-accel tcg,thread=multi -S -bios %s -smp %u %s"
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=0,program-ns=1000000000", quoted, invalidate ? 2 : 1);
+        "cache-pages=0,program-ns=1000000000", quoted, invalidate ? 2 : 1,
+        unplug ? "-global cxl-rp.power_controller_present=on "
+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off " : "");
     femu_cxl_decode(qts);
     qtest_writew(qts, 0x500, 31);
     qtest_writel(qts, 0x502, 0x508);
@@ -13926,11 +13930,22 @@ static void femu_test_cxl_wait(void *obj, void *data,
         g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
         g_assert_cmpuint(femu_cxl_stat(qts, "invalidations"), >,
                          invalidations);
+    } else if (unplug) {
+        /*
+         * The slot power-off runs inside the host bridge's dispatch guard, so
+         * it must not wait for the write sleeping through its 1 s delay.
+         */
+        start = g_get_monotonic_time();
+        femu_cxl_unplug(qts);
+        g_assert_cmpint(g_get_monotonic_time() - start, <,
+                        G_TIME_SPAN_SECOND / 2);
     } else if (data) {
         /* A concurrent access must queue, not trip the IO recursion guard. */
         g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW), ==, 0x5a);
     }
-    femu_cxl_set(qts, "realized", false);
+    if (!unplug) {
+        femu_cxl_set(qts, "realized", false);
+    }
     while (qtest_readb(qts, 0x6000) != 2) {
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
         g_usleep(1000);
@@ -14645,6 +14660,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-wait-invalidate", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)2 });
     qos_add_test("cxl-wait", "femu", femu_test_cxl_wait, NULL);
+    qos_add_test("cxl-wait-unplug", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)3 });
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);

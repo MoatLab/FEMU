@@ -54,6 +54,8 @@ typedef struct FemuCxlMedia {
     bool cylon_kernel_ack;
     bool busy;
     bool closing;
+    /* Set when unplug found the gate held; run by the holder as it leaves. */
+    void (*release)(struct FemuCxlMedia *s);
     uint64_t invalidations;
     QemuCond idle;
     FemuCxlDer direct;

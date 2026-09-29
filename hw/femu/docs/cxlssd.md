@@ -89,7 +89,12 @@ CCI commands run inside another owner's re-entrancy guard, and blocking there
 would refuse unrelated accesses from other vCPUs. It revokes DER mappings at
 once and bumps the read-only `invalidations` generation; an access in flight
 does not install a mapping when the generation moved during its media delay. An access holds an object reference until completion;
-teardown marks the device closing, waits for the gate, and prevents new work.
+teardown marks the device closing and prevents new work. It never waits for
+the gate either: a guest unplug arrives inside the host bridge's dispatch
+guard. If an operation holds the gate, teardown revokes and disables DER,
+finishes the PCI teardown, and leaves the media (DER state, FTL worker, labels
+and I/O log) to be freed by that operation as it leaves the gate; the
+operation then skips its payload copy and reports a transaction error.
 A waiter re-routes and re-translates after entering the gate and completes at
 the current DPA, or with random data when media became disabled, as the parent
 Type-3 device would; only an address that no longer decodes fails.
@@ -100,8 +105,9 @@ Other vCPUs can run and access other devices; accesses to this device queue
 behind the current operation. The worker mutex protects the single stack-owned
 request and completion, and is released before reacquiring the BQL. The worker
 alone modifies FTL/NAND state. Cache iterators, entries, payload and access
-latency accounting stay stable because flush and teardown wait for the gate
-and invalidation touches only DER mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
+latency accounting stay stable because flush waits for the gate, teardown
+defers freeing them to the gate holder, and invalidation touches only DER
+mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
 It dispatches FEMU media directly, so no parent window guard remains engaged
 across a BQL wait. The component-register overlay revokes and then enters the
 parent register callback without waiting. Plain Type-3 callbacks retain their normal guard.

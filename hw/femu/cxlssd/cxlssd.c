@@ -15,6 +15,13 @@ void femu_cxl_enter(FemuCxlMedia *s)
 
 void femu_cxl_leave(FemuCxlMedia *s)
 {
+    /* Teardown deferred by an unplug runs while the gate is still held. */
+    if (s->release) {
+        void (*release)(FemuCxlMedia *) = s->release;
+
+        s->release = NULL;
+        release(s);
+    }
     s->busy = false;
     qemu_cond_broadcast(&s->idle);
 }
@@ -113,7 +120,7 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
                     uint64_t dpa)
 {
-    return s->invalidations == generation &&
+    return s->invalidations == generation && !s->closing &&
            femu_cxl_der_map(&s->direct, hpa, dpa);
 }
 
@@ -190,6 +197,10 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
     if (remaining > 0) {
         femu_cxl_delay(remaining);
+    }
+    /* Unplugged during the wait: the backend may already serve a new device. */
+    if (s->closing) {
+        return MEMTX_ERROR;
     }
     if (write) {
         memcpy((uint8_t *)s->backend.logical_space + dpa, data, size);
