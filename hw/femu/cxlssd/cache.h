@@ -13,16 +13,27 @@ typedef enum FemuCxlPolicy {
     FEMU_CXL_S3FIFO,
 } FemuCxlPolicy;
 
+typedef enum FemuCxlQueue {
+    FEMU_CXL_SMALL,
+    FEMU_CXL_MAIN,
+    FEMU_CXL_PINNED,
+} FemuCxlQueue;
+
 typedef struct FemuCxlEntry {
     uint64_t lpn;
     bool dirty;
     unsigned freq;
+    /* The entry's own node in the queue @queue, for O(1) removal. */
+    GList *link;
+    FemuCxlQueue queue;
 } FemuCxlEntry;
 
+/* Pinned entries leave small and main, so eviction never sees them. */
 typedef struct FemuCxlSet {
     GQueue small;
     GQueue main;
     GQueue ghost;
+    GQueue pinned;
 } FemuCxlSet;
 
 typedef struct FemuCxlCache {
@@ -36,6 +47,9 @@ typedef struct FemuCxlCache {
     uint64_t misses;
     uint64_t inserts;
     uint64_t evictions;
+    uint64_t pinned;
+    /* Bumped by every rebuild, so a long operation can notice one. */
+    uint64_t generation;
 } FemuCxlCache;
 
 typedef bool (*FemuCxlEvict)(void *opaque, FemuCxlEntry *entry);
@@ -48,5 +62,18 @@ FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
                                    FemuCxlEvict evict, void *opaque);
 bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque);
 void femu_cxl_cache_destroy(FemuCxlCache *c);
+
+FemuCxlSet *femu_cxl_cache_set(FemuCxlCache *c, uint64_t lpn);
+bool femu_cxl_cache_all_pinned(FemuCxlCache *c, uint64_t lpn);
+uint32_t femu_cxl_cache_pin_room(FemuCxlCache *c, uint64_t lpn);
+void femu_cxl_cache_pin(FemuCxlCache *c, FemuCxlEntry *e);
+void femu_cxl_cache_unpin(FemuCxlCache *c, FemuCxlEntry *e);
+void femu_cxl_cache_unpin_all(FemuCxlCache *c);
+bool femu_cxl_cache_remove(FemuCxlCache *c, FemuCxlEntry *e,
+                           FemuCxlEvict evict, void *opaque);
+bool femu_cxl_cache_clean_pinned(FemuCxlCache *c, FemuCxlEvict wb,
+                                 void *opaque);
+bool femu_cxl_cache_pins_fit(FemuCxlCache *c, uint32_t pages, uint32_t ways);
+void femu_cxl_cache_rebuild(FemuCxlCache *c, uint32_t pages, uint32_t ways);
 
 #endif

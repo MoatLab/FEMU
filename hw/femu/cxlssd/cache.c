@@ -33,7 +33,33 @@ void femu_cxl_cache_init(FemuCxlCache *c, uint32_t pages, uint32_t ways,
         g_queue_init(&c->sets[i].small);
         g_queue_init(&c->sets[i].main);
         g_queue_init(&c->sets[i].ghost);
+        g_queue_init(&c->sets[i].pinned);
     }
+}
+
+FemuCxlSet *femu_cxl_cache_set(FemuCxlCache *c, uint64_t lpn)
+{
+    return c->nsets ? &c->sets[lpn % c->nsets] : NULL;
+}
+
+static GQueue *entry_queue(FemuCxlSet *set, FemuCxlQueue queue)
+{
+    switch (queue) {
+    case FEMU_CXL_SMALL:
+        return &set->small;
+    case FEMU_CXL_MAIN:
+        return &set->main;
+    default:
+        return &set->pinned;
+    }
+}
+
+/* Moving the node itself keeps e->link valid across rotations. */
+static void entry_move(FemuCxlSet *set, FemuCxlEntry *e, FemuCxlQueue to)
+{
+    g_queue_unlink(entry_queue(set, e->queue), e->link);
+    g_queue_push_tail_link(entry_queue(set, to), e->link);
+    e->queue = to;
 }
 
 FemuCxlEntry *femu_cxl_cache_find(FemuCxlCache *c, uint64_t lpn)
@@ -66,12 +92,14 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
                          FemuCxlEvict evict, void *opaque)
 {
     GQueue *queue = &set->small;
+    /* Pins take ways away; size the small queue from what is left. */
+    uint32_t ways = c->ways - set->pinned.length;
     FemuCxlEntry *e;
     bool ghost = false;
 
     for (;;) {
         if (c->policy == FEMU_CXL_S3FIFO && c->ways > 1) {
-            queue = (set->small.length >= MAX(1, c->ways / 10) ||
+            queue = (set->small.length >= MAX(1, ways / 10) ||
                      g_queue_is_empty(&set->main)) ? &set->small : &set->main;
         }
         e = c->policy == FEMU_CXL_LIFO ? g_queue_peek_tail(queue) :
@@ -79,15 +107,15 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
         g_assert(e);
         if (c->policy == FEMU_CXL_CLOCK && e->freq) {
             e->freq = 0;
-            g_queue_push_tail(queue, g_queue_pop_head(queue));
+            g_queue_push_tail_link(queue, g_queue_pop_head_link(queue));
         } else if (c->policy == FEMU_CXL_S3FIFO && c->ways > 1 &&
                    queue == &set->small && e->freq > 1) {
             e->freq = 0;
-            g_queue_push_tail(&set->main, g_queue_pop_head(queue));
+            entry_move(set, e, FEMU_CXL_MAIN);
         } else if (c->policy == FEMU_CXL_S3FIFO &&
                    queue == &set->main && e->freq) {
             e->freq--;
-            g_queue_push_tail(queue, g_queue_pop_head(queue));
+            g_queue_push_tail_link(queue, g_queue_pop_head_link(queue));
         } else {
             ghost = c->policy == FEMU_CXL_S3FIFO && queue == &set->small;
             break;
@@ -110,11 +138,7 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
             g_free(old);
         }
     }
-    if (c->policy == FEMU_CXL_LIFO) {
-        g_queue_pop_tail(queue);
-    } else {
-        g_queue_pop_head(queue);
-    }
+    g_queue_delete_link(queue, e->link);
     g_hash_table_remove(c->entries, &e->lpn);
     g_free(e);
     c->evictions++;
@@ -136,20 +160,27 @@ FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
         return e;
     }
     set = &c->sets[lpn % c->nsets];
+    /* A set whose every way is pinned has nothing to evict. */
+    if (set->pinned.length == c->ways) {
+        return NULL;
+    }
     main = ghost_remove(c, set, lpn) && c->ways > 1;
-    if (set->small.length + set->main.length == c->ways &&
-        !cache_evict(c, set, evict, opaque)) {
+    if (set->small.length + set->main.length + set->pinned.length ==
+        c->ways && !cache_evict(c, set, evict, opaque)) {
         return NULL;
     }
     e = g_new0(FemuCxlEntry, 1);
     e->lpn = lpn;
     e->freq = c->policy == FEMU_CXL_CLOCK;
-    g_queue_push_tail(main ? &set->main : &set->small, e);
+    e->queue = main ? FEMU_CXL_MAIN : FEMU_CXL_SMALL;
+    g_queue_push_tail(entry_queue(set, e->queue), e);
+    e->link = entry_queue(set, e->queue)->tail;
     g_hash_table_insert(c->entries, &e->lpn, e);
     c->inserts++;
     return e;
 }
 
+/* Pinned entries stay; only small and main are evicted. */
 bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque)
 {
     uint32_t i;
@@ -173,8 +204,169 @@ bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque)
 
 void femu_cxl_cache_destroy(FemuCxlCache *c)
 {
+    uint32_t i;
+
     femu_cxl_cache_clear(c, NULL, NULL);
+    for (i = 0; i < c->nsets; i++) {
+        FemuCxlEntry *e;
+
+        while ((e = g_queue_pop_head(&c->sets[i].pinned))) {
+            g_hash_table_remove(c->entries, &e->lpn);
+            g_free(e);
+        }
+    }
+    c->pinned = 0;
     g_hash_table_destroy(c->entries);
     g_hash_table_destroy(c->ghosts);
     g_free(c->sets);
+}
+
+bool femu_cxl_cache_all_pinned(FemuCxlCache *c, uint64_t lpn)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(c, lpn);
+
+    return set && set->pinned.length == c->ways;
+}
+
+uint32_t femu_cxl_cache_pin_room(FemuCxlCache *c, uint64_t lpn)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(c, lpn);
+
+    return set ? c->ways - set->pinned.length : 0;
+}
+
+void femu_cxl_cache_pin(FemuCxlCache *c, FemuCxlEntry *e)
+{
+    if (e->queue != FEMU_CXL_PINNED) {
+        entry_move(femu_cxl_cache_set(c, e->lpn), e, FEMU_CXL_PINNED);
+        c->pinned++;
+    }
+}
+
+/* Requeue as a fresh insert would; under LIFO that makes it the next victim. */
+void femu_cxl_cache_unpin(FemuCxlCache *c, FemuCxlEntry *e)
+{
+    if (e->queue == FEMU_CXL_PINNED) {
+        entry_move(femu_cxl_cache_set(c, e->lpn), e,
+                   c->policy == FEMU_CXL_S3FIFO && c->ways > 1 ?
+                   FEMU_CXL_MAIN : FEMU_CXL_SMALL);
+        c->pinned--;
+    }
+}
+
+void femu_cxl_cache_unpin_all(FemuCxlCache *c)
+{
+    uint32_t i;
+
+    for (i = 0; c->pinned && i < c->nsets; i++) {
+        while (c->sets[i].pinned.head) {
+            femu_cxl_cache_unpin(c, c->sets[i].pinned.head->data);
+        }
+    }
+}
+
+/* Drop one entry, pinned or not, without leaving a ghost behind. */
+bool femu_cxl_cache_remove(FemuCxlCache *c, FemuCxlEntry *e,
+                           FemuCxlEvict evict, void *opaque)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(c, e->lpn);
+
+    if (evict && !evict(opaque, e)) {
+        return false;
+    }
+    if (e->queue == FEMU_CXL_PINNED) {
+        c->pinned--;
+    }
+    g_queue_delete_link(entry_queue(set, e->queue), e->link);
+    ghost_remove(c, set, e->lpn);
+    g_hash_table_remove(c->entries, &e->lpn);
+    g_free(e);
+    return true;
+}
+
+/* Write back pinned entries; they stay resident and pinned. */
+bool femu_cxl_cache_clean_pinned(FemuCxlCache *c, FemuCxlEvict wb,
+                                 void *opaque)
+{
+    uint32_t i;
+
+    for (i = 0; c->pinned && i < c->nsets; i++) {
+        GList *l;
+
+        for (l = c->sets[i].pinned.head; l; l = l->next) {
+            FemuCxlEntry *e = l->data;
+
+            if (wb && !wb(opaque, e)) {
+                return false;
+            }
+            e->dirty = false;
+        }
+    }
+    return true;
+}
+
+/* Whether every pinned entry still fits the geometry @pages / @ways. */
+bool femu_cxl_cache_pins_fit(FemuCxlCache *c, uint32_t pages, uint32_t ways)
+{
+    g_autoptr(GHashTable) counts = NULL;
+    uint32_t nsets = pages / ways;
+    uint32_t i;
+
+    if (!c->pinned) {
+        return true;
+    }
+    if (!nsets || c->pinned > pages) {
+        return false;
+    }
+    counts = g_hash_table_new(g_direct_hash, g_direct_equal);
+    for (i = 0; i < c->nsets; i++) {
+        GList *l;
+
+        for (l = c->sets[i].pinned.head; l; l = l->next) {
+            gpointer key = GUINT_TO_POINTER(((FemuCxlEntry *)l->data)->lpn %
+                                            nsets);
+            uint32_t n = GPOINTER_TO_UINT(g_hash_table_lookup(counts, key));
+
+            if (n == ways) {
+                return false;
+            }
+            g_hash_table_insert(counts, key, GUINT_TO_POINTER(n + 1));
+        }
+    }
+    return true;
+}
+
+/*
+ * Rebuild with a new geometry, keeping pinned pages pinned. The caller has
+ * evicted everything else and written the pinned pages back, and checked
+ * femu_cxl_cache_pins_fit(); event totals carry over.
+ */
+void femu_cxl_cache_rebuild(FemuCxlCache *c, uint32_t pages, uint32_t ways)
+{
+    g_autoptr(GArray) pins = g_array_new(false, false, sizeof(uint64_t));
+    FemuCxlCache previous;
+    uint32_t i;
+
+    for (i = 0; i < c->nsets; i++) {
+        GList *l;
+
+        for (l = c->sets[i].pinned.head; l; l = l->next) {
+            g_array_append_val(pins, ((FemuCxlEntry *)l->data)->lpn);
+        }
+    }
+    previous = *c;
+    femu_cxl_cache_destroy(c);
+    femu_cxl_cache_init(c, pages, ways, previous.policy);
+    for (i = 0; i < pins->len; i++) {
+        FemuCxlEntry *e = femu_cxl_cache_insert(c,
+                              g_array_index(pins, uint64_t, i), NULL, NULL);
+
+        g_assert(e);
+        femu_cxl_cache_pin(c, e);
+    }
+    c->hits = previous.hits;
+    c->misses = previous.misses;
+    c->inserts = previous.inserts;
+    c->evictions = previous.evictions;
+    c->generation = previous.generation + 1;
 }
