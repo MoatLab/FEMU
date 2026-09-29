@@ -1621,9 +1621,8 @@ struct FemuCylon {
     int pagemap;
     KVMSlotReservation *reservation;
     MemoryListener listener;
-    uint64_t generation;
-    uint64_t pending_generation;
     bool installing;
+    bool rearm;
     CXLFixedWindow *window;
     CylonGetLinearSpt spt;
     void *areas[CYLON_SPT_CHUNKS];
@@ -1639,7 +1638,8 @@ struct FemuCylon {
     bool batch;
 };
 
-static void cylon_listener_begin(MemoryListener *listener);
+static void cylon_region_change(MemoryListener *listener,
+                                MemoryRegionSection *section);
 static void cylon_listener_commit(MemoryListener *listener);
 static bool cylon_log_start(MemoryListener *listener, Error **errp);
 static void cylon_log_stop(MemoryListener *listener);
@@ -1807,12 +1807,14 @@ static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
         }
     }
     c->pagemap = fd;
-    c->listener.begin = cylon_listener_begin;
+    c->listener.region_add = cylon_region_change;
+    c->listener.region_del = cylon_region_change;
     c->listener.commit = cylon_listener_commit;
     c->listener.log_global_start = cylon_log_start;
     c->listener.log_global_stop = cylon_log_stop;
     c->listener.name = "femu-cxl-external-slot";
-    c->listener.priority = 20;
+    /* Forward order: delete before the KVM listener can add overlapping RAM. */
+    c->listener.priority = MEMORY_LISTENER_PRIORITY_ACCEL - 1;
     der->fast = c;
     memory_listener_register(&c->listener, &address_space_memory);
     return c;
@@ -1951,15 +1953,17 @@ static void cylon_install_bh(void *opaque)
     FemuCylon *c = opaque;
 
     pause_all_vcpus();
+    /* Checked after the pause, so changes made while it waited count. */
     if (!c->detached && !c->failed &&
-        c->generation == c->pending_generation &&
         cylon_coverage(c, c->pending_window) &&
         !cylon_install(c->der, c->pending_window)) {
         cylon_fail(c->der);
     }
     object_unref(OBJECT(c->pending_window));
     c->installing = false;
-    if (!c->detached && c->installed) {
+    /* Disabled media must keep trapping, so map nothing until re-enabled. */
+    if (!c->detached && c->installed &&
+        !cxl_dev_media_disabled(&c->der->dev->parent_obj.cxl_dstate)) {
         if (c->der->ratio) {
             cylon_ratio_apply(c->der, c->window);
         } else {
@@ -2045,7 +2049,6 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     if (!c->installed) {
         c->installing = true;
         c->pending_window = fw;
-        c->pending_generation = c->generation;
         object_ref(OBJECT(fw));
         aio_bh_schedule_oneshot(qemu_get_aio_context(), cylon_install_bh, c);
         return false;
@@ -2209,7 +2212,6 @@ static void femu_cylon_clear(FemuCxlDer *der)
     if (!c) {
         return;
     }
-    c->generation++;
     while (g_hash_table_size(der->maps)) {
         GHashTableIter it;
         gpointer key;
@@ -2226,20 +2228,28 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
     femu_cylon_clear(der);
 }
 
-/* Delete before the KVM listener can expose overlapping RAM. */
-static void cylon_listener_begin(MemoryListener *listener)
+/* Only map changes over the installed window can expose overlapping RAM. */
+static void cylon_region_change(MemoryListener *listener,
+                                MemoryRegionSection *section)
 {
     FemuCylon *c = container_of(listener, FemuCylon, listener);
+    uint64_t start = section->offset_within_address_space;
+    uint64_t size = int128_get64(section->size);
 
-    femu_cylon_clear(c->der);
+    if (c->installed && size && start < c->window->base + c->window->size &&
+        c->window->base < start + size) {
+        femu_cylon_clear(c->der);
+        c->rearm = true;
+    }
 }
 
 static void cylon_listener_commit(MemoryListener *listener)
 {
     FemuCylon *c = container_of(listener, FemuCylon, listener);
 
-    if (c->window && !c->detached && !c->failed && !c->installing &&
+    if (c->rearm && !c->detached && !c->failed && !c->installing &&
         cylon_coverage(c, c->window)) {
+        c->rearm = false;
         femu_cylon_map(c->der, c->window, c->window->base, 0);
     }
 }

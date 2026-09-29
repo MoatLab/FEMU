@@ -161,15 +161,19 @@ Before registration, FEMU checks complete writable I/O coverage of the window,
 the selected endpoint, and linear translation across every decoder boundary.
 The slot covers exactly the window and backend size. Reservation ownership and
 registered state are checked before SPT access. Cylon and ordinary RAM-alias
-DER are mutually exclusive. A FEMU memory listener deletes the external slot
-in `begin()` before any map update can expose overlapping RAM; re-admission
-requires fresh coverage and routing checks after commit. Dirty-ring logging
+DER are mutually exclusive. A FEMU memory listener on the system address space
+runs just below the KVM listener's priority, so its `region_add` precedes KVM's
+for the same section. It deletes the external slot only when an added or
+removed section overlaps the installed window; changes elsewhere, or in other
+address spaces, leave the slot alone. Re-admission after such a deletion
+requires fresh coverage and routing checks at commit. Dirty-ring logging
 refuses activation, and global dirty-log start revokes and disables Cylon.
 
 Installation pauses vCPUs before registration because the published kernel
 publishes a slot before allocating its SPT storage. Pending installation holds
-a window reference and a generation; invalidation or teardown cancels stale
-work even while the callback waits for vCPUs. Detached state is freed after
+a window reference. The callback checks coverage and teardown only after vCPUs
+are paused, so map changes made while it waited are seen rather than dropping
+the install, and it maps no cache pages while media is disabled. Detached state is freed after
 pending installation and RCU readers finish. Slot deletion precedes SPT unmap,
 backing unlock and reservation release. Failed deletion terminates QEMU rather
 than releasing an ID or payload that the kernel might still use.
