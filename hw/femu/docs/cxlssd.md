@@ -59,7 +59,16 @@ and during the remaining media delay, while keeping its share of the gate.
 An access holds the pages it touches, in ascending order, until it completes:
 accesses to one page stay ordered, a second miss to a page waits for the first
 fill instead of repeating it, and misses to different pages wait for the
-media together. Eviction leaves a held page resident, and the access that
+media together, when misses overlap. They do by default only while a direct
+mode is active (`concurrent-misses=auto`); `on` and `off` force it. With
+`der=off` a guest's lock-prefixed read-modify-write reaches the device as a
+read and a separate write, so it is never atomic; one access at a time keeps
+other vCPUs out from between the two most of the time (0.6% to 0.9% of
+`lock add` increments were lost with four vCPUs), while overlapping misses
+make it common (51% to 52.5%). In the direct modes the write lands on the
+page mapped by the read, where KVM exchanges and retries, and none were lost
+either way (`der=cylon` needs a host kernel whose emulated exchange does not
+use the slot's backing; see "Host kernel"). Eviction leaves a held page resident, and the access that
 needed the room bypasses the cache; a dirty victim is held while its
 write-back drops the BQL. The worker mutex protects the queue of stack-owned
 requests and their completions, and is released before reacquiring the BQL.

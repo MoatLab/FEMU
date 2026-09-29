@@ -13675,6 +13675,8 @@ static void femu_test_cxl_wait(void *obj, void *data,
     int64_t deadline;
     bool invalidate = data == (void *)2;
     bool other = data == (void *)3 || data == (void *)4;
+    /* 5: the default, which keeps der=off accesses in one line. */
+    bool serial = data == (void *)5;
     /* 4: a one-page cache, whose only entry the media write's access holds. */
     bool cached = data == (void *)4;
 
@@ -13688,8 +13690,8 @@ static void femu_test_cxl_wait(void *obj, void *data,
     qts = qtest_initf(FEMU_CXL_MACHINE
         "-accel tcg,thread=multi -S -bios %s -smp %u "
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=%s,program-ns=1000000000", quoted, invalidate ? 2 : 1,
-        cached ? "1,cache-ways=1" : "0");
+        "cache-pages=%s,program-ns=1000000000%s", quoted, invalidate ? 2 : 1,
+        cached ? "1,cache-ways=1" : "0", other ? ",concurrent-misses=on" : "");
     femu_cxl_decode(qts);
     qtest_writew(qts, 0x500, 31);
     qtest_writel(qts, 0x502, 0x508);
@@ -13747,6 +13749,10 @@ static void femu_test_cxl_wait(void *obj, void *data,
             g_usleep(1000);
         }
         g_assert_cmpuint(qtest_readb(qts, 0x6003), ==, 1);
+    } else if (serial) {
+        /* Another page waits for the media write too, as before. */
+        g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW + 4096), ==, 0);
+        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 2);
     } else if (other) {
         /*
          * An access to another page must not wait for the media write: it
@@ -13866,6 +13872,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)3 });
     qos_add_test("cxl-wait-held-victim", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)4 });
+    qos_add_test("cxl-wait-other-page-serial", "femu", femu_test_cxl_wait,
+                 &(QOSGraphTestOptions) { .arg = (void *)5 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
     qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
     qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);

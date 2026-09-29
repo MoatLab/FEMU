@@ -42,6 +42,7 @@ struct FemuCxlSsd {
     bool ftl;
     char *der;
     bool cylon_kernel_ack;
+    OnOffAuto concurrent;
     bool busy;
     bool closing;
     uint64_t accesses;
@@ -86,6 +87,20 @@ static void cxl_leave(FemuCxlSsd *s)
 {
     s->busy = false;
     qemu_cond_broadcast(&s->idle);
+}
+
+/*
+ * With der=off a guest's lock-prefixed read-modify-write reaches the device as
+ * a read and a separate write, so it is never atomic. Serializing accesses
+ * keeps other vCPUs out from between the two most of the time; overlapping
+ * misses make it common. A direct mode resolves the write on the mapped page,
+ * where KVM exchanges and retries, so by default misses overlap only while
+ * direct mapping is active.
+ */
+static bool cxl_concurrent(FemuCxlSsd *s)
+{
+    return s->concurrent == ON_OFF_AUTO_ON ||
+           (s->concurrent == ON_OFF_AUTO_AUTO && s->direct.available);
 }
 
 static void cxl_enter_access(FemuCxlSsd *s)
@@ -281,16 +296,25 @@ static MemTxResult cxl_access(CXLType3Dev *ct3d, hwaddr hpa, uint64_t dpa,
     MemTxResult result = MEMTX_ERROR;
     AddressSpace *as;
     uint64_t current_dpa;
+    bool shared = cxl_concurrent(s);
 
     object_ref(OBJECT(s));
-    cxl_enter_access(s);
+    if (shared) {
+        cxl_enter_access(s);
+    } else {
+        cxl_enter(s);
+    }
     if (s->started && !s->closing &&
         !cxl_dev_media_disabled(&ct3d->cxl_dstate) &&
         !cxl_type3_hpa_to_as_and_dpa(ct3d, hpa, size, &as, &current_dpa) &&
         current_dpa == dpa) {
         result = cxl_access_locked(ct3d, hpa, dpa, data, size, write, attrs);
     }
-    cxl_leave_access(s);
+    if (shared) {
+        cxl_leave_access(s);
+    } else {
+        cxl_leave(s);
+    }
     object_unref(OBJECT(s));
     return result;
 }
@@ -510,6 +534,8 @@ static const Property cxl_props[] = {
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, ftl, true),
     DEFINE_PROP_STRING("der", FemuCxlSsd, der),
     DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd, cylon_kernel_ack, false),
+    DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, concurrent,
+                            ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, read_ns, 40000),
     DEFINE_PROP_UINT64("program-ns", FemuCxlSsd, program_ns, 200000),
     DEFINE_PROP_UINT64("erase-ns", FemuCxlSsd, erase_ns, 2000000),

@@ -240,6 +240,7 @@ All properties below belong to `femu-cxl-ssd`, not `femu`.
 | `cache-policy` | string | `fifo` when unset | `fifo`, `lifo`, `clock`, or `s3-fifo`. |
 | `ftl` | bool | on | Charge cache misses and dirty writeback to the current FTL/NAND model. Off keeps memory functionality with no media timing. |
 | `der` | string | off | `off`: MMIO without probes. `memslot`: QEMU aliases using ordinary KVM. `cylon`: published mapped-SPT interface, requiring shared preallocated hugetlb backing, locking and readable PFNs; unsupported hosts warn once and retain MMIO. See `cxlssd.md` for topology and kernel restrictions. |
+| `concurrent-misses` | on/off/auto | auto | Let misses to different pages wait for the media together. `auto` does so while a direct mode is active; with `der=off` it would make guest atomics lose updates (see `cxlssd.md`, "Thread ownership"). |
 | `cylon-kernel-ack` | bool | off | Required with `der=cylon`: states that the host runs a Cylon kernel with the dual-slot fixes (see `cxlssd.md`, "Host kernel"). Not verified by the device. |
 | `read-ns` | uint64 | 40000 | NAND page read time; zero through one second in nanoseconds. |
 | `program-ns` | uint64 | 200000 | NAND page program time; same range. |
