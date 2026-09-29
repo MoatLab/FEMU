@@ -79,9 +79,13 @@ library can be built independently of QEMU.
 
 CXL MMIO arrives on vCPU threads under the BQL; qtest and management operations
 also hold it. The BQL protects payload copies, cache membership, counters and
-DER mappings. A per-device operation gate serializes accesses, cache flushes,
-invalidation and teardown across waits. Gate waiters release the BQL using a
-condition variable. An access holds an object reference until completion;
+DER mappings. A per-device operation gate serializes accesses, cache flushes
+and teardown across waits. Gate waiters release the BQL using a condition
+variable. Invalidation never waits: configuration writes, component writes and
+CCI commands run inside another owner's re-entrancy guard, and blocking there
+would refuse unrelated accesses from other vCPUs. It revokes DER mappings at
+once and bumps the read-only `invalidations` generation; an access in flight
+does not install a mapping when the generation moved during its media delay. An access holds an object reference until completion;
 teardown marks the device closing, waits for the gate, and prevents new work.
 A waiter rechecks decoder translation and media state before using its DPA.
 
@@ -91,11 +95,11 @@ Other vCPUs can run and access other devices; accesses to this device queue
 behind the current operation. The worker mutex protects the single stack-owned
 request and completion, and is released before reacquiring the BQL. The worker
 alone modifies FTL/NAND state. Cache iterators, entries, payload and access
-latency accounting stay stable because invalidation, flush and teardown wait
-for the gate. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
+latency accounting stay stable because flush and teardown wait for the gate
+and invalidation touches only DER mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
 It dispatches FEMU media directly, so no parent window guard remains engaged
-across a BQL wait. The component-register overlay drains before entering the
-parent register callback. Plain Type-3 callbacks retain their normal guard.
+across a BQL wait. The component-register overlay revokes and then enters the
+parent register callback without waiting. Plain Type-3 callbacks retain their normal guard.
 Read-only QOM counters may show an operation in progress.
 The worker is joined before its state is destroyed.
 

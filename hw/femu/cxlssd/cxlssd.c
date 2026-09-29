@@ -101,9 +101,18 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     return !e->dirty || s->free_writeback || cxl_media(s, e->lpn, true);
 }
 
+/* The media delay drops the BQL, so a decoder change may have intervened. */
+static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
+                    uint64_t dpa)
+{
+    return s->invalidations == generation &&
+           femu_cxl_der_map(&s->direct, hpa, dpa);
+}
+
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write)
 {
+    uint64_t generation = s->invalidations;
     uint64_t first = dpa / 4096;
     uint64_t last;
     uint64_t lpn;
@@ -158,7 +167,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     return MEMTX_ERROR;
                 }
                 s->prefetch_inserts++;
-                if (femu_cxl_der_map(&s->direct, next_hpa, next * 4096) &&
+                if (cxl_map(s, generation, next_hpa, next * 4096) &&
                     !s->direct.cylon) {
                     prefetched->dirty = true;
                 }
@@ -180,7 +189,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
 
         if ((e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
-            femu_cxl_der_map(&s->direct, hpa, dpa) &&
+            cxl_map(s, generation, hpa, dpa) &&
             !s->direct.cylon && e) {
             /* Direct writes cannot update metadata, so charge on eviction. */
             e->dirty = true;

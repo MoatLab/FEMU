@@ -54,7 +54,7 @@ typedef struct FemuCxlMedia {
     bool cylon_kernel_ack;
     bool busy;
     bool closing;
-    uint64_t invalidation_waiters;
+    uint64_t invalidations;
     QemuCond idle;
     FemuCxlDer direct;
     uint64_t read_ns;

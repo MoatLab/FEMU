@@ -13807,6 +13807,7 @@ static void femu_test_cxl_wait(void *obj, void *data,
     int fd = g_mkstemp(rom_path);
     QTestState *qts;
     int64_t deadline;
+    uint64_t invalidations;
     bool invalidate = data == (void *)2;
 
     g_assert_cmpint(fd, >=, 0);
@@ -13856,30 +13857,25 @@ static void femu_test_cxl_wait(void *obj, void *data,
             g_assert_cmpint(g_get_monotonic_time(), <, deadline);
             g_usleep(1000);
         }
+        invalidations = femu_cxl_stat(qts, "invalidations");
         qtest_writeb(qts, 0x6002, 1);
-        while (!femu_cxl_stat(qts, "invalidation-waiters")) {
-            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
-            g_usleep(1000);
-        }
-        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
-        g_assert_cmpuint(qtest_readb(qts, 0x6001), ==, 1);
         /*
-         * Unrealize must release the blocked config write and let it finish
-         * before PCI teardown, while the media write still holds the gate.
+         * The config write runs inside the host bridge's dispatch guard, so
+         * it must finish while the media write still holds the gate.
          */
-        femu_cxl_set(qts, "realized", false);
         while (qtest_readb(qts, 0x6001) != 2) {
             g_assert_cmpint(g_get_monotonic_time(), <, deadline);
             g_usleep(1000);
         }
         g_assert_cmpuint(qtest_readb(qts, 0x6003), ==, 1);
+        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 1);
+        g_assert_cmpuint(femu_cxl_stat(qts, "invalidations"), >,
+                         invalidations);
     } else if (data) {
         /* A concurrent access must queue, not trip the IO recursion guard. */
         g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW), ==, 0x5a);
     }
-    if (!invalidate) {
-        femu_cxl_set(qts, "realized", false);
-    }
+    femu_cxl_set(qts, "realized", false);
     while (qtest_readb(qts, 0x6000) != 2) {
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
         g_usleep(1000);

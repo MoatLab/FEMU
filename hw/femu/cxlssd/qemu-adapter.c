@@ -497,36 +497,26 @@ static void adapter_detach(FemuCxlSsd *dev)
     dev->attached = false;
 }
 
+/*
+ * Callers run inside another owner's dispatch guard, so never wait here.
+ * Revoke now; an access in flight sees the new generation and does not
+ * install a mapping it translated before the change.
+ */
 static void cxl_invalidate(CXLType3Dev *ct3d)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(ct3d)->media;
 
-    /*
-     * The caller touches PCI state after this returns, so teardown waits for
-     * waiters; once it starts, stop waiting for the operation it drains.
-     */
-    s->invalidation_waiters++;
-    while (s->busy && !s->closing) {
-        qemu_cond_wait_bql(&s->idle);
+    s->invalidations++;
+    if (s->started) {
+        femu_cxl_der_clear(&s->direct);
     }
-    if (!s->busy) {
-        s->busy = true;
-        if (s->started) {
-            femu_cxl_der_clear(&s->direct);
-        }
-        s->busy = false;
-    }
-    s->invalidation_waiters--;
-    qemu_cond_broadcast(&s->idle);
 }
 
 static void adapter_config_write(PCIDevice *dev, uint32_t addr,
                                    uint32_t value, int size)
 {
-    object_ref(OBJECT(dev));
     cxl_invalidate(CXL_TYPE3(dev));
     parent_config_write(dev, addr, value, size);
-    object_unref(OBJECT(dev));
 }
 
 static MemTxResult adapter_component_read(void *opaque, hwaddr offset,
@@ -544,14 +534,10 @@ static MemTxResult adapter_component_write(void *opaque, hwaddr offset,
                                            MemTxAttrs attrs)
 {
     CXLType3Dev *dev = CXL_TYPE3(opaque);
-    MemTxResult result;
 
-    object_ref(OBJECT(dev));
     cxl_invalidate(dev);
-    result = memory_region_dispatch_write(&dev->cxl_cstate.crb.cache_mem,
-                                         offset, data, size_memop(size), attrs);
-    object_unref(OBJECT(dev));
-    return result;
+    return memory_region_dispatch_write(&dev->cxl_cstate.crb.cache_mem,
+                                        offset, data, size_memop(size), attrs);
 }
 
 static const MemoryRegionOps adapter_component_ops = {
@@ -573,10 +559,8 @@ static void adapter_pre_command(void *opaque)
         FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
         return;
     }
-    object_ref(OBJECT(dev));
     cxl_invalidate(dev);
     FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
-    object_unref(OBJECT(dev));
 }
 
 static void adapter_cci_hook(CXLCCI *cci, CXLType3Dev *dev)
@@ -607,7 +591,6 @@ static void adapter_reset_hold(Object *obj, ResetType type)
 {
     CXLType3Dev *dev = CXL_TYPE3(obj);
 
-    object_ref(obj);
     cxl_invalidate(dev);
     adapter_cci_dispose(&dev->cci, false);
     adapter_cci_dispose(&dev->vdm_fm_owned_ld_mctp_cci, false);
@@ -618,7 +601,6 @@ static void adapter_reset_hold(Object *obj, ResetType type)
     adapter_cci_hook(&dev->cci, dev);
     adapter_cci_hook(&dev->vdm_fm_owned_ld_mctp_cci, dev);
     adapter_cci_hook(&dev->ld0_cci, dev);
-    object_unref(obj);
 }
 
 static void cxl_flush(Object *obj, bool value, Error **errp)
@@ -1035,10 +1017,8 @@ static void cxl_exit(PCIDevice *dev)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
 
-    /* Callers of cxl_invalidate() finish under the BQL before we proceed. */
     s->closing = true;
-    qemu_cond_broadcast(&s->idle);
-    while (s->busy || s->invalidation_waiters) {
+    while (s->busy) {
         qemu_cond_wait_bql(&s->idle);
     }
     s->busy = true;
@@ -1181,8 +1161,7 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "read-hits", &s->read_hits,
                                    OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "invalidation-waiters",
-                                   &s->invalidation_waiters,
+    object_property_add_uint64_ptr(obj, "invalidations", &s->invalidations,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
     object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
