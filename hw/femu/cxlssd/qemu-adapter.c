@@ -1599,6 +1599,8 @@ static void cxl_register_types(void)
 type_init(cxl_register_types);
 
 typedef struct FemuCxlMap {
+    /* g_free_rcu() needs the head at a small offset. */
+    struct rcu_head rcu;
     uint64_t lpn;
     uint64_t pages;
     MemoryRegion mr;
@@ -2003,7 +2005,8 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
     object_unparent(OBJECT(&map->mr));
     der->mapped -= map->pages;
     der->revocations += map->pages;
-    g_free(map);
+    /* A reader on the previous flat view may still reach the region. */
+    g_free_rcu(map, rcu);
 }
 
 void femu_cxl_der_clear(FemuCxlDer *der)
