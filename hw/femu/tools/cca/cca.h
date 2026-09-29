@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Guest library for the femu-cxl-ssd caching API (CCA): pin, unpin,
- * invalidate, bypass and query ranges of the device's DRAM cache through
+ * invalidate, uncache and query ranges of the device's DRAM cache through
  * BAR5. The layout comes from cca-abi.h, shared with the device.
  *
  * All calls are thread safe. Tags are opaque to the library.
@@ -34,7 +34,7 @@ struct cca_result {
     uint64_t resident;                  /* QUERY only */
     uint64_t dirty;
     uint64_t pinned;
-    uint64_t bypassed;
+    uint64_t uncached;
 };
 
 struct cca_completion {

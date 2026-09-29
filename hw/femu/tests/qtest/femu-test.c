@@ -14874,7 +14874,7 @@ typedef struct FemuCcaResp {
     uint64_t resident;
     uint64_t dirty;
     uint64_t pinned;
-    uint64_t bypassed;
+    uint64_t uncached;
 } FemuCcaResp;
 
 static uint32_t femu_cxl_config_read(QTestState *qts, unsigned bus,
@@ -14970,7 +14970,7 @@ static void femu_cca_reap(FemuCca *c, FemuCcaResp *r)
     r->resident = qtest_readq(c->qts, base + 32);
     r->dirty = qtest_readq(c->qts, base + 40);
     r->pinned = qtest_readq(c->qts, base + 48);
-    r->bypassed = qtest_readq(c->qts, base + 56);
+    r->uncached = qtest_readq(c->qts, base + 56);
     c->tail++;
     qtest_writel(c->qts, FEMU_CCA_RESP + offsetof(struct cca_ring, tail),
                  c->tail);
@@ -15296,7 +15296,7 @@ static void femu_test_cca_miss_time(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
-static void femu_test_cca_bypass(void *obj, void *data,
+static void femu_test_cca_uncached(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
     FemuCca c;
@@ -15312,7 +15312,7 @@ static void femu_test_cca_bypass(void *obj, void *data,
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 1);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "media-writes"), ==, writes + 1);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
-    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, 1);
     reads = femu_cxl_stat(c.qts, "media-reads");
     misses = femu_cxl_stat(c.qts, "read-misses");
     inserts = femu_cxl_stat(c.qts, "cache-inserts");
@@ -15331,7 +15331,7 @@ static void femu_test_cca_bypass(void *obj, void *data,
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 0);
     femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, -EBUSY, 0);
     femu_cca_expect(&c, CCA_CTRL_CACHE_ENABLE, 0, 0, 2, 0, 1);
-    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, 0);
     g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(0)), ==, 0xc2);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-inserts"), ==, inserts + 1);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
@@ -15350,7 +15350,7 @@ static void femu_test_cca_prefetch(void *obj, void *data,
     g_assert_cmpuint(femu_cxl_stat(c.qts, "prefetch-inserts"), ==, 1);
     g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 0, 3, &r), ==, 0);
     g_assert_cmpuint(r.resident, ==, 2);
-    g_assert_cmpuint(r.bypassed, ==, 1);
+    g_assert_cmpuint(r.uncached, ==, 1);
     g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, 0, 1, 1, &r), ==, 0);
     g_assert_cmpuint(r.resident, ==, 0);
     femu_cca_quit(&c);
@@ -15427,7 +15427,7 @@ static void femu_test_cca_ratio(void *obj, void *data,
     femu_cca_start(&c, "", "cache-pages=4,cache-ways=2,der=memslot");
     femu_cxl_number(c.qts, "der-ratio", 100, true);
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, -EBUSY, 0);
-    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, 0);
     femu_cxl_number(c.qts, "der-ratio", 0, true);
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, 0, 1);
     rsp = qtest_qmp(c.qts, "{'execute':'qom-set','arguments':{"
@@ -15435,7 +15435,7 @@ static void femu_test_cca_ratio(void *obj, void *data,
                     "'property':'der-ratio','value':100}}");
     g_assert_true(qdict_haskey(rsp, "error"));
     g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
-                                        "desc"), "bypass"));
+                                        "desc"), "uncached"));
     qobject_unref(rsp);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "der-ratio"), ==, 0);
     femu_cca_expect(&c, CCA_CTRL_CACHE_ENABLE, CCA_F_ALL, 0, 0, 0, 1);
@@ -15466,9 +15466,9 @@ static void femu_test_cca_query(void *obj, void *data,
         g_assert_cmpuint(r.dirty, ==, 1);
         g_assert_cmpuint(r.pinned, ==, femu_cxl_stat(c.qts, "cca-pinned"));
         g_assert_cmpuint(r.pinned, ==, 1);
-        g_assert_cmpuint(r.bypassed, ==,
-                         femu_cxl_stat(c.qts, "cca-bypassed"));
-        g_assert_cmpuint(r.bypassed, ==, 1);
+        g_assert_cmpuint(r.uncached, ==,
+                         femu_cxl_stat(c.qts, "cca-uncached"));
+        g_assert_cmpuint(r.uncached, ==, 1);
     }
     femu_cca_quit(&c);
 }
@@ -15578,7 +15578,7 @@ static void femu_test_cca_reset(void *obj, void *data,
     qtest_qmp_assert_success(c.qts, "{'execute':'system_reset'}");
     qtest_qmp_eventwait(c.qts, "RESET");
     femu_cca_poll_stat(c.qts, "cca-pinned", 0);
-    femu_cca_poll_stat(c.qts, "cca-bypassed", 0);
+    femu_cca_poll_stat(c.qts, "cca-uncached", 0);
     /* Reset keeps cached contents; only CCA state goes. */
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, entries);
     femu_cca_map(&c);
@@ -15722,7 +15722,7 @@ static void femu_test_cca_media(void *obj, void *data,
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 1, -ENODEV, 0);
     femu_cca_expect(&c, CCA_CTRL_QUERY, 0, 0, 1, -ENODEV, 0);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-pinned"), ==, 0);
-    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-bypassed"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, 0);
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 1);
     femu_cca_expect(&c, CCA_CTRL_NOP, 0, 0, 0, 0, 0);
     femu_cxl_set(c.qts, "test-media-disabled", false);
@@ -16378,7 +16378,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-cca-miss-time", "femu", femu_test_cca_miss_time,
                  NULL);
-    qos_add_test("cxl-cca-bypass", "femu", femu_test_cca_bypass, NULL);
+    qos_add_test("cxl-cca-uncached", "femu", femu_test_cca_uncached, NULL);
     qos_add_test("cxl-cca-prefetch", "femu", femu_test_cca_prefetch, NULL);
     qos_add_test("cxl-cca-flush", "femu", femu_test_cca_flush, NULL);
     qos_add_test("cxl-cca-ways", "femu", femu_test_cca_ways, NULL);

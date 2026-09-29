@@ -34,9 +34,9 @@ which the `*_addr` calls accept virtual addresses in the mapping.
     ccactl [-d mem0] pin 0 16          # pin device pages 0..15
     ccactl [-d mem0] query all         # whole-device census
     ccactl [-d mem0] -f invalidate all # unpin, write back and drop all
-    ccactl [-d mem0] disable 100 8     # bypass the cache for 8 pages
+    ccactl [-d mem0] disable 100 8     # leave 8 pages uncached
     ccactl [-d mem0] enable all
-    ccactl [-d mem0] reset all         # rings, pins and bypass
+    ccactl [-d mem0] reset all         # rings, pins and uncached ranges
 
 `-d` accepts a memdev name, a PCI address or a `resource5` path; without it
 the only CCA device is used. The exit status is 0 when the device returned
@@ -78,11 +78,11 @@ Create the region first, for example with `cxl create-region -t ram -m mem0
 | query | One touched page is resident and dirty |
 | thrash | A pinned page stays resident and at hit latency while 4x the cache streams past; an invalidated control, programmed first and flushed from the CPU cache before each invalidate (an emulated CLFLUSH reads the page), is at least 5x slower |
 | invalidate | 64 dirty pages are written back, dropped and read back unchanged |
-| disable | A bypassed page is at least 5x slower than once re-enabled |
+| disable | An uncached page is at least 5x slower than once re-enabled |
 | errors | `-ERANGE`, `-ENOSPC` and `-EBUSY` through the library |
 | threads | 8 threads, 800,000 asynchronous commands, no lost or duplicate tags |
 | crash | A holder killed with SIGKILL mid-batch does not wedge the next open |
-| before-reboot, after-reboot | Pins and bypass do not survive a guest reboot |
+| before-reboot, after-reboot | Pins and uncached ranges do not survive a guest reboot |
 
 Lines starting with `CCA-MARK` bracket steps whose host counters a runner
 should compare; `invalidate` expects `media-writes` to rise by 64 between

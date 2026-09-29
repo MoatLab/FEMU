@@ -25,8 +25,8 @@ typedef struct FemuCxlCca {
     uint32_t epoch;             /* changes on every reset */
     uint32_t reset_pending;     /* CCA_RESET_*, applied by the thread */
     uint64_t completed;
-    unsigned long *bypass;      /* one bit per media page, or NULL */
-    uint64_t bypassed;
+    unsigned long *uncached_map;     /* one bit per media page, or NULL */
+    uint64_t uncached;
     uint64_t pinned_set_misses;
     uint64_t commands;
     uint64_t errors;
@@ -50,9 +50,9 @@ void femu_cxl_cca_reset(FemuCxlMedia *s, uint32_t kind);
 void femu_cxl_cca_stop(FemuCxlMedia *s);
 void femu_cxl_cca_stats_reset(FemuCxlCca *cca);
 
-static inline bool femu_cxl_cca_bypassed(FemuCxlCca *cca, uint64_t lpn)
+static inline bool femu_cxl_cca_uncached(FemuCxlCca *cca, uint64_t lpn)
 {
-    return cca->bypass && test_bit(lpn, cca->bypass);
+    return cca->uncached_map && test_bit(lpn, cca->uncached_map);
 }
 
 #endif

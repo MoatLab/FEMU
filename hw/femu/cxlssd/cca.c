@@ -43,7 +43,7 @@ struct CcaOp {
     uint64_t resident;
     uint64_t dirty;
     uint64_t pinned;
-    uint64_t bypassed;
+    uint64_t uncached;
 };
 
 static bool cca_abandoned(FemuCxlMedia *s, uint32_t epoch)
@@ -357,10 +357,10 @@ static int cca_query_page(CcaOp *op, uint64_t lpn)
     return 0;
 }
 
-static uint64_t cca_bypass_count(FemuCxlCca *cca, uint64_t start, uint64_t end)
+static uint64_t cca_uncached_count(FemuCxlCca *cca, uint64_t start, uint64_t end)
 {
-    return cca->bypass ?
-           bitmap_count_one_with_offset(cca->bypass, start, end - start) : 0;
+    return cca->uncached_map ?
+           bitmap_count_one_with_offset(cca->uncached_map, start, end - start) : 0;
 }
 
 static int cca_validate(FemuCxlMedia *s, CcaOp *op)
@@ -426,7 +426,7 @@ static int cca_prepare(CcaOp *op)
         if (!c->nsets) {
             return -EOPNOTSUPP;
         }
-        if (cca->bypass && find_next_bit(cca->bypass, op->end, op->start) <
+        if (cca->uncached_map && find_next_bit(cca->uncached_map, op->end, op->start) <
                            op->end) {
             return -EBUSY;
         }
@@ -443,7 +443,7 @@ static int cca_prepare(CcaOp *op)
         cca_candidates(op, true);
         return 0;
     case CCA_CTRL_CACHE_DISABLE:
-        /* A ratio mapping would serve a bypassed page at DRAM speed. */
+        /* A ratio mapping would serve an uncached page at DRAM speed. */
         if (s->direct.ratio) {
             return -EBUSY;
         }
@@ -454,31 +454,31 @@ static int cca_prepare(CcaOp *op)
             return -EBUSY;
         }
         if (op->cmd.cmd == CCA_CTRL_CACHE_DISABLE) {
-            if (!cca->bypass) {
-                cca->bypass = bitmap_new(s->backend.size / 4096);
+            if (!cca->uncached_map) {
+                cca->uncached_map = bitmap_new(s->backend.size / 4096);
             }
             /* Set first, so no access re-inserts a page as it is dropped. */
-            before = cca_bypass_count(cca, op->start, op->end);
-            bitmap_set(cca->bypass, op->start, count);
+            before = cca_uncached_count(cca, op->start, op->end);
+            bitmap_set(cca->uncached_map, op->start, count);
             op->acted = count - before;
-            cca->bypassed += op->acted;
+            cca->uncached += op->acted;
         }
         cca_candidates(op, false);
         return 0;
     case CCA_CTRL_CACHE_ENABLE:
-        before = cca_bypass_count(cca, op->start, op->end);
+        before = cca_uncached_count(cca, op->start, op->end);
         if (before) {
-            bitmap_clear(cca->bypass, op->start, count);
-            cca->bypassed -= before;
+            bitmap_clear(cca->uncached_map, op->start, count);
+            cca->uncached -= before;
         }
         op->acted = before;
-        if (cca->bypass && (!cca->bypassed || (op->cmd.flags & CCA_F_ALL))) {
-            g_clear_pointer(&cca->bypass, g_free);
-            cca->bypassed = 0;
+        if (cca->uncached_map && (!cca->uncached || (op->cmd.flags & CCA_F_ALL))) {
+            g_clear_pointer(&cca->uncached_map, g_free);
+            cca->uncached = 0;
         }
         return 1;
     case CCA_CTRL_QUERY:
-        op->bypassed = cca_bypass_count(cca, op->start, op->end);
+        op->uncached = cca_uncached_count(cca, op->start, op->end);
         op->acted = count;
         cca_candidates(op, false);
         return 0;
@@ -518,7 +518,7 @@ static bool cca_exec(FemuCxlMedia *s, CcaOp *op, struct cca_ctrl_resp_s *resp)
         resp->resident = op->resident;
         resp->dirty = op->dirty;
         resp->pinned = op->pinned;
-        resp->bypassed = op->bypassed;
+        resp->uncached = op->uncached;
     }
     return true;
 }
@@ -528,7 +528,7 @@ static void cca_fatal(FemuCxlCca *cca)
     cca->status |= CCA_STATUS_FATAL;
 }
 
-/* A device-wide reset clears pins and bypass under the gate, here. */
+/* A device-wide reset clears pins and uncached ranges under the gate. */
 static void cca_apply_reset(FemuCxlMedia *s)
 {
     FemuCxlCca *cca = &s->cca;
@@ -539,8 +539,8 @@ static void cca_apply_reset(FemuCxlMedia *s)
         femu_cxl_enter(s);
         if (s->started && !s->closing) {
             femu_cxl_cache_unpin_all(&s->cache);
-            g_clear_pointer(&cca->bypass, g_free);
-            cca->bypassed = 0;
+            g_clear_pointer(&cca->uncached_map, g_free);
+            cca->uncached = 0;
         }
         femu_cxl_leave(s);
     }
@@ -732,7 +732,7 @@ void femu_cxl_cca_init(FemuCxlCca *cca)
 
 void femu_cxl_cca_finalize(FemuCxlCca *cca)
 {
-    g_clear_pointer(&cca->bypass, g_free);
+    g_clear_pointer(&cca->uncached_map, g_free);
     qemu_cond_destroy(&cca->cond);
     qemu_mutex_destroy(&cca->lock);
 }

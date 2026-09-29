@@ -649,7 +649,7 @@ static void adapter_reset_hold(Object *obj, ResetType type)
 
     cxl_invalidate(dev);
     femu_cylon_reset(&FEMU_CXL_SSD(dev)->media.direct);
-    /* A guest reboot loses the library state that pins and bypass serve. */
+    /* A guest reboot loses the library state behind pins and uncached ranges. */
     femu_cxl_cca_reset(&FEMU_CXL_SSD(dev)->media, CCA_RESET_ALL);
     adapter_cci_dispose(&dev->cci, false);
     adapter_cci_dispose(&dev->vdm_fm_owned_ld_mctp_cci, false);
@@ -1418,7 +1418,7 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cca-pinned", &s->cache.pinned,
                                    OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-bypassed", &s->cca.bypassed,
+    object_property_add_uint64_ptr(obj, "cca-uncached", &s->cca.uncached,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cca-pin-fills", &s->cca.pin_fills,
                                    OBJ_PROP_FLAG_READ);
@@ -1979,9 +1979,9 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
         error_setg(errp, "der-ratio requires a realized device");
         goto out;
     }
-    /* A ratio mapping would serve a bypassed page at DRAM speed. */
-    if (ratio && s->cca.bypassed) {
-        error_setg(errp, "a direct ratio cannot be set while CCA bypass "
+    /* A ratio mapping would serve an uncached page at DRAM speed. */
+    if (ratio && s->cca.uncached) {
+        error_setg(errp, "a direct ratio cannot be set while CCA uncached "
                    "ranges exist");
         goto out;
     }

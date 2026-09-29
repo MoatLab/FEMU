@@ -89,7 +89,7 @@ struct cca_ctrl_resp_s {
     uint64_t resident;              /* QUERY only */
     uint64_t dirty;
     uint64_t pinned;
-    uint64_t bypassed;
+    uint64_t uncached;
 };
 
 struct cca_ctrl_slot_s {

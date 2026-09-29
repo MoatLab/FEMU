@@ -170,7 +170,7 @@ static void to_result(const struct cca_ctrl_resp_s *resp, struct cca_result *r)
     r->resident = resp->resident;
     r->dirty = resp->dirty;
     r->pinned = resp->pinned;
-    r->bypassed = resp->bypassed;
+    r->uncached = resp->uncached;
 }
 
 /*

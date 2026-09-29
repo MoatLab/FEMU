@@ -187,20 +187,20 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
         if (!e) {
             /*
-             * Without a cache, for a bypassed page, or when every way of
+             * Without a cache, for an uncached page, or when every way of
              * the set is pinned, each access goes to the media.
              */
-            bool bypassed = femu_cxl_cca_bypassed(&s->cca, lpn);
-            bool uncached = !s->cache.nsets || bypassed ||
+            bool uncached = femu_cxl_cca_uncached(&s->cca, lpn);
+            bool to_media = !s->cache.nsets || uncached ||
                             femu_cxl_cache_all_pinned(&s->cache, lpn);
 
-            if (s->cache.nsets && uncached && !bypassed) {
+            if (s->cache.nsets && to_media && !uncached) {
                 s->cca.pinned_set_misses++;
             }
-            if (!femu_cxl_media(s, lpn, write && uncached)) {
+            if (!femu_cxl_media(s, lpn, write && to_media)) {
                 return MEMTX_ERROR;
             }
-            if (!uncached) {
+            if (!to_media) {
                 e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, s);
                 if (!e) {
                     return MEMTX_ERROR;
@@ -222,7 +222,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 uint64_t next_hpa = hpa - dpa + next * 4096;
 
                 if (g_hash_table_contains(s->cache.entries, &next) ||
-                    femu_cxl_cca_bypassed(&s->cca, next) ||
+                    femu_cxl_cca_uncached(&s->cca, next) ||
                     femu_cxl_cache_all_pinned(&s->cache, next)) {
                     continue;
                 }

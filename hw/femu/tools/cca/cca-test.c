@@ -314,8 +314,8 @@ static int case_disable(void)
         off[i] = load_ns(p);
     }
     CHECK(!cca_query_addr(dev, p, PAGE, &r), "%s", cca_strerror(r.status));
-    CHECK(r.resident == 0 && r.bypassed == 1, "resident %" PRIu64
-          " bypassed %" PRIu64, r.resident, r.bypassed);
+    CHECK(r.resident == 0 && r.uncached == 1, "resident %" PRIu64
+          " uncached %" PRIu64, r.resident, r.uncached);
     CHECK(!cca_cache_enable(dev, lpn_of(p), 1, &r), "%s",
           cca_strerror(r.status));
     peek(p);
@@ -479,7 +479,7 @@ static int case_crash(void)
     return 0;
 }
 
-/* Leave pins and a bypassed page for after-reboot to find gone. */
+/* Leave pins and an uncached page for after-reboot to find gone. */
 static int case_before_reboot(void)
 {
     struct cca_result r;
@@ -489,8 +489,8 @@ static int case_before_reboot(void)
     CHECK(!cca_cache_disable(dev, 1, 1, CCA_FLAG_FORCE, &r), "%s",
           cca_strerror(r.status));
     CHECK(!cca_query(dev, 0, CCA_WHOLE, &r), "%s", cca_strerror(r.status));
-    CHECK(r.pinned == 1 && r.bypassed == 1, "pinned %" PRIu64 " bypassed %"
-          PRIu64, r.pinned, r.bypassed);
+    CHECK(r.pinned == 1 && r.uncached == 1, "pinned %" PRIu64 " uncached %"
+          PRIu64, r.pinned, r.uncached);
     return 0;
 }
 
@@ -499,8 +499,8 @@ static int case_after_reboot(void)
     struct cca_result r;
 
     CHECK(!cca_query(dev, 0, CCA_WHOLE, &r), "%s", cca_strerror(r.status));
-    CHECK(r.pinned == 0 && r.bypassed == 0, "pinned %" PRIu64 " bypassed %"
-          PRIu64, r.pinned, r.bypassed);
+    CHECK(r.pinned == 0 && r.uncached == 0, "pinned %" PRIu64 " uncached %"
+          PRIu64, r.pinned, r.uncached);
     return 0;
 }
 

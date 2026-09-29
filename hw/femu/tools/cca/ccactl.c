@@ -162,8 +162,8 @@ int main(int argc, char **argv)
            r.pages);
     if (cmds[i].cmd == CCA_CTRL_QUERY && !rc) {
         printf("resident %" PRIu64 "\ndirty %" PRIu64 "\npinned %" PRIu64
-               "\nbypassed %" PRIu64 "\n", r.resident, r.dirty, r.pinned,
-               r.bypassed);
+               "\nuncached %" PRIu64 "\n", r.resident, r.dirty, r.pinned,
+               r.uncached);
     }
     cca_close(d);
     return rc ? 1 : 0;
