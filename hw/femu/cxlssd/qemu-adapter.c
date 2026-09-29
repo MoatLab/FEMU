@@ -2249,8 +2249,6 @@ void femu_cxl_der_destroy(FemuCxlDer *der)
 
 #include "spt.h"
 #define KVM_CYLON_DUAL_MODE (1U << 17)
-#define CYLON_PAGEMAP_PRESENT (UINT64_C(1) << 63)
-#define CYLON_PAGEMAP_PFN ((UINT64_C(1) << 55) - 1)
 
 typedef struct CylonSpteFlag {
     uint64_t gpa;
@@ -2303,6 +2301,8 @@ struct FemuCylon {
     bool failed;
     bool logging;
     bool batch;
+    /* During a batch, the last huge page whose frame was found current. */
+    uint64_t checked_huge;
 };
 
 static void cylon_region_change(MemoryListener *listener,
@@ -2660,19 +2660,6 @@ static void cylon_drop(FemuCxlDer *der, CylonPage *page, bool dirty)
     der->revocations++;
 }
 
-/* Detect migration already visible at admission; this cannot pin a PFN. */
-static bool cylon_pfn_current(FemuCylon *c, uint64_t dpa)
-{
-    uint64_t index = dpa / c->huge_size;
-    uint64_t entry;
-    off_t offset = ((uintptr_t)c->ram + index * c->huge_size) /
-                   CYLON_PAGE_SIZE * sizeof(entry);
-
-    return pread(c->pagemap, &entry, sizeof(entry), offset) == sizeof(entry) &&
-           (entry & CYLON_PAGEMAP_PRESENT) &&
-           (entry & CYLON_PAGEMAP_PFN) * CYLON_PAGE_SIZE == c->huge[index];
-}
-
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
                     uint64_t hpa, uint64_t dpa)
 {
@@ -2697,7 +2684,10 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         cylon_fail(der);
         return false;
     }
-    if (!cylon_pfn_current(c, dpa)) {
+    /* A ratio batch reads the pagemap once per huge page, not per page. */
+    if (!cylon_pfn_current(c->pagemap, c->huge, (uintptr_t)c->ram,
+                           c->huge_size, dpa,
+                           c->batch ? &c->checked_huge : NULL)) {
         cylon_fail(der);
         return false;
     }
@@ -2774,6 +2764,7 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw)
         return;
     }
     c->batch = true;
+    c->checked_huge = UINT64_MAX;
     for (lpn = 0; c->installed && lpn < c->size / 4096; lpn++) {
         if (femu_cxl_ratio_selected(der->ratio, lpn)) {
             femu_cylon_map(der, fw, fw->base + lpn * 4096, lpn * 4096);

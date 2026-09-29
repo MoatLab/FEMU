@@ -5,6 +5,7 @@
 #include "../cxlssd/spte.h"
 #include "../cxlssd/spt.h"
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 static void test_spt_areas(void)
@@ -94,6 +95,87 @@ static void test_spte_take_dirty(void)
     assert(spte == (cylon_direct_spte(0x400000) | CYLON_EPT_DIRTY));
 }
 
+/* Store a pagemap entry for the huge page at @ram + @offset. */
+static void put_entry(int fd, uintptr_t ram, uint64_t offset, uint64_t entry)
+{
+    if (pwrite(fd, &entry, sizeof(entry), (ram + offset) / CYLON_PAGE_SIZE *
+               sizeof(entry)) != sizeof(entry)) {
+        abort();
+    }
+}
+
+static double seconds(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/*
+ * The frame check reads the pagemap once per huge page when the caller
+ * walks pages in order, and a ratio apply walks millions of pages.
+ */
+static void test_pfn_current(void)
+{
+    enum { HUGE_PAGES = 64, HUGE = 2 << 20 };
+    char path[] = "/tmp/femu-pagemap-XXXXXX";
+    uintptr_t ram = UINT64_C(0x40000000);
+    uint64_t huge[HUGE_PAGES];
+    uint64_t checked = UINT64_MAX;
+    uint64_t offset;
+    double t0;
+    double per_page;
+    double per_huge;
+    unsigned i;
+    int fd = mkstemp(path);
+
+    assert(fd >= 0);
+    unlink(path);
+    for (i = 0; i < HUGE_PAGES; i++) {
+        huge[i] = (UINT64_C(0x100000) + i) * HUGE;
+        put_entry(fd, ram, i * (uint64_t)HUGE,
+                  CYLON_PAGEMAP_PRESENT | huge[i] / CYLON_PAGE_SIZE);
+    }
+    assert(cylon_pfn_current(fd, huge, ram, HUGE, 4096, &checked));
+    assert(checked == 0);
+    /* The frame moves: a cached walk has checked it already, others see it. */
+    put_entry(fd, ram, 0,
+              CYLON_PAGEMAP_PRESENT | (huge[0] + HUGE) / CYLON_PAGE_SIZE);
+    assert(cylon_pfn_current(fd, huge, ram, HUGE, 8192, &checked));
+    assert(!cylon_pfn_current(fd, huge, ram, HUGE, 8192, NULL));
+    checked = UINT64_MAX;
+    assert(!cylon_pfn_current(fd, huge, ram, HUGE, 8192, &checked));
+    assert(checked == UINT64_MAX);
+    assert(cylon_pfn_current(fd, huge, ram, HUGE, HUGE + 4096, &checked));
+    assert(checked == 1);
+    /* Not present. */
+    put_entry(fd, ram, 2 * (uint64_t)HUGE, 0);
+    assert(!cylon_pfn_current(fd, huge, ram, HUGE, 2 * HUGE, NULL));
+    put_entry(fd, ram, 0, CYLON_PAGEMAP_PRESENT | huge[0] / CYLON_PAGE_SIZE);
+    put_entry(fd, ram, 2 * (uint64_t)HUGE,
+              CYLON_PAGEMAP_PRESENT | huge[2] / CYLON_PAGE_SIZE);
+
+    /* Microbenchmark: every 4 KiB page of the backing, both ways. */
+    t0 = seconds();
+    for (offset = 0; offset < HUGE_PAGES * (uint64_t)HUGE; offset += 4096) {
+        assert(cylon_pfn_current(fd, huge, ram, HUGE, offset, NULL));
+    }
+    per_page = seconds() - t0;
+    checked = UINT64_MAX;
+    t0 = seconds();
+    for (offset = 0; offset < HUGE_PAGES * (uint64_t)HUGE; offset += 4096) {
+        assert(cylon_pfn_current(fd, huge, ram, HUGE, offset, &checked));
+    }
+    per_huge = seconds() - t0;
+    printf("CXL frame check over %u pages: %.0f ns/page read per page, "
+           "%.1f ns/page read per huge page\n", HUGE_PAGES * HUGE / 4096,
+           per_page * 1e9 / (HUGE_PAGES * HUGE / 4096),
+           per_huge * 1e9 / (HUGE_PAGES * HUGE / 4096));
+    assert(per_huge * 4 < per_page);
+    close(fd);
+}
+
 int main(void)
 {
     uint64_t huge[] = { 0x200000, 0x1000000, 0x600000 };
@@ -105,6 +187,7 @@ int main(void)
     test_spt_areas();
     test_spte_transitions();
     test_spte_take_dirty();
+    test_pfn_current();
 
     /* spte.h: RWX, WB, IPAT, A, MMU-present, host/MMU writable. */
     assert(cylon_direct_spte(0x12345000) == UINT64_C(0x600000012345977));

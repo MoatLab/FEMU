@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <unistd.h>
 
 /* CylonLinux arch/x86/kvm/mmu/spte.h and Intel EPT definitions. */
 #define CYLON_PAGE_SIZE UINT64_C(4096)
@@ -27,6 +28,8 @@
     CYLON_MMU_PRESENT | CYLON_HOST_WRITABLE | CYLON_MMU_WRITABLE)
 
 #define CYLON_REMOVED_SPTE UINT64_C(0x5a0)
+#define CYLON_PAGEMAP_PRESENT (UINT64_C(1) << 63)
+#define CYLON_PAGEMAP_PFN ((UINT64_C(1) << 55) - 1)
 
 static inline bool cylon_spte_revoked(uint64_t spte)
 {
@@ -136,6 +139,36 @@ static inline bool cylon_page_address(const uint64_t *huge, uint64_t count,
         return false;
     }
     *pa = base + within;
+    return true;
+}
+
+/*
+ * Whether the huge page holding @offset of the backing at @ram still has
+ * the frame recorded in @huge. This detects a migration already visible;
+ * it cannot pin the frame. All 4 KiB pages of a huge page share the
+ * answer, so a caller walking pages passes in *@checked the last huge page
+ * found current (UINT64_MAX at first) and reads the pagemap once per huge
+ * page instead of once per page.
+ */
+static inline bool cylon_pfn_current(int pagemap, const uint64_t *huge,
+                                     uintptr_t ram, uint64_t huge_size,
+                                     uint64_t offset, uint64_t *checked)
+{
+    uint64_t index = offset / huge_size;
+    uint64_t entry;
+    off_t at = (ram + index * huge_size) / CYLON_PAGE_SIZE * sizeof(entry);
+
+    if (checked && *checked == index) {
+        return true;
+    }
+    if (pread(pagemap, &entry, sizeof(entry), at) != sizeof(entry) ||
+        !(entry & CYLON_PAGEMAP_PRESENT) ||
+        (entry & CYLON_PAGEMAP_PFN) * CYLON_PAGE_SIZE != huge[index]) {
+        return false;
+    }
+    if (checked) {
+        *checked = index;
+    }
     return true;
 }
 #endif
