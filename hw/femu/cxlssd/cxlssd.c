@@ -554,6 +554,12 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
 
     s->backend.size = size;
     s->backend.logical_space = payload;
+    /*
+     * A linked controller copies through backend_rw(), which takes a zero
+     * mode for OCSSD and reads one offset per scatter entry: every transfer
+     * past one page then read its offsets from beyond the caller's one.
+     */
+    s->backend.femu_mode = FEMU_BBSSD_MODE;
     femu_cxl_cache_init(&s->cache, s->cache_pages, s->cache_ways, policy);
     if (!s->ftl) {
         return;
