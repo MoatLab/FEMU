@@ -588,7 +588,8 @@ it borrowed outlives an unplug. A CXL reset or disabled media leaves the NVMe
 path working on the same payload.
 
 Qtests cover link refusals, data in both directions at 512-byte and 4 KiB
-blocks and through a memslot mapping, each dropping command, a long write
+blocks and through a memslot mapping, PRP-list transfers up to MDTS on one
+and two queues, each dropping command, a long write
 under a direct ratio, deallocation
 without resurrection, DULBE after CXL stores and mappings, flips, pinned
 pages, both unplug orders and the slot power-off, and a completion held while

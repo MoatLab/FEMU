@@ -16267,6 +16267,149 @@ static void femu_test_cxl_nvme_data(void *obj, void *data,
     femu_link_quit(&l);
 }
 
+/* A transfer of @pages pages: PRP1 names the first, a PRP list the rest. */
+typedef struct FemuLinkXfer {
+    uint64_t data;
+    uint64_t list;
+    unsigned pages;
+} FemuLinkXfer;
+
+/* The list pages are contiguous; the last slot of a full one chains on. */
+static void femu_link_xfer_init(FemuLink *l, FemuLinkXfer *x, unsigned pages)
+{
+    uint64_t at;
+    unsigned slot = 0;
+    unsigned k;
+
+    x->pages = pages;
+    x->data = guest_alloc(&l->alloc, (uint64_t)pages * 4096);
+    x->list = guest_alloc(&l->alloc, (pages / 511 + 1) * 4096);
+    at = x->list;
+    for (k = 1; k < pages; k++) {
+        if (slot == 511 && pages - k > 1) {
+            qtest_writeq(l->qts, at + slot * 8, at + 4096);
+            at += 4096;
+            slot = 0;
+        }
+        qtest_writeq(l->qts, at + slot * 8, x->data + (uint64_t)k * 4096);
+        slot++;
+    }
+}
+
+static void femu_link_xfer_free(FemuLink *l, FemuLinkXfer *x)
+{
+    guest_free(&l->alloc, x->list);
+    guest_free(&l->alloc, x->data);
+}
+
+static void femu_link_xfer_submit(FemuLink *l, FemuQueue *q, uint8_t opcode,
+                                  uint64_t page, FemuLinkXfer *x)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(x->data);
+    rw.dptr.prp2 = cpu_to_le64(x->list);
+    rw.slba = cpu_to_le64(femu_link_lba(l, page));
+    rw.nlb = cpu_to_le16(x->pages * 4096 / l->c.lba_size - 1);
+    femu_submit(&l->c, q, (NvmeCmd *)&rw);
+}
+
+/* A second I/O queue pair with its own completion queue. */
+static void femu_link_queue(FemuLink *l, FemuQueue *q, uint16_t qid)
+{
+    NvmeCmd cmd = { 0 };
+
+    femu_queue_init(&l->c, q, qid);
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&l->c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32((qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&l->c, &cmd), ==, NVME_SUCCESS);
+}
+
+#define FEMU_LINK_QUEUES    (1u << 16)
+
+/*
+ * Transfers of many pages at 512-byte blocks, as Linux issues them: the
+ * scatter list has an entry per page. Each write lands in the shared payload
+ * and drops the resident pages it covers; with two queues, one write per
+ * queue is in flight at once and each is read back through the other queue.
+ */
+static void femu_test_cxl_nvme_prp(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    unsigned pages = (uintptr_t)data & 0xffff;
+    unsigned n = (uintptr_t)data & FEMU_LINK_QUEUES ? 2 : 1;
+    size_t size = (size_t)pages * 4096;
+    g_autofree uint8_t *want = g_malloc(n * size);
+    g_autofree uint8_t *got = g_malloc(n * size);
+    FemuQueue *q[2];
+    FemuQueue q2;
+    FemuLinkXfer x[2];
+    uint64_t drops;
+    uint64_t writes;
+    FemuLink l;
+    unsigned i;
+    size_t b;
+
+    femu_link_start(&l, "", ",cache-pages=64",
+                    n > 1 ? ",multipoller_enabled=1" : "");
+    q[0] = &l.c.io;
+    q[1] = &q2;
+    if (n > 1) {
+        femu_link_queue(&l, &q2, 2);
+    }
+    for (b = 0; b < n * size; b++) {
+        want[b] = (uint8_t)(b / 4096 * 7 + b);
+    }
+    for (i = 0; i < n; i++) {
+        femu_link_xfer_init(&l, &x[i], pages);
+        qtest_memwrite(l.qts, x[i].data, want + i * size, size);
+        g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + i * size), ==, 0);
+        g_assert_cmphex(qtest_readq(l.qts, FEMU_CXL_WINDOW + i * size +
+                                    size - 4096), ==, 0);
+    }
+    drops = femu_cxl_stat(l.qts, "nvme-drops");
+    writes = femu_cxl_stat(l.qts, "media-writes");
+    for (i = 0; i < n; i++) {
+        femu_link_xfer_submit(&l, q[i], NVME_CMD_WRITE, i * pages, &x[i]);
+    }
+    for (i = 0; i < n; i++) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&l.c, q[i], NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "nvme-drops"), ==, drops + 2 * n);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "media-writes"), >=,
+                     writes + n * pages);
+    qtest_memread(l.qts, FEMU_CXL_WINDOW, got, n * size);
+    g_assert_cmpmem(got, n * size, want, n * size);
+
+    for (i = 0; i < n; i++) {
+        qtest_memset(l.qts, x[i].data, 0xee, size);
+        femu_link_xfer_submit(&l, q[n - 1 - i], NVME_CMD_READ, i * pages,
+                              &x[i]);
+    }
+    for (i = 0; i < n; i++) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&l.c, q[n - 1 - i], NULL,
+                                              NULL)), ==, NVME_SUCCESS);
+        qtest_memread(l.qts, x[i].data, got + i * size, size);
+        femu_link_xfer_free(&l, &x[i]);
+    }
+    g_assert_cmpmem(got, n * size, want, n * size);
+    if (n > 1) {
+        femu_queue_free(&l.c, &q2);
+    }
+    femu_link_quit(&l);
+}
+
 enum {
     FEMU_LINK_WRITE,
     FEMU_LINK_ZEROES,
@@ -16742,6 +16885,13 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-nvme-data", "femu", femu_test_cxl_nvme_data, NULL);
     qos_add_test("cxl-nvme-data-4k", "femu", femu_test_cxl_nvme_data,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-nvme-prp", "femu", femu_test_cxl_nvme_prp,
+                 &(QOSGraphTestOptions) { .arg = (void *)128 });
+    qos_add_test("cxl-nvme-prp-mdts", "femu", femu_test_cxl_nvme_prp,
+                 &(QOSGraphTestOptions) { .arg = (void *)1024 });
+    qos_add_test("cxl-nvme-prp-queues", "femu", femu_test_cxl_nvme_prp,
+                 &(QOSGraphTestOptions) {
+                     .arg = (void *)(uintptr_t)(128 | FEMU_LINK_QUEUES) });
     qos_add_test("cxl-nvme-write", "femu", femu_test_cxl_nvme_invalidate,
                  &(QOSGraphTestOptions) { .arg = (void *)FEMU_LINK_WRITE });
     qos_add_test("cxl-nvme-write-zeroes", "femu",
