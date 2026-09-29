@@ -15708,6 +15708,42 @@ static void femu_test_cca_interleave(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/*
+ * A rings reset abandons CACHE_DISABLE after its first chunk. The pages it
+ * never reached are still resident, so they must not stay uncached.
+ */
+static void femu_test_cca_disable_abandon(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    uint64_t pages = 256 * 256;
+    uint64_t reads;
+    FemuCca c;
+    FemuCcaResp r;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "cache-pages=1024,cache-ways=1024,"
+                   "program-ns=500000");
+    for (lpn = 0; lpn < 512; lpn++) {
+        qtest_writeq(c.qts, femu_cca_page(lpn), lpn);
+    }
+    femu_cca_post_raw(&c, 0, CCA_CTRL_CACHE_DISABLE, CCA_F_ALL, 0, 0, 0);
+    femu_cca_kick(&c);
+    femu_cca_poll_stat(c.qts, "cca-writebacks", 256);
+    qtest_writel(c.qts, FEMU_CCA_BAR + CCA_REG_RESET, CCA_RESET_RINGS);
+    femu_cca_wait_status(&c, CCA_STATUS_READY, CCA_STATUS_READY);
+    c.head = 0;
+    c.tail = 0;
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_QUERY, CCA_F_ALL, 0, 0, &r), ==,
+                    0);
+    g_assert_cmpuint(r.resident, ==, 256);
+    g_assert_cmpuint(r.uncached, ==, pages - 256);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, pages - 256);
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(300)), ==, 300);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads);
+    femu_cca_quit(&c);
+}
+
 /* Commands that touch the cache refuse while media is disabled. */
 static void femu_test_cca_media(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -16389,6 +16425,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-der", "femu", femu_test_cca_der, NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
+    qos_add_test("cxl-cca-disable-abandon", "femu",
+                 femu_test_cca_disable_abandon, NULL);
     qos_add_test("cxl-cca-interleave", "femu", femu_test_cca_interleave,
                  NULL);
     qos_add_test("cxl-nvme-link", "femu", femu_test_cxl_nvme_link, NULL);

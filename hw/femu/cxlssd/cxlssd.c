@@ -260,6 +260,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
 
         if ((e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
+            !femu_cxl_cca_uncached(&s->cca, first) &&
             cxl_map(s, generation, hpa, dpa, e) &&
             !s->direct.cylon && e) {
             /* Direct writes cannot update metadata, so charge on eviction. */

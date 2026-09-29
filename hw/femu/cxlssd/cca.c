@@ -486,6 +486,52 @@ static int cca_prepare(CcaOp *op)
     return -EINVAL;
 }
 
+/*
+ * A CACHE_DISABLE that failed or was abandoned has set bits over pages it
+ * could not drop. Clear those, so an uncached page is never resident and
+ * never served from DRAM.
+ */
+static void cca_disable_undo(CcaOp *op)
+{
+    FemuCxlMedia *s = op->s;
+    FemuCxlCca *cca = &s->cca;
+    FemuCxlCache *c = &s->cache;
+    GHashTableIter iter;
+    gpointer value;
+    uint64_t lpn;
+    uint64_t cleared = 0;
+
+    femu_cxl_enter(s);
+    if (!s->started || s->closing || !cca->uncached_map) {
+        femu_cxl_leave(s);
+        return;
+    }
+    if (op->end - op->start <= g_hash_table_size(c->entries)) {
+        for (lpn = op->start; lpn < op->end; lpn++) {
+            if (g_hash_table_contains(c->entries, &lpn) &&
+                test_and_clear_bit(lpn, cca->uncached_map)) {
+                cleared++;
+            }
+        }
+    } else {
+        g_hash_table_iter_init(&iter, c->entries);
+        while (g_hash_table_iter_next(&iter, NULL, &value)) {
+            FemuCxlEntry *e = value;
+
+            if (e->lpn >= op->start && e->lpn < op->end &&
+                test_and_clear_bit(e->lpn, cca->uncached_map)) {
+                cleared++;
+            }
+        }
+    }
+    cca->uncached -= cleared;
+    op->acted -= MIN(op->acted, cleared);
+    if (!cca->uncached) {
+        g_clear_pointer(&cca->uncached_map, g_free);
+    }
+    femu_cxl_leave(s);
+}
+
 /* Execute one command; false if it was abandoned and must not complete. */
 static bool cca_exec(FemuCxlMedia *s, CcaOp *op, struct cca_ctrl_resp_s *resp)
 {
@@ -506,8 +552,15 @@ static bool cca_exec(FemuCxlMedia *s, CcaOp *op, struct cca_ctrl_resp_s *resp)
         cca_leave(op);
         if (status == 1) {
             status = 0;
-        } else if (!status && !cca_walk(op, pages[op->cmd.cmd], &status)) {
-            return false;
+        } else if (!status) {
+            bool done = cca_walk(op, pages[op->cmd.cmd], &status);
+
+            if (op->cmd.cmd == CCA_CTRL_CACHE_DISABLE && (!done || status)) {
+                cca_disable_undo(op);
+            }
+            if (!done) {
+                return false;
+            }
         }
     }
     resp->status = status;
