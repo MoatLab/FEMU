@@ -19,11 +19,19 @@ void femu_cxl_leave(FemuCxlMedia *s)
     qemu_cond_broadcast(&s->idle);
 }
 
+/* Spin only this close to the deadline; sleeps can overshoot by this much. */
+#define FEMU_CXL_SPIN_NS (100 * SCALE_US)
+
 void femu_cxl_delay(uint64_t ns)
 {
     int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
+    int64_t remaining;
 
     bql_unlock();
+    remaining = deadline - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (remaining > FEMU_CXL_SPIN_NS) {
+        g_usleep((remaining - FEMU_CXL_SPIN_NS) / SCALE_US);
+    }
     while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < deadline) {
         cpu_relax();
     }
