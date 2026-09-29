@@ -13,6 +13,12 @@ typedef struct FemuCxlWork {
     bool done;
 } FemuCxlWork;
 
+/* Pages a linked NVMe command replaced. */
+typedef struct FemuCxlRange {
+    uint64_t first;
+    uint64_t last;
+} FemuCxlRange;
+
 typedef struct FemuCxlMedia {
     FemuCtrl *ctrl;
     NvmeNamespace ns;
@@ -82,8 +88,21 @@ typedef struct FemuCxlMedia {
     FemuCtrl *nvme;
     NvmeNamespace *nvme_ns;
     Error *nvme_blocker;
+    /*
+     * The NVMe FTL thread appends what its writes replaced under @lock,
+     * tagging each request with the batch number @nvme_taken + 1. @nvme_bh
+     * takes the batch under @lock, drops those pages from the cache under
+     * the BQL and the gate, then publishes its number in @nvme_done, which
+     * the NVMe completions wait for.
+     */
+    GArray *nvme_ranges;
+    uint64_t nvme_taken;
+    uint64_t nvme_done;
+    QEMUBH *nvme_bh;
+    bool nvme_kick;
     /* The device went away first and left its FTL to the controller. */
     bool nvme_owns_ftl;
+    uint64_t nvme_drops;
 } FemuCxlMedia;
 
 void femu_cxl_enter(FemuCxlMedia *s);
@@ -98,5 +117,6 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);
 void femu_cxl_stop(FemuCxlMedia *s);
 uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+void femu_cxl_nvme_bh(void *opaque);
 
 #endif

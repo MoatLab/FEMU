@@ -1621,6 +1621,12 @@ typedef struct NvmeRequest {
     /* position in the priority queue for delay emulation */
     size_t                  pos;
 
+    /*
+     * The invalidation batch a linked CXL medium must apply before this
+     * command completes, so its cache no longer holds what it replaced.
+     */
+    uint64_t                cxl_seq;
+
     /* DSM (Dataset Management) related fields */
     NvmeDsmRange    *dsm_ranges;
     int             dsm_nr_ranges;
@@ -2314,11 +2320,13 @@ typedef struct FemuCtrl {
 
     /*
      * A femu-cxl-ssd whose backend and FTL namespace 1 shares. @cxl_media is
-     * set while the medium serves requests, and cleared if it goes away
-     * first.
+     * set while the medium serves requests; @cxl_done then points at the
+     * last invalidation batch it applied, which completions wait for. Both
+     * are cleared if the medium goes away first.
      */
     DeviceState     *cxl_dev;
     struct FemuCxlMedia *cxl_media;
+    const uint64_t  *cxl_done;
     struct ssd      *cxl_ssd;
 } FemuCtrl;
 

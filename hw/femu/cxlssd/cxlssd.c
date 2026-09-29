@@ -26,6 +26,11 @@ void femu_cxl_leave(FemuCxlMedia *s)
         release(s);
     }
     s->busy = false;
+    /* Invalidation found the gate taken and did not wait for it. */
+    if (s->nvme_kick && s->nvme_bh) {
+        s->nvme_kick = false;
+        qemu_bh_schedule(s->nvme_bh);
+    }
     qemu_cond_broadcast(&s->idle);
 }
 
@@ -270,21 +275,172 @@ bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
     return true;
 }
 
+/* Queue [slba, slba + nlb) of @ns for dropping; called under @lock. */
+static bool cxl_nvme_record(FemuCxlMedia *s, NvmeNamespace *ns, uint64_t slba,
+                            uint64_t nlb)
+{
+    uint64_t off = slba << ns->lbaf.lbads;
+    FemuCxlRange r = {
+        .first = off / 4096,
+        .last = (off + (nlb << ns->lbaf.lbads) - 1) / 4096,
+    };
+
+    if (nlb) {
+        g_array_append_val(s->nvme_ranges, r);
+    }
+    return nlb;
+}
+
 /*
  * Run a linked NVMe request on the medium's FTL. The medium's worker holds
  * @lock for each of its requests, so the two never interleave. The pollers'
- * pause waits for this thread, so it must never need the BQL.
+ * pause waits for this thread, so it must never need the BQL; the cache is
+ * updated later by a main-loop bottom half instead.
  */
 uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
     FemuCxlMedia *s = n->cxl_media;
+    const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
+    bool recorded = false;
     uint64_t lat;
+    int i;
 
     assert(!bql_locked());
     qemu_mutex_lock(&s->lock);
+    /*
+     * The poller already changed the payload, whatever the FTL decides.
+     * Record from the command: the FTL frees DSM ranges as it trims.
+     */
+    switch (req->status == NVME_SUCCESS ? req->cmd.opcode : 0) {
+    case NVME_CMD_WRITE:
+    case NVME_CMD_WRITE_ZEROES:
+        recorded = cxl_nvme_record(s, ns, le64_to_cpu(rw->slba),
+                                   le16_to_cpu(rw->nlb) + 1);
+        break;
+    case NVME_CMD_COPY:
+        recorded = cxl_nvme_record(s, ns, le32_to_cpu(req->cmd.cdw10) |
+                                   (uint64_t)le32_to_cpu(req->cmd.cdw11) << 32,
+                                   req->nlb);
+        break;
+    case NVME_CMD_DSM:
+        for (i = 0; req->dsm_ranges && i < req->dsm_nr_ranges; i++) {
+            recorded |= cxl_nvme_record(s, ns,
+                                        le64_to_cpu(req->dsm_ranges[i].slba),
+                                        le32_to_cpu(req->dsm_ranges[i].nlb));
+        }
+        break;
+    default:
+        break;
+    }
+    /* The request completes once the bottom half took this batch. */
+    if (recorded) {
+        req->cxl_seq = s->nvme_taken + 1;
+    }
     lat = bb_ftl_process_req(n, ns, req);
     qemu_mutex_unlock(&s->lock);
+    if (req->cxl_seq) {
+        qemu_bh_schedule(s->nvme_bh);
+    }
     return lat;
+}
+
+/* Revoking page by page costs two VM-wide flushes each under Cylon. */
+#define FEMU_CXL_NVME_CLEAR 64
+
+/*
+ * The NVMe command already programmed or unmapped these pages, so a cached
+ * copy must not be written back: that would program them twice, or map a
+ * deallocated page again. Revoke direct mappings first so Cylon's dirty
+ * sample is discarded with the entry. Pinned pages stay resident and pinned,
+ * as the caching API promised, but clean.
+ */
+static void cxl_nvme_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
+{
+    g_autoptr(GPtrArray) victims = g_ptr_array_new();
+    uint64_t pages = s->backend.size / 4096;
+    FemuCxlEntry *e;
+    uint64_t lpn;
+    bool clear;
+    guint i;
+
+    if (first >= pages) {
+        return;
+    }
+    last = MIN(last, pages - 1);
+    clear = last - first + 1 > FEMU_CXL_NVME_CLEAR && s->direct.mapped;
+    if (clear) {
+        femu_cxl_der_clear(&s->direct);
+    }
+    if (last - first + 1 <= g_hash_table_size(s->cache.entries)) {
+        for (lpn = first; lpn <= last; lpn++) {
+            e = g_hash_table_lookup(s->cache.entries, &lpn);
+            if (e) {
+                g_ptr_array_add(victims, e);
+            }
+        }
+    } else {
+        GHashTableIter it;
+        gpointer value;
+
+        g_hash_table_iter_init(&it, s->cache.entries);
+        while (g_hash_table_iter_next(&it, NULL, &value)) {
+            e = value;
+            if (e->lpn >= first && e->lpn <= last) {
+                g_ptr_array_add(victims, e);
+            }
+        }
+    }
+    for (i = 0; i < victims->len; i++) {
+        e = g_ptr_array_index(victims, i);
+        if (!clear && !femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
+            femu_cxl_der_remove(&s->direct, e->lpn);
+        }
+        s->nvme_drops++;
+        if (e->queue == FEMU_CXL_PINNED) {
+            e->dirty = false;
+        } else {
+            femu_cxl_cache_remove(&s->cache, e, NULL, NULL);
+        }
+    }
+}
+
+/*
+ * Apply what linked NVMe writes replaced. Invalidation never waits for the
+ * gate: when it is taken, the holder reschedules this as it leaves.
+ */
+void femu_cxl_nvme_bh(void *opaque)
+{
+    FemuCxlMedia *s = opaque;
+    GArray *ranges;
+    uint64_t done;
+    guint i;
+
+    if (s->busy) {
+        s->nvme_kick = true;
+        return;
+    }
+    femu_cxl_enter(s);
+    qemu_mutex_lock(&s->lock);
+    ranges = s->nvme_ranges;
+    s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
+    done = ++s->nvme_taken;
+    qemu_mutex_unlock(&s->lock);
+    if (!s->direct.cylon) {
+        memory_region_transaction_begin();
+    }
+    for (i = 0; i < ranges->len; i++) {
+        FemuCxlRange *r = &g_array_index(ranges, FemuCxlRange, i);
+
+        cxl_nvme_drop(s, r->first, r->last);
+    }
+    if (!s->direct.cylon) {
+        memory_region_transaction_commit();
+    }
+    g_array_free(ranges, true);
+    s->cache_entries = g_hash_table_size(s->cache.entries);
+    s->media_writes = ssd_nand_write_pages(s->ns.ssd);
+    qatomic_store_release(&s->nvme_done, done);
+    femu_cxl_leave(s);
 }
 
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
@@ -323,6 +479,7 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     ssd_init(n, &s->ns);
     qemu_mutex_init(&s->lock);
     qemu_cond_init(&s->wake);
+    s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
     s->stopping = false;
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,
                        QEMU_THREAD_JOINABLE);
@@ -353,9 +510,13 @@ void femu_cxl_stop(FemuCxlMedia *s)
     qemu_thread_join(&s->worker);
     qemu_cond_destroy(&s->wake);
     qemu_mutex_destroy(&s->lock);
+    g_clear_pointer(&s->nvme_bh, qemu_bh_delete);
+    g_array_free(s->nvme_ranges, true);
+    s->nvme_ranges = NULL;
     s->started = false;
     femu_cxl_cache_destroy(&s->cache);
     if (nvme) {
+        qatomic_set(&nvme->cxl_done, NULL);
         nvme->cxl_media = NULL;
         s->nvme_ns = NULL;
         s->nvme_owns_ftl = true;

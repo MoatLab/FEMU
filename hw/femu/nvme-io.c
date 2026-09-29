@@ -246,6 +246,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->nr_zone_resets = 0;
         req->fdp_pids = NULL;
         req->nr_fdp_pids = 0;
+        req->cxl_seq = 0;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
         req->cqe.cid = cmd.cid;
@@ -504,6 +505,17 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         now = nvme_io_clock(n);
         if (now < req->expire_time) {
             break;
+        }
+        /*
+         * A linked CXL medium still caches what this command replaced. Hold
+         * it, and what is due after it, until the main loop has dropped that.
+         */
+        if (req->cxl_seq) {
+            const uint64_t *done = qatomic_read(&n->cxl_done);
+
+            if (done && qatomic_load_acquire(done) < req->cxl_seq) {
+                break;
+            }
         }
 
         pqueue_pop(pq);

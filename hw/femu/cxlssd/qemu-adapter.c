@@ -1357,6 +1357,8 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "invalidations", &s->invalidations,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "nvme-drops", &s->nvme_drops,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
     object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
                                    OBJ_PROP_FLAG_READ);
@@ -1514,6 +1516,9 @@ static bool cxl_nvme_prepare(FemuCtrl *n, Error **errp)
     error_setg(&s->nvme_blocker, "femu-cxl-ssd is in use by NVMe "
                "controller %s", id);
     qdev_add_unplug_blocker(DEVICE(dev), s->nvme_blocker);
+    if (!s->nvme_bh) {
+        s->nvme_bh = qemu_bh_new(femu_cxl_nvme_bh, s);
+    }
     return true;
 }
 
@@ -1522,6 +1527,7 @@ static void cxl_nvme_attach(FemuCtrl *n, NvmeNamespace *ns)
     FemuCxlMedia *s = &FEMU_CXL_SSD(n->cxl_dev)->media;
 
     s->nvme_ns = ns;
+    n->cxl_done = &s->nvme_done;
     n->cxl_media = s;
 }
 
@@ -1552,6 +1558,7 @@ static void cxl_nvme_detach(FemuCtrl *n)
     s->nvme = NULL;
     s->nvme_ns = NULL;
     n->cxl_media = NULL;
+    n->cxl_done = NULL;
     n->cxl_ssd = NULL;
 }
 
