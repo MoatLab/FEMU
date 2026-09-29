@@ -41,6 +41,7 @@ struct FemuCxlSsd {
     MemoryRegion component_overlay;
     Notifier machine_done;
     bool attached;
+    bool test_change_dpa;
 };
 
 static void (*parent_realize)(PCIDevice *dev, Error **errp);
@@ -371,7 +372,9 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
     PCIDevice *dev = adapter_route(w->fw, offset);
     FemuCxlMedia *s;
     CXLType3Dev *ct3d;
+    uint64_t hpa = w->fw->base + offset;
     uint64_t dpa;
+    uint64_t current_dpa;
     MemTxResult result = MEMTX_ERROR;
 
     if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
@@ -382,19 +385,30 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
     }
     ct3d = CXL_TYPE3(dev);
     s = &FEMU_CXL_SSD(dev)->media;
+    if (!adapter_translate(ct3d, hpa, size, &dpa)) {
+        return MEMTX_ERROR;
+    }
+    if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+        if (!write) {
+            qemu_guest_getrandom_nofail(data, size);
+        }
+        return MEMTX_OK;
+    }
+    /* Inject a decoder change between the two translation snapshots. */
+    if (FEMU_CXL_SSD(dev)->test_change_dpa) {
+        uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
+
+        FEMU_CXL_SSD(dev)->test_change_dpa = false;
+        stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
+    }
     object_ref(OBJECT(dev));
     femu_cxl_enter(s);
-    if (s->started && !s->closing && adapter_route(w->fw, offset) == dev &&
-        adapter_translate(ct3d, w->fw->base + offset, size, &dpa)) {
-        if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
-            if (!write) {
-                qemu_guest_getrandom_nofail(data, size);
-            }
-            result = MEMTX_OK;
-        } else {
-            result = femu_cxl_access(s, w->fw->base + offset, dpa,
-                                     data, size, write);
-        }
+    if (s->started && !s->closing && hpa == w->fw->base + offset &&
+        adapter_route(w->fw, offset) == dev &&
+        !cxl_dev_media_disabled(&ct3d->cxl_dstate) &&
+        adapter_translate(ct3d, hpa, size, &current_dpa) &&
+        current_dpa == dpa) {
+        result = femu_cxl_access(s, hpa, dpa, data, size, write);
     }
     femu_cxl_leave(s);
     object_unref(OBJECT(dev));
@@ -765,11 +779,18 @@ static bool adapter_reservation_test(Object *obj, Error **errp)
 #endif
 }
 
+static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
+{
+    FEMU_CXL_SSD(obj)->test_change_dpa = value;
+}
+
 static void cxl_init(Object *obj)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
 
     if (qtest_driver()) {
+        object_property_add_bool(obj, "test-change-dpa", NULL,
+                                 adapter_test_change_dpa);
         object_property_add_bool(obj, "test-slot-reservation",
                                  adapter_reservation_test, NULL);
     }

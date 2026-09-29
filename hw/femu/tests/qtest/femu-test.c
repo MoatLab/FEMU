@@ -13485,6 +13485,30 @@ static void femu_test_cxl_local_overlay(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_stale_translation(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(
+        "-machine q35,cxl=on -m 128M "
+        "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+        "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M "
+        "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+        "-object memory-backend-ram,id=mem,size=512M "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+
+    femu_cxl_decode(qts);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeed);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 1);
+    /* Change to another valid DPA between translation and revalidation. */
+    femu_cxl_set(qts, "test-change-dpa", true);
+    qtest_readq(qts, FEMU_CXL_WINDOW);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-hits"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-inserts"), ==, 2);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_topology(void *obj, void *data,
                                    QGuestAllocator *alloc)
 {
@@ -13949,6 +13973,8 @@ static void femu_register_nodes(void)
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_node_create_driver("femu", femu_create);
+    qos_add_test("cxl-stale-translation", "femu",
+                 femu_test_cxl_stale_translation, NULL);
     qos_add_test("cxl-forward", "femu", femu_test_cxl_forward, NULL);
     qos_add_test("cxl-local-overlay", "femu", femu_test_cxl_local_overlay,
                  NULL);
