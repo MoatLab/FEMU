@@ -28,6 +28,7 @@ typedef struct FemuCxlSet {
 typedef struct FemuCxlCache {
     FemuCxlSet *sets;
     GHashTable *entries;
+    GHashTable *ghosts;
     uint32_t nsets;
     uint32_t ways;
     FemuCxlPolicy policy;

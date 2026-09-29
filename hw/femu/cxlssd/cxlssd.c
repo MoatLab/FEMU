@@ -108,6 +108,15 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     for (lpn = first; lpn <= last; lpn++) {
         FemuCxlEntry *e = femu_cxl_cache_find(&s->cache, lpn);
 
+        bool miss = !e;
+
+        if (write) {
+            s->write_hits += !miss;
+            s->write_misses += miss;
+        } else {
+            s->read_hits += !miss;
+            s->read_misses += miss;
+        }
         if (!e) {
             if (!cxl_media(s, lpn, write && !s->cache.nsets)) {
                 return MEMTX_ERROR;
@@ -120,6 +129,31 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         if (e && write) {
             e->dirty = true;
         }
+        if (e && miss) {
+            uint64_t next;
+            uint64_t end = MIN(s->backend.size / 4096,
+                              lpn + s->prefetch_stride + s->prefetch_degree);
+
+            for (next = lpn + s->prefetch_stride; next < end; next++) {
+                FemuCxlEntry *prefetched;
+                uint64_t next_hpa = hpa - dpa + next * 4096;
+
+                if (g_hash_table_contains(s->cache.entries, &next)) {
+                    continue;
+                }
+                prefetched = femu_cxl_cache_insert(&s->cache, next,
+                                                   femu_cxl_evict, s);
+                if (!prefetched) {
+                    return MEMTX_ERROR;
+                }
+                s->prefetch_inserts++;
+                if (femu_cxl_der_map(&s->direct, next_hpa, next * 4096) &&
+                    !s->direct.cylon) {
+                    prefetched->dirty = true;
+                }
+            }
+        }
+        s->cache_entries = g_hash_table_size(s->cache.entries);
     }
     remaining = s->access_ns -
                 (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);

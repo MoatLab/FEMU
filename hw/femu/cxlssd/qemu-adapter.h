@@ -20,6 +20,14 @@ typedef struct FemuCxlMedia {
     uint32_t cache_pages;
     uint32_t cache_ways;
     char *cache_policy;
+    uint32_t prefetch_degree;
+    uint32_t prefetch_stride;
+    uint64_t prefetch_inserts;
+    uint64_t read_hits;
+    uint64_t read_misses;
+    uint64_t write_hits;
+    uint64_t write_misses;
+    uint64_t cache_entries;
     bool ftl;
     char *der;
     bool cylon_kernel_ack;

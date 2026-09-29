@@ -79,11 +79,33 @@ static void s3_promote(void)
     femu_cxl_cache_destroy(&c);
 }
 
+static void fully_associative(void)
+{
+    FemuCxlCache c;
+    FemuCxlPolicy policy;
+    const unsigned pages = 1258291;
+    unsigned i;
+
+    for (policy = FEMU_CXL_FIFO; policy <= FEMU_CXL_S3FIFO; policy++) {
+        femu_cxl_cache_init(&c, pages, pages, policy);
+        for (i = 0; i < 2 * pages; i++) {
+            g_assert_nonnull(femu_cxl_cache_insert(&c, i, NULL, NULL));
+        }
+        g_assert_cmpuint(g_hash_table_size(c.entries), ==, pages);
+        g_assert_cmpuint(c.evictions, ==, pages);
+        for (i = 0; i < pages; i++) {
+            g_assert_nonnull(femu_cxl_cache_insert(&c, i, NULL, NULL));
+        }
+        femu_cxl_cache_destroy(&c);
+    }
+}
+
 int main(void)
 {
     FemuCxlPolicy policy;
     unsigned ways;
 
+    fully_associative();
     ordering();
     s3_promote();
     for (policy = FEMU_CXL_FIFO; policy <= FEMU_CXL_S3FIFO; policy++) {

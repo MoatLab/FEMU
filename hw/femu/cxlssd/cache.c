@@ -26,6 +26,7 @@ void femu_cxl_cache_init(FemuCxlCache *c, uint32_t pages, uint32_t ways,
         .nsets = pages ? pages / ways : 0,
         .policy = policy,
         .entries = g_hash_table_new(g_int64_hash, g_int64_equal),
+        .ghosts = g_hash_table_new(g_int64_hash, g_int64_equal),
     };
     c->sets = g_new0(FemuCxlSet, c->nsets);
     for (i = 0; i < c->nsets; i++) {
@@ -48,20 +49,17 @@ FemuCxlEntry *femu_cxl_cache_find(FemuCxlCache *c, uint64_t lpn)
     return e;
 }
 
-static bool ghost_remove(FemuCxlSet *set, uint64_t lpn)
+static bool ghost_remove(FemuCxlCache *c, FemuCxlSet *set, uint64_t lpn)
 {
-    GList *it;
+    GList *link = g_hash_table_lookup(c->ghosts, &lpn);
 
-    for (it = set->ghost.head; it; it = it->next) {
-        uint64_t *key = it->data;
-
-        if (*key == lpn) {
-            g_free(key);
-            g_queue_delete_link(&set->ghost, it);
-            return true;
-        }
+    if (!link) {
+        return false;
     }
-    return false;
+    g_hash_table_remove(c->ghosts, &lpn);
+    g_free(link->data);
+    g_queue_delete_link(&set->ghost, link);
+    return true;
 }
 
 static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
@@ -104,11 +102,19 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
 
         *key = e->lpn;
         g_queue_push_tail(&set->ghost, key);
+        g_hash_table_insert(c->ghosts, key, set->ghost.tail);
         while (set->ghost.length > c->ways) {
-            g_free(g_queue_pop_head(&set->ghost));
+            uint64_t *old = g_queue_pop_head(&set->ghost);
+
+            g_hash_table_remove(c->ghosts, old);
+            g_free(old);
         }
     }
-    g_queue_remove(queue, e);
+    if (c->policy == FEMU_CXL_LIFO) {
+        g_queue_pop_tail(queue);
+    } else {
+        g_queue_pop_head(queue);
+    }
     g_hash_table_remove(c->entries, &e->lpn);
     g_free(e);
     c->evictions++;
@@ -130,7 +136,7 @@ FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
         return e;
     }
     set = &c->sets[lpn % c->nsets];
-    main = ghost_remove(set, lpn) && c->ways > 1;
+    main = ghost_remove(c, set, lpn) && c->ways > 1;
     if (set->small.length + set->main.length == c->ways &&
         !cache_evict(c, set, evict, opaque)) {
         return NULL;
@@ -156,7 +162,11 @@ bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque)
                 return false;
             }
         }
-        g_queue_clear_full(&set->ghost, g_free);
+        while (set->ghost.head) {
+            uint64_t *key = set->ghost.head->data;
+
+            ghost_remove(c, set, *key);
+        }
     }
     return true;
 }
@@ -165,5 +175,6 @@ void femu_cxl_cache_destroy(FemuCxlCache *c)
 {
     femu_cxl_cache_clear(c, NULL, NULL);
     g_hash_table_destroy(c->entries);
+    g_hash_table_destroy(c->ghosts);
     g_free(c->sets);
 }

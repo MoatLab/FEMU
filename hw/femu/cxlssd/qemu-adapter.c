@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qemu/main-loop.h"
@@ -614,8 +615,93 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
     if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
         error_setg(errp, "CXL cache cannot flush: NAND is full");
     }
+    s->cache_entries = g_hash_table_size(s->cache.entries);
     if (s->access_ns) {
         femu_cxl_delay(s->access_ns);
+    }
+out:
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
+static void cxl_stats_reset(Object *obj, bool value, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+
+    femu_cxl_enter(s);
+    if (value) {
+        s->read_hits = s->read_misses = 0;
+        s->write_hits = s->write_misses = 0;
+        s->cache.hits = s->cache.misses = 0;
+        s->cache.inserts = s->cache.evictions = 0;
+        s->prefetch_inserts = 0;
+    }
+    femu_cxl_leave(s);
+}
+
+static void cxl_runtime_get(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint32_t value = !strcmp(name, "cache-ways") ? s->cache_ways :
+                     !strcmp(name, "prefetch-degree") ? s->prefetch_degree :
+                     s->prefetch_stride;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    object_ref(obj);
+    femu_cxl_enter(s);
+    if (!strcmp(name, "cache-ways")) {
+        if (!value || (s->cache_pages &&
+                       (value > s->cache_pages || s->cache_pages % value))) {
+            error_setg(errp, "cache-ways must divide cache-pages");
+            goto out;
+        }
+        if (s->started && !s->closing) {
+            FemuCxlPolicy policy = s->cache.policy;
+            FemuCxlCache previous;
+
+            s->access_ns = 0;
+            if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, s)) {
+                error_setg(errp, "CXL cache cannot rebuild: NAND is full");
+                goto out;
+            }
+            previous = s->cache;
+            femu_cxl_cache_destroy(&s->cache);
+            femu_cxl_cache_init(&s->cache, s->cache_pages, value, policy);
+            s->cache.hits = previous.hits;
+            s->cache.misses = previous.misses;
+            s->cache.inserts = previous.inserts;
+            s->cache.evictions = previous.evictions;
+            s->cache_entries = 0;
+            if (s->access_ns) {
+                femu_cxl_delay(s->access_ns);
+            }
+        }
+        s->cache_ways = value;
+    } else {
+        uint64_t limit = s->started ? s->backend.size / 4096 :
+                                     120 * GiB / 4096;
+
+        if (value > limit) {
+            error_setg(errp, "prefetch value exceeds media pages");
+            goto out;
+        }
+        if (!strcmp(name, "prefetch-degree")) {
+            s->prefetch_degree = value;
+        } else {
+            s->prefetch_stride = value;
+        }
     }
 out:
     femu_cxl_leave(s);
@@ -658,11 +744,11 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
                    "at most 64 GiB");
         return;
     }
-    if (!s->cache_ways || s->cache_ways > 1024 ||
+    if (!s->cache_ways || s->cache_ways > size / 4096 ||
         (s->cache_pages && (s->cache_pages % s->cache_ways ||
                            s->cache_pages > size / 4096))) {
         error_setg(errp, "cache-pages must fit the media and be divisible by "
-                   "cache-ways (1..1024)");
+                   "cache-ways");
         return;
     }
     if (!femu_cxl_policy(s->cache_policy ? s->cache_policy : "fifo", &policy)) {
@@ -796,6 +882,27 @@ static void cxl_init(Object *obj)
     }
     qemu_cond_init(&s->idle);
     s->der = g_strdup("off");
+    s->cache_ways = 16;
+    s->prefetch_stride = 1;
+    object_property_add(obj, "cache-ways", "uint32", cxl_runtime_get,
+                        cxl_runtime_set, NULL, NULL);
+    object_property_add(obj, "prefetch-degree", "uint32", cxl_runtime_get,
+                        cxl_runtime_set, NULL, NULL);
+    object_property_add(obj, "prefetch-stride", "uint32", cxl_runtime_get,
+                        cxl_runtime_set, NULL, NULL);
+    object_property_add_bool(obj, "stats-reset", NULL, cxl_stats_reset);
+    object_property_add_uint64_ptr(obj, "prefetch-inserts", &s->prefetch_inserts,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cache-entries", &s->cache_entries,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "write-misses", &s->write_misses,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "write-hits", &s->write_hits,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "read-misses", &s->read_misses,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "read-hits", &s->read_hits,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "invalidation-waiters",
                                    &s->invalidation_waiters,
                                    OBJ_PROP_FLAG_READ);
@@ -829,7 +936,6 @@ static void cxl_init(Object *obj)
 
 static const Property cxl_props[] = {
     DEFINE_PROP_UINT32("cache-pages", FemuCxlSsd, media.cache_pages, 1024),
-    DEFINE_PROP_UINT32("cache-ways", FemuCxlSsd, media.cache_ways, 16),
     DEFINE_PROP_STRING("cache-policy", FemuCxlSsd, media.cache_policy),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, media.ftl, true),
     DEFINE_PROP_STRING("der", FemuCxlSsd, media.der),
