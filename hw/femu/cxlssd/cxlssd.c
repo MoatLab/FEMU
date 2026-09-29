@@ -7,9 +7,12 @@
 /* BQL protects the gate; waiters must let the current operation finish. */
 void femu_cxl_enter(FemuCxlMedia *s)
 {
+    s->waiters++;
     while (s->busy) {
         qemu_cond_wait_bql(&s->idle);
     }
+    s->waiters--;
+    s->entries++;
     s->busy = true;
 }
 

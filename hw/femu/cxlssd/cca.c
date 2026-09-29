@@ -6,6 +6,7 @@
  * keeps a vCPU in an MMIO exit or stalls the main loop.
  */
 #include "qemu/osdep.h"
+#include <sched.h>
 #include "qemu/bitmap.h"
 #include "qemu/bswap.h"
 #include "qemu/main-loop.h"
@@ -19,6 +20,8 @@
 #define CCA_SCAN        4096
 /* Longest sleep between checks for reset or unplug during a delay. */
 #define CCA_NAP_US      10000
+/* Commands per pass before the thread lets go of the BQL. */
+#define CCA_BATCH       64
 #define CCA_SPIN_NS     (100 * SCALE_US)
 
 typedef struct CcaOp CcaOp;
@@ -68,10 +71,27 @@ static void cca_delay(FemuCxlMedia *s, uint32_t epoch)
     bql_lock();
 }
 
+/*
+ * The thread holds the BQL across chunks, so a waiter woken by the last
+ * leave could never take the gate first. Let one go ahead before retaking.
+ */
+static void cca_yield(FemuCxlMedia *s, uint32_t epoch)
+{
+    uint64_t entries = s->entries;
+
+    while (s->waiters && s->entries == entries && !s->busy &&
+           !cca_abandoned(s, epoch)) {
+        bql_unlock();
+        sched_yield();
+        bql_lock();
+    }
+}
+
 static bool cca_enter(CcaOp *op)
 {
     FemuCxlMedia *s = op->s;
 
+    cca_yield(s, op->epoch);
     femu_cxl_enter(s);
     if (!s->started || s->closing || qatomic_read(&s->cca.stop) ||
         s->cca.epoch != op->epoch) {
@@ -171,6 +191,11 @@ static bool cca_walk(CcaOp *op, CcaPage page, int *status)
             if (*status) {
                 done = true;
                 break;
+            }
+            /* Unplug or reset: stop issuing media work for a dead command. */
+            if (cca_abandoned(op->s, op->epoch)) {
+                cca_leave(op);
+                return false;
             }
         }
         cca_leave(op);
@@ -274,7 +299,7 @@ static int cca_pin_page(CcaOp *op, uint64_t lpn)
         if (!femu_cxl_media(s, lpn, false)) {
             return -EIO;
         }
-        e = femu_cxl_cache_insert(c, lpn, femu_cxl_evict, s);
+        e = femu_cxl_cache_insert(c, lpn, cca_evict, s);
         if (!e) {
             return -EIO;
         }
@@ -309,9 +334,8 @@ static int cca_drop_page(CcaOp *op, uint64_t lpn)
         return 0;
     }
     op->work++;
-    femu_cxl_cache_unpin(c, e);
     if (!femu_cxl_cache_remove(c, e, cca_evict, s)) {
-        /* NAND refused the write; the page stays resident and dirty. */
+        /* NAND refused the write; the page stays resident, dirty, pinned. */
         return -EIO;
     }
     s->cca.dropped++;
@@ -526,32 +550,39 @@ static void cca_apply_reset(FemuCxlMedia *s)
     }
 }
 
-/* Drain the request ring; called with the BQL held. */
-static void cca_run(FemuCxlMedia *s)
+/*
+ * Run up to CCA_BATCH commands with the BQL held. Returns true if more may
+ * be pending, so a guest that keeps the ring full cannot hold the BQL.
+ */
+static bool cca_run(FemuCxlMedia *s)
 {
     FemuCxlCca *cca = &s->cca;
+    unsigned n;
 
-    while (!qatomic_read(&cca->stop)) {
+    for (n = 0; !qatomic_read(&cca->stop); n++) {
         struct cca_ctrl_resp_s resp = { 0 };
         CcaOp op = { .s = s };
         uint32_t slot;
         bool complete;
         int rc;
 
+        if (n == CCA_BATCH) {
+            return true;
+        }
         if (cca->reset_pending) {
             cca_apply_reset(s);
             continue;
         }
         if (cca->status & CCA_STATUS_FATAL) {
-            return;
+            return false;
         }
         rc = cca_ring_pop(&cca->ring, &slot, &op.cmd);
         if (rc < 0) {
             cca_fatal(cca);
-            return;
+            return false;
         }
         if (!rc) {
-            return;
+            return false;
         }
         op.epoch = cca->epoch;
         cca->status |= CCA_STATUS_BUSY;
@@ -566,12 +597,21 @@ static void cca_run(FemuCxlMedia *s)
         }
         if (!cca_ring_complete(&cca->ring, slot, &resp)) {
             cca_fatal(cca);
-            return;
+            return false;
         }
         cca->completed++;
         cca->commands++;
         cca->errors += resp.status != 0;
     }
+    return false;
+}
+
+static void cca_kick(FemuCxlCca *cca)
+{
+    qemu_mutex_lock(&cca->lock);
+    cca->kick = true;
+    qemu_cond_signal(&cca->cond);
+    qemu_mutex_unlock(&cca->lock);
 }
 
 /*
@@ -586,6 +626,7 @@ static void *cca_thread(void *opaque)
 
     rcu_register_thread();
     for (;;) {
+        bool more;
         bool stop;
 
         qemu_mutex_lock(&cca->lock);
@@ -599,8 +640,12 @@ static void *cca_thread(void *opaque)
             break;
         }
         bql_lock();
-        cca_run(s);
+        more = cca_run(s);
         bql_unlock();
+        if (more) {
+            sched_yield();
+            cca_kick(cca);
+        }
     }
     bql_lock();
     object_unref(owner);
@@ -609,15 +654,10 @@ static void *cca_thread(void *opaque)
     return NULL;
 }
 
-static void cca_kick(FemuCxlCca *cca)
-{
-    qemu_mutex_lock(&cca->lock);
-    cca->kick = true;
-    qemu_cond_signal(&cca->cond);
-    qemu_mutex_unlock(&cca->lock);
-}
-
-/* Runs under the BQL and never waits, like any invalidation. */
+/*
+ * Runs under the BQL and never waits, like any invalidation. Slots are
+ * cleared too, so entries a guest posts against stale indices are NOPs.
+ */
 void femu_cxl_cca_reset(FemuCxlMedia *s, uint32_t kind)
 {
     FemuCxlCca *cca = &s->cca;
@@ -655,6 +695,7 @@ static uint64_t cca_reg_read(void *opaque, hwaddr addr, unsigned size)
     /* Every way of a set may be pinned; its misses then stay uncached. */
     stl_le_p(regs + CCA_REG_PIN_LIMIT, s->cache_pages ? s->cache_ways : 0);
     stq_le_p(regs + CCA_REG_COMPLETED, cca->completed);
+    stl_le_p(regs + CCA_REG_EPOCH, cca->epoch);
     return size == 4 ? ldl_le_p(regs + addr) : ldq_le_p(regs + addr);
 }
 

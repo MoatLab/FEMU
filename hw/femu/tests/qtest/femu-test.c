@@ -15277,12 +15277,14 @@ static void femu_test_cca_reset(void *obj, void *data,
 {
     FemuCca c;
     uint64_t entries;
+    uint32_t epoch;
 
     femu_cca_start(&c, "", "cache-pages=4,cache-ways=2");
     qtest_writeq(c.qts, femu_cca_page(0), 0xf0);
     femu_cca_expect(&c, CCA_CTRL_PIN, 0, 0, 1, 0, 1);
     femu_cca_expect(&c, CCA_CTRL_CACHE_DISABLE, 0, 3, 1, 0, 1);
     entries = femu_cxl_stat(c.qts, "cache-entries");
+    epoch = femu_cca_reg(&c, CCA_REG_EPOCH);
     qtest_qmp_assert_success(c.qts, "{'execute':'system_reset'}");
     qtest_qmp_eventwait(c.qts, "RESET");
     femu_cca_poll_stat(c.qts, "cca-pinned", 0);
@@ -15290,6 +15292,10 @@ static void femu_test_cca_reset(void *obj, void *data,
     /* Reset keeps cached contents; only CCA state goes. */
     g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, entries);
     femu_cca_map(&c);
+    g_assert_cmpuint(femu_cca_reg(&c, CCA_REG_EPOCH), ==, epoch + 1);
+    /* Slots are cleared too, so stale ones would run as NOPs. */
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_SLOTS), ==, 0);
+    g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_SLOTS + 8), ==, 0);
     g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_REQ), ==, 0);
     g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_RESP), ==, 0);
     g_assert_cmpuint(qtest_readq(c.qts, FEMU_CCA_BAR + CCA_REG_COMPLETED),
@@ -15380,6 +15386,35 @@ static void femu_test_cca_unplug(void *obj, void *data,
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
         g_usleep(10000);
     }
+    femu_cca_quit(&c);
+}
+
+/*
+ * An access that queues behind a long command runs between its chunks,
+ * not after the whole command.
+ */
+static void femu_test_cca_interleave(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    FemuCca c;
+    FemuCcaResp r;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "cache-pages=1024,cache-ways=1024,"
+                   "program-ns=500000");
+    for (lpn = 0; lpn < 512; lpn++) {
+        qtest_writeq(c.qts, femu_cca_page(lpn), lpn);
+    }
+    femu_cca_post_raw(&c, 0, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0);
+    femu_cca_kick(&c);
+    /* The first chunk has charged its programs and is waiting them out. */
+    femu_cca_poll_stat(c.qts, "cca-writebacks", 256);
+    g_assert_cmphex(qtest_readq(c.qts, femu_cca_page(700)), ==, 0);
+    /* The second chunk's media time has not passed yet. */
+    g_assert_cmpuint(qtest_readl(c.qts, FEMU_CCA_RESP), ==, 0);
+    femu_cca_reap(&c, &r);
+    g_assert_cmpint(r.status, ==, 0);
+    g_assert_cmpuint(r.count, ==, 512);
     femu_cca_quit(&c);
 }
 
@@ -15501,6 +15536,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-der", "femu", femu_test_cca_der, NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
+    qos_add_test("cxl-cca-interleave", "femu", femu_test_cca_interleave,
+                 NULL);
     {
         static const char * const policies[] = {
             "fifo", "lifo", "clock", "s3-fifo"

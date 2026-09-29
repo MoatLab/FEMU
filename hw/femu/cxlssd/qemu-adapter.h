@@ -54,6 +54,9 @@ typedef struct FemuCxlMedia {
     char *der;
     bool cylon_kernel_ack;
     bool busy;
+    /* Threads waiting for the gate, and how often it has been taken. */
+    uint32_t waiters;
+    uint64_t entries;
     bool closing;
     /* Set when unplug found the gate held; run by the holder as it leaves. */
     void (*release)(struct FemuCxlMedia *s);

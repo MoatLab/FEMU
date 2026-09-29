@@ -41,7 +41,8 @@
 #define CCA_REG_CACHE_WAYS      0x24    /* RO */
 #define CCA_REG_PIN_LIMIT       0x28    /* RO, pins allowed per set */
 #define CCA_REG_COMPLETED       0x30    /* RO, 64 bits, since last reset */
-#define CCA_REG_END             0x38
+#define CCA_REG_EPOCH           0x38    /* RO, changes on every reset */
+#define CCA_REG_END             0x40
 
 #define CCA_STATUS_READY        (1u << 0)
 #define CCA_STATUS_FATAL        (1u << 1)

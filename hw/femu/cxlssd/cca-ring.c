@@ -15,7 +15,7 @@ static struct cca_ctrl_slot_s *cca_slot(CcaRingHost *h, uint32_t slot)
     return &pool[slot % CCA_RING_COUNT];
 }
 
-/* Rewrite the header and empty both rings; slot contents do not matter. */
+/* Rewrite the header, empty both rings and zero every slot (NOP). */
 void cca_ring_format(CcaRingHost *h, uint8_t *shm)
 {
     struct cca_shmem_header hdr = {
@@ -32,7 +32,7 @@ void cca_ring_format(CcaRingHost *h, uint8_t *shm)
     h->req_tail = 0;
     h->resp_head = 0;
     h->fatal = 0;
-    memset(shm, 0, CCA_SLOT_POOL_OFFSET);
+    memset(shm, 0, CCA_SLOT_POOL_OFFSET + CCA_RING_COUNT * CCA_SLOT_SIZE);
     memcpy(shm, &hdr, sizeof(hdr));
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }

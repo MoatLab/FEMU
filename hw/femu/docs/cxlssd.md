@@ -339,6 +339,7 @@ the header, as in Cylon.
 | 0x18 MEDIA_PAGES | 64-bit media size in 4 KiB pages |
 | 0x20, 0x24, 0x28 | cache-pages, cache-ways, pins allowed per set |
 | 0x30 COMPLETED | 64-bit count since the last reset |
+| 0x38 EPOCH | Changes on every reset; the library resynchronizes when it does |
 
 Registers take 4- and 8-byte accesses; others read as zero. Both rings are
 single producer, single consumer; the library serializes its threads and
@@ -349,20 +350,30 @@ single producer, single consumer; the library serializes its threads and
 A doorbell sets a flag under the CCA mutex and signals the `femu-cxl-cca`
 thread; it never waits, like any invalidation. Nothing takes the BQL while
 holding that mutex. The thread takes the BQL, drains the request ring and
-executes commands one at a time in submission order. Each command runs in
-chunks of up to 256 pages of work (4096 lookups), and each chunk holds the
-operation gate and then waits out its accumulated media time with the BQL
-released, exactly as a guest access does. Guest accesses therefore run
-between chunks, a long invalidation never keeps a vCPU in an MMIO exit, and
-the main loop is never blocked. The worst stall a chunk adds to an access
-is about 256 programs. Cache membership still changes only under the gate.
+executes commands one at a time in submission order, at most 64 per pass
+before it releases the BQL, so a guest that keeps the ring full cannot hold
+it. Each command runs in chunks of up to 256 pages of work (4096 lookups),
+and each chunk holds the operation gate and then waits out its accumulated
+media time with the BQL released, exactly as a guest access does. Because
+the thread holds the BQL between chunks, a woken gate waiter could never
+win the gate back from it; before each chunk the thread therefore lets one
+waiting access take the gate first. Guest accesses thus run between chunks,
+a long invalidation never keeps a vCPU in an MMIO exit, and the main loop
+is never blocked. The worst stall a chunk adds to an access is about 256
+programs. The checks that must precede any change (the PIN budget, pinned
+pages in an INVALIDATE or CACHE_DISABLE range, the candidate snapshot) run
+in one gate hold without media time; they are bounded by the cache size,
+as a flush is. Cache membership still changes only under the gate.
 
-Device reset reformats the rings under the BQL, clears READY and asks the
+Device reset reformats the rings and zeroes every slot under the BQL, so
+entries posted against stale indices run as NOPs, bumps EPOCH, clears READY
+and asks the
 thread to unpin everything and end bypass under the gate; READY returns when
 it has. A command in flight notices the new epoch at its next chunk and is
-dropped without a completion. Unplug does not wait either: the thread holds
+dropped without a completion, as is a command still running at unplug (the
+design's `-ESHUTDOWN` has no ring left to carry it). Unplug does not wait either: the thread holds
 a reference to the device, like an access in flight; unplug sets its stop
-flag, the thread cuts its media delay short, frees the media as the gate
+flag, the thread stops at the next page and cuts its media delay short, frees the media as the gate
 holder if unplug deferred that, and exits, dropping the reference.
 
 ### Commands
