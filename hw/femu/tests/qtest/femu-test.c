@@ -14073,6 +14073,28 @@ static void femu_test_cxl_geometry_bounds(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_compat(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cylon-first-touch-program=on,cylon-free-writeback=on,"
+        "channels=8,luns-per-channel=8,pages-per-block=64,"
+        "blocks-per-plane=32,channel-ns=100,gc-threshold=70,"
+        "gc-threshold-high=90");
+
+    femu_cxl_decode(qts);
+    qtest_readq(qts, FEMU_CXL_WINDOW);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns"), >=, 200000);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 42);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 42);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14092,6 +14114,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
                  NULL);
+    qos_add_test("cxl-compat", "femu", femu_test_cxl_compat, NULL);
     qos_add_test("cxl-prefetch", "femu", femu_test_cxl_prefetch, NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);
     qos_node_create_driver("femu", femu_create);

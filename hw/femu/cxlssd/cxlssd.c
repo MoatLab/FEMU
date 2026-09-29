@@ -21,8 +21,12 @@ void femu_cxl_leave(FemuCxlMedia *s)
 
 void femu_cxl_delay(uint64_t ns)
 {
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
+
     bql_unlock();
-    g_usleep(DIV_ROUND_UP(ns, 1000));
+    while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < deadline) {
+        cpu_relax();
+    }
     bql_lock();
 }
 
@@ -38,6 +42,11 @@ static void *cxl_worker(void *opaque)
         if (!work) {
             qemu_cond_wait(&s->wake, &s->lock);
             continue;
+        }
+        if (s->first_touch_program &&
+            work->req.cmd.opcode == NVME_CMD_READ &&
+            s->ns.ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
+            work->req.cmd.opcode = NVME_CMD_WRITE;
         }
         work->latency = bb_ftl_process_req(s->ctrl, &s->ns, &work->req);
         work->done = true;
@@ -75,9 +84,8 @@ static bool cxl_media(FemuCxlMedia *s, uint64_t lpn, bool write)
     bql_lock();
     s->media_ns += work.latency;
     s->access_ns += work.latency;
-    if (write) {
-        s->media_writes = ssd_nand_write_pages(s->ns.ssd);
-    } else {
+    s->media_writes = ssd_nand_write_pages(s->ns.ssd);
+    if (work.req.cmd.opcode == NVME_CMD_READ) {
         s->media_reads++;
     }
     return work.req.status == NVME_SUCCESS;
@@ -88,7 +96,7 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     FemuCxlMedia *s = opaque;
 
     femu_cxl_der_remove(&s->direct, e->lpn);
-    return !e->dirty || cxl_media(s, e->lpn, true);
+    return !e->dirty || s->free_writeback || cxl_media(s, e->lpn, true);
 }
 
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,

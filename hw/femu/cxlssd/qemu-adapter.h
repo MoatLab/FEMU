@@ -29,6 +29,8 @@ typedef struct FemuCxlMedia {
     uint64_t write_misses;
     uint64_t cache_entries;
     bool ftl;
+    bool first_touch_program;
+    bool free_writeback;
     uint32_t channels;
     uint32_t luns_per_channel;
     uint32_t blocks_per_plane;
