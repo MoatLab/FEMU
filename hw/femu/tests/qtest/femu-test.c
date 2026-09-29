@@ -14350,6 +14350,19 @@ static void femu_test_cxl_ratio_fallback(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_ratio_off(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+
+    /* Without DER a ratio could never map anything; refuse it. */
+    femu_cxl_number(qts, "der-ratio", 99, false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 0);
+    femu_cxl_number(qts, "der-ratio", 0, true);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_lsa_bounds(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -14408,6 +14421,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
     qos_add_test("cxl-lsa-normal", "femu", femu_test_cxl_lsa_normal, NULL);
+    qos_add_test("cxl-ratio-off", "femu", femu_test_cxl_ratio_off, NULL);
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);

@@ -1452,6 +1452,10 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
         error_setg(errp, "unsupported Cylon direct ratio");
         return;
     }
+    if (ratio && (!s->der || !strcmp(s->der, "off"))) {
+        error_setg(errp, "a direct ratio requires der=memslot or der=cylon");
+        return;
+    }
     object_ref(OBJECT(dev));
     femu_cxl_enter(s);
     if (der->cylon) {

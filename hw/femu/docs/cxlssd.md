@@ -378,7 +378,7 @@ host controls work with `lsa-control=off` too.
 | 9, 11 | Flush/clear the cache, as in Cylon; keep the configured DER mode |
 | 13, 15 | Start a new per-access log / close it |
 | 17 | Dump current tracked direct mappings and Cylon SPTE values |
-| 90, 80 | Set direct ratio / revoke and reset it |
+| 90, 80 | Set direct ratio / revoke and reset it; a nonzero ratio needs `der=memslot` or `der=cylon` |
 | 91, 81 | Enable / disable QEMU memory-region read/write trace events |
 
 The trace command numbering follows Cylon's implementation (91 starts,
