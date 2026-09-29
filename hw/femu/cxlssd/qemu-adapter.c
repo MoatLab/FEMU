@@ -1529,6 +1529,10 @@ static void cxl_nvme_attach(FemuCtrl *n, NvmeNamespace *ns)
     s->nvme_ns = ns;
     n->cxl_done = &s->nvme_done;
     n->cxl_media = s;
+    /* The bitmap cannot tell which pages earlier CXL traffic wrote. */
+    if (s->entries || s->direct.mapped || s->direct.ratio) {
+        femu_cxl_nvme_mark(s, 0, s->backend.size);
+    }
 }
 
 /* The controller's threads are stopped; it may never have attached. */
@@ -1862,6 +1866,15 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     der->ratio = ratio;
     if (!cxl_ratio_map(dev, errp)) {
         der->ratio = 0;
+    } else if (s->nvme_ns) {
+        /* Stores to selected pages never reach this device. */
+        uint64_t lpn;
+
+        for (lpn = 0; lpn < s->backend.size / 4096; lpn++) {
+            if (femu_cxl_ratio_selected(ratio, lpn)) {
+                femu_cxl_nvme_mark(s, lpn * 4096, 4096);
+            }
+        }
     }
 out:
     femu_cxl_leave(s);

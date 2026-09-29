@@ -118,5 +118,6 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
 void femu_cxl_stop(FemuCxlMedia *s);
 uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
 void femu_cxl_nvme_bh(void *opaque);
+void femu_cxl_nvme_mark(FemuCxlMedia *s, uint64_t dpa, uint64_t len);
 
 #endif

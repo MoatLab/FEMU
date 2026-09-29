@@ -124,12 +124,37 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     return !e->dirty || s->free_writeback || femu_cxl_media(s, e->lpn, true);
 }
 
+/*
+ * Linked NVMe reads check these bits for DULBE and LBA status; a CXL store
+ * writes those blocks too. Pollers read the bitmap concurrently.
+ */
+void femu_cxl_nvme_mark(FemuCxlMedia *s, uint64_t dpa, uint64_t len)
+{
+    NvmeNamespace *ns = s->nvme_ns;
+    uint64_t lba;
+    uint64_t end;
+
+    if (!ns || !ns->util || !len || !ns->ns_blks) {
+        return;
+    }
+    lba = dpa >> ns->lbaf.lbads;
+    end = MIN((dpa + len - 1) >> ns->lbaf.lbads, ns->ns_blks - 1);
+    for (; lba <= end; lba++) {
+        set_bit_atomic(lba, ns->util);
+    }
+}
+
 /* The media delay drops the BQL, so a decoder change may have intervened. */
 static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
                     uint64_t dpa)
 {
-    return s->invalidations == generation && !s->closing &&
-           femu_cxl_der_map(&s->direct, hpa, dpa);
+    if (s->invalidations != generation || s->closing ||
+        !femu_cxl_der_map(&s->direct, hpa, dpa)) {
+        return false;
+    }
+    /* Stores through the mapping bypass this device entirely. */
+    femu_cxl_nvme_mark(s, dpa & ~4095ULL, 4096);
+    return true;
 }
 
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
@@ -227,6 +252,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     if (write) {
         memcpy((uint8_t *)s->backend.logical_space + dpa, data, size);
+        femu_cxl_nvme_mark(s, dpa, size);
     } else {
         memcpy(data, (uint8_t *)s->backend.logical_space + dpa, size);
     }
