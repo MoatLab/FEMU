@@ -173,6 +173,9 @@ typedef struct CXLEventLog {
 } CXLEventLog;
 
 typedef struct CXLCCI {
+    void (*pre_command)(void *opaque);
+    void *pre_command_opaque;
+
     struct cxl_cmd cxl_cmd_set[256][256];
     struct cel_log {
         uint16_t opcode;

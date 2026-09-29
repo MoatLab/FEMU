@@ -178,6 +178,28 @@ void kvm_resample_fd_notify(int gsi)
     }
 }
 
+struct KVMSlotReservation {
+    KVMMemoryListener *listener;
+    unsigned int id;
+    QLIST_ENTRY(KVMSlotReservation) next;
+};
+
+static QLIST_HEAD(, KVMSlotReservation) slot_reservations =
+    QLIST_HEAD_INITIALIZER(slot_reservations);
+
+/* Store IDs because listener growth can relocate the slot array. */
+static bool kvm_slot_reserved(KVMMemoryListener *kml, unsigned int id)
+{
+    KVMSlotReservation *r;
+
+    QLIST_FOREACH(r, &slot_reservations, next) {
+        if (r->listener == kml && r->id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /**
  * kvm_slots_grow(): Grow the slots[] array in the KVMMemoryListener
  *
@@ -261,7 +283,7 @@ static KVMSlot *kvm_get_free_slot(KVMMemoryListener *kml)
     int i;
 
     for (i = 0; i < kml->nr_slots_allocated; i++) {
-        if (kml->slots[i].memory_size == 0) {
+        if (kml->slots[i].memory_size == 0 && !kvm_slot_reserved(kml, i)) {
             return &kml->slots[i];
         }
     }
@@ -278,6 +300,48 @@ static KVMSlot *kvm_get_free_slot(KVMMemoryListener *kml)
     }
 
     return NULL;
+}
+
+KVMSlotReservation *kvm_reserve_memslot(void)
+{
+    KVMSlotReservation *r = NULL;
+    int i;
+
+    kvm_slots_lock();
+    for (i = 0; i < kvm_state->nr_as; i++) {
+        KVMMemoryListener *kml = kvm_state->as[i].ml;
+        KVMSlot *slot;
+
+        if (!kml || kvm_state->as[i].as != &address_space_memory) {
+            continue;
+        }
+        slot = kvm_get_free_slot(kml);
+        if (slot) {
+            r = g_new0(KVMSlotReservation, 1);
+            r->listener = kml;
+            r->id = slot->slot;
+            kml->nr_slots_used++;
+            QLIST_INSERT_HEAD(&slot_reservations, r, next);
+        }
+        break;
+    }
+    kvm_slots_unlock();
+    return r;
+}
+
+unsigned int kvm_reserved_memslot_id(const KVMSlotReservation *r)
+{
+    return r->id;
+}
+
+void kvm_release_memslot(KVMSlotReservation *r)
+{
+    kvm_slots_lock();
+    assert(!r->listener->slots[r->id].memory_size);
+    r->listener->nr_slots_used--;
+    QLIST_REMOVE(r, next);
+    kvm_slots_unlock();
+    g_free(r);
 }
 
 /* Called with KVMMemoryListener.slots_lock held */

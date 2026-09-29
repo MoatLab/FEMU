@@ -3905,6 +3905,10 @@ int cxl_process_cci_message(CXLCCI *cci, uint8_t set, uint8_t cmd,
         return CXL_MBOX_BUSY;
     }
 
+    if (cci->pre_command) {
+        cci->pre_command(cci->pre_command_opaque);
+    }
+
     /* forbid any selected commands while the media is disabled */
     if (object_dynamic_cast(OBJECT(cci->d), TYPE_CXL_TYPE3)) {
         CXLType3Dev *ct3d = CXL_TYPE3(cci->d);

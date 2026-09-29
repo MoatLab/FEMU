@@ -189,6 +189,16 @@ typedef struct KVMRouteChange {
 
 /* external API */
 
+/*
+ * Reserve a normal-address-space slot ID, excluded from listener allocation.
+ * The caller owns kernel registration and must delete its kernel slot before
+ * releasing the handle. External slots must not use dirty-ring logging.
+ */
+typedef struct KVMSlotReservation KVMSlotReservation;
+KVMSlotReservation *kvm_reserve_memslot(void);
+unsigned int kvm_reserved_memslot_id(const KVMSlotReservation *reservation);
+void kvm_release_memslot(KVMSlotReservation *reservation);
+
 unsigned int kvm_get_max_memslots(void);
 unsigned int kvm_get_free_memslots(void);
 /* Validate an exact listener-owned Cylon slot before mapping its SPT. */
