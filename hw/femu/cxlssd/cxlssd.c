@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qapi/error.h"
 #include "qemu-adapter.h"
 
 /* BQL protects the gate; waiters must let the current operation finish. */
@@ -177,6 +178,34 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     return MEMTX_OK;
 }
 
+bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
+{
+    uint64_t pages;
+    uint64_t line;
+
+    if (!s->channels || s->channels > (1 << CH_BITS) ||
+        !s->luns_per_channel || s->luns_per_channel > (1 << LUN_BITS) ||
+        !s->pages_per_block || s->pages_per_block > (1 << PG_BITS) ||
+        s->blocks_per_plane > (1 << BLK_BITS) ||
+        !s->gc_threshold || s->gc_threshold > 100 ||
+        s->gc_threshold_high < s->gc_threshold || s->gc_threshold_high > 100 ||
+        s->channel_ns > NANOSECONDS_PER_SECOND) {
+        error_setg(errp, "invalid NAND geometry, GC thresholds or timing");
+        return false;
+    }
+    line = (uint64_t)s->channels * s->luns_per_channel * s->pages_per_block;
+    if (!s->blocks_per_plane) {
+        s->blocks_per_plane = DIV_ROUND_UP(size / 4096 * 5 / 4, line) + 4;
+    }
+    pages = line * s->blocks_per_plane;
+    if (s->blocks_per_plane > (1 << BLK_BITS) || pages > INT_MAX / 8 ||
+        pages < size / 4096 || s->blocks_per_plane < 2) {
+        error_setg(errp, "NAND geometry must cover media and fit FTL limits");
+        return false;
+    }
+    return true;
+}
+
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy)
 {
@@ -186,21 +215,25 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     s->backend.size = size;
     s->backend.logical_space = payload;
     femu_cxl_cache_init(&s->cache, s->cache_pages, s->cache_ways, policy);
+    if (!s->ftl) {
+        return;
+    }
     s->ctrl = n = g_new0(FemuCtrl, 1);
     n->mbe = &s->backend;
     p = &n->bb_params;
     p->secsz = 512;
     p->secs_per_pg = 8;
-    p->pgs_per_blk = 256;
-    p->blks_per_pl = size / (16 * MiB) * 5 / 4 + 4;
+    p->pgs_per_blk = s->pages_per_block;
+    p->blks_per_pl = s->blocks_per_plane;
     p->pls_per_lun = 1;
-    p->luns_per_ch = 4;
-    p->nchs = 4;
+    p->luns_per_ch = s->luns_per_channel;
+    p->nchs = s->channels;
     p->pg_rd_lat = s->read_ns;
     p->pg_wr_lat = s->program_ns;
     p->blk_er_lat = s->erase_ns;
-    p->gc_thres_pcent = 75;
-    p->gc_thres_pcent_high = 95;
+    p->ch_xfer_lat = s->channel_ns;
+    p->gc_thres_pcent = s->gc_threshold;
+    p->gc_thres_pcent_high = s->gc_threshold_high;
     s->ns.ctrl = n;
     s->ns.lbaf.lbads = 9;
     s->ns.ssd = g_new0(struct ssd, 1);
@@ -216,6 +249,11 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
 
 void femu_cxl_stop(FemuCxlMedia *s)
 {
+    if (!s->ftl) {
+        s->started = false;
+        femu_cxl_cache_destroy(&s->cache);
+        return;
+    }
     qemu_mutex_lock(&s->lock);
     s->stopping = true;
     qemu_cond_broadcast(&s->wake);

@@ -739,9 +739,9 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         return;
     }
     size = memory_region_size(mr);
-    if (!size || size % (256 * MiB) || size > 64 * GiB) {
+    if (!size || size % (256 * MiB) || size > 120 * GiB) {
         error_setg(errp, "CXL media size must be a multiple of 256 MiB, "
-                   "at most 64 GiB");
+                   "at most 120 GiB");
         return;
     }
     if (!s->cache_ways || s->cache_ways > size / 4096 ||
@@ -761,7 +761,8 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         error_setg(errp, "NAND timing must be at most one second");
         return;
     }
-    if (!adapter_topology(dev, errp)) {
+    if (!femu_cxl_geometry(s, size, errp) ||
+        !adapter_topology(dev, errp)) {
         return;
     }
     parent_realize(dev, &local_err);
@@ -938,6 +939,17 @@ static const Property cxl_props[] = {
     DEFINE_PROP_UINT32("cache-pages", FemuCxlSsd, media.cache_pages, 1024),
     DEFINE_PROP_STRING("cache-policy", FemuCxlSsd, media.cache_policy),
     DEFINE_PROP_BOOL("ftl", FemuCxlSsd, media.ftl, true),
+    DEFINE_PROP_UINT32("channels", FemuCxlSsd, media.channels, 4),
+    DEFINE_PROP_UINT32("luns-per-channel", FemuCxlSsd,
+                       media.luns_per_channel, 4),
+    DEFINE_PROP_UINT32("blocks-per-plane", FemuCxlSsd,
+                       media.blocks_per_plane, 0),
+    DEFINE_PROP_UINT32("pages-per-block", FemuCxlSsd,
+                       media.pages_per_block, 256),
+    DEFINE_PROP_UINT32("gc-threshold", FemuCxlSsd, media.gc_threshold, 75),
+    DEFINE_PROP_UINT32("gc-threshold-high", FemuCxlSsd,
+                       media.gc_threshold_high, 95),
+    DEFINE_PROP_UINT64("channel-ns", FemuCxlSsd, media.channel_ns, 0),
     DEFINE_PROP_STRING("der", FemuCxlSsd, media.der),
     DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd,
                      media.cylon_kernel_ack, false),

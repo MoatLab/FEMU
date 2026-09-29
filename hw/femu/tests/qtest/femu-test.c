@@ -14020,6 +14020,59 @@ static void femu_test_cxl_ways(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_capacity(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QTestState *qts;
+    unsigned sizes[] = { 48, 96, 120 };
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(sizes); i++) {
+        QDict *rsp;
+
+        qts = qtest_init(FEMU_CXL_MACHINE);
+        qtest_qmp_assert_success(qts, "{'execute':'object-add','arguments':{"
+            "'qom-type':'memory-backend-ram','id':'large',"
+            "'reserve':false,'size':%llu}}",
+            (unsigned long long)sizes[i] * (1ULL << 30));
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+            "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
+            "'volatile-memdev':'large','ftl':false,"
+            "'channels':8,'luns-per-channel':8}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+}
+
+static void femu_test_cxl_geometry_bounds(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    static const char * const options[] = {
+        "'channels':0", "'channels':4097", "'luns-per-channel':129",
+        "'luns-per-channel':0", "'pages-per-block':0",
+        "'pages-per-block':65537", "'blocks-per-plane':65537",
+        "'blocks-per-plane':1", "'gc-threshold':0",
+        "'gc-threshold':101", "'gc-threshold-high':74",
+        "'gc-threshold-high':101", "'channel-ns':1000000001",
+    };
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(options); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu-cxl-ssd',"
+            "'id':'ssd','bus':'rp0','volatile-memdev':'mem',%s}}", options[i]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), "NAND geometry"));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14036,6 +14089,9 @@ static void femu_register_nodes(void)
 
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
+    qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
+    qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
+                 NULL);
     qos_add_test("cxl-prefetch", "femu", femu_test_cxl_prefetch, NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);
     qos_node_create_driver("femu", femu_create);

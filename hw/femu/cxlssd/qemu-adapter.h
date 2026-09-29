@@ -29,6 +29,13 @@ typedef struct FemuCxlMedia {
     uint64_t write_misses;
     uint64_t cache_entries;
     bool ftl;
+    uint32_t channels;
+    uint32_t luns_per_channel;
+    uint32_t blocks_per_plane;
+    uint32_t pages_per_block;
+    uint32_t gc_threshold;
+    uint32_t gc_threshold_high;
+    uint64_t channel_ns;
     char *der;
     bool cylon_kernel_ack;
     bool busy;
@@ -57,6 +64,7 @@ void femu_cxl_delay(uint64_t ns);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
+bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);
 void femu_cxl_stop(FemuCxlMedia *s);
