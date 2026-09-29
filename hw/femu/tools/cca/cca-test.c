@@ -147,6 +147,9 @@ static int map_dax(void)
     fclose(f);
     /* devdax needs 2 MiB granularity; a gigabyte is plenty for these tests. */
     map_len = (size < MAP_LIMIT ? size : MAP_LIMIT) & ~((2u << 20) - 1);
+    if (!map_len) {
+        return -ENOSPC;
+    }
     snprintf(path, sizeof(path), "/dev/%s", dax_name);
     fd = open(path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {

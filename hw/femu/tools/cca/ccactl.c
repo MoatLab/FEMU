@@ -10,6 +10,7 @@
  */
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,9 +76,20 @@ int main(int argc, char **argv)
         case 'f':
             flags |= CCA_FLAG_FORCE;
             break;
-        case 't':
-            timeout = atoi(optarg);
+        case 't': {
+            char *end;
+            long value;
+
+            errno = 0;
+            value = strtol(optarg, &end, 0);
+            if (errno || end == optarg || *end || value < INT_MIN ||
+                value > INT_MAX) {
+                fprintf(stderr, "ccactl: bad timeout '%s'\n", optarg);
+                usage();
+            }
+            timeout = value;
             break;
+        }
         default:
             usage();
         }

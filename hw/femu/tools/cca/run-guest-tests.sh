@@ -86,7 +86,9 @@ dax=${dax:-$(find_dax)}
 {
     report_env
     rc=0
-    "$dir/cca-test" -d "$memdev" ${dax:+-x "$dax"} "${cases[@]}" || rc=$?
+    # bash before 4.4 calls an empty array unbound under set -u.
+    "$dir/cca-test" -d "$memdev" ${dax:+-x "$dax"} ${cases[@]+"${cases[@]}"} \
+        || rc=$?
     echo "== cca-test exit $rc"
     exit "$rc"
 } 2>&1 | tee "$log"
