@@ -14322,6 +14322,17 @@ static void femu_test_cxl_capacity(void *obj, void *data,
     }
 }
 
+/* Wait until no Get LSA control command is queued. */
+static void femu_cxl_lsa_wait(QTestState *qts)
+{
+    gint64 deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+
+    while (femu_cxl_stat(qts, "control-status") == 2) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
 static void femu_cxl_command(QTestState *qts, bool lsa, unsigned command,
                              unsigned argument)
 {
@@ -14330,12 +14341,18 @@ static void femu_cxl_command(QTestState *qts, bool lsa, unsigned command,
 
         qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, argument);
         qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 4, command);
+        uint8_t status;
+
         qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
         qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
         g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_STS) >> 32,
                          ==, 0);
-        g_assert_cmpuint(qtest_readb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE),
-                         ==, 0);
+        status = qtest_readb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE);
+        /* Commands that can wait run after the read; 2 says queued. */
+        g_assert_cmpuint(status, ==,
+                         command == 2 || command == 3 || command == 9 ||
+                         command == 11 ? 2 : 0);
+        femu_cxl_lsa_wait(qts);
     } else {
         femu_cxl_number(qts, "control-argument", argument, true);
         femu_cxl_number(qts, "control-command", command, true);
@@ -14616,6 +14633,42 @@ static void femu_test_cxl_lsa_normal(void *obj, void *data,
     qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
     g_assert_cmpuint(qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_CMD) >> 16,
                      ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The mailbox handler holds the device's re-entrancy guard, so a Get LSA
+ * flush must not wait out its media time there; it runs afterwards.
+ */
+static void femu_test_cxl_lsa_queue(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "lsa-control=on,program-ns=20000000");
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+    gint64 start;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    for (i = 0; i < 50; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i);
+    }
+    /* Writing back 50 dirty pages costs a second of media time. */
+    qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0);
+    qtest_writel(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 4, 2);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+    start = g_get_monotonic_time();
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpint(g_get_monotonic_time() - start, <, G_USEC_PER_SEC / 2);
+    g_assert_cmpuint(qtest_readb(qts, mbox + CXL_MAILBOX_REGISTERS_SIZE), ==,
+                     2);
+    femu_cxl_lsa_wait(qts);
+    g_assert_cmpuint(femu_cxl_stat(qts, "control-status"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), >=, 50);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 0);
     qtest_quit(qts);
 }
 
@@ -15885,6 +15938,45 @@ static void femu_test_cca_der_replace(void *obj, void *data,
     femu_cca_quit(&c);
 }
 
+/*
+ * A Get LSA command that finds the gate held by a sleeping CCA chunk is
+ * queued rather than waited for inside the mailbox handler.
+ */
+static void femu_test_cca_lsa_busy(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+    FemuCca c;
+    FemuCcaResp r;
+    gint64 start;
+    unsigned lpn;
+
+    femu_cca_start(&c, "", "lsa-control=on,cache-pages=1024,"
+                   "cache-ways=1024,program-ns=2000000");
+    femu_cxl_config(c.qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(c.qts, 53, 0x1c, 0);
+    for (lpn = 0; lpn < 512; lpn++) {
+        qtest_writeq(c.qts, femu_cca_page(lpn), lpn);
+    }
+    femu_cca_post_raw(&c, 0, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0);
+    femu_cca_kick(&c);
+    /* The first chunk now sleeps for half a second holding the gate. */
+    femu_cca_poll_stat(c.qts, "cca-writebacks", 256);
+    qtest_writel(c.qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0);
+    qtest_writel(c.qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 4, 1);
+    qtest_writeq(c.qts, mbox + A_CXL_DEV_MAILBOX_CMD, (8ULL << 16) | 0x4102);
+    start = g_get_monotonic_time();
+    qtest_writel(c.qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpint(g_get_monotonic_time() - start, <, G_USEC_PER_SEC / 5);
+    g_assert_cmpuint(qtest_readb(c.qts, mbox + CXL_MAILBOX_REGISTERS_SIZE),
+                     ==, 2);
+    femu_cxl_lsa_wait(c.qts);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "control-status"), ==, 0);
+    femu_cca_reap(&c, &r);
+    g_assert_cmpint(r.status, ==, 0);
+    femu_cca_quit(&c);
+}
+
 /* Commands that touch the cache refuse while media is disabled. */
 static void femu_test_cca_media(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -16521,6 +16613,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
+    qos_add_test("cxl-lsa-queue", "femu", femu_test_cxl_lsa_queue, NULL);
     qos_add_test("cxl-ratio-dirty", "femu", femu_test_cxl_ratio_dirty, NULL);
     qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
     qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,
@@ -16599,6 +16692,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
+    qos_add_test("cxl-cca-lsa-busy", "femu", femu_test_cca_lsa_busy, NULL);
     qos_add_test("cxl-cca-disable-abandon", "femu",
                  femu_test_cca_disable_abandon, NULL);
     qos_add_test("cxl-cca-interleave", "femu", femu_test_cca_interleave,

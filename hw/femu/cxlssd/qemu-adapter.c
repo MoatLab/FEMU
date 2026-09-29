@@ -44,7 +44,18 @@ struct FemuCxlSsd {
     bool test_change_dpa;
     bool test_media_disabled;
     size_t lsa_limit;
+    /* Get LSA control commands left to a bottom half, oldest first. */
+    GQueue lsa_queue;
+    bool lsa_running;
 };
+
+typedef struct FemuCxlLsaCommand {
+    uint64_t command;
+    uint64_t argument;
+} FemuCxlLsaCommand;
+
+/* Get LSA byte 0 for a command left to run after the read returns. */
+#define FEMU_CXL_LSA_QUEUED 2
 
 static void (*parent_realize)(PCIDevice *dev, Error **errp);
 static void (*parent_exit)(PCIDevice *dev);
@@ -1088,6 +1099,50 @@ static void cxl_control_set(Object *obj, Visitor *v, const char *name,
     object_unref(obj);
 }
 
+/*
+ * Commands that never drop the BQL, so they can finish inside the mailbox
+ * handler once the gate is free. Flushes and way changes wait for the media.
+ */
+static bool cxl_lsa_inline(uint64_t command)
+{
+    switch (command) {
+    case 1:
+    case 5:
+    case 7:
+    case 13:
+    case 15:
+    case 17:
+    case 80:
+    case 81:
+    case 90:
+    case 91:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void cxl_lsa_bh(void *opaque)
+{
+    FemuCxlSsd *dev = opaque;
+    FemuCxlMedia *s = &dev->media;
+    FemuCxlLsaCommand *c;
+
+    /* Commands queued while one sleeps join this pass, in order. */
+    while ((c = g_queue_pop_head(&dev->lsa_queue))) {
+        Error *err = NULL;
+
+        s->control_command = c->command;
+        s->control_argument = c->argument;
+        cxl_command(OBJECT(dev), c->command, c->argument, &err);
+        s->control_status = err != NULL;
+        error_free(err);
+        g_free(c);
+    }
+    dev->lsa_running = false;
+    object_unref(OBJECT(dev));
+}
+
 static uint64_t cxl_lsa_size(CXLType3Dev *dev)
 {
     return FEMU_CXL_SSD(dev)->media.lsa_control ? FEMU_CXL_LSA_SIZE :
@@ -1097,7 +1152,8 @@ static uint64_t cxl_lsa_size(CXLType3Dev *dev)
 static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
                            uint64_t offset)
 {
-    FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+    FemuCxlSsd *cxl = FEMU_CXL_SSD(dev);
+    FemuCxlMedia *s = &cxl->media;
     Error *err = NULL;
 
     if (size > FEMU_CXL_SSD(dev)->lsa_limit) {
@@ -1114,21 +1170,38 @@ static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
         size > FEMU_CXL_LSA_SIZE - offset) {
         return 0;
     }
-    object_ref(OBJECT(dev));
-    s->control_command = size;
-    s->control_argument = offset;
-    cxl_command(OBJECT(dev), size, offset, &err);
-    s->control_status = err != NULL;
-    error_free(err);
-    /* An unplug while the command slept has freed the label buffer. */
     if (!s->labels) {
         s->control_status = 1;
-        size = 0;
-    } else {
-        memcpy(buf, s->labels + offset, size);
-        ((uint8_t *)buf)[0] = s->control_status;
+        return 0;
     }
-    object_unref(OBJECT(dev));
+    /*
+     * The mailbox handler runs with this device's re-entrancy guard held,
+     * so nothing here may wait: other vCPUs' MSI-X, mailbox and component
+     * accesses would be refused meanwhile. Run a command now only if it
+     * cannot wait and nothing is ahead of it; else leave it to a bottom
+     * half and report it queued.
+     */
+    if (cxl_lsa_inline(size) && !s->busy && !cxl->lsa_running) {
+        s->control_command = size;
+        s->control_argument = offset;
+        cxl_command(OBJECT(dev), size, offset, &err);
+        s->control_status = err != NULL;
+        error_free(err);
+    } else {
+        FemuCxlLsaCommand *c = g_new(FemuCxlLsaCommand, 1);
+
+        c->command = size;
+        c->argument = offset;
+        g_queue_push_tail(&cxl->lsa_queue, c);
+        s->control_status = FEMU_CXL_LSA_QUEUED;
+        if (!cxl->lsa_running) {
+            cxl->lsa_running = true;
+            object_ref(OBJECT(dev));
+            aio_bh_schedule_oneshot(qemu_get_aio_context(), cxl_lsa_bh, cxl);
+        }
+    }
+    memcpy(buf, s->labels + offset, size);
+    ((uint8_t *)buf)[0] = s->control_status;
     return size;
 }
 
@@ -1552,6 +1625,7 @@ static void cxl_class_init(ObjectClass *oc, const void *data)
 
 static void cxl_finalize(Object *obj)
 {
+    g_queue_clear_full(&FEMU_CXL_SSD(obj)->lsa_queue, g_free);
     g_clear_pointer(&FEMU_CXL_SSD(obj)->media.log_warned,
                     g_hash_table_destroy);
     qemu_cond_destroy(&FEMU_CXL_SSD(obj)->media.idle);
