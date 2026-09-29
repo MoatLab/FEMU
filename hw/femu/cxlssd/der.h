@@ -22,7 +22,46 @@ typedef struct FemuCxlDer {
     uint64_t mapped;
 } FemuCxlDer;
 
-bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn);
+static inline bool femu_cxl_ratio_selected(uint64_t ratio, uint64_t lpn)
+{
+    unsigned period;
+
+    switch (ratio) {
+    case 0:
+        return false;
+    case 50:
+        period = 2;
+        break;
+    case 75:
+        period = 4;
+        break;
+    case 90:
+        period = 10;
+        break;
+    case 95:
+        period = 20;
+        break;
+    case 97:
+        period = 33;
+        break;
+    case 98:
+        period = 50;
+        break;
+    case 99:
+        period = 100;
+        break;
+    case 995:
+        period = 200;
+        break;
+    case 999:
+        period = 1000;
+        break;
+    default:
+        return true;
+    }
+    return lpn % period != 0;
+}
+
 void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
                        FemuCxlCache *cache);
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa);

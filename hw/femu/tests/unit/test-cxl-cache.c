@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "../cxlssd/cache.h"
+#include "../cxlssd/der.h"
 
 static unsigned dirty_count;
 
@@ -100,11 +101,32 @@ static void fully_associative(void)
     }
 }
 
+static void direct_ratios(void)
+{
+    static const unsigned ratios[] = { 50, 75, 90, 95, 97, 98, 99, 995, 999 };
+    static const unsigned periods[] = { 2, 4, 10, 20, 33, 50, 100, 200, 1000 };
+    unsigned i;
+    unsigned lpn;
+
+    for (i = 0; i < G_N_ELEMENTS(ratios); i++) {
+        unsigned selected = 0;
+
+        for (lpn = 0; lpn < 1000; lpn++) {
+            selected += femu_cxl_ratio_selected(ratios[i], lpn);
+        }
+        g_assert_cmpuint(selected, ==, 1000 - (999 / periods[i] + 1));
+        g_assert_false(femu_cxl_ratio_selected(ratios[i], 0));
+    }
+    g_assert_false(femu_cxl_ratio_selected(0, 1));
+    g_assert_true(femu_cxl_ratio_selected(100, 0));
+}
+
 int main(void)
 {
     FemuCxlPolicy policy;
     unsigned ways;
 
+    direct_ratios();
     fully_associative();
     ordering();
     s3_promote();

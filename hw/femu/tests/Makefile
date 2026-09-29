@@ -32,7 +32,8 @@ nand-media.o: ../nand/nand-media.c ../nand/nand-media.h
 test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
 
-test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h
+test-femu-cxl-cache: unit/test-cxl-cache.c ../cxlssd/cache.c ../cxlssd/cache.h \
+                     ../cxlssd/der.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) $(shell $(PKG_CONFIG) --cflags glib-2.0) \
 	    -o $@ unit/test-cxl-cache.c ../cxlssd/cache.c \
 	    $(shell $(PKG_CONFIG) --libs glib-2.0)

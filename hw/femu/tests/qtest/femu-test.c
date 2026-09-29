@@ -14272,6 +14272,28 @@ static void femu_test_cxl_lsa_normal(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static void femu_test_cxl_ratio_fallback(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const unsigned ratios[] = {
+        50, 75, 90, 95, 97, 98, 99, 100, 995, 999, 0,
+    };
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "der=cylon,cylon-kernel-ack=on,ftl=off");
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(ratios); i++) {
+        femu_cxl_number(qts, "der-ratio", ratios[i], true);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, ratios[i]);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    }
+    femu_cxl_number(qts, "der-ratio", 1, false);
+    femu_cxl_number(qts, "der-ratio", UINT64_MAX, false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fallbacks"), ==, 1);
+    qtest_quit(qts);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -14292,6 +14314,8 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
     qos_add_test("cxl-lsa-normal", "femu", femu_test_cxl_lsa_normal, NULL);
+    qos_add_test("cxl-ratio-fallback", "femu", femu_test_cxl_ratio_fallback,
+                 NULL);
     qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
     qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
