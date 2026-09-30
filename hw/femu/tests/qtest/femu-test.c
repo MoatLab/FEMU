@@ -15266,6 +15266,200 @@ static void femu_cca_quit(FemuCca *c)
     qtest_quit(c->qts);
 }
 
+enum {
+    FEMU_STRESS_NONE,
+    FEMU_STRESS_FLUSH,
+    FEMU_STRESS_INVALIDATE,
+    FEMU_STRESS_WAYS,
+    FEMU_STRESS_CCA,
+    FEMU_STRESS_UNPLUG,
+};
+
+typedef struct FemuCxlStress {
+    const char *options;
+    int race;
+    /* Page offset between CPUs: 0 makes every CPU hit the same page. */
+    uint64_t spread;
+} FemuCxlStress;
+
+#define FEMU_STRESS_CPUS  4
+#define FEMU_STRESS_ITERS 3000
+#define FEMU_STRESS_STRIDE 3
+
+/*
+ * Four TCG vCPUs store to and read back their own slot of 16 window pages
+ * through a 4-page cache, so misses overlap, victims are held and pages are
+ * shared, while the test races an exclusive operation against them. Every
+ * store must read back and every slot must hold its last value.
+ */
+static void femu_test_cxl_stress(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    const FemuCxlStress *st = data;
+    /* Real mode to protected mode, then setup below; shared by the APs. */
+    static const uint8_t reset[] = {
+        0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x0f, 0x01, 0x16, 0x00, 0x05, 0x0f, 0x20,
+        0xc0, 0x66, 0x83, 0xc8, 0x01, 0x0f, 0x22, 0xc0, 0x66, 0xea, 0x00, 0x10,
+        0x00, 0x00, 0x08, 0x00,
+    };
+    /* Enable PAE/LME/paging, then jump to the 64-bit code at 0x1100. */
+    static const uint8_t setup[] = {
+        0x0f, 0x20, 0xe0, 0x83, 0xc8, 0x20, 0x0f, 0x22, 0xe0, 0xb8, 0x00, 0x20,
+        0x00, 0x00, 0x0f, 0x22, 0xd8, 0xb9, 0x80, 0x00, 0x00, 0xc0, 0x0f, 0x32,
+        0x0d, 0x00, 0x01, 0x00, 0x00, 0x0f, 0x30, 0x0f, 0x20, 0xc0, 0x0d, 0x00,
+        0x00, 0x00, 0x80, 0x0f, 0x22, 0xc0, 0xea, 0x00, 0x11, 0x00, 0x00, 0x18,
+        0x00,
+    };
+    static const uint8_t worker[] = {
+        0xb8, 0x10, 0x00, 0x00, 0x00, 0x8e, 0xd8, 0x8e, 0xd0, 0xb8, 0x01, 0x00,
+        0x00, 0x00, 0x0f, 0xa2, 0xc1, 0xeb, 0x18, 0x41, 0x89, 0xdf, 0x85, 0xdb,
+        0x75, 0x29, 0xbf, 0x00, 0x03, 0xe0, 0xfe, 0xc7, 0x07, 0x00, 0xc5, 0x0c,
+        0x00, 0xb9, 0x40, 0x0d, 0x03, 0x00, 0xff, 0xc9, 0x75, 0xfc, 0xc7, 0x07,
+        0x07, 0x06, 0x0c, 0x00, 0xb9, 0x40, 0x0d, 0x03, 0x00, 0xff, 0xc9, 0x75,
+        0xfc, 0xc7, 0x07, 0x07, 0x06, 0x0c, 0x00, 0x41, 0xc6, 0x87, 0x00, 0x60,
+        0x00, 0x00, 0x01, 0x80, 0x3c, 0x25, 0x00, 0x61, 0x00, 0x00, 0x01, 0x75,
+        0xf6, 0x4c, 0x8b, 0x34, 0x25, 0x10, 0x61, 0x00, 0x00, 0x4c, 0x8b, 0x1c,
+        0x25, 0x18, 0x61, 0x00, 0x00, 0x4c, 0x8b, 0x14, 0x25, 0x08, 0x61, 0x00,
+        0x00, 0x4c, 0x8b, 0x24, 0x25, 0x20, 0x61, 0x00, 0x00, 0x4d, 0x31, 0xed,
+        0x4c, 0x89, 0xe8, 0x49, 0x0f, 0xaf, 0xc3, 0x4c, 0x89, 0xfa, 0x49, 0x0f,
+        0xaf, 0xd2, 0x48, 0x01, 0xd0, 0x48, 0x83, 0xe0, 0x0f, 0x48, 0xc1, 0xe0,
+        0x0c, 0x49, 0x8d, 0x3c, 0x04, 0x4a, 0x8d, 0x3c, 0xff, 0x4c, 0x89, 0xeb,
+        0x48, 0xc1, 0xe3, 0x08, 0x4c, 0x09, 0xfb, 0x48, 0x89, 0x1f, 0x48, 0x8b,
+        0x17, 0x48, 0x39, 0xda, 0x74, 0x08, 0x42, 0xff, 0x04, 0xbd, 0x00, 0x62,
+        0x00, 0x00, 0x49, 0xff, 0xc5, 0x4d, 0x39, 0xf5, 0x72, 0xba, 0x41, 0xc6,
+        0x87, 0x00, 0x60, 0x00, 0x00, 0x02, 0xf4, 0xeb, 0xfd,
+    };
+    g_autofree char *rom_path = g_strdup("cxl-stress-rom-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree uint8_t *rom = g_malloc0(65536);
+    int fd = g_mkstemp(rom_path);
+    bool unplug = st->race == FEMU_STRESS_UNPLUG;
+    FemuCca cca = { 0 };
+    QTestState *qts;
+    int64_t deadline;
+    uint64_t invalidations;
+    unsigned done;
+    unsigned round = 0;
+    unsigned c;
+    unsigned p;
+    uint64_t i;
+
+    g_assert_cmpint(fd, >=, 0);
+    memcpy(rom, reset, sizeof(reset));
+    memcpy(rom + 65520, (uint8_t[]) { 0xea, 0, 0, 0, 0xf0 }, 5);
+    g_assert_cmpint(write(fd, rom, 65536), ==, 65536);
+    close(fd);
+    quoted = g_shell_quote(rom_path);
+    qts = qtest_initf(FEMU_CXL_MACHINE
+        "-accel tcg,thread=multi -S -bios %s -smp %u %s"
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=4,cache-ways=4,read-ns=20000,program-ns=50000,"
+        "concurrent-misses=on%s", quoted, FEMU_STRESS_CPUS,
+        unplug ? "-global cxl-rp.power_controller_present=on "
+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off " : "",
+        st->options);
+    femu_cxl_decode(qts);
+    if (st->race == FEMU_STRESS_CCA) {
+        cca.qts = qts;
+        femu_cxl_config(qts, 53, 0x24, FEMU_CCA_BAR);
+        femu_cca_wait_status(&cca, CCA_STATUS_READY, CCA_STATUS_READY);
+    }
+    qtest_writew(qts, 0x500, 31);
+    qtest_writel(qts, 0x502, 0x508);
+    qtest_writeq(qts, 0x508, 0);
+    qtest_writeq(qts, 0x510, 0x00cf9a000000ffffULL);
+    qtest_writeq(qts, 0x518, 0x00cf92000000ffffULL);
+    qtest_writeq(qts, 0x520, 0x00af9a000000ffffULL);
+    qtest_memwrite(qts, 0x1000, setup, sizeof(setup));
+    qtest_memwrite(qts, 0x1100, worker, sizeof(worker));
+    qtest_memwrite(qts, 0x7000, reset, sizeof(reset));
+    qtest_writeq(qts, 0x2000, 0x3003);
+    qtest_writeq(qts, 0x3000, 0x4003);
+    qtest_writeq(qts, 0x3018, 0x8003);
+    qtest_writeq(qts, 0x3020, 0x5003);
+    qtest_writeq(qts, 0x4000, 0x83);
+    qtest_writeq(qts, 0x5400, FEMU_CXL_WINDOW | 0x83);
+    qtest_writeq(qts, 0x8fb8, 0xfee00083);
+    qtest_writeq(qts, 0x6108, st->spread);
+    qtest_writeq(qts, 0x6110, FEMU_STRESS_ITERS);
+    qtest_writeq(qts, 0x6118, FEMU_STRESS_STRIDE);
+    qtest_writeq(qts, 0x6120, FEMU_CXL_WINDOW);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    deadline = g_get_monotonic_time() + 60 * G_TIME_SPAN_SECOND;
+    for (c = 0; c < FEMU_STRESS_CPUS; c++) {
+        while (qtest_readb(qts, 0x6000 + c) != 1) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+    }
+    invalidations = femu_cxl_stat(qts, "invalidations");
+    qtest_writeb(qts, 0x6100, 1);
+    do {
+        switch (st->race) {
+        case FEMU_STRESS_FLUSH:
+            femu_cxl_set(qts, "flush-cache", true);
+            break;
+        case FEMU_STRESS_INVALIDATE:
+            femu_cxl_config(qts, 53, PCI_COMMAND, PCI_COMMAND_MEMORY);
+            break;
+        case FEMU_STRESS_WAYS:
+            femu_cxl_number(qts, "cache-ways", round % 2 ? 4 : 2, true);
+            break;
+        case FEMU_STRESS_CCA:
+            /* Pin a page the CPUs never use, then drop theirs. */
+            femu_cca_expect(&cca, round % 2 ? CCA_CTRL_UNPIN : CCA_CTRL_PIN,
+                            0, 20, 1, 0, 1);
+            femu_cca_cmd(&cca, CCA_CTRL_INVALIDATE, 0, 0, 16, NULL);
+            break;
+        case FEMU_STRESS_UNPLUG:
+            if (round == 20) {
+                femu_cxl_unplug(qts);
+            }
+            break;
+        }
+        round++;
+        g_usleep(2000);
+        done = 0;
+        for (c = 0; c < FEMU_STRESS_CPUS; c++) {
+            done += qtest_readb(qts, 0x6000 + c) == 2;
+        }
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+    } while (done < FEMU_STRESS_CPUS);
+    if (unplug) {
+        /* The device is gone; QEMU must have survived its last accesses. */
+        g_assert_cmpuint(round, >, 20);
+        qtest_quit(qts);
+        unlink(rom_path);
+        return;
+    }
+    for (c = 0; c < FEMU_STRESS_CPUS; c++) {
+        g_assert_cmpuint(qtest_readl(qts, 0x6200 + 4 * c), ==, 0);
+    }
+    /* The last store of each CPU to each page it used must be there. */
+    for (c = 0; c < FEMU_STRESS_CPUS; c++) {
+        for (p = 0; p < 16; p++) {
+            uint64_t want = UINT64_MAX;
+
+            for (i = 0; i < FEMU_STRESS_ITERS; i++) {
+                if ((i * FEMU_STRESS_STRIDE + c * st->spread) % 16 == p) {
+                    want = i << 8 | c;
+                }
+            }
+            if (want != UINT64_MAX) {
+                g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW +
+                                            p * 4096 + c * 8), ==, want);
+            }
+        }
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), >, 0);
+    if (st->race == FEMU_STRESS_INVALIDATE) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "invalidations"), >,
+                         invalidations);
+    }
+    qtest_quit(qts);
+    unlink(rom_path);
+}
+
 static void femu_test_cca_off(void *obj, void *data, QGuestAllocator *alloc)
 {
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE
@@ -16934,6 +17128,48 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)5 });
     qos_add_test("cxl-wait-other-page-serial", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)6 });
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_NONE, 0 };
+
+        qos_add_test("cxl-stress-same-page", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_NONE, 1 };
+
+        qos_add_test("cxl-stress-spread", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_FLUSH, 0 };
+
+        qos_add_test("cxl-stress-flush", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_INVALIDATE, 0 };
+
+        qos_add_test("cxl-stress-invalidate", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_WAYS, 1 };
+
+        qos_add_test("cxl-stress-ways", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { ",cca=on", FEMU_STRESS_CCA, 1 };
+
+        qos_add_test("cxl-stress-cca", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
+    {
+        static const FemuCxlStress st = { "", FEMU_STRESS_UNPLUG, 1 };
+
+        qos_add_test("cxl-stress-unplug", "femu", femu_test_cxl_stress,
+                     &(QOSGraphTestOptions) { .arg = (void *)&st });
+    }
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
