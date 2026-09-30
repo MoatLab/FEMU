@@ -13952,6 +13952,28 @@ static void femu_test_cxl_der_invalid(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/* TCG cannot keep other vCPUs' TLBs coherent with memslot aliases. */
+static void femu_test_cxl_memslot_tcg(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE "-accel tcg ");
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+        "'driver':'femu-cxl-ssd','id':'bad','bus':'rp0',"
+        "'volatile-memdev':'mem','der':'memslot'}}");
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                        "desc"), "not supported with TCG"));
+    qobject_unref(rsp);
+    /* The same device without direct mapping realizes under TCG. */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+        "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
+        "'volatile-memdev':'mem','der':'off'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_cylon_ack(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
@@ -16873,6 +16895,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-der-cylon", "femu", femu_test_cxl_der_modes,
                  &(QOSGraphTestOptions) { .arg = (void *)"cylon" });
     qos_add_test("cxl-der-invalid", "femu", femu_test_cxl_der_invalid, NULL);
+    qos_add_test("cxl-memslot-tcg", "femu", femu_test_cxl_memslot_tcg, NULL);
     qos_add_test("cxl-der", "femu", femu_test_cxl_der, NULL);
     qos_add_test("cxl-wait-invalidate", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)2 });
