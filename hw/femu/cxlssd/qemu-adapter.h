@@ -81,6 +81,7 @@ typedef struct FemuCxlMedia {
     uint64_t media_ns;
     uint64_t media_reads;
     uint64_t media_writes;
+    uint64_t media_full;
     uint64_t access_ns;
     QemuMutex lock;
     QemuCond wake;

@@ -2,6 +2,7 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qemu-adapter.h"
 
 /* BQL protects the gate; waiters must let the current operation finish. */
@@ -184,6 +185,19 @@ static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
     return true;
 }
 
+/*
+ * NAND without over-provisioning fills up once every page is programmed, and
+ * then a write-back has nowhere to go. NAND only models timing; the payload is
+ * in host memory, so the access still completes, uncached.
+ */
+static void cxl_media_full(FemuCxlMedia *s)
+{
+    if (!s->media_full++) {
+        warn_report("femu-cxl-ssd: NAND is full; accesses go uncached "
+                    "(add over-provisioning with blocks-per-plane)");
+    }
+}
+
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write)
 {
@@ -225,12 +239,16 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 s->cca.pinned_set_misses++;
             }
             if (!femu_cxl_media(s, lpn, write && to_media)) {
-                return MEMTX_ERROR;
+                /* Report failed reads; a failed program only loses timing. */
+                if (!(write && to_media)) {
+                    return MEMTX_ERROR;
+                }
+                cxl_media_full(s);
             }
             if (!to_media) {
                 e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, s);
                 if (!e) {
-                    return MEMTX_ERROR;
+                    cxl_media_full(s);
                 }
             }
         }

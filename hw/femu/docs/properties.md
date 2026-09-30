@@ -290,6 +290,7 @@ marked "event" are cleared by `stats-reset`; the rest keep counting.
 | `media-time-ns` | read uint64 | Sum of modeled latency returned by FTL requests, including resource contention. |
 | `media-reads` | read uint64 | Read requests sent to the FTL: every miss that fills the cache (a write miss reads the page first), every read with no cache or of an uncached page, and PIN fills. A page the FTL has never mapped costs no NAND read time; its contents come from the memory backend and read as zero only when the backend is zero-filled. |
 | `media-writes` | read uint64 | User page programs completed by the shared FTL, including those of a linked NVMe controller; excludes GC copying. |
+| `media-full` | read uint64 | Event. Accesses that found no NAND page for a program or a dirty victim's write-back, which happens once NAND without over-provisioning (`blocks-per-plane` covering the media exactly) is full. The access still completes from the memory backend, uncached, so the data is kept but its timing is not modeled; the first occurrence warns. A measurement is valid only while this stays zero. |
 | `cache-entries` | read uint64 | Resident pages, pinned ones included. |
 | `cache-hits` | read uint64 | Event. MMIO page lookups that found a resident entry, reads and writes together. Direct accesses are unobserved. |
 | `cache-misses` | read uint64 | Event. MMIO page lookups that missed, including accesses with no cache. |

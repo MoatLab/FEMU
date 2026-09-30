@@ -14170,6 +14170,37 @@ static void femu_cxl_number(QTestState *qts, const char *name, uint64_t value,
     qobject_unref(rsp);
 }
 
+static void femu_test_cxl_media_full(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    /* 4 x 4 LUNs x 256 pages x 16 blocks cover 256 MiB with no spare. */
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
+        "pages-per-block=256,blocks-per-plane=16,read-ns=0,program-ns=0,"
+        "erase-ns=0");
+    uint64_t pages = 256 * 1024 * 1024 / 4096;
+    uint64_t i;
+
+    femu_cxl_decode(qts);
+    for (i = 0; i < pages; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i);
+    }
+    /* Writing back the last cached pages programs the final free NAND pages. */
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), ==, 0);
+    /* Later write-backs cannot be placed; the stores must still land. */
+    for (i = 0; i < 64; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i | 0xfeed0000ULL);
+    }
+    for (i = 0; i < 64; i++) {
+        g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + i * 4096), ==,
+                        i | 0xfeed0000ULL);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), >, 0);
+    qtest_quit(qts);
+}
+
 static void femu_test_cxl_prefetch(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
@@ -16804,6 +16835,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-compat", "femu", femu_test_cxl_compat, NULL);
     qos_add_test("cxl-capacity", "femu", femu_test_cxl_capacity, NULL);
     qos_add_test("cxl-prefetch", "femu", femu_test_cxl_prefetch, NULL);
+    qos_add_test("cxl-media-full", "femu", femu_test_cxl_media_full, NULL);
     qos_add_test("cxl-prefetch-clamp", "femu", femu_test_cxl_prefetch_clamp,
                  NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);

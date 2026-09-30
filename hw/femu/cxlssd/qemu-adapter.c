@@ -1531,6 +1531,8 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "media-writes", &s->media_writes,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "media-full", &s->media_full,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cache-hits", &s->cache.hits,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "cache-misses", &s->cache.misses,
