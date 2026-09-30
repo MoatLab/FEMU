@@ -14903,9 +14903,15 @@ static void femu_test_cxl_der_budget_rate(void *obj, void *data,
 static void femu_test_cxl_der_replace_rate(void *obj, void *data,
                                           QGuestAllocator *alloc)
 {
-    double full = femu_cxl_hit_rate("memslot", 0, 0);
-    double replaced = femu_cxl_hit_rate("memslot", 1000, 64);
+    double full = 0;
+    double replaced = 0;
+    unsigned i;
 
+    /* Best of three interleaved runs per mode, as for the budget rate. */
+    for (i = 0; i < 3; i++) {
+        full = MAX(full, femu_cxl_hit_rate("memslot", 0, 0));
+        replaced = MAX(replaced, femu_cxl_hit_rate("memslot", 1000, 64));
+    }
     g_test_message("hits/s on a new hot set: kept aliases %.0f, "
                    "replaced %.0f", full, replaced);
     /* qtest's own overhead caps the gain, most of all under ASan. */
