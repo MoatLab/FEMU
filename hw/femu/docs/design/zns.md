@@ -176,8 +176,8 @@ also moves the zone between the per-state lists.
       +------------------->|                     Full                      |
                            +-----------------------------------------------+
 
-  also to Full: a write that reaches ZCAP, or Finish, from either Open state
-  or Closed
+  also to Full: a write that reaches ZCAP (from Empty, either Open state or
+  Closed), or Finish from either Open state or Closed
   Reset: Explicitly Open, Implicitly Open, Closed, Full --> Empty
   controller: injected write fault --> Read Only --(Offline action)--> Offline
 ```
@@ -191,13 +191,13 @@ also moves the zone between the per-state lists.
 | Implicitly Open | another zone needs an open resource at the open limit | Closed | `zns_auto_transition_zone()` |
 | Closed | write | Implicitly Open | `zns_advance_zone_wp()` |
 | Empty, Open, Closed | Finish Zone | Full | `zns_finish_zone()` |
-| Open, Closed | write reaches the zone capacity | Full | `zns_finalize_zoned_write()` |
+| Empty, Open, Closed | write reaches the zone capacity | Full | `zns_finalize_zoned_write()` |
 | Open, Closed, Full | Reset Zone | Empty | `zns_reset_zone()` |
 | any but Read Only | injected write fault on the zone | Read Only | `zns_nvme_rw()` |
 | Read Only | Offline Zone | Offline | `zns_offline_zone()` |
 
-Read Only and Offline are final: Reset and Finish refuse them with Invalid
-Zone State Transition. Reads work in every state except Offline. Writes are
+Offline is final, and Read Only leaves only through Offline. Open, Close,
+Finish and Reset refuse both with Invalid Zone State Transition. Reads work in every state except Offline. Writes are
 refused in Full (Zone Is Full), Read Only (Zone Is Read Only) and Offline
 (Zone Is Offline).
 
@@ -207,8 +207,8 @@ specification requires for Empty and Offline zones.
 
 Zone state lives only in QEMU memory. It survives a controller reset and a
 guest reboot, and is lost when QEMU exits. `zns_ns_shutdown()`, which moves
-open zones to Closed (or Empty when they hold nothing), runs only when the
-device is removed.
+open and closed zones to Closed, or to Empty when they hold no data and no
+descriptor extension, runs only when the device is removed.
 
 ### Open and active resources
 
@@ -239,6 +239,7 @@ Zone Management Receive. Other I/O opcodes go through the common path in
 - Dataset Management, Write Zeroes, Copy and Write Uncorrectable fail with
   Invalid Opcode on a zoned namespace: they would change blocks without
   going through the state machine.
+- Verify runs the common path without zone state or boundary checks.
 - Flush and the I/O Management commands behave as on any namespace.
 
 ### Read and Write
@@ -250,9 +251,10 @@ must stay inside its zone unless cross-zone reads are on; see
 
 ### Zone Append
 
-Zone Append names the zone by its ZSLBA. Under `zone_lock` the poller reads
-`w_ptr`, places the data there, and advances the pointer in one step, so
-appends on different queues never overlap. The completion carries the LBA
+Zone Append names the zone by its ZSLBA. Under `zone_lock` the poller takes
+`w_ptr` as the append's LBA and advances the pointer in one step, so appends
+on different queues never overlap; the data is copied afterwards, outside
+the lock. The completion carries the LBA
 where the data landed. An append fails with Invalid Field when it does not
 name a zone start or exceeds the Zone Append Size Limit, and with Zone
 Boundary Error when it would cross the zone capacity.
@@ -332,9 +334,12 @@ window.
 ### Conventional zones
 
 `zns_num_conv_zones=N` makes the first N zones conventional (zone type 1).
-A conventional zone accepts writes anywhere inside it, keeps no write
-pointer, never changes state, and rejects Zone Append (Invalid Field) and
-every zone management action (Invalid Zone State Transition). N above the
+A conventional zone accepts writes anywhere below ZSLBA + ZCAP and keeps no
+write pointer. Its state changes only through an injected write fault, which
+can take it to Read Only like any zone. It rejects Zone Append (Invalid
+Field), single-zone Open, Close, Finish, Reset, Offline and Set Zone
+Descriptor Extension (Invalid Zone State Transition), and ZRWA Flush
+(Invalid Zone Operation). Zone reports describe it as usual. N above the
 zone count is lowered to the zone count. The ZNS specification defines only
 sequential-write-required zones, so Linux refuses a namespace that reports
 a conventional zone; the [mode guide](../modes/zns.md#optional-zone-features)
@@ -382,8 +387,9 @@ zone becomes Read Only. That zone's ZSLBA is added to the list by
 - Identify Controller advertises OAES bit 27 (ZDCN) whenever a zoned
   namespace exists. The notice itself is sent only when the host has set
   bit 27 of Asynchronous Event Configuration; the list is kept either way.
-  Linux does not set that bit, which is why `scripts/zone-aen-probe.c` sets
-  it itself.
+  The [mode guide](../modes/zns.md#changed-zone-list) notes that Linux
+  leaves the bit clear, which is why `scripts/zone-aen-probe.c` sets it
+  itself.
 - The supported log pages list (log 00h) shows BFh for CSI 2 only.
 
 ## Threads, locks and where latency is charged
@@ -406,7 +412,7 @@ What each command is charged, in `zftl.c`:
 
 | Command | Cost |
 | --- | --- |
-| Write, Zone Append | the larger of two figures: 1 us for each 4 KiB logical page put into the zone's write cache, summed over the pages added since the request's last cache flush, and the program time of any cache this write caused to be programmed (an evicted cache, or this zone's cache when it filled) |
+| Write, Zone Append | the larger of two figures: 1 us for each 4 KiB logical page put into the zone's write cache, summed over the pages added since the request's last cache flush, and the program time of any cache this write caused to be programmed: an evicted cache, or this zone's own cache when a page of this write found it full. The write that fills a cache is not charged for programming it; the next write to the zone is |
 | Read | the largest NAND read time over the 4 KiB pages it touches that have been programmed; pages still in a write cache, or never written, cost nothing |
 | Zone Reset | the largest erase time over the blocks of each reset zone; zones reset by one command share planes, so the command ends with its last erase |
 | Open, Close, Finish, Report, Offline | nothing |
@@ -423,8 +429,9 @@ its capacity is one stripe unit (`stripe unit / 4 KiB` pages). There are
                       no  -> take an empty cache, else evict the fullest
                              cache (program it now, cost charged to this
                              write), bind it to z
-   cache full?        program it: one program unit per slot, each plane of
-                      the slot's LUN one NAND program op, L2P updated
+   for each page:     cache already full? program it first: one program
+                      unit per slot, each plane of the slot's LUN one NAND
+                      program op, L2P updated; then add the page
  Zone Reset of z: drop z's cache without programming it
 ```
 
@@ -493,7 +500,7 @@ A device with 64 MiB zones of half width on an 8-channel geometry:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `zone-reset`, `zone-open-limits`, `zone-active-limit`, `zone-append-parallel`, `zoned-append-limit`, `zoned-append-mdts0`, `zone-bad-dptr`, `zone-report-length`, `mdts0-zone-report`, `zoned-format-index`, `zoned-compare`, `zone-change-notice`, `zrwa-reopen`, `zrwa-write-bounds`, `zrwa-odd-granule`, `zrwa-zd-ext`, `io-fuzz-zoned` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `zone-reset`, `zone-open-limits`, `zone-active-limit`, `zone-append-parallel`, `zoned-append-limit`, `zoned-append-mdts0`, `zone-bad-dptr`, `zone-report-length`, `mdts0-zone-report`, `zoned-format-index`, `zoned-compare`, `zone-change-notice`, `log-contents-zoned`, `sgl-zoned`, `dma-error-zoned`, `ns-mgmt-unavailable-zoned`, `zrwa-reopen`, `zrwa-write-bounds`, `zrwa-odd-granule`, `zrwa-zd-ext`, `io-fuzz-zoned` |
 | Documentation examples | each tagged ZNS example starts under qtest, identifies the controller and writes and reads one block |
 | `hw/femu/scripts/zone-aen-probe.c` | in-guest, manual: Zone Descriptor Changed notice end to end with `err_write_fail_ppm` |
 | Guest tools | `blkzone`, `nvme zns`, fio `--zonemode=zbd` on a Linux guest, as in the [mode guide](../modes/zns.md#verify) |
@@ -535,7 +542,8 @@ math has unit tests in `hw/femu/tests/unit/test-nand-media.c`.
   FTL thread, as Zone Reset does through `req->zone_resets`.
 - A new property: declare it in `femu.c` next to the other `zns_` ones, add
   the field to `ZNSCtrlParams`, copy it per namespace in
-  `nvme_init_namespaces()` if it is a per-zone limit, validate it in
+  `nvme_init_namespaces()` if the zoned code reads it from the namespace,
+  validate it in
   `zns_check_params()` or `zns_init_zone_geometry()`, give it a description
   and topic so `gen-property-docs.py` documents it, and add a qtest case.
 
