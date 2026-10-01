@@ -1261,10 +1261,10 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
         return;
     }
     /*
-     * Under TCG a memslot alias changes the dispatch map from inside a vCPU's
-     * MMIO handler while other vCPUs still hold TLB entries indexing the old
-     * map, which trips iotlb_to_section(). Ratio mappings use the same
-     * aliases, so refuse the mode rather than any later mapping.
+     * Under TCG other vCPUs keep TLB entries for a revoked alias until their
+     * queued flush runs, so they keep reaching the page directly after the
+     * device has taken it back. Ratio mappings use the same aliases, so
+     * refuse the mode rather than any later mapping.
      */
     if (s->der && !strcmp(s->der, "memslot") && tcg_enabled()) {
         error_setg(errp, "der=memslot is not supported with TCG; use KVM, "

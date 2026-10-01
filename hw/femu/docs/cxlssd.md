@@ -165,11 +165,10 @@ can exercise these mappings directly. All modes expose read-only QOM
 `der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations`,
 `der-quiet-revocations`, `der-replacements` and `der-fallbacks`. Mapped is a current gauge; remaps and revocations count completed
 page operations; fallbacks count rejected mapping attempts or device disablement.
-For Cylon, active becomes true only after installing and validating the slot. Realize refuses `memslot` under TCG: an alias changes the
-dispatch map from inside one vCPU's MMIO handler while other vCPUs still hold
-TLB entries indexing the old map, which trips an assertion in
-`iotlb_to_section()`. The qtest accelerator, which runs no vCPUs, and KVM are
-unaffected.
+For Cylon, active becomes true only after installing and validating the slot. Realize refuses `memslot` under TCG: other vCPUs keep TLB
+entries for a revoked alias until their queued flush runs, so they keep
+reaching the page directly after the device has taken it back. The qtest
+accelerator, which runs no vCPUs, and KVM are unaffected.
 
 The device realizes in any topology, but both direct modes (cache mappings,
 prefetch mappings and direct ratios) map pages only for a single endpoint
