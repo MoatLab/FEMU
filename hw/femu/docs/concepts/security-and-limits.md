@@ -146,8 +146,9 @@ The message names the property, for example:
 qemu-system-x86_64: -device femu,devsz_mb=64,femu_mode=7: femu_mode must be 0 (OpenChannel), 1 (black-box), 2 (no-SSD), 3 (zoned), 4 (computational storage) or 5 (key-value)
 ```
 
-[CONFIGURATION-CHANGES.md](../CONFIGURATION-CHANGES.md) lists these and
-other refusals, and the changes that move numbers without stopping a run.
+The [changelog](../CHANGELOG.md#configuration-changes-and-new-refusals) lists
+these and other refusals, and the changes that move numbers without stopping
+a run.
 Most mode guides list their own refusals under "Limits and refusals"; the
 CXL SSD guide has them under "Limits".
 
@@ -219,4 +220,4 @@ on top of the guest's vCPUs
 - [Architecture](architecture.md)
 - [Performance tuning](../guides/performance-tuning.md)
 - [Troubleshooting](../troubleshooting.md)
-- [CONFIGURATION-CHANGES.md](../CONFIGURATION-CHANGES.md)
+- [Changelog](../CHANGELOG.md)

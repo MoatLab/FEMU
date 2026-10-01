@@ -10,10 +10,18 @@ make -C hw/femu/tests check-docs QEMU=$PWD/build/qemu-system-x86_64 \
 
 | Check | Script | Fails when |
 | --- | --- | --- |
-| Property reference | `hw/femu/scripts/gen-property-docs.py --check` | a property has no description, or `reference/*.md` differs from the binary |
+| Property reference | `hw/femu/scripts/gen-property-docs.py --check` | a property has no description, or `reference/properties.md` or `reference/runtime-properties.md` differs from the binary |
 | Mode table | `hw/femu/scripts/gen-mode-table.py --check` | a mode table differs from `modes.py`, or `modes.py` disagrees with the tree |
 | Links | `hw/femu/scripts/check-doc-links.py` | a relative link or heading anchor does not exist |
 | Examples | `hw/femu/scripts/check-doc-examples.py` | a code block is not tagged, or a tagged example does not work |
+
+Only two reference pages are generated: `reference/properties.md` and
+`reference/runtime-properties.md`, from the built binary plus
+`reference/property-topics.py` and `reference/environment.inc.md`. The
+others, `reference/log-pages-and-counters.md` and `reference/scripts.md`,
+are written by hand and no check compares them with the code, so update
+them in the same commit as the change they describe. A user-visible change
+also needs an entry in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Per-mode facts: `modes.py`
 

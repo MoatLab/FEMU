@@ -1,7 +1,7 @@
 # FEMU documentation
 
-Start with the goal you have. Pages marked "coming" are planned and not
-written yet; until then the [top-level README](../../../README.md) covers them.
+Start with the goal you have. What changed since the last release is in the
+[changelog](CHANGELOG.md).
 
 ## I am new to FEMU
 
@@ -48,9 +48,10 @@ The guest kernel each mode needs is in
 - [Runtime properties](reference/runtime-properties.md): QOM properties and
   counters you read or set with `qom-get` and `qom-set`.
 - [Log pages and counters](reference/log-pages-and-counters.md): vendor log C0h
-  (WAF and media counters), telemetry, supported log pages.
-- [Configuration changes](CONFIGURATION-CHANGES.md): properties whose meaning
-  or default changed.
+  (WAF and media counters), telemetry, supported log pages, asynchronous
+  events, keeping the Persistent Event log in a file.
+- [Changelog](CHANGELOG.md): what changed since femu-v9.0.1, including
+  properties that are now refused and settings whose effect changed.
 - [Scripts and tools](reference/scripts.md): every shipped script and tool,
   its arguments and environment variables, and which ones are legacy.
 
@@ -89,10 +90,11 @@ The guest kernel each mode needs is in
   checks, guest-side tests, and how to add a test.
 - [Keeping the documentation correct](development/docs-maintenance.md): the
   generated references, the mode table and the example checks.
-- `development/code-structure.md` and `development/adding-a-mode.md`
-  (coming). Until then, see
-  [the README's development section](../../../README.md#development) and
-  [architecture](concepts/architecture.md).
+- [Code structure](development/code-structure.md): what lives where under
+  `hw/femu/`, and where to start a change. [Architecture](concepts/architecture.md)
+  explains how the parts work together.
+- [Contributing](../../../CONTRIBUTING.md): style, tests, sign-off and pull
+  requests.
 - `hw/femu/scripts/gen-property-docs.py` regenerates the property reference,
   and `hw/femu/scripts/check-doc-links.py` checks that every relative link in
   the docs resolves. CI runs both.
