@@ -1124,6 +1124,8 @@ compatibility, a top-level `femu-scripts` symlink points to `hw/femu/scripts/`,
 so the historical `cd build-femu && ../femu-scripts/...` workflow still works.
 
 Docs under `hw/femu/docs/`:
+- `properties.md`: device properties and the vendor log page C0h.
+- `cxlssd.md`: CXL SSD (`femu-cxl-ssd`) design notes.
 - `HIOPS.md` — NoSSD high-IOPS optimizations, results, and reproduction.
 - `CONFIGURATION-CHANGES.md` — configuration changes that affect existing runs.
 
@@ -1267,7 +1269,7 @@ sudo dstat -cdn            # System-wide stats
 
 ### Getting Help
 
-1. **Check [Wiki](https://github.com/MoatLab/FEMU/wiki)** for detailed documentation
+1. **Check [`hw/femu/docs/`](hw/femu/docs/)** for the property reference and design notes
 2. **Search [Issues](https://github.com/MoatLab/FEMU/issues)** for similar problems
 3. **Join discussions** in GitHub Discussions
 4. **Contact maintainers** for research collaboration
@@ -1335,7 +1337,7 @@ We welcome contributions from the community! FEMU is actively used in systems re
 **Documentation:**
 - Update relevant README sections
 - Add inline code documentation
-- Create wiki pages for major features
+- Document new features in this README or under `hw/femu/docs/`
 - Include usage examples
 
 ### Research Collaborations
@@ -1358,7 +1360,7 @@ We welcome contributions from the community! FEMU is actively used in systems re
 
 - **GitHub Issues**: [Report bugs and request features](https://github.com/MoatLab/FEMU/issues)
 - **GitHub Discussions**: [Community Q&A and discussions](https://github.com/MoatLab/FEMU/discussions)
-- **Wiki**: [Comprehensive documentation](https://github.com/MoatLab/FEMU/wiki)
+- **Documentation**: this README and [`hw/femu/docs/`](hw/femu/docs/)
 
 ### Professional Support
 
@@ -1453,7 +1455,7 @@ We thank all contributors who have helped improve FEMU:
 
 ---
 
-**For more detailed information, visit the [FEMU Wiki](https://github.com/MoatLab/FEMU/wiki).**
+**For more detailed information, see [`hw/femu/docs/`](hw/femu/docs/).**
 
 ---
 
