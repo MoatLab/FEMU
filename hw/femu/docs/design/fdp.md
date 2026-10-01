@@ -268,27 +268,24 @@ FDP is on.
 | 22h FDP Statistics | HBMW, MBMW and MBE as 128-bit counters; FEMU fills the low 64 bits | `nvme_fdp_stats()` |
 | 23h FDP Events | number of events, then the events of the ring selected by LSP bit 0 (1 = host events, 0 = controller events) | `nvme_fdp_events()` |
 
-### The 21h descriptor size
+### The 21h layout
 
-The specification defines the Reclaim Unit Handle Usage Descriptor as
-8 bytes: RUHA in byte 0 and 7 reserved bytes. On master at the time of
-writing, `NvmeRuhuDescr` in `nvme.h` is 24 bytes: RUHA, 7 reserved bytes,
-then the handle's HBMW and MBMW as two 8-byte fields. The log is therefore
-`8 + 24 * NRUH` bytes, and a host that walks it in 8-byte steps reads the
-RUHA of handle 1 and later from inside handle 0's counters:
+The log is an 8-byte header followed by one 8-byte Reclaim Unit Handle
+Usage Descriptor per handle, as the specification defines it. Each
+descriptor holds the handle's RUHA in byte 0, and bytes 1 to 7 are
+reserved. `NvmeRuhuDescr` in `nvme.h` has that layout, and a
+`QEMU_BUILD_BUG_ON` keeps it at 8 bytes. The log is `8 + 8 * NRUH` bytes:
 
 ```text
- offset    specification (8 B per handle)    master (24 B per handle)
- 0         NRUH, reserved                    NRUH, reserved
- 8         handle 0: RUHA, reserved          handle 0: RUHA, reserved
- 16        handle 1: RUHA, reserved          handle 0: HBMW
- 24        handle 2: RUHA, reserved          handle 0: MBMW
- 32        handle 3: RUHA, reserved          handle 1: RUHA, reserved
+ offset      content
+ 0           NRUH (2 bytes), reserved (6 bytes)
+ 8           handle 0: RUHA, reserved
+ 16          handle 1: RUHA, reserved
+ 8 + 8 * i   handle i: RUHA, reserved
 ```
 
-Check `NvmeRuhuDescr` before parsing this log from a tool. Per-handle byte
-counters are not part of the 21h descriptor in the specification; the
-endurance-group totals are in 22h.
+The log carries no per-handle byte counters. The endurance-group totals are
+in 22h.
 
 ### Statistics
 
@@ -386,7 +383,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-write-zeroes`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
@@ -409,8 +406,6 @@ last:
 - The 128-bit statistics carry only their low 64 bits.
 - Write Zeroes carries no placement fields of its own and adds nothing to
   HBMW or MBMW.
-- The 21h descriptor is larger than the specification's; see
-  [above](#the-21h-descriptor-size).
 - Metadata, Streams and Namespace Management do not combine with FDP.
 
 ## How to extend it
