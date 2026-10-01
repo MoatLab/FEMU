@@ -99,7 +99,7 @@ NVMe log pages ([log pages and counters](log-pages-and-counters.md)).
 These are not parameters, but they change the model while the guest runs:
 
 - Vendor admin command 0xEF on a BlackBox controller turns GC time and the
-  flat NAND times off and on, and reports late completions
+  flat NAND times off and on, and counts completions posted after their due time
   ([timing model](../concepts/timing-model.md#changing-timing-at-run-time)).
 - Set Features 06h (Volatile Write Cache) turns the write buffer off and on
   when `vwc=1`; Set Features 20h (Key Value Configuration) sets EDNEK on a

@@ -47,7 +47,7 @@ RAM=2G ../femu-scripts/run-cxlssd.sh \
 | Part | Why |
 | --- | --- |
 | `RAM=2G` | the guest's RAM; the script's default is 4G |
-| `-object memory-backend-ram,...` and `-numa node,...` | describe the guest RAM as NUMA node 0, so QEMU builds an ACPI SRAT and the CXL memory can later become a node of its own; the backend size must equal the guest RAM |
+| `-object memory-backend-ram,...` and `-numa node,...` | describe the guest RAM as NUMA node 0, so QEMU builds an ACPI SRAT and the CXL memory can become a node of its own; the backend size must equal the guest RAM |
 | `-drive`, `-device virtio-blk-pci` | the guest disk |
 | `-netdev`, `-device virtio-net-pci` | SSH to the guest on `SSH_PORT` |
 | `-qmp unix:...` | the socket you read the counters through in step 6 |

@@ -61,7 +61,7 @@ needs. The FEMU device:
 | `op_pcent=25` | 25% over-provisioning |
 
 Wait for the `femu-guest login:` prompt, about 30 seconds. Leave this
-terminal running. To stop QEMU later, press `Ctrl-a` then `x`.
+terminal running. To stop QEMU, press `Ctrl-a` then `x`.
 
 ## 3. Look at the device
 
