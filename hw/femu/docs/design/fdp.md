@@ -109,9 +109,8 @@ The BlackBox side (`bb.c`, `ftl-fdp.c`) adds:
 
 `ssd_stream_write_lpns()` does this on the FTL thread. Write, Write Zeroes
 without the Deallocate bit, and the destination of Copy all go through it;
-Copy reads its placement fields from the same CDW12 and CDW13 bits. Write
-Zeroes parses no placement fields: it is placed by whatever DTYPE and DSPEC
-the request slot last carried, so do not rely on its placement.
+Copy and Write Zeroes read their placement fields from the same CDW12 and
+CDW13 bits.
 
 The order inside `ssd_stream_write_lpns()` is:
 
@@ -291,8 +290,8 @@ in 22h.
 
 | Counter | Grows by | Where |
 | --- | --- | --- |
-| HBMW (host bytes with metadata written) | bytes a Write or Copy actually programmed; Write Zeroes adds nothing | `nvme_do_write_fdp()` |
-| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC; Write Zeroes adds nothing | `nvme_do_write_fdp()`, `do_gc_fdp_style()` |
+| HBMW (host bytes with metadata written) | bytes a Write, Copy or Write Zeroes without Deallocate actually programmed | `fdp_count_write()` |
+| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC | `fdp_count_write()`, `do_gc_fdp_style()` |
 | MBE (media bytes erased) | bytes of every block erased by GC | `do_gc_fdp_style()` |
 
 The ratio MBMW / HBMW is the write amplification of the endurance group.
@@ -383,7 +382,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
@@ -404,8 +403,6 @@ last:
 - EARUTR is always 0; there is no active reclaim unit time limit, so event
   1h is never raised.
 - The 128-bit statistics carry only their low 64 bits.
-- Write Zeroes carries no placement fields of its own and adds nothing to
-  HBMW or MBMW.
 - Metadata, Streams and Namespace Management do not combine with FDP.
 
 ## How to extend it

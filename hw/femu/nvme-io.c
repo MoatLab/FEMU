@@ -246,6 +246,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->nr_zone_resets = 0;
         req->fdp_pids = NULL;
         req->nr_fdp_pids = 0;
+        req->fdp_dtype = 0;
+        req->fdp_dspec = 0;
         req->cxl_seq = 0;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
@@ -1588,6 +1590,12 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
     if (status) {
         return status;
+    }
+
+    /* Write Zeroes carries directives in the same fields as Write */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        req->fdp_dspec = le16_to_cpu(rw->dspec);
+        req->fdp_dtype = (control >> 4) & 0xF;
     }
 
     /*

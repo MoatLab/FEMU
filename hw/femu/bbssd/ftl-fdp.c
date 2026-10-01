@@ -1436,6 +1436,33 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
 }
 
 /*
+ * Charge what a placed write actually programmed to the endurance group and
+ * to the handle its placement identifier selects.
+ */
+static void fdp_count_write(NvmeNamespace *ns, struct ssd *ssd,
+                            NvmeRequest *req)
+{
+    uint64_t data_bytes = req->xfer_bytes;
+    uint16_t ph, rg, ruhid;
+
+    if (!data_bytes) {
+        return;
+    }
+    if (req->fdp_dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
+        !nvme_parse_pid(ns, req->fdp_dspec, &ph, &rg)) {
+        ph = 0;
+    }
+    ruhid = ns->fdp.phs[ph];
+
+    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, data_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->mbmw, data_bytes);
+}
+
+/*
  * nvme_do_write_fdp - top-level FDP write: stats + stream write
  */
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
@@ -1443,42 +1470,19 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 {
     NvmeNamespace *ns = req->ns;
     struct ssd *ssd = n->ssd;
-    uint64_t data_bytes;
     uint64_t lat;
-
-    /* per-RUH stats */
-    uint16_t pid = req->fdp_dspec;
-    uint8_t dtype = req->fdp_dtype;
-    uint16_t ph, rg, ruhid;
 
     (void)slba;
     (void)nlb;
 
-    if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
-        !nvme_parse_pid(ns, pid, &ph, &rg)) {
-        ph = 0;
-        rg = 0;
-    }
-    ruhid = ns->fdp.phs[ph];
-
     lat = ssd_stream_write(n, ssd, req);
 
     /*
-     * Charged from what the write actually programmed, after the fact. The
-     * command's own length was charged before the attempt, so a write the
-     * device had no room for still added its bytes to both the host and the
-     * media totals -- which is how the reported amplification fell below one.
+     * Charged from what the write actually programmed, after the fact: a
+     * write the device had no room for must not add its length to either
+     * total, or the reported amplification falls below one.
      */
-    data_bytes = req->xfer_bytes;
-    if (!data_bytes) {
-        return lat;
-    }
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, data_bytes);
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->mbmw, data_bytes);
+    fdp_count_write(ns, ssd, req);
 
     return lat;
 }
@@ -1856,7 +1860,10 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
      * charged the media nor counted the pages.
      */
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
-        return ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
+        uint64_t lat = ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
+
+        fdp_count_write(req->ns, ssd, req);
+        return lat;
     }
 
     ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);

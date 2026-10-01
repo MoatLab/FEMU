@@ -5146,6 +5146,86 @@ static void femu_test_fdp_ruh_usage(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_LOG_FDP_STATS      0x22
+
+/* RUAMW of the reclaim unit behind placement id @pid of namespace 1 */
+static uint64_t femu_ruh_ruamw(FemuCtrlState *c, uint64_t buf, uint16_t pid)
+{
+    NvmeCmd cmd;
+    uint8_t st[16 + 4 * 32];
+    uint16_t want, got;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(st) / 4 - 1);
+    want = c->cid;
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(c->pdev->bus->qts, buf, st, sizeof(st));
+    g_assert_cmpint(lduw_le_p(st + 16 + 32 * pid), ==, pid);
+    return ldq_le_p(st + 16 + 32 * pid + 8);
+}
+
+/* low 64 bits of HBMW in the FDP Statistics log */
+static uint64_t femu_fdp_hbmw(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, buf, 64), ==,
+                    NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, buf);
+}
+
+/*
+ * Write Zeroes carries placement directives in the same fields as Write.
+ * They were never read, so the zeros went wherever the request slot's last
+ * command had placed its data, and the host byte counters did not move.
+ */
+static void femu_test_fdp_write_zeroes_placed(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint64_t ruamw0, ruamw1, hbmw;
+    const uint32_t blocks = 8;
+    uint16_t want, got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    ruamw0 = femu_ruh_ruamw(&c, buf, 0);
+    ruamw1 = femu_ruh_ruamw(&c, buf, 1);
+    hbmw = femu_fdp_hbmw(&c, buf);
+
+    /* no deallocate bit, data placement directive, placement id 1 */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(0);
+    rw.nlb = cpu_to_le16(blocks - 1);
+    rw.control = cpu_to_le16(2 << 4);
+    rw.dspec = cpu_to_le16(1);
+    want = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    g_assert_cmpint(femu_ruh_ruamw(&c, buf, 1), ==, ruamw1 - blocks);
+    g_assert_cmpint(femu_ruh_ruamw(&c, buf, 0), ==, ruamw0);
+    g_assert_cmpint(femu_fdp_hbmw(&c, buf) - hbmw, ==, blocks * 4096);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* the Changed Zone List belongs to the zoned command set's list of pages */
 static void femu_test_log_contents_zoned(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -18819,6 +18899,14 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "subsys=fdpsub"
+    });
+    qos_add_test("fdp-write-zeroes-placed", "femu",
+                 femu_test_fdp_write_zeroes_placed,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "oncs=0xc,subsys=fdpsub",
     });
     qos_add_test("log-contents-zoned", "femu", femu_test_log_contents_zoned,
                  &(QOSGraphTestOptions) {
