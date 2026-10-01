@@ -58,15 +58,17 @@ the subsystem's storage object) and are built from controller properties.
 
 Every controller has one DRAM backend of `devsz_mb` MiB, created in
 `femu_realize()`. For bbssd with `op_pcent` the backend is the full NAND
-capacity of the geometry instead, and the exposed share is reduced by the
-over-provisioning percentage.
+capacity of the geometry instead, and the exposed capacity is that NAND
+capacity divided by `1 + op_pcent / 100`, so the spare space is `op_pcent`
+percent of the exposed size (`op_pcent=25` exposes 80 % of the NAND).
 
 `nvme_resolve_ns_sizes()` then sizes the boot namespaces:
 
-- `namespace_sizes` unset: the backend is split evenly, each share rounded
+- `namespace_sizes` unset: the exposed capacity is split evenly, each share rounded
   down to 512 bytes.
 - `namespace_sizes` set: one size per namespace, each rounded down to
-  512 bytes and at least one sector; the sum must fit in the backend.
+  512 bytes and at least one sector; the sum must fit in the exposed capacity (`devsz_mb`, or the
+  over-provisioned NAND capacity with `op_pcent`).
 
 `nvme_init_namespaces()` packs the slices in NSID order. Each namespace
 records where its slice starts in `backend_offset`, and every data path
@@ -119,8 +121,10 @@ At run time the mode is chosen per command, not per controller:
 - The controller's single FTL thread routes each request by
   `req->ns`: ZNS namespaces to `zns_ftl_process_req()`, bbssd and CSD
   namespaces to `bb_ftl_process_req()`; NoSSD and KV cost nothing there.
-- The controller sets its I/O command set from its namespaces: one ZNS
-  namespace makes it offer the zoned command set.
+- Each namespace reports its own command set (CSI 2 for ZNS, 1 for KV,
+  0 otherwise). The controller always advertises NVM, Zoned and KV in its
+  I/O Command Set list; only the Changed Zone List entry in the supported
+  log pages depends on a zoned namespace being present.
 
 Each namespace keeps its own mode state. Every bbssd or CSD namespace has a
 complete FTL with the full NAND geometry, and must fit in that geometry on
@@ -147,7 +151,9 @@ namespace run the same mode, NoSSD or bbssd, with no `dps` and no FDP
   notices;
 - reports each namespace's NVMCAP.
 
-In any other configuration `ns_mgmt=on` is accepted and has no effect.
+In any other configuration `ns_mgmt=on` adds no Namespace Management.
+Realize refuses it outright with a subsystem that lacks `ns_mgmt`, and with
+`power_loss` or `cxl_ssd`.
 
 ### Create, attach, detach, delete
 
@@ -207,7 +213,7 @@ A controller with `streams=on` also cannot share a subsystem.
        ^                      ^                       ^
        | attached_ns bitmap   | attached_ns bitmap    |
    controller A (CNTLID 0)  controller B (CNTLID 1)   ...
-   own queues, pollers, FTL thread, namespace-change log
+   own queues, pollers, FTL thread (bbssd only), namespace-change log
    all I/O decode and FTL work of every controller under subsys->ns_lock
 ```
 
@@ -279,7 +285,7 @@ and [shared namespaces](../reference/properties.md#shared-namespaces).
 | `namespaces` | `femu` | Boot namespaces, 1 to 256. |
 | `namespace_sizes` | `femu` | Per-namespace sizes; commas doubled on the QEMU command line. |
 | `namespace_modes` | `femu` | Per-namespace modes; see the rules above. Refused with a shared subsystem. |
-| `op_pcent` | `femu` | bbssd: backend = NAND capacity, namespaces smaller by this percentage. |
+| `op_pcent` | `femu` | bbssd: backend = NAND capacity; exposed capacity = NAND capacity / (1 + op_pcent / 100). |
 | `ns_mgmt` | `femu`, `femu-subsys` | Namespace Management; on the subsystem, shared namespaces. A controller with it cannot join a subsystem without it. |
 | `bbssd_ns_limit` | `femu` | bbssd namespaces allocated at once, 1 to 256 and at least `namespaces`. Each has a full FTL in host memory. |
 | `subsys` | `femu` | Joins a `femu-subsys`. |
@@ -299,8 +305,8 @@ A NoSSD namespace and a ZNS namespace of different sizes on one controller:
 | --- | --- |
 | Identify Controller TNVMCAP, UNVMCAP | the controller's namespace pool |
 | Identify Namespace NSZE, NCAP, NUSE, NVMCAP | one namespace (NVMCAP with Namespace Management) |
-| Namespace lists (CNS 02h, 10h), controller lists (CNS 12h, 13h) | 10h to 13h answer only with Namespace Management |
-| Changed Namespace List (04h) | namespaces whose attachment changed, per controller |
+| Namespace lists (CNS 02h, 10h), controller lists (CNS 12h, 13h) | 12h and 13h answer only with Namespace Management; 02h and 10h on any controller |
+| Changed Namespace List (04h) | namespaces attached, detached, deleted or reformatted, per controller; filled only with Namespace Management |
 | SMART / Health (02h) | the controller, summed over its namespaces |
 | Vendor log C0h | summed over the bbssd, CSD and KV namespaces ([log pages and counters](../reference/log-pages-and-counters.md#vendor-log-page-c0h)) |
 
