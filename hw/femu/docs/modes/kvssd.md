@@ -23,8 +23,9 @@ key-value devices, without key-value hardware.
 - Guest kernel: 6.0 or newer. Linux 6.0 started to attach namespaces of a
   command set it has no driver for, with only the generic node (commit
   eb867ee995bd, "nvme: enable generic interface (/dev/ngXnY) for unknown
-  command sets"). Linux 5.9 to 5.19 log `unknown csi 1 for nsid N` and skip
-  the namespace, so passthrough on `/dev/nvme0` fails too.
+  command sets"). Linux 5.10 to 5.19 log `unknown csi 1 for nsid N` (5.9:
+  `unknown csi:1 ns:N`) and skip the namespace, so passthrough on
+  `/dev/nvme0` fails too.
 - Guest tools: `nvme-cli` (`io-passthru`), and a C compiler to build
   `kv-probe.c`. The image from `make-guest-image.sh` has no compiler; add one
   with `./make-guest-image.sh --packages build-essential`, or run

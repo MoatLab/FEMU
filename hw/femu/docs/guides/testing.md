@@ -5,7 +5,7 @@ CI; the last runs inside a booted guest.
 
 | Tests | Where | What they cover | Run with |
 | --- | --- | --- | --- |
-| Unit tests | `hw/femu/tests/unit/` | the NAND timing math, the completion priority queue, the hybrid mapping, the CXL cache, page table entries and caching API ring | `make -C hw/femu/tests check`, or `meson test` in a build |
+| Unit tests | `hw/femu/tests/unit/` | the NAND timing math, the completion priority queue, the hybrid mapping, the CXL cache, page table entries and caching API ring | `make -C hw/femu/tests check` and `meson test` in a build; each runs a different subset |
 | Device tests (qtest) | `hw/femu/tests/qtest/femu-test.c` | about 400 cases that drive the controller through its registers with no guest: every mode, admin and I/O commands, error paths, fuzzers, the CXL SSD | `qos-test` |
 | Documentation checks | `hw/femu/scripts/` | the property reference, mode tables, links and every example in the docs | `make -C hw/femu/tests check-docs` |
 | Configuration files | `hw/femu/scripts/ssd-config-test.sh` | every file in `scripts/configs/` starts QEMU | `ssd-config-test.sh BINARY` |
@@ -34,10 +34,12 @@ make -C hw/femu/tests check
 make -C hw/femu/tests clean
 ```
 
-This compiles each test against a stub `qemu/osdep.h` and runs it, in about
-a second. The CXL cache test needs GLib development files and is skipped
-without them. In a configured build directory, meson runs the tests it
-knows against QEMU's real headers:
+This compiles the NAND media, hybrid mapping, CXL cache, page table entry
+and caching API ring tests against a stub `qemu/osdep.h` and runs them, in
+about a second. The CXL cache test needs GLib development files and is
+skipped without them. In a configured build directory, meson runs the NAND
+media, priority queue and hybrid mapping tests against QEMU's real headers.
+CI runs both:
 
 ```sh
 cd build
@@ -57,7 +59,8 @@ QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
 List them, or run one by its full path:
 
 ```sh
-QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -l | grep femu-tests
+QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -l |
+    sed -n 's|^# \(.*femu-tests/.*\)|\1|p'
 QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
     -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests/cc-states
 ```
@@ -80,6 +83,16 @@ mkdir build-debug && cd build-debug
     --disable-libnfs --disable-libiscsi --disable-curl \
     --enable-asan --enable-ubsan --extra-cflags=-DFEMU_FTL_ASSERT
 make -j"$(nproc)"
+```
+
+Run the qtests in that build with the sanitizer options CI uses. Without
+`abort_on_error=1`, a sanitizer report does not fail the test:
+
+```sh
+export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1
+export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
+    -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
 ```
 
 The fuzz cases (names containing `fuzz`) take most of the sanitized run
@@ -166,8 +179,8 @@ All of them are listed in the [scripts reference](../reference/scripts.md#guest-
 
 ### A unit test
 
-Put it in `hw/femu/tests/unit/` and add it to `UNIT_TESTS` and a build rule
-in `hw/femu/tests/Makefile`. If it should also build against QEMU's
+Put it in `hw/femu/tests/unit/` and add it to `UNIT_TESTS`, a build rule
+and the `clean` rule in `hw/femu/tests/Makefile`. If it should also build against QEMU's
 headers, add it to `femu_unit_tests` in `hw/femu/tests/meson.build`.
 
 ### A documentation example

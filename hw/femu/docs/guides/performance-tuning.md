@@ -17,7 +17,7 @@ These threads run inside QEMU:
 | `CPU N/KVM` | one per guest vCPU (`-smp`) | at start | while the vCPU runs |
 | `femu-poller` | 1, or `ceil(queues / poller_ratio)` with `multipoller_enabled=1` | when the guest first enables the controller | always: it spins while the controller is enabled |
 | `FEMU-FTL-Thread` | one per controller with a BlackBox, ZNS or CSD namespace | at start | always: it spins while the controller is enabled |
-| `femu-cxl-ftl` | one per `femu-cxl-ssd` | at start | only while it serves a miss |
+| `femu-cxl-ftl` | one per `femu-cxl-ssd` with `ftl=on` (the default) | at start | only while it serves a miss |
 | `femu-cxl-cca` | one per `femu-cxl-ssd` with `cca=on` | at start | only while it serves a command |
 
 Linux shows these names only when QEMU runs with `-name NAME,debug-threads=on`.
@@ -97,9 +97,10 @@ for tid in $(ps -T -p "$pid" -o tid=,comm= |
 done
 ```
 
-Keep the rest of QEMU (its main loop and I/O threads) off these cores, for
-example with `sudo taskset -pc 8-15 "$pid"` before the loops above, since a
-new affinity applies only to the thread it is set on. Choose cores that are
+Before you pin anything, move every existing QEMU thread off the cores you
+reserve for FEMU, for example with `sudo taskset -apc 8-15 "$pid"`, then pin
+the vCPUs and FEMU's threads as above. A thread created later inherits the
+affinity of the thread that creates it. Choose cores that are
 not hardware-thread siblings of each other (`lscpu -e` shows the core of
 each CPU), so that two spinning threads do not share one physical core.
 
@@ -108,8 +109,9 @@ FTL thread ([scripts reference](../reference/scripts.md#host-tuning-helpers)).
 
 ## Hugepages
 
-FEMU's device memory is ordinary anonymous memory; FEMU does not use
-hugepages for it. You can back the guest's RAM with hugepages, which
+FEMU's device memory is ordinary anonymous memory; FEMU does not request
+hugepages for it (a host with transparent hugepages set to `always` may still
+use them). You can back the guest's RAM with hugepages, which
 reduces TLB misses in the guest. Reserve them on the host (2048 pages of
 2 MiB for a 4 GiB guest):
 
@@ -153,7 +155,8 @@ To place only the device memory, set `FEMU_MBE_INTERLEAVE` in QEMU's
 environment: `0` or `1` binds it to that node, `on` interleaves it across
 nodes 0 and 1
 ([environment variables](../reference/properties.md#environment-variables)).
-The launchers start QEMU with `sudo`, which drops your environment, so put
+The launchers other than `run-cxlssd.sh` start QEMU with `sudo`, which drops
+your environment, so put
 the variable on the launcher's `sudo` line:
 
 <!-- femu-untested: an edit to the sudo line inside a launcher, not a full command -->
@@ -189,7 +192,7 @@ the FTL thread and the device memory on the other.
 | --- | --- | --- |
 | `multipoller_enabled=1` | throughput that scales with guest jobs | one spinning core per poller |
 | `poller_ratio` above 1 | fewer cores used | longer passes, more completion delay per poller |
-| `queues` | one queue per guest CPU, no queue sharing in the guest | each extra queue adds a poller with `poller_ratio=1` |
+| `queues` | one queue per guest CPU, no queue sharing in the guest | with `multipoller_enabled=1` and `poller_ratio=1`, each extra queue adds a spinning poller |
 | Pinning | stable latency, no migrations | cores reserved for FEMU |
 | Guest RAM on hugepages | fewer TLB misses in the guest | memory reserved up front |
 | One NUMA node | no cross-socket copies | that node's cores and memory bandwidth only |

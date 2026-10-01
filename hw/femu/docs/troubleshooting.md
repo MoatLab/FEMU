@@ -52,7 +52,7 @@ Related issues: #21, #36, #60, #68, #153.
 | CXL SSD | CXL region support (`CONFIG_CXL_REGION` and related options) |
 
 The image from `make-guest-image.sh` runs Linux 6.8 and covers every mode
-except OCSSD.
+except OCSSD. Build it with `--cxl` for the CXL SSD tools.
 
 **Fix:** if `nvme list` shows the controller but no usable namespace, check
 `uname -r` in the guest against this table and `dmesg | grep nvme`.
@@ -94,8 +94,9 @@ so Ubuntu 20.04 and older cannot build it with their own packages.
 
 - `-Werror` stops the build on a new compiler warning: add
   `--disable-werror` to the `configure` line, and report the warning.
-- Errors around `nfs_pread_async`: libnfs 6 changed its API. `femu-compile.sh`
-  passes `--disable-libnfs`; pass it yourself if you run `configure` by hand.
+- Errors around `nfs_pread_async`: older FEMU trees failed against libnfs 6,
+  whose API changed. The current QEMU base ignores libnfs 6, and
+  `femu-compile.sh` passes `--disable-libnfs` as well.
 - `Cannot find Ninja` or `python venv creation failed`: install
   `ninja-build` and `python3-venv`.
 - Errors such as `memfd_create` declared twice, or syntax errors in the ZNS
@@ -109,15 +110,21 @@ Related issues: #2, #56, #136, #150, #168.
 
 As large as the host's free memory. FEMU keeps the whole device in host
 DRAM, so a 256 GiB device needs 256 GiB of free host RAM, plus the guest's
-RAM and the FTL tables. A BlackBox, CSD or KV namespace can address at most
-2^31 - 1 sectors, just under 1 TiB with 512-byte sectors.
+RAM and the FTL tables. In BlackBox, CSD and KV mode the NAND geometry as
+a whole (every namespace plus spare space) may hold at most 2^31 - 1
+sectors of `secsz` bytes, just under 1 TiB with the default 512-byte
+sectors; a larger geometry is refused at start.
 
-Under `sudo`, FEMU locks the device memory at start-up, so all of it must be
-free when QEMU starts. When the host cannot allocate it, QEMU aborts with
-`failed to allocate N bytes`.
+FEMU allocates the whole device at start-up and tries to lock it in memory.
+Under `sudo` the lock normally succeeds, so all of it must be free when QEMU
+starts. If the allocation itself is more than the kernel will commit, QEMU
+aborts with `failed to allocate N bytes`. If only the lock fails, FEMU
+prints `[FEMU] Err: cannot pin the N MiB memory backend` and runs anyway.
 
-**Fix:** set `devsz_mb` (or, for BlackBox, the geometry and `op_pcent`) to
-fit. [Host sizing](concepts/security-and-limits.md#host-sizing) explains the
+**Fix:** for NoSSD and ZNS, set `devsz_mb`. For BlackBox, CSD and KV, also
+size the geometry (`nchs`, `luns_per_ch`, `blks_per_pl` and so on) to hold
+the namespace plus spare space; with `op_pcent`, the host memory used is the
+full NAND capacity. [Host sizing](concepts/security-and-limits.md#host-sizing) explains the
 memory a device takes.
 
 Related issues: #19, #33, #52, #73, #144; discussion #119.
@@ -269,8 +276,9 @@ and mode; double the commas inside them on the QEMU command line:
 ```
 
 The `serial` property has no effect: each controller reports a serial
-number made of a mode prefix and a counter, in the order the controllers
-are created. Names under `/dev/disk/by-id` therefore depend on the order of
+number made of a mode prefix (`vSSD`, `vZNSSD`, `vNoSSD` and so on) and
+that mode's own counter, which advances once for each namespace the mode
+sets up. In the example above the serials are `vSSD1` and `vZNSSD0`. Names under `/dev/disk/by-id` therefore depend on the order of
 the `-device` options.
 
 **Fix:** see [several namespaces and devices](features/multi-namespace.md).
@@ -309,9 +317,10 @@ Related issues: #4, #48, #139.
 
 ## How do I get debug output?
 
-FEMU prints `[FEMU] Log:` and `[FEMU] Err:` lines on QEMU's console.
+FEMU prints lines that start with `[FEMU]` (`Log:`, `Err:`, `FTL-Log:`,
+`FTL-Err:`) and, for the ZNS FTL, `[Misao] ZFTL-` on QEMU's console.
 `run-blackbox.sh`, `run-zns.sh` and `run-csd.sh` save the console in
-`build-femu/log`. There is no `FEMU_DEBUG` environment variable, and FEMU
+`build-femu/log`; `run-blackbox-fdp.sh` writes `/tmp/femu-fdp.log`. There is no `FEMU_DEBUG` environment variable, and FEMU
 defines no QEMU trace events.
 
 **Fix:** compile the debug messages in with
@@ -322,8 +331,8 @@ Related issues: #18, #105; discussion #133.
 
 ## How do I tune for performance?
 
-Give every FEMU thread a core. The `femu-poller` threads and the
-`FEMU-FTL-Thread` spin while the guest has the controller enabled, so each
+Give every FEMU thread a core. The `femu-poller` threads and, with a
+BlackBox, ZNS or CSD namespace, the `FEMU-FTL-Thread` spin while the guest has the controller enabled, so each
 needs a host core of its own, on top of the vCPUs. One poller serves every
 queue by default; `multipoller_enabled=1` starts one per queue, or one per
 `poller_ratio` queues.
@@ -361,8 +370,10 @@ Related issues: #72, #114, #162.
 
 ## Does data survive a reboot?
 
-A guest reboot keeps the data. Stopping QEMU loses it. FEMU keeps every
-namespace in host memory and never writes it to a file; there is no option
+A guest reboot keeps the data, unless you trigger `simulate-power-loss` on
+a `power_loss=on` device, which drops the write buffer. Stopping QEMU loses
+it. FEMU keeps every NVMe namespace in host memory and never writes it to a
+file; there is no option
 to make it persistent. Snapshots and migration are refused
 ([security and limits](concepts/security-and-limits.md#migration-and-snapshots)).
 

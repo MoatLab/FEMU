@@ -21,6 +21,9 @@ FEMU prints its messages on QEMU's console:
 `build-femu/log`, and `run-blackbox-fdp.sh` to `/tmp/femu-fdp.log`.
 `run-nossd.sh`, `run-whitebox.sh` and `run-cxlssd.sh` print only to the
 terminal.
+Through the `tee` pipe, standard output is buffered, so stdout lines can
+reach the log later than stderr lines. Put `stdbuf -oL` in front of
+`./qemu-system-x86_64` on the launcher's `sudo` line to write them at once.
 
 Check the guest's side too. A guest that gives up on the device logs it in
 `dmesg`:
@@ -32,7 +35,7 @@ sudo dmesg | grep -i nvme
 FEMU defines no QEMU trace events and does not use QEMU's `-d` log
 categories, so `-d` and `-trace` show nothing from FEMU itself. They still
 help with the QEMU code around it. `-d guest_errors,unimp -D qemu.log` logs
-bad register accesses that QEMU's PCI, MSI-X and CXL code detect. Add them
+bad register accesses that QEMU's MSI-X and CXL code detect. Add them
 to the QEMU command line in the launcher:
 
 <!-- femu-untested: QEMU logging options added to a launcher; they create no device -->
@@ -77,8 +80,9 @@ that `info threads` shows the `femu-poller` and `FEMU-FTL-Thread` names
 
 ## Debug builds and compile-time switches
 
-`femu-compile.sh` builds with optimization and without debug information.
-For gdb, configure a debug build yourself from `build-femu/`:
+`femu-compile.sh` builds with `-O2 -g`. gdb works on that build, but many
+variables are optimized out. To single-step, configure an unoptimized build
+yourself from `build-femu/`:
 
 ```sh
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
@@ -87,7 +91,7 @@ For gdb, configure a debug build yourself from `build-femu/`:
 make -j"$(nproc)"
 ```
 
-FEMU has no run-time switch for debug messages. These macros, passed with
+The debug messages (`Dbg:`) have no run-time switch. These macros, passed with
 `--extra-cflags`, compile them in:
 
 | Macro | Effect |
@@ -128,7 +132,8 @@ FEMU reads a few environment variables
 | `FEMU_DUMP_LPN=N` | a hex dump of logical page N on every read not served from the write buffer |
 | `FEMU_KV_SELFTEST` (any value) | the result of a KV FTL self-test run once at start |
 
-The launchers start QEMU with `sudo`, which drops your environment.
+The launchers other than `run-cxlssd.sh` start QEMU with `sudo`, which drops
+your environment.
 `run-blackbox.sh` passes `FEMU_EXP_LOG`, `FEMU_SECRET` and `FEMU_DUMP_LPN`
 through, so this works:
 
@@ -147,7 +152,7 @@ GC time and NAND time on and off and prints poller counts
 ## Inspect a running device
 
 QEMU's monitor shows what QEMU built. With the QMP socket the launchers
-create (`build-femu/qmp-sock`), on the host:
+other than `run-cxlssd.sh` create (`build-femu/qmp-sock`), on the host:
 
 ```sh
 printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-pci"}' |
@@ -156,8 +161,9 @@ printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-pci"}' |
 
 `qom-list` and `qom-get` on `/machine/peripheral/<id>` read a device's
 properties and counters ([runtime properties](../reference/runtime-properties.md)).
-The launchers other than `run-cxlssd.sh` give the controller no `id=` (only
-`run-nossd.sh` uses `id=nvme0`), so add one to address it by name.
+`run-nossd.sh` names its controller `nvme0` and `run-cxlssd.sh` names its
+device `cxlssd`. The other launchers give the controller no `id=`, so add one
+to address it by name.
 
 ## Common crash reports
 
@@ -165,7 +171,7 @@ The launchers other than `run-cxlssd.sh` give the controller no `id=` (only
 | --- | --- | --- |
 | `qemu-system-x86_64: -device femu,...: MESSAGE` and QEMU exits | A property value was refused at start | Read the message; the mode guide's "Limits and refusals" table explains it |
 | `[FEMU] Err: cannot pin the N MiB memory backend` | Not a crash. QEMU runs without `sudo` and the memory lock limit is too low | Ignore it, or raise `ulimit -l` ([requirements](../getting-started/requirements.md#memory)) |
-| `failed to allocate N bytes`, then an abort and a core dump | The host has less free memory than the device needs | Lower `devsz_mb` or free memory ([host sizing](../concepts/security-and-limits.md#host-sizing)) |
+| `failed to allocate N bytes`, then QEMU stops with a trap or abort and may dump core | The host has less free memory than the device needs | Lower `devsz_mb` or free memory ([host sizing](../concepts/security-and-limits.md#host-sizing)) |
 | Guest `dmesg` shows `nvme nvme0: I/O ... timeout`, then a controller reset | The guest's NVMe driver waited too long for a completion and reset the controller | Check the QEMU console for an error at the same time. If there is none, check that the pollers have cores ([performance tuning](performance-tuning.md)). If it repeats on an idle host, report it |
 | The device is missing in the guest, and the console shows `[FEMU] Err:` lines | FEMU refused a command or a configuration the guest used | Read the console; for ZNS, see the [ZNS troubleshooting](../modes/zns.md#troubleshooting) |
 | QEMU exits with a segmentation fault or an assertion | A FEMU bug | Run it under gdb or the sanitizer build, and report it with the steps below |

@@ -17,6 +17,9 @@ being honoured.
 | `nand_cell_type` with `pgs_per_blk` above 512 | Read past the page-type latency tables. |
 | `gc_strategy` outside {0,1,2,4} | Other values silently fell back to greedy or never collected at all. |
 | `zns_flash_type` 0, 6 or above, or MLC/PLC without explicit latencies | 0 gives a zero-length write cache and an endless flush loop; 6+ indexes past the timing tables; MLC and PLC have no built-in figures, so every NAND operation cost nothing. |
+| `femu_mode` above 5 | No mode registers command handlers for it (6 was a SmartSSD placeholder), so the controller came up with none. |
+| `multipoller_enabled` other than 0 or 1 | Values above 1 started several pollers that each swept every queue, so two pollers could run and complete the same command. |
+| `lver` other than 1 or 2 with `femu_mode=0` | No Open-Channel handlers were registered for it. |
 | `flash_type` outside 1 to 4 with `femu_mode=0` | OCSSD 2.0 indexed the SLC to PLC timing tables with it unchecked, so 6 or above read past them; 0 and 5 have no built-in figures. OCSSD 1.2 already refused them. |
 | `zns_num_plane` above 8, `zns_num_ch` above 128, or a page count above 65536 | Wrapped and aliased onto lower indices in the PPA. |
 | `zns_chnls_per_zone` that does not divide `zns_num_ch` | Was silently replaced by the full channel width. |

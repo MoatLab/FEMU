@@ -603,7 +603,7 @@ sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1
 **Zone width.** By default a zone spans every channel, so it is as wide as the
 device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a
 zone to N channels, which divides the zone size and multiplies the zone count by
-`zns_num_ch / N` while leaving the device capacity alone — useful for studying
+`zns_num_ch / N` while leaving the device capacity alone, which is useful for studying
 how zone size and zone-level parallelism affect a zoned workload. N must divide
 `zns_num_ch`; FEMU refuses any other value at realize
 (`zns_chnls_per_zone N must divide zns_num_ch M`).

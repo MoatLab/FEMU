@@ -3,11 +3,12 @@
 Every script and tool shipped under `hw/femu/scripts/` and `hw/femu/tools/`:
 what it does, its arguments and the environment variables it reads. The
 top-level `femu-scripts` link points to `hw/femu/scripts/`, so from
-`build-femu/` you can also run any of them as `../femu-scripts/NAME`.
+`build-femu/` you can also run them as `../femu-scripts/NAME`.
 
 Scripts marked **legacy** do not start FEMU. They start QEMU's stock `nvme`
-device on the old `x86_64-softmmu/` binary path, or tune a specific lab
-machine. They are kept for reference. Do not use them.
+device or another disk on the old `x86_64-softmmu/` binary path, set thread
+affinity by hand, or prepare a specific lab machine. They are kept for
+reference. Do not use them.
 
 ## Build and setup
 
@@ -26,10 +27,12 @@ machine. They are kept for reference. Do not use them.
 
 ## Launchers
 
-Run each one from `build-femu/` after `femu-copy-scripts.sh`. All of them
+Run each NVMe launcher from `build-femu/` after `femu-copy-scripts.sh`. They
 start `./qemu-system-x86_64` with `sudo`, KVM, `-cpu host`, `-nographic`,
 a virtio-scsi boot disk and user networking that forwards host port
-`SSH_PORT` to the guest's port 22. All except `run-cxlssd.sh` read:
+`SSH_PORT` to the guest's port 22. `run-cxlssd.sh` is different: it is not
+copied, so run it as `../femu-scripts/run-cxlssd.sh`, and it adds no disk,
+no network and no `sudo` (see below). All except `run-cxlssd.sh` read:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -48,16 +51,16 @@ script. Edit them there; they are not read from the environment.
 | `run-zns.sh` | ZNS, 4 GiB, QLC timing, 16 zones of 256 MiB ([ZNS](../modes/zns.md)) | 4 vCPUs, 4 GiB | `log`, `qmp-sock` |
 | `run-whitebox.sh` | Open-Channel 2.0 (`OCVER=2` in the script; 1 selects 1.2), 4 GiB ([OCSSD](../modes/ocssd.md)) | 4 vCPUs, 4 GiB | `qmp-sock` |
 | `run-csd.sh` | Computational storage, 4 GiB, 4 compute units ([CSD](../modes/csd.md)). It does not set `csd_program_dir`, so only the built-in program type loads | 4 vCPUs, 4 GiB | `log`, `qmp-sock` |
-| `run-cxlssd.sh` | One `femu-cxl-ssd` below a CXL host bridge ([CXL SSD](../modes/cxl-ssd.md)) | 4 vCPUs, 4 GiB, no disk and no network unless you add them | none |
+| `run-cxlssd.sh` | One `femu-cxl-ssd` below a CXL host bridge ([CXL SSD](../modes/cxl-ssd.md)) | 4 vCPUs, 4 GiB, no disk and no network unless you add them | `cxlssd-stats.log`, `cxlssd-io-N.log` and `cxlssd-spt.log` in `LOG_DIR` when the guest asks for them through `lsa-control` |
 
 `run-blackbox.sh` also passes `FEMU_EXP_LOG`, `FEMU_SECRET` and
 `FEMU_DUMP_LPN` through `sudo` to QEMU
 ([environment variables](properties.md#environment-variables)). The other
 launchers pass no variables to QEMU.
 
-The `log` and `qmp-sock` files are created by root in the current
-directory. Two launchers started from the same directory share them, so
-start a second VM from another directory.
+`qmp-sock` is created by root in the current directory; `log` is written
+by `tee` as you. Two launchers started from the same directory share them,
+so start a second VM from another directory.
 
 `run-cxlssd.sh` runs QEMU without `sudo` and adds its own arguments after
 the ones it builds, so you append a boot disk, a network and a QMP socket on
@@ -87,8 +90,10 @@ its command line. Its settings are environment variables:
 | `DRY_RUN` | `0` | `1` prints the command instead of running it |
 
 These defaults follow Cylon's launch script and differ from the device's
-own defaults in three places: one cache way instead of 16, 8x8 channels and
-LUNs instead of 4x4, and `lsa-control` on instead of off.
+own defaults: one cache way instead of 16, a cache of size / 20 (3072 pages
+for 256 MiB) instead of 1024 pages, 8x8 channels and LUNs instead of 4x4,
+fixed `blocks-per-plane` for the 48G and 96G sizes, and `lsa-control` on
+instead of off.
 
 ## Configuration files
 
@@ -109,12 +114,16 @@ The files in `configs/`:
 | `write-buffer.conf` | BlackBox with a 2048-page write buffer, `vwc=1` and Write Zeroes |
 | `zns.conf` | ZNS, 16 zones of 256 MiB |
 
-To boot one, put the output on a launcher's QEMU command line in place of
-its `-device femu` option:
+Run it from `build-femu/` with `FEMU_BIN` set. Through the
+`../femu-scripts` link the script cannot find the binary on its own, and
+then it skips the key check:
 
 ```sh
-../femu-scripts/ssd-config.sh ../femu-scripts/configs/zns.conf
+FEMU_BIN=./qemu-system-x86_64 ../femu-scripts/ssd-config.sh ../femu-scripts/configs/zns.conf
 ```
+
+The launchers take no arguments. To boot a config, copy a launcher and put
+the output in place of its `-device femu` option.
 
 ## Guest-side test tools
 
@@ -126,7 +135,7 @@ Copy these into the guest and run them there. The C programs build with
 | `femu-test.sh` | `--yes [DEVICE]`, default `/dev/nvme0n1` | Data integrity, counters, deallocate, and zone or key-value commands, chosen by what the namespace reports. **It overwrites the whole namespace**, so `--yes` is required, and it refuses a mounted device. See [testing](../guides/testing.md#guest-side-tests). |
 | `kv-probe.c` | `[CONTROLLER]`, default `/dev/nvme0` | A key-value Store, Exist, Retrieve, Delete and a Retrieve of the deleted key ([KV](../modes/kvssd.md)) |
 | `aer-probe.c` | `[CONTROLLER]`, default `/dev/nvme0` | That crossing the temperature threshold completes an Asynchronous Event Request, and that the event is re-armed after the log is read |
-| `zone-aen-probe.c` | `[CONTROLLER] [NAMESPACE]`, defaults `/dev/nvme0` `/dev/nvme0n1` | That a zone taken read only raises the Zone Descriptor Changed notice ([ZNS](../modes/zns.md)) |
+| `zone-aen-probe.c` | `[CONTROLLER] [NAMESPACE]`, defaults `/dev/nvme0` `/dev/nvme0n1` | That a zone taken read only raises the Zone Descriptor Changed notice; needs a ZNS device with `err_write_fail_ppm` set ([ZNS](../modes/zns.md)) |
 | `fdp-test-nvme-admin.sh` | none; uses `/dev/nvme0`, `/dev/nvme0n1` and `/dev/ng0n1` | The FDP admin commands of nvme-cli against the configuration `run-blackbox-fdp.sh` creates (4 handles, 1 reclaim group); written for a Linux 6.12 guest |
 
 ## Host tuning helpers
@@ -134,7 +143,7 @@ Copy these into the guest and run them there. The C programs build with
 | Script | What it does |
 | --- | --- |
 | `ftk/qmp-vcpu-pin -s SOCKET CPU...` | Pins each vCPU thread to a host CPU with `taskset`, using QMP `query-cpus-fast` on `SOCKET`; vCPU i goes to the i-th CPU in the list, wrapping around. It imports `ftk/qmp.py`. Run it with `sudo` when QEMU runs as root. A Unix socket path longer than about 107 bytes fails with `AF_UNIX path too long`. |
-| `pin.sh` | Runs `ftk/qmp-vcpu-pin -s ./qmp-sock` with CPUs 0 to N, where N is the number of host CPUs (one more than the last CPU number), then pins the main thread of the newest process whose command line contains `qemu` to CPUs 1 to N. It does not pin FEMU's poller or FTL threads. Prefer the steps in [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
+| `pin.sh` | Runs `ftk/qmp-vcpu-pin -s ./qmp-sock` with CPUs 0 to N, where N is the number of host CPUs (one more than the last CPU number), then pins the main thread of the process with the highest PID whose command line contains `qemu` to CPUs 1 to N. It does not pin FEMU's poller or FTL threads. Prefer the steps in [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
 | `set_cpu_perf_mode.sh` | Sets every CPU's cpufreq scaling policy to `performance` through sysfs. Run it as root. |
 
 ## Documentation tooling
@@ -144,7 +153,7 @@ explains each.
 
 | Script | Arguments |
 | --- | --- |
-| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md`, `runtime-properties.md` and `log-pages-and-counters.md` from the binary; `--check` compares instead of writing |
+| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md` and `runtime-properties.md` from the binary; `--check` compares instead of writing (`--qemu` is still required) |
 | `gen-mode-table.py` | rewrites the mode tables from `docs/modes.py`; `--check` compares and checks `modes.py` against the code |
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |
 | `check-doc-examples.py` | `--lint`, `--list`, `--self-test`, `--qemu BINARY`, `--qos-test BINARY`, `--only NAME`, `--timeout SEC`, `[PATH...]`; checks every code block's tag and runs the tagged examples |
@@ -154,7 +163,8 @@ explains each.
 Guest code for `femu-cxl-ssd,cca=on`. `make -C hw/femu/tools/cca` in the
 guest builds `libcca.a`, the `ccactl` command and the `cca-test` self-test.
 `run-guest-tests.sh [-d MEMDEV] [-x DAX] [-o LOG] [CASE...]` builds them and
-runs the self-test as root, logging to `cca-guest-<date>.log` by default.
+runs the self-test as root, logging to `cca-guest-YYYYMMDD-HHMMSS.log` by
+default.
 See [the caching API guide](../features/cxl-cca.md) and the
 [tool README](../../tools/cca/README.md).
 
@@ -172,12 +182,12 @@ binary, or a `u14s.qcow2` image.
 | `valgrind-run.sh` | Start the stock `nvme` device under valgrind, with properties that no longer exist |
 | `aff.sh PID` | Pin 20 consecutive thread IDs starting at `PID` to CPUs 5 to 24 |
 | `getaff.sh` | Print the CPU affinity of every thread of every `qemu` process |
-| `pre.sh` | Format `/dev/nvme0n1` with ext4 and mount it for one user. **Destroys data** |
+| `pre.sh` | Turn off address space randomization, format `/dev/nvme0n1` with ext4 and mount it for one lab user. **Destroys data** |
 | `pre-all.sh` | Run `pre.sh` and network setup over SSH on three named lab hosts |
 | `tuning.sh` | Stop a list of services on one lab machine |
 
-One more NoSSD launcher and its benchmark harness under `hw/femu/scripts/`
-have their own README and are not covered here.
+One more NoSSD launcher, and a benchmark harness in a subdirectory of
+`hw/femu/scripts/` with its own README, are not covered here.
 
 ## Related pages
 

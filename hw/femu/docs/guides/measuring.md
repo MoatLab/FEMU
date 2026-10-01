@@ -2,8 +2,10 @@
 
 How to read FEMU's counters, measure latency and throughput from the guest,
 and get numbers that repeat from run to run. Commands in `sh` blocks run
-inside the guest unless they say otherwise; from the host, prefix them with
-`./run-guest-ssh.sh` as in the [quick start](../getting-started/quick-start.md).
+inside the guest unless they say otherwise. From the host, prefix a single
+command with `./run-guest-ssh.sh` as in the
+[quick start](../getting-started/quick-start.md); run multi-line blocks in a
+shell inside the guest (`./run-guest-ssh.sh` with no arguments).
 
 Before you measure anything, tune the host as in
 [performance tuning](performance-tuning.md). Most surprising numbers come
@@ -36,7 +38,8 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 FEMU computes the WAF as
 `(pages programmed + pages GC moved) x 1000 / pages the host wrote`. The
 counters are summed over every BlackBox, CSD and KV namespace of the
-controller, and they count from the moment QEMU started the device. The WAF
+controller, and they count from the moment QEMU started the device (or
+from when namespace management created the namespace). The WAF
 in the log is therefore the WAF since start, not the WAF of your last run.
 To measure one run, read the counters before and after it and use the
 differences:
@@ -77,13 +80,15 @@ FEMU fills these SMART fields:
   host moved, rounded up.
 - `host_read_commands`, `host_write_commands`.
 - `percentage_used`: wear of the most worn namespace, from erase counts and
-  `pe_cycles_rated`.
+  `pe_cycles_rated` (or the rating of `nand_cell_type`); 0 when neither is
+  set.
 - `available_spare`: the worst namespace, from `nand_bad_blocks`.
 - `media_errors`, `num_err_log_entries`, `temperature` (the `temperature`
   property), power-on hours and unsafe shutdowns.
 
 With FDP, the endurance group statistics give host and media bytes written.
-Their ratio is the WAF over the FDP namespace:
+Their ratio is the WAF over the endurance group, every FDP namespace of the
+subsystem:
 
 ```sh
 sudo nvme fdp stats /dev/nvme0 -e 1
@@ -105,8 +110,9 @@ scripts/qmp/qom-get /machine/peripheral/cxlssd.media-full
 
 `cxlssd` is the `id=` that `run-cxlssd.sh` gives the device.
 
-- `stats-reset` clears the cache and prefetch event counters and copies
-  them to the `last-*` properties first. It does not clear the media
+- `stats-reset` clears the cache, prefetch and caching API (`cca-*`) event
+  counters. It copies the cache and prefetch counters to the `last-*`
+  properties first. It does not clear the media
   counters (`media-reads`, `media-writes`, `media-time-ns`) or the `der-*`
   counters, so measure those as differences between two reads.
 - `media-full` must stay 0. A non-zero value means some accesses found no
@@ -202,12 +208,15 @@ sudo fio --name=fdp --filename=/dev/ng0n1 --ioengine=io_uring_cmd --cmd_type=nvm
 1. **Fix the host.** Pin vCPUs, pollers and the FTL thread to their own
    cores, set the CPU frequency policy to performance, and keep other work
    off those cores ([performance tuning](performance-tuning.md)).
-2. **Record the setup.** The FEMU commit, the `-device` line (most launchers
-   print it), the guest kernel and the fio job file. A number without these
+2. **Record the setup.** The FEMU commit, the `-device` line
+   (`run-blackbox.sh`, `run-blackbox-fdp.sh` and `run-csd.sh` print it;
+   `DRY_RUN=1 ../femu-scripts/run-cxlssd.sh` prints the CXL command), the guest kernel and the fio job file. A number without these
    cannot be compared.
 3. **Start from a known state.** Restart QEMU between configurations. The
-   device memory and every counter start from zero only when QEMU starts; a
-   guest reboot keeps both. Then precondition: fill the range you will read,
+   device memory and every counter start from zero when QEMU starts; a
+   guest reboot or controller reset keeps both. A namespace created with
+   namespace management starts its counters at zero, and deleting one
+   removes its counts from C0h. Then precondition: fill the range you will read,
    and for steady-state write numbers, overwrite at random until the WAF
    stops changing.
 4. **Measure intervals, not totals.** Read C0h, SMART or the QOM counters
@@ -218,8 +227,11 @@ sudo fio --name=fdp --filename=/dev/ng0n1 --ioengine=io_uring_cmd --cmd_type=nvm
 6. **Check FEMU kept up.** On a BlackBox controller, vendor command 0xEF
    with CDW10 5 prints to QEMU's console how many completions were posted 20
    us or more after they were due, out of all completions, and resets both
-   counts. `run-blackbox.sh` copies the console to `build-femu/log`. Reset
-   the counts before a run, read them after:
+   counts. `run-blackbox.sh` copies the console to `build-femu/log`. Its
+   standard output goes through a pipe there, so the line can appear only
+   later; put `stdbuf -oL` in front of `./qemu-system-x86_64` on the
+   launcher's `sudo` line to see it at once. Reset the counts before a run,
+   read them after:
 
    ```sh
    sudo nvme admin-passthru /dev/nvme0 --opcode=0xef --cdw10=5

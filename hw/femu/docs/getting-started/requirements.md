@@ -106,7 +106,7 @@ threads. 8 host cores is a comfortable minimum.
 | BlackBox SSD (BBSSD) | 1 | any with NVMe | |
 | OpenChannel SSD 1.2 / 2.0 | 0 | 4.16 to 5.14 (2.0 needs 4.17 or newer) | LightNVM was removed in Linux 5.15. On newer kernels use SPDK. |
 | Zoned Namespace (ZNS) | 3 | 5.9 or newer, `CONFIG_BLK_DEV_ZONED=y` | |
-| Key-value (KV) | 5 | 6.0 or newer | No block device. The namespace appears as the generic character device `/dev/ngXnY`. Older kernels do not attach the namespace at all. |
+| Key-value (KV) | 5 | 6.0 or newer | No block device. The namespace appears as the generic character device `/dev/ngXnY`. Linux 5.9 to 5.19 do not attach the namespace at all. |
 | Computational storage (CSD) | 4 | any with NVMe | Guest tools in `hw/femu/tests/csd/`. |
 | Flexible Data Placement (FDP) | 1, with `femu-subsys,fdp=on` | any with NVMe | Use passthrough commands or io_uring to send placement hints. |
 | CXL SSD (`femu-cxl-ssd`) | not a `femu_mode` | CXL region support: `CONFIG_CXL_BUS`, `CXL_PCI`, `CXL_ACPI`, `CXL_MEM`, `CXL_PORT`, `CXL_REGION`, `DEV_DAX`, `DEV_DAX_KMEM` | Needs `cxl-cli` and `daxctl` in the guest. |

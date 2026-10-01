@@ -8,16 +8,18 @@ host memory a device takes. To report a vulnerability, follow
 ## Security model
 
 FEMU runs inside the QEMU process on the host. Everything a FEMU device
-does, it does with QEMU's privileges. The `run-*.sh` launchers start QEMU
-with `sudo`, so by default that means root.
+does, it does with QEMU's privileges. The NVMe `run-*.sh` launchers start
+QEMU with `sudo`, so by default that means root; `run-cxlssd.sh` runs QEMU
+as you.
 
 Treat the guest as trusted unless you have turned off every feature below.
 For a guest you do not trust:
 
 - Run QEMU as a normal user in the `kvm` group, not with `sudo`. FEMU then
   cannot pin the device memory unless you raise the memory lock limit
-  ([requirements](../getting-started/requirements.md#memory)), and it starts
-  anyway with a warning.
+  ([requirements](../getting-started/requirements.md#memory)). It starts
+  anyway and prints `[FEMU] Err: cannot pin the N MiB memory backend`,
+  which is a warning, not a failure.
 - Do not use CSD mode with `csd_program_dir`.
 - Keep `lsa-control` off on `femu-cxl-ssd`.
 
@@ -33,9 +35,9 @@ FEMU limits which files the guest can name:
 
 - With `csd_program_dir` unset (the default, and what `run-csd.sh` does),
   only the built-in program type loads.
-- With it set, a name must be a file in that directory. FEMU refuses a name
-  with `/`, `.` or `..`, and refuses a name whose path leaves the directory
-  after symbolic links are resolved.
+- With it set, a name must be a file in that directory. FEMU refuses an
+  empty name, a name containing `/`, the names `.` and `..`, and a name
+  whose path leaves the directory after symbolic links are resolved.
 
 This keeps the guest away from the rest of the host file system. It does
 not make the programs in the directory safe: any shared object there runs
@@ -56,11 +58,13 @@ With it on, the guest can:
 - write the host's `trace` and `tracing_on` files in `tracefs-dir`, which
   clears the host trace buffer and turns host tracing on or off, when
   `tracefs-dir` is set;
-- flush and reconfigure the device cache.
+- flush and reconfigure the device cache, reset the statistics, and set or
+  remove a direct-mapping ratio.
 
 Each file is capped at `log-limit` (64 MiB by default) and FEMU reuses a
-fixed set of 64 I/O log names, so a guest cannot fill the disk through
-these files without limit.
+fixed set of 64 I/O log names. With the statistics and mapping dump files,
+a guest can therefore make FEMU write about 66 times `log-limit` (about
+4.1 GiB with the default) in `log-dir`, and no more.
 
 `lsa-control` is off by default on the device. `run-cxlssd.sh` turns it on,
 because Cylon's scripts use it. Turn it off for a guest you do not trust:
@@ -79,9 +83,11 @@ These are chosen on the host, not by the guest:
 
 - `pel_file` keeps the Persistent Event Log in a host file that QEMU
   creates if it is missing.
-- `FEMU_DUMP_LPN` and `FEMU_EXP_LOG` print guest data (page contents and
-  traced writes) to QEMU's standard error, which the launchers copy into
-  their log file. Leave them unset when the guest's data is private.
+- `FEMU_DUMP_LPN` (BlackBox) hex-dumps the contents of one logical page to
+  QEMU's standard error on every read, which `run-blackbox.sh` copies into
+  its log file. `FEMU_EXP_LOG` traces only the addresses of pages that
+  contain the `FEMU_SECRET` marker. Leave `FEMU_DUMP_LPN` unset when the
+  guest's data is private.
 
 ## Migration and snapshots
 
@@ -102,8 +108,10 @@ your command line.
 Device data lives only in host memory:
 
 - A guest reboot or a controller reset keeps the data.
-- QEMU exiting, for any reason, loses it. FEMU never writes the namespace to
-  a file, and there is no option to do so.
+- QEMU exiting, for any reason, loses it. FEMU never writes an NVMe
+  namespace to a file, and there is no option to do so. (`femu-cxl-ssd`
+  keeps its data in the memory backend you give it; a file-backed
+  `memory-backend-file` leaves the bytes in that file.)
 - A snapshot of the guest's boot disk (for example with `qemu-img`) does not
   include the FEMU device.
 
@@ -138,9 +146,10 @@ The message names the property, for example:
 qemu-system-x86_64: -device femu,devsz_mb=64,femu_mode=7: femu_mode must be 0 (OpenChannel), 1 (black-box), 2 (no-SSD), 3 (zoned), 4 (computational storage) or 5 (key-value)
 ```
 
-[CONFIGURATION-CHANGES.md](../CONFIGURATION-CHANGES.md) lists the older
-refusals and the changes that move numbers without stopping a run. Each mode
-guide lists its own refusals under "Limits and refusals".
+[CONFIGURATION-CHANGES.md](../CONFIGURATION-CHANGES.md) lists these and
+other refusals, and the changes that move numbers without stopping a run.
+Most mode guides list their own refusals under "Limits and refusals"; the
+CXL SSD guide has them under "Limits".
 
 ### Properties that are accepted but do nothing
 
@@ -152,10 +161,10 @@ nothing the guest can observe:
 | `serial` | Identify Controller reports a serial number FEMU generates |
 | `ms` | the metadata size comes from `meta` |
 | `dlfeat` | Identify Namespace always reports 0x9 |
-| `ms_max` (OCSSD 2.0) | the controller reports a single LBA format |
+| `ms_max` (OCSSD 2.0) | the controller reports a single LBA format (NLBAF 0) |
 | `tplpbsy`, `tplrbsy`, `trcbsy` | programs and reads are issued one plane at a time, and the cache read model is not enabled |
 | `nr_thread`, `time_slice`, `context_switch_time` (CSD) | accepted for CEMU configurations; `nr_thread` must still be non-zero |
-| `intc`, `intc_thresh`, `intc_time` | reported in the Interrupt Coalescing features; interrupts are not coalesced |
+| `intc`, `intc_thresh`, `intc_time` | `intc_thresh` and `intc_time` are reported in Interrupt Coalescing (feature 08h) and `intc` (0 or 1) in Interrupt Vector Configuration (09h); interrupts are not coalesced |
 
 The [property reference](../reference/properties.md) says this in each
 description, and `-device femu,help` prints the same text.
@@ -180,10 +189,11 @@ for:
 - **QEMU itself**: the requirements page budgets about 1 GiB.
 
 The [requirements page](../getting-started/requirements.md#memory) gives
-the totals for each launcher. If the host cannot allocate the backend, QEMU
-aborts at start with `failed to allocate N bytes`.
+the totals for each launcher. If the allocation is more than the kernel
+will commit, QEMU aborts at start with `failed to allocate N bytes`.
 
-A BlackBox, CSD or KV namespace can address at most 2^31 - 1 sectors, just
+In BlackBox, CSD and KV mode the NAND geometry as a whole (every namespace
+plus spare space) may hold at most 2^31 - 1 sectors of `secsz` bytes, just
 under 1 TiB with the default 512-byte sectors.
 
 ### Hugepages
@@ -198,7 +208,8 @@ preallocated hugetlb memory backend
 
 ### CPU
 
-Each `femu-poller` thread and the `FEMU-FTL-Thread` spin on a host core
+Each `femu-poller` thread, and the `FEMU-FTL-Thread` of a controller with a
+BlackBox, ZNS or CSD namespace, spin on a host core
 while the guest has the controller enabled. Plan one core for each of them
 on top of the guest's vCPUs
 ([performance tuning](../guides/performance-tuning.md#threads-and-cores)).

@@ -157,7 +157,7 @@ the copies in `build-femu/`, including any run script you edited there.
 | `ERROR: python venv creation failed` | Debian and Ubuntu ship `venv` in a separate package | `sudo apt install python3-venv` |
 | `ERROR: Cannot use 'python3', Python >= 3.9 is required.` | Python is older than 3.9 (Ubuntu 20.04) | Use Ubuntu 22.04 or newer |
 | `Dependency "glib-2.0" not found` or a version below 2.66 | GLib is missing or too old | `sudo apt install libglib2.0-dev`; on Ubuntu 20.04, upgrade the distribution |
-| Errors around `nfs_pread_async` | The libnfs 6 API changed | `femu-compile.sh` passes `--disable-libnfs`. Use it, or pass the flag yourself. |
+| Errors around `nfs_pread_async` | Older FEMU trees used libnfs 6, whose API changed; the current QEMU base ignores libnfs 6 | Build current `master`. `femu-compile.sh` also passes `--disable-libnfs`. |
 | A meson subproject fails to download | No network during `configure` | Build once with network access |
 | `pkgdep: unsupported system type` | Not Debian or Ubuntu | Install the equivalent packages by hand |
 | A warning stops the build (`-Werror`) | A newer compiler warns where QEMU 10.1's did not | Add `--disable-werror` to the `configure` line, and please report the warning |
