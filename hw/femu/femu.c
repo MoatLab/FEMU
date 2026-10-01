@@ -7,6 +7,7 @@
 
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
+#include "./femu-props.h"
 
 #define NVME_SPEC_VER (0x00010400)
 
@@ -276,6 +277,7 @@ static void nvme_subsys_class_init(ObjectClass *oc, const void *data)
     dc->unrealize = nvme_subsys_unrealize;
     dc->desc = "FEMU NVMe Subsystem (FDP)";
     device_class_set_props(dc, nvme_subsystem_props);
+    femu_subsys_describe_props(oc);
 }
 
 static const TypeInfo nvme_subsys_info = {
@@ -3014,6 +3016,7 @@ static void femu_instance_init(Object *obj)
 {
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
+    femu_ctrl_describe_runtime(obj);
     if (qtest_enabled()) {
         object_property_add_bool(obj, "x-oc12-clock", NULL,
                                  femu_test_oc12_clock);
@@ -3037,12 +3040,7 @@ static void femu_class_init(ObjectClass *oc, const void *data)
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "FEMU Non-Volatile Memory Express";
     device_class_set_props(dc, femu_props);
-    object_class_property_set_description(oc, "oc12_channel_timing",
-        "Account OC 1.2 channel transfers per lsecs_per_pg sectors; "
-        "ch_xfer_lat sets ns per NAND page, zero uses flash_type timing");
-    object_class_property_set_description(oc, "streams",
-        "Enable Streams; bbssd separates streams per FTL page (SWS), "
-        "sub-SWS writes share that page and line; NoSSD has no placement effect");
+    femu_ctrl_describe_props(oc);
     dc->vmsd = &femu_vmstate;
 }
 

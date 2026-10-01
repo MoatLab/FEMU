@@ -2,6 +2,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
               if_true: files('dma.c', 'intr.c', 'nvme-util.c',
                              'nvme-admin.c', 'nvme-io.c', 'nvme-pi.c',
                              'nvme-pel.c', 'nvme-streams.c', 'femu.c',
+                             'femu-props.c',
                              'nossd/nop.c', 'nand/nand.c',
                              'nand/nand-media.c',
                              'timing-model/timing.c', 'ocssd/oc12.c',
@@ -20,6 +21,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
 system_ss.add(when: 'CONFIG_FEMU_CSD_UBPF', if_true: femu_csd_ubpf)
 system_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
               if_true: files('cxlssd/cxlssd.c', 'cxlssd/cache.c',
-                             'cxlssd/cca.c', 'cxlssd/cca-ring.c'))
+                             'cxlssd/cca.c', 'cxlssd/cca-ring.c',
+                             'cxlssd/props.c'))
 specific_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
                 if_true: files('cxlssd/qemu-adapter.c'))

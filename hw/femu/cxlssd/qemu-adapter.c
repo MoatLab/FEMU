@@ -14,6 +14,7 @@
 #include "../bbssd/ftl.h"
 #include "cache.h"
 #include "qemu-adapter.h"
+#include "../femu-props.h"
 
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
@@ -1590,6 +1591,7 @@ static void cxl_init(Object *obj)
     object_property_add_uint64_ptr(obj, "cca-pinned-set-misses",
                                    &s->cca.pinned_set_misses,
                                    OBJ_PROP_FLAG_READ);
+    femu_cxl_describe_runtime(obj);
 }
 
 static const Property cxl_props[] = {
@@ -1653,6 +1655,7 @@ static void cxl_class_init(ObjectClass *oc, const void *data)
     dc->desc = "FEMU CXL SSD";
     dc->vmsd = &cxl_vmstate;
     device_class_set_props(dc, cxl_props);
+    femu_cxl_describe_props(oc);
     parent_config_write = pc->config_write;
     pc->config_write = adapter_config_write;
     resettable_class_set_parent_phases(rc, NULL, adapter_reset_hold, NULL,
