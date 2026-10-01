@@ -143,7 +143,7 @@ Copy these into the guest and run them there. The C programs build with
 | Script | What it does |
 | --- | --- |
 | `ftk/qmp-vcpu-pin -s SOCKET CPU...` | Pins each vCPU thread to a host CPU with `taskset`, using QMP `query-cpus-fast` on `SOCKET`; vCPU i goes to the i-th CPU in the list, wrapping around. It imports `ftk/qmp.py`. Run it with `sudo` when QEMU runs as root. A Unix socket path longer than about 107 bytes fails with `AF_UNIX path too long`. |
-| `pin.sh` | Runs `ftk/qmp-vcpu-pin -s ./qmp-sock` with CPUs 0 to N, where N is the number of host CPUs (one more than the last CPU number), then pins the main thread of the process with the highest PID whose command line contains `qemu` to CPUs 1 to N. It does not pin FEMU's poller or FTL threads. Prefer the steps in [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
+| `pin.sh [FIRST_CPU]` | Pins each vCPU thread, then each `femu-poller` and `FEMU-FTL-Thread`, to its own host CPU, starting at `FIRST_CPU` (default 0), and moves the other QEMU threads to the CPUs after those. It finds the threads by name, so QEMU must run with `-name NAME,debug-threads=on` (the launchers pass it), and it finds QEMU with `pgrep -x qemu-system-x86`; set `QEMU_PID` when several run. Run it after the guest has booted: the pollers start when the guest enables the controller. It stops if the host has too few CPUs. See [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
 | `set_cpu_perf_mode.sh` | Sets every CPU's cpufreq scaling policy to `performance` through sysfs. Run it as root. |
 
 ## Documentation tooling

@@ -40,7 +40,7 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",zns_flash_type=${FLASH_TYPE}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=3"
 
 sudo ./qemu-system-x86_64 \
-    -name "FEMU-ZNSSD-VM" \
+    -name "FEMU-ZNSSD-VM",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp 4 \

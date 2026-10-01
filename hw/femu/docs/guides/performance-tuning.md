@@ -21,10 +21,10 @@ These threads run inside QEMU:
 | `femu-cxl-cca` | one per `femu-cxl-ssd` with `cca=on` | at start | only while it serves a command |
 
 Linux shows these names only when QEMU runs with `-name NAME,debug-threads=on`.
-The launchers pass `-name` without it, so every thread is called
-`qemu-system-x86`. To see the names, add `,debug-threads=on` to the `-name`
-option in the launcher you use, for example
-`-name "FEMU-BBSSD-VM",debug-threads=on` in `run-blackbox.sh`.
+The `run-*.sh` launchers pass it, for example
+`-name "FEMU-BBSSD-VM",debug-threads=on` in `run-blackbox.sh`. Without it,
+every thread is called `qemu-system-x86`, so add it to any QEMU command line
+of your own.
 
 Plan one host core for every poller and FTL thread, on top of one per vCPU.
 `run-blackbox.sh` (4 vCPUs, one poller, one FTL thread) needs at least 6
@@ -69,7 +69,7 @@ What you trade:
 
 Unpinned, the scheduler moves vCPUs and pollers between cores and lets them
 share a core with other work. Pin them to separate cores. With
-`debug-threads=on` added to the launcher (see above), boot the guest, then
+`debug-threads=on` on the command line (see above), boot the guest, then
 on the host:
 
 ```sh
@@ -104,8 +104,18 @@ affinity of the thread that creates it. Choose cores that are
 not hardware-thread siblings of each other (`lscpu -e` shows the core of
 each CPU), so that two spinning threads do not share one physical core.
 
-`pin.sh` pins only the vCPUs and the main thread, not the pollers or the
-FTL thread ([scripts reference](../reference/scripts.md#host-tuning-helpers)).
+`pin.sh` does all of this in one step. From `build-femu/`, after the guest
+has booted:
+
+```sh
+./pin.sh 4      # vCPUs, then pollers and FTL threads, from host CPU 4
+```
+
+It gives each vCPU, `femu-poller` and `FEMU-FTL-Thread` a CPU of its own,
+starting at the CPU you name (default 0), and moves the other QEMU threads
+to the CPUs after those. It finds the threads by name, so it stops with an
+error when QEMU runs without `debug-threads=on`. Set `QEMU_PID` when more
+than one QEMU runs ([scripts reference](../reference/scripts.md#host-tuning-helpers)).
 
 ## Hugepages
 

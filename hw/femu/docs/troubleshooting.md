@@ -339,8 +339,8 @@ queue by default; `multipoller_enabled=1` starts one per queue, or one per
 
 **Fix:** follow [performance tuning](guides/performance-tuning.md): pin
 the vCPUs, the pollers and the FTL thread, set the CPU frequency policy to
-performance, and keep the threads on one NUMA node. `pin.sh` pins only the
-vCPUs and the main thread.
+performance, and keep the threads on one NUMA node. `pin.sh` pins the vCPUs,
+the pollers and the FTL threads in one step.
 
 Related issues: #69, #77, #101.
 

@@ -20,7 +20,7 @@ if [[ ! -e "$OSIMGF" ]]; then
 fi
 
 sudo ./qemu-system-x86_64 \
-    -name "FEMU-NoSSD-VM" \
+    -name "FEMU-NoSSD-VM",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp 4 \

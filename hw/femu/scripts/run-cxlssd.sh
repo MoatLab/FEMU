@@ -97,6 +97,7 @@ if [[ -n ${TRACEFS_DIR:-} ]]; then
 fi
 
 args=(
+    -name FEMU-CXLSSD-VM,debug-threads=on
     -machine q35,cxl=on,smm=off -accel "${ACCEL:-kvm}"
     -cpu "${CPU:-host}" -smp "${CPUS:-4}" -m "${RAM:-4G}"
     -object "$CXL_BACKEND,id=cxlmem,size=$CXL_SIZE"

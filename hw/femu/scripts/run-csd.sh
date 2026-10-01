@@ -77,7 +77,7 @@ if [[ ! -e "$OSIMGF" ]]; then
 fi
 
 sudo ./qemu-system-x86_64 \
-    -name "FEMU-CSD-VM" \
+    -name "FEMU-CSD-VM",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp 4 \
