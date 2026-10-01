@@ -895,11 +895,12 @@ Runtime write errors are reported to stderr; subsequent events and lifecycle
 saves retry. Use one file per device and only one QEMU writer per file; the file
 is not a shared storage or migration mechanism.
 
-Every property FEMU accepts is listed in
-[`hw/femu/docs/properties.md`](hw/femu/docs/properties.md), with its type,
-default and the line of source it comes from. That file is generated from the
-property tables, so it covers all 135 of them rather than the handful this
-README walks through below.
+Device properties are listed in
+[`hw/femu/docs/properties.md`](hw/femu/docs/properties.md), with their type and
+default. `femu` defines 145 properties, `femu-subsys` 8 and `femu-cxl-ssd` 24;
+that file is maintained by hand and does not yet list 14 of the `femu` ones.
+`./qemu-system-x86_64 -device femu,help` prints every `femu` property the binary
+accepts.
 
 ### Config Files
 

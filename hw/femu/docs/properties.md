@@ -1,14 +1,16 @@
 <!--
-Generated from the DEFINE_PROP_ tables in hw/femu/femu.c and the other mode
-sources. Do not edit by hand: a property added to the source will not appear
-here until this is regenerated, and an edit here will be overwritten.
+Maintained by hand. No generator is committed, so a property added to the
+DEFINE_PROP_ tables in hw/femu/femu.c or hw/femu/cxlssd/qemu-adapter.c does
+not appear here until someone adds it.
 -->
 
 # Configuration reference
 
-Every property FEMU accepts, read from the source so this page cannot drift from the emulator it documents.
+Properties of the `femu` and `femu-subsys` devices, and of `femu-cxl-ssd` at the end.
 
-There are 136 of them. Most have a default that leaves the feature off, so a working configuration names only the handful it needs.
+`femu` defines 145 properties, `femu-subsys` 8 and `femu-cxl-ssd` 24. This page does not yet list these `femu` properties: `bbssd_ns_limit`, `learly_reset`, `ns_mgmt` (the `femu-subsys` property of the same name is listed), `oc12_channel_timing`, `pel_file`, `pe_suspend`, `pi`, `power_loss`, `streams`, `streams.max`, `tsusp_ns`, `zns_num_wc`, `zns_pe_suspend` and `zns_tsusp_ns`. `./qemu-system-x86_64 -device femu,help` prints every `femu` property the binary accepts.
+
+Most have a default that leaves the feature off, so a working configuration names only the handful it needs.
 
 ## Device and capacity
 
@@ -230,7 +232,7 @@ supports, so this page can be discovered rather than assumed.
 
 ---
 
-82 of 137 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
+Rows marked _undocumented_ list only the type and default; filling them in is tracked as documentation work.
 
 ## CXL SSD
 
