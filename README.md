@@ -226,7 +226,7 @@ boot a guest. The badge at the top of this README shows the build status.
    ./femu-compile.sh
    ```
 
-   The FEMU binary will be created as: `x86_64-softmmu/qemu-system-x86_64`
+   The FEMU binary will be created as: `build-femu/qemu-system-x86_64`
 
 5. **Verify installation:**
    ```bash
@@ -267,12 +267,14 @@ cd ~/images
 # If the link no longer works, visit http://releases.ubuntu.com to download the correct version of ISO image
 wget http://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso
 
-# Create VM disk image
-qemu-img create -f qcow2 femu.qcow2 80G
+# Create VM disk image. The run scripts look for ~/images/u20s.qcow2,
+# whichever Ubuntu release it holds.
+qemu-img create -f qcow2 u20s.qcow2 80G
 
-# Install OS (requires GUI environment)
+# Install OS (requires GUI environment). qemu-img and qemu-system-x86_64 can
+# come from your distribution or from build-femu/.
 qemu-system-x86_64 -cdrom ubuntu-24.04.3-live-server-amd64.iso \
-    -hda femu.qcow2 -boot d -net nic -net user -m 8192 -localtime -smp 8 -cpu host -enable-kvm
+    -hda u20s.qcow2 -boot d -net nic -net user -m 8192 -rtc base=localtime -smp 8 -cpu host -enable-kvm
 ```
 
 ### 2. Configure VM for Serial Console
