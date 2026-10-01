@@ -99,7 +99,7 @@ The BlackBox side (`bb.c`, `ftl-fdp.c`) adds:
    v
  PH --ns->fdp.phs[]--> RUH --curr_ru--> active RU --wptr--> next page
    |
-   | per 4 KiB page: invalidate the old copy, map LPN -> new page,
+   | per FTL page (secsz * secs_per_pg, 4 KiB by default): invalidate the old copy, map LPN -> new page,
    | RUAMW -= logical blocks written, advance the write pointer,
    | charge a NAND program
    v
@@ -109,12 +109,21 @@ The BlackBox side (`bb.c`, `ftl-fdp.c`) adds:
 
 `ssd_stream_write_lpns()` does this on the FTL thread. Write, Write Zeroes
 without the Deallocate bit, and the destination of Copy all go through it;
-Copy reads its placement fields from the same CDW12 and CDW13 bits. Before
-it places any page it runs foreground GC while the free-unit count is at or
-below the high watermark (see [Garbage collection](#garbage-collection)).
-If a handle has no active unit and none can be taken, or the device runs out
-part way, the command completes with Capacity Exceeded and only the pages
-already placed count.
+Copy reads its placement fields from the same CDW12 and CDW13 bits. Write
+Zeroes parses no placement fields: it is placed by whatever DTYPE and DSPEC
+the request slot last carried, so do not rely on its placement.
+
+The order inside `ssd_stream_write_lpns()` is:
+
+1. If the handle has no active unit (the last one filled and no free unit
+   was left), take a free unit without running GC; if there is none, fail
+   with Capacity Exceeded. A unit that fills on a command's last page
+   therefore makes the next write to that handle fail when the device is
+   full.
+2. Run foreground GC while the free-unit count is at or below the high
+   watermark (see [Garbage collection](#garbage-collection)).
+3. Place the pages. If the device runs out part way, the command completes
+   with Capacity Exceeded and only the pages already placed count.
 
 Writes of different handles never share an RU, but they share the NAND:
 every RU spans all channels, so concurrent handles compete for the same
@@ -150,6 +159,8 @@ identifiers. The poller checks every identifier first and fails the command
 with Invalid Field if one is invalid, so nothing changes. On a bbssd
 namespace `ssd_fdp_update_ruhs()` then, for each handle:
 
+- skips a handle that has no current unit (device full); the command still
+  succeeds;
 - keeps the current unit if nothing was written to it yet;
 - otherwise takes a fresh unit (running one GC pass if none is free) and
   retires the old one as if it had filled, or fails the command with
@@ -186,10 +197,14 @@ the RUAMW of the handle's current unit.
 
 - Background: after every request the FTL thread handles, if a reclaim
   group's free units are at or below
-  `(1 - gc_thres_pcent / 100) * units`, it runs one pass.
+  `(1 - gc_thres_pcent / 100) * units`, it runs one pass. A background pass
+  puts its victim back, whatever the policy, unless the victim is empty or
+  at least 1/8 of its pages are invalid.
 - Foreground: before a placed write, while free units are at or below
   `(1 - gc_thres_pcent_high / 100) * units`, it runs passes until the
   pressure clears or no victim is left. The host write waits for them.
+  Foreground passes, and the pass RUH Update may run, always collect their
+  victim.
 
 ### Victim selection
 
@@ -199,7 +214,7 @@ not apply under FDP and only `greedy` is accepted with it.
 | `gc_strategy` | Policy |
 | --- | --- |
 | 0 (default) | greedy: the unit with the fewest valid pages |
-| 1 | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid fraction and `age` the time since a page in the unit was last invalidated, computed at selection time |
+| 1 | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid pages over the pages written (over the unit's pages until a page is invalidated) and `age` the time since a page in the unit was last invalidated, computed at selection time; a unit never invalidated counts as maximally old |
 | 2 | random among the victims |
 | 4 | per handle: the unit with the fewest valid pages among the per-handle queues of Persistently Isolated handles, falling back to greedy |
 
@@ -226,16 +241,18 @@ A pass copies every valid page of the victim, erases the planes of each LUN
 as one multi-plane erase when `enable_gc_delay` is on (the default), adds the
 copied bytes to MBMW and the erased bytes to MBE, records a controller event
 for the handle, and returns the unit to the free list. If the destination
-runs out of space part way, the victim is put back and the pass fails
-without erasing anything.
+runs out of space part way, the pass stops: blocks already emptied stay
+erased, the block being cleaned and those after it keep their data, and the
+victim goes back on the queue.
 
 ### Deallocate
 
 Dataset Management deallocate on an FDP namespace unmaps the given ranges;
 the pages become invalid and GC reclaims their units later. Write Zeroes
 with the Deallocate bit does the same. `fdp_trim_erase_all` (test only)
-instead resets every unit, handle and mapping on any deallocate, ignoring
-the ranges.
+instead resets every unit, handle and mapping on any Dataset Management
+deallocate, ignoring the ranges; Write Zeroes with Deallocate still unmaps
+only its range.
 
 ## Log pages and features
 
@@ -277,8 +294,8 @@ endurance-group totals are in 22h.
 
 | Counter | Grows by | Where |
 | --- | --- | --- |
-| HBMW (host bytes with metadata written) | bytes the host write actually programmed | `nvme_do_write_fdp()` |
-| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC | `nvme_do_write_fdp()`, `do_gc_fdp_style()` |
+| HBMW (host bytes with metadata written) | bytes a Write or Copy actually programmed; Write Zeroes adds nothing | `nvme_do_write_fdp()` |
+| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC; Write Zeroes adds nothing | `nvme_do_write_fdp()`, `do_gc_fdp_style()` |
 | MBE (media bytes erased) | bytes of every block erased by GC | `do_gc_fdp_style()` |
 
 The ratio MBMW / HBMW is the write amplification of the endurance group.
@@ -295,15 +312,16 @@ Each event carries the Timestamp feature's current value.
 | Type | Ring | Generated when |
 | --- | --- | --- |
 | 0h Reclaim Unit Not Fully Written | host | RUH Update moves a handle off a unit that still had room |
-| 3h Invalid Placement Identifier | host | a write has DTYPE 2 and a DSPEC that is not a valid PID; checked against the event filter of placement handle 0 |
+| 3h Invalid Placement Identifier | host | a placed write (Write, Copy, Write Zeroes) on a bbssd namespace has DTYPE 2 and a DSPEC that is not a valid PID; checked against the event filter of placement handle 0; other modes never raise it |
 | 81h (implicit reclaim unit change) | controller | GC frees a unit of the handle |
 | 1h, 2h, 80h | | accepted by the event filter, never generated |
 
 Get and Set Features 1Eh (FDP Events) read and change the enabled event
 types of one placement handle, named in CDW11; an unsupported type in a Set
 fails with Invalid Field. Get Features 1Dh (FDP Mode) for endurance group 1
-reports whether FDP is on; Set Features 1Dh always fails with Command
-Sequence Error, since the mode may only change while the endurance group has
+reports whether FDP is on. Set Features 1Dh fails with Invalid Field for an
+endurance group other than 1 or without a subsystem, and otherwise with
+Command Sequence Error, since the mode may only change while the endurance group has
 no namespaces and FEMU builds the namespace at realize.
 
 ## Threads, locks and where latency is charged
@@ -362,13 +380,13 @@ last:
 | Logs 20h to 23h | configuration, handle usage, endurance-group byte counters, events |
 | Vendor log C0h | write amplification and page counts of the FTL; placed writes count as host and programmed pages, relocations as GC pages ([log pages and counters](../reference/log-pages-and-counters.md#vendor-log-page-c0h)) |
 | SMART / Health (02h) | host data units and commands, as for every mode |
-| `FEMU_FDP_DEBUG` in QEMU's environment | traces of RU rotation and GC passes on stdout |
+| `FEMU_FDP_DEBUG` in QEMU's environment | traces of RU rotation and GC passes on stderr |
 
 ## Validation
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-write-zeroes`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `ns-mgmt-unavailable-fdp` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-write-zeroes`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
@@ -380,14 +398,17 @@ last:
 - An RU is exactly one line; RUNS cannot be smaller or larger than a
   superblock.
 - Only bbssd places data. A NoSSD, ZNS or OCSSD controller in an FDP
-  subsystem answers the log pages and features, and RUH Update only resets
-  the handle's RUAMW; no data is placed. CSD uses the bbssd path but is not
+  subsystem answers the log pages and features, and RUH Update resets
+  the handle's RUAMW and records event 0h if the unit still had room; no
+  data is placed. CSD uses the bbssd path but is not
   tested with FDP. KV is refused.
 - Page mapping only, no write buffer, no read reclaim or retention model
   under FDP.
 - EARUTR is always 0; there is no active reclaim unit time limit, so event
   1h is never raised.
 - The 128-bit statistics carry only their low 64 bits.
+- Write Zeroes carries no placement fields of its own and adds nothing to
+  HBMW or MBMW.
 - The 21h descriptor is larger than the specification's; see
   [above](#the-21h-descriptor-size).
 - Metadata, Streams and Namespace Management do not combine with FDP.
