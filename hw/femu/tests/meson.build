@@ -21,3 +21,14 @@ foreach test_name, test_src : femu_unit_tests
        timeout: 30,
        suite: ['unit'])
 endforeach
+
+# The property reference is generated from the binary's own help text, so a
+# property without a description, or a reference that no longer matches the
+# binary, fails here as well as in CI.
+if 'qemu-system-x86_64' in emulators
+  test('femu-property-docs', python,
+       args: [files('../scripts/gen-property-docs.py'), '--check',
+              '--qemu', emulators['qemu-system-x86_64']],
+       timeout: 120,
+       suite: ['femu-docs'])
+endif

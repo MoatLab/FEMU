@@ -57,8 +57,13 @@ ifneq ($(HAVE_GLIB),1)
 	@echo "SKIP test-femu-cxl-cache: glib-2.0 not found"
 endif
 
+# Needs a built binary; QEMU names the one to check, build/ by default.
+QEMU ?= $(ROOT)/build/qemu-system-x86_64
+check-docs:
+	python3 ../scripts/gen-property-docs.py --check --qemu $(QEMU)
+
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
 	      test-femu-cxl-cca-ring nand-media.o
 
-.PHONY: check clean
+.PHONY: check check-docs clean

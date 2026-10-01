@@ -97,6 +97,13 @@ jobs:
         done
         echo "✓ FEMU device parameters accessible"
 
+    - name: Check the generated property reference
+      run: |
+        # Fails on a property with no or a placeholder description, and on a
+        # committed hw/femu/docs/reference/*.md that differs from a fresh run.
+        python3 hw/femu/scripts/gen-property-docs.py --check \
+          --qemu build-femu/qemu-system-x86_64
+
     - name: Check FEMU modes
       run: |
         cd build-femu
