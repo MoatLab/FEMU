@@ -91,6 +91,8 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 | **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime | Realistic NAND per value |
 | **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands | Passthrough only |
 
+When `femu_mode` is not set, the device runs in NoSSD mode (2).
+
 Flexible Data Placement is not a separate mode: it is BlackBox with `fdp=on`
 set on the subsystem. See `run-blackbox-fdp.sh`.
 
@@ -535,7 +537,8 @@ plain block mode.
 
 ### Multiple Namespaces
 
-BBSSD and NoSSD can expose more than one namespace. The namespaces share the
+BBSSD, NoSSD, ZNS and KV can expose more than one namespace, and
+`namespace_modes` can give each namespace its own mode. The namespaces share the
 device's capacity, each getting its own slice, so they are independent block
 devices (`/dev/nvme0n1`, `/dev/nvme0n2`, ...) that cannot overwrite each other.
 
@@ -558,10 +561,10 @@ namespace_sizes=       # Optional per-namespace sizes, e.g. "8G,,4G".
 Note the doubled comma in `namespace_sizes`: QEMU treats a comma as an option
 separator, so a comma inside a value has to be escaped by doubling it.
 
-Zoned (ZNSSD), Open-Channel (OCSSD), and CSD modes keep their geometry on the
-controller and support a single namespace; so does FDP, whose reclaim groups are
-shared device-wide. Requesting more than one namespace in those configurations
-is rejected at startup.
+Open-Channel (OCSSD) keeps its geometry on the controller and supports a single
+namespace; so does FDP, whose reclaim groups are shared device-wide. A
+controller can also hold at most one CSD namespace, although its other
+namespaces may use other modes. FEMU refuses to start with more than that.
 
 ### WhiteBox SSD Mode (OCSSD)
 
@@ -1010,10 +1013,10 @@ total_capacity = total_pages × secs_per_pg × secsz
 
 `pls_per_lun` above 1 is addressed: a line spans one block index across every
 channel, LUN and plane, so the planes add capacity and are collected together.
-They share their LUN's timing gate, so they do not yet add parallelism -- the
-media layer has a multi-plane operation but nothing batches a request's pages
-into one. FDP keeps its own reclaim-unit allocator, which still assumes a single
-plane, so that combination is refused at startup.
+Garbage collection erases a line's planes on one LUN in a single multi-plane
+operation. Reads and programs are not batched across planes and share their
+LUN's timing gate, so planes do not add read or program parallelism. FDP places
+its reclaim units across the planes too.
 
 ### Performance Tuning
 
