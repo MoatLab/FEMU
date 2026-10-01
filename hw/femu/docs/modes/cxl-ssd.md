@@ -100,9 +100,10 @@ them yourself. From `build-femu/`:
 <!-- femu-example: cxl-ssd-launch -->
 ```bash
 ../femu-scripts/run-cxlssd.sh \
-    -drive file=$HOME/images/u20s.qcow2,if=virtio \
+    -drive file=$HOME/images/u20s.qcow2,if=none,id=hd0 \
+    -device virtio-blk-pci,drive=hd0,bus=pcie.0 \
     -netdev user,id=net0,hostfwd=tcp::8080-:22 \
-    -device virtio-net-pci,netdev=net0
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
 ```
 
 The script looks for QEMU at `./qemu-system-x86_64`; set `QEMU` to use another
@@ -154,9 +155,10 @@ the remaining properties at their default values:
     -device cxl-rp,id=cxl-rp0,bus=cxl.0,chassis=0,slot=0 \
     -device femu-cxl-ssd,id=cxlssd,bus=cxl-rp0,volatile-memdev=cxlmem,cache-pages=3072,cache-ways=1,cache-policy=fifo,der=off,channels=8,luns-per-channel=8,lsa-control=on \
     -M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M \
-    -drive file=$HOME/images/u20s.qcow2,if=virtio \
+    -drive file=$HOME/images/u20s.qcow2,if=none,id=hd0 \
+    -device virtio-blk-pci,drive=hd0,bus=pcie.0 \
     -netdev user,id=net0,hostfwd=tcp::8080-:22 \
-    -device virtio-net-pci,netdev=net0 \
+    -device virtio-net-pci,netdev=net0,bus=pcie.0 \
     -nographic
 ```
 
@@ -227,9 +229,10 @@ backend size must equal `-m` (4G with the script's default `RAM`):
 ../femu-scripts/run-cxlssd.sh \
     -object memory-backend-ram,id=ram0,size=4G \
     -numa node,nodeid=0,cpus=0-3,memdev=ram0 \
-    -drive file=$HOME/images/u20s.qcow2,if=virtio \
+    -drive file=$HOME/images/u20s.qcow2,if=none,id=hd0 \
+    -device virtio-blk-pci,drive=hd0,bus=pcie.0 \
     -netdev user,id=net0,hostfwd=tcp::8080-:22 \
-    -device virtio-net-pci,netdev=net0
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
 ```
 
 With this the CXL window becomes node 1. FEMU's guest runs wrote and verified

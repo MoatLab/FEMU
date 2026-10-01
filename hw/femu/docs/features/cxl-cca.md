@@ -25,9 +25,10 @@ variable for it, so pass a `-global`:
 <!-- femu-example: cxl-cca-launch -->
 ```bash
 ../femu-scripts/run-cxlssd.sh -global femu-cxl-ssd.cca=on \
-    -drive file=$HOME/images/u20s.qcow2,if=virtio \
+    -drive file=$HOME/images/u20s.qcow2,if=none,id=hd0 \
+    -device virtio-blk-pci,drive=hd0,bus=pcie.0 \
     -netdev user,id=net0,hostfwd=tcp::8080-:22 \
-    -device virtio-net-pci,netdev=net0
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
 ```
 
 On a full command line, add `cca=on` to the device:

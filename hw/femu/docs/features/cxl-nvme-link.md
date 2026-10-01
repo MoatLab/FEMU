@@ -23,9 +23,10 @@ Add a `femu` controller with `femu_mode=1` and `cxl_ssd=<id>` after the
 ```bash
 ../femu-scripts/run-cxlssd.sh \
     -device femu,id=nvme0,bus=pcie.0,femu_mode=1,cxl_ssd=cxlssd \
-    -drive file=$HOME/images/u20s.qcow2,if=virtio \
+    -drive file=$HOME/images/u20s.qcow2,if=none,id=hd0 \
+    -device virtio-blk-pci,drive=hd0,bus=pcie.0 \
     -netdev user,id=net0,hostfwd=tcp::8080-:22 \
-    -device virtio-net-pci,netdev=net0
+    -device virtio-net-pci,netdev=net0,bus=pcie.0
 ```
 
 On a full command line:
