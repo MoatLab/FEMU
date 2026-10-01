@@ -129,8 +129,9 @@ sudo bash femu-test.sh --yes /dev/nvme0n1
 It prints `PASS`, `FAIL` and `SKIP` lines and a summary, and exits non-zero
 when a check failed, so it can gate a script. A read that fails counts as a
 failure, the same as a bad checksum. It refuses a mounted device. A
-key-value namespace has no block node, so it is driven through the
-controller. It makes no timing claims. A BlackBox run prints lines like
+key-value namespace has no block node, so it is driven by passthrough
+through its generic node, `/dev/ngXnY`; name it as `/dev/nvmeXnY` or
+`/dev/ngXnY`. It makes no timing claims. A BlackBox run prints lines like
 these (`N` stands for the counts; `...` for lines left out here).
 `max_block_reads` is the read count of the most-read block since its
 erase:
@@ -160,7 +161,7 @@ Smaller probes, built in the guest with `gcc -O2 -o NAME NAME.c`:
 | --- | --- | --- |
 | `kv-probe.c` | `sudo ./kv-probe /dev/nvme0` | key-value Store, Exist, Retrieve and Delete |
 | `aer-probe.c` | `sudo ./aer-probe /dev/nvme0` | a temperature event completes an Asynchronous Event Request |
-| `zone-aen-probe.c` | `sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1` | Zone Descriptor Changed notices |
+| `zone-aen-probe.c` | `sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1` | Zone Descriptor Changed notices, on a ZNS device with `err_write_fail_ppm` set |
 
 Mode-specific suites:
 

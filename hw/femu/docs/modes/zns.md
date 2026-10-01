@@ -264,10 +264,13 @@ this list. A host that enabled Zone Descriptor Changed notices (bit 27 of
 Asynchronous Event Configuration, Set Features 0Bh) and has an Asynchronous
 Event Request outstanding then gets the notice; without that bit the zone
 is still listed, but no event is raised. The failures come at a fixed count, so a
-run repeats exactly. `hw/femu/scripts/zone-aen-probe.c` checks this path:
+run repeats exactly. `hw/femu/scripts/zone-aen-probe.c` checks this path
+and sets bit 27 itself, since Linux leaves it clear. Add
+`,err_write_fail_ppm=10000` to the device in `run-zns.sh`, copy the probe
+into the guest, and run it on a fresh device; it prints `ZAEN PASS`:
 
 ```sh
-gcc -O2 -o zone-aen-probe femu-scripts/zone-aen-probe.c   # inside the guest
+gcc -O2 -o zone-aen-probe zone-aen-probe.c   # inside the guest
 sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1
 ```
 
