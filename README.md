@@ -470,27 +470,30 @@ was. Note that with a buffer configured a write that is absorbed costs nothing
 and the cost appears later on whichever write evicts it, so per-request latency
 is redistributed rather than reduced.
 
-**Write amplification and wear.** The device reports these in the vendor area of
-the SMART log:
+**Write amplification and wear.** The device reports these in its vendor log
+page C0h (512 bytes, little-endian), not in the SMART log:
 
 | byte | width | meaning |
 |---|---|---|
-| 192 | 4 | write amplification, scaled by 1000 |
-| 200 | 8 | pages the host wrote (the denominator) |
-| 208 | 8 | pages garbage collection relocated |
-| 216 | 8 | user pages programmed into NAND |
-| 224 | 8 | reads taken by the most-read block since its erase |
-| 232 | 8 | lines rewritten because of read stress |
+| 0 | 4 | write amplification, scaled by 1000 |
+| 8 | 8 | pages the host wrote (the denominator) |
+| 16 | 8 | pages garbage collection relocated |
+| 24 | 8 | user pages programmed into NAND |
+| 32 | 8 | reads taken by the most-read block since its erase |
+| 40 | 8 | lines rewritten because of read stress |
+| 48 | 8 | lines rewritten because of retention age |
 
 ```bash
-sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
-sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu8 -j200 -N8   # host pages
+sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -tu4 -j0 -N4   # WAF x1000
+sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -tu8 -j8 -N8   # host pages
 ```
 
 Amplification is `(programmed + relocated) / host`, so a write buffer that
-absorbs repeated writes to the same page shows up as a factor below 1. Bytes 200
-and 216 are equal when no buffer is configured. The read count at 224 is the
-stress a real device watches to decide when data must be rewritten.
+absorbs repeated writes to the same page shows up as a factor below 1. Bytes 8
+and 24 are equal when no buffer is configured. The read count at byte 32 is the
+stress a real device watches to decide when data must be rewritten. The full
+layout, including the write buffer and `mapping=hybrid` merge counters, is in
+[`hw/femu/docs/properties.md`](hw/femu/docs/properties.md#vendor-log-page-c0h).
 
 **Read stress.** Reading a page disturbs the others in its block, so a block read
 many times without being rewritten drifts towards errors. Set
@@ -515,8 +518,9 @@ amplification only 1.542 to 1.628 -- but it also means a workload that never
 writes never refreshes anything, where a real device would do this in the
 background. Model reads-only ageing some other way.
 
-These are summed across the bbssd namespaces of the controller, and are populated
-in FDP mode as well as plain block mode.
+These are summed across the bbssd, CSD and KV namespaces of the controller (the
+most-read block count is the maximum), and are populated in FDP mode as well as
+plain block mode.
 
 **Use Cases:**
 - Commercial SSD simulation research

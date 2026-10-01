@@ -203,6 +203,15 @@ own media counters, little-endian at these offsets:
 | 32 | 8 | Reads of the most-read block since its erase |
 | 40 | 8 | Lines rewritten because of read stress |
 | 48 | 8 | Lines rewritten because of retention age |
+| 56 | 8 | Host read pages the write buffer saw |
+| 64 | 8 | Of those, pages the buffer held |
+| 72 | 8 | Host write pages the write buffer saw |
+| 80 | 8 | Of those, pages the buffer already held |
+| 88 | 8 | Log-block switch merges (`mapping=hybrid` only) |
+| 96 | 8 | Log-block full merges |
+| 104 | 8 | Erases charged to log-block merges |
+
+Bytes 4-7 and 112-511 are reserved and read as zero.
 
 They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
