@@ -3437,6 +3437,134 @@ static void femu_test_shared_cq(void *obj, void *data, QGuestAllocator *alloc)
     g_free(wbuf);
 }
 
+#define FEMU_BURST_QUEUES   4
+#define FEMU_BURST_ROUNDS   64
+
+/* a queue pair with its own completion queue, interrupts off */
+static void femu_burst_queue(FemuCtrlState *c, FemuQueue *q, uint16_t qid)
+{
+    NvmeCmd cmd = { 0 };
+
+    femu_queue_init(c, q, qid);
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32((qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/*
+ * A poller fetches a submission queue entry by reading and advancing the head
+ * without a lock, so each queue must have exactly one poller. Fill several
+ * queues, ring them together, and expect every command to complete exactly
+ * once, in the queue it was submitted to.
+ */
+static void femu_test_poller_burst(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q[FEMU_BURST_QUEUES];
+    uint16_t first[FEMU_BURST_QUEUES];
+    const int depth = FEMU_QSIZE - 1;
+    uint64_t buf;
+    NvmeCqe cqe;
+    int r, i, k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    for (i = 0; i < FEMU_BURST_QUEUES; i++) {
+        femu_burst_queue(&c, &q[i], i + 1);
+    }
+
+    for (r = 0; r < FEMU_BURST_ROUNDS; r++) {
+        for (i = 0; i < FEMU_BURST_QUEUES; i++) {
+            first[i] = c.cid;
+            for (k = 0; k < depth; k++) {
+                NvmeRwCmd rw = { 0 };
+
+                rw.opcode = NVME_CMD_READ;
+                rw.cid = cpu_to_le16(c.cid++);
+                rw.nsid = cpu_to_le32(1);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.slba = cpu_to_le64(k);
+                qtest_memwrite(qts, q[i].sq_addr +
+                               q[i].sq_tail * sizeof(NvmeCmd), &rw,
+                               sizeof(rw));
+                q[i].sq_tail = (q[i].sq_tail + 1) % FEMU_QSIZE;
+            }
+        }
+        for (i = 0; i < FEMU_BURST_QUEUES; i++) {
+            qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, q[i].qid),
+                           q[i].sq_tail);
+        }
+        for (i = 0; i < FEMU_BURST_QUEUES; i++) {
+            uint32_t done = 0;
+
+            for (k = 0; k < depth; k++) {
+                uint16_t cid;
+
+                g_assert_cmpint(FEMU_SC(femu_complete(&c, &q[i], &cid, NULL)),
+                                ==, NVME_SUCCESS);
+                cid -= first[i];
+                g_assert_cmpuint(cid, <, depth);
+                g_assert_false(done & (1u << cid));
+                done |= 1u << cid;
+            }
+        }
+    }
+
+    /* nothing completed twice after its first completion was read */
+    g_usleep(10 * 1000);
+    for (i = 0; i < FEMU_BURST_QUEUES; i++) {
+        qtest_memread(qts, q[i].cq_addr + q[i].cq_head * sizeof(cqe), &cqe,
+                      sizeof(cqe));
+        g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, q[i].phase);
+        femu_queue_free(&c, &q[i]);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* settings realize must refuse, and the property its error has to name */
+static const struct {
+    const char *args;
+    const char *names;
+} femu_refused[] = {
+    { "'multipoller_enabled':2", "multipoller_enabled" },
+    { "'multipoller_enabled':255", "multipoller_enabled" },
+};
+
+static void femu_test_config_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(femu_refused); i++) {
+        g_autofree char *cmd = g_strdup_printf("{'execute':'device_add',"
+            "'arguments':{'driver':'femu','id':'refused','addr':'5',"
+            "'devsz_mb':64,%s}}", femu_refused[i].args);
+        QDict *rsp = qtest_qmp(femu->dev.bus->qts, "%p",
+                               qobject_from_json(cmd, NULL));
+
+        g_test_message("%s", femu_refused[i].args);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                femu_refused[i].names));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /*
  * Check a completion queue of FEMU_SMALL_CQ entries that the host has not
  * read from, after more commands than it can hold were submitted: it holds
@@ -18390,6 +18518,16 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "multipoller_enabled=1"
     });
+    qos_add_test("poller-burst", "femu", femu_test_poller_burst, NULL);
+    qos_add_test("poller-burst-per-queue", "femu", femu_test_poller_burst,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "multipoller_enabled=1"
+    });
+    qos_add_test("poller-burst-sharded", "femu", femu_test_poller_burst,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "multipoller_enabled=1,poller_ratio=3"
+    });
+    qos_add_test("config-refused", "femu", femu_test_config_refused, NULL);
     femu_csd_dir = g_strdup_printf("%s/femu-csd-%d", g_get_tmp_dir(),
                                    (int)getpid());
     qos_add_test("csd-program-dir", "femu", femu_test_csd_program_dir,

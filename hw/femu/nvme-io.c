@@ -653,9 +653,10 @@ void *nvme_poller(void *arg)
             }
 
             /*
-             * Several submission queues may share one completion queue, so
-             * the queue to check is the one this submission queue names, not
-             * the one that happens to carry the same number.
+             * The only poller sweeps every queue; realize refuses settings
+             * that would start more than one here. Several submission queues
+             * may share one completion queue, so the queue to check is the one
+             * this submission queue names, not the one with the same number.
              */
             for (i = 1; i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];

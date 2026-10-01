@@ -982,6 +982,16 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         return false;
     }
     /*
+     * A poller fetches commands without a lock, so every queue needs a single
+     * owner. Values above 1 started one poller per shard but had each sweep
+     * every queue, and two pollers then ran and completed the same command.
+     */
+    if (n->multipoller_enabled > 1) {
+        error_setg(errp, "multipoller_enabled must be 0 (one poller for all "
+                   "queues) or 1 (each poller owns poller_ratio queues)");
+        return false;
+    }
+    /*
      * CAP.MQES is 0's based and a queue's size is kept in 16 bits, so a queue
      * of MQES + 1 entries has to fit in them.
      */
