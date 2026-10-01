@@ -38,6 +38,8 @@ Research and Innovation*.
 
 ## Table of Contents
 
+The full documentation starts at the [doc map](hw/femu/docs/README.md).
+
 - [Overview](#overview)
 - [Features](#features)
 - [Architecture](#architecture)
@@ -148,219 +150,72 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 
 ## System Requirements
 
-### Minimum Requirements
-
-- **Physical Machine**: Run FEMU on a physical machine, not inside a VM (nested virtualization is not recommended due to performance impact)
-- **OS**: Linux with Python >= 3.9 and GLib >= 2.66, which the QEMU 10.1 base requires (for example Ubuntu 22.04 or 24.04)
-- **CPU**: x86_64 with hardware virtualization (Intel VT-x/AMD-V)
-- **Memory**: At least 12GB DRAM to enable seamless run of default FEMU scripts emulating a 4GB SSD
-- **CPU Cores**: At least 8 cores for 4 vCPUs and 4GB DRAM VM
-- **Storage**: 20GB free disk space
-
-### Recommended Configuration
-- **CPU**: 16+ cores (Intel Xeon or AMD EPYC)
-- **Memory**: 32GB+ RAM
-- **Storage**: NVMe SSD with 100GB+ free space
-- **Network**: For distributed testing scenarios
+An x86_64 Linux host with KVM, Python >= 3.9 and GLib >= 2.66 (Ubuntu 22.04 or
+24.04; CI builds on both). The emulated SSD lives in host DRAM, so the default
+BBSSD launcher needs about 17 GiB of free RAM. Full details, including the
+guest kernel each mode needs:
+[requirements.md](hw/femu/docs/getting-started/requirements.md).
 
 ### Host Environment Compatibility
 
-| Linux Distribution | Python | GLib | Status |
-|:-------------------|:-------|:-----|:-------|
-| Ubuntu 24.04 LTS   | 3.12   | 2.80 | Built in CI |
-| Ubuntu 22.04 LTS   | 3.10   | 2.72 | Built in CI |
-
-Other distributions with Python >= 3.9 and GLib >= 2.66 should build FEMU but
-are not tested. Ubuntu 20.04 (Python 3.8, GLib 2.64) and older releases cannot
-build it with their stock packages. `pkgdep.sh` supports only Debian and Ubuntu.
+See [Operating system and CPU](hw/femu/docs/getting-started/requirements.md#operating-system-and-cpu).
 
 ### Guest Environment Compatibility
 
-| Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    | 6.1     | 6.9     |
-| :---                      | :---:   | :---:   | :---:   | :---:   | :---:   | :---:   |
-| NoSSD                     | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| BlackBox SSD              | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| OpenChannel-SSD v1.2      | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| OpenChannel-SSD v2.0      | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Zoned-Namespace (ZNS) SSD | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-
-**Continuous Integration**: GitHub Actions builds FEMU with `femu-compile.sh` on
-Ubuntu 22.04 and 24.04. It then:
-
-- runs the FEMU unit tests and qtests, also in a sanitizer build;
-- starts every `femu_mode` (0-5) without a guest (`-M accel=qtest`);
-- expands every example config file and checks FEMU accepts it;
-- checks the run scripts parse (`bash -n`).
-
-CI installs its own packages rather than running `pkgdep.sh`, and it does not
-boot a guest. The badge at the top of this README shows the build status.
+See [Kernel per mode](hw/femu/docs/getting-started/requirements.md#kernel-per-mode).
+OCSSD needs a guest kernel older than 5.15 and ZNS needs 5.9 or newer.
 
 ---
 
 ## Installation
 
+```bash
+git clone https://github.com/MoatLab/FEMU.git
+cd FEMU && mkdir build-femu && cd build-femu
+cp ../femu-scripts/femu-copy-scripts.sh . && ./femu-copy-scripts.sh
+sudo ./pkgdep.sh      # Debian/Ubuntu dependencies
+./femu-compile.sh     # builds build-femu/qemu-system-x86_64
+```
+
+Dependencies, optional features (CSD uBPF, CXL SSD), debug builds and common
+build errors: [build.md](hw/femu/docs/getting-started/build.md).
+
 ### Build FEMU
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/MoatLab/FEMU.git
-   cd FEMU
-   ```
-
-2. **Create build directory:**
-   ```bash
-   mkdir build-femu
-   cd build-femu
-   ```
-
-3. **Setup build environment and install dependencies:**
-   ```bash
-   # Copy FEMU helper scripts
-   cp ../femu-scripts/femu-copy-scripts.sh .
-   ./femu-copy-scripts.sh .
-
-   # Install all build dependencies automatically (Ubuntu/Debian only)
-   sudo ./pkgdep.sh
-   ```
-
-4. **Compile FEMU:**
-   ```bash
-   ./femu-compile.sh
-   ```
-
-   The FEMU binary will be created as: `build-femu/qemu-system-x86_64`
-
-5. **Verify installation:**
-   ```bash
-   ./qemu-system-x86_64 -device help | grep femu
-   # Should output: name "femu", bus PCI, desc "FEMU Non-Volatile Memory Express"
-   ```
-
-### Build Verification
-
-To ensure your build is successful, run the basic device check:
-
-```bash
-# Check if FEMU device is properly registered
-./qemu-system-x86_64 -device femu,help
-
-# Check version information
-./qemu-system-x86_64 --version
-```
+See [build.md](hw/femu/docs/getting-started/build.md).
 
 ---
 
 ## Quick Start
 
+From `build-femu/`:
+
+```bash
+./make-guest-image.sh               # Ubuntu 24.04 guest in ~/images/u20s.qcow2
+./run-blackbox.sh                   # terminal 1: boot the guest with a BBSSD
+./run-guest-ssh.sh sudo nvme list   # terminal 2: the emulated SSD is /dev/nvme0n1
+./run-guest-ssh.sh sudo poweroff
+```
+
+The full walk-through, with fio and the write amplification factor, is in
+[quick-start.md](hw/femu/docs/getting-started/quick-start.md). Other ways to
+get a guest image are in
+[guest-image.md](hw/femu/docs/getting-started/guest-image.md).
+
+The emulated SSD lives in memory: nothing written to it survives shutting the
+VM down.
+
 ### 1. VM Image Setup
 
-**Option A: Build an image with one command (Recommended)**
-
-```bash
-# From the build-femu directory
-./make-guest-image.sh
-```
-
-The script downloads the Ubuntu 24.04 cloud image and checks it against
-Ubuntu's published SHA256 sums. It then boots the image once, without a
-display, to create user `femu`, install `nvme-cli` and `fio`, and turn on the
-serial console. It writes two files:
-
-- `~/images/u20s.qcow2`, the path the run scripts use. The name is kept for
-  compatibility; the image holds Ubuntu 24.04.
-- `~/images/femu-guest-key`, the SSH key for user `femu`.
-
-It needs no root access. The host needs `curl`, `qemu-img`, one of
-`cloud-localds`, `genisoimage`, `xorriso` or `mkisofs`, and read-write access
-to `/dev/kvm`. Common options:
-
-```bash
-./make-guest-image.sh --size 64G           # disk size (default 32G)
-./make-guest-image.sh --ssh-key ~/.ssh/id_ed25519.pub
-./make-guest-image.sh --password femu      # also allow console login
-./make-guest-image.sh --cxl                # also install ndctl, daxctl, cxl-cli
-./make-guest-image.sh -o /data/images      # another output directory
-```
-
-To boot a different image, set `OSIMGF` (or `IMGDIR`) for the run script:
-`OSIMGF=/data/images/u20s.qcow2 ./run-blackbox.sh`.
-
-**Option B: Use a pre-built image**
-1. Request the image from the [FEMU VM Image Portal](https://forms.gle/nEZaEe2fkj5B1bxt9)
-2. Extract it to the `~/images/` directory
-3. Rename it to `u20s.qcow2`
-
-**Option C: Install from an ISO**
-
-This needs a display for the installer, and step 2 below afterwards.
-```bash
-mkdir -p ~/images
-cd ~/images
-
-# If the link no longer works, visit http://releases.ubuntu.com to download the correct version of ISO image
-wget http://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso
-
-qemu-img create -f qcow2 u20s.qcow2 80G
-
-# qemu-img and qemu-system-x86_64 can come from your distribution or from build-femu/.
-qemu-system-x86_64 -cdrom ubuntu-24.04.3-live-server-amd64.iso \
-    -hda u20s.qcow2 -boot d -net nic -net user -m 8192 -rtc base=localtime -smp 8 -cpu host -enable-kvm
-```
-
-### 2. Configure VM for Serial Console (Options B and C)
-
-The run scripts use `-nographic`, so the guest must use the serial console.
-Images from Option A already do. For other images, edit `/etc/default/grub`
-inside the VM:
-
-```bash
-sudo nano /etc/default/grub
-```
-
-Add these lines:
-```
-GRUB_CMDLINE_LINUX="ip=dhcp console=ttyS0,115200 console=tty console=ttyS0"
-GRUB_TERMINAL=serial
-GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1"
-```
-
-Update GRUB and reboot:
-```bash
-sudo update-grub
-sudo reboot
-```
+See [guest-image.md](hw/femu/docs/getting-started/guest-image.md).
 
 ### 3. Run Your First FEMU Instance
 
-```bash
-# From the build-femu directory
-./run-blackbox.sh
-```
-
-> **The emulated device lives in memory.** FEMU allocates its backing store when
-> the device is created; it is not a file, and nothing written to the emulated
-> SSD survives shutting the VM down. Size the host accordingly -- a 32 GiB
-> emulated SSD needs 32 GiB of host memory -- and copy anything you want to keep
-> out of the guest before you stop it.
->
-> FEMU also tries to pin that memory so page faults do not distort the emulated
-> latency. Where `RLIMIT_MEMLOCK` does not allow it, the device still starts and
-> says so; raise the limit (`ulimit -l`) if timing precision matters.
+See [quick-start.md](hw/femu/docs/getting-started/quick-start.md#3-boot-the-guest-with-a-bbssd-terminal-1).
 
 ### 4. Access the VM
 
-The VM will start in text mode. You can also SSH into the VM. For an image
-from Option A:
-```bash
-# From the build-femu directory
-./run-guest-ssh.sh                  # shell
-./run-guest-ssh.sh sudo nvme list   # one command
-
-# or directly
-ssh -i ~/images/femu-guest-key -p 8080 femu@localhost
-```
-
-For other images, use `ssh -p 8080 username@localhost`.
+See [Log in with SSH](hw/femu/docs/getting-started/guest-image.md#log-in-with-ssh).
 
 ---
 
@@ -1259,12 +1114,8 @@ sudo cpupower frequency-set -g performance
 ```
 
 **Issue: Build failures**
-```bash
-# Update build dependencies
-sudo apt update && sudo apt upgrade
-# Clean rebuild:
-make clean && ./femu-compile.sh
-```
+
+See [common build errors](hw/femu/docs/getting-started/build.md#common-build-errors).
 
 ### Performance Optimization
 
