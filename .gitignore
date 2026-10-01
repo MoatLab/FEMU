@@ -132,6 +132,7 @@ trace-ust-all.h
 trace-ust-all.c
 build-femu/
 build/
-*.md
+# Local session notes; documentation .md files are tracked.
+/cc-session.md
 
 /build-asan/
