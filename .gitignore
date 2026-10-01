@@ -64,6 +64,7 @@
 *.ky
 *.log
 *.pdf
+!/hw/femu/docs/femu-manual.pdf
 *.pod
 *.cps
 *.fns

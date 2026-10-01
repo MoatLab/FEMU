@@ -93,6 +93,10 @@ and a source map:
 - [OCSSD](design/ocssd.md), [KV](design/kvssd.md), [CSD](design/csd.md),
   [NoSSD](design/nossd.md) and [CXL SSD](design/cxl-ssd.md).
 
+The same pages, with figures, are collected in one PDF:
+[the FEMU Manual](femu-manual.pdf). The Markdown pages are the reference
+when the two differ.
+
 ## I want to measure or tune
 
 - [Measuring](guides/measuring.md): WAF and counters from log page C0h,
