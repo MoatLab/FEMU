@@ -61,6 +61,7 @@ endif
 QEMU ?= $(ROOT)/build/qemu-system-x86_64
 check-docs:
 	python3 ../scripts/gen-property-docs.py --check --qemu $(QEMU)
+	python3 ../scripts/gen-mode-table.py --check
 
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \

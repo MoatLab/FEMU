@@ -85,13 +85,28 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ## Features
 
-| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD | KVSSD |
-|---------|----------|----------|-----|--------|-----|-------|
-| **`femu_mode`** | 1 | 0 | 3 | 2 | 4 | 5 |
-| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side | Key-indexed log |
-| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research | Key-value store research |
-| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime | Realistic NAND per value |
-| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands | Passthrough only |
+<!-- modes-table:start -->
+<!-- Generated from hw/femu/docs/modes.py by hw/femu/scripts/gen-mode-table.py; edit modes.py, not this table. -->
+
+| Mode or feature | Use it for | Turn it on with | Guest kernel | Guest tools | Host needs | Launcher | Checked |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [NoSSD](#nossd-mode) | fast NVMe device in DRAM, no flash timing | `femu_mode=2` (the default) | any with the NVMe driver | nvme-cli, fio | none beyond the common ones | `run-nossd.sh` | CI: realize, Identify, write and read back |
+| [BlackBox SSD (BBSSD)](#blackbox-ssd-mode-bbssd) | a commercial SSD: device FTL, GC, NAND timing | `femu_mode=1` | any with the NVMe driver | nvme-cli, fio | about 17 GiB free RAM for the launcher's 12 GiB device | `run-blackbox.sh` | CI: realize, Identify, write and read back; guest: [quick start, run end to end](hw/femu/docs/getting-started/quick-start.md) |
+| [Zoned Namespace (ZNS)](#zoned-namespace-ssd-mode-znssd) | zoned storage research | `femu_mode=3` | 5.9 or newer with `CONFIG_BLK_DEV_ZONED=y`; 4 KiB guest pages | nvme-cli 1.12 or newer for `nvme zns` | none beyond the common ones | `run-zns.sh` | CI: realize, Identify, write and read back |
+| [Open-Channel SSD 1.2](#whitebox-ssd-mode-ocssd) | host-managed FTL research | `femu_mode=0,lver=1` | 4.16 to 5.14 (LightNVM was removed in 5.15) | LightNVM tools, or SPDK on newer kernels | none beyond the common ones | `run-whitebox.sh` | CI: realize, Identify |
+| [Open-Channel SSD 2.0](#whitebox-ssd-mode-ocssd) | host-managed FTL research | `femu_mode=0` (`lver=2` is the default) | 4.17 to 5.14 (LightNVM was removed in 5.15) | LightNVM tools, or SPDK on newer kernels | none beyond the common ones | `run-whitebox.sh` | CI: realize, Identify |
+| [Key-value SSD (KV)](#key-value-ssd-mode-kvssd) | key-value store research | `femu_mode=5` | 5.13 or newer; no block device, the namespace is `/dev/ngXnY` | nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c` | none beyond the common ones | none | CI: realize, Identify, store and retrieve |
+| [Computational storage (CSD)](#computational-storage-mode-csd) | running programs next to the data | `femu_mode=4,fdm_size=<MiB>` | any with the NVMe driver | `hw/femu/tests/csd` tools | `csd_program_dir` for shared-library programs; `--enable-csd-ubpf` build for eBPF programs | `run-csd.sh` | CI: realize, Identify, write and read back |
+| [Flexible Data Placement (FDP)](#features) | placement hints on a BBSSD | `femu-subsys,fdp=on,fdp.nruh=<n>` and `femu,femu_mode=1,subsys=<id>` | any with the NVMe driver; placement hints need passthrough or io_uring commands | nvme-cli with `nvme fdp` | none beyond the common ones | `run-blackbox-fdp.sh` | CI: realize, Identify, write and read back |
+| [Multiple namespaces](#multiple-namespaces) | several namespaces, each with its own mode | `namespaces=<n>`, optionally `namespace_sizes` and `namespace_modes` | any with the NVMe driver (ZNS namespaces need what ZNS needs) | nvme-cli | none beyond the common ones | none | CI: realize, Identify, write and read back |
+| [Namespace management](hw/femu/docs/CONFIGURATION-CHANGES.md) | create, delete and attach namespaces at run time | `ns_mgmt=on` on a NoSSD or BBSSD controller; `femu-subsys,ns_mgmt=on` to share namespaces | any with the NVMe driver | nvme-cli `create-ns`, `attach-ns` | none beyond the common ones | none | CI: realize, Identify, write and read back |
+| [Metadata and protection information](hw/femu/docs/reference/properties.md) | per-block metadata, PI types 1 to 3 | `meta=<bytes>,mc=<mask>`, plus `pi=on` with `meta` of 8 or more | `CONFIG_BLK_DEV_INTEGRITY=y` to use metadata formats through the block layer | nvme-cli `format` | none beyond the common ones | none | CI: realize, Identify, write and read back |
+| [CXL SSD, `der=off`](hw/femu/docs/cxlssd.md) | CXL memory backed by flash, all accesses trapped | `femu-cxl-ssd` below `pxb-cxl` and `cxl-rp` on `-machine q35,cxl=on` | `CONFIG_CXL_BUS`, `CXL_PCI`, `CXL_ACPI`, `CXL_MEM`, `CXL_PORT`, `CXL_REGION`, `DEV_DAX`, `DEV_DAX_KMEM` | `cxl-cli`, `daxctl`, `ndctl` | a build with `CONFIG_CXL_MEM_DEVICE` | `run-cxlssd.sh` | CI: realize |
+| [CXL SSD, `der=memslot`](hw/femu/docs/cxlssd.md) | cached pages mapped into the guest as KVM memory slots | `der=memslot` on `femu-cxl-ssd` | as for `der=off` | as for `der=off` | KVM (TCG is refused) | `run-cxlssd.sh` | CI: realize |
+| [CXL SSD, `der=cylon`](hw/femu/docs/cxlssd.md) | cached pages mapped by a Cylon host kernel | `der=cylon,cylon-kernel-ack=on` on `femu-cxl-ssd` | as for `der=off` | as for `der=off` | Cylon host kernel; KVM with EPT A/D bits and the TDP MMU; 4 KiB host pages; a shared, preallocated hugetlb backend. Without them the device warns and uses MMIO | `run-cxlssd.sh` | CI: realize |
+| [CXL caching API (CCA)](hw/femu/tools/cca/README.md) | guest pins, unpins and invalidates cached pages | `cca=on` on `femu-cxl-ssd` | as for `der=off`; a devdax region | `hw/femu/tools/cca` (`ccactl`, `cca-test`), run as root | as for `der=off` | `run-cxlssd.sh` | CI: realize |
+| [NVMe front end on a CXL SSD](hw/femu/docs/cxlssd.md) | the same media as CXL memory and as an NVMe namespace | `femu,bus=pcie.0,femu_mode=1,cxl_ssd=<id>` after the `femu-cxl-ssd` | as for `der=off`, plus the NVMe driver | as for `der=off`, plus nvme-cli | as for `der=off` | none | CI: realize, Identify, write and read back |
+<!-- modes-table:end -->
 
 When `femu_mode` is not set, the device runs in NoSSD mode (2).
 

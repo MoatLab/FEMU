@@ -388,6 +388,12 @@ jobs:
         grep -q "source femu/Kconfig" hw/Kconfig
         echo "✓ Build system integration verified"
 
+    - name: Check the mode table
+      run: |
+        # Needs no build: the mode tables must match hw/femu/docs/modes.py,
+        # and modes.py must match the tree (mode enum, launchers, links).
+        python3 hw/femu/scripts/gen-mode-table.py --check
+
     - name: Validate documentation
       run: |
         # Check that README references are valid
