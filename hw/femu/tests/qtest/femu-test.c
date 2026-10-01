@@ -3546,6 +3546,10 @@ static const struct {
     { "'namespaces':2,'namespace_modes':'bbssd,smartssd'", "namespace_modes" },
     { "'femu_mode':0,'lver':0", "lver" },
     { "'femu_mode':0,'lver':3", "lver" },
+    { "'femu_mode':0,'lver':2,'flash_type':0", "flash_type" },
+    { "'femu_mode':0,'lver':2,'flash_type':5", "flash_type" },
+    { "'femu_mode':0,'lver':2,'flash_type':6", "flash_type" },
+    { "'femu_mode':0,'lver':2,'flash_type':255", "flash_type" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,

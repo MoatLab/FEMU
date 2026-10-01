@@ -987,6 +987,16 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "2 (Open-Channel 2.0)");
         return false;
     }
+    /*
+     * The timing code indexes its per-cell-type tables with this value, and
+     * only SLC to QLC have entries in them.
+     */
+    if (n->femu_mode == FEMU_OCSSD_MODE &&
+        (n->flash_type < SLC || n->flash_type > QLC)) {
+        error_setg(errp, "flash_type must be 1 (SLC), 2 (MLC), 3 (TLC) or "
+                   "4 (QLC)");
+        return false;
+    }
     if (n->num_namespaces == 0 ||
         n->num_namespaces > NVME_MAX_NUM_NAMESPACES) {
         error_setg(errp, "namespaces must be in [1, %d]",

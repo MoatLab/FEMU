@@ -210,7 +210,7 @@ Devices:
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `lver` | `uint8` | `2` | OCSSD: Open-Channel version, 1 for 1.2 or 2 for 2.0; other values fail realize |
-| `flash_type` | `uint8` | `2` | OCSSD: cell type for the built-in timing tables, 1 SLC, 2 MLC, 3 TLC or 4 QLC; OCSSD 1.2 rejects other values, OCSSD 2.0 does not check them |
+| `flash_type` | `uint8` | `2` | OCSSD: cell type for the built-in timing tables, 1 SLC, 2 MLC, 3 TLC or 4 QLC; other values fail realize |
 | `oc12_channel_timing` | `bool` | `off` | OCSSD 1.2: charge channel transfer time for each page accessed, scaled by the sectors used out of lsecs_per_pg; ch_xfer_lat sets ns per page and 0 uses the flash_type value; off, transfers take no time |
 | `lsec_size` | `uint16` | `4096` | OCSSD 1.2: sector size in bytes reported in the geometry, greater than 0 in both versions; data moves at the namespace block size, and OCSSD 2.0 always uses 4096 |
 | `lsecs_per_pg` | `uint8` | `4` | OCSSD: sectors per page, greater than 0 |

@@ -481,8 +481,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "fail realize" },
     { "flash_type",
       "OCSSD: cell type for the built-in timing tables, 1 SLC, 2 MLC, 3 "
-      "TLC or 4 QLC; OCSSD 1.2 rejects other values, OCSSD 2.0 does not "
-      "check them" },
+      "TLC or 4 QLC; other values fail realize" },
     { "oc12_channel_timing",
       "OCSSD 1.2: charge channel transfer time for each page accessed, "
       "scaled by the sectors used out of lsecs_per_pg; ch_xfer_lat sets "
