@@ -39,9 +39,9 @@ the media time itself before the access completes (see
 | --- | --- | --- |
 | NoSSD | nothing | n/a |
 | BBSSD | NAND reads, programs and erases; write buffer and read cache hits; DFTL mapping misses; GC; deallocate (`trim_lat_ns`) | `FEMU-FTL-Thread` |
-| CSD | as BBSSD, plus program run time on a compute unit | FTL thread; compute units in the poller |
+| CSD | as BBSSD, plus program run time on a compute unit and copies into device memory | FTL thread; compute units and copies in the poller |
 | ZNS | NAND reads, programs and erases; write cache accesses | `FEMU-FTL-Thread` |
-| KV | NAND reads and programs for values and index | poller |
+| KV | NAND reads and programs for values, erases on reclaim, and a fixed per-command cost of one page read | poller |
 | OCSSD | NAND reads, programs and erases, optional channel transfer | poller |
 
 Optional host-link and firmware-CPU models apply on top of any NVMe mode (see
@@ -63,9 +63,10 @@ The array time of an operation comes from one of two sources:
   position in its wordline (lower to upper).
 - **Cell-type tables**: `nand_cell_type` 1 to 4 (SLC, MLC, TLC, QLC) uses the
   built-in per-page-type read and program times and erase time in
-  `hw/femu/nand/nand.c`, and ignores the flat times. ZNS always uses the
-  tables for `zns_flash_type`, unless `zns_pg_rd_lat`, `zns_pg_wr_lat` or
-  `zns_blk_er_lat` overrides them.
+  `hw/femu/nand/nand.h`, and ignores the flat times.
+- **ZNS** uses one built-in value per cell type for `zns_flash_type`
+  (`hw/femu/zns/zns.h`; SLC, TLC and QLC have one), unless `zns_pg_rd_lat`,
+  `zns_pg_wr_lat` or `zns_blk_er_lat` overrides it.
 
 Properties: [NAND timing](../reference/properties.md#nand-timing-bbssd-csd-kv),
 [ZNS](../reference/properties.md#zns).
@@ -77,9 +78,10 @@ own:
 
 - **BBSSD, CSD, KV**: one per LUN. An operation starts at the later of its
   own start time and the LUN's busy-until time, and the LUN is busy until the
-  operation ends. All planes of a LUN are busy together. The one exception is
-  a GC erase with `pls_per_lun` > 1, which erases the same block on every
-  plane of the LUN in one operation.
+  operation ends. All planes of a LUN are busy together. Erasing a whole
+  line (GC, FDP GC and KV reclaim) with `pls_per_lun` > 1 erases the same
+  block on every plane of a LUN as one operation, which takes one erase time
+  instead of one per plane.
 - **ZNS**: one per plane, so the planes of a LUN work in parallel.
 
 Different LUNs (or ZNS planes) never wait for each other. A command that
@@ -110,8 +112,9 @@ for when it will happen, so other LUNs can use the bus in the meantime.
 ### Program and erase suspend, ECC
 
 - `pe_suspend` (`zns_pe_suspend` for ZNS) lets a read go ahead of a program or
-  erase that is running on its LUN (plane for ZNS). The read pays `tsusp_ns`
-  (`zns_tsusp_ns`) once, and the suspended operation ends that much later.
+  erase that is running on its LUN (plane for ZNS). The first such read pays
+  `tsusp_ns` (`zns_tsusp_ns`); the suspended operation then ends later by
+  `tsusp_ns` plus the time of every read that went ahead of it.
 - `ecc_step_ns` adds read time for worn or old blocks: one step per 750
   erases of the block, plus one per `ecc_retention_sec` seconds since its line
   was filled, at most four steps.
@@ -183,12 +186,15 @@ Properties: [OCSSD](../reference/properties.md#ocssd-open-channel).
 
 ## KV and CSD
 
-KV computes its latency in the poller, using the BBSSD NAND model for the
-value and index pages each command touches.
+KV computes its latency in the poller with the BBSSD NAND model: value
+pages are read and programmed, reclaim erases are charged to the command that
+triggers them, and every command pays one page read for the index lookup.
 
 CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time
-multiplied by `csf_runtime_scale`. `nr_cu` sets how many units run at once.
+multiplied by the program's own scale, or by `csf_runtime_scale` when it
+gives none. `nr_cu` sets how many units run at once. A copy from the
+namespace into device memory costs `pg_rd_lat`.
 
 Properties: [CSD](../reference/properties.md#csd-computational-storage).
 
@@ -221,9 +227,9 @@ A `femu-cxl-ssd` access is timed on the vCPU thread that made it:
 | Read miss | one NAND page read; nothing if the FTL has never mapped the page |
 | Write miss | one NAND page read to fill the page, which then becomes dirty |
 | Eviction of a dirty page | one NAND page program, charged to the access that caused it |
-| Prefetched page | none; it is inserted without a NAND read |
+| Prefetched page | none for the page itself; a dirty page it evicts is written back at the access's cost |
 | Any access with `cache-pages=0` | a NAND read or program for every access |
-| Access through a direct mapping (`der=memslot` or `cylon`) | none, and it is not counted; it never reaches QEMU |
+| Access through a direct mapping (`der=memslot` or `cylon`) | none, and it is not counted; it never reaches QEMU. A `memslot` mapped page counts as dirty, so its eviction costs a program |
 
 The access hands the page to the `femu-cxl-ftl` worker, which runs the same
 BBSSD FTL and NAND model as above and returns the latency. The vCPU then waits
@@ -262,12 +268,15 @@ sudo nvme admin-passthru /dev/nvme0 --opcode=0xef --cdw10=2
 | --- | --- |
 | 1 | GC NAND operations take time (the default) |
 | 2 | GC NAND operations take no time |
-| 3 | Set read, program and erase to the built-in 40 us, 200 us and 2 ms, and the channel transfer to 0 |
-| 4 | Set read, program, erase and channel transfer to 0, which turns NAND timing off |
-| 5 | Print the completed command count to QEMU's standard output and reset it |
-| 6, 7 | Turn per-command debug logging on or off |
+| 3 | Set the flat read, program and erase times to the built-in 40 us, 200 us and 2 ms |
+| 4 | Set the flat read, program and erase times to 0 |
+| 5 | Print the number of completions posted 20 us or more after they were due and the total number of completions to QEMU's standard output, then reset both |
+| 6, 7 | Turn per-command debug logging on or off; it prints only in a build with `FEMU_DEBUG_NVME` defined |
 
 Code 3 restores the built-in values, not the ones given on the command line.
+Codes 3 and 4 change only the flat times: channel bus phases, the
+`nand_cell_type` tables, `ecc_step_ns` and `trim_lat_ns` stay in force, and
+write buffer and read cache hits still cost 1 us when `pg_rd_lat` is 0.
 For a controller linked to a CXL SSD, it restores the medium's `read-ns`,
 `program-ns`, `erase-ns` and `channel-ns` instead.
 

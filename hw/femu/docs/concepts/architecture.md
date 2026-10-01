@@ -10,8 +10,10 @@ Two ideas explain most of the design:
 - **Data and time are separate.** The guest's data is copied into a host
   memory buffer as soon as a command is parsed. The FTL and NAND model never
   touch the data; they only compute how long the command would take on a real
-  device, and the completion is held back until that time has passed.
-- **Commands run on FEMU's own threads, not on the vCPU.** For NVMe, a
+  device, and the completion is held back until that time has passed. (The
+  power-loss model is the exception: with `power_loss=on` the FTL thread
+  applies the data.)
+- **NVMe I/O commands run on FEMU's own threads, not on the vCPU.** A
   doorbell write only records the new queue tail. Polling threads fetch and
   execute the commands, and an FTL thread computes their timing.
 
@@ -74,7 +76,7 @@ goes straight to the memory backend.
 | 1. Guest-visible interface | `hw/femu/femu.c`, `hw/femu/femu-props.c`, `hw/femu/intr.c`, `hw/femu/cxlssd/qemu-adapter.c` | vCPU threads, QEMU main loop |
 | 2. Frontend | `hw/femu/nvme-io.c`, `hw/femu/nvme-admin.c`, `hw/femu/dma.c`, `hw/femu/lib/`, `hw/femu/cxlssd/cxlssd.c`, `hw/femu/cxlssd/cache.c` | `femu-poller`, vCPU threads |
 | 3. Mode backends | `hw/femu/nossd/`, `hw/femu/bbssd/bb.c`, `hw/femu/zns/zns.c`, `hw/femu/ocssd/`, `hw/femu/kvssd/`, `hw/femu/csd/` | `femu-poller` |
-| 4. FTL | `hw/femu/bbssd/`, `hw/femu/zns/zftl.c`, `hw/femu/kvssd/kvssd-ftl.c` | `FEMU-FTL-Thread`, `femu-cxl-ftl` |
+| 4. FTL | `hw/femu/bbssd/`, `hw/femu/zns/zftl.c`, `hw/femu/kvssd/kvssd-ftl.c` | `FEMU-FTL-Thread`, `femu-poller` (KV), `femu-cxl-ftl` |
 | 5. NAND media timing | `hw/femu/nand/`, `hw/femu/timing-model/` | the caller's thread |
 | 6. Memory backend | `hw/femu/backend/dram.c`; for CXL, a QEMU memory backend object | the thread that copies the data |
 
@@ -85,8 +87,8 @@ FEMU registers three device types.
 **`-device femu`** is a PCIe NVMe controller. It reports NVMe version 1.4 and
 PCI ID `1d1d:1f1f` by default (`vid`, `did`). BAR0 holds the controller
 registers and the doorbells, MSI-X has one vector per queue plus the admin
-queue, and an optional Controller Memory Buffer sits on BAR2 (`cmbsz`,
-`cmbloc`). `femu_mode` selects which kind of SSD the controller emulates (see
+queue, and an optional Controller Memory Buffer (`cmbsz`) must be placed on
+BAR2 with `cmbloc`. `femu_mode` selects which kind of SSD the controller emulates (see
 [layer 3](#3-mode-backends) and [choosing a mode](choosing-a-mode.md)).
 
 Namespaces are not separate devices. There is no FEMU namespace device to put
@@ -114,13 +116,14 @@ Where it lives:
 - `hw/femu/femu.c`: QOM types `femu` and `femu-subsys`, `femu_realize()`,
   `nvme_check_constraints()`, PCI and BAR setup, MMIO and doorbell handlers
   (`nvme_mmio_write()`).
-- `hw/femu/femu-props.c`: the `femu` and `femu-subsys` property tables. The
-  generated [property reference](../reference/properties.md) is built from
-  these.
+- `hw/femu/femu-props.c`: the help text of the `femu` and `femu-subsys`
+  properties. The properties and their defaults are defined in `femu.c`
+  (`femu_props[]`). The generated
+  [property reference](../reference/properties.md) is built from the binary.
 - `hw/femu/intr.c`: MSI-X, MSI and pin interrupts (`nvme_isr_notify_io()`).
 - `hw/femu/cxlssd/qemu-adapter.c`: QOM type `femu-cxl-ssd`, realize checks,
-  window overlay and address decoding. `hw/femu/cxlssd/props.c`: its
-  properties.
+  window overlay and address decoding, and its properties (`cxl_props[]`).
+  `hw/femu/cxlssd/props.c`: their help text.
 
 Threads: register and doorbell writes are MMIO exits handled on the vCPU
 thread that made them, under QEMU's big lock (BQL).
@@ -178,14 +181,17 @@ For each new submission queue entry, `nvme_process_sq_io()`:
    (`ns->ext_ops.io_cmd`);
 3. puts the request on `to_ftl[i]`.
 
-For Read and Write, the mode handler calls `nvme_rw()`, which checks the
+For Read and Write on NoSSD, BBSSD and CSD, the mode handler calls
+`nvme_rw()`, which checks the
 command, maps the guest's PRP or SGL list (`hw/femu/dma.c`) and copies the
 data between guest memory and the memory backend with `backend_rw()`. The data
 transfer is finished at this point, on the poller thread, before any time has
-been charged.
+been charged. ZNS and OCSSD have their own read and write paths that copy
+to the same backend, and KV copies values into a store of its own.
 
-NoSSD skips the rings: it posts the completion inside the same sweep, unless
-the host-link or firmware-CPU model is enabled.
+On a NoSSD controller, NoSSD namespaces skip the rings: the poller posts the
+completion inside the same sweep, unless the host-link or firmware-CPU model
+is enabled.
 
 ### Completion
 
@@ -248,8 +254,8 @@ Threads: one `FEMU-FTL-Thread` per controller, started at realize only when a
 namespace is BBSSD, ZNS or CSD, or the controller shares a BBSSD subsystem
 (`femu_needs_ftl_thread()`). It reads every poller's `to_ftl[i]` ring, calls
 `femu_ftl_process_req()`, adds the returned latency to the request's
-completion time and puts it on `to_poller[i]`. NoSSD, OCSSD and KV
-controllers have no FTL thread.
+completion time and puts it on `to_poller[i]`. A controller whose namespaces
+are all NoSSD, OCSSD or KV has no FTL thread.
 
 ## 4. FTL
 
@@ -271,7 +277,9 @@ unchanged, and the CXL SSD runs a private instance of it. Its state is
   (a cached mapping table of `mapping_cache_mb` whose misses cost NAND reads),
   `hybrid` and `fast` (log-block schemes). Code: `hw/femu/bbssd/ftl-map*.c`.
 - **Write buffer** (`buffer_size`, in pages): a DRAM buffer that accepts
-  writes and programs them when it fills past `buffer_thres_pcent`. It holds
+  writes. Once it reaches `buffer_thres_pcent`, the next write that needs a
+  slot programs a batch of the least recently
+  written pages. Without `power_loss` it holds
   page numbers only, since the data is already in the memory backend. FUA
   writes and stream writes go straight to NAND, and Flush drains it. Code:
   `hw/femu/bbssd/ftl-datapath.c`.
@@ -321,7 +329,8 @@ Units that differ run in parallel. A channel bus with command, data and status
 phases is modelled only when one of those phases has a non-zero time.
 
 Read, program and erase times come either from flat properties or from
-built-in per-cell-type tables (`hw/femu/nand/nand.c`). OCSSD uses the older
+built-in per-cell-type tables (`hw/femu/nand/nand.h` for BBSSD, CSD and KV;
+`hw/femu/zns/zns.h` for ZNS). OCSSD uses the older
 chip and channel timestamp model in `hw/femu/timing-model/timing.c`.
 
 [Timing model](timing-model.md) explains the rules and the properties that
@@ -333,11 +342,13 @@ worker for the CXL SSD.
 
 ## 6. Memory backend
 
-For `femu`, the data lives in one host buffer of `devsz_mb` MiB, allocated
-zero-filled and locked into RAM at realize (`init_dram_backend()` in
+For `femu`, the data lives in one host buffer of `devsz_mb` MiB (the full
+NAND capacity for BBSSD with `op_pcent`), allocated zero-filled at realize
+and locked into RAM when `RLIMIT_MEMLOCK` allows (`init_dram_backend()` in
 `hw/femu/backend/dram.c`). Namespaces are slices of it, packed back to back.
-Controllers that share namespaces through a subsystem share one buffer. Every
-mode reads and writes this buffer with `backend_rw()`. Nothing is written to a
+Controllers that share namespaces through a subsystem share one buffer. The
+block modes read and write it with `backend_rw()`; KV keeps its values in a
+separate buffer of its own. Nothing is written to a
 file, so the contents are lost when QEMU exits. `FEMU_MBE_INTERLEAVE` controls
 its NUMA placement (see the [environment
 variables](../reference/properties.md#environment-variables)).
@@ -353,7 +364,7 @@ backend instead of allocating its own.
 
 | Thread name | Created by | How many | Runs |
 | --- | --- | --- | --- |
-| vCPU threads and the QEMU main loop | QEMU | one per vCPU | MMIO: controller registers, doorbells, admin commands; CXL accesses and their media wait; QMP and monitor commands |
+| vCPU threads and the QEMU main loop | QEMU | one per vCPU, plus one main loop | MMIO: controller registers, doorbells, admin commands; CXL accesses and their media wait; QMP and monitor commands |
 | `femu-poller` | `nvme_start_dataplane()` when the host enables the controller | 1, or ceil(`queues` / `poller_ratio`) | I/O command fetch and execution, data copy, completion and interrupts |
 | `FEMU-FTL-Thread` | `femu_realize()` | 0 or 1 per controller | BBSSD, CSD and ZNS FTL and NAND timing |
 | `femu-cxl-ftl` | `femu_cxl_start()` | 1 per `femu-cxl-ssd` with `ftl=on` | FTL and NAND timing for cache misses and write-backs |
@@ -423,11 +434,11 @@ The guest loads 8 bytes from a `femu-cxl-ssd` region at host physical address
    copies the 8 bytes from the memory backend and returns. The cost is the
    MMIO exit itself, paid on every access.
 3. **Miss.** The page must be brought into the cache:
-   - If the set is full, the policy evicts a victim. A dirty victim is first
-     written back, which costs a NAND program.
    - The page is read from NAND: the vCPU drops the BQL, queues a read for the
      `femu-cxl-ftl` worker, and waits for the latency it returns. A page the
      FTL has never mapped costs nothing to read.
+   - If the page's set is full, the policy evicts a victim. A dirty victim is
+     written back, which costs a NAND program.
    - `femu_cxl_delay()` waits out the rest of the media time, sleeping until
      100 us before the deadline and spinning for the rest, with the BQL
      dropped so other vCPUs keep running.
@@ -443,13 +454,15 @@ What happens to the next access to the same page depends on `der`:
 | `der` | After a miss or hit | Next access to the page |
 | --- | --- | --- |
 | `off` (default) | nothing | traps again; a hit with no media time |
-| `memslot` | the page is mapped as a one-page KVM memory slot alias (at most 1024 for all devices) | goes straight to host memory with no exit and no time charged |
+| `memslot` | the page is mapped as a one-page KVM memory slot alias (at most 1024 for all devices) | goes straight to host memory with no exit and no time charged; the page counts as dirty, so its eviction costs a program |
 | `cylon` | the page is mapped by writing the guest's EPT entry through a Cylon host kernel | goes straight to host memory; dirty state comes from EPT dirty bits |
 
 A direct mapping is removed when its page is evicted, flushed or invalidated,
-and the next access traps again. `der=cylon` needs a Cylon host kernel and a
-hugetlbfs backend; when either is missing the device falls back to `off` with
-a warning. The [CXL SSD design note](../cxlssd.md) gives the details.
+and the next access traps again. Both direct modes map pages only in the
+single-endpoint topology the design note describes; elsewhere accesses stay
+on MMIO. `der=memslot` fails realize under TCG. `der=cylon` fails realize
+without `cylon-kernel-ack=on`, and falls back to MMIO with a warning when the
+Cylon host kernel or the hugetlbfs backend is missing. The [CXL SSD design note](../cxlssd.md) gives the details.
 
 ## Related pages
 

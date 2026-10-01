@@ -73,11 +73,12 @@ backend of `devsz_mb` MiB is split evenly, or by `namespace_sizes`.
 - `meta` and Streams need every namespace to be NoSSD or BBSSD.
 
 **Namespace Management.** `ns_mgmt=on` takes effect only when the controller
-and every namespace are NoSSD, or every one is BBSSD; with other modes it is
-accepted and stays off. To share namespaces between controllers, set
+and every namespace are NoSSD, or every one is BBSSD; with other modes, or
+with `dps`, it is accepted and stays off. On a controller that joins a
+subsystem without `ns_mgmt`, it fails realize. To share namespaces between controllers, set
 `ns_mgmt=on` on the `femu-subsys` instead. A shared subsystem takes NoSSD or
-BBSSD controllers that all have the same mode, metadata, PI, `nlbaf`, `vwc`
-and `oncs` settings, and no Streams or `namespace_modes`.
+BBSSD controllers that all have the same mode, `meta`, `mc`, `pi`, `dpc`,
+`nlbaf`, `vwc` and `oncs`, and no Streams, `dps` or `namespace_modes`.
 
 **Metadata and protection information.** `meta` (bytes per block) works on
 NoSSD and BBSSD namespaces only, not with FDP, and needs a matching `mc` bit.
@@ -90,7 +91,8 @@ with one namespace, and must not use `namespace_modes`, `namespace_sizes`,
 `ns_mgmt`, `subsys`, `streams`, `power_loss`, `buffer_size`, `op_pcent`,
 `meta`, `pi` or `dps`. The `femu-cxl-ssd` must come first on the command line
 and have `ftl=on`. Its geometry and timing apply; the controller's own are
-ignored, and `devsz_mb` must be unset or equal to the CXL medium's size.
+ignored, and `devsz_mb` must be left at its default or equal the CXL
+medium's size.
 
 **Other combinations.**
 
