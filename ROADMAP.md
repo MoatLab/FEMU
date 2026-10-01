@@ -12,8 +12,8 @@ issue to propose or claim one.
 - Crash-consistency testing: an opt-in power-loss model for the volatile write
   cache.
 - Open-Channel 1.2 per-channel transfer timing (opt-in).
-- CXL-attached SSD emulation (Cylon, FAST '26): on the `cylon-v9.0.1` branch
-  and in https://github.com/MoatLab/Cylon; not yet merged into master.
+- CXL-attached SSD emulation (Cylon, FAST '26): merged into master as the
+  `femu-cxl-ssd` device; see `hw/femu/docs/cxlssd.md`.
 - End-to-end protection information (opt-in, Types 1-3).
 - Streams directive (opt-in) alongside Flexible Data Placement.
 - Zoned: ZRWA, conventional zones, zone width, Changed Zone List.
@@ -21,7 +21,6 @@ issue to propose or claim one.
   Open-Channel and computational storage paths; ASan/UBSan CI.
 
 ## Next
-- Merge CXL-SSD emulation from `cylon-v9.0.1` into master.
 - A published guest regression suite (`hw/femu/tests/guest/`).
 - A release with signed tags, checksums, SBOM and build provenance.
 

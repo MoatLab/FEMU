@@ -23,9 +23,9 @@ FEMU is supported by the U.S. National Science Foundation through [NSF POSE awar
 Research and Innovation*.
 
 > **Consolidation in progress (2026).** Features that were previously maintained in separate
-> FEMU-based repositories (for example, CXL SSD emulation) are being ported into this
-> repository, and FEMU is being made easier to configure, script, and drive with AI coding
-> agents. Much of this work is AI-assisted. We believe that careful use of AI-assisted coding,
+> FEMU-based repositories are being ported into this repository; CXL SSD emulation is already
+> merged as the `femu-cxl-ssd` device. FEMU is also being made easier to configure, script,
+> and drive with AI coding agents. Much of this work is AI-assisted. We believe that careful use of AI-assisted coding,
 > with every change built and regression-tested in CI and reviewed by the maintainers, will
 > help FEMU reach a more organized code structure and better efficiency. A more thorough
 > review is under way in parallel; in the meantime, some existing behavior may change or
