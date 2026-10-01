@@ -95,7 +95,7 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 | [Zoned Namespace (ZNS)](hw/femu/docs/modes/zns.md) | zoned storage research | `femu_mode=3` | 5.9 or newer with `CONFIG_BLK_DEV_ZONED=y`; 4 KiB guest pages | nvme-cli 1.12 or newer for `nvme zns` | none beyond the common ones | `run-zns.sh` | CI: realize, Identify, write and read back |
 | [Open-Channel SSD 1.2](hw/femu/docs/modes/ocssd.md) | host-managed FTL research | `femu_mode=0,lver=1` | 4.16 to 5.14 (LightNVM was removed in 5.15) | LightNVM tools, or SPDK on newer kernels | none beyond the common ones | `run-whitebox.sh` | CI: realize, Identify |
 | [Open-Channel SSD 2.0](hw/femu/docs/modes/ocssd.md) | host-managed FTL research | `femu_mode=0` (`lver=2` is the default) | 4.17 to 5.14 (LightNVM was removed in 5.15) | LightNVM tools, or SPDK on newer kernels | none beyond the common ones | `run-whitebox.sh` | CI: realize, Identify |
-| [Key-value SSD (KV)](hw/femu/docs/modes/kvssd.md) | key-value store research | `femu_mode=5` | 5.13 or newer; no block device, the namespace is `/dev/ngXnY` | nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c` | none beyond the common ones | none | CI: realize, Identify, store and retrieve |
+| [Key-value SSD (KV)](hw/femu/docs/modes/kvssd.md) | key-value store research | `femu_mode=5` | 6.0 or newer; no block device, the namespace is `/dev/ngXnY` | nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c` | none beyond the common ones | none | CI: realize, Identify, store and retrieve |
 | [Computational storage (CSD)](hw/femu/docs/modes/csd.md) | running programs next to the data | `femu_mode=4,fdm_size=<MiB>` | any with the NVMe driver | `hw/femu/tests/csd` tools | `csd_program_dir` for shared-library programs; `--enable-csd-ubpf` build for eBPF programs | `run-csd.sh` | CI: realize, Identify, write and read back |
 | [Flexible Data Placement (FDP)](hw/femu/docs/features/fdp.md) | placement hints on a BBSSD | `femu-subsys,fdp=on,fdp.nruh=<n>` and `femu,femu_mode=1,subsys=<id>` | any with the NVMe driver; placement hints need passthrough or io_uring commands | nvme-cli with `nvme fdp` | none beyond the common ones | `run-blackbox-fdp.sh` | CI: realize, Identify, write and read back |
 | [Multiple namespaces](hw/femu/docs/features/multi-namespace.md) | several namespaces, each with its own mode | `namespaces=<n>`, optionally `namespace_sizes` and `namespace_modes` | any with the NVMe driver (ZNS namespaces need what ZNS needs) | nvme-cli | none beyond the common ones | none | CI: realize, Identify, write and read back |
@@ -605,7 +605,8 @@ device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a
 zone to N channels, which divides the zone size and multiplies the zone count by
 `zns_num_ch / N` while leaving the device capacity alone — useful for studying
 how zone size and zone-level parallelism affect a zoned workload. N must divide
-`zns_num_ch`; anything else warns and falls back to full width.
+`zns_num_ch`; FEMU refuses any other value at realize
+(`zns_chnls_per_zone N must divide zns_num_ch M`).
 
 With `zns_num_ch=8`, a 4 GiB device gives:
 
@@ -935,7 +936,7 @@ total_pages = nchs × luns_per_ch × pls_per_lun × blks_per_pl × pgs_per_blk
 total_capacity = total_pages × secs_per_pg × secsz
 
 # Example:
-# 8 × 8 × 1 × 256 × 256 × 8 × 512 = 68,719,476,736 bytes (~64GB raw)
+# 8 × 8 × 1 × 256 × 256 × 8 × 512 = 17,179,869,184 bytes (16 GiB raw, the defaults)
 ```
 
 `pls_per_lun` above 1 is addressed: a line spans one block index across every

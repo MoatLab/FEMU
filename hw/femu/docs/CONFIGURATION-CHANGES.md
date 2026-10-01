@@ -11,8 +11,8 @@ being honoured.
 | Property | Why it is refused |
 |---|---|
 | any violated controller constraint | The check ran but returned silently, leaving QEMU up with no FEMU PCI device and no namespaces. The reason is now reported. |
-| `mpsmax` vs `mpsmin` | The test was inverted, so `mpsmax=1` was rejected and `mpsmin=1,mpsmax=0` accepted, advertising CAP.MPSMIN above CAP.MPSMAX. |
-| `meta` non-zero | LBA metadata is not implemented; every read and write failed at runtime. |
+| `mpsmax` below `mpsmin` or above 15 | The test used to be inverted, so `mpsmax=1` was rejected and `mpsmin=1,mpsmax=0` accepted, advertising CAP.MPSMIN above CAP.MPSMAX. |
+| `meta` with `dpc` or `dps`, with `nlbaf` above 8, or without a matching `mc` | Metadata is implemented for NoSSD and bbssd (separate buffer or interleaved with the data), but not together with the legacy protection settings; use `pi` for protection information. Before metadata was implemented, any non-zero `meta` was refused. |
 | `cell_pages` above 5 | Indexed past the page-type multiplier table. |
 | `nand_cell_type` with `pgs_per_blk` above 512 | Read past the page-type latency tables. |
 | `gc_strategy` outside {0,1,2,4} | Other values silently fell back to greedy or never collected at all. |

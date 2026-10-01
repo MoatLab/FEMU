@@ -139,7 +139,7 @@ MODES = [
         "select": "`femu_mode=5`",
         "example": "-device femu,devsz_mb=1024,femu_mode=5",
         "io": "kv",
-        "guest_kernel": "5.13 or newer; no block device, the namespace is "
+        "guest_kernel": "6.0 or newer; no block device, the namespace is "
                         "`/dev/ngXnY`",
         "guest_tools": "nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c`",
         "host": "none beyond the common ones",

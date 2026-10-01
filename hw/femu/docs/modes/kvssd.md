@@ -19,8 +19,12 @@ key-value devices, without key-value hardware.
   with one namespace, send them to the controller node `/dev/nvme0`. Linux
   refuses I/O passthrough on the controller node when the controller has
   more than one namespace; then use the namespace's generic node
-  `/dev/ngXnY`, which only newer guest kernels create for a key-value
-  namespace.
+  `/dev/ngXnY`.
+- Guest kernel: 6.0 or newer. Linux 6.0 started to attach namespaces of a
+  command set it has no driver for, with only the generic node (commit
+  eb867ee995bd, "nvme: enable generic interface (/dev/ngXnY) for unknown
+  command sets"). Linux 5.9 to 5.19 log `unknown csi 1 for nsid N` and skip
+  the namespace, so passthrough on `/dev/nvme0` fails too.
 - Guest tools: `nvme-cli` (`io-passthru`), and a C compiler to build
   `kv-probe.c`. The image from `make-guest-image.sh` has no compiler; add one
   with `./make-guest-image.sh --packages build-essential`, or run
