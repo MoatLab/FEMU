@@ -1812,7 +1812,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
             uint16_t pid = nvme_make_pid(ns, rg, ph);
             NvmeReclaimUnit *ru = ruh->rus[rg];
             ruhsd->pid = cpu_to_le16(pid);
-            ruhsd->ruhid = *ruhid;
+            ruhsd->ruhid = cpu_to_le16(*ruhid);
             ruhsd->earutr = 0;
             ruhsd->ruamw = cpu_to_le64(ru->ruamw);
         }

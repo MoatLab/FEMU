@@ -2327,7 +2327,7 @@ static uint16_t nvme_fdp_confs(FemuCtrl *n, uint32_t endgrpid,
     if (endgrp->fdp.enabled) {
         hdr->fdpa = FIELD_DP8(hdr->fdpa, FDPA, VALID, 1);
         hdr->fdpa = FIELD_DP8(hdr->fdpa, FDPA, RGIF, endgrp->fdp.rgif);
-        hdr->nrg = cpu_to_le16(endgrp->fdp.nrg);
+        hdr->nrg = cpu_to_le32(endgrp->fdp.nrg);
         hdr->nruh = cpu_to_le16(endgrp->fdp.nruh);
         hdr->maxpids = cpu_to_le16(NVME_FDP_MAXPIDS - 1);
         hdr->nnss = cpu_to_le32(NVME_MAX_NAMESPACES);
@@ -2338,7 +2338,7 @@ static uint16_t nvme_fdp_confs(FemuCtrl *n, uint32_t endgrpid,
             ruhd++;
         }
     } else {
-        hdr->nrg = cpu_to_le16(1);
+        hdr->nrg = cpu_to_le32(1);
         hdr->nruh = cpu_to_le16(1);
         hdr->maxpids = cpu_to_le16(NVME_FDP_MAXPIDS - 1);
         hdr->nnss = cpu_to_le32(1);
