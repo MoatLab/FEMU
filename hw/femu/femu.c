@@ -978,6 +978,13 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "5 (key-value)");
         return false;
     }
+    /* any other version registered no Open-Channel handlers */
+    if (n->femu_mode == FEMU_OCSSD_MODE && n->lver != OCSSD12 &&
+        n->lver != OCSSD20) {
+        error_setg(errp, "lver must be 1 (Open-Channel 1.2) or "
+                   "2 (Open-Channel 2.0)");
+        return false;
+    }
     if (n->num_namespaces == 0 ||
         n->num_namespaces > NVME_MAX_NUM_NAMESPACES) {
         error_setg(errp, "namespaces must be in [1, %d]",

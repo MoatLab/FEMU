@@ -3544,6 +3544,8 @@ static const struct {
     { "'femu_mode':7", "femu_mode" },
     { "'femu_mode':255", "femu_mode" },
     { "'namespaces':2,'namespace_modes':'bbssd,smartssd'", "namespace_modes" },
+    { "'femu_mode':0,'lver':0", "lver" },
+    { "'femu_mode':0,'lver':3", "lver" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,
