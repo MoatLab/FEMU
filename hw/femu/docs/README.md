@@ -18,6 +18,10 @@ Read these in order:
 
 ## I want a specific kind of SSD
 
+[Choosing a mode](concepts/choosing-a-mode.md) has the full decision table:
+every `femu_mode` value, the settings for each goal, which features combine,
+and what the guest needs. In short:
+
 | Goal | Mode | Launcher | Guide |
 | --- | --- | --- | --- |
 | A fast NVMe drive with no FTL timing | NoSSD (`femu_mode=2`, the default) | `run-nossd.sh` | [README](../../../README.md#nossd-mode); `modes/nossd.md` coming |
@@ -47,9 +51,13 @@ The guest kernel each mode needs is in
 
 ## I want to understand how FEMU works
 
-- `concepts/architecture.md`: the layers from the guest interface to the
-  memory backend (coming).
-- `concepts/choosing-a-mode.md` and `concepts/timing-model.md` (coming).
+- [Architecture](concepts/architecture.md): the layers from the guest
+  interface to the memory backend, the threads, and a walk through one NVMe
+  write and one CXL load.
+- [Choosing a mode](concepts/choosing-a-mode.md): which mode or feature fits
+  a goal, and which ones combine.
+- [Timing model](concepts/timing-model.md): how latency is computed and
+  enforced, the properties that control it, and how to measure it.
 - [CXL SSD design](cxlssd.md): the design note for `femu-cxl-ssd`.
 
 ## I want to measure or tune
