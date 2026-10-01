@@ -509,7 +509,7 @@ The ones you need most:
 | `cache-hits`, `cache-misses`, `read-hits`, `read-misses`, `write-hits`, `write-misses` | Trapped lookups; direct hits are not counted |
 | `cache-entries`, `cache-evictions`, `prefetch-inserts` | Cache occupancy and churn |
 | `media-reads`, `media-writes`, `media-time-ns` | NAND page reads, page programs and total modelled media time |
-| `media-full` | Accesses that found no free NAND page and completed uncached without media time. A measurement is valid only while it is 0 |
+| `media-full` | Accesses whose NAND program found no free page. That program is not timed and the access completes uncached; a fill read already issued is still charged. A measurement is valid only while it is 0 |
 | `der-active`, `der-mapped`, `der-fallbacks` | Whether direct mapping is on, how many pages are mapped now, and refused mappings |
 
 `qom-set ... stats-reset true` copies the counters to the `last-*` properties

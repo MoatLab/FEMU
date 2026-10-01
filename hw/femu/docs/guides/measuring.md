@@ -119,8 +119,8 @@ scripts/qmp/qom-get /machine/peripheral/cxlssd.media-full
   properties first. It does not clear the media
   counters (`media-reads`, `media-writes`, `media-time-ns`) or the `der-*`
   counters, so measure those as differences between two reads.
-- `media-full` must stay 0. A non-zero value means some accesses found no
-  free NAND page and completed with no media time, and the run is not valid.
+- `media-full` must stay 0. A non-zero value means some NAND programs found
+  no free page and were not timed, and the run is not valid.
 - Accesses served through a direct mapping (`der=memslot` or `cylon`) never
   reach QEMU and are not counted as hits.
 

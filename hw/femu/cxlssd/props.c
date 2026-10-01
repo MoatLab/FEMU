@@ -186,8 +186,9 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "this device, so writes from a linked NVMe controller appear after "
       "the next one" },
     { "media-full",
-      "Read-only: accesses that found no free NAND page and completed "
-      "uncached without media timing; stats-reset keeps it, and a "
+      "Read-only: accesses whose NAND program found no free page; that "
+      "program is not timed and the access completes uncached, though a "
+      "fill read already issued is charged; stats-reset keeps it, and a "
       "measurement is valid only while it is 0" },
 
     /* direct mapping counters */

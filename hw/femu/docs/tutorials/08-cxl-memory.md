@@ -218,9 +218,9 @@ der-active: False
 
 After a workload on the region, `cache-misses`, `media-reads` and
 `media-time-ns` grow, and `cache-hits` counts the accesses the cache
-served. `media-full` must stay 0: a non-zero value means some accesses
-found no free NAND page and completed with no media time, and the run is
-not valid.
+served. `media-full` must stay 0: a non-zero value means some NAND
+programs found no free page and were not timed, and the run is not
+valid.
 
 To change a setting or start from a cold cache, send raw QMP, for example
 with `socat`. `flush-cache` writes dirty pages back and drops every page that is not

@@ -81,7 +81,7 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `media-time-ns` | `uint64` | Read-only: total modelled media time in ns returned by FTL requests, including contention |
 | `media-reads` | `uint64` | Read-only: page reads the FTL performed for cache fills, uncached reads and PIN fills, not counting reads that cylon-first-touch-program turned into programs; stays 0 with ftl=off |
 | `media-writes` | `uint64` | Read-only: user page programs counted by the FTL, garbage collection copies excluded, refreshed at each media request of this device, so writes from a linked NVMe controller appear after the next one |
-| `media-full` | `uint64` | Read-only: accesses that found no free NAND page and completed uncached without media timing; stats-reset keeps it, and a measurement is valid only while it is 0 |
+| `media-full` | `uint64` | Read-only: accesses whose NAND program found no free page; that program is not timed and the access completes uncached, though a fill read already issued is charged; stats-reset keeps it, and a measurement is valid only while it is 0 |
 
 ### Direct mapping counters
 
