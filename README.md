@@ -254,34 +254,64 @@ To ensure your build is successful, run the basic device check:
 
 ### 1. VM Image Setup
 
-**Option A: Use Pre-built Image (Recommended)**
-1. Download VM image from [FEMU VM Image Portal](https://forms.gle/nEZaEe2fkj5B1bxt9)
-2. Extract to `~/images/` directory
-3. Rename to match script expectations: `u20s.qcow2`
+**Option A: Build an image with one command (Recommended)**
 
-**Option B: Build Custom Image**
 ```bash
-# Create image directory
+# From the build-femu directory
+./make-guest-image.sh
+```
+
+The script downloads the Ubuntu 24.04 cloud image and checks it against
+Ubuntu's published SHA256 sums. It then boots the image once, without a
+display, to create user `femu`, install `nvme-cli` and `fio`, and turn on the
+serial console. It writes two files:
+
+- `~/images/u20s.qcow2`, the path the run scripts use. The name is kept for
+  compatibility; the image holds Ubuntu 24.04.
+- `~/images/femu-guest-key`, the SSH key for user `femu`.
+
+It needs no root access. The host needs `curl`, `qemu-img`, one of
+`cloud-localds`, `genisoimage`, `xorriso` or `mkisofs`, and read-write access
+to `/dev/kvm`. Common options:
+
+```bash
+./make-guest-image.sh --size 64G           # disk size (default 32G)
+./make-guest-image.sh --ssh-key ~/.ssh/id_ed25519.pub
+./make-guest-image.sh --password femu      # also allow console login
+./make-guest-image.sh --cxl                # also install ndctl, daxctl, cxl-cli
+./make-guest-image.sh -o /data/images      # another output directory
+```
+
+To boot a different image, set `OSIMGF` (or `IMGDIR`) for the run script:
+`OSIMGF=/data/images/u20s.qcow2 ./run-blackbox.sh`.
+
+**Option B: Use a pre-built image**
+1. Request the image from the [FEMU VM Image Portal](https://forms.gle/nEZaEe2fkj5B1bxt9)
+2. Extract it to the `~/images/` directory
+3. Rename it to `u20s.qcow2`
+
+**Option C: Install from an ISO**
+
+This needs a display for the installer, and step 2 below afterwards.
+```bash
 mkdir -p ~/images
 cd ~/images
 
-# Download Ubuntu Server ISO
 # If the link no longer works, visit http://releases.ubuntu.com to download the correct version of ISO image
 wget http://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso
 
-# Create VM disk image. The run scripts look for ~/images/u20s.qcow2,
-# whichever Ubuntu release it holds.
 qemu-img create -f qcow2 u20s.qcow2 80G
 
-# Install OS (requires GUI environment). qemu-img and qemu-system-x86_64 can
-# come from your distribution or from build-femu/.
+# qemu-img and qemu-system-x86_64 can come from your distribution or from build-femu/.
 qemu-system-x86_64 -cdrom ubuntu-24.04.3-live-server-amd64.iso \
     -hda u20s.qcow2 -boot d -net nic -net user -m 8192 -rtc base=localtime -smp 8 -cpu host -enable-kvm
 ```
 
-### 2. Configure VM for Serial Console
+### 2. Configure VM for Serial Console (Options B and C)
 
-Inside the VM, edit `/etc/default/grub`:
+The run scripts use `-nographic`, so the guest must use the serial console.
+Images from Option A already do. For other images, edit `/etc/default/grub`
+inside the VM:
 
 ```bash
 sudo nano /etc/default/grub
@@ -319,11 +349,18 @@ sudo reboot
 
 ### 4. Access the VM
 
-The VM will start in text mode. You can also SSH into the VM:
+The VM will start in text mode. You can also SSH into the VM. For an image
+from Option A:
 ```bash
-# From host machine
-ssh -p 8080 username@localhost
+# From the build-femu directory
+./run-guest-ssh.sh                  # shell
+./run-guest-ssh.sh sudo nvme list   # one command
+
+# or directly
+ssh -i ~/images/femu-guest-key -p 8080 femu@localhost
 ```
+
+For other images, use `ssh -p 8080 username@localhost`.
 
 ---
 
