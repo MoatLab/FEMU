@@ -104,6 +104,12 @@ jobs:
         python3 hw/femu/scripts/gen-property-docs.py --check \
           --qemu build-femu/qemu-system-x86_64
 
+    - name: Check the documentation links
+      run: |
+        # Fails on a relative link in README.md or hw/femu/docs/** whose file
+        # or heading anchor does not exist.
+        python3 hw/femu/scripts/check-doc-links.py
+
     - name: Check FEMU modes
       run: |
         cd build-femu
