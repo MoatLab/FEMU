@@ -33,6 +33,8 @@ sudo ./pkgdep.sh
 
 ```
 name "femu", bus PCI, desc "FEMU Non-Volatile Memory Express"
+name "femu-cxl-ssd", bus PCI, desc "FEMU CXL SSD"
+name "femu-subsys", desc "FEMU NVMe Subsystem (FDP)"
 ```
 
 If the build fails, see [build.md](build.md#common-build-errors).

@@ -87,8 +87,8 @@ host kernel (see [cxlssd.md](../cxlssd.md)).
 
 ### Disk
 
-The source tree and one build take about 6 GiB. The guest image built by
-`make-guest-image.sh` uses about 3.5 GiB on disk (32 GiB virtual), plus a
+The source tree and one build take about 3 GiB. The guest image built by
+`make-guest-image.sh` uses about 2.5 GiB on disk (32 GiB virtual), plus a
 0.6 GiB download cache.
 
 ### CPU cores

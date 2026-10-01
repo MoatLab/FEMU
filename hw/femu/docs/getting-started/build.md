@@ -82,10 +82,11 @@ Check that the FEMU devices are registered:
 ./qemu-system-x86_64 -device help | grep femu
 ```
 
-You should see the `femu` controller and the `femu-subsys` subsystem:
+You should see the NVMe controller, the CXL SSD and the NVMe subsystem:
 
 ```
 name "femu", bus PCI, desc "FEMU Non-Volatile Memory Express"
+name "femu-cxl-ssd", bus PCI, desc "FEMU CXL SSD"
 name "femu-subsys", desc "FEMU NVMe Subsystem (FDP)"
 ```
 
