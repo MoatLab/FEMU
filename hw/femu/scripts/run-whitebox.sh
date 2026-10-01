@@ -8,9 +8,9 @@
 #-------------------------------------------------------------------------------
 
 # VM image directory
-IMGDIR=$HOME/images
+IMGDIR=${IMGDIR:-$HOME/images}
 # Virtual machine disk image
-OSIMGF=$IMGDIR/u20s.qcow2
+OSIMGF=${OSIMGF:-$IMGDIR/u20s.qcow2}
 
 # OCSSD Spec version (1 for Spec 1.2, and 2 for Spec 2.0)
 OCVER=2
@@ -27,10 +27,10 @@ num_chips_per_channel=4   # Number of NAND flash chips/dies per channel
 if [[ ! -e "$OSIMGF" ]]; then
 	echo ""
 	echo "VM disk image couldn't be found ..."
-	echo "Please prepare a usable VM image and place it as $OSIMGF"
-	echo "Once VM disk image is ready, please rerun this script"
+	echo "Build one with ./make-guest-image.sh, or place an image at $OSIMGF"
+	echo "(set OSIMGF or IMGDIR to use another path), then rerun this script"
 	echo ""
-	exit
+	exit 1
 fi
 
 if [[ $OCVER != 1 && $OCVER != 2 ]]; then

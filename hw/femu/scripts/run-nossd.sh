@@ -3,18 +3,18 @@
 # Run FEMU with no SSD emulation logic, (e.g., for SCM/Optane emulation)
 
 # Image directory
-IMGDIR=$HOME/images
+IMGDIR=${IMGDIR:-$HOME/images}
 # Virtual machine disk image
-OSIMGF=$IMGDIR/u20s.qcow2
+OSIMGF=${OSIMGF:-$IMGDIR/u20s.qcow2}
 
 
 if [[ ! -e "$OSIMGF" ]]; then
 	echo ""
 	echo "VM disk image couldn't be found ..."
-	echo "Please prepare a usable VM image and place it as $OSIMGF"
-	echo "Once VM disk image is ready, please rerun this script again"
+	echo "Build one with ./make-guest-image.sh, or place an image at $OSIMGF"
+	echo "(set OSIMGF or IMGDIR to use another path), then rerun this script"
 	echo ""
-	exit
+	exit 1
 fi
 
 sudo ./qemu-system-x86_64 \
