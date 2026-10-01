@@ -93,7 +93,7 @@ There are two media engines:
 | KV | media layer, through the BBSSD wrapper | `ssd_init()` from `kvssd/kvssd-ftl.c` | poller |
 | ZNS | media layer | `zns_nand_media_init()` in `zns/zftl.c` | FTL thread |
 | `femu-cxl-ssd` | media layer, through the BBSSD wrapper | `femu_cxl_start()` in `cxlssd/cxlssd.c` | `femu-cxl-ftl` worker |
-| OCSSD 1.2, 2.0 | `timing-model/timing.c` | `set_latency()`, `init_nand_flash()` | poller |
+| OCSSD 1.2, 2.0 | `timing-model/timing.c` | `init_nand_flash()` | poller |
 | NoSSD | none | | |
 
 ## Geometry
@@ -127,7 +127,9 @@ names of the properties and the field widths differ.
 A field width is an upper bound on its axis. `bb_check_geometry()` in
 `bbssd/ftl-geom.c` refuses a count larger than its field can hold, and refuses
 a geometry whose total sector count does not fit in a signed 32-bit integer.
-`zns_check_params()` and `oc_timing_geometry_ok()` do the same for their modes.
+`zns_check_params()` bounds each ZNS axis by its field. `oc_timing_geometry_ok()`
+requires every OCSSD axis to be non-zero, `lnum_ch` at most 32 and
+`lnum_ch * lnum_lun` at most 128, the sizes of the per-chip arrays.
 
 ### How pages land on the geometry
 
@@ -254,12 +256,13 @@ The ZNS program time covers a whole program unit (`zns_flash_type` pages of
 Values come from `nand/nand.h`: MLC from a profile of Micron L95B parts, TLC
 from SimpleSSD, QLC scaled from the TLC values. Any other value is reset to 0
 with a message (`ssd_init()` in `bbssd/ftl.c`); PLC has no table here. With a
-cell type set, `pg_rd_lat`, `pg_wr_lat` and `blk_er_lat` are ignored and
+cell type set, `pg_rd_lat`, `pg_wr_lat` and `blk_er_lat` no longer set NAND
+times (`pg_rd_lat` still sets the write buffer and read cache hit cost), and
 `pgs_per_blk` must be at most 512, the size of the page-type tables.
 
 The page type of page `pg` in a block comes from the pairing tables
-`slc_tbl`, `mlc_tbl`, `tlc_tbl` and `qlc_tbl`, built by `init_nand_flash()`
-in `nand/nand.c`. They follow a shadow programming order: the first pages of
+`mlc_tbl`, `tlc_tbl` and `qlc_tbl`, built by `init_nand_flash()` in
+`nand/nand.c`; `slc_tbl` is all zeros. They follow a shadow programming order: the first pages of
 a block are lower pages, then consecutive pairs of pages cycle through the
 page types from lower to upper.
 
@@ -279,7 +282,8 @@ The page type is `pg % cell_pages`; `cell_pages` 0 is set to 3 when
 | 4 | 500 | 850 | 1150 | 1500 | |
 | 5 | 400 | 750 | 1000 | 1250 | 1600 |
 
-Each row averages to 1000, so the mean program time stays `pg_wr_lat`.
+Each row averages to 1000, so the mean program time stays `pg_wr_lat` when
+`pgs_per_blk` is a multiple of `cell_pages`.
 Reads and erases are not scaled.
 
 ### ZNS and OCSSD
@@ -303,7 +307,7 @@ Two kinds of phase share a channel:
   `max(earliest, ch_avail)`, moves past any booked window it would overlap,
   and advances `ch_avail` to its end.
 - `bus_later()`: a read's data-out and status, which happen after the array
-  finishes. It is booked as a window `[start, end)` in `bus_res[ch]` and does
+  finishes. It starts no earlier than `ch_avail` and is booked as a window `[start, end)` in `bus_res[ch]` and does
   not advance `ch_avail`, so another die's "now" phase can use the bus before
   the window opens.
 
@@ -394,11 +398,19 @@ Worked example, one LUN, `pg_wr_lat` 200 us, `pg_rd_lat` 40 us,
  W2 program  arrives 160   waits for the LUN until P ends: 330-530
  (ss = tsusp_ns)
 
- P alone ends at 200.  With the reads: 200 + (5+40) + 40 + (5+40) = 330
+ P's die time: 200 alone; with the reads 200 + (5+40) + 40 + (5+40) = 330
 ```
 
-The state is read and written without a lock, so operations on one position
-must be serialized. BBSSD and ZNS run them on the single FTL thread. A device
+P's own command still completes at 200. Its latency was computed when it
+was issued and is never revisited. Suspension moves only the die's
+busy-until time, from 200 to 330, so operations issued afterwards, such as
+W2, start after 330. A suspended program or erase never makes its own
+command complete afterwards; it delays the commands that follow.
+
+`nand_media_multiplane()` does not consult the suspend state, so a read
+issued through it never suspends; only erases use it today. The state is
+read and written without a lock, so operations on one position must be
+serialized. BBSSD and ZNS run them on the single FTL thread. A device
 with suspend on also leaves the lock-free fast path described in
 [Concurrency](#concurrency).
 
@@ -433,7 +445,8 @@ when it stops using it. With the bus off and the LUN gate this reduces to:
 ```
 
 `stime` is the command's submission time, stamped by the poller from
-`QEMU_CLOCK_REALTIME` (`nvme-io.c`). Background work (GC) passes `stime = 0`,
+`QEMU_CLOCK_REALTIME` (`nvme-io.c`; a test-only property switches it to the
+virtual clock). Background work (GC) passes `stime = 0`,
 which the wrappers replace with the current time.
 
 ### The per-command rule
@@ -486,14 +499,15 @@ returns.
 With the bus off, the same four operations end at P 200, R1 40, R2 240,
 R3 40. With `pe_suspend=1` and `tsusp_ns=5000`, R2 suspends P instead: it
 starts at 13 + 5 = 18, ends its array at 58, waits for R1's booked window and
-moves its data at 62-72 (done 72), and P's die time moves to 256.
+moves its data at 62-72 (done 72), and the die stays busy until 256. P's
+own completion stays at 211.
 
 If R1 and R2 were the two pages of one 8 KiB read command, its media latency
 would be max(62, 261) = 261 us.
 
 ### Worked example: full command completion
 
-A host read of two 4 KiB pages on idle LUNs of the default BBSSD (bus off),
+A host read of two written 4 KiB pages on idle LUNs of the default BBSSD (bus off),
 with `pcie_bandwidth_mbps=4000`, `pcie_prop_delay_ns=500` and
 `fw_cpu_ns=1000`, submitted at time S:
 
@@ -504,7 +518,7 @@ with `pcie_bandwidth_mbps=4000`, `pcie_prop_delay_ns=500` and
                          device-to-host queue (starts at max(queue free, expire))
  S + 42 548              + propagation 500 ns
  S + 42 548 .. 43 548    firmware core: max(core free, expire) + 1 000 ns
- S + 43 548              expire_time; CQE posted on the first sweep after it
+ S + 43 548              expire_time; CQE posted on the first sweep at or after it
 ```
 
 The link and firmware queues are shared by every command of the controller,
@@ -514,7 +528,8 @@ queues.
 ### Concurrency
 
 - BBSSD and ZNS call the layer from the single `FEMU-FTL-Thread`, so their
-  timelines need no lock.
+  timelines need no lock. KV calls it from the poller and `femu-cxl-ssd` from
+  its `femu-cxl-ftl` worker, each under its own device lock.
 - With the LUN gate, no bus and no suspend, `nand_media_op()` updates
   `next_lun_avail_time` with a compare-and-swap loop that gives the same
   result as a locked read-max-add-store. Any other configuration takes the
@@ -533,9 +548,14 @@ GC operations go through the same timelines as host operations, with
 - The returned latency is discarded. GC never adds to a command's latency
   directly. It makes LUNs and channels busy, and the host operations that
   need them afterwards wait.
-- **Foreground GC** runs at the start of `ssd_write()` when the share of used
-  lines has reached `gc_thres_pcent_high`. The write's own programs then
-  queue behind the GC operations on the LUNs they share.
+- **Foreground GC** runs when the share of used lines has reached
+  `gc_thres_pcent_high`: at the start of `ssd_write()`, of a write buffer
+  destage and of a Write Zeroes (`bbssd/ftl-datapath.c`), until the share
+  drops below it. The command's own programs then queue behind the
+  GC operations on the LUNs they share.
+- **Read reclaim** (`read_reclaim_limit`, `retention_limit_sec`) rewrites one
+  queued line through `reclaim_line()` at the start of a write, charged the
+  same way as GC.
 - **Background GC** runs one victim after a request finishes in
   `bb_ftl_process_req()` (`bbssd/ftl.c`), once the latency of that request
   has been computed. It delays the commands that follow.
@@ -552,9 +572,33 @@ GC operations go through the same timelines as host operations, with
  ^ write arrives                                                                  ^ write's done
 ```
 
+KV is different. Its reclaim erases and compaction moves are stamped with
+the triggering command's `stime`, their latency is added to that command
+(`kvssd/kvssd-ftl.c`), and 0xEF does not apply to KV, so they cannot be
+switched off.
+
 ZNS has no device GC. A Zone Reset charges one erase per block of the zone on
 every plane it spans, with the command's `stime`, and returns the largest
 (`zns_zone_reset()`).
+
+### Costs that are not NAND operations
+
+The FTL adds these to a command's latency alongside its NAND operations:
+
+- **BBSSD write buffer** (`buffer_size` > 0): a write the buffer accepts costs
+  `pg_rd_lat / 16` (1 us when `pg_rd_lat` is 0), plus the programs of any
+  destage it forces. A Flush pays for programming everything buffered
+  (`bbssd/ftl.c`). A read of a buffered page costs the same DRAM access.
+- **BBSSD read cache and DFTL mapping cache**: a hit costs a DRAM access; a
+  mapping miss adds a NAND read of the translation page, after a program if
+  the evicted entry is dirty.
+- **ZNS write cache**: a write only enters the zone's write cache and pays
+  `SRAM_WRITE_LATENCY_NS` (1 us) per 4 KiB page, summed over the command
+  (`zns_write()` in `zns/zftl.c`). It pays program time only when the cache
+  fills, or when it has to evict another zone's cache. A cache holds one
+  stripe: 16 KiB * `zns_flash_type` * `zns_num_plane` * `zns_num_ch` *
+  `zns_num_lun`. A read of data still in the cache is not mapped yet and
+  costs nothing.
 
 ## Host link and firmware CPU
 
@@ -564,12 +608,13 @@ queue. Both are off by default.
 
 | Model | Applies to | Computation |
 | --- | --- | --- |
-| Link transfer (`pcie_bandwidth_mbps`) | Read and Write, every NVMe mode; KV store and retrieve use the bytes moved | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. `start = max(queue, expire)`, `queue = start + trans` |
+| Link transfer (`pcie_bandwidth_mbps`) | NVMe Read and Write (opcodes 01h and 02h) in BBSSD, CSD, KV, ZNS and NoSSD; KV store and retrieve share those opcodes and use the bytes moved. Not Zone Append, and not the Open-Channel vector commands, so OCSSD 1.2 never pays it | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. `start = max(queue, expire)`, `queue = start + trans` |
 | Propagation (`pcie_prop_delay_ns`) | same | `expire = queue + delay`; does not occupy the queue |
-| Firmware CPU (`fw_cpu_ns`) | Read, Write, Zone Append | one modelled core: `start = max(core, expire)`, `core = start + fw_cpu_ns`, `expire = core` |
+| Firmware CPU (`fw_cpu_ns`) | Read, Write (01h, 02h) and Zone Append; not the Open-Channel vector commands | one modelled core: `start = max(core, expire)`, `core = start + fw_cpu_ns`, `expire = core` |
 
-The link is modelled after the media, so a read's transfer to the host never
-overlaps its NAND time. The firmware cost is charged at the end of a command,
+The link is modelled after the media for both directions. A read's transfer
+to the host never overlaps its NAND time, and a write's transfer from the
+host is charged after its programs, not before them. The firmware cost is charged at the end of a command,
 which caps the command rate at about one per `fw_cpu_ns` but does not delay
 the start of the media operations. With any of the three set, a NoSSD
 controller completes through the priority queue instead of inline in the
@@ -595,16 +640,23 @@ Open-Channel devices use `hw/femu/timing-model/timing.c`:
   for `flash_type` when it is 0, scaled by the sectors used out of
   `lsecs_per_pg`. Open-Channel 2.0 charges no channel time and uses page
   type 0.
-- The latency is `max over pages of (done - stime)`, written straight into
-  `expire_time` in the poller (`oc12_advance_status()`,
+- Open-Channel 1.2 charges one chip operation per NAND page of the address
+  list. Open-Channel 2.0 groups addresses that differ only in the sector
+  field, which spans the whole chunk, so a run of consecutive sectors in one
+  chunk pays one chip operation whatever its length.
+- The latency is `max over operations of (done - stime)`, written straight
+  into `expire_time` in the poller (`oc12_advance_status()`,
   `oc20_advance_status()`).
+- Open-Channel 1.2 keeps its data-out windows in an unbounded list per
+  channel, where the media layer caps its list at 32.
 
 ## Runtime switches
 
 A BBSSD controller accepts the vendor admin command 0xEF (`bb_flip()` in
-`bbssd/bb.c`). The action is in CDW10. It pauses the pollers, applies the
-change to every namespace of the controller that has a BBSSD FTL, and resumes
-them. ZNS, KV, CSD and OCSSD controllers return Invalid Opcode.
+`bbssd/bb.c`). The action is in CDW10. For codes 1 to 4 it pauses the
+pollers, applies the change to every namespace of the controller that has a
+BBSSD FTL, and resumes them. Controllers of every other mode return Invalid
+Opcode.
 
 | CDW10 | Constant (`bbssd/ftl.h`) | Effect on timing |
 | --- | --- | --- |
@@ -615,9 +667,12 @@ them. ZNS, KV, CSD and OCSSD controllers return Invalid Opcode.
 | 5 | accounting reset | Prints and resets the per-poller completion counters; no timing change |
 | 6, 7 | `FEMU_ENABLE_LOG`, `FEMU_DISABLE_LOG` | Per-command debug log on or off; no timing change |
 
-Codes 3 and 4 refresh only `rd_ns`, `wr_ns` and `er_ns` in the media layer
-(`bb_nand_media_refresh_timing()`). They do not change the channel bus
-phases, the `nand_cell_type` tables, `pgtype_lat`, ECC time or `trim_lat_ns`.
+Codes 3 and 4 refresh only the flat `rd_ns`, `wr_ns` and `er_ns` in the
+media layer (`bb_nand_media_refresh_timing()`). With `nand_cell_type` 1 to 4
+the flat times are not used, so the codes have no effect on NAND time. They
+never change the channel bus phases, `pgtype_lat`, ECC time or
+`trim_lat_ns`. Code 4 makes a write buffer hit cost 1 us; the read cache
+keeps the hit cost it computed at start.
 On a controller linked to a `femu-cxl-ssd`, codes 1 to 4 change the medium's
 FTL instead, and code 3 restores its `read-ns`, `program-ns` and `erase-ns`.
 
@@ -647,10 +702,10 @@ properties and states how they interact.
 | [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy` (`tplpbsy`, `tplrbsy`, `trcbsy` have no effect) | Used only by multi-plane erase, so only with `pls_per_lun > 1`. |
 | [Suspend](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pe_suspend`, `tsusp_ns` | `tsusp_ns` matters only with `pe_suspend`. |
 | [ECC](../reference/properties.md#reliability-and-wear) | `ecc_step_ns`, `ecc_retention_sec` | `ecc_retention_sec` matters only with `ecc_step_ns`. |
-| [Other FTL costs](../reference/properties.md#nand-timing-bbssd-csd-kv) | `trim_lat_ns` | Charged per Dataset Management range by the FTL, not by the media layer. |
+| [Other FTL costs](../reference/properties.md#nand-timing-bbssd-csd-kv) | `trim_lat_ns` | Charged per Dataset Management range by the FTL, not by the media layer. Refused with FDP. |
 | [ZNS](../reference/properties.md#zns) | `zns_num_ch`, `zns_num_lun`, `zns_num_plane`, `zns_num_blk`, `zns_flash_type`, `zns_pg_rd_lat`, `zns_pg_wr_lat`, `zns_blk_er_lat`, `zns_cmd_addr_lat`, `zns_pg_xfer_lat`, `zns_status_lat`, `zns_pe_suspend`, `zns_tsusp_ns` | The `zns_*_lat` overrides apply to the configured cell type only. `zns_num_plane` scales the program unit. |
-| [OCSSD](../reference/properties.md#ocssd-open-channel) | `flash_type`, `oc12_channel_timing`, `ch_xfer_lat`, `lnum_ch`, `lnum_lun`, `lnum_pln`, `lsecs_per_pg`, `lpgs_per_blk` | `ch_xfer_lat` is shared with BBSSD. `lnum_ch * lnum_lun` is at most 128. |
-| [Host link and firmware](../reference/properties.md#host-link-and-controller-firmware) | `pcie_bandwidth_mbps`, `pcie_prop_delay_ns`, `fw_cpu_ns` | Apply to every NVMe mode, after the media time. |
+| [OCSSD](../reference/properties.md#ocssd-open-channel) | `flash_type`, `oc12_channel_timing`, `ch_xfer_lat`, `lnum_ch`, `lnum_lun`, `lnum_pln`, `lsecs_per_pg`, `lpgs_per_blk` | `ch_xfer_lat` is shared with BBSSD. `lnum_ch` is at most 32 and `lnum_ch * lnum_lun` at most 128. |
+| [Host link and firmware](../reference/properties.md#host-link-and-controller-firmware) | `pcie_bandwidth_mbps`, `pcie_prop_delay_ns`, `fw_cpu_ns` | Applied after the media time, to the opcodes listed in [Host link and firmware CPU](#host-link-and-firmware-cpu). |
 | [`femu-cxl-ssd`](../reference/properties.md#nand-geometry-and-timing) | `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | One plane per LUN; feeds the same media layer. |
 
 A BBSSD configuration with the bus and suspend on:
@@ -703,7 +758,8 @@ The media layer keeps no counters of its own. What it charges shows up in:
    unwritten page costs nothing), then run a queue depth 1 4 KiB random read.
    The median completion latency should be about tR plus the data-out and
    status phases plus guest and poller overhead. Measure that overhead once
-   with all NAND times at 0 (0xEF code 4) and subtract it.
+   with flat timing, no bus phases, no caches and 0xEF code 4, and subtract
+   it.
 5. **Check the saturated throughput.** A random read at high queue depth
    should approach `nchs * luns_per_ch / tR` operations per second when the
    bus is not the limit, or `nchs / (pg_xfer_lat + cmd_addr_lat + status_lat)`
@@ -728,11 +784,15 @@ Give each poller and the FTL thread its own host core while measuring;
   erases, copyback, and program/erase suspend. Run it with
   `make -C hw/femu/tests check`.
 - **qtests**: `hw/femu/tests/qtest/femu-test.c` covers the OCSSD 1.2 channel
-  model (`oc12-channel-timing`, `oc12-channel-gap`, `oc12-ppa-timing`,
-  `oc12-flash-type`, `oc12-transfer-cost`) and the 0xEF flips on a linked
-  `femu-cxl-ssd` (`cxl-nvme-flip`).
-- **Not covered by automated tests**: end-to-end guest latency for BBSSD and
-  ZNS against a reference device. The built-in MLC table is a profile of real
+  model (`oc12-channel-timing`, `oc12-channel-gap`, `oc12-channel-default`,
+  `oc12-channel-off`, `oc12-ppa-timing`, `oc12-flash-type`, `oc12-page-count`,
+  `oc12-transfer-cost`), the warning for the timing properties that have no
+  effect (`ignored-props`), the 0xEF flips on a linked `femu-cxl-ssd`
+  (`cxl-nvme-flip`), and the two example configurations on this page
+  (`doc-examples`).
+- **Not covered by automated tests**: BBSSD and ZNS timing inside QEMU, the
+  host link, `fw_cpu_ns`, the 0xEF flips on a plain BBSSD controller, and
+  end-to-end guest latency against a reference device. The built-in MLC table is a profile of real
   parts; the other tables are from published papers, as cited in the
   headers. Check numbers that matter to you with the calibration steps above.
 
@@ -747,8 +807,8 @@ make -C hw/femu/tests check
   corrupted.
 - Multi-plane reads and programs: host pages are issued one plane at a time.
   Only line erases are batched.
-- Cache read and cache program pipelining. The code path exists but no mode
-  enables it.
+- Cache read pipelining: the code path exists but no mode enables it. There
+  is no cache program model.
 - Copyback for GC. The function exists and has no caller, because GC's
   destination is almost never on the source LUN.
 - Program suspend for programs, or erase suspend by another erase. Only reads
@@ -756,8 +816,8 @@ make -C hw/femu/tests check
 - Per-die power or thermal limits, and temperature-dependent timing.
 - Plane-level parallelism for BBSSD, CSD and KV reads and programs (the gate
   is per LUN), and the channel bus for OCSSD 2.0.
-- PLC page-type tables. PLC exists only for ZNS, with times you supply, and
-  as an endurance rating.
+- PLC outside ZNS. ZNS accepts PLC with times you supply; BBSSD resets
+  `nand_cell_type=5` to 0 and OCSSD refuses `flash_type=5`.
 - Queueing inside the controller other than the link and the single
   firmware core: there is no DRAM bandwidth or NAND controller queue model.
 - Timing accuracy below the poller sweep. A completion is posted on the first
