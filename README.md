@@ -149,7 +149,7 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 ### Minimum Requirements
 
 - **Physical Machine**: Run FEMU on a physical machine, not inside a VM (nested virtualization is not recommended due to performance impact)
-- **OS**: Linux (Ubuntu 18.04+, CentOS 7+, or equivalent)
+- **OS**: Linux with Python >= 3.9 and GLib >= 2.66, which the QEMU 10.1 base requires (for example Ubuntu 22.04 or 24.04)
 - **CPU**: x86_64 with hardware virtualization (Intel VT-x/AMD-V)
 - **Memory**: At least 12GB DRAM to enable seamless run of default FEMU scripts emulating a 4GB SSD
 - **CPU Cores**: At least 8 cores for 4 vCPUs and 4GB DRAM VM
@@ -163,14 +163,14 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 
 ### Host Environment Compatibility
 
-| Linux Distribution | Kernel | GCC    | Ninja  | Python | Status |
-|:-------------------|:-------|:-------|:-------|:-------|:-------|
-| Ubuntu 24.04 LTS   | 6.8.0  | 13.2.0 | 1.12.1 | 3.12.3 | ✅ Tested |
-| Ubuntu 22.04 LTS   | 5.15.0 | 11.3.0 | 1.10.1 | 3.10.6 | ✅ Tested |
-| Ubuntu 20.04 LTS   | 5.4.0  | 9.3.0  | 1.10.0 | 3.8.2  | ✅ Tested |
-| Ubuntu 18.04 LTS   | 4.15.0 | 7.5.0  | 1.8.2  | 3.6.7  | ✅ Tested |
-| Ubuntu 16.04.5     | 4.15.0 | 5.4.0  | 1.8.2  | 3.6.0  | ⚠️ Legacy |
-| Gentoo             | 5.10   | 9.3.0  | 1.10.1 | 3.7.9  | ⚠️ Community |
+| Linux Distribution | Python | GLib | Status |
+|:-------------------|:-------|:-----|:-------|
+| Ubuntu 24.04 LTS   | 3.12   | 2.80 | Built in CI |
+| Ubuntu 22.04 LTS   | 3.10   | 2.72 | Built in CI |
+
+Other distributions with Python >= 3.9 and GLib >= 2.66 should build FEMU but
+are not tested. Ubuntu 20.04 (Python 3.8, GLib 2.64) and older releases cannot
+build it with their stock packages. `pkgdep.sh` supports only Debian and Ubuntu.
 
 ### Guest Environment Compatibility
 
@@ -182,13 +182,16 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 | OpenChannel-SSD v2.0      | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
 | Zoned-Namespace (ZNS) SSD | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 
-**Continuous Integration**: FEMU uses GitHub Actions for automated testing across multiple Ubuntu versions. The CI pipeline:
+**Continuous Integration**: GitHub Actions builds FEMU with `femu-compile.sh` on
+Ubuntu 22.04 and 24.04. It then:
 
-- Tests compilation on Ubuntu 20.04, 22.04, and 24.04 LTS
-- Verifies FEMU device registration and all SSD modes (BlackBox, WhiteBox, ZNS, NoSSD)
-- Validates code quality and build system integration
-- Runs compatibility tests for configuration parameters and run scripts
-- Build status is shown in the badge at the top of this README
+- runs the FEMU unit tests and qtests, also in a sanitizer build;
+- starts every `femu_mode` (0-5) without a guest (`-M accel=qtest`);
+- expands every example config file and checks FEMU accepts it;
+- checks the run scripts parse (`bash -n`).
+
+CI installs its own packages rather than running `pkgdep.sh`, and it does not
+boot a guest. The badge at the top of this README shows the build status.
 
 ---
 
