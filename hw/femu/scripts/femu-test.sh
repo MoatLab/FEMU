@@ -9,6 +9,9 @@
 #
 #   femu-test.sh --yes [/dev/nvme0n1]
 #
+# A key-value namespace has no block node; name it as /dev/nvme0nN or by its
+# generic node, /dev/ng0nN.
+#
 # THIS DESTROYS THE CONTENTS OF THE DEVICE. It writes over the whole namespace,
 # so --yes is required and a device that is mounted, or has a mounted partition,
 # is refused.
@@ -23,17 +26,25 @@ CONFIRM=0
 for a in "$@"; do
     case "$a" in
         --yes)  CONFIRM=1 ;;
-        --help|-h) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --help|-h) sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         /dev/*) DEV="$a" ;;
         *)      echo "unknown argument: $a" >&2; exit 1 ;;
     esac
 done
-CTRL="/dev/$(basename "$DEV" | sed 's/n[0-9]*$//')"
 # the namespace id is the trailing number: /dev/nvme0n2 is namespace 2. Commands
 # that go through the controller need it named explicitly, and assuming 1 tests
-# the wrong namespace on a device that has several.
+# the wrong namespace on a device that has several. A generic node, /dev/ng0n2,
+# names the same namespace of controller /dev/nvme0.
 NSID="$(basename "$DEV" | sed 's/.*n//')"
 [[ "$NSID" =~ ^[0-9]+$ ]] || NSID=1
+CTRL="/dev/$(basename "$DEV" | sed 's/n[0-9]*$//; s/^ng/nvme/')"
+# Linux refuses I/O passthrough on the controller node once the controller has
+# more than one namespace, so a key-value namespace is driven through its
+# generic node when there is one.
+PTDEV="/dev/$(basename "$CTRL" | sed 's/^nvme/ng/')n$NSID"
+[[ -c "$PTDEV" ]] || PTDEV="$CTRL"
+# a block namespace named by its generic node is tested through its block node
+[[ -b "${CTRL}n$NSID" ]] && DEV="${CTRL}n$NSID"
 
 pass=0; fail=0; skip=0
 ok()   { echo "  PASS  $*"; pass=$((pass + 1)); }
@@ -182,23 +193,23 @@ run_kv_checks() {
     local vsz=4096
     head -c "$vsz" /dev/urandom > "$val"
 
-    nvme io-passthru "$CTRL" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
+    nvme io-passthru "$PTDEV" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
         -l "$vsz" -w -i "$val" >/dev/null 2>&1 \
         && ok "store a key" || { bad "store a key"; return; }
 
-    nvme io-passthru "$CTRL" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+    nvme io-passthru "$PTDEV" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
         && ok "the key exists" || bad "the key exists"
 
-    nvme io-passthru "$CTRL" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
+    nvme io-passthru "$PTDEV" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
         -l "$vsz" -r -b 2>/dev/null > "$ret"
     cmp -s "$val" "$ret" && ok "the value reads back byte for byte" \
                          || bad "the value reads back byte for byte"
 
-    nvme io-passthru "$CTRL" -O 0x10 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+    nvme io-passthru "$PTDEV" -O 0x10 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
         && ok "delete the key" || bad "delete the key"
 
     # a deleted key must be reported missing, not silently succeed
-    if nvme io-passthru "$CTRL" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1; then
+    if nvme io-passthru "$PTDEV" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1; then
         bad "a deleted key is reported missing"
     else
         ok "a deleted key is reported missing"
@@ -212,7 +223,7 @@ run_kv_checks() {
     # both ends of the run.
     local n=0 want=256 first=0x4b565f30
     while [ $n -lt $want ]; do
-        nvme io-passthru "$CTRL" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 \
+        nvme io-passthru "$PTDEV" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 \
             --cdw2=$((first + n)) -l "$vsz" -w -i "$val" >/dev/null 2>&1 || break
         n=$((n + 1))
     done
@@ -222,7 +233,7 @@ run_kv_checks() {
         ok "many keys span the geometry ($n stored)"
         local bad_rd=0 k
         for k in 0 $((n / 2)) $((n - 1)); do
-            nvme io-passthru "$CTRL" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 \
+            nvme io-passthru "$PTDEV" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 \
                 --cdw2=$((first + k)) -l "$vsz" -r -b 2>/dev/null > "$ret"
             cmp -s "$val" "$ret" || bad_rd=$((bad_rd + 1))
         done
@@ -232,7 +243,7 @@ run_kv_checks() {
     # leave the device as found, so a second run has the same room as the first
     while [ $n -gt 0 ]; do
         n=$((n - 1))
-        nvme io-passthru "$CTRL" -O 0x10 -n "$NSID" --cdw11=4 \
+        nvme io-passthru "$PTDEV" -O 0x10 -n "$NSID" --cdw11=4 \
             --cdw2=$((first + n)) >/dev/null 2>&1
     done
 }
