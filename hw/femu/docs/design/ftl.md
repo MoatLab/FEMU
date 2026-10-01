@@ -99,7 +99,9 @@ Two things follow from this picture.
   the mapping, the lines, the write buffer and the caches. With Streams on,
   each request runs under `n->streams_lock`; on a shared subsystem namespace
   it runs under the subsystem's `ns_lock`. An NVMe controller linked to a
-  `femu-cxl-ssd` runs its requests on the medium's worker instead.
+  `femu-cxl-ssd` runs its requests on its own FTL thread against the
+  medium's FTL, under the medium's lock, which also serializes the medium's
+  worker.
 - **Admin commands that change FTL state pause the dataplane.**
   `nvme_pause_pollers()` waits until the FTL thread is outside a request (the
   `ftl_in_sweep` flag), so the run-time switch (admin opcode 0xEF), the
@@ -163,9 +165,11 @@ ssd->ch[nchs]
 ```
 
 A page goes FREE -> VALID when it is programmed (`mark_page_valid()`),
-VALID -> INVALID when its logical page is overwritten, deallocated or
-relocated (`mark_page_invalid()`), and back to FREE when its block is erased
-(`mark_block_free()`).
+VALID -> INVALID when its logical page is overwritten, deallocated or moved
+by a log-block merge (`mark_page_invalid()`), and back to FREE when its block
+is erased (`mark_block_free()`). A page that line GC relocates stays VALID
+until its block is erased. Closing a stream's line marks its unwritten pages
+INVALID directly.
 
 ### Mapping tables
 
@@ -260,9 +264,9 @@ flat `maptbl` stays the source of truth, and `cmt_touch()` in
 With `mapping_cache_mb` left at 0, DFTL uses 4 MiB, which holds 1024
 translation pages and so covers 2 GiB of logical space on a 4 KiB page. The
 translation-page traffic occupies the LUN timelines like any other NAND
-operation but is not counted as host or GC writes. Only the host read and
-write paths are charged: GC relocation, deallocate and the FDP write path
-update `maptbl` without a CMT access.
+operation but is not counted as host or GC writes. Host reads, host writes and
+buffer write-backs are charged; GC relocation, deallocate, Write Zeroes and
+the FDP write path update `maptbl` without a CMT access.
 
 ### Log-block mapping: BAST (`mapping=hybrid`) and FAST (`mapping=fast`)
 
@@ -307,7 +311,10 @@ block (LBN) is `pgs_per_blk` consecutive LPNs.
   blocks' worth of pages for everything else. When the pool fills (or the
   dirty-LBN list reaches its 4095 limit), a reclaim relocates the live pages
   of up to two dirty LBNs, and repeats on later writes until the pool is
-  empty. A full in-order sequential log switch-merges with one erase. FAST
+  no longer full. A full in-order sequential log switch-merges with one
+  erase. The sequential log is released only when it fills in order; a
+  broken run keeps holding it, and later sequential runs go to the shared
+  pool. FAST
   reclaims once per request, not once per page, and its merge counts are not
   exported.
 
@@ -348,8 +355,8 @@ channel first, then LUN, then plane, then page.
 
 Consecutive pages land on different channels, then different LUNs, so a
 large write or a burst of small ones spreads over the whole device. With
-several planes, a LUN's planes are filled in turn before the page index
-moves on.
+several planes, the pointer sweeps every channel and LUN on plane 0, then on
+plane 1, and so on, before the page index moves on.
 
 ### Why there are several write pointers
 
@@ -446,7 +453,7 @@ The two watermarks are stored as free-line counts:
 A GC step returns -1 when there is no victim, or when the background filter
 rejects it; the forced loop then stops. With Streams on, a step also fails
 when it frees nothing, because lines of distinct retired streams cannot be
-combined.
+combined, or when the victim holds valid pages and no line is free.
 
 ### Victim policies
 
@@ -462,8 +469,9 @@ combined.
 
 Only lines in the victim queue are candidates. A line that closed with every
 page valid stays in the full list until something invalidates one of its
-pages. `random` and `d-choice` depend on `rand()` and the host clock, so two
-runs do not pick the same victims.
+pages. `d-choice` samples by the host clock, so its picks differ between runs.
+`random` uses the process-wide, unseeded `rand()` stream, so it repeats only
+when the order of collections, and of other `rand()` users, repeats.
 
 ### Collecting a line
 
@@ -524,8 +532,8 @@ read or program on a LUN that GC is using starts when GC is done with it.
   moves the pages and erases the blocks, but issues no NAND operations. Code
   1 turns it back on.
 
-The fields `gc_endtime` on LUNs and channels are written at the end of a
-collection but nothing reads them.
+The LUN field `gc_endtime` is updated as GC programs and erases, and the
+channel field is never written; nothing reads either.
 
 ### FDP reclaim units
 
@@ -571,16 +579,16 @@ buffered page cost one program. The code is in
   DRAM access = pg_rd_lat / 16 (1000 ns when pg_rd_lat is 0)
 ```
 
-- **Structure.** A tail queue in write order (`write_buffer`) and a GLib
+- **Structure.** A tail queue in order of last write, LRU (`write_buffer`) and a GLib
   tree keyed by LPN (`wb_tree`) for lookup. Capacity is `buffer_size` pages.
 - **Admission is per page.** A command larger than the buffer cannot push it
   past its size: it writes back a batch whenever the buffer is at the
   watermark. If a write-back frees nothing because the device is out of
   lines, the write fails with Capacity Exceeded.
 - **Write-back** (`ssd_buffer_destage()`) takes pages from the head (the
-  oldest written), runs forced GC as needed, charges the DFTL lookup and
-  programs each page exactly as a direct write would, then lets a log-block
-  scheme merge once. A page costs the same buffered or not; only the request
+  least recently written), runs forced GC as needed, charges the DFTL lookup and
+  programs each page exactly as a direct write would. Hybrid merges after
+  each page as usual; FAST merges once per batch. A page costs the same buffered or not; only the request
   that pays differs.
 - **Reads.** A read of a buffered page costs one DRAM access and does not
   reach NAND, even when the buffer has stopped accepting writes.
@@ -612,9 +620,10 @@ the page is programmed the record is dropped. Setting the QOM property
 resets the controller, restores every buffered page from its undo record,
 empties the buffer and counts an unsafe shutdown.
 
-In this mode a Flush, a normal shutdown, turning the cache off, Format,
-Sanitize, and Dataset Management, Copy, Write Zeroes and Write
-Uncorrectable first write back the namespace's buffer. If the device has no
+In this mode a normal shutdown, turning the cache off and Sanitize first
+write back every namespace's buffer; Flush, Format, Dataset Management,
+Copy, Write Zeroes (except on a PI-formatted namespace) and Write
+Uncorrectable write back their own namespace's. If the device has no
 line to write to, they fail with Capacity Exceeded (a shutdown sets
 Controller Fatal Status instead) rather than claim the data is durable. An FUA write programs a whole NAND page, so buffered
 neighbours in that page become durable with it.
@@ -652,8 +661,8 @@ neighbours in that page become durable with it.
 - **Write Zeroes with Deallocate** unmaps the range in the same way and costs
   no time. **Without Deallocate** it programs the range directly, after
   forced GC if needed, and counts the pages as host writes.
-- **Format** and **Sanitize** call `bbssd_deallocate_all()`, which unmaps
-  every LPN of the namespace's FTL. The lines keep their wear.
+- **Format** and **Sanitize** call `bbssd_deallocate_all()` on BlackBox
+  namespaces (not CSD), which unmaps every LPN of the namespace's FTL. The lines keep their wear.
 
 ONCS bit 0x8 (Write Zeroes) and 0x100 (Copy) are off unless `oncs` sets them.
 
@@ -706,8 +715,8 @@ translation page do not count. The rewrite happens on a write, where
 relocation already costs something, so a read never stalls behind a whole
 line. One line is refreshed per write at most. A line that nothing reads is
 never refreshed, and a workload that only reads refreshes nothing: FEMU runs
-no background media scan. If GC collects a queued line first, the request is
-dropped.
+no background media scan. The request is dropped if GC collects the line first, or if the line is
+still open for writing when the next write checks it.
 
 ## Fault insertion
 
@@ -746,8 +755,8 @@ applies per namespace.
 Without `op_pcent`, the backend is `devsz_mb` MiB, split across the
 namespaces, and the spare area is whatever the geometry has beyond that.
 With `op_pcent`, the backend is the raw NAND capacity and each namespace
-gets `raw * 100 / (100 + op_pcent) / namespaces`, rounded down to 512 bytes;
-`devsz_mb` is ignored.
+gets `raw * 100 / (100 + op_pcent) / namespaces`, rounded down to 512 bytes
+(an even split unless `namespace_sizes` is given); `devsz_mb` is ignored.
 
 ### Worked example: the default geometry
 
@@ -770,8 +779,9 @@ The default properties describe 8 channels x 8 LUNs x 1 plane x 256 blocks x
   usable          = 243 x 64 MiB                 = 15,552 MiB
 
   devsz_mb=12288 (the launcher):  12 GiB = 192 lines of data
-     -> one full pass over the namespace leaves 64 free lines,
-        which is exactly where background GC starts
+     -> the data pointer holds a line from init, so free lines reach
+        64 and background GC starts as the last of the 192 lines is
+        opened, just before one full pass completes
   op_pcent=25:  16 GiB x 100 / 125               = 13,107.2 MiB exposed
   op_pcent=7:   16 GiB x 100 / 107               = 15,312.1 MiB exposed
 
@@ -791,8 +801,9 @@ shrink the geometry instead; this one has 512 MiB of NAND and exposes about
 
 ## Run-time controls
 
-Admin opcode 0xEF changes the FTL while the guest runs. It is device-wide:
-it applies to every namespace with an FTL, with the dataplane paused.
+Admin opcode 0xEF changes the FTL while the guest runs. Only a BlackBox
+controller accepts it. Codes 1 to 4 apply to every namespace with an FTL,
+with the dataplane paused; codes 5 to 7 act on the controller.
 
 | CDW10 | Effect |
 | --- | --- |
@@ -836,10 +847,10 @@ ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 | Field | Source |
 | --- | --- |
 | Percentage Used | `ssd_percentage_used()`, most worn namespace |
-| Available Spare | `ssd_available_spare()`, lowest namespace; below 20 sets the spare critical warning |
+| Available Spare | `ssd_available_spare()`, lowest namespace; 20 or below sets the spare critical warning |
 | Media and Data Integrity Errors | injected read and write faults (and ZNS write faults) |
 | Data units, host commands | the pollers' host I/O counters, not the FTL |
-| Endurance Group Media Units Written | (NAND + GC write pages) x page size |
+| Endurance Group Media Units Written | (NAND + GC write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
 
 ### Counters kept but not exported
 
@@ -879,7 +890,7 @@ does inside the FTL and what it interacts with.
 | `gc_strategy` | reclaim unit victim selection | FDP only |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams; FDP needs `page` |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
-| `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time follows `pg_rd_lat` |
+| `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `pg_rd_lat` / 16 at realize; 0xEF does not change it |
 | `hot_cold_sep` | hot write pointer for overwrites | page or DFTL only; reserves a line; refused with FDP |
 | `buffer_size`, `buffer_thres_pcent` | write buffer capacity in pages, and the write-back watermark | `vwc`, `power_loss`; refused with FDP |
 | `fdp_trim_erase_all` | FDP deallocate resets every reclaim unit | FDP only |
@@ -958,20 +969,20 @@ What the automated tests check:
 
 | Area | Test | Checks |
 | --- | --- | --- |
-| BAST merges | unit test `test-hybrid-oracle`, qtests `hybrid-oracle-*`, `hybrid-batch-occupancy`, `hybrid-destage-occupancy`, `hybrid-switch-trim-erase`, `hybrid-trim-occupancy` | switch, full merge and erase counts against a reference model, including deallocate and the write buffer |
-| Victim queue | unit test `test-pqueue` | priority queue operations, including random pop |
-| NAND timing | unit test `test-nand-media` | the media layer the FTL calls |
+| BAST merges | unit test `test-femu-hybrid-oracle`; qtests `hybrid-oracle-*`, `hybrid-batch-occupancy`, `hybrid-destage-occupancy`, `hybrid-switch-trim-erase`, `hybrid-trim-occupancy` | the unit test checks the reference model; the qtests compare FEMU's switch, full merge and erase counts against it, including deallocate and the write buffer |
+| Victim queue | unit test `test-femu-pqueue` | priority queue operations, including random pop |
+| NAND timing | unit test `test-femu-nand-media` | the media layer the FTL calls |
 | C0h counters | qtest `media-counters` | host and NAND page counts and the WAF move with writes |
 | Write buffer | qtest `buffer-counters` and `power-loss-*` | hit counts; Flush, FUA, write-back, cache disable, shutdown and power-cut rollback |
 | Streams | qtest `streams-gc` and the other `streams-*` cases | stream placement and GC of stream lines |
-| Format, Sanitize | qtests `format-ftl`, `sanitize` | the FTL is emptied |
+| Format, Sanitize | qtests `format-ftl`, `sanitize` | after Format, GC relocates nothing; Sanitize status and zeroed data (the FTL state is not checked) |
 | Robustness | qtests `io-fuzz`, `io-fuzz-fdp`, `config-refused` | malformed I/O, refused configurations |
 | Start-up | `doc-examples` | every tagged example on this page and the BlackBox guide starts and moves one block |
 
 No automated test checks the behaviour of the `random`, `cost-benefit`,
 `fifo` and `d-choice` policies, `dftl` and `fast` mapping, hot/cold
-separation, the read cache, read reclaim, retention refresh, read fault
-insertion, or the wear and spare figures. They are covered only by the
+separation, the read cache, read reclaim, retention refresh, read and write
+fault insertion on BlackBox, or the wear and spare figures. They are covered only by the
 start-up examples and by guest runs during development; `femu-test.sh`
 ([guest-side tests](../guides/testing.md#guest-side-tests)) checks that the
 counters move. FEMU's latencies and write amplification have not been
@@ -981,13 +992,14 @@ calibrated against a specific commercial drive.
 
 - Data placement is modelled per page; the FTL never tracks sectors within a
   page, so writes smaller than a page cost a whole page program.
-- GC relocations always go through the data pointer, never back to the
-  victim's LUN (no copyback), and GC runs on the FTL thread, one line at a
+- GC relocations go through the data pointer (or a stream pointer for
+  stream data), never back to the victim's LUN (no copyback), and GC runs on the FTL thread, one line at a
   time.
 - There is no explicit wear levelling, and bad blocks do not affect
   placement.
 - Read reclaim and retention refresh act only on reads followed by writes.
-- `random` and `d-choice` GC are not reproducible run to run.
+- `d-choice` GC is not reproducible run to run, and `random` only when
+  everything else that calls `rand()` repeats too.
 - An injected write fault still programs and maps the data.
 - GC that finds no destination line erases the victim anyway (see
   [Collecting a line](#collecting-a-line)); only the capacity reserve keeps
@@ -1058,7 +1070,7 @@ never changes in a mode means the mode is not reached.
 | `hw/femu/bbssd/ftl-cache.c` | read cache and its eviction policies |
 | `hw/femu/bbssd/ftl-media.c` | bridge to the NAND media layer, block read counts |
 | `hw/femu/bbssd/ftl-fdp.c` | FDP reclaim units, handles and their GC |
-| `hw/femu/bbssd/ftl-exp.c` | debug tracing of marked pages, off unless `FEMU_EXP_LOG` is set |
+| `hw/femu/bbssd/ftl-exp.c` | debug tracing of marked pages, off unless `FEMU_EXP_LOG` or `FEMU_DUMP_LPN` is set |
 | `hw/femu/femu.c` | the FTL thread, `op_pcent` sizing, `simulate-power-loss` |
 | `hw/femu/nvme-admin.c` | C0h, SMART and Endurance Group counters, Sanitize, the cache feature |
 
