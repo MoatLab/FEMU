@@ -4,7 +4,8 @@
 #   ./run-guest-ssh.sh                 # interactive shell
 #   ./run-guest-ssh.sh sudo nvme list  # one command
 #
-# The run-*.sh scripts forward host port 8080 to the guest's port 22.
+# The run-*.sh scripts forward host port $SSH_PORT (default 8080) to the
+# guest's port 22.
 
 set -euo pipefail
 

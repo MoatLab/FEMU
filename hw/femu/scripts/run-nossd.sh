@@ -6,6 +6,8 @@
 IMGDIR=${IMGDIR:-$HOME/images}
 # Virtual machine disk image
 OSIMGF=${OSIMGF:-$IMGDIR/u20s.qcow2}
+# Host port forwarded to the guest's SSH port; run-guest-ssh.sh reads it too
+SSH_PORT=${SSH_PORT:-8080}
 
 
 if [[ ! -e "$OSIMGF" ]]; then
@@ -27,7 +29,7 @@ sudo ./qemu-system-x86_64 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     -device femu,devsz_mb=4096,id=nvme0 \
-    -net user,hostfwd=tcp::8080-:22 \
+    -net user,hostfwd=tcp::${SSH_PORT}-:22 \
     -net nic,model=virtio \
     -nographic \
     -qmp unix:./qmp-sock,server,nowait

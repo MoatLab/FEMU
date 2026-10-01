@@ -5,6 +5,8 @@
 IMGDIR=${IMGDIR:-$HOME/images}
 # Virtual machine disk image
 OSIMGF=${OSIMGF:-$IMGDIR/u20s.qcow2}
+# Host port forwarded to the guest's SSH port; run-guest-ssh.sh reads it too
+SSH_PORT=${SSH_PORT:-8080}
 
 # Configurable SSD Controller layout parameters (must be power of 2)
 secsz=512         # sector size in bytes
@@ -87,7 +89,7 @@ sudo ./qemu-system-x86_64 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     ${FEMU_OPTIONS} \
-    -net user,hostfwd=tcp::8080-:22 \
+    -net user,hostfwd=tcp::${SSH_PORT}-:22 \
     -net nic,model=virtio \
     -nographic \
     -qmp unix:./qmp-sock,server,nowait 2>&1 | tee /tmp/femu-fdp.log
