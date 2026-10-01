@@ -360,7 +360,7 @@ mapping=page           # page (default), dftl, hybrid, or fast
 mapping_cache_mb=0     # DFTL translation-cache size in MiB (used only for dftl)
 
 # Write amplification / debugging
-debug_ftl=false        # report FTL invariant violations instead of aborting
+debug_ftl=false        # print page-state violations on the GC path to stderr
 
 # Fault insertion (0 = off)
 err_read_unc_ppm=0     # uncorrectable reads per million reads
@@ -376,11 +376,12 @@ read_cache_mb=0        # Read-cache size in MiB (0 disables it)
 cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
 
 # Write buffer (optional; default off)
-buffer_size=0          # Device write-buffer size in MiB (0 disables it)
+buffer_size=0          # Device write-buffer size in flash pages (0 disables it)
 buffer_thres_pcent=90  # Occupancy at which the buffer starts flushing
 
 # NAND media (optional)
-nand_cell_type=        # slc, mlc, tlc, qlc or plc; selects the page-type table
+nand_cell_type=0       # 0 flat timing (pg_rd_lat etc.); 1 SLC, 2 MLC, 3 TLC, 4 QLC
+                       #   use built-in per-cell-type latency tables
 op_pcent=0             # Over-provisioning withheld from the host, percent
 pls_per_lun=1          # Planes per LUN; above one, a line erases across planes
 nand_bad_blocks=0      # Blocks marked bad at init, reflected in available spare

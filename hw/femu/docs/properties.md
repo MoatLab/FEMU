@@ -55,7 +55,7 @@ There are 136 of them. Most have a default that leaves the feature off, so a wor
 
 | Property | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `nand_cell_type` | uint8 | `0` | Bits per cell: slc, mlc, tlc, qlc or plc. Selects the page-type latency table. |
+| `nand_cell_type` | uint8 | `0` | Cell type as a number: 0 keeps the flat `pg_rd_lat`/`pg_wr_lat`/`blk_er_lat` timing; 1 SLC, 2 MLC, 3 TLC, 4 QLC use the built-in per-type latency tables. Other values print an error and fall back to flat timing. Read by the black-box FTL only. |
 | `cell_pages` | int32 | `0` | _undocumented_ |
 | `pgtype_lat` | int32 | `0` | _undocumented_ |
 | `flash_type` | uint8 | `MLC` | _undocumented_ |
@@ -87,7 +87,7 @@ There are 136 of them. Most have a default that leaves the feature off, so a wor
 | --- | --- | --- | --- |
 | `read_cache_mb` | uint32 | `0` | Device read-cache size in MiB. Zero disables it. |
 | `cache_evict` | string | `--` | Read-cache eviction policy: clock, random, lru or arc. |
-| `buffer_size` | int32 | `0` | Write-buffer capacity in MiB. Zero disables it; the buffer holds page numbers for timing, not data. |
+| `buffer_size` | int32 | `0` | Write-buffer capacity in flash pages. Zero disables it; the buffer holds page numbers for timing, not data. |
 | `buffer_thres_pcent` | int32 | `90` | Occupancy at which the write buffer starts flushing, as a percentage of buffer_size. |
 
 ## Host link and controller
@@ -115,7 +115,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `context_switch_time` | uint64 | `200` | this port, so they have no effect | set on `-device femu,...` |
 | `cqr` | uint8 | `1` | _undocumented_ | set on `-device femu,...` |
 | `csf_runtime_scale` | uint16 | `3` | A program that names no runtime is charged its host | set on `-device femu,...` |
-| `debug_ftl` | bool | `false` | report FTL invariant violations instead of aborting | set on `-device femu,...` |
+| `debug_ftl` | bool | `false` | Print bbssd page-state violations on the GC path, and periodic merge counts under `mapping=hybrid` or `fast`. The `ftl_assert` checks are compiled in only with `FEMU_DEBUG_FTL` or `FEMU_FTL_ASSERT`. | set on `-device femu,...` |
 | `did` | uint16 | `0x1f1f` | _undocumented_ | set on `-device femu,...` |
 | `dlfeat` | uint8 | `1` | _undocumented_ | set on `-device femu,...` |
 | `dpc` | uint8 | `0` | Protection types offered (Identify DPC); must be 0 with `meta` | set on `-device femu,...` |
