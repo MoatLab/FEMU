@@ -946,6 +946,7 @@ blk_er_lat=2000000     # 2ms erase
 # In run scripts, adjust VM memory and SSD size
 -m 8G                  # Guest RAM
 devsz_mb=16384         # 16GB SSD capacity
+blks_per_pl=512        # flash must exceed devsz_mb so GC has room
 ```
 
 **Multi-Device Setup:**
