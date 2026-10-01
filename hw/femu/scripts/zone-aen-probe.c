@@ -3,6 +3,10 @@
  * Check that a zone taken read only raises the Zone Descriptor Changed notice.
  * The event is queued when it happens, so the writes come first and the Async
  * Event Request is armed afterwards: it is completed from the queue at once.
+ *
+ * The device must inject write faults (err_write_fail_ppm), and the notice is
+ * sent only when its bit is set in Asynchronous Event Configuration. Linux
+ * does not set it, so this does.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -23,11 +27,15 @@ struct nvme_admin_cmd {
 };
 #define NVME_IOCTL_ADMIN_CMD _IOWR('N', 0x41, struct nvme_admin_cmd)
 
+#define NVME_FEAT_ASYNC_EVENT   0x0b
+#define NVME_AEC_ZDCN           (1u << 27)
+
 int main(int argc, char **argv)
 {
     const char *ctrl = argc > 1 ? argv[1] : "/dev/nvme0";
     const char *blk  = argc > 2 ? argv[2] : "/dev/nvme0n1";
     struct nvme_admin_cmd c = {0};
+    uint32_t aec;
     void *buf;
     int fd, bfd, ret, i;
 
@@ -36,6 +44,26 @@ int main(int argc, char **argv)
         perror("open ctrl");
         return 1;
     }
+
+    /* keep the events the driver enabled; add Zone Descriptor Changed */
+    c.opcode = 0x0a;
+    c.cdw10 = NVME_FEAT_ASYNC_EVENT;
+    ret = ioctl(fd, NVME_IOCTL_ADMIN_CMD, &c);
+    if (ret) {
+        fprintf(stderr, "get async event configuration: %d\n", ret);
+        return 1;
+    }
+    aec = c.result | NVME_AEC_ZDCN;
+    memset(&c, 0, sizeof(c));
+    c.opcode = 0x09;
+    c.cdw10 = NVME_FEAT_ASYNC_EVENT;
+    c.cdw11 = aec;
+    ret = ioctl(fd, NVME_IOCTL_ADMIN_CMD, &c);
+    if (ret) {
+        fprintf(stderr, "set async event configuration: %d\n", ret);
+        return 1;
+    }
+    memset(&c, 0, sizeof(c));
 
     /* write until the injection takes a zone read only */
     bfd = open(blk, O_WRONLY | O_DIRECT);
