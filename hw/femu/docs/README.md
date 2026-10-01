@@ -51,7 +51,8 @@ The guest kernel each mode needs is in
   (WAF and media counters), telemetry, supported log pages.
 - [Configuration changes](CONFIGURATION-CHANGES.md): properties whose meaning
   or default changed.
-- `reference/scripts.md`: every shipped script and its knobs (coming).
+- [Scripts and tools](reference/scripts.md): every shipped script and tool,
+  its arguments and environment variables, and which ones are legacy.
 
 ## I want to understand how FEMU works
 
@@ -62,26 +63,42 @@ The guest kernel each mode needs is in
   a goal, and which ones combine.
 - [Timing model](concepts/timing-model.md): how latency is computed and
   enforced, the properties that control it, and how to measure it.
+- [Security and limits](concepts/security-and-limits.md): what a guest can
+  do to the host, migration and snapshots, property compatibility, host
+  sizing.
 - [CXL SSD design](cxlssd.md): the design note for `femu-cxl-ssd`.
 
 ## I want to measure or tune
 
-- `guides/measuring.md`: WAF, latency, counters, fio recipes (coming).
-- `guides/performance-tuning.md`: pollers, CPU pinning, hugepages, NUMA
-  (coming).
+- [Measuring](guides/measuring.md): WAF and counters from log page C0h,
+  SMART, CXL counters, fio recipes per mode, repeatable numbers.
+- [Performance tuning](guides/performance-tuning.md): pollers, CPU pinning,
+  hugepages, NUMA, host settings, and what each knob trades.
 
 ## Something does not work
 
-- `troubleshooting.md`: answers to common questions from the issue tracker
-  (coming). Until then, see
-  [the README's troubleshooting section](../../../README.md#troubleshooting)
-  and [build errors](getting-started/build.md#common-build-errors).
+- [Troubleshooting and FAQ](troubleshooting.md): answers to the 18 most
+  common questions from the issue tracker.
+- [Debugging](guides/debugging.md): where messages go, gdb, compile-time
+  debug switches, common crash reports, what to put in a bug report.
+- [Build errors](getting-started/build.md#common-build-errors).
 
 ## I want to change FEMU
 
-- `development/code-structure.md`, `development/adding-a-mode.md` and
-  `development/docs-maintenance.md` (coming). Until then, see
-  [the README's development section](../../../README.md#development).
+- [Testing](guides/testing.md): unit tests, the qtests, the documentation
+  checks, guest-side tests, and how to add a test.
+- [Keeping the documentation correct](development/docs-maintenance.md): the
+  generated references, the mode table and the example checks.
+- `development/code-structure.md` and `development/adding-a-mode.md`
+  (coming). Until then, see
+  [the README's development section](../../../README.md#development) and
+  [architecture](concepts/architecture.md).
 - `hw/femu/scripts/gen-property-docs.py` regenerates the property reference,
   and `hw/femu/scripts/check-doc-links.py` checks that every relative link in
   the docs resolves. CI runs both.
+
+## How to cite
+
+If you use FEMU in your research, cite the FAST '18 paper. The BibTeX entry
+is in [the README](../../../README.md#primary-citation), and
+[CITATION.cff](../../../CITATION.cff) has the same entry for citation tools.

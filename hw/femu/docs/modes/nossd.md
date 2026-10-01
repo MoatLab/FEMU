@@ -151,8 +151,8 @@ If the host cannot allocate `devsz_mb` of memory, QEMU aborts in GLib with
   that leaves one poller per host core you can spare, and pin the threads.
 - **Latency varies from run to run.** The pollers compete with vCPUs and
   other host work. Pin vCPUs and pollers to separate cores, and keep the host
-  CPU at a fixed frequency (see the
-  [README](../../../../README.md#performance-optimization)).
+  CPU at a fixed frequency (see
+  [performance tuning](../guides/performance-tuning.md)).
 - **Data is gone after QEMU exits.** FEMU keeps the device only in host
   memory. A guest reboot keeps the data.
 

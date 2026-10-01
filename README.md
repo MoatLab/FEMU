@@ -1084,45 +1084,21 @@ Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
 
 ### Debugging
 
-**GDB Debugging:** do not use `gdb-run.sh`; it is an old script that starts
-QEMU's stock `nvme` device, not FEMU. Run a launcher's own command line under
-gdb instead. From `build-femu/`, make a copy of the launcher that starts QEMU
-through gdb:
-
-<!-- femu-untested: starts QEMU under gdb, which needs an interactive terminal -->
-```bash
-sed -e 's|\./qemu-system-x86_64|gdb -ex "handle SIGUSR1 nostop noprint pass" --args ./qemu-system-x86_64|' \
-    -e 's/ 2>&1 | tee .*$//' run-blackbox.sh > gdb-blackbox.sh
-bash gdb-blackbox.sh
-
-# In GDB session
-(gdb) break femu_realize
-(gdb) run
-```
-
-KVM uses SIGUSR1 to kick vCPU threads, which is why gdb is told to pass it.
-
-**Debug output:** FEMU has no runtime switch for debug output and defines no
-QEMU trace events. Its debug messages are compiled in with extra flags:
-
-```sh
-# FEMU_DEBUG_FTL: FTL debug messages, and arms the FTL assertions
-# FEMU_DEBUG_NVME: controller debug messages
-../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
-    --disable-libnfs --disable-libiscsi --disable-curl \
-    --extra-cflags="-DFEMU_DEBUG_FTL -DFEMU_DEBUG_NVME"
-make -j$(nproc)
-```
-
-`-DFEMU_FTL_ASSERT` arms the FTL assertions without the messages; the CI
-sanitizer build uses it. For FDP, setting `FEMU_FDP_DEBUG=1` in QEMU's
-environment traces placement to stderr. The launchers start QEMU through
-`sudo`, which drops the caller's environment, so put the variable on that line:
-`sudo FEMU_FDP_DEBUG=1 ./qemu-system-x86_64 ...`.
+[hw/femu/docs/guides/debugging.md](hw/femu/docs/guides/debugging.md) covers
+where FEMU's messages go, running a launcher's command line under gdb (do not
+use the old `gdb-run.sh`, which starts QEMU's stock `nvme` device), the
+compile-time switches `FEMU_DEBUG_NVME`, `FEMU_DEBUG_FTL`, `FEMU_DEBUG_ZFTL`
+and `FEMU_FTL_ASSERT`, the run-time environment variables, and common crash
+reports. [Testing](hw/femu/docs/guides/testing.md) covers the unit tests,
+qtests and sanitizer build.
 
 ---
 
 ## Troubleshooting
+
+The [troubleshooting and FAQ page](hw/femu/docs/troubleshooting.md) answers
+the questions asked most often in the issue tracker. For tuning, see
+[performance tuning](hw/femu/docs/guides/performance-tuning.md).
 
 ### Common Issues
 
