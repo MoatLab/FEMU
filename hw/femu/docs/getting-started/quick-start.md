@@ -75,6 +75,14 @@ femu-guest login:
 You cannot log in here (user `femu` has no password). Leave the terminal
 running.
 
+The guest's SSH port is forwarded to host port 8080. If another program
+already uses 8080, QEMU stops with `Could not set up host forwarding rule`.
+Pick a free port and set it for both scripts, in both terminals:
+
+```bash
+export SSH_PORT=8081
+```
+
 ## 4. Look at the SSD (terminal 2)
 
 Back in terminal 2, in `build-femu/`:

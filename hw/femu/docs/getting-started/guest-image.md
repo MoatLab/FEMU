@@ -106,8 +106,14 @@ plain equivalent is:
 ssh -i ~/images/femu-guest-key -p 8080 femu@localhost
 ```
 
-Only one guest can use port 8080 at a time. To run two, edit
-`hostfwd=tcp::8080-:22` in the second run script.
+Only one guest can use a port at a time. To run a second guest, or when
+another program holds 8080, set `SSH_PORT` for both the run script and
+`run-guest-ssh.sh`:
+
+```bash
+SSH_PORT=8081 ./run-blackbox.sh        # terminal 1
+SSH_PORT=8081 ./run-guest-ssh.sh       # terminal 2
+```
 
 ## Alternatives
 
