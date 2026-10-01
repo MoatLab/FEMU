@@ -24,17 +24,19 @@ and what the guest needs. In short:
 
 | Goal | Mode | Launcher | Guide |
 | --- | --- | --- | --- |
-| A fast NVMe drive with no FTL timing | NoSSD (`femu_mode=2`, the default) | `run-nossd.sh` | [README](../../../README.md#nossd-mode); `modes/nossd.md` coming |
-| A conventional SSD with a device FTL, GC and WAF | BlackBox SSD (`femu_mode=1`) | `run-blackbox.sh` | [README](../../../README.md#blackbox-ssd-mode-bbssd); `modes/blackbox.md` coming |
-| A Zoned Namespace SSD | ZNS (`femu_mode=3`) | `run-zns.sh` | [README](../../../README.md#zoned-namespace-ssd-mode-znssd); `modes/zns.md` coming |
-| A host-managed OpenChannel SSD | OCSSD (`femu_mode=0`) | `run-whitebox.sh` | [README](../../../README.md#whitebox-ssd-mode-ocssd); `modes/ocssd.md` coming |
-| A key-value SSD | KV (`femu_mode=5`) | none | [README](../../../README.md#key-value-ssd-mode-kvssd); `modes/kvssd.md` coming |
-| Computational storage | CSD (`femu_mode=4`) | `run-csd.sh` | [README](../../../README.md#computational-storage-mode-csd), [CSD guest tools](../tests/csd/README.md); `modes/csd.md` coming |
-| Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | `modes/fdp.md` coming |
+| A fast NVMe drive with no FTL timing | NoSSD (`femu_mode=2`, the default) | `run-nossd.sh` | [NoSSD](modes/nossd.md) |
+| A conventional SSD with a device FTL, GC and WAF | BlackBox SSD (`femu_mode=1`) | `run-blackbox.sh` | [BlackBox](modes/blackbox.md) |
+| A Zoned Namespace SSD | ZNS (`femu_mode=3`) | `run-zns.sh` | [ZNS](modes/zns.md) |
+| A host-managed OpenChannel SSD | OCSSD (`femu_mode=0`) | `run-whitebox.sh` | [OCSSD](modes/ocssd.md) |
+| A key-value SSD | KV (`femu_mode=5`) | none | [KV](modes/kvssd.md) |
+| Computational storage | CSD (`femu_mode=4`) | `run-csd.sh` | [CSD](modes/csd.md), [CSD guest tools](../tests/csd/README.md) |
+| Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | [FDP](features/fdp.md) |
+| Create and delete namespaces from the guest | NoSSD or BBSSD with `ns_mgmt=on` | none | [Namespace management](features/ns-management-and-pi.md#namespace-management) |
+| Per-block metadata and protection information | NoSSD or BBSSD with `meta`, `mc`, `pi=on` | none | [Metadata and PI](features/ns-management-and-pi.md#metadata-and-protection-information) |
+| Several namespaces on one controller | any NVMe mode | none | [Several namespaces](features/multi-namespace.md) |
 | A CXL memory-semantic SSD | `femu-cxl-ssd` device | `run-cxlssd.sh` | [CXL SSD](modes/cxl-ssd.md), [design note](cxlssd.md) |
 | Guest control of the CXL SSD cache: pin, drop, uncached ranges | `femu-cxl-ssd,cca=on` | `run-cxlssd.sh` | [CXL caching API](features/cxl-cca.md) |
 | The CXL SSD medium also as an NVMe namespace | `femu,femu_mode=1,cxl_ssd=<id>` | `run-cxlssd.sh` plus `-device femu,...` | [CXL NVMe link](features/cxl-nvme-link.md) |
-| Several namespaces on one controller | any NVMe mode | | [README](../../../README.md#multiple-namespaces); `modes/multi-namespace.md` coming |
 
 The guest kernel each mode needs is in
 [requirements.md](getting-started/requirements.md#kernel-per-mode).
