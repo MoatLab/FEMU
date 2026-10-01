@@ -8,7 +8,7 @@ the image can hold any Linux release.
 
 From `build-femu/` (after [the build](build.md)):
 
-```bash
+```sh
 ./make-guest-image.sh
 ```
 
@@ -36,7 +36,7 @@ It takes a few minutes and needs no root access. The host needs `curl`,
 `qemu-img` next to it in `build-femu/` when they exist. If tools are missing,
 the script names them. On Ubuntu:
 
-```bash
+```sh
 sudo apt install curl cloud-image-utils
 ```
 
@@ -45,7 +45,7 @@ It also needs read and write access to `/dev/kvm` (see
 
 Options:
 
-```bash
+```sh
 ./make-guest-image.sh --size 64G                     # disk size (default 32G)
 ./make-guest-image.sh --ssh-key ~/.ssh/id_ed25519.pub
 ./make-guest-image.sh --password femu                # also allow console login
@@ -70,6 +70,7 @@ Every `run-*.sh` script reads two variables:
 - `IMGDIR`: the image directory (default `~/images`);
 - `OSIMGF`: the image file (default `$IMGDIR/u20s.qcow2`).
 
+<!-- femu-example: guest-image-osimgf -->
 ```bash
 OSIMGF=/data/images/u20s.qcow2 ./run-blackbox.sh
 ```
@@ -92,7 +93,7 @@ by hand as below, or use SPDK in the guest.
 The run scripts forward host port 8080 to the guest's SSH port. From
 `build-femu/`, while a run script is running:
 
-```bash
+```sh
 ./run-guest-ssh.sh                  # interactive shell
 ./run-guest-ssh.sh sudo nvme list   # one command
 ```
@@ -102,7 +103,7 @@ The run scripts forward host port 8080 to the guest's SSH port. From
 checks, because the guest is rebuilt often and listens only on localhost. The
 plain equivalent is:
 
-```bash
+```sh
 ssh -i ~/images/femu-guest-key -p 8080 femu@localhost
 ```
 
@@ -110,6 +111,7 @@ Only one guest can use a port at a time. To run a second guest, or when
 another program holds 8080, set `SSH_PORT` for both the run script and
 `run-guest-ssh.sh`:
 
+<!-- femu-example: guest-image-ssh-port -->
 ```bash
 SSH_PORT=8081 ./run-blackbox.sh        # terminal 1
 SSH_PORT=8081 ./run-guest-ssh.sh       # terminal 2
@@ -129,6 +131,7 @@ described with the image.
 
 This needs a display for the installer.
 
+<!-- femu-untested: installs a guest operating system from an ISO; needs KVM and an interactive installer -->
 ```bash
 mkdir -p ~/images
 cd ~/images

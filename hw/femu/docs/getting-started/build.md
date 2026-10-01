@@ -5,7 +5,7 @@ How to get the source, install dependencies and build the FEMU binary. Check
 
 ## Clone
 
-```bash
+```sh
 git clone https://github.com/MoatLab/FEMU.git
 cd FEMU
 ```
@@ -19,7 +19,7 @@ subprojects (for example `keycodemapdb` and `berkeley-softfloat-3`) during
 On Debian and Ubuntu, `pkgdep.sh` installs what the build needs. It must run as
 root:
 
-```bash
+```sh
 mkdir build-femu
 cd build-femu
 cp ../femu-scripts/femu-copy-scripts.sh .
@@ -35,14 +35,14 @@ libpixman-1-dev zlib1g-dev libdw-dev libaio-dev libslirp-dev libnuma-dev
 ninja-build`. QEMU's `configure` also needs `python3-venv`, `flex` and `bison`;
 install them if `configure` asks:
 
-```bash
+```sh
 sudo apt install python3-venv flex bison
 ```
 
 CI installs a longer list, which is a known-good superset
 (`.github/workflows/ci.yml`, step "Install dependencies"):
 
-```bash
+```sh
 sudo apt install -y build-essential pkg-config libglib2.0-dev \
   libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
   libcap-ng-dev libattr1-dev ninja-build python3-pip \
@@ -58,13 +58,13 @@ sudo apt install -y build-essential pkg-config libglib2.0-dev \
 
 From `build-femu/`:
 
-```bash
+```sh
 ./femu-compile.sh
 ```
 
 The script runs `make clean`, then
 
-```bash
+```sh
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
     --disable-libnfs --disable-libiscsi --disable-curl
 ```
@@ -78,6 +78,7 @@ current directory, so run them from `build-femu/`. The build also produces
 
 Check that the FEMU devices are registered:
 
+<!-- femu-untested: lists the device types and creates no device -->
 ```bash
 ./qemu-system-x86_64 -device help | grep femu
 ```
@@ -100,7 +101,7 @@ default; [the property reference](../reference/properties.md) explains them.
 Computational storage mode (`femu_mode=4`) loads shared-library programs with no
 extra build option. To also run uBPF programs, build with uBPF:
 
-```bash
+```sh
 ./femu-compile.sh --enable-csd-ubpf                     # libubpf found by pkg-config
 ./femu-compile.sh --enable-csd-ubpf=/path/to/ubpf-cemu  # a ubpf-cemu source tree
 ```
@@ -113,6 +114,7 @@ options `femu-compile.sh` accepts.
 `femu-cxl-ssd` is built by default for `x86_64-softmmu`. It needs no option.
 Check it with:
 
+<!-- femu-untested: lists the device types and creates no device -->
 ```bash
 ./qemu-system-x86_64 -device help | grep femu-cxl-ssd
 ```
@@ -122,7 +124,7 @@ Check it with:
 `femu-compile.sh` has no debug switch. Run `configure` yourself from
 `build-femu/`:
 
-```bash
+```sh
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
     --disable-libnfs --disable-libiscsi --disable-curl \
     --enable-debug --enable-debug-info
@@ -137,7 +139,7 @@ that are compiled out by default.
 After you change the source, rerun `make` from `build-femu/`. It rebuilds only
 what changed:
 
-```bash
+```sh
 make -j"$(nproc)"
 ```
 

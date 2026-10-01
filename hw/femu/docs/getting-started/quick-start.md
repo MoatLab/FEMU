@@ -13,7 +13,7 @@ to it over SSH.
 
 ## 1. Build FEMU (terminal 2)
 
-```bash
+```sh
 git clone https://github.com/MoatLab/FEMU.git
 cd FEMU
 mkdir build-femu
@@ -28,6 +28,7 @@ sudo ./pkgdep.sh
 and ends with
 `===> FEMU compilation done ...`. Check that the build has the FEMU device:
 
+<!-- femu-untested: lists the device types and creates no device -->
 ```bash
 ./qemu-system-x86_64 -device help | grep femu
 ```
@@ -44,7 +45,7 @@ If the build fails, see [build.md](build.md#common-build-errors).
 
 Still in `build-femu/`:
 
-```bash
+```sh
 sudo apt install curl cloud-image-utils
 ./make-guest-image.sh
 ```
@@ -63,6 +64,7 @@ explains the options and alternatives.
 
 Open a second terminal, go to the same `build-femu/` directory, and run:
 
+<!-- femu-example: quick-start-bbssd -->
 ```bash
 ./run-blackbox.sh
 ```
@@ -82,7 +84,7 @@ The guest's SSH port is forwarded to host port 8080. If another program
 already uses 8080, QEMU stops with `Could not set up host forwarding rule`.
 Pick a free port and set it for both scripts, in both terminals:
 
-```bash
+```sh
 export SSH_PORT=8081
 ```
 
@@ -90,7 +92,7 @@ export SSH_PORT=8081
 
 Back in terminal 2, in `build-femu/`:
 
-```bash
+```sh
 ./run-guest-ssh.sh sudo nvme list
 ```
 
@@ -105,7 +107,7 @@ If SSH says `Connection refused`, the guest is still booting; wait and retry.
 
 ## 5. Write to it with fio (terminal 2)
 
-```bash
+```sh
 ./run-guest-ssh.sh sudo fio --name=qs --filename=/dev/nvme0n1 --direct=1 --ioengine=libaio --rw=randwrite --bs=4k --iodepth=16 --size=1G
 ```
 
@@ -117,7 +119,7 @@ it saw. The latency includes the emulated NAND program time.
 FEMU reports its media counters in the vendor log page C0h. The first 4 bytes
 are the WAF times 1000:
 
-```bash
+```sh
 ./run-guest-ssh.sh "sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4"
 ```
 
@@ -130,7 +132,7 @@ garbage collection has not run yet. The next three 8-byte counters are the
 pages the host wrote, the pages garbage collection moved, and the pages
 programmed in total:
 
-```bash
+```sh
 ./run-guest-ssh.sh "sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 -N 24 -w24"
 ```
 
@@ -144,7 +146,7 @@ lists every counter.
 
 ## 7. Shut down (terminal 2)
 
-```bash
+```sh
 ./run-guest-ssh.sh sudo poweroff
 ```
 

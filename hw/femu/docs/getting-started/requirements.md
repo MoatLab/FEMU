@@ -14,7 +14,7 @@ the emulated latency, and WSL is not supported.
 FEMU is based on QEMU 10.1, which needs Python 3.9 or newer and GLib 2.66 or
 newer. Check yours:
 
-```bash
+```sh
 python3 --version
 pkg-config --modversion glib-2.0
 ```
@@ -41,7 +41,7 @@ mode without a guest. It does not boot a guest. The guest-level
 The run scripts start QEMU with `-enable-kvm`. Check that KVM is loaded and
 that you can open it:
 
-```bash
+```sh
 ls -l /dev/kvm
 id -nG | grep -w kvm
 ```
@@ -50,7 +50,7 @@ If `/dev/kvm` is missing, enable virtualization in the BIOS and load the module
 (`sudo modprobe kvm_intel` or `sudo modprobe kvm_amd`). If you are not in the
 `kvm` group, add yourself and log in again:
 
-```bash
+```sh
 sudo usermod -aG kvm "$USER"
 ```
 

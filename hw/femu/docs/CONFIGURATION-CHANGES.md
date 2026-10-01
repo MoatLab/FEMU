@@ -93,6 +93,7 @@ notices, persistent storage and other namespace modes are outside this change.
 
 For example, realize a NoSSD subsystem and two controllers in this order:
 
+<!-- femu-example: shared-namespaces -->
 ```sh
 -device femu-subsys,id=shared,ns_mgmt=on \
 -device femu,id=ctrl-a,subsys=shared,femu_mode=2,devsz_mb=64 \

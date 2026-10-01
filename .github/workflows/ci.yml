@@ -110,6 +110,21 @@ jobs:
         # or heading anchor does not exist.
         python3 hw/femu/scripts/check-doc-links.py
 
+    - name: Check the documented examples
+      run: |
+        # Every command block in README.md and hw/femu/docs/** is tagged as
+        # a tested example or as untested with a reason. Each example, and
+        # each mode's example in hw/femu/docs/modes.py, is realized under
+        # qtest with no stray warnings and then driven through the qtest
+        # harness: enable, Identify, one write and read back. The self-test
+        # first plants mistakes the check must catch.
+        python3 hw/femu/scripts/check-doc-examples.py --self-test \
+          --qemu build-femu/qemu-system-x86_64 \
+          --qos-test build-femu/tests/qtest/qos-test
+        python3 hw/femu/scripts/check-doc-examples.py \
+          --qemu build-femu/qemu-system-x86_64 \
+          --qos-test build-femu/tests/qtest/qos-test
+
     - name: Check FEMU modes
       run: |
         cd build-femu
@@ -388,11 +403,13 @@ jobs:
         grep -q "source femu/Kconfig" hw/Kconfig
         echo "✓ Build system integration verified"
 
-    - name: Check the mode table
+    - name: Check the mode table and the code block tags
       run: |
-        # Needs no build: the mode tables must match hw/femu/docs/modes.py,
-        # and modes.py must match the tree (mode enum, launchers, links).
+        # Neither needs a build: the mode tables must match
+        # hw/femu/docs/modes.py and modes.py must match the tree, and every
+        # command block must carry a femu-example or femu-untested tag.
         python3 hw/femu/scripts/gen-mode-table.py --check
+        python3 hw/femu/scripts/check-doc-examples.py --lint
 
     - name: Validate documentation
       run: |

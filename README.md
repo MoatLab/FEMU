@@ -184,7 +184,7 @@ OCSSD needs a guest kernel older than 5.15 and ZNS needs 5.9 or newer.
 
 ## Installation
 
-```bash
+```sh
 git clone https://github.com/MoatLab/FEMU.git
 cd FEMU && mkdir build-femu && cd build-femu
 cp ../femu-scripts/femu-copy-scripts.sh . && ./femu-copy-scripts.sh
@@ -205,6 +205,7 @@ See [build.md](hw/femu/docs/getting-started/build.md).
 
 From `build-femu/`:
 
+<!-- femu-untested: needs a guest image and KVM; run-blackbox.sh itself is tested by readme-bbssd -->
 ```bash
 ./make-guest-image.sh               # Ubuntu 24.04 guest in ~/images/u20s.qcow2
 ./run-blackbox.sh                   # terminal 1: boot the guest with a BBSSD
@@ -242,11 +243,13 @@ FEMU supports multiple SSD emulation modes, each optimized for different researc
 
 Emulates commercial SSDs with device-managed FTL.
 
+<!-- femu-example: readme-bbssd -->
 ```bash
 ./run-blackbox.sh
 ```
 
 **Key Parameters:**
+<!-- femu-example: readme-bbssd-params; device: femu,femu_mode=1,devsz_mb=12288 -->
 ```bash
 # SSD Layout Configuration
 secsz=512              # Sector size (bytes)
@@ -357,7 +360,7 @@ reads the log page it pointed at with Retain Asynchronous Event clear, so the
 same condition is not reported repeatedly before the host has looked. A
 controller reset drops anything outstanding.
 
-```bash
+```sh
 gcc -O2 -o aer-probe femu-scripts/aer-probe.c   # inside the guest
 sudo ./aer-probe /dev/nvme0
 ```
@@ -369,7 +372,7 @@ where every I/O command passes before reaching whichever mode owns the
 namespace, so they are the same in every mode, including the ones with no FTL.
 Data units follow the spec's unit of a thousand 512 byte units, rounded up.
 
-```bash
+```sh
 sudo nvme smart-log /dev/nvme0        # Data Units Written, host_write_commands, ...
 ```
 
@@ -398,7 +401,7 @@ page C0h (512 bytes, little-endian), not in the SMART log:
 | 40 | 8 | lines rewritten because of read stress |
 | 48 | 8 | lines rewritten because of retention age |
 
-```bash
+```sh
 sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -tu4 -j0 -N4   # WAF x1000
 sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -tu8 -j8 -N8   # host pages
 ```
@@ -415,6 +418,7 @@ many times without being rewritten drifts towards errors. Set
 `read_reclaim_limit` to the number of reads a block may take before its line is
 refreshed:
 
+<!-- femu-example: readme-read-reclaim -->
 ```
 -device femu,...,femu_mode=1,read_reclaim_limit=100000
 ```
@@ -449,6 +453,7 @@ BBSSD, NoSSD, ZNS and KV can expose more than one namespace, and
 device's capacity, each getting its own slice, so they are independent block
 devices (`/dev/nvme0n1`, `/dev/nvme0n2`, ...) that cannot overwrite each other.
 
+<!-- femu-example: readme-namespaces -->
 ```bash
 # two namespaces, splitting the capacity evenly
 -device femu,devsz_mb=4096,namespaces=2,femu_mode=1,...
@@ -458,6 +463,7 @@ devices (`/dev/nvme0n1`, `/dev/nvme0n2`, ...) that cannot overwrite each other.
 ```
 
 **Key Parameters:**
+<!-- femu-example: readme-namespace-params; device: femu,femu_mode=1 -->
 ```bash
 namespaces=1           # Number of namespaces (default 1)
 namespace_sizes=       # Optional per-namespace sizes, e.g. "8G,,4G".
@@ -477,6 +483,7 @@ namespaces may use other modes. FEMU refuses to start with more than that.
 
 Emulates OpenChannel SSDs with host-managed FTL.
 
+<!-- femu-example: readme-ocssd -->
 ```bash
 ./run-whitebox.sh
 ```
@@ -486,7 +493,7 @@ Emulates OpenChannel SSDs with host-managed FTL.
 - OpenChannel SSD 2.0 (default)
 
 **Configuration:**
-```bash
+```sh
 # Set OCSSD version in run-whitebox.sh
 OCVER=2    # For OCSSD 2.0 (default)
 OCVER=1    # For OCSSD 1.2
@@ -501,6 +508,7 @@ OCVER=1    # For OCSSD 1.2
 
 Emulates NVMe ZNS SSDs with zone-based interface.
 
+<!-- femu-example: readme-zns -->
 ```bash
 ./run-zns.sh
 ```
@@ -511,6 +519,7 @@ Emulates NVMe ZNS SSDs with zone-based interface.
 - Zone state tracking and validation
 
 **Key Parameters:**
+<!-- femu-example: readme-zns-params; device: femu,femu_mode=3 -->
 ```bash
 zns_max_active=0       # Max active zones (0 = unlimited)
 zns_max_open=0         # Max open zones (0 = unlimited)
@@ -586,7 +595,7 @@ Async Event Request outstanding. The counter makes a run repeat rather than
 drawing at random. With the knob unset nothing does this, and the list stays
 empty.
 
-```bash
+```sh
 gcc -O2 -o zone-aen-probe femu-scripts/zone-aen-probe.c   # inside the guest
 sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1
 ```
@@ -621,6 +630,7 @@ the conventional zone type, or to exercise FEMU's own zone handling.
 To combine randomly-writable and zoned capacity on a Linux guest, give the
 controller one namespace of each mode instead (see Multiple Namespaces):
 
+<!-- femu-example: readme-zns-and-bbssd -->
 ```bash
 -device femu,devsz_mb=8192,namespaces=2,namespace_modes=znssd,,bbssd,...
 ```
@@ -635,6 +645,7 @@ controller one namespace of each mode instead (see Multiple Namespaces):
 Emulates a key-value SSD: the namespace stores values against keys rather than
 blocks against addresses.
 
+<!-- femu-example: readme-kv -->
 ```bash
 -device femu,devsz_mb=4096,namespaces=1,femu_mode=5,...
 ```
@@ -656,7 +667,7 @@ The commands are:
 Linux has no key-value command set, so the namespace appears without a block
 device and is driven by passthrough:
 
-```bash
+```sh
 # store a 64 byte value under the 4 byte key "BBBB"
 nvme io-passthru /dev/nvme0 -O 0x01 -n 1 --cdw10=64 --cdw11=4 \
     --cdw2=0x42424242 -l 64 -w -i value.bin
@@ -677,7 +688,7 @@ exist, with Do Not Retry set alongside it.
 in full and short form, the conditional stores, delete, and the miss afterwards
 -- and checks both status and data:
 
-```bash
+```sh
 gcc -O2 -o kv-probe femu-scripts/kv-probe.c   # inside the guest
 sudo ./kv-probe /dev/nvme0
 ```
@@ -690,6 +701,7 @@ sudo ./kv-probe /dev/nvme0
 
 Ultra-fast NVMe emulation without storage logic.
 
+<!-- femu-example: readme-nossd -->
 ```bash
 ./run-nossd.sh
 ```
@@ -737,11 +749,13 @@ please also cite:
 }
 ```
 
+<!-- femu-example: readme-csd -->
 ```bash
 ./run-csd.sh
 ```
 
 **Key Parameters:**
+<!-- femu-example: readme-csd-params; device: femu,femu_mode=4 -->
 ```bash
 fdm_size=64            # Functional data memory size (MB), required
 csd_program_dir=       # Host directory programs load from; the guest names a
@@ -816,6 +830,7 @@ FEMU has well over a hundred device properties, so writing them out as a single
 `hw/femu/scripts/ssd-config.sh` expands a config file into those arguments
 instead:
 
+<!-- femu-untested: prints options and starts nothing; ssd-config-test.sh checks every shipped config in CI -->
 ```bash
 ./hw/femu/scripts/ssd-config.sh hw/femu/scripts/configs/bbssd.conf
 # -device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,...,femu_mode=1
@@ -823,6 +838,7 @@ instead:
 
 so a run script can say:
 
+<!-- femu-untested: the options come from ssd-config.sh, which ssd-config-test.sh checks in CI -->
 ```bash
 QEMU_ARGS=$(./hw/femu/scripts/ssd-config.sh my-ssd.conf)
 qemu-system-x86_64 -enable-kvm -cpu host -smp 8 -m 8G $QEMU_ARGS ...
@@ -877,7 +893,7 @@ what the device reports itself to be, so the same script covers a block, zoned
 or key-value namespace. A key-value namespace is not block addressable, so it
 has no block node at all and is driven through the controller instead.
 
-```bash
+```sh
 # inside the guest -- this OVERWRITES the device, hence --yes
 sudo ./femu-test.sh --yes /dev/nvme0n1
 ```
@@ -913,7 +929,7 @@ Channels → LUNs → Planes → Blocks → Pages → Sectors
 ```
 
 **Key Relationships:**
-```bash
+```text
 # Total capacity calculation
 total_pages = nchs × luns_per_ch × pls_per_lun × blks_per_pl × pgs_per_blk
 total_capacity = total_pages × secs_per_pg × secsz
@@ -932,6 +948,7 @@ its reclaim units across the planes too.
 ### Performance Tuning
 
 **For Realistic Simulation:**
+<!-- femu-example: readme-latency-params; device: femu,femu_mode=1 -->
 ```bash
 # Production SSD-like settings
 pg_rd_lat=40000        # 40μs read
@@ -942,6 +959,7 @@ blk_er_lat=2000000     # 2ms erase
 ### Advanced Configuration
 
 **Memory Configuration:**
+<!-- femu-example: readme-memory; device: femu,femu_mode=1 -->
 ```bash
 # In run scripts, adjust VM memory and SSD size
 -m 8G                  # Guest RAM
@@ -950,6 +968,7 @@ blks_per_pl=512        # flash must exceed devsz_mb so GC has room
 ```
 
 **Multi-Device Setup:**
+<!-- femu-example: readme-two-devices -->
 ```bash
 # Add multiple FEMU devices
 -device femu,devsz_mb=4096,femu_mode=1,serial=femu1 \
@@ -985,7 +1004,7 @@ source of truth. `cache_evict` selects the replacement policy: `clock`
 
 For development work, use the debug build:
 
-```bash
+```sh
 # Configure with debugging enabled (femu-compile.sh's options plus debug)
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
     --disable-libnfs --disable-libiscsi --disable-curl \
@@ -1050,7 +1069,7 @@ Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
 ### Adding New Features
 
 1. **Create feature branch:**
-   ```bash
+   ```sh
    git checkout -b feature/new-ssd-mode
    ```
 
@@ -1069,6 +1088,7 @@ QEMU's stock `nvme` device, not FEMU. Run a launcher's own command line under
 gdb instead. From `build-femu/`, make a copy of the launcher that starts QEMU
 through gdb:
 
+<!-- femu-untested: starts QEMU under gdb, which needs an interactive terminal -->
 ```bash
 sed -e 's|\./qemu-system-x86_64|gdb -ex "handle SIGUSR1 nostop noprint pass" --args ./qemu-system-x86_64|' \
     -e 's/ 2>&1 | tee .*$//' run-blackbox.sh > gdb-blackbox.sh
@@ -1084,7 +1104,7 @@ KVM uses SIGUSR1 to kick vCPU threads, which is why gdb is told to pass it.
 **Debug output:** FEMU has no runtime switch for debug output and defines no
 QEMU trace events. Its debug messages are compiled in with extra flags:
 
-```bash
+```sh
 # FEMU_DEBUG_FTL: FTL debug messages, and arms the FTL assertions
 # FEMU_DEBUG_NVME: controller debug messages
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
@@ -1106,6 +1126,7 @@ environment traces placement to stderr. The launchers start QEMU through
 ### Common Issues
 
 **Issue: "femu device not found"**
+<!-- femu-untested: lists the device types and creates no device -->
 ```bash
 # Solution: Ensure using FEMU-compiled binary
 ./qemu-system-x86_64 -device help | grep femu
@@ -1113,7 +1134,7 @@ environment traces placement to stderr. The launchers start QEMU through
 ```
 
 **Issue: VM fails to boot**
-```bash
+```sh
 # Check KVM support
 lsmod | grep kvm
 # Enable if needed:
@@ -1122,7 +1143,7 @@ sudo modprobe kvm-amd    # AMD CPUs
 ```
 
 **Issue: Poor performance**
-```bash
+```sh
 # Check host CPU governor
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # Set to performance:
@@ -1136,6 +1157,7 @@ See [common build errors](hw/femu/docs/getting-started/build.md#common-build-err
 ### Performance Optimization
 
 **Host Optimization:**
+<!-- femu-untested: host tuning that needs root; run-blackbox.sh itself is tested by readme-bbssd -->
 ```bash
 # Disable CPU frequency scaling
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -1148,7 +1170,7 @@ taskset -c 0-7 ./run-blackbox.sh
 ```
 
 **Guest Optimization:**
-```bash
+```sh
 # In VM, disable unnecessary services
 sudo systemctl disable cups bluetooth
 sudo systemctl mask sleep.target suspend.target
@@ -1163,12 +1185,13 @@ echo mq-deadline | sudo tee /sys/block/nvme*/queue/scheduler
 environment variables. Add these options to the QEMU command line in the run
 script instead:
 
+<!-- femu-untested: QEMU logging options added to a launcher; they create no device -->
 ```bash
 -d guest_errors,unimp -D femu-debug.log
 ```
 
 **Monitor performance:**
-```bash
+```sh
 # In guest VM
 sudo iostat -x 1           # I/O statistics
 sudo iotop                 # I/O by process

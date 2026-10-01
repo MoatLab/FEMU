@@ -57,11 +57,19 @@ ifneq ($(HAVE_GLIB),1)
 	@echo "SKIP test-femu-cxl-cache: glib-2.0 not found"
 endif
 
-# Needs a built binary; QEMU names the one to check, build/ by default.
+# Needs a built binary and qos-test; QEMU and QOS_TEST name them, build/ by
+# default. The example check runs its planted mistakes first, so a check that
+# stopped catching them fails here instead of passing every document.
 QEMU ?= $(ROOT)/build/qemu-system-x86_64
+QOS_TEST ?= $(ROOT)/build/tests/qtest/qos-test
 check-docs:
 	python3 ../scripts/gen-property-docs.py --check --qemu $(QEMU)
 	python3 ../scripts/gen-mode-table.py --check
+	python3 ../scripts/check-doc-links.py
+	python3 ../scripts/check-doc-examples.py --self-test --qemu $(QEMU) \
+	    --qos-test $(QOS_TEST)
+	python3 ../scripts/check-doc-examples.py --qemu $(QEMU) \
+	    --qos-test $(QOS_TEST)
 
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
