@@ -114,6 +114,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `cmbsz` | uint32 | `0` | _undocumented_ | set on `-device femu,...` |
 | `context_switch_time` | uint64 | `200` | this port, so they have no effect | set on `-device femu,...` |
 | `cqr` | uint8 | `1` | _undocumented_ | set on `-device femu,...` |
+| `csd_program_dir` | string | `--` | Host directory CSD shared-library and uBPF programs are loaded from. The guest names a file in it, without `/`. Unset, only phantom programs load. | set on `-device femu,...` |
 | `csf_runtime_scale` | uint16 | `3` | A program that names no runtime is charged its host | set on `-device femu,...` |
 | `debug_ftl` | bool | `false` | Print bbssd page-state violations on the GC path, and periodic merge counts under `mapping=hybrid` or `fast`. The `ftl_assert` checks are compiled in only with `FEMU_DEBUG_FTL` or `FEMU_FTL_ASSERT`. | set on `-device femu,...` |
 | `did` | uint16 | `0x1f1f` | _undocumented_ | set on `-device femu,...` |

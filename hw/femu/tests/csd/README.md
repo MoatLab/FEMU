@@ -28,12 +28,35 @@ original CEMU-style admin lifecycle commands through `NVME_IOCTL_ADMIN_CMD`:
 
 Build also produces `csd-vadd.so`, a minimal shared-library CSF used by the
 shared-library smoke path. The program load payload follows the original CEMU
-descriptor format: a PRP data buffer containing `path\0symbol\0`. Because the
-shared library is loaded by the QEMU process on the host, the `path` string
-inside that descriptor must be visible to the host QEMU process:
+descriptor format: a PRP data buffer containing `path\0symbol\0`.
+
+The QEMU process on the host loads the program, so the file must be on the
+host, in the directory named by the `csd_program_dir` property. The `path` in
+the descriptor is a file name in that directory: FEMU refuses a name that
+contains `/` or resolves outside the directory, and refuses every shared-library
+and uBPF load when `csd_program_dir` is unset. `run-csd.sh` does not set it.
+
+Build the programs on the host and copy them into one directory
+(`csd-original-kernels.so` needs the lz4 development package):
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 smoke-so /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+cd hw/femu/tests/csd                 # in the FEMU source tree on the host
+make csd-vadd.so csd-original-kernels.so
+mkdir -p ~/csd-programs
+cp csd-vadd.so csd-original-kernels.so ~/csd-programs/
+```
+
+Start FEMU with `csd_program_dir` pointing at that directory. With
+`run-csd.sh`, add this line after the other `FEMU_OPTIONS` lines:
+
+```bash
+FEMU_OPTIONS=${FEMU_OPTIONS}",csd_program_dir=$HOME/csd-programs"
+```
+
+Then pass the file name alone in the guest:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 smoke-so csd-vadd.so
 ```
 
 `make` also builds `csd-original-kernels.so`, which contains small
@@ -42,7 +65,7 @@ kernels. These tests exercise the same CSD program lifecycle and inline memory
 range interface as the vadd test:
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 smoke-so-all /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so
+sudo ./csd-passthru /dev/nvme0n1 smoke-so-all csd-original-kernels.so
 ```
 
 FDMFS-free MRS is available through the original CEMU memory range set
@@ -50,28 +73,28 @@ management command layout (`0x21`). The passthrough helper creates an MRS from
 AFDM-backed memory range descriptors and executes a CSF by `rsid`:
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 smoke-mrs /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
-sudo ./csd-passthru /dev/nvme0n1 vadd-example /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+sudo ./csd-passthru /dev/nvme0n1 smoke-mrs csd-vadd.so
+sudo ./csd-passthru /dev/nvme0n1 vadd-example csd-vadd.so
 ```
 
 The migrated sync-breakdown check measures NVM-to-AFDM copy, CSF execution, and
 AFDM read as separate stages:
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 sync-breakdown /home/<user>/FEMU/tests/femu-csd/csd-vadd.so 4096 16
+sudo ./csd-passthru /dev/nvme0n1 sync-breakdown csd-vadd.so 4096 16
 ```
 
 The indirect vadd smoke keeps the original indirect CSF ABI shape and uses an
 AFDM-backed MRS instead of FDMFS files:
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 indirect-vadd /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+sudo ./csd-passthru /dev/nvme0n1 indirect-vadd csd-vadd.so
 ```
 
 A compact benchmark entry covers vadd plus the original kernel smoke set:
 
 ```bash
-sudo ./csd-passthru /dev/nvme0n1 benchmark-kernels /home/<user>/FEMU/tests/femu-csd/csd-vadd.so /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so 1
+sudo ./csd-passthru /dev/nvme0n1 benchmark-kernels csd-vadd.so csd-original-kernels.so 1
 ```
 
 The shared-library CSF ABI is:
@@ -112,8 +135,8 @@ without the CEMU kernel driver:
 
 ```bash
 sudo ./csd-passthru /dev/nvme0 admin-load-phantom 1 1000
-sudo ./csd-passthru /dev/nvme0 admin-load-so 1 /host/path/csd-vadd.so csd_vadd
-sudo ./csd-passthru /dev/nvme0 admin-load-ubpf 1 /host/path/csf.bpf.o csf_symbol 0
+sudo ./csd-passthru /dev/nvme0 admin-load-so 1 csd-vadd.so csd_vadd
+sudo ./csd-passthru /dev/nvme0 admin-load-ubpf 1 csd-vadd.bpf.o csd_vadd_bpf 0
 sudo ./csd-passthru /dev/nvme0 admin-activate 1
 sudo ./csd-passthru /dev/nvme0 admin-deactivate 1
 sudo ./csd-passthru /dev/nvme0 admin-unload 1
@@ -124,7 +147,7 @@ sudo ./csd-passthru /dev/nvme0 admin-delete-mrs <rsid>
 The tool assumes FEMU was started with CSD mode enabled, for example:
 
 ```bash
--device femu,femu_mode=4,fdm_size=64
+-device femu,femu_mode=4,fdm_size=64,csd_program_dir=/path/to/csd-programs
 ```
 
 It intentionally does not depend on CEMU's modified kernel driver or FDMFS. CSD
@@ -147,10 +170,16 @@ If you use the `ubpf-cemu` source tree directly, pass its path explicitly:
 ```
 
 The guest helper does not build BPF objects by default. Build the BPF test
-program on the host or in a guest with Clang BPF support:
+program on the host with Clang BPF support and copy it into `csd_program_dir`:
 
 ```bash
-make bpf
-sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf /host/path/csd-vadd.bpf.o 0
-sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf /host/path/csd-vadd.bpf.o 1
+make bpf                             # on the host
+cp csd-vadd.bpf.o ~/csd-programs/
+```
+
+Then, in the guest:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf csd-vadd.bpf.o 0
+sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf csd-vadd.bpf.o 1
 ```

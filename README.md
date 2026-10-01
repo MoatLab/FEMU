@@ -837,6 +837,9 @@ please also cite:
 **Key Parameters:**
 ```bash
 fdm_size=64            # Functional data memory size (MB), required
+csd_program_dir=       # Host directory programs load from; the guest names a
+                       #   file in it. Unset, only phantom programs load. Not
+                       #   set by run-csd.sh; see hw/femu/tests/csd/README.md
 nr_cu=4                # Compute units; programs queue for the first free one
 csf_runtime_scale=3    # A program that names no runtime is charged its host
                        #   run time times this (a load's own scale, in tenths,
