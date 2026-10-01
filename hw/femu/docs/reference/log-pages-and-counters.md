@@ -31,6 +31,8 @@ Bytes 4-7 and 112-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.
+Bytes 8 and 24 are equal when no write buffer is configured; a buffer that
+absorbs repeated writes to one page makes the factor drop below 1.
 
 They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
@@ -45,3 +47,55 @@ never holds data, because the controller does not capture on its own.
 `nvme get-log /dev/nvme0 --log-id=0 --log-len=1024 -b` lists every log page the
 controller answers, four bytes per identifier with bit 0 set for the ones it
 supports, so this page can be discovered rather than assumed.
+
+## Asynchronous events
+
+The controller completes an outstanding Asynchronous Event Request when one
+of these happens:
+
+| Event | Raised when | Log page it names |
+| --- | --- | --- |
+| SMART temperature warning | the host has enabled it with Async Event Configuration and set a temperature threshold at or below the reported value (`temperature`, in Kelvin, default 323, which is 50 C) | SMART / Health (02h) |
+| Error | the host writes a doorbell that does not exist, or a value past the end of its queue | Error Information (01h) |
+| Namespace Attribute Changed | with `ns_mgmt=on`, a namespace is attached, detached, deleted or formatted, and the host enabled the notice | Changed Namespace List (04h) |
+| Zone Descriptor Changed | a ZNS zone changed without the host asking, for example a write failure made it read only | Changed Zone List (BFh) |
+
+An event of a given type is reported once and then held back until the
+host reads the log page it named without Retain Asynchronous Event (RAE), so
+the same condition is not reported again before the host has looked. A
+controller reset drops anything outstanding. `hw/femu/scripts/aer-probe.c`
+checks the temperature path from inside the guest:
+
+```sh
+gcc -O2 -o aer-probe femu-scripts/aer-probe.c   # inside the guest
+sudo ./aer-probe /dev/nvme0
+```
+
+## Persistent Event log retention
+
+The Persistent Event log (0Dh) lives in memory and is lost when QEMU exits.
+Set `pel_file=/absolute/path/events.pel` on a `femu` device to keep it
+across QEMU runs. A missing file starts an empty history. A corrupt or
+incompatible file refuses device creation and is left unchanged.
+
+The file holds the encoded events, the log generation and the power cycle
+count. Each realize adds one power cycle, a power-on event and a SMART
+snapshot. The PEL header's power cycle count (PWRCC), the Controller Power
+Cycle and SMART Power Cycles all use the retained count. Reporting contexts,
+the other SMART counters, namespace data and power-on hours are not
+retained.
+
+The file is written on the main loop after events and generation changes,
+and again at controller reset, device removal and normal process exit. Each
+write goes to a temporary file in the same directory, which is synced,
+renamed over the old file, and followed by a sync of the directory. At
+normal exit, event collection closes under the log mutex before the last
+write: events added before that point are saved, and later ones, including
+completions of outstanding I/O, are dropped. The exit path does not wait
+for the pollers, whose MMIO DMA may need the main thread's lock. Killing
+QEMU abruptly can lose changes still queued for the main loop. A write
+error is printed to stderr, and the next event or lifecycle save tries
+again.
+
+Use one file per device and one QEMU writing it. The file is not a way to
+share a log between devices or to migrate one.

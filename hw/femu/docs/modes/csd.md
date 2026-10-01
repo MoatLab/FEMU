@@ -8,9 +8,10 @@ program, and reads the result back, all with NVMe commands. Ordinary reads
 and writes go through the [BlackBox](blackbox.md) FTL, so they have SSD
 timing.
 
-The mode is a port of [CEMU](https://github.com/cs-qyzhang/CEMU). The
-[README](../../../../README.md#computational-storage-mode-csd) has the
-citation to use. It does not need CEMU's modified guest kernel or FDMFS.
+The mode is a port of [CEMU](https://github.com/cs-qyzhang/CEMU); if you use
+it, cite CEMU as well as FEMU ([citation](#citation)). It does not need
+CEMU's modified guest kernel, FDMFS or a fixed VM image. CEMU's VM freezing
+and virtual clock changes are left out of this port.
 
 Use it to study offloading filters, scans, compression or other kernels to
 the drive, and what that does to latency and host CPU use.
@@ -233,6 +234,30 @@ unknown program type fails with Invalid Field and prints nothing.
   `csd-passthru` in the guest.
 
 Related issues: #60, #143, #188.
+
+## Citation
+
+CSD mode is derived from [CEMU](https://github.com/cs-qyzhang/CEMU). We thank
+the CEMU authors, Qiuyang Zhang, Jiapin Wang, You Zhou, Peng Xu, Kai Lu,
+Jiguang Wan, Fei Wu and Tao Lu, and Emilio
+([@Emilio597](https://github.com/Emilio597)), who ported it to FEMU in
+[#188](https://github.com/MoatLab/FEMU/pull/188). If you use the CSD mode,
+please also cite:
+
+```bibtex
+@inproceedings{Zhang+26-CEMU,
+  author    = {Qiuyang Zhang and Jiapin Wang and You Zhou and Peng Xu and
+               Kai Lu and Jiguang Wan and Fei Wu and Tao Lu},
+  title     = {{CEMU: Enabling Full-System Emulation of Computational Storage
+               Beyond Hardware Limits}},
+  booktitle = {Proceedings of the 31st ACM International Conference on
+               Architectural Support for Programming Languages and Operating
+               Systems (ASPLOS '26), Volume 2},
+  pages     = {323--341},
+  year      = {2026},
+  doi       = {10.1145/3779212.3790137},
+}
+```
 
 ## Related pages
 

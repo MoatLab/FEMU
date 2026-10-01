@@ -24,6 +24,10 @@ from a FEMU thread that did not get a core.
 ZNS, NoSSD and OCSSD leave the C0h counters at zero. ZNS has no device
 garbage collection: the host resets zones.
 
+The guest's own tools show I/O from the guest's side: `iostat -x 1` per
+device, `iotop` per process, `dstat -cdn` for CPU, disk and network
+together.
+
 ## Write amplification and media counters (C0h)
 
 The first 4 bytes of log page C0h are the write amplification factor (WAF)

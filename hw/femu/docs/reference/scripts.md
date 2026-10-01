@@ -123,7 +123,41 @@ FEMU_BIN=./qemu-system-x86_64 ../femu-scripts/ssd-config.sh ../femu-scripts/conf
 ```
 
 The launchers take no arguments. To boot a config, copy a launcher and put
-the output in place of its `-device femu` option.
+the output in place of its `-device femu` option, or call QEMU yourself:
+
+<!-- femu-untested: the options come from ssd-config.sh, which ssd-config-test.sh checks in CI -->
+```bash
+QEMU_ARGS=$(FEMU_BIN=./qemu-system-x86_64 ../femu-scripts/ssd-config.sh my-ssd.conf)
+./qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G $QEMU_ARGS ...
+```
+
+The file format: keys are `femu` device properties and mean what
+`-device femu,help` says. `#` and `;` start comments, section headers are
+labels for the reader (except `[subsys]`), and a key with an empty value is
+ignored. List values such as `namespace_modes = bbssd,znssd,nossd` get
+their commas doubled for QEMU automatically.
+
+```ini
+[device]
+mode        = bbssd        # friendly name for femu_mode
+devsz_mb    = 4096
+
+[geometry]
+secs_per_pg = 8            # 4 KiB pages
+luns_per_ch = 8
+nchs        = 8
+
+[timing]
+pg_rd_lat   = 40000        # ns
+pg_wr_lat   = 200000
+```
+
+A misspelled key stops the expansion when the binary is found:
+
+```text
+ssd-config: unknown property 'gc_polcy' -- not one FEMU accepts
+ssd-config: config rejected; see the warnings above
+```
 
 ## Guest-side test tools
 

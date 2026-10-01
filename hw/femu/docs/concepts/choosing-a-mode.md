@@ -40,8 +40,8 @@ guest-side use, refusals and troubleshooting for its mode or feature.
 | Several namespaces on one controller, possibly of different modes | multi-namespace | `namespaces=N`, optional `namespace_sizes=...`, `namespace_modes=...` | none | [Several namespaces](../features/multi-namespace.md) |
 | Create and delete namespaces from the guest | Namespace Management | `ns_mgmt=on` on a NoSSD or BBSSD controller; `bbssd_ns_limit` for BBSSD | none | [Namespace management](../features/ns-management-and-pi.md#namespace-management) |
 | Metadata and end-to-end protection information | metadata, PI | `meta=8` (or more), `mc`, `pi=on` | none | [Metadata and PI](../features/ns-management-and-pi.md#metadata-and-protection-information) |
-| SSD capacity that the guest uses as memory, with SSD timing on cache misses | CXL SSD | `-device femu-cxl-ssd,volatile-memdev=...` on a CXL topology; `cache-pages`, `cache-policy`, `der` | `run-cxlssd.sh` | `modes/cxl-ssd.md` (guide coming); [design note](../cxlssd.md) |
-| The same CXL medium also as an NVMe block device | CXL NVMe front end | `femu-cxl-ssd` first, then `-device femu,femu_mode=1,cxl_ssd=<id>` | none | `features/cxl-nvme-link.md` (guide coming) |
+| SSD capacity that the guest uses as memory, with SSD timing on cache misses | CXL SSD | `-device femu-cxl-ssd,volatile-memdev=...` on a CXL topology; `cache-pages`, `cache-policy`, `der` | `run-cxlssd.sh` | [CXL SSD](../modes/cxl-ssd.md); [design note](../cxlssd.md) |
+| The same CXL medium also as an NVMe block device | CXL NVMe front end | `femu-cxl-ssd` first, then `-device femu,femu_mode=1,cxl_ssd=<id>` | none | [CXL NVMe link](../features/cxl-nvme-link.md) |
 
 Commas inside a property value are doubled on the QEMU command line, for
 example `namespace_modes=bbssd,,znssd`.

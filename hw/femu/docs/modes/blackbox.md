@@ -53,7 +53,8 @@ Properties: [mode and capacity](../reference/properties.md#mode-capacity-and-nam
 The NAND geometry is `nchs` channels, each with `luns_per_ch` LUNs, each
 with `pls_per_lun` planes of `blks_per_pl` blocks of `pgs_per_blk` pages. A
 page is `secs_per_pg` sectors of `secsz` bytes. The raw NAND capacity is
-the product of all seven. With the defaults it is 16 GiB, and a page is
+the product of all seven. With the defaults it is 16 GiB
+(8 x 8 x 1 x 256 x 256 x 8 x 512 = 17,179,869,184 bytes), and a page is
 4 KiB.
 
 The namespace the guest sees is `devsz_mb` MiB, which can be smaller than
@@ -99,8 +100,15 @@ Properties: [garbage collection, mapping and caches](../reference/properties.md#
 
 Background GC starts when the share of lines in use reaches
 `gc_thres_pcent` (75). Foreground GC runs inside writes from
-`gc_thres_pcent_high` (95). `gc_policy` picks the victim line: `greedy`
-(the default), `random`, `cost-benefit`, `fifo` or `d-choice`.
+`gc_thres_pcent_high` (95). `gc_policy` picks the victim line:
+
+- `greedy` (the default): the line with the fewest valid pages.
+- `random`: a random line among the GC candidates.
+- `cost-benefit`: the line with the largest age x (1 - u) / 2u, where u is
+  the share of valid pages.
+- `fifo`: the oldest closed line.
+- `d-choice`: samples 4 random candidate lines and takes the one with the
+  fewest valid pages.
 
 ### Mapping and caches
 
@@ -109,7 +117,22 @@ Properties: [garbage collection, mapping and caches](../reference/properties.md#
 - `mapping`: `page` (default, a full table in DRAM), `dftl` (a cached table
   of `mapping_cache_mb` MiB whose misses cost NAND reads), `hybrid` or `fast`
   (log-block schemes).
-- `read_cache_mb` and `cache_evict` add a DRAM read cache.
+- `read_cache_mb` and `cache_evict` add a DRAM read cache. It models timing
+  only: a hit costs DRAM time and skips the NAND read, but the cache holds no
+  data, so NAND stays the source of truth. `cache_evict` is `clock` (the
+  default), `random`, `lru` or `arc`, which resists scans.
+
+The two log-block schemes follow published designs:
+
+| `mapping` | Model |
+| --- | --- |
+| `hybrid` | BAST log-block mapping (Kim 2002): one log block per data block, merged when the log pool runs out |
+| `fast` | FAST log-block mapping (Lee et al. 2007): a sequential log block plus a shared, fully associative pool for random writes |
+
+Both suit some workloads more than others: sequential overwrites merge
+cheaply, random overwrites force full merges. A merge is charged to the NAND
+timeline and counted as relocated pages, so it shows in latency and in the
+write amplification factor.
 - `hot_cold_sep` writes overwrites of mapped pages to separate lines.
 
 ### Write buffer and power loss
@@ -122,7 +145,9 @@ Once the buffer is `buffer_thres_pcent` full, the next write programs a batch
 of the least recently written pages. A write the buffer absorbs costs no
 NAND time; the cost moves to the write that evicts it. Set `vwc=1` so that
 the guest sees a volatile write cache: Flush then drains the buffer, and the
-guest can turn the buffer off with feature 06h.
+guest can turn the buffer off with feature 06h. A read of a page the buffer
+still holds costs no NAND time, and deallocating such a page drops it
+instead of writing it out later.
 
 <!-- femu-example: blackbox-buffer -->
 ```
@@ -148,6 +173,29 @@ All of these are off by default.
 - `read_reclaim_limit` and `retention_limit_sec` rewrite lines that were read
   too often or hold old data. The line is picked on a read and rewritten on a
   following write, so a workload that never writes never triggers it.
+
+Both refresh knobs act only when something reads the line. A region nothing
+reads is never refreshed: modelling a background media scan would need a
+timer that FEMU does not run.
+
+`read_reclaim_limit` is the number of reads a block may take before its line
+is refreshed:
+
+<!-- femu-example: blackbox-read-reclaim -->
+```
+-device femu,devsz_mb=1024,femu_mode=1,read_reclaim_limit=100000
+```
+
+The line is chosen on the read but rewritten on the next write, where
+relocation already costs something, so a read never waits behind a whole
+line. One line is queued at a time and at most one is refreshed per write,
+so the rate follows how often the host writes, not how hard it reads. The
+cost shows up as write amplification. On a 512 MiB region read six times
+over with a low limit, 5 lines were refreshed and 77824 pages relocated, and
+the write amplification factor went from 1.000 to 1.542. Lowering the limit
+from 500 to 10 moved it only from 1.542 to 1.628. A workload that only reads
+never refreshes anything, where a real drive would do it in the background,
+so model read-only ageing some other way.
 
 ### Host link and controller firmware
 

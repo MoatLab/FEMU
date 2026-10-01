@@ -195,6 +195,21 @@ the FTL thread and the device memory on the other.
   there.
 - **Physical host.** Nested virtualization and WSL add their own delays
   ([requirements](../getting-started/requirements.md#operating-system-and-cpu)).
+- **Priority.** `sudo nice -n -10 ./run-blackbox.sh` starts QEMU, and every
+  thread it creates, at a higher scheduling priority.
+
+Inside the guest, services that wake up on their own add noise to a
+measurement, and a guest that suspends stops it. For example:
+
+```sh
+sudo systemctl disable cups bluetooth
+sudo systemctl mask sleep.target suspend.target
+cat /sys/block/nvme0n1/queue/scheduler          # the guest's I/O scheduler
+echo mq-deadline | sudo tee /sys/block/nvme0n1/queue/scheduler
+```
+
+The guest's I/O scheduler queues requests before they reach FEMU, so state
+which one a measurement used.
 
 ## What each knob trades
 

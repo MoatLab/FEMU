@@ -155,7 +155,7 @@ scp -P 8080 -i ~/images/femu-guest-key ../femu-scripts/kv-probe.c femu@localhost
 | --- | --- |
 | 0x85 | Invalid Value Size: the value is larger than 2 MiB. |
 | 0x86 | Invalid Key Size: a key length of 0 on Store, Retrieve, Delete or Exist. For List, length 0 means "from the start". |
-| 0x87 | Key Does Not Exist: Retrieve or Exist of a missing key, a Store with bit 8 (only if the key exists) for a missing key, or Delete of a missing key when EDNEK is set. |
+| 0x87 | Key Does Not Exist: Retrieve or Exist of a missing key, a Store with bit 8 (only if the key exists) for a missing key, or Delete of a missing key when EDNEK is set. It comes with Do Not Retry set. |
 | 0x89 | Key Exists: a Store with bit 9 (only if the key is absent) found the key. |
 | Capacity Exceeded | The value space or the key index is full. |
 | Invalid Field | A key longer than 16 bytes, a List buffer smaller than 4 bytes, or the broadcast namespace ID. |

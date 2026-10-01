@@ -143,7 +143,10 @@ All of these are off by default.
 - **Zone Random Write Area.** Set `zns_zrwa_size` and `zns_zrwafg_size` (in
   logical blocks) and `zns_zrwa_num` (zones that may hold one at once). A zone
   opened with the ZRWA flag accepts writes anywhere in a window above the
-  write pointer.
+  write pointer. The write pointer advances only in whole flush-granularity
+  units: when a write crosses the end of the window, or when the host
+  flushes explicitly. Finishing or resetting the zone returns its ZRWA
+  resource. With all three properties at 0 the namespace advertises no ZRWA.
 
 <!-- femu-example: zns-zrwa -->
 ```
@@ -151,15 +154,26 @@ All of these are off by default.
 ```
 
 - **Conventional zones.** `zns_num_conv_zones=N` makes the first N zones
-  accept random writes. Leave it at 0 for a Linux guest: Linux rejects the
-  conventional zone type and the namespace then reports no zones. To mix
+  accept writes anywhere inside the zone. They keep no write pointer
+  (reported as all ones) and reject zone management and Zone Append. Leave
+  it at 0 for a Linux guest: the NVMe ZNS command set defines only the
+  sequential-write-required zone type, so Linux rejects a conventional zone,
+  fails the whole zone report with `EINVAL`, and the namespace reports no
+  zones, which leaves it unusable for zoned btrfs, f2fs, zonefs or
+  dm-zoned. To mix
   random-write and zoned capacity, give the controller a
   [BlackBox namespace and a ZNS namespace](../features/multi-namespace.md)
   instead.
-- **Reads across zone boundaries.** `zns_cross_zone_read=on` allows a read
-  that spans zones.
+- **Reads across zone boundaries.** By default a read that runs past the end
+  of its zone fails with a zone boundary error. `zns_cross_zone_read=on`
+  allows it and advertises OZCS bit 0, which tells the host it may issue
+  one. Every zone the read spans must still be in a readable state.
 - **Zone Append size limit.** `zns_zasl_bs` (default 128 KiB) caps one Zone
-  Append, and must be a power-of-two multiple of 4 KiB. 0 follows `mdts`.
+  Append, and must be a power-of-two multiple of 4 KiB, because Identify
+  reports the limit (ZASL) as a power-of-two count of 4 KiB pages; other
+  values are refused, not rounded down. 0 follows `mdts`. The host reads
+  ZASL to size its appends, and a larger append fails with Invalid Field in
+  Command.
 - **Zone descriptor extensions.** `zns_zd_ext_size` in bytes, a multiple of
   64.
 - **Write failures.** `err_write_fail_ppm` fails a fixed share of writes. The
@@ -229,6 +243,30 @@ Read the Changed Zone List log page (BFh). It needs an explicit namespace:
 
 ```sh
 sudo nvme get-log /dev/nvme0 --log-id=0xbf --log-len=4096 --namespace-id=1
+```
+
+### Changed Zone List
+
+The page is per namespace, which is why the command above names one:
+nvme-cli otherwise sends the broadcast identifier. It holds an 8-byte count
+followed by up to 511 zone start LBAs, and lists only zone changes the host
+did not cause. As the ZNS specification requires, it leaves out changes
+that follow a Zone Management Send command, writes that open or fill a
+zone, and the controller closing a zone to free a resource. Reading it
+without `--rae` clears both the list and the event behind it.
+
+With `err_write_fail_ppm` unset nothing adds to the list, and it stays
+empty. With it set, one write in every 1,000,000 / `err_write_fail_ppm`
+fails and makes its zone read only, the way a controller does when it can
+no longer program the zone. The failing write completes with Write Fault,
+later writes to that zone are refused as read only, the zone is added to
+this list, and a host with an Asynchronous Event Request outstanding gets a
+Zone Descriptor Changed notice. The failures come at a fixed count, so a
+run repeats exactly. `hw/femu/scripts/zone-aen-probe.c` checks this path:
+
+```sh
+gcc -O2 -o zone-aen-probe femu-scripts/zone-aen-probe.c   # inside the guest
+sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1
 ```
 
 Do not run `mkfs.ext4` on the namespace: it needs random writes. Use a file system with zoned support, zonefs, or zone-aware
