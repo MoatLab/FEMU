@@ -1,7 +1,7 @@
 # Quick start
 
-From a fresh clone to a running BlackBox SSD (BBSSD), in about 30 minutes,
-most of it spent compiling. You build FEMU, build a guest image, boot the guest
+From a fresh clone to a running BlackBox SSD (BBSSD). On a 20-core host the
+whole run took 5 minutes, most of it compiling. You build FEMU, build a guest image, boot the guest
 with an emulated SSD, write to the SSD with fio and read its write
 amplification factor (WAF).
 
@@ -24,7 +24,8 @@ sudo ./pkgdep.sh
 ./femu-compile.sh
 ```
 
-`femu-compile.sh` takes 5 to 15 minutes and ends with
+`femu-compile.sh` takes 3 to 15 minutes, depending on the number of cores,
+and ends with
 `===> FEMU compilation done ...`. Check that the build has the FEMU device:
 
 ```bash
@@ -48,8 +49,8 @@ sudo apt install curl cloud-image-utils
 ./make-guest-image.sh
 ```
 
-This downloads the Ubuntu 24.04 cloud image (about 600 MB) and provisions it in
-a few minutes. It ends with:
+This downloads the Ubuntu 24.04 cloud image (about 600 MB) and provisions it,
+which takes one to a few minutes. It ends with:
 
 ```
 Image ready: /home/<you>/images/u20s.qcow2
@@ -130,7 +131,7 @@ pages the host wrote, the pages garbage collection moved, and the pages
 programmed in total:
 
 ```bash
-./run-guest-ssh.sh "sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 -N 24"
+./run-guest-ssh.sh "sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 -N 24 -w24"
 ```
 
 ```
@@ -152,9 +153,8 @@ the emulated SSD is gone: FEMU keeps it only in host memory.
 
 If the guest hangs, stop QEMU from terminal 1 with `Ctrl-a` then `x`.
 
-`run-blackbox.sh` leaves two root-owned files in `build-femu/`: `log` (the
-console output) and `qmp-sock` (the QEMU monitor socket). They are reused on
-the next run.
+`run-blackbox.sh` saves the console output of the run in `build-femu/log` and
+overwrites it on the next run.
 
 ## Next steps
 

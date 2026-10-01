@@ -69,8 +69,8 @@ The script runs `make clean`, then
     --disable-libnfs --disable-libiscsi --disable-curl
 ```
 
-and `make` with one job per CPU. A first build takes 5 to 15 minutes,
-depending on the host.
+and `make` with one job per CPU. A first build takes 3 to 15 minutes,
+depending on the number of cores.
 
 The binary is `build-femu/qemu-system-x86_64`. The run scripts expect it in the
 current directory, so run them from `build-femu/`. The build also produces
