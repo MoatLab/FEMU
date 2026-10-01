@@ -17191,6 +17191,189 @@ static void femu_test_cxl_nvme_gate(void *obj, void *data,
     femu_link_quit(&l);
 }
 
+/*
+ * Command lines from the documentation, handed over by
+ * hw/femu/scripts/check-doc-examples.py. FEMU_DOC_EXAMPLES names a file of
+ * "name<TAB>io,io,...<TAB>QEMU options" lines with one io entry per femu
+ * controller, in command-line order: "rw" writes and reads back one block of
+ * namespace 1, "kv" stores and retrieves one value, "identify" stops after
+ * Identify. A controller whose namespace 1 is not attached is identified
+ * only, but every example has to move data through at least one controller
+ * unless all its entries are "identify".
+ */
+#define FEMU_DOC_MAX_CTRLS  16
+
+typedef struct FemuDocCtrls {
+    QPCIDevice *dev[FEMU_DOC_MAX_CTRLS];
+    int n;
+} FemuDocCtrls;
+
+static void femu_doc_collect(QPCIDevice *dev, int devfn, void *data)
+{
+    FemuDocCtrls *f = data;
+
+    if (qpci_config_readw(dev, PCI_CLASS_DEVICE) == 0x0108 &&
+        f->n < FEMU_DOC_MAX_CTRLS) {
+        f->dev[f->n++] = dev;
+        return;
+    }
+    g_free(dev);
+}
+
+/* one command on the I/O queue against namespace 1; returns the status */
+static uint16_t femu_doc_io(FemuCtrlState *c, NvmeCmd *cmd)
+{
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    cmd->nsid = cpu_to_le32(1);
+    femu_submit(c, &c->io, cmd);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
+/* Identify, then exercise namespace 1; returns whether data moved */
+static bool femu_doc_ctrl(FemuCtrlState *c, const char *io)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t buf = guest_alloc(c->alloc, 4096);
+    uint8_t *wbuf = g_malloc(4096);
+    uint8_t *rbuf = g_malloc(4096);
+    NvmeIdCtrl id;
+    NvmeIdNs ns;
+    NvmeCmd cmd;
+    uint32_t len = 0;
+    bool moved = false;
+    int i;
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmpint(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    /* a controller that answered with an empty structure is no answer */
+    g_assert_cmpint(id.mn[0], !=, 0);
+    g_assert_cmpint(id.mn[0], !=, ' ');
+    if (!strcmp(io, "identify")) {
+        goto out;
+    }
+
+    femu_create_io_queues(c);
+    for (i = 0; i < 4096; i++) {
+        wbuf[i] = (uint8_t)(0x3c + i * 11);
+    }
+    if (!strcmp(io, "kv")) {
+        len = 64;
+        qtest_memwrite(qts, buf, wbuf, len);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_STORE;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(0x53434f44ULL);  /* the key "DOCS" */
+        cmd.cdw10 = cpu_to_le32(len);
+        cmd.cdw11 = cpu_to_le32(4);
+        g_assert_cmpint(femu_doc_io(c, &cmd), ==, NVME_SUCCESS);
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+    } else {
+        qtest_memset(qts, buf, 0, 4096);
+        if (femu_identify(c, 1, NVME_ID_CNS_NS, 0, buf) != NVME_SUCCESS) {
+            g_test_message("namespace 1 is not attached here; Identify only");
+            goto queues;
+        }
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        if (!ns.nsze) {
+            g_test_message("namespace 1 is not attached here; Identify only");
+            goto queues;
+        }
+        len = 1u << ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns.flbas)].ds;
+        g_assert_cmpint(len, <=, 4096);
+        qtest_memwrite(qts, buf, wbuf, len);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        g_assert_cmpint(femu_doc_io(c, &cmd), ==, NVME_SUCCESS);
+        cmd.opcode = NVME_CMD_READ;
+    }
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmpint(femu_doc_io(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, rbuf, len);
+    g_assert_cmpint(memcmp(wbuf, rbuf, len), ==, 0);
+    moved = true;
+queues:
+    femu_queue_free(c, &c->io);
+out:
+    g_free(rbuf);
+    g_free(wbuf);
+    guest_free(c->alloc, buf);
+    return moved;
+}
+
+static void femu_doc_example(const char *name, const char *ios,
+                             const char *args)
+{
+    g_auto(GStrv) io = g_strsplit(ios, ",", -1);
+    FemuDocCtrls ctrls = { 0 };
+    QGuestAllocator alloc;
+    QTestState *qts;
+    QPCIBus *bus;
+    bool need_data = false;
+    bool moved = false;
+    int i;
+
+    g_test_message("doc-example %s: start", name);
+    qts = qtest_init(args);
+    pc_alloc_init(&alloc, qts, ALLOC_NO_FLAGS);
+    bus = qpci_new_pc(qts, &alloc);
+    qpci_device_foreach(bus, -1, -1, femu_doc_collect, &ctrls);
+    g_assert_cmpint(ctrls.n, ==, g_strv_length(io));
+
+    for (i = 0; i < ctrls.n; i++) {
+        FemuCtrlState c = { 0 };
+
+        femu_enable(&c, ctrls.dev[i], &alloc);
+        need_data |= strcmp(io[i], "identify") != 0;
+        moved |= femu_doc_ctrl(&c, io[i]);
+        femu_disable(&c);
+        g_free(ctrls.dev[i]);
+    }
+    g_assert_true(moved || !need_data);
+
+    qpci_free_pc(bus);
+    alloc_destroy(&alloc);
+    qtest_quit(qts);
+    g_test_message("doc-example %s: ok", name);
+}
+
+static void femu_test_doc_examples(void *obj, void *data,
+                                   QGuestAllocator *unused)
+{
+    const char *path = g_getenv("FEMU_DOC_EXAMPLES");
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    int ran = 0;
+    int i;
+
+    if (!path) {
+        g_test_skip("FEMU_DOC_EXAMPLES is not set; "
+                    "hw/femu/scripts/check-doc-examples.py sets it");
+        return;
+    }
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", -1);
+    for (i = 0; lines[i]; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[i], "\t", 3);
+
+        if (!lines[i][0]) {
+            continue;
+        }
+        g_assert_cmpint(g_strv_length(f), ==, 3);
+        femu_doc_example(f[0], f[1], f[2]);
+        ran++;
+    }
+    /* an empty list must not pass as if every example had run */
+    g_assert_cmpint(ran, >, 0);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -17207,6 +17390,7 @@ static void femu_register_nodes(void)
 
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
+    qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
                  NULL);
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
