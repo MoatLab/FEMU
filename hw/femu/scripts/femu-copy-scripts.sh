@@ -4,7 +4,7 @@
 
 FSD="../femu-scripts"
 
-CPL=(pkgdep.sh femu-compile.sh run-whitebox.sh run-blackbox.sh run-blackbox-fdp.sh run-nossd.sh run-zns.sh run-csd.sh pin.sh ftk)
+CPL=(pkgdep.sh femu-compile.sh make-guest-image.sh run-guest-ssh.sh run-whitebox.sh run-blackbox.sh run-blackbox-fdp.sh run-nossd.sh run-zns.sh run-csd.sh pin.sh ftk)
 
 echo ""
 echo "==> Copying following FEMU script to current directory:"
