@@ -616,9 +616,7 @@ The link is modelled after the media for both directions. A read's transfer
 to the host never overlaps its NAND time, and a write's transfer from the
 host is charged after its programs, not before them. The firmware cost is charged at the end of a command,
 which caps the command rate at about one per `fw_cpu_ns` but does not delay
-the start of the media operations. With any of the three set, a NoSSD
-controller completes through the priority queue instead of inline in the
-sweep. The link model is enabled when either link property is non-zero
+the start of the media operations. The link model is enabled when either link property is non-zero
 (`pcie_enabled` in `femu.c`).
 
 ## OCSSD timing model

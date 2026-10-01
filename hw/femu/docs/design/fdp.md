@@ -150,7 +150,7 @@ different dies:
 
 `fdp_advance_ru_pointer()` implements the order; `fdp_get_new_page()`
 turns the pointer into an address. The NAND timing of each program is the
-BlackBox timing (see `design/nand-timing.md`).
+BlackBox timing (see [NAND timing](nand-timing.md)).
 
 ### Reclaim Unit Handle Update
 
@@ -333,7 +333,7 @@ no namespaces and FEMU builds the namespace at realize.
 A placed write is charged the largest NAND program latency of its pages,
 after any foreground GC passes, whose erases and relocations occupy the
 same LUNs. GC programs and erases use the BlackBox timing with
-`enable_gc_delay` (see `design/ftl.md`).
+`enable_gc_delay` (see [the FTL chapter](ftl.md)).
 
 ## Parameters
 

@@ -443,7 +443,7 @@ puts this in context with the other modes.
 ### NAND timing
 
 `zns_nand_media_init()` hands the timing to the shared NAND media layer
-(see `design/nand-timing.md`) with:
+(see [NAND timing](nand-timing.md)) with:
 
 - one latency per cell type for read, program and erase, from the
   `zns_flash_type` row of the built-in table in `zns/zns.h` and

@@ -14,7 +14,7 @@ the geometry and NAND timing but run their own key-value FTL. A
 `femu-cxl-ssd` builds a private instance on its own worker thread.
 
 NAND operation timing (per-LUN timelines, the channel bus, suspend, ECC
-tiers) is the subject of the NAND timing chapter, `nand-timing.md` in this
+tiers) is the subject of the [NAND timing chapter](nand-timing.md) in this
 directory, and of [the timing model](../concepts/timing-model.md). This
 chapter covers what the FTL asks of the NAND, not how long each operation
 takes.
@@ -541,8 +541,8 @@ With Flexible Data Placement the FTL places data in reclaim units, one line
 each, through per-handle write pointers, and collects reclaim units instead
 of lines (`do_gc_fdp_style()` in `hw/femu/bbssd/ftl-fdp.c`). `gc_strategy`
 picks that victim policy; `gc_policy` and the other FTL knobs listed under
-[Interactions](#interactions-and-refusals) are refused. The FDP chapter,
-`fdp.md` in this directory, and the [FDP guide](../features/fdp.md) describe
+[Interactions](#interactions-and-refusals) are refused. The [FDP chapter](fdp.md)
+and the [FDP guide](../features/fdp.md) describe
 it.
 
 ## Write buffer

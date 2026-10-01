@@ -69,6 +69,20 @@ The guest kernel each mode needs is in
   sizing.
 - [CXL SSD design](cxlssd.md): the design note for `femu-cxl-ssd`.
 
+## I want the full design
+
+The [design manual](design/README.md) has one chapter per component, each
+with diagrams, data structures, algorithms, parameters, counters, limits
+and a source map:
+
+- [Overview](design/README.md) and [NVMe frontend](design/nvme-frontend.md):
+  the component hierarchy, queues, pollers, dispatch and completion.
+- [BlackBox FTL](design/ftl.md) and [NAND media and timing](design/nand-timing.md).
+- [ZNS](design/zns.md), [FDP](design/fdp.md) and
+  [namespaces and subsystems](design/namespaces.md).
+- [OCSSD](design/ocssd.md), [KV](design/kvssd.md), [CSD](design/csd.md),
+  [NoSSD](design/nossd.md) and [CXL SSD](design/cxl-ssd.md).
+
 ## I want to measure or tune
 
 - [Measuring](guides/measuring.md): WAF and counters from log page C0h,

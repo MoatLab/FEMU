@@ -51,9 +51,7 @@ collection or write amplification.
   |      Flush, DSM, Compare, Write Zeroes, Copy, ...  (shared)|
   |      Read, Write -> nop_io_cmd() -> nvme_rw()              |
   |                       map PRP or SGL, copy to backend     |
-  |    complete:                                               |
-  |      (a) in this sweep: post the completion entry          |
-  |      (b) via the poller's priority queue (see below)       |
+  |    complete: via the poller's priority queue (see below)   |
   +-----+------------------------------------------------------+
         |
   +-----v---------------------------+
@@ -85,49 +83,28 @@ Namespaces are slices of that buffer
 
 The data survives a guest reboot and is lost when QEMU exits.
 
-## Completion paths
+## Completion path
 
 Every request is stamped with its arrival time as both its start time and
 its completion time (`expire_time`). NoSSD adds nothing to it, so a NoSSD
-request is due the moment it is stamped. There are two ways it reaches the
-completion queue:
+request is due the moment it is stamped.
 
 ```text
-  (a) in the sweep                   (b) through the priority queue
-
-  fetch -> execute -> copy           fetch -> execute -> copy
-        -> post completion                 -> to_ftl ring
-        -> interrupt                       -> nvme_process_cq_cpl()
-                                              + link time, firmware time
-                                              -> priority queue
-                                              -> post when due
-                                              -> interrupt
+  fetch -> execute -> copy -> to_ftl ring
+        -> nvme_process_cq_cpl(): + link time, firmware time
+        -> priority queue -> post when due -> interrupt
 ```
 
-Path (a) is used when all of these hold:
+With no FTL thread, the poller drains its own `to_ftl` ring at the end of
+the sweep, so the request is posted in the same sweep unless a link or
+firmware time pushes it into the future or the completion queue is full. A
+completion that finds the queue full waits in a per-poller backlog. When a
+black-box, ZNS or CSD namespace on the same controller has started the FTL
+thread, the request goes through that thread and back.
 
-- the controller's own mode is NoSSD and the request's namespace is NoSSD;
-- [`hiops_inline`](../reference/properties.md#queues-pollers-and-interrupts)
-  is on (NoSSD only: performance option, on by default; set off only when
-  debugging);
-- neither the host-link model (`pcie_bandwidth_mbps`, `pcie_prop_delay_ns`)
-  nor the firmware model (`fw_cpu_ns`) is enabled, because those are applied
-  in `nvme_process_cq_cpl()`.
-
-On a NoSSD controller with `hiops_inline` on, the poller does not take a
-new command from a submission queue whose completion queue is full; it
-leaves it for the next sweep. A completion that still finds the queue full
-waits in a per-poller backlog. Otherwise the request takes path (b), the
-same completion step every other mode uses. With no FTL thread, the poller
-drains its own `to_ftl` ring at the end of the sweep, so the request is
-posted in the same sweep unless a link or firmware time pushes it into the
-future or the completion queue is full. When a black-box, ZNS or CSD
-namespace on the same controller has started the FTL thread, path (b) goes
-through that thread and back.
-
-A namespace of another mode on a NoSSD controller always takes path (b),
-through the FTL thread when its mode needs one. On a controller of another
-mode, NoSSD namespaces take path (b).
+[`hiops_inline`](../reference/properties.md#queues-pollers-and-interrupts)
+applies to NoSSD only: performance option, on by default; set off only when
+debugging.
 
 ## Threads and pollers
 
@@ -154,7 +131,6 @@ group apply to NoSSD as to every mode:
 - `fw_cpu_ns`: a fixed time per Read, Write and Zone Append on one
   modelled controller core.
 
-Setting any of them moves NoSSD requests to path (b).
 
 ## Parameters
 
@@ -215,8 +191,8 @@ Refusal messages are listed in the
 ## Extending the mode
 
 - **A fixed device latency.** Add a constant to `req->expire_time` in
-  `nop_io_cmd()` and keep the request off path (a), the way the host-link
-  model does; the completion step then holds it until it is due.
+  `nop_io_cmd()` and run with `hiops_inline=off`; the completion step
+  then holds the request until it is due.
 - **Another I/O command.** Add a case to `nop_io_cmd()` for a NoSSD-only
   command, or to `nvme_io_cmd()` in `hw/femu/nvme-io.c` when every block mode
   should get it.

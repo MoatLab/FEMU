@@ -195,8 +195,8 @@ completion. Time runs downward.
 
 1. The guest writes a submission queue entry and rings the tail doorbell. The
    vCPU exits to QEMU, which stores the new tail and returns. With shadow
-   doorbells the guest usually writes only to its own memory and does not
-   exit at all.
+   doorbells the guest also writes the value to its own memory and rings the
+   register only when the EventIdx protocol asks for it.
 2. The poller that owns the queue finds the new entry on its next sweep and
    stamps the request with the host time.
 3. The command is checked and dispatched to the namespace's mode. For a block
@@ -258,7 +258,7 @@ accesses to a cached page do not leave the guest at all.
 
 | Device or mode | Time computed in | Time enforced by |
 | --- | --- | --- |
-| NoSSD | nothing to compute | on a NoSSD controller with inline completion on and no host-link or firmware-CPU model, posted in the same sweep; otherwise through the poller heap |
+| NoSSD | nothing to compute | poller heap, usually in the same sweep |
 | BBSSD, ZNS, CSD NAND time | `FEMU-FTL-Thread` | poller heap |
 | OCSSD, KV, CSD compute units and CSD memory-copy reads | the poller, while executing the command | poller heap |
 | Host link, firmware CPU | the poller, before the heap | poller heap |
@@ -277,7 +277,7 @@ accesses to a cached page do not leave the guest at all.
 | [ocssd.md](ocssd.md) | Open-Channel SSD 1.2 and 2.0: the host-managed interface and its timing |
 | [kvssd.md](kvssd.md) | The NVMe Key Value command set and its FTL |
 | [csd.md](csd.md) | Computational storage: compute units, device memory, programs |
-| [nossd.md](nossd.md) | NoSSD: memory-backed NVMe with no media timing, inline completion |
+| [nossd.md](nossd.md) | NoSSD: memory-backed NVMe with no media timing |
 | [cxl-ssd.md](cxl-ssd.md) | The CXL SSD: address decoding, page cache, direct mapping, cache control, NVMe link |
 
 ## Design choices
@@ -311,8 +311,7 @@ data, because it has to roll back unflushed writes.
 stores a number. Dedicated `femu-poller` threads fetch commands and post
 completions. Doing the work on the vCPU would make every command pay a VM
 exit and stall the guest CPU, and a trap-driven design cannot post a
-completion at a chosen microsecond. Shadow doorbells let the guest skip most
-doorbell exits too. The cost is host cores that spin while the controller is
+completion at a chosen microsecond. The cost is host cores that spin while the controller is
 enabled.
 
 **One owner per queue.** A poller fetches from a submission queue without a

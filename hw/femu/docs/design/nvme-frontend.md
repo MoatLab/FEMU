@@ -238,13 +238,8 @@ queue is ignored.
 
 With shadow doorbells the host rings the real doorbell only when its new
 value passes the EventIdx the controller published. FEMU's pollers read the
-shadow on every sweep and never wait for a doorbell, so FEMU publishes an
-EventIdx one slot behind the current position: for an SQ after each fetch
-pass over it, for a CQ just before each interrupt it raises. No legal advance
-passes that value, so the host does not ring I/O doorbells at all. This
-relies on the pollers sweeping every active queue unconditionally.
-
-Two exceptions:
+shadow values of every active I/O queue on every sweep, so I/O queues do not
+depend on doorbell writes. Two queues are handled differently:
 
 - **The admin pair** keeps its EventIdx equal to the value just written, so a
   host that follows the EventIdx protocol still rings it (the admin queue is
@@ -328,30 +323,26 @@ Plan one core per poller and one for the FTL thread
    |     NoSSD, BBSSD, CSD Read/Write: nvme_rw() maps PRP/SGL, copies data
    |     ZNS, OCSSD, KV: their own paths; OCSSD and KV add NAND time now
    |  status stored; on success the SMART host counters are updated
+   v
+ to_ftl[i] (every request, failed ones included)
    |
-   +-- NoSSD controller, NoSSD namespace, inline completion on,
-   |   no host-link or firmware-CPU model:
-   |       post the CQE in this sweep (or hold it in cpl_backlog[i])  --+
-   |                                                                     |
-   +-- every other request, failed ones included: to_ftl[i]              |
-          |                                                              |
-          +-- controller has an FTL thread: it dequeues, calls           |
-          |   femu_ftl_process_req(), adds the latency to expire_time,   |
-          |   enqueues on to_poller[i]                                   |
-          +-- no FTL thread: the poller reads to_ftl[i] itself           |
-          v                                                              |
- nvme_process_cq_cpl(i)                                                  |
-   |  add host-link time (Read, Write) and firmware-CPU time             |
-   |  (Read, Write, Zone Append), insert into pq[i]                      |
-   |  retry cpl_backlog[i]                                               |
-   |  while the heap's earliest request is due (now >= expire_time)      |
-   |  and, for a CXL-linked request, the medium has dropped stale pages: |
-   |      CQ inactive -> request back to the free list                   |
-   |      CQ full     -> cpl_backlog[i]                                  |
-   |      otherwise   -> post CQE ------------------------------------- -+
+   +-- controller has an FTL thread: it dequeues, calls
+   |   femu_ftl_process_req(), adds the latency to expire_time,
+   |   enqueues on to_poller[i]
+   +-- no FTL thread: the poller reads to_ftl[i] itself
+   v
+ nvme_process_cq_cpl(i)
+   |  add host-link time (Read, Write) and firmware-CPU time
+   |  (Read, Write, Zone Append), insert into pq[i]
+   |  retry cpl_backlog[i]
+   |  while the heap's earliest request is due (now >= expire_time)
+   |  and, for a CXL-linked request, the medium has dropped stale pages:
+   |      CQ inactive -> request back to the free list
+   |      CQ full     -> cpl_backlog[i]
+   |      otherwise   -> post CQE
    v
  request back on sq->req_list; should_isr[cqid] = true
- end of sweep: for each flagged CQ, publish its EventIdx, raise its interrupt
+ end of sweep: for each flagged CQ, raise its interrupt
 ```
 
 Things to note:
@@ -369,8 +360,7 @@ Things to note:
 - **Order.** Completions are posted in `expire_time` order per poller, not in
   submission order.
 - **Full completion queues.** A due completion whose CQ has no free slot waits
-  in the poller's backlog, and the poller retries it every sweep. NoSSD inline
-  completion stops fetching from an SQ while its CQ is full.
+  in the poller's backlog, and the poller retries it every sweep.
 - **Abort** marks a command that is still in the SQ (not yet fetched) so that
   it completes as aborted when fetched. A command already fetched is not
   aborted.
@@ -400,8 +390,7 @@ The clock is `QEMU_CLOCK_REALTIME`. Only the qtest-only property
 
 Each I/O CQ created with interrupts enabled gets its vector. After a sweep
 that posted to a CQ through the heap, the poller calls `nvme_isr_notify_io()`
-once for that CQ. NoSSD inline completion notifies once per SQ it served,
-so a CQ shared by several SQs can be notified more than once in a sweep:
+once for that CQ:
 
 ```text
  nvme_isr_notify_io(cq)                      (poller thread, no BQL)
@@ -567,7 +556,7 @@ ranges are in the generated reference; follow the link of each group.
 | `max_sqes`, `max_cqes` | Identify SQES and CQES; only 64-byte SQEs and 16-byte CQEs are accepted | same |
 | `stride` | doorbell spacing, 4 << `stride` bytes; also the shadow doorbell entry size | same |
 | `multipoller_enabled`, `poller_ratio` | number of pollers and queue ownership | same |
-| NoSSD inline completion switch | listed in the same table; on by default, NoSSD only | same |
+| `hiops_inline` | NoSSD only: performance option, on by default; set off only when debugging | same |
 | `aerl`, `elpe` | held AER limit, Error log length | same |
 | `mdts` | largest data transfer per command | same |
 | `intc`, `intc_thresh`, `intc_time` | values reported by the coalescing features only | same |
@@ -579,7 +568,7 @@ ranges are in the generated reference; follow the link of each group.
 | `cmbsz`, `cmbloc` | Controller Memory Buffer on BAR 2 | same |
 | `femu_mode`, `namespaces`, `namespace_modes` | which mode tables are installed, NSID range | [mode, capacity and namespaces](../reference/properties.md#mode-capacity-and-namespaces) |
 | `ns_mgmt`, `streams`, `power_loss` | admin commands answered; FTL thread applies data with `power_loss` | [namespace management, streams and power loss](../reference/properties.md#namespace-management-streams-and-power-loss) |
-| `pcie_bandwidth_mbps`, `pcie_prop_delay_ns`, `fw_cpu_ns` | time added in `nvme_process_cq_cpl()`; any of them turns off NoSSD inline completion | [host link and controller firmware](../reference/properties.md#host-link-and-controller-firmware) |
+| `pcie_bandwidth_mbps`, `pcie_prop_delay_ns`, `fw_cpu_ns` | time added in `nvme_process_cq_cpl()` | [host link and controller firmware](../reference/properties.md#host-link-and-controller-firmware) |
 | `subsys` | CNTLID, FDP, shared namespaces | [femu-subsys](../reference/properties.md#femu-subsys-nvme-subsystem) |
 
 Interactions:
@@ -673,8 +662,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
   `nvme_feature_support[]` and `nvme_feature_cap[]`, `nvme_get_log()` and
   `nvme_supported_log_pages()`.
 - **A new host-side cost**: add it next to the host-link and firmware-CPU
-  models in `nvme_process_cq_cpl()`, and turn off NoSSD inline completion when
-  it is enabled.
+  models in `nvme_process_cq_cpl()`.
 - **Anything that changes state the I/O path reads**: wrap it in
   `nvme_pause_pollers()` and `nvme_resume_pollers()`.
 - **A new property**: define it in `femu_props[]` in `hw/femu/femu.c`,
