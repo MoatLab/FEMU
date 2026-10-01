@@ -37,7 +37,7 @@ Devices:
 | `subsys` | `link<femu-subsys>` | unset | ID of a femu-subsys device to join, created before this controller; needed for FDP, shared namespaces and the Endurance Group log |
 | `cxl_ssd` | `link<femu-cxl-ssd>` | unset | ID of a femu-cxl-ssd, listed before this controller, whose memory and FTL this bbssd controller serves as its one namespace |
 | `pel_file` | `str` | unset | Host file that keeps the Persistent Event Log and power cycle count across runs, created if missing; a corrupt or incompatible file fails realize |
-| `serial` | `str` | unset | Accepted for compatibility; Identify Controller reports a serial number FEMU generates, so this value has no visible effect |
+| `serial` | `str` | unset | No effect, kept for compatibility; Identify Controller reports a serial number FEMU generates. Setting it warns at realize |
 
 ### Queues, pollers and interrupts
 
@@ -88,9 +88,9 @@ Devices:
 | `pi` | `bool` | `off` | Offer end-to-end protection information types 1 to 3 when meta is at least 8 bytes and allow Format and Create to select them; not with power_loss or cxl_ssd |
 | `dpc` | `uint8` | `0` | Data Protection Capabilities reported in Identify Namespace when pi is off; must be 0 with meta |
 | `dps` | `uint8` | `0` | Data Protection Type Settings reported in Identify Namespace; a non-zero value needs 8 bytes of metadata, which meta refuses, so leave it 0 and use pi |
-| `ms` | `uint8` | `16` | Accepted for compatibility and not used; metadata size is set with meta |
-| `ms_max` | `uint8` | `64` | OCSSD 2.0: largest metadata size used when listing LBA formats, in bytes; the controller then reports a single format, so it has no visible effect |
-| `dlfeat` | `uint8` | `1` | Accepted for compatibility and not used; Identify Namespace always reports DLFEAT 0x9 (deallocated blocks read as zeroes) |
+| `ms` | `uint8` | `16` | No effect, kept for compatibility; meta sets the metadata size. A value other than the default warns at realize |
+| `ms_max` | `uint8` | `64` | No effect, kept for compatibility; OCSSD 2.0 reports a single LBA format. A value other than the default warns at realize |
+| `dlfeat` | `uint8` | `1` | No effect, kept for compatibility; Identify Namespace always reports DLFEAT 0x9 (deallocated blocks read as zeroes). A value other than the default warns at realize |
 
 ### Namespace management, streams and power loss
 
@@ -125,10 +125,10 @@ Devices:
 | `cmd_addr_lat` | `int32` | `0` | bbssd, CSD, KV: command and address phase on the channel bus in ns; the bus is modelled only when this, pg_xfer_lat (or ch_xfer_lat) or status_lat is non-zero |
 | `pg_xfer_lat` | `int32` | `0` | bbssd, CSD, KV: page data transfer phase on the channel bus in ns; 0 uses ch_xfer_lat |
 | `status_lat` | `int32` | `0` | bbssd, CSD, KV: status read phase on the channel bus in ns |
-| `tplpbsy` | `int32` | `0` | bbssd, CSD, KV: multi-plane program busy time in ns; accepted but has no effect, since programs are issued one plane at a time |
-| `tplrbsy` | `int32` | `0` | bbssd, CSD, KV: multi-plane read busy time in ns; accepted but has no effect, since reads are issued one plane at a time |
+| `tplpbsy` | `int32` | `0` | No effect, kept for compatibility; programs are issued one plane at a time. A value other than the default warns at realize |
+| `tplrbsy` | `int32` | `0` | No effect, kept for compatibility; reads are issued one plane at a time. A value other than the default warns at realize |
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |
-| `trcbsy` | `int32` | `0` | bbssd, CSD, KV: cache read busy time in ns; accepted but has no effect, because the cache read model is not enabled for these modes |
+| `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range; refused with FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
 | `tsusp_ns` | `int32` | `0` | bbssd, CSD, KV: overhead in ns added to a read that suspends a program or erase, 0 or more |
@@ -228,9 +228,9 @@ Devices:
 | --- | --- | --- | --- |
 | `fdm_size` | `uint64` | `0` | CSD: functional data memory size in MiB; required, greater than 0 |
 | `nr_cu` | `uint8` | `4` | CSD: number of compute units, 1 to 64; programs wait for the first free unit |
-| `nr_thread` | `uint8` | `4` | CSD: accepted for compatibility, must be non-zero, and is only logged |
-| `time_slice` | `uint64` | `200000` | CSD: accepted for compatibility and not used |
-| `context_switch_time` | `uint64` | `200` | CSD: accepted for compatibility and not used |
+| `nr_thread` | `uint8` | `4` | No effect, kept for CEMU compatibility; CSD still refuses 0. A value other than the default warns at realize |
+| `time_slice` | `uint64` | `200000` | No effect, kept for CEMU compatibility. A value other than the default warns at realize |
+| `context_switch_time` | `uint64` | `200` | No effect, kept for CEMU compatibility. A value other than the default warns at realize |
 | `csf_runtime_scale` | `uint16` | `3` | CSD: non-zero multiplier applied to the host run time of a program that sets neither a runtime nor its own scale |
 | `csd_program_dir` | `str` | unset | CSD: host directory that shared-object and uBPF programs are loaded from, named by a file name with no slash that must resolve inside it; unset allows only the built-in phantom program type |
 

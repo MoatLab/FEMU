@@ -17344,6 +17344,78 @@ static void femu_doc_example(const char *name, const char *ios,
     g_test_message("doc-example %s: ok", name);
 }
 
+/*
+ * Properties kept only so old command lines still start. Each is set to a
+ * value other than its default, and to its default in the control run.
+ */
+static const struct {
+    const char *name;
+    const char *other;
+    const char *dflt;
+} femu_ignored_props[] = {
+    { "serial", "femu0", "" },
+    { "ms", "8", "16" },
+    { "ms_max", "32", "64" },
+    { "dlfeat", "0", "1" },
+    { "tplpbsy", "100", "0" },
+    { "tplrbsy", "100", "0" },
+    { "trcbsy", "100", "0" },
+    { "nr_thread", "8", "4" },
+    { "time_slice", "1", "200000" },
+    { "context_switch_time", "1", "200" },
+};
+
+/* Start a NoSSD controller with @opts and return what QEMU wrote to stderr. */
+static char *femu_realize_stderr(const char *opts)
+{
+    g_autofree char *log = g_strdup("femu-ignored-XXXXXX");
+    g_autofree char *quoted = NULL;
+    char *text = NULL;
+    int fd = g_mkstemp(log);
+    QTestState *qts;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    quoted = g_shell_quote(log);
+    qts = qtest_initf("-machine pc -nodefaults -device femu,addr=5,"
+                      "devsz_mb=64,femu_mode=2%s 2>%s", opts, quoted);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(log, &text, NULL, NULL));
+    unlink(log);
+    return text;
+}
+
+static void femu_test_ignored_props(void *obj, void *data,
+                                    QGuestAllocator *unused)
+{
+    g_autoptr(GString) other = g_string_new("");
+    g_autoptr(GString) dflt = g_string_new("");
+    g_autofree char *warned = NULL;
+    g_autofree char *quiet = NULL;
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(femu_ignored_props); i++) {
+        g_string_append_printf(other, ",%s=%s", femu_ignored_props[i].name,
+                               femu_ignored_props[i].other);
+        g_string_append_printf(dflt, ",%s=%s", femu_ignored_props[i].name,
+                               femu_ignored_props[i].dflt);
+    }
+
+    warned = femu_realize_stderr(other->str);
+    quiet = femu_realize_stderr(dflt->str);
+    for (i = 0; i < ARRAY_SIZE(femu_ignored_props); i++) {
+        const char *name = femu_ignored_props[i].name;
+        g_autofree char *needle =
+            g_strdup_printf("femu: %s has no effect", name);
+        const char *hit = strstr(warned, needle);
+
+        g_assert_nonnull(hit);
+        g_assert_null(strstr(hit + 1, needle));
+        g_assert_null(strstr(quiet, needle));
+    }
+    g_assert_null(strstr(quiet, "has no effect"));
+}
+
 static void femu_test_doc_examples(void *obj, void *data,
                                    QGuestAllocator *unused)
 {
@@ -17377,7 +17449,7 @@ static void femu_test_doc_examples(void *obj, void *data,
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
-        .extra_device_opts = "addr=04.0,devsz_mb=64,femu_mode=2,serial=femu0",
+        .extra_device_opts = "addr=04.0,devsz_mb=64,femu_mode=2",
         /*
          * A placement-enabled subsystem for the tests that link to it. It has
          * to be on the command line before the controller, which a test's own
@@ -17391,6 +17463,7 @@ static void femu_register_nodes(void)
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
+    qos_add_test("ignored-props", "femu", femu_test_ignored_props, NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
                  NULL);
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);

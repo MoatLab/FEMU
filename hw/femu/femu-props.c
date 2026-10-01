@@ -83,8 +83,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "full NAND capacity and expose capacity/(1 + op_pcent/100); 0 keeps "
       "devsz_mb sizing, not with cxl_ssd" },
     { "serial",
-      "Accepted for compatibility; Identify Controller reports a serial "
-      "number FEMU generates, so this value has no visible effect" },
+      "No effect, kept for compatibility; Identify Controller reports a "
+      "serial number FEMU generates. Setting it warns at realize" },
     { "pel_file",
       "Host file that keeps the Persistent Event Log and power cycle count "
       "across runs, created if missing; a corrupt or incompatible file "
@@ -213,15 +213,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "non-zero value needs 8 bytes of metadata, which meta refuses, so "
       "leave it 0 and use pi" },
     { "ms",
-      "Accepted for compatibility and not used; metadata size is set with "
-      "meta" },
+      "No effect, kept for compatibility; meta sets the metadata size. A "
+      "value other than the default warns at realize" },
     { "ms_max",
-      "OCSSD 2.0: largest metadata size used when listing LBA formats, in "
-      "bytes; the controller then reports a single format, so it has no "
-      "visible effect" },
+      "No effect, kept for compatibility; OCSSD 2.0 reports a single LBA "
+      "format. A value other than the default warns at realize" },
     { "dlfeat",
-      "Accepted for compatibility and not used; Identify Namespace always "
-      "reports DLFEAT 0x9 (deallocated blocks read as zeroes)" },
+      "No effect, kept for compatibility; Identify Namespace always reports "
+      "DLFEAT 0x9 (deallocated blocks read as zeroes). A value other than "
+      "the default warns at realize" },
 
     /* namespace management, streams and power loss */
     { "ns_mgmt",
@@ -288,19 +288,18 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "status_lat",
       "bbssd, CSD, KV: status read phase on the channel bus in ns" },
     { "tplpbsy",
-      "bbssd, CSD, KV: multi-plane program busy time in ns; accepted but "
-      "has no effect, since programs are issued one plane at a time" },
+      "No effect, kept for compatibility; programs are issued one plane at "
+      "a time. A value other than the default warns at realize" },
     { "tplrbsy",
-      "bbssd, CSD, KV: multi-plane read busy time in ns; accepted but has "
-      "no effect, since reads are issued one plane at a time" },
+      "No effect, kept for compatibility; reads are issued one plane at a "
+      "time. A value other than the default warns at realize" },
     { "tplebsy",
       "bbssd, CSD, KV: busy time in ns between the planes of a "
       "multi-plane erase, which garbage collection issues when "
       "pls_per_lun > 1" },
     { "trcbsy",
-      "bbssd, CSD, KV: cache read busy time in ns; accepted but has no "
-      "effect, because the cache read model is not enabled for these "
-      "modes" },
+      "No effect, kept for compatibility; no mode enables the cache read "
+      "model. A value other than the default warns at realize" },
     { "trim_lat_ns",
       "bbssd, CSD: time in ns charged per Dataset Management deallocate "
       "range; refused with FDP" },
@@ -519,12 +518,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "CSD: number of compute units, 1 to 64; programs wait for the first "
       "free unit" },
     { "nr_thread",
-      "CSD: accepted for compatibility, must be non-zero, and is only "
-      "logged" },
+      "No effect, kept for CEMU compatibility; CSD still refuses 0. A "
+      "value other than the default warns at realize" },
     { "time_slice",
-      "CSD: accepted for compatibility and not used" },
+      "No effect, kept for CEMU compatibility. A value other than the "
+      "default warns at realize" },
     { "context_switch_time",
-      "CSD: accepted for compatibility and not used" },
+      "No effect, kept for CEMU compatibility. A value other than the "
+      "default warns at realize" },
     { "csf_runtime_scale",
       "CSD: non-zero multiplier applied to the host run time of a program "
       "that sets neither a runtime nor its own scale" },

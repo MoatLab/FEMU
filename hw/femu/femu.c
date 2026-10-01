@@ -1,9 +1,11 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/error-report.h"
 #include "system/qtest.h"
 #include "hw/qdev-properties.h"
 #include "qom/qom-qobject.h"
 #include "qobject/qobject.h"
+#include "qobject/qstring.h"
 
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
@@ -2242,6 +2244,54 @@ static void femu_realize_undo(FemuCtrl *n)
     }
 }
 
+/*
+ * Properties that nothing reads. They stay accepted so old command lines
+ * still start, but a value other than the default changes nothing, and the
+ * user should hear that once rather than trust it.
+ */
+static const struct {
+    const char *name;
+    const char *instead;
+} femu_ignored_props[] = {
+    { "serial", NULL },
+    { "ms", "meta sets the metadata size" },
+    { "ms_max", NULL },
+    { "dlfeat", NULL },
+    { "tplpbsy", NULL },
+    { "tplrbsy", NULL },
+    { "trcbsy", NULL },
+    { "nr_thread", NULL },
+    { "time_slice", NULL },
+    { "context_switch_time", NULL },
+};
+
+static void femu_warn_ignored_props(FemuCtrl *n)
+{
+    Object *obj = OBJECT(n);
+
+    for (int i = 0; i < ARRAY_SIZE(femu_ignored_props); i++) {
+        const char *name = femu_ignored_props[i].name;
+        const char *instead = femu_ignored_props[i].instead;
+        ObjectProperty *op = object_property_find(obj, name);
+        QObject *val = object_property_get_qobject(obj, name, &error_abort);
+        QString *str = qobject_to(QString, val);
+        bool set;
+
+        /* A string property has no default; unset reads back as "". */
+        if (op->defval) {
+            set = !qobject_is_equal(val, op->defval);
+        } else {
+            set = str && *qstring_get_str(str);
+        }
+        qobject_unref(val);
+        if (set) {
+            warn_report("femu: %s has no effect and is accepted only for "
+                        "compatibility%s%s", name,
+                        instead ? "; " : "", instead ? instead : "");
+        }
+    }
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -2283,6 +2333,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!nvme_check_constraints(n, errp)) {
         return;
     }
+    femu_warn_ignored_props(n);
 
     /* Format and Sanitize would rewrite the whole medium under its cache. */
     if (n->cxl_dev) {
