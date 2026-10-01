@@ -16,6 +16,13 @@ Read these in order:
 4. [Quick start](getting-started/quick-start.md): build, boot a BlackBox SSD,
    run fio and read the write amplification factor.
 
+## I want to learn by doing
+
+The [tutorials](tutorials/README.md) walk through nine tasks in a real
+guest, with the output each step should print: a first SSD, GC and WAF,
+ZNS, FDP, latency tuning, several namespaces, KV, CXL memory and
+configuration files.
+
 ## I want a specific kind of SSD
 
 [Choosing a mode](concepts/choosing-a-mode.md) has the full decision table:
@@ -45,6 +52,9 @@ The guest kernel each mode needs is in
 
 - [Device properties](reference/properties.md): every `-device femu`,
   `femu-subsys` and `femu-cxl-ssd` property, generated from the binary.
+- [Parameter manual](reference/parameter-manual.md): the parameters grouped
+  by component, with units, valid values, interactions and worked
+  configurations.
 - [Runtime properties](reference/runtime-properties.md): QOM properties and
   counters you read or set with `qom-get` and `qom-set`.
 - [Log pages and counters](reference/log-pages-and-counters.md): vendor log C0h
