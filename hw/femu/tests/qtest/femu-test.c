@@ -10066,6 +10066,13 @@ static void femu_shared_full_cq(FemuCtrlState *c, FemuQueue *sq)
     NvmeCmd cmd = { 0 };
     NvmeCqe cqe;
     unsigned waited = 0;
+    /*
+     * Earlier I/O moved the head, so the last entry need not be in the last
+     * slot. Wait for it at the phase its lap carries; otherwise the queue may
+     * still have room when the caller snapshots it.
+     */
+    uint16_t last = (c->io.cq_head + FEMU_QSIZE - 2) % FEMU_QSIZE;
+    uint16_t phase = last < c->io.cq_head ? !c->io.phase : c->io.phase;
 
     femu_queue_init(c, sq, 2);
     cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
@@ -10080,12 +10087,11 @@ static void femu_shared_full_cq(FemuCtrlState *c, FemuQueue *sq)
         femu_submit(c, &c->io, &cmd);
     }
     do {
-        qtest_memread(c->pdev->bus->qts,
-                      c->io.cq_addr + (FEMU_QSIZE - 2) * sizeof(cqe),
+        qtest_memread(c->pdev->bus->qts, c->io.cq_addr + last * sizeof(cqe),
                       &cqe, sizeof(cqe));
         g_assert_cmpuint(waited++, <, FEMU_POLL_LIMIT_MS);
         g_usleep(1000);
-    } while (!(le16_to_cpu(cqe.status) & 1));
+    } while ((le16_to_cpu(cqe.status) & 1) != phase);
 }
 
 static void femu_shared_retired(FemuCtrlState *c)
