@@ -2390,8 +2390,6 @@ static uint16_t nvme_fdp_ruh_usage(FemuCtrl *n, uint32_t endgrpid,
 
     for (i = 0; i < endgrp->fdp.nruh; i++, ruhud++, ruh++) {
         ruhud->ruha = ruh->ruha;
-        ruhud->hbmw = ruh->hbmw;
-        ruhud->mbmw = ruh->mbmw;
     }
 
     return dma_read_prp(n, (uint8_t *)buf + off, trans_len, prp1, prp2);

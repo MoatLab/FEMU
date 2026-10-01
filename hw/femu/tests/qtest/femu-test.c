@@ -5052,6 +5052,100 @@ static void femu_test_log_contents_fdp(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_LOG_FDP_RUH_USAGE  0x21
+#define FEMU_RUHU_HDR           8
+#define FEMU_RUHU_DESCR         8
+
+/* Get Log Page of endurance group 1 at byte offset @off */
+static uint16_t femu_endgrp_log(FemuCtrlState *c, uint8_t lid, uint64_t off,
+                                uint64_t buf, uint32_t len)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | ((len / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    cmd.cdw12 = cpu_to_le32(off);
+    cmd.cdw13 = cpu_to_le32(off >> 32);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * The Reclaim Unit Handle Usage log is an 8 byte header and one 8 byte
+ * descriptor per handle, holding only the attributes byte (TP4146). Every
+ * handle backs a placement handle of the namespace, so each
+ * reads host specified. Counters written into the descriptors shifted every
+ * handle after the first onto them, which a write makes non-zero.
+ */
+static void femu_test_fdp_ruh_usage(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t nruh = 4;
+    const uint32_t size = FEMU_RUHU_HDR + nruh * FEMU_RUHU_DESCR;
+    uint8_t page[64];
+    uint64_t buf, log;
+    uint32_t i, j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 2 * 4096);
+    log = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 2 * 4096);
+    g_assert_cmpint(femu_write_8k(&c, buf, 0, 2), ==, NVME_SUCCESS);
+
+    qtest_memset(qts, log, 0xff, 4096);
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, 0, log,
+                                    sizeof(page)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+
+    g_assert_cmpint(lduw_le_p(page), ==, nruh);
+    for (j = 2; j < FEMU_RUHU_HDR; j++) {
+        g_assert_cmpint(page[j], ==, 0);
+    }
+    for (i = 0; i < nruh; i++) {
+        const uint8_t *d = page + FEMU_RUHU_HDR + i * FEMU_RUHU_DESCR;
+
+        g_assert_cmpint(d[0], ==, NVME_RUHA_HOST);
+        for (j = 1; j < FEMU_RUHU_DESCR; j++) {
+            g_assert_cmpint(d[j], ==, 0);
+        }
+    }
+    /* nothing is transferred past the end of the log */
+    for (j = size; j < sizeof(page); j++) {
+        g_assert_cmpint(page[j], ==, 0xff);
+    }
+
+    /* a read at an offset starts at that byte: the last descriptor */
+    qtest_memset(qts, log, 0xff, 4096);
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE,
+                                    size - FEMU_RUHU_DESCR, log, 16), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, log, page, 16);
+    g_assert_cmpint(page[0], ==, NVME_RUHA_HOST);
+    for (j = 1; j < FEMU_RUHU_DESCR; j++) {
+        g_assert_cmpint(page[j], ==, 0);
+    }
+    for (j = FEMU_RUHU_DESCR; j < 16; j++) {
+        g_assert_cmpint(page[j], ==, 0xff);
+    }
+
+    /* the log ends after the last descriptor */
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, size, log, 4),
+                    ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* the Changed Zone List belongs to the zoned command set's list of pages */
 static void femu_test_log_contents_zoned(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -18718,6 +18812,13 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "subsys=fdpsub,oncs=0x2"
+    });
+    qos_add_test("fdp-ruh-usage", "femu", femu_test_fdp_ruh_usage,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "subsys=fdpsub"
     });
     qos_add_test("log-contents-zoned", "femu", femu_test_log_contents_zoned,
                  &(QOSGraphTestOptions) {

@@ -104,11 +104,13 @@ enum NvmeRuhAttributes {
     NVME_RUHA_CTRL = 2,
 };
 
+/*
+ * One per handle in the Reclaim Unit Handle Usage log: the attributes byte
+ * and nothing else. The per-handle byte counters stay in NvmeRuHandle.
+ */
 typedef struct QEMU_PACKED NvmeRuhuDescr {
     uint8_t ruha;
     uint8_t rsvd1[7];
-    uint64_t hbmw;
-    uint64_t mbmw;
 } NvmeRuhuDescr;
 
 typedef struct QEMU_PACKED NvmeFdpStatsLog {
@@ -1553,6 +1555,17 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpConfsHdr) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpDescrHdr) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeRuhDescr) != 4);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeRuhuLog) != 8);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeRuhuDescr) != 8);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpStatsLog) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEventsLog) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEvent) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEventDescr) != 2);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeRuhStatus) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeRuhStatusDescr) != 32);
 
     /* Coperd: FIXME, check FEMU OC structure size */
     //oc12_check_size();
