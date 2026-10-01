@@ -23,7 +23,7 @@ ssd_size=12288 # in megabytes, if you change the above layout parameters, make s
 pg_rd_lat=40000 # page read latency
 pg_wr_lat=200000 # page write latency
 blk_er_lat=2000000 # block erase latency
-ch_xfer_lat=0 # channel transfer time, ignored for now
+ch_xfer_lat=0 # page transfer time on the channel bus (ns); 0 leaves the bus out of the model
 
 # GC Threshold (1-100)
 gc_thres_pcent=75
