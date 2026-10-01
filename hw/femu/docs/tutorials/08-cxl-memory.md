@@ -15,7 +15,8 @@ inside a virtual machine; step 4 explains what that takes.
 
 The guest sees ordinary CXL memory. Behind it, FEMU keeps a cache of 4 KiB
 pages in front of the BlackBox FTL and NAND model. A cache hit costs no
-media time, a miss costs a NAND page read, and evicting a dirty page costs
+media time, a miss costs a NAND page read (nothing for a page never
+written), and evicting a dirty page costs
 a NAND program. With the default `der=off`, every guest load or store to
 the device exits to QEMU, and the vCPU waits out the media time before the
 access completes ([CXL SSD design](../design/cxl-ssd.md#the-media-path)).
@@ -222,7 +223,8 @@ found no free NAND page and completed with no media time, and the run is
 not valid.
 
 To change a setting or start from a cold cache, send raw QMP, for example
-with `socat`. `flush-cache` writes dirty pages back and empties the cache;
+with `socat`. `flush-cache` writes dirty pages back and drops every page that is not
+pinned;
 `cache-ways` can change while the guest runs:
 
 ```sh

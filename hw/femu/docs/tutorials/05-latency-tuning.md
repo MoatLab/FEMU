@@ -42,14 +42,19 @@ sudo fio --name=fill --filename=/dev/nvme0n1 --direct=1 --ioengine=libaio \
     --rw=write --bs=128k --iodepth=16 --size=256M
 F="--filename=/dev/nvme0n1 --direct=1 --ioengine=libaio --size=256M --runtime=8 --time_based"
 sudo fio --name=rd4k   $F --rw=randread  --bs=4k   --iodepth=1
-sudo fio --name=wr4k   $F --rw=randwrite --bs=4k   --iodepth=1
 sudo fio --name=rd128k $F --rw=randread  --bs=128k --iodepth=1
 sudo fio --name=qd32   $F --rw=randread  --bs=4k   --iodepth=32
+sudo fio --name=wr4k   $F --rw=randwrite --bs=4k   --iodepth=1
 ```
 
-Read the median (`clat` 50.00th percentile) of the first three and the
-IOPS of the last. The writes stay inside 256 MiB of a 410 MiB namespace,
-so garbage collection does not run.
+Read the median (`clat` 50.00th percentile) of the QD1 tests and the IOPS
+of the QD32 test. Keep the write test last. Random overwrites move pages to
+new places, so a 128 KiB read after them finds its 32 pages spread
+unevenly over the LUNs and takes longer than the model of a freshly filled
+range (in a first run with the write test second, it took 289 us instead
+of 165 us). On this small drive, background garbage collection may also
+start in the last second of the write test; that moves its tail, not its
+median.
 
 ## 2. The baseline
 
@@ -59,13 +64,16 @@ With the default timing (40 us read, 200 us program, no channel bus):
 | --- | --- |
 | 4 KiB read, QD1 | 44.3 us |
 | 4 KiB write, QD1 | 203.8 us |
-| 128 KiB read, QD1 | 288.8 us |
+| 128 KiB read, QD1 | 164.9 us |
 | 4 KiB read, QD32 | 176,880 IOPS |
 
 A 4 KiB read is `pg_rd_lat` plus about 4 us. A 128 KiB read is 32 pages.
 The FTL spreads consecutive pages over the channels and then the LUNs, so
-the 32 pages sit on all 8 LUNs, 4 each, and the LUNs work in parallel: the
-read costs far less than 32 x 40 us. At queue depth 32, 8 LUNs reading in
+the 32 pages sit on all 8 LUNs, 4 each. The LUNs work in parallel and each
+reads its 4 pages one after another: 4 x 40 us = 160 us. Copying the
+128 KiB takes about 30 us (measured with NAND times set to 0), but FEMU
+copies at once and holds only the completion, so the copy overlaps the
+modelled time instead of adding to it. At queue depth 32, 8 LUNs reading in
 parallel allow at most 8 / 40 us = 200,000 reads per second; FEMU delivers
 88% of that.
 
@@ -104,8 +112,9 @@ each page type in a wordline its own time
 | 4 KiB write, QD1 | 203.8 us | 2310.1 us |
 | 4 KiB read, QD32 | 176,880 IOPS | 89,449 IOPS |
 
-The read median sits near the average of the three page types, and the
-99th percentile near the upper page. TLC programs take milliseconds.
+The pages of a block are split about equally over the lower, center and
+upper types, so the read median is the center page's 77.5 us plus
+overhead, and the 99th percentile is near the upper page. TLC programs take milliseconds.
 `pg_rd_lat`, `pg_wr_lat` and `blk_er_lat` have no effect while
 `nand_cell_type` is set.
 
@@ -123,10 +132,13 @@ transfer per page, and transfers on one channel run one at a time:
 | Test | Baseline | 20 us transfer |
 | --- | --- | --- |
 | 4 KiB read, QD1 | 44.3 us | 63.7 us |
-| 128 KiB read, QD1 | 288.8 us | 432.1 us |
+| 128 KiB read, QD1 | 164.9 us | 383.0 us |
 | 4 KiB read, QD32 | 176,880 IOPS | 98,056 IOPS |
 
-A single page read gains exactly one transfer. Under load the two channels
+A single page read gains exactly one transfer. A 128 KiB read moves 16
+pages over each channel, one at a time: 320 us of transfers, which now
+dominate the read (with NAND times set to 0 it still takes 342 us). Under
+load the two channels
 become the limit: each moves one page per 20 us, 100,000 pages per second
 for both, which is where QD32 lands.
 
@@ -144,9 +156,9 @@ link bandwidth, on one queue per direction
 | Test | Baseline | 1000 MB/s link |
 | --- | --- | --- |
 | 4 KiB read, QD1 | 44.3 us | 47.9 us |
-| 128 KiB read, QD1 | 288.8 us | 432.1 us |
+| 128 KiB read, QD1 | 164.9 us | 305.2 us |
 
-128 KiB at 1000 MB/s is 131 us, and the 128 KiB read grew by 143 us. A
+128 KiB at 1000 MB/s is 131 us, and the 128 KiB read grew by 140 us. A
 4 KiB read pays 4 us. `pcie_prop_delay_ns` adds a fixed delay on top.
 
 ## 7. Controller firmware

@@ -46,7 +46,7 @@ export SSH_PORT=8080               # host port forwarded to the guest's SSH
 - `sh` blocks run inside the guest unless the text says "on the host".
   Run them in the shell `./run-guest-ssh.sh` gives you.
 - `text` blocks show output. Unless a block says it is illustrative, it
-  was captured from a real run: FEMU at the commit that added these pages,
+  was captured from a real run: FEMU at commit 1a03ded0f,
   the Ubuntu 24.04 guest from `make-guest-image.sh` (Linux 6.8, nvme-cli
   2.8, fio 3.36), on a 20-core host. Latencies and throughput depend on
   the host. Counter values such as the WAF depend only on the workload,
@@ -54,7 +54,10 @@ export SSH_PORT=8080               # host port forwarded to the guest's SSH
   few percent of the values shown.
 - The QEMU command lines run without `sudo`. That works when your user is
   in the `kvm` group; otherwise put `sudo` in front, as the `run-*.sh`
-  launchers do.
+  launchers do. Without root, FEMU usually cannot lock the device memory
+  (`ulimit -l` is too small) and says so at start; the device works, but
+  host paging can add jitter to latency, so use `sudo` or raise the limit
+  for latency measurements.
 - Each emulated device lives in host memory: plan for the device size
   plus the guest's `-m` in free host RAM.
 

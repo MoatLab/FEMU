@@ -166,10 +166,12 @@ sudo fio --name=rw --filename=/dev/nvme0n1 --direct=1 --ioengine=libaio \
 
 The median is 208 us, the program time `pg_wr_lat` of 200 us plus
 overhead. The 99.9th percentile is 55 ms. After the fill, more than 75%
-of the lines are in use, so GC is running: every overwrite leaves an
-invalid page behind, and GC reads the valid pages of a line, programs them
-elsewhere and erases the line. A write that needs a LUN GC is busy with
-waits for it. Read the counters again:
+of the lines are in use, so GC is armed. Every overwrite leaves an invalid
+page behind, and once a line has 1/8 of its pages invalid, GC reads its
+valid pages, programs them elsewhere and erases it. This run gets there
+towards its end, and a write that needs a LUN GC is busy with waits for
+it. That is why GC shows in the slowest 0.1% and not in the median. Read
+the counters again:
 
 ```text
        1477

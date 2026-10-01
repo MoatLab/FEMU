@@ -66,8 +66,9 @@ the generic character device `/dev/ng0n4`: Linux has no block driver for
 the key-value command set.
 
 The model and serial number are the controller's, and with mixed modes
-they do not tell you the modes: each namespace's mode sets the controller
-strings when it starts, and the last one to do so wins (NoSSD here). Tell
+they do not tell you the modes: the namespaces' modes set the controller
+strings as they start, and the last one wins (NoSSD here; a KV namespace
+sets them only when it is namespace 1). Tell
 the namespaces apart by what they report:
 
 ```sh
@@ -152,8 +153,9 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 24046 pages are the BlackBox run alone (5 seconds at about 4,800 writes
 per second); the 2.7 GiB written to the NoSSD namespace in the same time
 is not counted. The SMART log (`sudo nvme smart-log /dev/nvme0`) counts
-the Read, Write and Zone Append commands of every namespace, NoSSD and ZNS
-included.
+the successful Read, Write and Zone Append commands of every namespace,
+NoSSD and ZNS included; KV Store and Retrieve share those opcodes and are
+counted too.
 
 ## What you learned
 
@@ -162,7 +164,8 @@ included.
 - Each mode keeps its own behaviour: zone geometry, NAND timing, key space.
 - A KV namespace has only a generic node, and on a controller with several
   namespaces passthrough needs that node.
-- C0h counts only the modes with an FTL; NoSSD and ZNS do not add to it.
+- C0h counts only BlackBox, CSD and KV namespaces; NoSSD and ZNS do not
+  add to it.
 
 ## Next
 

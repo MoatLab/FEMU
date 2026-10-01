@@ -72,8 +72,11 @@ type, default and description; `femu-subsys,help` and
 the same `-device` options, so a configuration can be read, commented and
 kept in version control. Keys are property names, `mode = bbssd` stands for
 `femu_mode`, and a `[subsys]` section becomes a `femu-subsys` device that
-the controller joins. The script checks names against the binary in
-`FEMU_BIN`; QEMU still checks the values.
+the controller joins. The script checks names against `-device femu,help`
+(and `femu-subsys,help` for `[subsys]` keys) of the binary in `FEMU_BIN`,
+or of one it finds in the build directories; without a binary it only
+warns. It also rejects an unknown `mode` and malformed lines. QEMU still
+checks the values.
 [Tutorial 09](../tutorials/09-ssd-config-files.md) walks through it, and
 [scripts and tools](scripts.md#configuration-files) describes the shipped
 files.
@@ -99,7 +102,9 @@ NVMe log pages ([log pages and counters](log-pages-and-counters.md)).
 These are not parameters, but they change the model while the guest runs:
 
 - Vendor admin command 0xEF on a BlackBox controller turns GC time and the
-  flat NAND times off and on, and counts completions posted after their due time
+  flat NAND times off and on, and counts completions posted after their
+  due time. Code 3 sets the built-in flat times, not the ones on your
+  command line; code 4 sets them to 0
   ([timing model](../concepts/timing-model.md#changing-timing-at-run-time)).
 - Set Features 06h (Volatile Write Cache) turns the write buffer off and on
   when `vwc=1`; Set Features 20h (Key Value Configuration) sets EDNEK on a
@@ -202,7 +207,7 @@ Reference: [LBA formats, metadata and protection](properties.md#lba-formats-meta
 | `meta` | bytes per block | NoSSD and bbssd only | metadata per logical block; each format is then also offered with metadata |
 | `mc` | bit mask | bit 0 interleaved, bit 1 separate | Metadata Capabilities; required with `meta` |
 | `extended` | 0 or 1 | needs `mc` bit 0 | boot with metadata interleaved (extended LBAs) |
-| `pi` | bool | needs `meta` >= 8 | offer protection information types 1 to 3 to Format and Create |
+| `pi` | bool | takes effect only with `meta` >= 8 | offer protection information types 1 to 3 to Format and Create |
 | `dpc`, `dps` | bit masks | `dpc` 0 with `meta`; leave `dps` 0 | Identify fields; use `pi` instead |
 
 Interactions: `meta` is refused with FDP, with `dpc` or `dps`, and with any
@@ -248,10 +253,13 @@ Interactions:
   runs `femu_mode` with `dps` 0; with a shared subsystem use the
   subsystem's `ns_mgmt`.
 - `streams` needs bbssd with `mapping` `page` or `dftl` (or NoSSD, where it
-  has no placement effect), and is refused with FDP or a shared subsystem.
+  has no placement effect). It is refused with FDP, with shared namespaces
+  (`ns_mgmt` on the subsystem), and when a second controller joins the
+  subsystem.
   bbssd reserves `streams.max` + 1 lines for it.
-- `power_loss` needs `buffer_size` > 0, `vwc=1` and page-aligned
-  namespaces, and is refused with `meta`, `pi`, `ns_mgmt`, `subsys`,
+- `power_loss` needs bbssd (`femu_mode=1`), `buffer_size` > 0 and
+  page-aligned namespaces. Without `vwc=1` it is accepted but the write
+  buffer is off, so there is nothing to roll back. It is refused with `meta`, `pi`, `ns_mgmt`, `subsys`,
   `namespace_modes` and `cxl_ssd`.
 
 ## 5. NAND geometry
@@ -314,8 +322,9 @@ Interactions:
 - The channel bus is modelled only when `cmd_addr_lat`, `pg_xfer_lat` (or
   `ch_xfer_lat`) or `status_lat` is non-zero; phases on one channel then
   run one at a time.
-- Vendor command 0xEF codes 3 and 4 change only the flat times; they have
-  no effect while `nand_cell_type` is set.
+- Vendor command 0xEF codes 3 and 4 change only the flat times: code 3 sets
+  the built-in values, not the configured ones, and code 4 sets them to 0.
+  Neither has an effect while `nand_cell_type` is set.
 - Read time also grows with `ecc_step_ns` ([section 9](#9-reliability-wear-and-fault-insertion)).
 - [Tutorial 05](../tutorials/05-latency-tuning.md) measures each of these.
 
@@ -331,7 +340,7 @@ Design: [the BlackBox FTL](../design/ftl.md).
 | `mapping_cache_mb` | MiB | 32-bit; 0 picks the built-in size | with `mapping=dftl`, the cached part of the table; a miss costs a NAND read |
 | `read_cache_mb` | MiB | 0 disables | DRAM read cache; a hit costs DRAM time instead of a NAND read |
 | `cache_evict` | name | `clock`, `random`, `lru`, `arc` | read cache eviction policy |
-| `hot_cold_sep` | bool | `page` or `dftl` mapping; refused with FDP | write overwrites of mapped pages to separate hot lines |
+| `hot_cold_sep` | bool | acts with `page` or `dftl`; ignored under `hybrid` and `fast`, which still reserve its line; refused with FDP | write overwrites of mapped pages to separate hot lines |
 | `buffer_size` | NAND pages, not bytes | >= 0; refused with FDP | DRAM write buffer; 0 programs every write directly |
 | `buffer_thres_pcent` | percent | 1 to 100 when `buffer_size` > 0 | fill level at which buffered pages are written to NAND |
 | `debug_ftl` | bool | | print FTL invariant violations and log-block merge counts |
@@ -349,7 +358,7 @@ Interactions:
 
 ## 8. Garbage collection
 
-Applies to bbssd and CSD; KV uses `gc_thres_pcent` only. Reference:
+Applies to bbssd and CSD; KV uses `gc_thres_pcent` only (but see [KV](#kv)). Reference:
 [garbage collection, mapping and caches](properties.md#garbage-collection-mapping-and-caches).
 Design: [garbage collection](../design/ftl.md#garbage-collection).
 
@@ -511,7 +520,9 @@ bbssd FTL, so sections 5 to 9 apply.
 
 KV uses the geometry (section 5), the NAND timing (section 6), and
 `gc_thres_pcent` as the share of the NAND usable for values. The FTL,
-mapping, cache and write buffer properties do not apply, and the GC
+mapping, cache, write buffer and other GC properties have no effect on KV,
+but KV runs the same validation as bbssd, so an out-of-range or unknown
+value is still refused. The GC
 capacity check of bbssd is not made: a namespace larger than the NAND
 starts, with its value space clamped. Design: [KV](../design/kvssd.md).
 
@@ -548,9 +559,11 @@ Interactions:
 - The machine needs `cxl=on`, a `pxb-cxl` host bridge, a `cxl-rp` root
   port and a `cxl-fmw` window at least as large as the backend;
   `run-cxlssd.sh` builds them.
-- `der=memslot` needs KVM. `der=cylon` needs a Cylon host kernel, a shared,
-  preallocated hugetlbfs backend and `smm=off`; without them it falls back
-  to MMIO with a warning.
+- `der=memslot` needs KVM. `der=cylon` needs a Cylon host kernel and a
+  shared, preallocated hugetlbfs backend; without them, or when the memory
+  cannot be locked, it falls back to MMIO with a warning. It also needs
+  `-machine smm=off`, which the device does not check
+  ([`der=cylon`](../modes/cxl-ssd.md#dercylon)).
 - A `femu` controller with `cxl_ssd=<id>` serves the same medium as an NVMe
   namespace. It needs `femu_mode=1`, one namespace, `ftl=on` on the CXL
   device, `devsz_mb` unset or equal to the medium's size, and none of
@@ -589,8 +602,9 @@ that suspend a program or erase for 15 us of overhead:
 ### DFTL with caches and a write buffer
 
 A DFTL table with 8 MiB cached, a 64 MiB read cache with LRU eviction, and
-a write buffer of 4096 pages (16 MiB) that the guest sees as a volatile
-write cache. `oncs=0x1c` adds Write Zeroes to the defaults:
+a write buffer of 4096 NAND pages that the guest sees as a volatile
+write cache. `oncs=0x1c` enables Write Zeroes (0x8) together with Dataset
+Management (0x4) and Save/Select (0x10):
 
 <!-- femu-example: pm-dftl-caches -->
 ```
@@ -599,13 +613,14 @@ write cache. `oncs=0x1c` adds Write Zeroes to the defaults:
 
 ### A GC study drive
 
-512 MiB of NAND with 25% spare, GC only when forced, cost-benefit victims
+512 MiB of NAND exposed as NAND / 1.25, background and forced GC both
+starting at 95% of lines in use, cost-benefit victims
 and hot/cold separation, as in
 [tutorial 02](../tutorials/02-gc-and-waf.md):
 
 <!-- femu-example: pm-gc-study -->
 ```
--device femu,femu_mode=1,nchs=2,luns_per_ch=4,blks_per_pl=64,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,hot_cold_sep=on
+-device femu,femu_mode=1,nchs=2,luns_per_ch=4,blks_per_pl=64,op_pcent=25,gc_thres_pcent=95,gc_thres_pcent_high=95,gc_policy=cost-benefit,hot_cold_sep=on
 ```
 
 ### A ZNS drive with 4 KiB blocks, limits and ZRWA
@@ -620,12 +635,12 @@ ZRWA of 64 blocks flushed in units of 8 on up to 4 zones at once:
 
 ### FDP with eight handles
 
-Eight placement handles over the default geometry's 256 lines, with
+Eight placement handles over 256 lines (`blks_per_pl=256`), with
 cost-benefit reclaim unit selection:
 
 <!-- femu-example: pm-fdp -->
 ```
--device femu-subsys,id=fdp0,fdp=on,fdp.nruh=8 -device femu,femu_mode=1,devsz_mb=2048,subsys=fdp0,gc_strategy=1
+-device femu-subsys,id=fdp0,fdp=on,fdp.nruh=8 -device femu,femu_mode=1,devsz_mb=2048,blks_per_pl=256,subsys=fdp0,gc_strategy=1
 ```
 
 ### Mixed namespaces on a modelled link
@@ -651,8 +666,9 @@ A drive rated for 3000 program/erase cycles, with 100 bad blocks, an ECC step of
 
 ### Namespace management
 
-A controller that starts with one bbssd namespace and lets the guest create
-up to four:
+A controller that starts with one bbssd namespace and lets the guest
+allocate up to four bbssd namespaces in all, the boot one included, so
+three more:
 
 <!-- femu-example: pm-ns-mgmt -->
 ```

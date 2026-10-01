@@ -29,8 +29,8 @@ describes GC in full; this tutorial needs two facts from it:
   reaches `gc_thres_pcent`. It collects one line at a time, and only a
   line with at least 1/8 of its pages invalid.
 - **Forced GC** runs inside a write once the share reaches
-  `gc_thres_pcent_high`. It takes the best victim whatever it holds, and
-  repeats until enough lines are free.
+  `gc_thres_pcent_high`. It takes the policy's victim however few invalid
+  pages it holds, and repeats until enough lines are free.
 
 ## 1. The device
 
@@ -88,7 +88,7 @@ Three things in it matter:
   script reads them before and after the measured run and divides the
   differences.
 - **Time switched off.** Vendor command 0xEF with code 2 makes GC take no
-  time and code 4 sets the NAND times to 0. GC still copies the same pages,
+  time and code 4 sets the flat NAND times to 0. GC still copies the same pages,
   so the WAF is unchanged, and a run takes seconds instead of minutes. Code
   3 would restore the built-in times, not the ones on your command line, so
   restart QEMU before you measure latency again
@@ -134,8 +134,8 @@ then run `bash waf-run.sh`:
 | 90 | 4.590 |
 | 95 | 3.273 |
 
-At 95 the background and forced thresholds are equal: GC runs only when
-it must, by which time the lines hold more invalid pages, and each
+At 95, `gc_thres_pcent` equals `gc_thres_pcent_high` in this
+configuration, so background GC starts only where forced GC does. By then the lines hold more invalid pages, and each
 collection frees more space per copy. Set `gc_thres_pcent` above the share
 of the NAND your namespace fills, or the background GC rate is what you
 measure.

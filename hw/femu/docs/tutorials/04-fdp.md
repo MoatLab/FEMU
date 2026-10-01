@@ -95,11 +95,6 @@ Placement Identifier 0; Reclaim Unit Handle Identifier 0
 RUAMW counts logical blocks: 16384 x 512 bytes = 8 MiB, an empty reclaim
 unit. The output repeats for identifiers 1 to 3.
 
-Do not rely on `nvme fdp usage` with FEMU at this version: FEMU's Reclaim
-Unit Handle Usage descriptors are 24 bytes long instead of the 8 bytes
-nvme-cli reads, so nvme-cli reports handles 1 and 2 as unused when every
-handle is in use.
-
 ## 3. Write through a placement identifier
 
 A write with directive type 2 (data placement) carries its placement
@@ -126,7 +121,9 @@ write: Success
 
 Only identifier 1's reclaim unit lost room: 3 writes of 8 blocks. A write
 without a directive, or with an identifier the namespace does not have,
-goes to handle 0. The endurance group statistics count bytes:
+goes to handle 0; an identifier the namespace does not have also logs an
+FDP event (`sudo nvme fdp events /dev/nvme0 -e 1 -E` lists them). The
+endurance group statistics count bytes:
 
 ```sh
 sudo nvme fdp stats /dev/nvme0 -e 1

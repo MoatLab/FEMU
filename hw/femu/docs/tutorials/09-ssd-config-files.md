@@ -25,7 +25,9 @@ says. Two additions:
 Other section headers are labels for the reader. `#` and `;` start a
 comment, and a key with an empty value is ignored, so a file can list a
 property and leave it at its default. The script checks every key against
-`-device femu,help` of the binary named by `FEMU_BIN`.
+`-device femu,help` (`femu-subsys,help` for `[subsys]` keys) of the binary
+named by `FEMU_BIN`, or of one it finds in `build-femu/`, `build/` or
+`build-official/` of the source tree.
 
 ## 1. Write a configuration
 
@@ -34,7 +36,7 @@ as `gc-study.conf` in `build-femu/`:
 
 ```ini
 # Tutorial 02's skewed-workload drive: 2 GiB of NAND, 25% spare,
-# GC only when forced, cost-benefit victims, hot and cold separated.
+# GC from 95% of lines in use, cost-benefit victims, hot and cold separated.
 
 [device]
 mode     = bbssd
@@ -103,7 +105,9 @@ ssd-config: config rejected; see the warnings above
 
 `--check` validates a file without printing the arguments: it prints the
 same warnings for a bad file, nothing for a good one, and its exit status
-says which. The script checks names only. Values, ranges and combinations
+says which. Without a binary to check against, it only warns and exits 0.
+Besides names, the script rejects an unknown `mode`, `mode` together with
+`femu_mode`, and lines that are not `key = value`. Values, ranges and combinations
 are checked when QEMU creates the device, which stops with a message; the
 "Limits and refusals" section of each mode page lists them, for example
 [BlackBox](../modes/blackbox.md#limits-and-refusals).

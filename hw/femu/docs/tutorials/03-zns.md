@@ -25,7 +25,7 @@ tutorial:
 | Empty or Closed | a write or an append | Implicitly Opened |
 | Empty, Implicitly Opened or Closed | Open Zone | Explicitly Opened |
 | Implicitly or Explicitly Opened | Close Zone | Closed |
-| Opened or Closed | Finish Zone, or the write pointer reaches the zone capacity | Full |
+| Empty, Opened or Closed | Finish Zone, or the write pointer reaches the zone capacity | Full |
 | Opened, Closed or Full | Reset Zone | Empty |
 
 Opened zones count against Maximum Open Resources, and opened plus closed
@@ -218,7 +218,9 @@ sudo fio --name=zr --filename=/dev/nvme0n1 --direct=1 --ioengine=psync \
 
 The average completion latency is about 89 us: the built-in QLC page read
 time of 85 us plus overhead. A ZNS write goes to a zone write cache at 1 us
-per 4 KiB page; the write that fills the cache pays for programming it
+per 4 KiB page. The cached pages are programmed when a write finds the
+cache full, or when another zone takes the cache over, and that write pays
+for the program
 ([write cache](../design/zns.md#write-cache)). Reset the zones before the
 next step:
 
@@ -283,8 +285,9 @@ this page.
 
 ## What you learned
 
-- A ZNS namespace is a host-managed zoned block device; zone size and
-  count follow from the namespace size and the `zns_` geometry.
+- A ZNS namespace is a host-managed zoned block device; the zone count
+  follows from the `zns_` geometry, and the zone size from the geometry and
+  the namespace size.
 - Writes and appends open zones implicitly; open, close, finish and reset
   move them by hand; the device enforces the open and active limits.
 - fio (`--zonemode=zbd`) and zonefs work on FEMU's ZNS as on real
