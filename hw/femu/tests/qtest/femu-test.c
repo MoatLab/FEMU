@@ -3540,6 +3540,10 @@ static const struct {
 } femu_refused[] = {
     { "'multipoller_enabled':2", "multipoller_enabled" },
     { "'multipoller_enabled':255", "multipoller_enabled" },
+    { "'femu_mode':6", "femu_mode" },
+    { "'femu_mode':7", "femu_mode" },
+    { "'femu_mode':255", "femu_mode" },
+    { "'namespaces':2,'namespace_modes':'bbssd,smartssd'", "namespace_modes" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,

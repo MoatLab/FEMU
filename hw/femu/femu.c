@@ -967,6 +967,17 @@ static const MemoryRegionOps nvme_mmio_ops = {
 
 static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
 {
+    /*
+     * A mode no extension registers for realized a controller with no command
+     * handlers. FEMU_SMARTSSD_MODE has none either, so the bound is the last
+     * mode that does, not FEMU_NR_MODES.
+     */
+    if (n->femu_mode > FEMU_KVSSD_MODE) {
+        error_setg(errp, "femu_mode must be 0 (OpenChannel), 1 (black-box), "
+                   "2 (no-SSD), 3 (zoned), 4 (computational storage) or "
+                   "5 (key-value)");
+        return false;
+    }
     if (n->num_namespaces == 0 ||
         n->num_namespaces > NVME_MAX_NUM_NAMESPACES) {
         error_setg(errp, "namespaces must be in [1, %d]",
