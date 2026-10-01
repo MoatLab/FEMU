@@ -260,7 +260,7 @@ A BBSSD controller (`femu_mode=1`) accepts the vendor admin command 0xEF,
 with the action in CDW10. It applies to every namespace of the controller
 that has a BBSSD FTL. From the guest:
 
-```bash
+```sh
 sudo nvme admin-passthru /dev/nvme0 --opcode=0xef --cdw10=2
 ```
 
