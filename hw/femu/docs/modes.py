@@ -56,7 +56,7 @@ MODES = [
         "guest_tools": "nvme-cli, fio",
         "host": "none beyond the common ones",
         "launcher": "run-nossd.sh",
-        "guide": "README.md#nossd-mode",
+        "guide": "hw/femu/docs/modes/nossd.md",
         "guest_check": None,
     },
     {
@@ -73,7 +73,7 @@ MODES = [
         "guest_tools": "nvme-cli, fio",
         "host": "about 17 GiB free RAM for the launcher's 12 GiB device",
         "launcher": "run-blackbox.sh",
-        "guide": "README.md#blackbox-ssd-mode-bbssd",
+        "guide": "hw/femu/docs/modes/blackbox.md",
         "guest_check": ("quick start, run end to end",
                         "hw/femu/docs/getting-started/quick-start.md"),
     },
@@ -92,7 +92,7 @@ MODES = [
         "guest_tools": "nvme-cli 1.12 or newer for `nvme zns`",
         "host": "none beyond the common ones",
         "launcher": "run-zns.sh",
-        "guide": "README.md#zoned-namespace-ssd-mode-znssd",
+        "guide": "hw/femu/docs/modes/zns.md",
         "guest_check": None,
     },
     {
@@ -109,7 +109,7 @@ MODES = [
         "guest_tools": "LightNVM tools, or SPDK on newer kernels",
         "host": "none beyond the common ones",
         "launcher": "run-whitebox.sh",
-        "guide": "README.md#whitebox-ssd-mode-ocssd",
+        "guide": "hw/femu/docs/modes/ocssd.md",
         "guest_check": None,
     },
     {
@@ -126,7 +126,7 @@ MODES = [
         "guest_tools": "LightNVM tools, or SPDK on newer kernels",
         "host": "none beyond the common ones",
         "launcher": "run-whitebox.sh",
-        "guide": "README.md#whitebox-ssd-mode-ocssd",
+        "guide": "hw/femu/docs/modes/ocssd.md",
         "guest_check": None,
     },
     {
@@ -144,7 +144,7 @@ MODES = [
         "guest_tools": "nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c`",
         "host": "none beyond the common ones",
         "launcher": None,
-        "guide": "README.md#key-value-ssd-mode-kvssd",
+        "guide": "hw/femu/docs/modes/kvssd.md",
         "guest_check": None,
     },
     {
@@ -162,7 +162,7 @@ MODES = [
         "host": "`csd_program_dir` for shared-library programs; "
                 "`--enable-csd-ubpf` build for eBPF programs",
         "launcher": "run-csd.sh",
-        "guide": "README.md#computational-storage-mode-csd",
+        "guide": "hw/femu/docs/modes/csd.md",
         "guest_check": None,
     },
     {
@@ -182,7 +182,7 @@ MODES = [
         "guest_tools": "nvme-cli with `nvme fdp`",
         "host": "none beyond the common ones",
         "launcher": "run-blackbox-fdp.sh",
-        "guide": "README.md#features",
+        "guide": "hw/femu/docs/features/fdp.md",
         "guest_check": None,
     },
     {
@@ -202,7 +202,7 @@ MODES = [
         "guest_tools": "nvme-cli",
         "host": "none beyond the common ones",
         "launcher": None,
-        "guide": "README.md#multiple-namespaces",
+        "guide": "hw/femu/docs/features/multi-namespace.md",
         "guest_check": None,
     },
     {
@@ -220,7 +220,7 @@ MODES = [
         "guest_tools": "nvme-cli `create-ns`, `attach-ns`",
         "host": "none beyond the common ones",
         "launcher": None,
-        "guide": "hw/femu/docs/CONFIGURATION-CHANGES.md",
+        "guide": "hw/femu/docs/features/ns-management-and-pi.md#namespace-management",
         "guest_check": None,
     },
     {
@@ -239,7 +239,7 @@ MODES = [
         "guest_tools": "nvme-cli `format`",
         "host": "none beyond the common ones",
         "launcher": None,
-        "guide": "hw/femu/docs/reference/properties.md",
+        "guide": "hw/femu/docs/features/ns-management-and-pi.md#metadata-and-protection-information",
         "guest_check": None,
     },
     {
