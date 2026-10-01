@@ -639,9 +639,9 @@ without resurrection, DULBE after CXL stores and mappings, flips, pinned
 pages, both unplug orders and the slot power-off, and a completion held while
 a caching-API chunk owns the gate, with and without the controller removed
 meanwhile. Each has a mutation of the device that turns it red. A guest run
-with fio on the namespace next to devdax traffic on the window, in every DER
-mode and with checksums on both paths, is still needed, as is sustained
-traffic past the GC threshold.
+with fio on the namespace next to devdax traffic on the window, with
+checksums on both paths, passed in every DER mode. Sustained traffic past
+the GC threshold has not been run in a guest.
 
 ## Earlier defects
 
