@@ -88,6 +88,9 @@ CXL_OPTS+=",read-ns=${READ_NS:-40000},program-ns=${PROGRAM_NS:-200000}"
 CXL_OPTS+=",erase-ns=${ERASE_NS:-2000000},channel-ns=${CHANNEL_NS:-0}"
 CXL_OPTS+=",gc-threshold=${GC_THRESHOLD:-75}"
 CXL_OPTS+=",gc-threshold-high=${GC_THRESHOLD_HIGH:-95}"
+# lsa-control lets the guest write files under log-dir and toggle tracing
+# under tracefs-dir. Cylon's experiment scripts need it; set LSA_CONTROL=off
+# for an untrusted guest.
 CXL_OPTS+=",ftl=${FTL:-on},lsa-control=${LSA_CONTROL:-on}"
 CXL_OPTS+=",cylon-first-touch-program=${CYLON_FIRST_TOUCH_PROGRAM:-off}"
 CXL_OPTS+=",cylon-free-writeback=${CYLON_FREE_WRITEBACK:-off}"
