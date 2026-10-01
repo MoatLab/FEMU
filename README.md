@@ -1077,8 +1077,9 @@ source of truth. `cache_evict` selects the replacement policy: `clock`
 For development work, use the debug build:
 
 ```bash
-# Configure with debugging enabled
-../configure --enable-kvm --target-list=x86_64-softmmu \
+# Configure with debugging enabled (femu-compile.sh's options plus debug)
+../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
+    --disable-libnfs --disable-libiscsi --disable-curl \
     --enable-debug --enable-debug-info
 
 # Compile with debug symbols
@@ -1149,28 +1150,40 @@ Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
 
 ### Debugging
 
-**GDB Debugging:**
+**GDB Debugging:** do not use `gdb-run.sh`; it is an old script that starts
+QEMU's stock `nvme` device, not FEMU. Run a launcher's own command line under
+gdb instead. From `build-femu/`, make a copy of the launcher that starts QEMU
+through gdb:
+
 ```bash
-# Use provided GDB script
-./gdb-run.sh
+sed -e 's|\./qemu-system-x86_64|gdb -ex "handle SIGUSR1 nostop noprint pass" --args ./qemu-system-x86_64|' \
+    -e 's/ 2>&1 | tee .*$//' run-blackbox.sh > gdb-blackbox.sh
+bash gdb-blackbox.sh
 
 # In GDB session
 (gdb) break femu_realize
-(gdb) continue
+(gdb) run
 ```
 
-**Logging:**
+KVM uses SIGUSR1 to kick vCPU threads, which is why gdb is told to pass it.
+
+**Debug output:** FEMU has no runtime switch for debug output and defines no
+QEMU trace events. Its debug messages are compiled in with extra flags:
+
 ```bash
-# Enable FEMU debug output
-export FEMU_DEBUG=1
-./run-blackbox.sh
+# FEMU_DEBUG_FTL: FTL debug messages, and arms the FTL assertions
+# FEMU_DEBUG_NVME: controller debug messages
+../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
+    --disable-libnfs --disable-libiscsi --disable-curl \
+    --extra-cflags="-DFEMU_DEBUG_FTL -DFEMU_DEBUG_NVME"
+make -j$(nproc)
 ```
 
-**Trace Events:**
-```bash
-# Enable QEMU tracing
-./qemu-system-x86_64 -trace events=/path/to/trace-events
-```
+`-DFEMU_FTL_ASSERT` arms the FTL assertions without the messages; the CI
+sanitizer build uses it. For FDP, setting `FEMU_FDP_DEBUG=1` in QEMU's
+environment traces placement to stderr. The launchers start QEMU through
+`sudo`, which drops the caller's environment, so put the variable on that line:
+`sudo FEMU_FDP_DEBUG=1 ./qemu-system-x86_64 ...`.
 
 ---
 
@@ -1231,17 +1244,17 @@ sudo systemctl disable cups bluetooth
 sudo systemctl mask sleep.target suspend.target
 
 # Use deadline scheduler for better SSD simulation
-echo deadline | sudo tee /sys/block/nvme*/queue/scheduler
+echo mq-deadline | sudo tee /sys/block/nvme*/queue/scheduler
 ```
 
 ### Logging and Monitoring
 
-**Enable detailed logging:**
+**Enable detailed logging:** QEMU system emulation reads no logging
+environment variables. Add these options to the QEMU command line in the run
+script instead:
+
 ```bash
-# Set environment variables before running
-export QEMU_LOG=guest_errors,unimp
-export QEMU_LOG_FILENAME=femu-debug.log
-./run-blackbox.sh
+-d guest_errors,unimp -D femu-debug.log
 ```
 
 **Monitor performance:**
