@@ -107,9 +107,20 @@ sudo nvme fdp events /dev/nvme0 -e 1 -E
 sudo nvme fdp status /dev/nvme0n1
 ```
 
-`configs` lists the handles and the reclaim unit size, `stats` gives host
-and media bytes written, and `status` lists the placement identifiers the
-namespace accepts with the space left in each one's reclaim unit (RUAMW).
+`configs` lists the handles and the reclaim unit size, `usage` gives each
+handle's attributes, `stats` gives host and media bytes written, and
+`status` lists the placement identifiers the namespace accepts with the
+space left in each one's reclaim unit (RUAMW).
+Every handle backs a placement handle of the namespace, so `usage` reports
+each one as host specified:
+
+```text
+Reclaim Unit Handle 0 Attributes: 0x1 (Host Specified)
+Reclaim Unit Handle 1 Attributes: 0x1 (Host Specified)
+Reclaim Unit Handle 2 Attributes: 0x1 (Host Specified)
+Reclaim Unit Handle 3 Attributes: 0x1 (Host Specified)
+```
+
 `events -E` shows host events, such as a write with an invalid placement
 identifier; every event type is enabled by default.
 

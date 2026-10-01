@@ -46,15 +46,19 @@ else
     pass "fdp stats returned (field names may vary by nvme-cli version)"
 fi
 
-# Test 5: fdp usage returns per-RUH data for all 4 RUHs
+# Test 5: fdp usage lists all 4 RUHs, each Host Specified: every handle backs
+# a placement handle of the namespace. A misaligned descriptor reads 0x0.
 USAGE=$(sudo nvme fdp usage $NS -e 1 2>&1)
 echo "FDP usage output:"
 echo "$USAGE"
-USAGE_LINES=$(echo "$USAGE" | grep -c "RUH\|ruh\|handle\|Handle" 2>/dev/null || echo "0")
-if [ "$USAGE_LINES" -ge "1" ]; then
-    pass "fdp usage returned RUH data"
+RUH_RE="Reclaim Unit Handle [0-9]+ Attributes"
+RUH_LINES=$(echo "$USAGE" | grep -cE "$RUH_RE" || true)
+HOST_LINES=$(echo "$USAGE" | grep -E "$RUH_RE" |
+             grep -c "(Host Specified)" || true)
+if [ "$RUH_LINES" = "4" ] && [ "$HOST_LINES" = "4" ]; then
+    pass "fdp usage: 4 RUHs, all Host Specified"
 else
-    pass "fdp usage returned (format may vary)"
+    fail "fdp usage: $RUH_LINES RUHs, $HOST_LINES Host Specified (want 4, 4)"
 fi
 
 # Test 6: io-mgmt-recv returns placement handle descriptors

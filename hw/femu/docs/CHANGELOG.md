@@ -255,6 +255,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A reset zone holds no data, an offline zone returns its resources, and zone geometry is reported for the namespace's format (bce5e1c3e, 2c7062ed0, 901d0908f, b4d9585ca, f0f989c21).
 - KV list entries are padded to 4 bytes, NVM-only commands are refused on KV namespaces, and KV Identify requires a KV namespace (240e21c43, f5a7d7bc8, 5ec9ee859).
 - FDP reports the reclaim unit size the FTL uses and moves a handle to a new reclaim unit on update (7fe32c556, 78de60448).
+- The FDP Reclaim Unit Handle Usage log uses 8 byte descriptors, so `nvme fdp usage` reports every handle as host specified instead of reading some as unused, and the placement logs store their fields little endian (ca844c994, a85b869fc).
 - SMART wear counters are summed across namespaces (4a4f0d9bf).
 - Counters fixed to move in every mode: FDP and KV write amplification and bytes, KV relocations, FDP erases (f4b3ac376, 980fb7886, 37464e4bd, ce20d8c06, 4c7d9c22a, 749e09fef, 2a16553c9, ba0c49338).
 
