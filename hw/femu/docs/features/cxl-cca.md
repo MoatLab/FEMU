@@ -81,7 +81,7 @@ ccactl [-d DEV] [-f] [-t MS] COMMAND [LPN COUNT | all]
 | `-d DEV` | A memdev name (`mem0`), a PCI address or a `resource5` path. Without it, the only CCA device is used |
 | `-f` | FORCE: lets `invalidate` and `disable` act on pinned pages, unpinning them |
 | `-t MS` | Command timeout in milliseconds, default 10000; negative waits forever |
-| `LPN COUNT` | First device page (DPA / 4096) and number of pages, decimal or `0x` hexadecimal; `all` is the whole media |
+| `LPN COUNT` | First device page (DPA / 4096) and number of pages, decimal, `0x` hexadecimal or, with a leading 0, octal; `all` is the whole media |
 
 | Command | What it does |
 | --- | --- |
@@ -107,19 +107,23 @@ sudo ./ccactl -d mem0 enable all
 
 Range commands print `status N (text)` and `pages N`, the number of pages
 acted on; `query` adds `resident`, `dirty`, `pinned` and `uncached`. The exit
-status is 0 when the device returns status 0, 1 on an error status or when
-the device cannot be opened, and 2 on a usage error.
+status is 0 when the device returns status 0 (always for `info`), 1 on an
+error status or when the device cannot be opened, and 2 on a usage error.
+`ccactl` opens the device before it checks the command, so with no device a
+usage error also exits 1.
 
 ## What each command does
 
 PIN
-: All or nothing. Resident pages are pinned. Other pages are read from NAND
+: Refused as a whole with `-ENOSPC` when the pins cannot fit. Resident pages
+  are pinned. Other pages are read from NAND
   as a miss would read them (counted in `media-reads` and `cca-pin-fills`,
   not as guest misses), possibly evicting an unpinned page, then pinned.
   Pinned pages leave the eviction queues, so eviction and prefetch never
   touch them. Every way of a set may be pinned; a miss to a set whose ways
   are all pinned is served from NAND without caching and counted in
-  `cca-pinned-set-misses`.
+  `cca-pinned-set-misses`. On `-EIO` or `-EAGAIN` partway through, the pages
+  pinned before the failure stay pinned; `pages` says how many.
 
 UNPIN
 : Returns pinned pages to the replacement queue a newly inserted page would
@@ -168,7 +172,7 @@ Status values from the device:
 | `-ENOSPC` | PIN: a set has no way left to pin |
 | `-EBUSY` | INVALIDATE or CACHE_DISABLE over pinned pages without FORCE; PIN over an uncached page; CACHE_DISABLE while a direct ratio is set |
 | `-EOPNOTSUPP` | PIN or UNPIN without a cache |
-| `-ENODEV` | The CXL media is disabled; every command but NOP fails |
+| `-ENODEV` | The CXL media is disabled; every command but NOP fails. Nothing a guest does through the CXL mailbox in this QEMU disables it |
 | `-EIO` | NAND refused a read or write. INVALIDATE leaves that page and the rest of the range resident |
 | `-EAGAIN` | A `cache-ways` change during a PIN left no room for the rest |
 
@@ -201,10 +205,11 @@ if (cca_open("mem0", &d) == 0) {
 ```
 
 - Synchronous calls (`cca_pin`, `cca_unpin`, `cca_invalidate`,
-  `cca_cache_disable`, `cca_cache_enable`, `cca_query`, `cca_nop`) return the
-  device status and fill `struct cca_result`; `pages` is the number of pages
-  acted on. Pass `CCA_FLAG_FORCE` to `cca_invalidate` and
-  `cca_cache_disable`, and `CCA_WHOLE` as the count for the whole media.
+  `cca_cache_disable`, `cca_cache_enable`, `cca_query`) return the device
+  status and fill `struct cca_result`; `pages` is the number of pages acted
+  on. `cca_nop` returns the status only. Pass `CCA_FLAG_FORCE` to
+  `cca_invalidate` and `cca_cache_disable`, and `CCA_WHOLE` as the count with
+  a start of 0 for the whole media.
 - `cca_submit()` and `cca_reap()` keep up to 2048 commands in flight;
   `CCA_SUBMIT_DEFER` batches doorbells, and `cca_kick()` rings once.
 - `cca_attach_dax()` takes a devdax mapping of a non-interleaved region on
@@ -212,7 +217,8 @@ if (cca_open("mem0", &d) == 0) {
   virtual addresses in the mapping and widen them to whole pages.
 - All calls are thread safe. The library locks `resource5` with `flock()`,
   so one process uses a device at a time. A process that dies holding it
-  leaves its ring state behind; the next `cca_open()` resets the rings.
+  leaves its ring state behind; the next `cca_open()` resets the rings. Its
+  pins and uncached ranges stay; `ccactl reset all` clears them.
 - `cca_set_timeout()` changes the 10 second default; negative waits forever.
 
 ## Guest tests
@@ -234,7 +240,7 @@ The `query`, `thrash`, `invalidate` and `disable` cases map the devdax
 device and are skipped without one of at least 2 MiB. The
 [tools README](../../tools/cca/README.md#guest-tests) lists every case.
 
-The `thrash` and `disable` cases compare latencies and expect a factor of 5.
+The `thrash` and `disable` cases compare access times and expect a factor of 5.
 With `der=off` a cache hit already costs microseconds of emulation, so
 `disable` can fail that ratio without anything being wrong; with
 `der=memslot` and `der=cylon` all cases passed in FEMU's guest runs.

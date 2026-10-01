@@ -33,7 +33,7 @@ Related pages:
 | Media | The BBSSD FTL: page mapping, garbage collection, NAND read, program and erase times, channels and LUNs. |
 | Direct mapping | Optional (`der`). Cached pages are mapped into the guest so hits run at DRAM speed with no exit to QEMU. |
 | Persistence | None. It is volatile memory. Data is lost when QEMU exits. |
-| Migration | Not supported. `migrate` fails with "State blocked by non-migratable device". |
+| Migration | Not supported. `migrate` fails with "State blocked by non-migratable device '...'". |
 
 Every guest access that is not direct-mapped is an MMIO exit to QEMU. The
 vCPU that made the access waits out the modelled media time before the load
@@ -70,8 +70,9 @@ The guest kernel needs the CXL stack with region support and the DAX drivers:
 | `CONFIG_CXL_REGION` | Create a region over the device |
 | `CONFIG_CXL_REGION_INVALIDATION_TEST` | Needed inside a VM. A guest cannot invalidate CPU caches by address range, and without this option Linux refuses to commit the region. The option skips that step |
 | `CONFIG_DEV_DAX`, `CONFIG_DEV_DAX_CXL` | Expose the region as `/dev/daxX.Y` |
-| `CONFIG_DEV_DAX_KMEM` | Online the region as system RAM. Build it as a module (`=m`); built in, it claims every RAM region as system RAM at once |
-| `CONFIG_FS_DAX`, `CONFIG_MEMORY_HOTPLUG`, `CONFIG_MEMORY_HOTREMOVE`, `CONFIG_ZONE_DEVICE` | DAX and memory hotplug support that the drivers above depend on |
+| `CONFIG_DEV_DAX_KMEM` | Online the region as system RAM. kmem may claim a new RAM region on its own; `daxctl reconfigure-device` switches it back |
+| `CONFIG_MEMORY_HOTPLUG`, `CONFIG_MEMORY_HOTREMOVE`, `CONFIG_ZONE_DEVICE` | Memory hotplug support that kmem and DAX need |
+| `CONFIG_FS_DAX` | Not needed for RAM regions; the validated guests had it on |
 
 The guest runs validated in FEMU's own testing used Linux 6.12 with these
 options. Check a guest kernel's configuration with:
@@ -141,7 +142,8 @@ applies to every `femu-cxl-ssd`:
 
 ### The equivalent command line
 
-This is what the script runs with its defaults, written out:
+This is equivalent to the script with its defaults. The script also passes
+the remaining properties at their default values:
 
 <!-- femu-example: cxl-ssd-cmdline -->
 ```bash
@@ -190,8 +192,8 @@ cxl create-region -d decoder0.0 -t ram -w 1 -m mem0
 daxctl list
 ```
 
-`daxctl list` shows one device, for example `dax0.0`. If the kernel has
-`CONFIG_DEV_DAX_KMEM=y`, kmem may already have claimed it as system RAM;
+`daxctl list` shows one device, for example `dax0.0`. If kmem already
+claimed it as system RAM (`daxctl list` shows `"mode":"system-ram"`),
 switch it back with `daxctl reconfigure-device --mode=devdax --force dax0.0`.
 If `cxl create-region` fails and `dmesg` reports that the CPU cache could
 not be synchronized, the kernel lacks `CONFIG_CXL_REGION_INVALIDATION_TEST`.
@@ -230,7 +232,9 @@ backend size must equal `-m` (4G with the script's default `RAM`):
     -device virtio-net-pci,netdev=net0
 ```
 
-With this the CXL window becomes node 1. With `der=off` each access to the
+With this the CXL window becomes node 1. FEMU's guest runs wrote and verified
+data on node 1 in all three `der` modes; long workloads on it have not been
+checked. With `der=off` each access to the
 node exits to QEMU, so expect a workload there to run orders of magnitude
 slower than on node 0; use `der=memslot` or `der=cylon` to serve cache hits
 at memory speed.
@@ -247,7 +251,7 @@ What an access costs:
 
 - A hit costs no media time.
 - A read miss reads the page from NAND and inserts it. A page the FTL has
-  never mapped is not read and costs nothing; its contents come from the
+  never mapped costs no media time, though it still counts in `media-reads`; its contents come from the
   backend, which reads as zeros for a fresh `memory-backend-ram`.
 - A write miss reads the page as a read miss does, then the write makes it
   dirty.
@@ -353,7 +357,8 @@ Each mapped page is a one-page alias in the guest address space. All
 `femu-cxl-ssd` devices share a budget of 1024 aliases (4 MiB), fewer when KVM
 runs short of free memory slots. A cached page that finds the budget full is
 served by MMIO at `der=off` cost and counts in `der-fallbacks`. When the hot
-set moves, a page that keeps missing replaces the oldest alias, at most
+set moves, a cached page that takes 256 trapped hits while the budget is full
+replaces this device's oldest alias that does not hold a pinned page, at most
 `der-replace-rate` times per second (default 64; 0 disables replacement).
 Every mapped page is treated as dirty, because writes through an alias are
 invisible to QEMU, so its eviction costs a program.
@@ -444,14 +449,17 @@ od -An -tu1 -N1 /tmp/status.bin                     # 0 ok, 1 error, 2 queued
 | 13 | Open the next per-access log, `cxlssd-io-N.log` (64 names, reused in turn) |
 | 15 | Close the per-access log |
 | 17 | Dump the current direct mappings to `cxlssd-spt.log` |
-| 90, 80 | Set a direct ratio (0 maps every page) / remove it; needs `der=memslot` or `der=cylon` |
+| 90, 80 | Set a direct ratio / remove it. The ratio is one of 50, 75, 90, 95, 97, 98, 99, 995 (99.5%), 999 (99.9%) or 100 percent, and 0 means 100. Setting one needs `der=memslot` or `der=cylon`; `memslot` refuses a ratio needing more aliases than are free, which on a 256 MiB device leaves 99 and up |
 | 91, 81 | Empty the host trace buffer and start tracing / stop tracing, in `tracefs-dir` |
 
-Byte zero of the data returned is the status: 0 success, 1 invalid command or
-argument, 2 queued. Flushes, way changes and unknown commands always run
-after the read returns, from QEMU's main loop; the others run at once unless
-the device is busy. `control-status` over QMP reads 2 until the queue
-drains. Commands 2, 3, 9 and 11 also clear the cache event counters.
+Byte zero of the data returned is the status: 0 success, 1 error, 2 queued.
+Commands 1, 5, 7, 13, 15, 17, 80, 81, 90 and 91 run at once unless the device
+is busy, and report 0 or 1. Flushes and way changes (2, 3, 9, 11), unknown
+commands and anything that finds the device busy are queued and run after
+the read returns, from QEMU's main loop; their byte zero is 2, and an error
+shows only in `control-status` over QMP, which reads 2 until the queue
+drains and then 0 or 1 for the last command. A read larger than the mailbox
+payload also returns 1. Commands 2, 3, 9 and 11 also clear the cache event counters.
 
 `lsa-control` is off by default on the device and on in `run-cxlssd.sh`. With
 it on, the device serves a 128 MiB internal label area and refuses an `lsa`
@@ -502,15 +510,17 @@ The ones you need most:
 | `der-active`, `der-mapped`, `der-fallbacks` | Whether direct mapping is on, how many pages are mapped now, and refused mappings |
 
 `qom-set ... stats-reset true` copies the counters to the `last-*` properties
-and clears the event counters. The full list is in
+and clears the cache, prefetch and caching API event counters. The media
+counters, `media-full` and the `der-*` counters are never cleared; measure
+them as differences between two reads. The full list is in
 [runtime properties](../reference/runtime-properties.md#femu-cxl-ssd-cxl-type-3-ssd).
 
 ## Limits
 
 - No live migration and no snapshots of device state.
-- Volatile only: no persistent memory, labels or dynamic capacity
-  (`memdev`, `persistent-memdev`, `volatile-dc-memdev` and `num-dc-regions`
-  are refused).
+- Volatile only: no persistent memory or dynamic capacity (`memdev`,
+  `persistent-memdev`, `volatile-dc-memdev` and `num-dc-regions` are
+  refused). An `lsa` label backend works only with `lsa-control=off`.
 - Direct mapping needs the single-endpoint topology above.
 - With `der=off`, every access costs an exit to QEMU; large workloads take
   hours. Use a small device and cache when you only need correct behaviour.

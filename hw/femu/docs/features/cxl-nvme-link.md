@@ -44,7 +44,7 @@ On a full command line:
 Give the controller a bus outside the CXL hierarchy. Without `bus=`, QEMU
 picks the `pxb-cxl` bus and refuses with "Only PCI/PCIe bridges can be
 plugged into pxb-cxl". `bus=pcie.0` is the simplest choice; use a
-`pcie-root-port` instead if you want to unplug the controller later (see
+`pcie-root-port` instead if you want to unplug the controller at run time (see
 [Unplugging](#unplugging)).
 
 In the guest the namespace appears as `/dev/nvme0n1` (with the NVMe driver),
@@ -56,7 +56,9 @@ Realize fails with a message naming the rule when one is broken:
 
 | Rule | Message |
 | --- | --- |
-| The `femu-cxl-ssd` comes first on the command line and exists | `cxl_ssd must name a realized femu-cxl-ssd` |
+| The `femu-cxl-ssd` exists and comes first on the command line | `Device 'cxlssd' not found` |
+| `cxl_ssd` names a `femu-cxl-ssd` | `Invalid parameter type for 'cxl_ssd', expected: femu-cxl-ssd` |
+| The `femu-cxl-ssd` is realized and not being removed | `cxl_ssd must name a realized femu-cxl-ssd` |
 | The `femu-cxl-ssd` has `ftl=on` (the default) | `cxl_ssd requires the femu-cxl-ssd to have ftl=on` |
 | One controller per medium | `the femu-cxl-ssd already serves an NVMe controller` |
 | `femu_mode=1` | `cxl_ssd requires femu_mode=1` |
@@ -66,7 +68,7 @@ Realize fails with a message naming the rule when one is broken:
 | No `meta`, `pi` or `dps` | `cxl_ssd requires no metadata or protection information` |
 | `devsz_mb` unset, 1024 or the medium's size in MiB | `devsz_mb must be unset or N, the size of the femu-cxl-ssd` |
 
-The medium's geometry and NAND timings govern. The controller's own
+The medium's geometry and NAND timings apply. The controller's own
 geometry and timing properties are ignored.
 
 ## What the controller offers
@@ -79,15 +81,16 @@ geometry and timing properties are ignored.
   the whole medium behind the CXL cache.
 - SMART, vendor log page C0h and the write amplification factor report the
   shared FTL. CXL traffic does not count as NVMe host I/O.
-- The timing admin command 0xEF works. Codes 1 to 4 change the shared NAND
-  timing and so affect CXL misses too; code 3 restores the medium's
-  `read-ns`, `program-ns`, `erase-ns` and `channel-ns`.
+- The timing admin command 0xEF works. Codes 1 and 2 (GC delay on and off)
+  and 3 and 4 (NAND times) act on the shared FTL and so affect CXL misses
+  too; code 3 restores the medium's `read-ns`, `program-ns`, `erase-ns` and
+  `channel-ns`. Codes 5 to 7 affect the NVMe side only.
 
 ## Consistency between the two views
 
 The data is consistent without any action from you:
 
-- An NVMe read returns the latest CXL store, whether the page is clean,
+- An NVMe read returns the most recent CXL store, whether the page is clean,
   dirty in the cache or direct-mapped.
 - A CXL access after an NVMe write completes sees the NVMe data.
 - Accesses that overlap in time with no synchronization in the guest have
@@ -98,14 +101,17 @@ What happens to the cache and the counters:
 1. Write, Write Zeroes, Copy (its destination) and Deallocate drop every
    page they touch from the CXL cache before the command completes, without
    writing it back: the command already programmed or unmapped the page.
-   `nvme-drops` counts these pages.
+   `nvme-drops` counts these pages, and the pinned pages of rule 2.
 2. A page pinned through the [caching API](cxl-cca.md) stays pinned and
    resident but becomes clean.
 3. NVMe reads leave the cache alone and are charged a NAND read even when
    the page is cached.
 4. CXL stores mark the blocks they cover as written, so Deallocated or
    Unwritten Logical Block errors (DULBE) and Get LBA Status see them. A
-   trapped CXL load marks nothing. A Deallocate does not clear pages that a
+   trapped CXL load marks nothing, but with `der=memslot` or `der=cylon` any
+   access that maps a page, a load or a prefetch included, marks the whole
+   page, since stores through the mapping are invisible. Linking to a medium
+   that was already accessed marks every block. A Deallocate does not clear pages that a
    direct ratio maps; they stay marked as written.
 5. NVMe Flush does not flush the CXL cache. The medium is volatile memory.
 6. A long cache operation (a flush, a `cache-ways` change, a caching API
@@ -116,8 +122,8 @@ CXL region. The filesystem would overwrite CXL-resident data, and kernel
 memory when the region is onlined as system RAM. Use one view at a time
 unless your workload coordinates the two.
 
-`media-writes` on the `femu-cxl-ssd` includes NVMe writes, but it is
-refreshed at the next CXL media request, so NVMe writes show up after it.
+`media-writes` on the `femu-cxl-ssd` includes NVMe writes; it is updated
+before each NVMe write, Write Zeroes, Copy or Deallocate completes.
 
 ## Concurrent misses and atomicity
 
@@ -136,8 +142,10 @@ With misses one at a time, other vCPUs rarely get between the two (under 1%
 of `lock add` increments were lost with four vCPUs in FEMU's tests). With
 `concurrent-misses=on` about half were lost. Do not combine `der=off` with
 `concurrent-misses=on` for anything that uses atomic operations on the
-region. In the direct modes, the write lands on the page the read mapped and
-none were lost either way.
+region. In the direct modes, on a page that is direct-mapped the write lands
+on the page the read mapped, and none were lost either way. A `memslot`
+page left on MMIO because the alias budget is full behaves as with
+`der=off`.
 
 <!-- femu-example: cxl-nvme-link-concurrent -->
 ```bash
@@ -151,7 +159,8 @@ DER=memslot ../femu-scripts/run-cxlssd.sh \
 While the link exists, `device_del` of the `femu-cxl-ssd` fails with
 "femu-cxl-ssd is in use by NVMe controller nvme0". Remove the controller
 first, then the medium. A controller on `pcie.0` cannot be unplugged
-("Bus 'pcie.0' does not support hotplugging"), so put it on a root port:
+("Bus 'pcie.0' does not support hotplugging"), so for this put it on a
+root port:
 
 <!-- femu-untested: the example check drops pcie-root-port devices, so bus=hp0 cannot resolve -->
 ```bash
