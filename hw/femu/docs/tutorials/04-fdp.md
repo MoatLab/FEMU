@@ -115,6 +115,9 @@ sudo nvme fdp status /dev/nvme0n1 | grep RUAMW
 ```
 
 ```text
+write: Success
+write: Success
+write: Success
   Reclaim Unit Available Media Writes (RUAMW): 16384
   Reclaim Unit Available Media Writes (RUAMW): 16360
   Reclaim Unit Available Media Writes (RUAMW): 16384
@@ -135,8 +138,9 @@ Media Bytes with Metadata Written (MBMW): 12288
 Media Bytes Erased (MBE): 0
 ```
 
-This output is illustrative: it is what a fresh device reports after the
-three writes. HBMW is what the host wrote; MBMW also counts what GC copied,
+On a device that has seen only these three writes, HBMW is the 12 KiB the
+host wrote, and no reclaim unit has been erased yet. HBMW counts what the
+host wrote; MBMW also counts what GC copied,
 so MBMW / HBMW is the WAF over the endurance group.
 
 ## 4. Measure what placement does
