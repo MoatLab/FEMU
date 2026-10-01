@@ -1,8 +1,8 @@
 /*
  * KV passthru probe: drive FEMU's NVMe-KV mode end-to-end via the IO passthru
- * ioctl on the controller node (/dev/nvme0), skipping the block layer (the
- * stock
- * Linux nvme driver does not bring up a CSI=01h namespace). Issues a full KV
+ * ioctl on the controller node (/dev/nvme0). Linux has no key-value command
+ * set, so a CSI=01h namespace never gets a block device; Linux 6.0 and later
+ * expose it only as the generic node /dev/ngXnY. Issues a full KV
  * lifecycle against the spec wire format: Store 01h, Exist 14h, Retrieve 02h
  * (full + short read), Delete 10h, then Retrieve-miss; checks status + data.
  *
