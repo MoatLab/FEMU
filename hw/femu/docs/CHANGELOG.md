@@ -232,6 +232,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - bbssd maps blocks by their real size, so 4 KiB formats no longer share logical pages (bb63df5a3).
 - Fixed ZNS zone append, Zone Append bounds, zone open on write, zone resource counts, multi-zone reset, and zone write caches keyed by zone (07acf491a, 27949b51f, 3fd4f34e6, 8129cfd16, 340522142, 99ce4fb2b, 9a3449362, 347a8a691).
 - A ZNS write refused for its data pointer no longer moves the write pointer (6343c4d22).
+- FDP Write Zeroes is placed by its own directive fields and counted in HBMW and MBMW, instead of reusing the placement of an earlier command (834abe2cb).
 - Write Zeroes and deallocate address the backend per namespace, program the media where required, and drop buffered copies (f44ce6499, 9005cf952, 373de039b, 783131b7d, 22988e07b).
 - The write buffer no longer resurrects deallocated pages and is bounded (d4d03f127, 0ee6d211b).
 - A Format rebuilds per-block state (a79474e73, 7e7e36161).
