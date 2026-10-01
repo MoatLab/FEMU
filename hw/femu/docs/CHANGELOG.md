@@ -44,7 +44,7 @@ listed one by one.
 - Opt-in Namespace Management and Attachment (`ns_mgmt=on`) for NoSSD and bbssd, with a bbssd namespace cap (`bbssd_ns_limit`) (b12bc8754, d9c9f2251, b48799800, e0fa92f19, 42369e0bd).
 - Namespace attribute changes are reported through AER and log page 04h, and recorded in the Persistent Event log (3630d6fa0, cc9e271b4).
 - Namespaces can be created with protection information (c213b120c).
-- Shared namespace management across controllers of one `femu-subsys,ns_mgmt=on`, with the subsystem owning namespace storage (fd587666b, ca80e3dc5, 23844afaa, feebe635c, 76cc58f63, 97fc6ae0a, 349f12d40).
+- Shared namespace management across controllers of one `femu-subsys,ns_mgmt=on`, with the subsystem owning namespace storage (ca80e3dc5, 23844afaa, feebe635c, 76cc58f63, 97fc6ae0a, 349f12d40).
 
 #### Metadata, protection information and Streams
 
@@ -80,6 +80,7 @@ listed one by one.
 - Optional conventional zones (`zns_num_conv_zones`) (6e7395b55).
 - Configurable zone width (`zns_chnls_per_zone`) (e04e4e901).
 - Zone Random Write Area support (`zns_zrwa_*`) (b18f56b2b, 9f51854d7).
+- An injected write fault (`err_write_fail_ppm`) takes the zone read only and lists it in the Changed Zone List (ccdae5d3b).
 - Changed Zone List log page (569608a41).
 - Configurable reads across zone boundaries (`zns_cross_zone_read`) and Zone Append size limit (`zns_zasl_bs`) (78caee058, bca834133).
 - ZNS takes NAND timing from the shared media layer, with configurable read, program and erase times and an opt-in channel bus (3d6056020, 34bbe45fa, 2a4ebc2cb).
@@ -92,15 +93,15 @@ listed one by one.
 - Pluggable GC victim selection (`gc_policy`: greedy, random, cost-benefit, fifo, d-choice) (7222d6744).
 - Opt-in DRAM read cache (`read_cache_mb`, `cache_evict`) (3b21542de, fc5d3ded0).
 - Pluggable L2P mapping (`mapping`: page, dftl, hybrid, fast) with a modelled mapping cache (`mapping_cache_mb`) (64a19a6f3, 46e4261f9, 0f9b6aeab).
-- Write amplification accounting and a `debug_ftl` switch that reports FTL invariant failures instead of aborting (e57448e41).
+- Write amplification accounting, and a `debug_ftl` switch that prints page-state violations found on the GC path (e57448e41).
 - Optional cell-type NAND timing (`nand_cell_type`, `cell_pages`, `pgtype_lat`, ONFI phase times, `ecc_step_ns`) (e405dbcbc).
 - Optional modelled TRIM time (`trim_lat_ns`) and explicit over-provisioning (`op_pcent`) (1027eb240, 6a4559ee4).
 - DRAM write buffer (`buffer_size`, `buffer_thres_pcent`) with Flush, FUA and volatile write cache support (6a8daec7a, d4d03f127, 0ee6d211b).
 - Hot/cold separation of overwritten pages (`hot_cold_sep`) (4ded2e928).
 - Read reclaim (`read_reclaim_limit`) and retention refresh (`retention_limit_sec`) (7f9b4f6af, 4e09c4797, e7f182b87).
 - Data age feeds the ECC read model (`ecc_retention_sec`) (f9433e9ab, 13f2b85de).
-- More than one plane per LUN (`pls_per_lun`) in bbssd, FDP, KV and OCSSD, with a line's planes erased in one operation (0f554fb7d, 3699e980d, 9c8228d28, 7276af2d8, 0d6d5926f).
-- Channel bus phases (`cmd_addr_lat`, `pg_xfer_lat`, `status_lat`, `ch_xfer_lat`) are added to the timing when set (c274ba7d9, c01b8f0ff).
+- More than one plane per LUN (`pls_per_lun`) in bbssd, FDP and KV, with a line's planes erased in one operation (0f554fb7d, 3699e980d, 9c8228d28, 7276af2d8).
+- Channel bus phases (`cmd_addr_lat`, `pg_xfer_lat`, `status_lat`, `ch_xfer_lat`) are added to the timing when set (c274ba7d9).
 - A read can suspend an in-flight program or erase (`pe_suspend`, `tsusp_ns`) (9ec423985, 6a5c498a8).
 - Optional debug logging to study whether deleted data remains on the device (18ba6557c, 45e61ae41).
 
@@ -115,7 +116,7 @@ listed one by one.
 
 #### NoSSD
 
-- NoSSD performance work: poller threads decoupled from queues (`poller_ratio`), per-poller I/O counters, an inline completion path with a single-PRP case, fewer shadow doorbell writes, and command decode improvements (0b192893b, 6b1592746, 5fc268bba, 7b321b9c0, 2b230f4ec, 87ff5ad57).
+- Poller threads decoupled from queues (`poller_ratio`), and I/O counters kept per poller (0b192893b, 6b1592746).
 - The backend memory can be bound to or interleaved across NUMA nodes with `FEMU_MBE_INTERLEAVE` (3594d27c6).
 
 ### Configuration changes and new refusals
@@ -147,7 +148,7 @@ was not doing anything.
 
 #### Other new refusals
 
-- Invalid bbssd and zoned geometries, and a bbssd namespace with no room left for garbage collection (b4bbd93e0, 1ac931d86, ceb2b5bf7, 5ccbe3f24).
+- Invalid bbssd and zoned geometries, and a bbssd namespace with no room left for garbage collection; CSD and KV, and every mode a controller serves, now run the same checks (b4bbd93e0, 1ac931d86, ceb2b5bf7, 5ccbe3f24, bf8961b9b, 0b82aa58a).
 - Invalid ZRWA configurations, page sizes ZNS cannot serve, and more write caches than zones (b89cde46d, 154775e62, fcfa0d581).
 - Unknown `mapping` or `gc_policy` names, and a negative suspend overhead (29c397f38, 2ae58aa55).
 - A CSD controller with more than one namespace (b425007c2).
@@ -203,7 +204,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - I/O past the device geometry is refused instead of accessing out of bounds (8848d724d).
 - Widened bbssd and ZNS physical address fields so large channel, LUN and plane counts no longer alias (2e4c7fe82, d7c5aff58).
 - Fixed an out-of-bounds write in ZNS zone reset with a narrow zone width, and ZNS backend addressing within a namespace (02a11cc51, 316ecf9df, cba095fb5).
-- Fixed OCSSD writes past the backing store and many OCSSD bounds checks on vector lists, chunk info, bad block tables, offsets and addresses (fca17a8c6, f2ccb06ab, e8d415a07, 11aafda03, b37e7dd58, ff6e8bb4b, 58ba9f515, 98641558d, d44f0c4c1, 761f78757, 42ae8360e, 1f135b961, d5a5b788b, 91412b74d, 3838cf6bf, 1c9f737fe).
+- Fixed OCSSD writes past the backing store and many OCSSD bounds checks on vector lists, chunk info, bad block tables, offsets and addresses (fca17a8c6, f2ccb06ab, e8d415a07, 11aafda03, b37e7dd58, ff6e8bb4b, 58ba9f515, 98641558d, d44f0c4c1, 761f78757, 42ae8360e, 1f135b961, d5a5b788b, 91412b74d, 3838cf6bf, 1c9f737fe, 0d6d5926f).
 - The FTL thread and pollers are stopped and every mode's state released on device removal, controller reset and failed realize (da76e206a, 06c7579b2, 81fa5697a, b3608d3f4, d0998ea16, 5a4107c14, 6610ecba1, f050a8bce, 3ba1ddec4, 42ba3cf4a, 817d34363, 36d1ef4b0, 52a579830, 8e8dc4431, 8c1fb192f, 0b7c53826, 9b0dd6eb0).
 - Fixed leaks of aborted requests, DSM range lists, PRP lists and dropped command lists (03a4eee3c, f3fdbe7c0, 1c498adad, 10aaf11e2, c501af95e).
 - A host address is no longer written into guest memory when setting up a non-contiguous queue, and Identify transfers the structure rather than a whole memory page (037d9c9c2, 14f4224d3).
@@ -215,6 +216,8 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Running out of lines refuses the write instead of aborting, and FDP reports device full instead of asserting or following a null reclaim unit (49ada8834, e1c4e9174, 59128ab66, e7913d89c, c0ae29cb4, cbda78bf6, 37b9b84f9, f05f128a9).
 - Zone state is locked, reset zones are erased on the media thread, and asynchronous events are raised from the main loop (fe8e931e3, 5001ae15c, 89e1c4b04).
 - FDP event rings are serialized and the written and uncorrectable bitmaps are updated atomically across pollers (645424c86, daaa6a3db).
+- The BlackBox flip command applies to every namespace of the controller (3b7d88d63).
+- `femu-cxl-ssd` no longer advertises that unmapped pages read as zeros (3c85bfd86).
 - Many `femu-cxl-ssd` lifecycle, decoder and mapping fixes, including teardown while callers wait on invalidation, little-endian forwarding, and keeping stores when NAND has no page for write-back (9e0223c19, bb7e28722, 51c420143, d31c48d92, ec8b1ac7d, 02a872661, 4505cd9a7, 86ba15078, 842d4ff72, b322efb8f, 2d0c1404e).
 
 #### Data correctness

@@ -177,7 +177,7 @@ allocation and its namespace-count cap are retained. Scaled FTL geometry,
 allocated-namespace notices, persistent storage and other namespace modes
 are not supported.
 
-With the `ns-mgmt-shared` example above, only ctrl-a initially has the boot
+With the shared example under [Launch](#launch), only ctrl-a initially has the boot
 namespace attached. Controller lists report the assigned CNTLIDs; use
 Namespace Attachment to expose it through ctrl-b too. Create honors NMIC:
 private namespaces can move between controllers but cannot be attached to

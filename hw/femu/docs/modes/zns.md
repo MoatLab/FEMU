@@ -260,8 +260,10 @@ empty. With it set, one write in every 1,000,000 / `err_write_fail_ppm`
 fails and makes its zone read only, the way a controller does when it can
 no longer program the zone. The failing write completes with Write Fault,
 later writes to that zone are refused as read only, the zone is added to
-this list, and a host with an Asynchronous Event Request outstanding gets a
-Zone Descriptor Changed notice. The failures come at a fixed count, so a
+this list. A host that enabled Zone Descriptor Changed notices (bit 27 of
+Asynchronous Event Configuration, Set Features 0Bh) and has an Asynchronous
+Event Request outstanding then gets the notice; without that bit the zone
+is still listed, but no event is raised. The failures come at a fixed count, so a
 run repeats exactly. `hw/femu/scripts/zone-aen-probe.c` checks this path:
 
 ```sh

@@ -130,21 +130,28 @@ It prints `PASS`, `FAIL` and `SKIP` lines and a summary, and exits non-zero
 when a check failed, so it can gate a script. A read that fails counts as a
 failure, the same as a bad checksum. It refuses a mounted device. A
 key-value namespace has no block node, so it is driven through the
-controller. It makes no timing claims. A BlackBox run looks like this
-(`max_block_reads` is the read count of the most-read block since its
-erase):
+controller. It makes no timing claims. A BlackBox run prints lines like
+these (`N` stands for the counts; `...` for lines left out here).
+`max_block_reads` is the read count of the most-read block since its
+erase:
 
 ```text
+== device ==
+  PASS  controller answers Identify
 == data survives the FTL ==
   PASS  random write then verify (crc32c)
 == deallocate ==
   PASS  deallocate accepted
-  PASS  mapping still sound after deallocate
+  ...
 == counters ==
-  waf_x1000=935 host_pages=40960 nand_pages=38335 max_block_reads=807
+  PASS  SMART log readable
+  data_units_written=N host_write_commands=N
+  ...
+  waf_x1000=N host_pages=N nand_pages=N max_block_reads=N read_reclaims=N
   PASS  host writes counted
+  PASS  write amplification reported
 
-FEMU_TEST pass=7 fail=0 skip=0
+FEMU_TEST pass=N fail=0 skip=N
 ```
 
 Smaller probes, built in the guest with `gcc -O2 -o NAME NAME.c`:

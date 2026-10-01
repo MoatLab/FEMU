@@ -250,7 +250,7 @@ are generated from the binary, and CI fails when they fall out of date.
 
 ### [Performance Tuning](hw/femu/docs/guides/performance-tuning.md)
 
-### [Advanced Configuration](hw/femu/docs/features/multi-namespace.md)
+### [Advanced Configuration](hw/femu/docs/getting-started/requirements.md#memory)
 
 ### [FTL Policies and Caches (BlackBox)](hw/femu/docs/modes/blackbox.md#garbage-collection)
 

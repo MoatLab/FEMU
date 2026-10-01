@@ -15,7 +15,7 @@ is in [architecture](../concepts/architecture.md).
 | [`nvme.h`](../../nvme.h) | NVMe structures, the `femu_mode` enum and the controller state `FemuCtrl` |
 | [`nvme-admin.c`](../../nvme-admin.c) | Admin commands, starting the pollers, namespace management, asynchronous events |
 | [`nvme-io.c`](../../nvme-io.c) | I/O commands and the poller loop that fetches submissions and posts completions |
-| [`nvme-util.c`](../../nvme-util.c) | Deallocation state per LBA (TRIM, Write Zeroes with deallocate, DULBE) |
+| [`nvme-util.c`](../../nvme-util.c) | Deallocation state per LBA (TRIM, Write Zeroes with deallocate, DULBE), queue head and tail and completion posting helpers, poller pause and resume, the Timestamp feature |
 | [`nvme-pel.c`](../../nvme-pel.c) | Persistent Event log and its `pel_file` |
 | [`nvme-pi.c`](../../nvme-pi.c) | Metadata and protection information |
 | [`nvme-streams.c`](../../nvme-streams.c) | Streams directive |

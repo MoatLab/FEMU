@@ -107,8 +107,8 @@ Background GC starts when the share of lines in use reaches
 - `cost-benefit`: the line with the largest age x (1 - u) / 2u, where u is
   the share of valid pages.
 - `fifo`: the oldest closed line.
-- `d-choice`: samples 4 random candidate lines and takes the one with the
-  fewest valid pages.
+- `d-choice`: samples 4 candidate lines at random (a line can be drawn
+  twice) and takes the one with the fewest valid pages.
 
 ### Mapping and caches
 
@@ -120,13 +120,14 @@ Properties: [garbage collection, mapping and caches](../reference/properties.md#
 - `read_cache_mb` and `cache_evict` add a DRAM read cache. It models timing
   only: a hit costs DRAM time and skips the NAND read, but the cache holds no
   data, so NAND stays the source of truth. `cache_evict` is `clock` (the
-  default), `random`, `lru` or `arc`, which resists scans.
+  default), `random`, `lru` or `arc` (a scan-resistant 2Q variant, not full
+  ARC).
 
 The two log-block schemes follow published designs:
 
 | `mapping` | Model |
 | --- | --- |
-| `hybrid` | BAST log-block mapping (Kim 2002): one log block per data block, merged when the log pool runs out |
+| `hybrid` | BAST log-block mapping (Kim 2002): one log block per data block, merged when that log block fills or the log pool runs out |
 | `fast` | FAST log-block mapping (Lee et al. 2007): a sequential log block plus a shared, fully associative pool for random writes |
 
 Both suit some workloads more than others: sequential overwrites merge
