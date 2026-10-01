@@ -1216,7 +1216,9 @@ FEMU has been used in numerous systems research projects across top-tier venues 
 
 ### Primary Citation
 
-If you use FEMU in your research, please cite our FAST 2018 paper:
+If you use FEMU in your research, please cite our FAST 2018 paper. The same
+entry is in [CITATION.cff](CITATION.cff), which GitHub shows as "Cite this
+repository":
 
 ```bibtex
 @inproceedings{Li+18-FEMU,
