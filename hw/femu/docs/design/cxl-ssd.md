@@ -151,11 +151,11 @@ Two generic hooks live outside `hw/femu/`, and both are inert unless a
 Everything else is done by chaining parent methods: PCI configuration writes
 call the inherited method after FEMU revokes, component register writes go
 through a FEMU overlay on the component register block, reset chains the
-parent's hold phase, and the LSA class methods are overridden only when
-`lsa-control=on`.
+parent's hold phase, and the LSA class methods are always overridden but
+pass through to the parent's unless `lsa-control=on`.
 
-`hw/femu/femu.c` (the NVMe controller) never includes CXL headers. It calls
-the medium through `femu_cxl_nvme_ops`, a table of five functions
+The NVMe side never includes CXL headers. `hw/femu/femu.c`, and
+`hw/femu/bbssd/bb.c` for flips, call the medium through `femu_cxl_nvme_ops`, a table of five functions
 (`prepare`, `attach`, `detach`, `ftl`, `flip`) that `qemu-adapter.c`
 registers. The CXL files are built only when both `CONFIG_FEMU_PCI` and
 `CONFIG_CXL_MEM_DEVICE` are on (`hw/femu/meson.build`); without them the
@@ -210,7 +210,8 @@ page boundary:
 A page is not cacheable when the cache is off (`cache-pages=0`), when the
 caching API marked it uncached, or when every way of its set is pinned.
 Such an access goes to the media every time: a read is a NAND read, a write
-a NAND program.
+a NAND program. An access also goes uncached when the only victim its insert
+could evict is held by another access in progress.
 
 The write miss is write-allocate with fill: a store to a page that is not
 resident first reads the page from NAND, then dirties it. An unmapped page
@@ -279,7 +280,7 @@ and the `idle` condition variable:
 | --- | --- |
 | Guest access, `concurrent-misses` in effect | Shared (`femu_cxl_enter_access()`) |
 | Guest access otherwise | Exclusive (`femu_cxl_enter()`) |
-| `flush-cache`, `cache-ways` change, control commands 2, 3, 9, 11 | Exclusive |
+| `flush-cache`, `stats-reset`, `cache-ways`, prefetch and `der-ratio` changes, every control command | Exclusive |
 | Each caching API chunk | Exclusive |
 | The NVMe link bottom half that drops cache entries | Exclusive |
 
@@ -360,7 +361,8 @@ Resident, out-of-range and uncached pages, and pages whose set is fully
 pinned, are skipped. A prefetch performs no NAND read and adds no media
 time, but a dirty page it evicts is still programmed. If an insert cannot
 evict, prefetching stops for that access without failing it. Prefetched
-pages may be mapped directly.
+pages may be mapped directly. A small cache may evict the demanded page
+itself while prefetching, following insertion order.
 
 ### Run-time changes
 
@@ -377,7 +379,7 @@ The cache is write-back. A dirty page is programmed to NAND when:
 
 | Event | Who pays |
 | --- | --- |
-| Eviction of a dirty victim by an insert | The access that caused the insert |
+| Eviction of a dirty victim by an insert | The access that caused the insert, or the `femu-cxl-cca` thread for a PIN fill |
 | `flush-cache=true`, control commands 2, 9, 11 | The caller (the main loop, waiting with the BQL dropped) |
 | `cache-ways` change | The caller |
 | Caching API INVALIDATE and CACHE_DISABLE | The `femu-cxl-cca` thread, per chunk |
@@ -396,7 +398,9 @@ reaches QEMU:
   written through the direct entry is evicted clean, with no program.
 
 The FTL worker (`cxl_worker()` in `cxlssd.c`, thread `femu-cxl-ftl`) is the
-only thread that changes FTL and NAND state for the medium. Callers queue a
+only thread of the device itself that changes FTL and NAND state; with a
+linked NVMe controller, that controller's FTL thread is the other one, and
+both run under `s->lock`. Callers queue a
 `FemuCxlWork` on `s->work` under `s->lock` and wait for `done`; the worker
 calls `bb_ftl_process_req()` with an 8-sector request (one 4 KiB page of
 512-byte sectors) and returns its latency. Requests are served in arrival
@@ -409,12 +413,14 @@ sectors, eight per page, one plane per LUN, and the geometry, timing and GC
 thresholds of the device properties. It has no PCI queues and none of the
 optional NVMe features. With `ftl=off` there is no FTL and no worker:
 accesses have no media time and write-back is metadata only. GC, mapping and
-NAND timing are those of the BBSSD FTL; the FTL and NAND timing chapters
-(`design/ftl.md`, `design/nand-timing.md`) describe them.
+NAND timing are those of the BBSSD FTL, which the
+[timing model](../concepts/timing-model.md) and the architecture page's
+[BBSSD section](../concepts/architecture.md#bbssd) describe.
 
 When NAND fills up (a geometry with no spare blocks), a write-back has
-nowhere to go. The access still completes, uncached, without media time, and
-`media-full` counts it. A measurement is valid only while `media-full` is 0.
+nowhere to go. The access still completes, uncached, and `media-full`
+counts it; the refused program adds no media time, though a fill read
+already issued is charged. A measurement is valid only while `media-full` is 0.
 
 ## Direct mapping
 
@@ -448,16 +454,17 @@ When the hot set moves, the aliases may hold cold pages. Replacement
 (`der_replace_due()`, `der_replace_victim()`, `der_displace()`):
 
 ```text
-  MMIO hit on a cached page, budget full
+  MMIO access to a cached page, budget full
         |
         v
-  entry->der_hits += 1  ---- < 256 (FEMU_CXL_DER_HOT) ---->  stay on MMIO
-        | >= 256
-        v
   der-replace-rate == 0 ? ---- yes ------------------------> stay on MMIO
-        | no
+        | no                                                 (no counting)
         v
-  time since last replacement >= (1 s / rate) << backoff ? -- no --> MMIO
+  entry->der_hits += 1  ---- < 256 (FEMU_CXL_DER_HOT) ---->  stay on MMIO
+        | >= 256           (the miss that inserted the page counts too)
+        v
+  first replacement, or time since the last one
+  >= (1 s / rate) << backoff ? ---------------- no -------> stay on MMIO
         | yes
         v
   victim = oldest alias of this device whose page is not pinned
@@ -468,7 +475,8 @@ When the hot set moves, the aliases may hold cold pages. Replacement
         |
         v
   backoff: this page was displaced before -> backoff + 1 (max 8, so the
-           interval grows up to 256x); 8 promotions of new pages -> backoff - 1
+           interval grows up to 256x); 8 consecutive promotions of pages
+           not displaced before -> backoff - 1
 ```
 
 Accesses through an alias never reach QEMU, so installation order is the
@@ -505,7 +513,8 @@ Per page, the SPTE moves through these states:
       | revoke (eviction, invalidation, teardown)
       v
    A bit clear? -- yes --> CAS direct -> saved MMIO, no TLB flush
-      |                    (der-quiet-revocations +1, page clean)
+      |                    (der-quiet-revocations +1, der-revocations +1,
+      |                    page clean)
       | no (or the CAS lost to the CPU setting A)
       v
    CAS clear W and MMU-writable; flush this GFN
@@ -520,9 +529,11 @@ Per page, the SPTE moves through these states:
 
 An entry whose accessed bit is still clear has not been used by any page
 walk since it was installed, so no TLB holds it: that is the quiet path. The
-full path costs two single-GFN flushes per page. A whole-slot invalidation
-deletes the slot instead, which flushes everything at once; later accesses
-reinstall it and pages map again lazily. Global dirty logging (migration)
+full path costs two single-GFN flushes per page. `der-revocations` counts
+every revocation, quiet or not. A whole-slot invalidation still samples each
+page (one flush per accessed page) but skips the final flush, because the
+slot deletion that follows flushes everything; later accesses reinstall the
+slot and pages map again lazily. Global dirty logging (migration)
 revokes everything and disables Cylon. A failed slot deletion aborts QEMU,
 because continuing could leave the kernel using a slot whose backing FEMU
 has released.
@@ -565,9 +576,9 @@ media delay does not install the mapping it translated before.
 | Device reset | `adapter_reset_hold()` | Revoke all, let a failed Cylon retry, caching API reset (unpin all, end uncached ranges), free CCI background state, then the parent's hold phase |
 | Unplug | `cxl_exit()` | Tell the caching API thread to stop, mark the device closing, disable DER, and free the media now or leave that to the last gate holder |
 | Eviction | `femu_cxl_evict()` | Revoke that page only (a ratio-selected page keeps its mapping; its dirty bit is sampled) |
-| Flush, way change, commands 2, 9, 11 | `cxl_flush()`, `cxl_command()` | Revoke all, write back, map a ratio again |
+| Flush, way change, commands 2, 3, 9, 11 | `cxl_flush()`, `cxl_runtime_set()` | Revoke all, write dirty pages back, drop unpinned entries, map a ratio again |
 | Caching API INVALIDATE, CACHE_DISABLE | `cca.c` | Revoke the chunk's pages, or all mappings once for more than 64 candidates |
-| Linked NVMe write, zeroes, copy, deallocate | `femu_cxl_nvme_bh()` | Revoke and drop the pages, without write-back |
+| Linked NVMe write, zeroes, copy, deallocate | `femu_cxl_nvme_bh()` | Revoke and drop the pages without write-back; pinned pages stay, made clean; ratio-selected pages keep their mapping; a range over 64 pages revokes all mappings at once when no ratio is set |
 | Global dirty logging (Cylon) | `cylon_log_start()` | Revoke all, disable Cylon |
 | Memory map change overlapping the window (Cylon) | `cylon_region_change()` | Delete the dual slot; re-admit after fresh checks |
 
@@ -609,11 +620,11 @@ The command table is in the
 available from the host through `control-argument` and `control-command`,
 whatever `lsa-control` says.
 
-**Trust.** The channel lets the guest act on the host. Commands 1, 13 and
-17 create and write files (`cxlssd-stats.log`, `cxlssd-io-N.log`,
-`cxlssd-spt.log`) in `log-dir`, QEMU's working directory by default.
-Commands 91 and 81 write the host's tracefs `trace` and `tracing_on` files
-when `tracefs-dir` is set. The device bounds this: each file stops at
+**Trust.** The channel lets the guest act on the host. Commands 1, 3, 5, 7,
+13 and 17 create or write files (`cxlssd-stats.log`, `cxlssd-io-N.log`,
+`cxlssd-spt.log`) in `log-dir`, QEMU's working directory by default. When
+`tracefs-dir` is set, command 91 truncates the host's tracefs `trace` file
+and writes `tracing_on`, and 81 writes `tracing_on`. The device bounds this: each file stops at
 `log-limit`, statistics appends pass a token bucket (a burst of 64, then 100
 per second), I/O log names cycle through 64 files, and `log-dropped` counts
 what was refused. It does not authenticate the guest. Keep `lsa-control`
@@ -671,8 +682,8 @@ STATUS.FATAL with a reason and stops the device side until RESET.
 | Command | Effect |
 | --- | --- |
 | NOP | Status 0 |
-| PIN | All or nothing (`-ENOSPC` if a set lacks room). Resident pages are pinned; others are filled by a NAND read, then pinned |
-| UNPIN | Returns pinned pages to the queue a fresh insert would join; dirty state is kept |
+| PIN | Room is checked for the whole range first (`-ENOSPC`). Resident pages are pinned; others are filled by a NAND read, then pinned. A later fill failure (`-EIO`) or a way change between chunks (`-EAGAIN`) leaves the pages already pinned. `-EBUSY` on an uncached page, `-EOPNOTSUPP` without a cache |
+| UNPIN | Returns pinned pages to `main` under S3-FIFO with more than one way, else to the tail of `small`; dirty state is kept |
 | INVALIDATE | Revoke mappings, write dirty pages back, drop them; pinned pages need `CCA_F_FORCE` |
 | CACHE_DISABLE | Mark pages uncached, then drop resident ones as INVALIDATE does |
 | CACHE_ENABLE | End the uncached marking |
@@ -773,15 +784,15 @@ case and the realize messages.
 | vCPU | MMIO overlay callback, the whole access path, Get LSA | BQL, gate, page holds; drops the BQL to wait for the worker and for the media delay |
 | `femu-cxl-ftl` | `cxl_worker()`: every FTL request of the medium | `s->lock` only; never the BQL, never guest memory |
 | `femu-cxl-cca` | Caching API commands | BQL, gate per chunk, `cca->lock` for the doorbell flag |
-| QEMU main loop | QMP `qom-set` (flush, way change, control commands), queued LSA commands, NVMe drop BH, Cylon install BH | BQL, gate |
+| QEMU main loop | QMP `qom-set` (flush, way change, control commands), queued LSA commands, NVMe drop BH, Cylon install BH | BQL; the gate, except the Cylon install BH, which pauses all vCPUs instead |
 | NVMe FTL thread (linked controller) | NVMe I/O on the shared FTL (`femu_cxl_nvme_ftl()`) | `s->lock`; never the BQL |
 | NVMe pollers (linked controller) | Hold a completion until its cache drop is published | Read `nvme_done` only |
 
 Latency model (`femu_cxl_media()`, `femu_cxl_delay()` in `cxlssd.c`):
 
 - Each FTL request is stamped `now + op.ns`, so the media operations of one
-  access (a victim write-back, then a fill) are serialized in modelled time,
-  and the returned latencies accumulate in `op.ns` and in `media-time-ns`.
+  access (a fill, then the write-back of the victim its insert evicts) are
+  serialized in modelled time, and the returned latencies accumulate in `op.ns` and in `media-time-ns`.
 - After its media work, the access waits `op.ns` minus the time already
   spent, with the BQL released. The wait sleeps until 100 us before the
   deadline and spins on the realtime clock for the last 100 us
@@ -809,15 +820,16 @@ the binary. This table explains how they interact.
 | [Backend](../reference/properties.md#inherited-from-cxl-type3) | `volatile-memdev` | Required and the only backend accepted: `memdev`, `persistent-memdev`, `volatile-dc-memdev` and `num-dc-regions` are refused, and `lsa` only with `lsa-control=off`. Size a nonzero multiple of 256 MiB, at most 120 GiB. `der=cylon` needs it hugetlbfs, `share=on`, `prealloc=on` |
 | [Cache](../reference/properties.md#cache) | `cache-pages`, `cache-policy` | `cache-pages=0` disables the cache. Otherwise at most the media page count and divisible by `cache-ways` |
 | [Cache tunables](../reference/runtime-properties.md#cache-tunables-also-accepted-on--device) | `cache-ways`, `prefetch-degree`, `prefetch-stride` | Accepted on `-device` and changeable with `qom-set`. Ways must be nonzero and divide `cache-pages`. Prefetch values are bounded by the media page count; the effective degree is capped at `cache-pages` |
-| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must cover the media. With no spare blocks, `media-full` rises. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these govern the NVMe namespace too and the controller's own geometry and timing properties are ignored |
+| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must cover the media. With no spare blocks, `media-full` rises. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these also apply to the NVMe namespace and the controller's own geometry and timing properties are ignored |
 | Cylon media switches (same table) | `cylon-first-touch-program`, `cylon-free-writeback` | Change the media model to match published Cylon experiments; off for normal use |
 | [Direct mapping](../reference/properties.md#direct-mapping-der) | `der`, `der-replace-rate`, `cylon-kernel-ack`, `concurrent-misses` | `der=memslot` is refused under TCG. `der=cylon` without `cylon-kernel-ack=on` is refused. `der-replace-rate` matters only for `memslot`. `concurrent-misses=auto` follows whether DER is available |
 | [Caching API, control channel and logs](../reference/properties.md#caching-api-control-channel-and-logs) | `cca`, `lsa-control`, `log-dir`, `tracefs-dir`, `log-limit` | `cca=off` registers no BAR5. `lsa-control=on` refuses an `lsa` backend. `log-limit=0` opens no I/O log and takes no statistics appends. `tracefs-dir` unset makes commands 91 and 81 no-ops on the host |
 | [Actions and control](../reference/runtime-properties.md#actions-and-control) | `der-ratio`, `control-command`, `control-argument`, `control-status`, `flush-cache`, `stats-reset` | Run time only. `der-ratio` needs a direct mode and no uncached ranges; `memslot` refuses a ratio that needs more aliases than are free |
 
 `run-cxlssd.sh` uses defaults that follow Cylon's launch script and differ
-from the device's (direct-mapped cache, 8 by 8 channels and LUNs,
-`lsa-control=on`); the [guide](../modes/cxl-ssd.md#with-run-cxlssdsh) has
+from the device's (a cache of 1/20 of the media, direct mapped, 8 by 8
+channels and LUNs, `lsa-control=on`, and no spare NAND blocks for the `48G`
+and `96G` presets); the [guide](../modes/cxl-ssd.md#with-run-cxlssdsh) has
 the table.
 
 ## Counters
@@ -876,7 +888,8 @@ has the exact list.
 - With `der=off`, `lock`-prefixed operations to the window are not atomic.
 - Direct hits are untimed and uncounted, and do not update CLOCK or S3-FIFO
   reference state.
-- `der=memslot` maps at most 1024 pages at once across all devices.
+- `der=memslot` holds at most 1024 aliases at once across all devices: one
+  page each for cache mappings, while a ratio run counts as one alias.
 - `der=cylon` needs the fixed host kernel and has the host restrictions and
   the 2 MiB first-touch effect described above.
 - The caching API data rings are not implemented; their header fields are 0.
@@ -885,15 +898,16 @@ has the exact list.
 
 | To add | Change | Check |
 | --- | --- | --- |
-| A cache policy | `FemuCxlPolicy` in `cache.h`, the name table in `femu_cxl_policy()`, insert and victim rules in `femu_cxl_cache_insert()` and `cache_evict()` in `cache.c`, the `cache-policy` description in `props.c` | `test-cxl-cache.c` builds `cache.c` without QEMU; add ordering cases there first |
+| A cache policy | `FemuCxlPolicy` in `cache.h`, the name table in `femu_cxl_policy()`, insert and victim rules in `femu_cxl_cache_insert()` and `cache_evict()` and the requeue rule in `femu_cxl_cache_unpin()` in `cache.c`, the name table in `cxl_policy_name()` and the realize error message in `qemu-adapter.c`, the `cache-policy` description in `props.c` | `test-cxl-cache.c` builds `cache.c` without QEMU; add ordering cases there first |
 | A counter | A QOM property in `cxl_init()` in `qemu-adapter.c` and its description in `cxl_runtime_descs` in `props.c` | `gen-property-docs.py --check` fails until the description exists and `reference/runtime-properties.md` is regenerated |
-| A control command | `cxl_command()` in `qemu-adapter.c`; add it to `cxl_lsa_inline()` only if it never needs the gate exclusively | qtests `cxl-control-qom` and `cxl-control-lsa` run the same table both ways |
-| A caching API command | The command enum in `cca-abi.h` (raise `CCA_LAYOUT_VERSION` if the layout changes), `cca_validate()` and the per-page handler table in `cca_exec()` in `cca.c`, the guest library in `hw/femu/tools/cca/` | `test-cxl-cca-ring.c` and the `cxl-cca-*` qtests |
+| A control command | `cxl_command()` in `qemu-adapter.c`; add it to `cxl_lsa_inline()` only if it never drops the BQL (no media wait, flush or way change) | qtests `cxl-control-qom` and `cxl-control-lsa` run the same table both ways |
+| A caching API command | The command enum in `cca-abi.h` (raise `CCA_LAYOUT_VERSION` if the layout changes), `cca_validate()`, `cca_prepare()` and the per-page handler table in `cca_exec()` in `cca.c`, the guest library in `hw/femu/tools/cca/` | `test-cxl-cca-ring.c` and the `cxl-cca-*` qtests |
 | A direct mapping mode | The `der` check in `cxl_realize()`, `femu_cxl_der_init()`, and the map, remove, sample and clear entry points in `qemu-adapter.c` | Every invalidation trigger in the table above must reach it |
 | Another media model | `cxl_worker()` calls `bb_ftl_process_req()`; replace the call and the FTL construction in `femu_cxl_start()` | Keep the worker free of guest memory: payload copies stay on the vCPU thread, and any future worker-side copy must use `femu_dma_rw()` |
 
-Keep new QEMU or KVM dependencies in `qemu-adapter.c`, so `cxlssd.c`,
-`cache.c` and the CCA ring code stay testable on their own.
+Keep new QEMU or KVM dependencies in `qemu-adapter.c`, so `cache.c`,
+`cca-ring.c`, `spte.h` and `spt.h` stay testable without QEMU and
+`cxlssd.c` stays free of CXL and KVM details.
 
 ## Source map
 
