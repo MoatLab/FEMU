@@ -260,12 +260,13 @@ MODES = [
                    "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M",
         "io": "none",
         "guest_kernel": "`CONFIG_CXL_BUS`, `CXL_PCI`, `CXL_ACPI`, "
-                        "`CXL_MEM`, `CXL_PORT`, `CXL_REGION`, `DEV_DAX`, "
-                        "`DEV_DAX_KMEM`",
+                        "`CXL_MEM`, `CXL_PORT`, `CXL_REGION`, "
+                        "`CXL_REGION_INVALIDATION_TEST` (in a VM), "
+                        "`DEV_DAX`, `DEV_DAX_CXL`, `DEV_DAX_KMEM`",
         "guest_tools": "`cxl-cli`, `daxctl`, `ndctl`",
         "host": "a build with `CONFIG_CXL_MEM_DEVICE`",
         "launcher": "run-cxlssd.sh",
-        "guide": "hw/femu/docs/cxlssd.md",
+        "guide": "hw/femu/docs/modes/cxl-ssd.md",
         "guest_check": None,
     },
     {
@@ -288,7 +289,7 @@ MODES = [
         "guest_tools": "as for `der=off`",
         "host": "KVM (TCG is refused)",
         "launcher": "run-cxlssd.sh",
-        "guide": "hw/femu/docs/cxlssd.md",
+        "guide": "hw/femu/docs/modes/cxl-ssd.md#dermemslot",
         "guest_check": None,
     },
     {
@@ -316,7 +317,7 @@ MODES = [
                 "4 KiB host pages; a shared, preallocated hugetlb backend. "
                 "Without them the device warns and uses MMIO",
         "launcher": "run-cxlssd.sh",
-        "guide": "hw/femu/docs/cxlssd.md",
+        "guide": "hw/femu/docs/modes/cxl-ssd.md#dercylon",
         "guest_check": None,
     },
     {
@@ -340,7 +341,7 @@ MODES = [
                        "root",
         "host": "as for `der=off`",
         "launcher": "run-cxlssd.sh",
-        "guide": "hw/femu/tools/cca/README.md",
+        "guide": "hw/femu/docs/features/cxl-cca.md",
         "guest_check": None,
     },
     {
@@ -365,7 +366,7 @@ MODES = [
         "guest_tools": "as for `der=off`, plus nvme-cli",
         "host": "as for `der=off`",
         "launcher": None,
-        "guide": "hw/femu/docs/cxlssd.md",
+        "guide": "hw/femu/docs/features/cxl-nvme-link.md",
         "guest_check": None,
     },
 ]

@@ -31,7 +31,9 @@ and what the guest needs. In short:
 | A key-value SSD | KV (`femu_mode=5`) | none | [README](../../../README.md#key-value-ssd-mode-kvssd); `modes/kvssd.md` coming |
 | Computational storage | CSD (`femu_mode=4`) | `run-csd.sh` | [README](../../../README.md#computational-storage-mode-csd), [CSD guest tools](../tests/csd/README.md); `modes/csd.md` coming |
 | Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | `modes/fdp.md` coming |
-| A CXL memory-semantic SSD | `femu-cxl-ssd` device | `run-cxlssd.sh` | [CXL SSD design](cxlssd.md); `modes/cxl-ssd.md` coming |
+| A CXL memory-semantic SSD | `femu-cxl-ssd` device | `run-cxlssd.sh` | [CXL SSD](modes/cxl-ssd.md), [design note](cxlssd.md) |
+| Guest control of the CXL SSD cache: pin, drop, uncached ranges | `femu-cxl-ssd,cca=on` | `run-cxlssd.sh` | [CXL caching API](features/cxl-cca.md) |
+| The CXL SSD medium also as an NVMe namespace | `femu,femu_mode=1,cxl_ssd=<id>` | `run-cxlssd.sh` plus `-device femu,...` | [CXL NVMe link](features/cxl-nvme-link.md) |
 | Several namespaces on one controller | any NVMe mode | | [README](../../../README.md#multiple-namespaces); `modes/multi-namespace.md` coming |
 
 The guest kernel each mode needs is in
