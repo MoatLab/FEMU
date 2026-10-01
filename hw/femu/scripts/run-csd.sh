@@ -30,7 +30,8 @@ gc_thres_pcent_high=95
 
 # FEMU CSD parameters. nr_thread, time_slice and context_switch_time are
 # accepted for CEMU config compatibility but configure a scheduler this port
-# does not carry, so they have no effect.
+# does not carry, so they have no effect; values other than these defaults
+# print a warning.
 fdm_size=64
 nr_cu=4
 nr_thread=4

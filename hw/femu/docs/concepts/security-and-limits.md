@@ -154,18 +154,24 @@ CXL SSD guide has them under "Limits".
 
 ### Properties that are accepted but do nothing
 
-These are kept so that old command lines still start. Setting them changes
-nothing the guest can observe:
+These are kept so that old command lines still start. Nothing reads them, so
+setting them changes nothing the guest can observe. A value other than the
+default prints one warning at realize, for example
+`warning: femu: dlfeat has no effect and is accepted only for compatibility`:
 
 | Property | Why |
 | --- | --- |
 | `serial` | Identify Controller reports a serial number FEMU generates |
-| `ms` | the metadata size comes from `meta` |
+| `ms` | the metadata size comes from `meta` (the warning says so) |
 | `dlfeat` | Identify Namespace always reports 0x9 |
-| `ms_max` (OCSSD 2.0) | the controller reports a single LBA format (NLBAF 0) |
-| `tplpbsy`, `tplrbsy`, `trcbsy` | programs and reads are issued one plane at a time, and the cache read model is not enabled |
-| `nr_thread`, `time_slice`, `context_switch_time` (CSD) | accepted for CEMU configurations; `nr_thread` must still be non-zero |
-| `intc`, `intc_thresh`, `intc_time` | `intc_thresh` and `intc_time` are reported in Interrupt Coalescing (feature 08h) and `intc` (0 or 1) in Interrupt Vector Configuration (09h); interrupts are not coalesced |
+| `ms_max` | OCSSD 2.0 reports a single LBA format (NLBAF 0), and no other mode reads it |
+| `tplpbsy`, `tplrbsy`, `trcbsy` | programs and reads are issued one plane at a time, and no mode enables the cache read model |
+| `nr_thread`, `time_slice`, `context_switch_time` (CSD) | accepted for CEMU configurations; CSD still refuses `nr_thread=0` |
+
+`intc`, `intc_thresh` and `intc_time` do not warn, because Get Features
+returns them: `intc_thresh` and `intc_time` in Interrupt Coalescing (feature
+08h) and `intc` (0 or 1) in Interrupt Vector Configuration (09h). Interrupts
+are still not coalesced.
 
 The [property reference](../reference/properties.md) says this in each
 description, and `-device femu,help` prints the same text.

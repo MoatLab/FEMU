@@ -97,7 +97,8 @@ namespace; see the [BlackBox guide](blackbox.md#configuration).
   (default 3).
 - `csd_program_dir`: the host directory programs load from.
 - `nr_thread`, `time_slice` and `context_switch_time` are accepted so CEMU
-  configurations still start. They have no effect.
+  configurations still start. They have no effect, and a value other than
+  the default prints a warning at realize.
 
 A copy from the namespace into device memory costs one `pg_rd_lat`,
 whatever its size, when any page of the range has been written, and nothing

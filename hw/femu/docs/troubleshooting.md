@@ -275,9 +275,9 @@ and mode; double the commas inside them on the QEMU command line:
 -device femu,id=nvme0,devsz_mb=4096,femu_mode=1,namespaces=2,namespace_sizes=3G,,1G -device femu,id=nvme1,devsz_mb=1024,femu_mode=3
 ```
 
-The `serial` property has no effect: each controller reports a serial
-number made of a mode prefix (`vSSD`, `vZNSSD`, `vNoSSD` and so on) and
-that mode's own counter, which advances once for each namespace the mode
+The `serial` property has no effect, and setting it prints a warning at
+realize. Each controller reports a serial number made of a mode prefix
+(`vSSD`, `vZNSSD`, `vNoSSD` and so on) and that mode's own counter, which advances once for each namespace the mode
 sets up. In the example above the serials are `vSSD1` and `vZNSSD0`. Names under `/dev/disk/by-id` therefore depend on the order of
 the `-device` options.
 

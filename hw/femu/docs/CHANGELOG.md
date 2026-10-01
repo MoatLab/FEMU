@@ -159,6 +159,10 @@ was not doing anything.
 - A format with protection information but no metadata room for it (1c9808bcd).
 - On `femu-cxl-ssd`, a direct ratio without DER, and `der=memslot` under TCG (34b9f8f9e, d03b0606e, f1182b72e).
 
+#### Accepted with a warning (still no effect)
+
+- `serial`, `ms`, `ms_max`, `dlfeat`, `tplpbsy`, `tplrbsy`, `trcbsy`, and the CSD `nr_thread`, `time_slice` and `context_switch_time` are still accepted, but nothing reads them, so a value other than the default now prints one warning at realize naming the property; for `ms` it points to `meta` (f67568880).
+
 #### Behaviour changes (still boots, numbers move)
 
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
