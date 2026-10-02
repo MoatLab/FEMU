@@ -57,6 +57,8 @@ void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
                     uint32_t xfer)
 {
     int upper = n->flash_type - 1;
+    /* the pollers read these per command; keep a command from mixing them */
+    bool resume = nvme_pause_pollers(n);
 
     n->oc_pg_rd_lat[upper] = rd_upper;
     n->oc_pg_wr_lat[upper] = wr_upper;
@@ -64,6 +66,7 @@ void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
     n->oc_pg_wr_lat[0] = wr_lower;
     n->oc_blk_er_lat = erase;
     n->oc_chnl_pg_xfer_lat = xfer;
+    nvme_resume_pollers(n, resume);
 }
 
 typedef struct OcChannelReservation {
