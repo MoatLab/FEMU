@@ -150,6 +150,18 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
 }
 
 /*
+ * The handle's active unit filled with nothing free to follow it. Point both
+ * views away from the retired unit: collection can free it and hand it to
+ * another handle, whose remaining room the host would then be shown here.
+ */
+static void fdp_drop_active_ru(FemuRuHandle *ruh, uint16_t rgidx)
+{
+    ruh->curr_ru = NULL;
+    ruh->rus[rgidx] = NULL;
+    ruh->ruh->rus[rgidx] = &ruh->no_ru;
+}
+
+/*
  * fdp_get_new_page - get next PPA from an RU's write pointer
  */
 static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
@@ -273,9 +285,11 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                         ruh->curr_ru = NULL;
                         return NULL;
                     }
-                    FDP_TRACE(ssd, "RU_ROTATE ruhid=%u(curr_ru %u) old_ru=%u "
+                    FDP_TRACE(ssd, "RU_ROTATE ruhid=%u old_ru=%u "
                               "new_ru=%u reason=%s victim_ru_cnt %d\n",
-                              ruh->ruhid, ruh->curr_ru->ruidx, ru->ruidx, new_ru->ruidx, (is_full)? "full_valid":"full_victim", rm->victim_ru_cnt);
+                              ruh->ruhid, ru->ruidx, new_ru->ruidx,
+                              is_full ? "full_valid" : "full_victim",
+                              rm->victim_ru_cnt);
                     wpp = new_ru->ssd_wptr;
                     wpp->blk = wpp->curline->id;
                     check_addr(wpp->blk, spp->blks_per_pl);
@@ -826,6 +840,8 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
             ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
             ssd->ruhs[gcruh_id].curr_ru = ret_ru;
             ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
+        } else if (!ret_ru) {
+            fdp_drop_active_ru(dest_ruh, dest_ru->rgidx);
         }
     }
 
@@ -1339,10 +1355,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
             ruh->ruh->rus[rgid] = ret->nvme_ru;
             ru = ret;
         } else if (!ret) {
-            /*
-             * fdp_advance_ru_pointer cleared curr_ru (no free RU).
-             * The while loop at the top of next iteration will handle it.
-             */
+            /* no free unit; the next page or command fails for it */
+            fdp_drop_active_ru(ruh, rgid);
             ru = NULL;
         }
 

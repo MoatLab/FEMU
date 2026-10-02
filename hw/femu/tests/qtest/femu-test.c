@@ -2735,14 +2735,26 @@ static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
     return FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
 }
 
+static uint64_t femu_ruh_ruamw(FemuCtrlState *c, uint64_t buf, uint16_t pid);
+
+/* pages garbage collection relocated, from the C0h log */
+static uint64_t femu_gc_pages(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, 512, 0)),
+                    ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, buf + 16);
+}
+
 /*
- * With forced collection held off, random writes over every handle leave the
- * device with no free unit and a collection frontier dropped part way through
- * a victim. Deallocating the whole namespace then leaves only units with
- * nothing valid in them. Collection used to need a frontier before it looked
- * at the victim, and could only derive one from the handle's active unit, so
- * once both were gone it never ran again and the empty namespace took no
- * write.
+ * With forced collection waiting until no unit is free, random writes over
+ * every handle leave the device with no free unit and a collection frontier
+ * dropped part way through a victim. Deallocating the whole namespace then
+ * leaves only units with nothing valid in them. Collection used to need a
+ * frontier before it looked at the victim, and could only derive one from the
+ * handle's active unit, so once both were gone it never ran again and the
+ * empty namespace took no write. Once it runs, the frontiers have to be taken
+ * again for pages that are still valid, and a handle left without a unit must
+ * not report the room of a unit another handle has since been given.
  */
 static void femu_test_fdp_gc_recover(void *obj, void *data,
                                      QGuestAllocator *alloc)
@@ -2752,13 +2764,15 @@ static void femu_test_fdp_gc_recover(void *obj, void *data,
     FemuCtrlState c = { 0 };
     const uint32_t pages = 256;
     const int handles = 4;
+    const int last = handles - 1;
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t list = guest_alloc(alloc, 4096);
-    uint64_t lost, mapped, orphans;
+    uint64_t lost, mapped, orphans, gc;
+    uint64_t ruamw[4];
     uint32_t seed = 7;
     uint32_t full = 0;
     uint16_t status;
-    int i;
+    int i, h;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -2784,25 +2798,45 @@ static void femu_test_fdp_gc_recover(void *obj, void *data,
     g_assert_cmpuint(full, >, 0);
 
     g_assert_cmphex(femu_dealloc_pages(&c, 0, pages, buf), ==, NVME_SUCCESS);
-    qtest_memset(qts, buf, 0x3c, 4096);
-    full = 0;
-    for (i = 0; i < pages; i += 64) {
-        status = FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
-                                                 (i / 64) % handles));
-        full += status == NVME_CAP_EXCEEDED;
+    for (h = 0; h < last; h++) {
+        ruamw[h] = femu_ruh_ruamw(&c, buf, h);
     }
-    for (i = 0; i < 64; i++) {
-        seed = seed * 1103515245 + 12345;
-        status = FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) % pages, 1,
-                                                 buf, list, handles - 1));
-        full += status == NVME_CAP_EXCEEDED;
+
+    /*
+     * The whole namespace again, then single pages until valid ones have
+     * moved, all through the last handle: the initially isolated one when
+     * there is one, which collects into its own active unit.
+     */
+    qtest_memset(qts, buf, 0x3c, 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        last)),
+                        ==, NVME_SUCCESS);
+    }
+    for (h = 0; h < last; h++) {
+        g_assert_cmpuint(femu_ruh_ruamw(&c, buf, h), ==, ruamw[h]);
+    }
+    /*
+     * With no unit kept free, a persistently isolated handle whose collection
+     * unit was dropped cannot take another while forced collection runs, so
+     * only the initially isolated one, which collects into its active unit,
+     * can be asked to move valid pages now.
+     */
+    if (data) {
+        gc = femu_gc_pages(&c, list);
+        for (i = 0; i < 1024 && femu_gc_pages(&c, list) < gc + 64; i++) {
+            seed = seed * 1103515245 + 12345;
+            qtest_memset(qts, buf, 0x3c, 4096);
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c,
+                                        (seed >> 8) % pages, 1, buf, list,
+                                        last)), ==, NVME_SUCCESS);
+        }
+        g_test_message("recovered: %d writes moved %" PRIu64 " valid pages",
+                       i, femu_gc_pages(&c, list) - gc);
+        g_assert_cmpuint(femu_gc_pages(&c, list), >=, gc + 64);
     }
 
     femu_ftl_check(qts, &mapped, &lost, &orphans);
-    g_test_message("recovered: capacity exceeded %u times, %" PRIu64 " of %"
-                   PRIu64 " mappings lost, %" PRIu64 " orphans", full, lost,
-                   mapped, orphans);
-    g_assert_cmpuint(full, ==, 0);
     g_assert_cmpuint(mapped, ==, pages);
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
@@ -19263,7 +19297,7 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub"
     });
-    /* forced collection off, so a frontier can be dropped */
+    /* forced only with no unit free, so a frontier can be dropped */
     qos_add_test("fdp-gc-recover", "femu", femu_test_fdp_gc_recover,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -19276,7 +19310,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=23,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub-ii"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub-ii",
+        .arg = (void *)1,
     });
     qos_add_test("flush-without-vwc", "femu", femu_test_flush_without_vwc,
                  &(QOSGraphTestOptions) {

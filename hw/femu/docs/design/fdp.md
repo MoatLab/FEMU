@@ -175,7 +175,8 @@ namespace `ssd_fdp_update_ruhs()` then, for each handle:
 
 I/O Management Receive with operation 1 (RUH Status) returns one descriptor
 per placement handle and reclaim group: PID, RUHID, EARUTR (always 0) and
-the RUAMW of the handle's current unit.
+the RUAMW of the handle's current unit, or 0 while the handle has none
+because its last unit filled with no free unit to follow it.
 
 ## Garbage collection
 

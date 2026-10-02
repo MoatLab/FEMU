@@ -337,6 +337,8 @@ struct FemuRuHandle {
     FemuReclaimUnit **rus;
     FemuReclaimUnit *curr_ru;
     FemuReclaimUnit *gc_ru;
+    /* what the host is shown while the handle has no unit: no room */
+    NvmeReclaimUnit no_ru;
     struct ru_mgmt *ru_mgmt;
     uint64_t hbmw;
     uint64_t mbmw;
