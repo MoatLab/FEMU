@@ -91,10 +91,17 @@ the fence. GitHub does not show it and still highlights the block.
 
 ### What the example check does
 
-1. QEMU starts with the example's FEMU devices, their memory backends and
-   CXL topology, and its `-machine` options (q35 when none is given), under
-   `-accel qtest -S`. Options that need a guest or host resource are dropped:
-   `-enable-kvm`, `-cpu`, `-smp`, `-m`, `-drive`, `-net`, guest disks, `-qmp`.
+1. QEMU starts with every `-device` of the example, in its order, plus the
+   memory backends and `-machine` options (q35 when none is given), under
+   `-accel qtest -S`. Guest disks and NICs are realized too, so one the
+   machine cannot plug where it lands fails here: on a `cxl=on` machine a
+   `virtio-net-pci` or `virtio-blk-pci` without `bus=pcie.0` fails with
+   "Only PCI/PCIe bridges can be plugged into pxb-cxl". Their backends are
+   replaced by stand-ins that touch nothing on the host: each `-drive` by a
+   `null-co` block device with the same `id` and `if`, each `-netdev` and
+   `-net user` by user networking with no forwarded ports (so the QEMU under
+   test needs `--enable-slirp`). The other options are dropped, among them
+   `-enable-kvm`, `-cpu`, `-smp`, `-m`, `-numa`, `-name` and `-qmp`.
    QMP must show every `femu`, `femu-subsys` and `femu-cxl-ssd` created, and
    `query-pci` must list each `femu` as an NVMe controller. Anything on
    stderr fails the example, except FEMU's `[FEMU] Log:` lines, the notice
@@ -102,7 +109,9 @@ the fence. GitHub does not show it and still highlights the block.
    `RLIMIT_MEMLOCK` so that it never pins), and allowed warnings. Test-only
    properties (`x-...`) are refused.
 2. For an example with an NVMe controller, the `doc-examples` case in
-   `hw/femu/tests/qtest/femu-test.c` starts the same options, enables each
+   `hw/femu/tests/qtest/femu-test.c` starts the FEMU devices, the CXL
+   topology and the memory backends from step 1, without the guest's disks
+   and NICs, enables each
    controller, sends Identify, and writes and reads back one block of
    namespace 1 (stores and retrieves one value in KV mode). Open-Channel
    controllers stop after Identify. A controller whose namespace 1 is not
@@ -114,7 +123,10 @@ anything done inside the guest are outside what it can see.
 
 `--self-test` runs planted mistakes (an untagged block, a misspelled
 property, `femu_mode=9`, a warning-only `der=cylon`, an I/O-only failure, a
-test-only property) and requires each to fail with the expected message, so
+test-only property, a `virtio-net-pci` without `bus=` on a `cxl=on` machine,
+a guest disk naming a drive that does not exist) and requires each to fail
+with the expected message, and two good examples, one with guest devices on
+a CXL machine, to pass, so
 a check that stopped catching them fails rather than passing everything.
 
 ```sh

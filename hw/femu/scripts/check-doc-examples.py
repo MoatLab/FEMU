@@ -34,17 +34,22 @@ a run-*.sh launcher other than run-guest-ssh.sh.
 Each femu-example (and each entry's example in hw/femu/docs/modes.py) is
 then run in two stages:
 
-  1. QEMU starts with the example's FEMU-related options under
-     `-accel qtest -S` (q35 unless the example names a machine). Options that
-     need a guest or a host resource (-enable-kvm, -cpu, -drive, -net, guest
-     disks, -qmp, -m) are dropped. QMP must report every femu, femu-subsys
+  1. QEMU starts with the example's devices under `-accel qtest -S` (q35
+     unless the example names a machine). Every -device is kept, in its
+     place on the command line, so a guest disk or NIC that the machine
+     cannot plug where it lands fails here. The backends they need are
+     replaced by stand-ins: each -drive by a null block device with the same
+     id and interface, each -netdev and -net user by user networking with no
+     forwarded ports. Options that need a guest or a host resource
+     (-enable-kvm, -cpu, -qmp, -m) are dropped. QMP must report every femu, femu-subsys
      and femu-cxl-ssd the example creates, query-pci must list each femu as
      an NVMe controller, and QEMU must print nothing on stderr except
      FEMU's informational "[FEMU] Log:" lines, the memory-pinning notice
      (the run lowers RLIMIT_MEMLOCK so it never pins) and the example's
      allow-warning text. Any QEMU warning or "[FEMU] Err:" line fails.
   2. For examples with an NVMe controller, the FEMU qtest doc-examples case
-     (hw/femu/tests/qtest/femu-test.c) starts the same options, enables each
+     (hw/femu/tests/qtest/femu-test.c) starts the FEMU devices and what they
+     need (the -device types in KEEP_DEVICES and every -object), enables each
      controller, sends Identify, and does one write and read back (or a
      key-value store and retrieve) on namespace 1.
 
@@ -88,6 +93,8 @@ ENV_RE = re.compile(r"^[A-Za-z_]\w*=")
 # The notice backend/dram.c prints when it cannot lock the device memory. The
 # run lowers RLIMIT_MEMLOCK, so every NVMe example prints it.
 PIN_NOTICE = re.compile(r"cannot pin the \d+ MiB memory backend")
+# -drive keys that say where the disk is attached rather than what backs it
+DRIVE_KEEP = ("if", "id", "index", "bus", "unit", "media")
 # FEMU's informational messages (femu_log, the FDP setup log); they report
 # what the device built, not a problem with the options.
 INFO_LINE = re.compile(r"^\[FEMU\] (Log|FDP-Log): ")
@@ -107,7 +114,7 @@ OPT_FLAG = {
     "-no-reboot", "-no-shutdown", "-nodefaults", "-mem-prealloc", "-s",
     "-no-user-config", "-full-screen",
 }
-# -device types that are kept; every other device belongs to the guest
+# -device types the I/O stage keeps; the others belong to the guest
 KEEP_DEVICES = {"femu", "femu-subsys", "femu-cxl-ssd", "pxb-cxl", "cxl-rp",
                 "cxl-upstream", "cxl-downstream"}
 COUNTED = ("femu", "femu-subsys", "femu-cxl-ssd")
@@ -382,10 +389,35 @@ def capture_launcher(ex, tmp):
         return [a for a in f.read().split("\0")[:-1]]
 
 
+def split_opts(val):
+    """Split a QEMU option string at single commas; ',,' is an escaped comma."""
+    return re.split(r"(?<!,),(?!,)", val)
+
+
+def stand_in(opt, val):
+    """The backend option realize() uses in place of a guest disk or network:
+    the same id and attachment, with nothing on the host behind it."""
+    parts = split_opts(val)
+    if opt == "-drive":
+        keep = [p for p in parts if p.split("=", 1)[0] in DRIVE_KEEP]
+        return ["-drive", ",".join(keep + ["driver=null-co", "read-zeroes=on"])]
+    if opt == "-netdev":
+        ids = [p for p in parts[1:] if p.startswith("id=")]
+        return ["-netdev", ",".join(["user"] + ids)]
+    if opt == "-net" and parts[0] == "user":
+        return ["-net", "user"]
+    if opt == "-net":
+        return ["-net", val]
+    return []
+
+
 def reduce_argv(argv, where):
-    """Keep the options that create FEMU devices and what they need."""
+    """Return the options for the realize stage (every device, backends
+    replaced by stand-ins) and for the I/O stage (FEMU devices and what they
+    need), the FEMU device counts, and each controller's I/O mode."""
     machine = []
     kept = []
+    full = []
     counts = {t: 0 for t in COUNTED}
     modes = []
     i = 0
@@ -404,7 +436,7 @@ def reduce_argv(argv, where):
         val = argv[i + 1]
         i += 2
         if opt in ("-machine", "-M"):
-            val = ",".join(p for p in re.split(r"(?<!,),(?!,)", val)
+            val = ",".join(p for p in split_opts(val)
                            if not p.startswith("accel="))
             if val:
                 machine += ["-machine", val]
@@ -413,13 +445,14 @@ def reduce_argv(argv, where):
             driver = val.split(",", 1)[0]
             if driver.startswith("driver="):
                 driver = driver[len("driver="):]
-            if driver not in KEEP_DEVICES:
-                continue
-            for p in re.split(r"(?<!,),(?!,)", val)[1:]:
+            for p in split_opts(val)[1:]:
                 key = p.split("=", 1)[0]
                 if key.startswith("x-"):
                     raise ValueError(f"{where}: {key} is a test-only property; "
                                      "documentation must not use it")
+            full += ["-device", val]
+            if driver not in KEEP_DEVICES:
+                continue
             if driver in counts:
                 counts[driver] += 1
             if driver == "femu":
@@ -427,11 +460,15 @@ def reduce_argv(argv, where):
             kept += ["-device", val]
         elif opt == "-object":
             kept += ["-object", drop_ellipsis_device(val)]
+            full += ["-object", drop_ellipsis_device(val)]
         elif opt == "-global" and val.startswith("femu"):
             kept += ["-global", val]
+            full += ["-global", val]
+        elif opt in ("-drive", "-netdev", "-net"):
+            full += stand_in(opt, val)
     if not machine or not machine[1].split(",")[0] or "=" in machine[1].split(",")[0]:
         machine = ["-machine", "q35"] + machine
-    return machine + kept, counts, modes
+    return machine + full, machine + kept, counts, modes
 
 
 def femu_io(val):
@@ -580,7 +617,7 @@ def run_examples(examples, args, quiet=False):
                 argv = ex.argv
                 if ex.script:
                     argv = capture_launcher(ex, os.path.join(tmp, ex.name)) + ex.argv
-                qargs, counts, ios = reduce_argv(argv, ex.where)
+                full, qargs, counts, ios = reduce_argv(argv, ex.where)
             except (ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
                 failures.append((ex, [str(e)]))
                 continue
@@ -588,9 +625,10 @@ def run_examples(examples, args, quiet=False):
                 ios = [ex.io] * len(ios)
             if args.list:
                 print(f"{ex.name} ({ex.where}): io={','.join(ios) or 'none'}\n"
-                      f"    {shlex.join(qargs)}")
+                      f"    realize: {shlex.join(full)}\n"
+                      f"    I/O:     {shlex.join(qargs)}")
                 continue
-            problems = realize(args.qemu, qargs, counts, ex.allow, args.timeout)
+            problems = realize(args.qemu, full, counts, ex.allow, args.timeout)
             if problems:
                 failures.append((ex, problems))
             elif counts["femu"] and any(io != "none" for io in ios):
@@ -644,9 +682,36 @@ SELF_TEST = [
      "<!-- femu-example: st-test-only -->\n```sh\n"
      "-device femu,femu_mode=2,x-ns-test=on\n```\n",
      "test-only property"),
+    ("cxl-nic-without-bus",
+     "<!-- femu-example: st-cxl-nic -->\n```sh\n"
+     "-machine q35,cxl=on -object memory-backend-ram,id=m,size=256M "
+     "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+     "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+     "-device femu-cxl-ssd,bus=rp0,volatile-memdev=m "
+     "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M "
+     "-netdev user,id=net0,hostfwd=tcp::8080-:22 "
+     "-device virtio-net-pci,netdev=net0\n```\n",
+     "Only PCI/PCIe bridges can be plugged into pxb-cxl"),
+    ("missing-backend",
+     "<!-- femu-example: st-no-drive -->\n```sh\n"
+     "-device femu,femu_mode=1,devsz_mb=1024 "
+     "-device virtio-blk-pci,drive=nothere\n```\n",
+     "nothere"),
     ("passes",
      "<!-- femu-example: st-good -->\n```sh\n"
      "-device femu,femu_mode=1,devsz_mb=1024\n```\n",
+     None),
+    ("passes-with-guest-devices",
+     "<!-- femu-example: st-good-cxl -->\n```sh\n"
+     "-machine q35,cxl=on -object memory-backend-ram,id=m,size=256M "
+     "-device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52 "
+     "-device cxl-rp,id=rp0,bus=cxl.0,chassis=0,slot=0 "
+     "-device femu-cxl-ssd,bus=rp0,volatile-memdev=m "
+     "-M cxl-fmw.0.targets.0=cxl.0,cxl-fmw.0.size=256M "
+     "-drive file=guest.qcow2,if=none,format=qcow2,id=hd0 "
+     "-device virtio-blk-pci,drive=hd0,bus=pcie.0 "
+     "-netdev user,id=net0,hostfwd=tcp::8080-:22 "
+     "-device virtio-net-pci,netdev=net0,bus=pcie.0\n```\n",
      None),
 ]
 
