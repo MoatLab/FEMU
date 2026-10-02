@@ -2,7 +2,8 @@
  * Uniform NAND media-layer timing implementation. The op math here reproduces the
  * bbssd staged model (the richest superset): channel-bus phases + LUN/plane array
  * gating + page-type program latency + ECC-wear-on-read + cache-read pipeline +
- * multi-plane + copyback. ZNS/OCSSD use strict config subsets of the same code.
+ * multi-plane + copyback. ZNS uses a strict config subset of the same code;
+ * OCSSD does not use this layer.
  *
  * Bit-identical contract for the channel-off modes: the max() ordering and the
  * per-op phase sequence below mirror hw/femu/bbssd/ftl.c ssd_advance_status /
@@ -335,9 +336,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 
     if (m->cfg.policy.channel_mode != NAND_CH_STAGED) {
         /*
-         * Plane-only / lun-only model (ZNS, bbssd legacy, OCSSD): array gate only.
-         * OCSSD adds (a) busy-extend semantics (avail += lat when busy) and (b) an
-         * optional per-LUN lock for its multi-threaded Open-Channel datapath.
+         * Plane-only / lun-only model (ZNS, bbssd without bus phases): array
+         * gate only. OCSSD does not come here; it has its own timing model.
          */
         uint64_t done;
         /*

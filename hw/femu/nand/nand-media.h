@@ -5,9 +5,10 @@
  * Uniform NAND media-layer API.
  *
  * NAND is the composable media layer: SLC/MLC/TLC/QLC/PLC chips with per-type
- * read/program/erase timing, organized across channels x LUNs x planes. Every FEMU
- * SSD controller (bbssd, bbssd+FDP, ZNS, OCSSD, CSD) runs its FTL/firmware on top and
- * talks to the NAND backend through this one interface. The media owns the timing
+ * read/program/erase timing, organized across channels x LUNs x planes. The
+ * bbssd FTL (with FDP, CSD, KV and CXL on top of it) and ZNS run on top and
+ * talk to the NAND backend through this one interface; OCSSD keeps its own
+ * model in timing-model/timing.c. The media owns the timing
  * policy and the busy-timeline op math; it never includes any controller header and
  * never branches on controller type -- a controller normalizes its own address into a
  * NandLoc and configures the media's policy/timing to reproduce its behavior.
@@ -30,17 +31,21 @@ typedef enum NandMediaOp {
     NAND_MEDIA_COPYBACK,
 } NandMediaOp;
 
-/* which array-level resource gates the op (controller-specific, set at init) */
+/*
+ * Which array-level resource gates the op, set at init. OCSSD keeps its own
+ * timing model (timing-model/timing.c) and uses neither enum.
+ */
 typedef enum NandArrayGate {
-    NAND_GATE_LUN_ONLY = 0,    /* bbssd legacy, OCSSD chip */
+    NAND_GATE_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one gate per LUN */
     NAND_GATE_PLANE_ONLY,      /* ZNS: plane gate, no lun gate */
-    NAND_GATE_LUN_AND_PLANE,   /* bbssd staged channel mode */
+    NAND_GATE_LUN_AND_PLANE,   /* no mode selects it */
 } NandArrayGate;
 
+/* bbssd and ZNS both pick STAGED when any bus phase is set, else OFF */
 typedef enum NandChannelMode {
-    NAND_CH_OFF = 0,           /* ZNS: no channel accounting */
-    NAND_CH_NOOP,              /* OCSSD: channel advance returns now() unchanged */
-    NAND_CH_STAGED,            /* bbssd: cmd/addr, data-xfer, status bus phases */
+    NAND_CH_OFF = 0,           /* no channel accounting */
+    NAND_CH_NOOP,              /* no mode selects it */
+    NAND_CH_STAGED,            /* cmd/addr, data-xfer, status bus phases */
 } NandChannelMode;
 
 /*
@@ -66,7 +71,7 @@ typedef struct NandMediaTiming {
     int64_t rd_ns;
     int64_t wr_ns;
     int64_t er_ns;
-    /* flash-type-indexed table (ZNS/OCSSD) */
+    /* flash-type-indexed table (ZNS, and bbssd with nand_cell_type) */
     int64_t rd_table_ns[NAND_MEDIA_MAX_FLASH][NAND_MEDIA_MAX_PGTYPE];
     int64_t wr_table_ns[NAND_MEDIA_MAX_FLASH][NAND_MEDIA_MAX_PGTYPE];
     int64_t er_table_ns[NAND_MEDIA_MAX_FLASH];
@@ -112,8 +117,10 @@ typedef struct NandTimelineOps {
     uint64_t *(*lun_avail)(void *opaque, const NandLoc *loc);
     uint64_t *(*plane_avail)(void *opaque, const NandLoc *loc);
     uint64_t *(*page_reg_ready)(void *opaque, const NandLoc *loc);
-    /* optional per-LUN lock around the array reservation (OCSSD multi-threaded
-     * Open-Channel path); both NULL = no locking (bbssd/ZNS single FTL thread). */
+    /*
+     * Optional per-LUN lock around the array reservation; both NULL = no
+     * locking. No mode sets them: bbssd and ZNS each have one FTL thread.
+     */
     void      (*lock_lun)(void *opaque, const NandLoc *loc);
     void      (*unlock_lun)(void *opaque, const NandLoc *loc);
 } NandTimelineOps;
@@ -179,9 +186,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 
 /*
  * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.
- * No caller yet. The bbssd allocator addresses planes now, so a group can be
- * built; what is still missing is batching the pages of one request that land
- * in different planes of a LUN into a single operation.
+ * Used for erases: line GC, FDP GC and KV reclaim erase a block on every plane
+ * of a LUN at once. Host reads and programs still go one page at a time.
  */
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime);

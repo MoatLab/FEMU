@@ -94,9 +94,8 @@ struct nand_block {
     int erase_cnt;
     /*
      * Reads of this block since it was last erased. Reading a page stresses the
-     * others in the block, so this is the pressure a real device watches to
-     * decide when data has to be rewritten before it decays. Reported only; no
-     * behaviour hangs off it yet.
+     * others in the block, so read reclaim rewrites the line once this reaches
+     * read_reclaim_limit; the largest value is also reported in log page C0h.
      */
     uint64_t read_cnt;
     int wp; /* current write pointer */
