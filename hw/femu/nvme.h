@@ -1662,6 +1662,13 @@ typedef struct NvmeRequest {
     /* FDP (Flexible Data Placement) */
     uint16_t        fdp_dspec;
     uint8_t         fdp_dtype;
+
+    /*
+     * Set by a mode that finishes the command on a thread of its own. The
+     * poller hands the request to it instead of the FTL ring, and the mode
+     * puts it on that poller's completion ring when it is done.
+     */
+    void            (*defer)(FemuCtrl *n, struct NvmeRequest *req, int poller);
 } NvmeRequest;
 
 typedef struct DMAOff {
@@ -2711,6 +2718,7 @@ int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 int nvme_register_csd(FemuCtrl *n);
+void femu_csd_drain_sq(FemuCtrl *n, struct NvmeSQueue *sq);
 int nvme_register_kvssd(FemuCtrl *n);
 
 /* per-namespace FTL entry points, dispatched by the controller's FTL thread */

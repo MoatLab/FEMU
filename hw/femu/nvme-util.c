@@ -535,6 +535,9 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
     size_t count, i, nkept;
     int p;
 
+    /* first, so nothing posts a completion for this queue after the drain */
+    femu_csd_drain_sq(n, sq);
+
     for (p = 1; p <= (int)n->nr_pollers; p++) {
         struct rte_ring *rings[2];
         int r;

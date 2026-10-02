@@ -249,6 +249,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->fdp_dtype = 0;
         req->fdp_dspec = 0;
         req->cxl_seq = 0;
+        req->defer = NULL;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
         req->cqe.cid = cmd.cid;
@@ -363,6 +364,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                 }
                 QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
             }
+        } else if (req->defer) {
+            req->defer(n, req, index_poller);
         } else {
             /*
              * Always enqueue to FTL ring for completion. Failed requests

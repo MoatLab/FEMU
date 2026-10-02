@@ -231,7 +231,7 @@ the controller's.
 | BBSSD | 1 | `hw/femu/bbssd/bb.c` | Read and Write through `nvme_rw()` | FTL thread, `bb_ftl_process_req()` |
 | NoSSD | 2 | `hw/femu/nossd/nop.c` | Read and Write through `nvme_rw()` | none |
 | ZNS | 3 | `hw/femu/zns/zns.c` | zoned command set, zone state machine | FTL thread, `zns_ftl_process_req()` |
-| CSD | 4 | `hw/femu/csd/csd.c` | computational storage commands plus block I/O | FTL thread for NAND; compute-unit time in the poller |
+| CSD | 4 | `hw/femu/csd/csd.c` | computational storage commands plus block I/O | FTL thread for NAND; programs and compute-unit time on the `femu-csd-cu` threads |
 | KV | 5 | `hw/femu/kvssd/kvssd.c` | key-value command set: Store, Retrieve, Delete, Exist, List | in the poller, through the BBSSD NAND model |
 
 Features that are not modes:
@@ -369,13 +369,14 @@ backend instead of allocating its own.
 | `FEMU-FTL-Thread` | `femu_realize()` | 0 or 1 per controller | BBSSD, CSD and ZNS FTL and NAND timing |
 | `femu-cxl-ftl` | `femu_cxl_start()` | 1 per `femu-cxl-ssd` with `ftl=on` | FTL and NAND timing for cache misses and write-backs |
 | `femu-cxl-cca` | `femu_cxl_cca_start()` | 1 per `femu-cxl-ssd` with `cca=on` | cache control commands from BAR5 |
+| `femu-csd-cu` | `csd_init()` | `nr_cu` per controller with a CSD namespace | CSD programs (Execute) and their compute-unit time |
 
 ## Where latency is charged and enforced
 
 | Device or mode | Computed in | Enforced by |
 | --- | --- | --- |
 | NoSSD | nothing to compute | completion posted in the same sweep |
-| BBSSD, CSD, ZNS | `FEMU-FTL-Thread` adds the FTL's latency to the completion time | the poller posts once the time has passed |
+| BBSSD, CSD, ZNS | `FEMU-FTL-Thread` adds the FTL's latency to the completion time; for a CSD Execute, the `femu-csd-cu` thread that ran the program adds its compute-unit time instead | the poller posts once the time has passed |
 | OCSSD, KV | the poller, while executing the command | the poller posts once the time has passed |
 | Host link, firmware CPU (`pcie_bandwidth_mbps`, `pcie_prop_delay_ns`, `fw_cpu_ns`) | the poller, before queueing the completion | same |
 | `femu-cxl-ssd` | `femu-cxl-ftl` returns the media time of a miss or write-back | the vCPU waits it out before the load or store completes |

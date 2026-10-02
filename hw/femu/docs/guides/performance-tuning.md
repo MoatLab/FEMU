@@ -19,6 +19,7 @@ These threads run inside QEMU:
 | `FEMU-FTL-Thread` | one per controller with a BlackBox, ZNS or CSD namespace | at start | always: it spins while the controller is enabled |
 | `femu-cxl-ftl` | one per `femu-cxl-ssd` with `ftl=on` (the default) | at start | only while it serves a miss |
 | `femu-cxl-cca` | one per `femu-cxl-ssd` with `cca=on` | at start | only while it serves a command |
+| `femu-csd-cu` | `nr_cu` per controller with a CSD namespace | at start | only while it runs a program |
 
 Linux shows these names only when QEMU runs with `-name NAME,debug-threads=on`.
 The `run-*.sh` launchers pass it, for example

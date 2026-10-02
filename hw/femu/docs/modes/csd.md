@@ -46,7 +46,8 @@ FEMU limits what the guest can name:
   links are followed.
 
 That protects the rest of the host file system. It does not make the
-programs in the directory safe. Use CSD only with guests you trust, put only
+programs in the directory safe: they run on QEMU's compute unit threads with
+all of QEMU's privileges and memory. Use CSD only with guests you trust, put only
 programs you built and trust in the directory, and make sure no one else can
 write to it.
 
@@ -91,7 +92,8 @@ The BlackBox geometry, timing, GC and FTL properties also apply to the
 namespace; see the [BlackBox guide](blackbox.md#configuration).
 
 - `fdm_size`: device memory in MiB. Required.
-- `nr_cu`: compute units, 1 to 64. A program waits for the first free unit.
+- `nr_cu`: compute units, 1 to 64. Each is a host thread, `femu-csd-cu`,
+  that runs programs. A program waits for the first free unit.
 - `csf_runtime_scale`: a program that declares no run time and no scale of
   its own holds its unit for its measured host run time times this value
   (default 3).
@@ -112,6 +114,26 @@ otherwise. See the
 | Phantom | Built in: copies the input memory range to the output range. Useful to test the command flow and timing. | nothing |
 | Shared library | A function with the signature `int64_t fn(struct femu_csd_args *args)` from a `.so` file, named in the load command. | `csd_program_dir` |
 | uBPF | An eBPF ELF object, interpreted or JIT-compiled. | `csd_program_dir` and a build with `--enable-csd-ubpf` |
+
+### How programs run
+
+An Execute command is checked on the poller and then handed to one of the
+`nr_cu` compute unit threads, which runs the program and posts the
+completion. While a program runs, I/O on every queue, other CSD commands
+and admin commands go on as usual; only that compute unit is busy.
+
+- At most `nr_cu` programs run at once. Runs of one program take turns, so
+  a shared library needs no locking of its own; different programs run
+  side by side, and a run waiting for its own program leaves the compute
+  unit free for another.
+- A program that never returns keeps its compute unit for good, and QEMU
+  waits for it when the device is removed. FEMU cannot stop native code it
+  has called.
+- Device memory a program is using stays allocated, and counted against
+  `fdm_size`, until the program returns, even after Free device memory.
+- Deleting the I/O queue an Execute came from, or resetting the controller,
+  while the program runs drops its result; the program still runs to the
+  end.
 
 ### Commands
 

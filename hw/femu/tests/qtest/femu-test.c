@@ -9341,6 +9341,274 @@ static void femu_test_csd_program_dir(void *obj, void *data,
     rmdir(femu_csd_dir);
 }
 
+#define FEMU_CSD_ACTIVATE       0x23
+#define FEMU_CSD_SLOW_MS        1000
+
+/* where the csd-exec-concurrency test builds its program */
+static char *femu_csd_slow_dir;
+
+/*
+ * A program that sleeps for cparam1 milliseconds and returns 7. The argument
+ * layout is struct femu_csd_args from hw/femu/tests/csd/femu-csd-kernel.h.
+ */
+static const char femu_csd_slow_src[] =
+    "#include <time.h>\n"
+    "struct args { int numr; void **a; long long *l; long long p1, p2;\n"
+    "              void *d; long long dl; } __attribute__((packed));\n"
+    "long long run(struct args *a)\n"
+    "{\n"
+    "    struct timespec t = { a->p1 / 1000, (a->p1 % 1000) * 1000000L };\n"
+    "    nanosleep(&t, 0);\n"
+    "    return 7;\n"
+    "}\n";
+
+/* build the program with the host compiler; false when there is none */
+static bool femu_csd_build_slow(void)
+{
+    g_autofree char *src = g_build_filename(femu_csd_slow_dir, "slow.c",
+                                            NULL);
+    g_autofree char *so = g_build_filename(femu_csd_slow_dir, "slow.so",
+                                           NULL);
+    const char *argv[] = { "cc", "-shared", "-fPIC", "-o", so, src, NULL };
+    int wait_status = -1;
+
+    g_assert_cmpint(g_mkdir_with_parents(femu_csd_slow_dir, 0700), ==, 0);
+    g_assert_true(g_file_set_contents(src, femu_csd_slow_src, -1, NULL));
+    if (!g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH |
+                      G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                      NULL, NULL, NULL, NULL, &wait_status, NULL)) {
+        return false;
+    }
+    return WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0;
+}
+
+static void femu_csd_remove_slow(void)
+{
+    g_autofree char *src = g_build_filename(femu_csd_slow_dir, "slow.c",
+                                            NULL);
+    g_autofree char *so = g_build_filename(femu_csd_slow_dir, "slow.so",
+                                           NULL);
+
+    unlink(so);
+    unlink(src);
+    rmdir(femu_csd_slow_dir);
+}
+
+static uint16_t femu_csd_activate(FemuCtrlState *c, uint16_t pind)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_CSD_ACTIVATE;
+    cmd.cdw10 = cpu_to_le32(pind | (1 << 16));
+    return femu_admin(c, &cmd);
+}
+
+/* load name:symbol at pind; with more set, as a later piece of no bytes */
+static uint16_t femu_csd_load_at(FemuCtrlState *c, uint64_t buf, uint16_t pind,
+                                 const char *name, const char *symbol,
+                                 bool more)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    size_t name_len = strlen(name) + 1;
+    size_t size = name_len + strlen(symbol) + 1;
+    NvmeCmd cmd;
+
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, name, name_len);
+    qtest_memwrite(qts, buf + name_len, symbol, strlen(symbol) + 1);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_COMPUTE_LOAD;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(pind | (FEMU_CSD_TYPE_SHARED_LIB << 16));
+    cmd.cdw11 = cpu_to_le32(size);
+    cmd.cdw14 = cpu_to_le32(more ? 0 : size);
+    cmd.cdw15 = cpu_to_le32(more ? 1 : 0);
+
+    return femu_admin(c, &cmd);
+}
+
+/* queue Execute of program pind on AFDM id, sleeping ms, without waiting */
+static void femu_csd_submit_exec_at(FemuCtrlState *c, FemuQueue *q,
+                                    uint64_t ranges, uint16_t pind,
+                                    uint32_t id, uint32_t ms)
+{
+    uint32_t mr[8] = { 0 };
+    uint32_t dw[16] = { 0 };
+
+    /* one memory range: nsid 0 (device memory), whole AFDM, sb = its id */
+    mr[2] = cpu_to_le32(id);
+    qtest_memwrite(c->pdev->bus->qts, ranges, mr, sizeof(mr));
+
+    dw[0] = FEMU_CSD_EXEC;
+    dw[1] = cpu_to_le32(1);
+    dw[2] = cpu_to_le32(pind);          /* rsid 0 */
+    dw[3] = cpu_to_le32(1);             /* numr */
+    dw[4] = cpu_to_le32(sizeof(mr));    /* dlen */
+    dw[6] = cpu_to_le32((uint32_t)ranges);
+    dw[7] = cpu_to_le32(ranges >> 32);
+    dw[10] = cpu_to_le32(ms);           /* cparam1 */
+    femu_submit(c, q, (NvmeCmd *)dw);
+}
+
+static void femu_csd_submit_exec(FemuCtrlState *c, FemuQueue *q,
+                                 uint64_t ranges, uint32_t id, uint32_t ms)
+{
+    femu_csd_submit_exec_at(c, q, ranges, 1, id, ms);
+}
+
+static bool femu_csd_cq_ready(FemuCtrlState *c, FemuQueue *q)
+{
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, q->cq_addr + q->cq_head * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    return (le16_to_cpu(cqe.status) & 1) == q->phase;
+}
+
+static void femu_csd_expect_exec(FemuCtrlState *c, FemuQueue *q)
+{
+    uint32_t result = 0;
+
+    g_assert_cmpint(FEMU_SC(femu_complete(c, q, NULL, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 7);
+}
+
+/*
+ * A program runs for as long as it likes, and while it runs the rest of the
+ * controller has to keep working: a read on another queue must complete, and
+ * an admin command must not wait for the program. Afterwards, a queue deleted
+ * and a controller disabled with a program still running must not leave the
+ * program's completion pointing at a request that is gone.
+ */
+static void femu_test_csd_exec_concurrency(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    FemuQueue qa, qb;
+    NvmeCmd cmd = { 0 };
+    uint64_t buf, ranges;
+    uint32_t id = 0;
+    int64_t start, read_us, admin_us, other_us;
+    bool exec_done_first;
+
+    if (!femu_csd_build_slow()) {
+        femu_csd_remove_slow();
+        g_test_skip("no host C compiler to build the test program");
+        return;
+    }
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    ranges = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_csd_load(&c, buf, "slow.so", "run"), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_csd_activate(&c, 1), ==, NVME_SUCCESS);
+    /* a loaded program is immutable; a further piece of it is refused */
+    g_assert_cmpint(femu_csd_load_at(&c, buf, 1, "slow.so", "run", true), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    g_assert_cmpint(femu_csd_load_at(&c, buf, 2, "slow.so", "run", false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_csd_activate(&c, 2), ==, NVME_SUCCESS);
+    femu_burst_queue(&c, &qa, 1);
+    femu_burst_queue(&c, &qb, 2);
+
+    cmd.opcode = FEMU_CSD_ALLOC_FDM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(4096);
+    femu_submit(&c, &qa, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &qa, NULL, &id)), ==,
+                    NVME_SUCCESS);
+
+    /* a read on queue 2 while queue 1 runs the program */
+    start = g_get_monotonic_time();
+    femu_csd_submit_exec(&c, &qa, ranges, id, FEMU_CSD_SLOW_MS);
+    g_usleep(50 * 1000);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    femu_submit(&c, &qb, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &qb, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    read_us = g_get_monotonic_time() - start;
+    exec_done_first = femu_csd_cq_ready(&c, &qa);
+    femu_csd_expect_exec(&c, &qa);
+
+    /* an admin command while queue 1 runs the program */
+    start = g_get_monotonic_time();
+    femu_csd_submit_exec(&c, &qa, ranges, id, FEMU_CSD_SLOW_MS);
+    g_usleep(50 * 1000);
+    g_assert_cmpint(femu_csd_activate(&c, 1), ==, NVME_SUCCESS);
+    admin_us = g_get_monotonic_time() - start;
+    femu_csd_expect_exec(&c, &qa);
+
+    /*
+     * Two runs of program 1, then one of program 2, on two compute units:
+     * the second run of 1 waits for the first, and must not keep program 2
+     * from the other unit.
+     */
+    start = g_get_monotonic_time();
+    femu_csd_submit_exec(&c, &qa, ranges, id, FEMU_CSD_SLOW_MS);
+    femu_csd_submit_exec(&c, &qa, ranges, id, FEMU_CSD_SLOW_MS);
+    g_usleep(50 * 1000);
+    femu_csd_submit_exec_at(&c, &qb, ranges + 2048, 2, id,
+                            FEMU_CSD_SLOW_MS / 10);
+    femu_csd_expect_exec(&c, &qb);
+    other_us = g_get_monotonic_time() - start;
+    femu_csd_expect_exec(&c, &qa);
+    femu_csd_expect_exec(&c, &qa);
+
+    g_test_message("program %d ms: read on the other queue done at %" PRId64
+                   " ms, admin command at %" PRId64 " ms, another program "
+                   "at %" PRId64 " ms", FEMU_CSD_SLOW_MS, read_us / 1000,
+                   admin_us / 1000, other_us / 1000);
+    g_assert_false(exec_done_first);
+    g_assert_cmpint(read_us, <, FEMU_CSD_SLOW_MS * 1000 / 2);
+    g_assert_cmpint(admin_us, <, FEMU_CSD_SLOW_MS * 1000 / 2);
+    g_assert_cmpint(other_us, <, FEMU_CSD_SLOW_MS * 1000 / 2);
+
+    /*
+     * Delete queue 1 under a running program and create it again at once.
+     * The program's completion must not land in the new queue.
+     */
+    femu_csd_submit_exec(&c, &qa, ranges, id, FEMU_CSD_SLOW_MS / 4);
+    g_usleep(50 * 1000);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DELETE_SQ;
+    cmd.cdw10 = cpu_to_le32(1);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &qa);
+    femu_burst_queue(&c, &qa, 1);
+    g_usleep(FEMU_CSD_SLOW_MS / 4 * 1000 + 200 * 1000);
+    g_assert_false(femu_csd_cq_ready(&c, &qa));
+    c.io = qa;
+    femu_round_trip(&c, 5);
+    qa = c.io;
+
+    /* disable the controller under a running program */
+    femu_csd_submit_exec(&c, &qb, ranges, id, FEMU_CSD_SLOW_MS / 4);
+    g_usleep(50 * 1000);
+    femu_disable(&c);
+    g_usleep(FEMU_CSD_SLOW_MS / 4 * 1000 + 200 * 1000);
+    femu_queue_free(&c, &qa);
+    femu_queue_free(&c, &qb);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 6);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+
+    guest_free(alloc, ranges);
+    guest_free(alloc, buf);
+    femu_csd_remove_slow();
+}
+
 /* the QEMU process's peak virtual size, which a large allocation raises */
 static uint64_t femu_vm_peak_kb(QTestState *qts)
 {
@@ -19405,6 +19673,15 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = g_strdup_printf(
             "femu_mode=4,fdm_size=16,csd_program_dir=%s", femu_csd_dir),
+    });
+    femu_csd_slow_dir = g_strdup_printf("%s/femu-csd-slow-%d",
+                                        g_get_tmp_dir(), (int)getpid());
+    qos_add_test("csd-exec-concurrency", "femu",
+                 femu_test_csd_exec_concurrency,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = g_strdup_printf(
+            "femu_mode=4,fdm_size=16,nr_cu=2,csf_runtime_scale=1,"
+            "csd_program_dir=%s", femu_csd_slow_dir),
     });
     qos_add_test("power-loss-mmio-cut", "femu", femu_test_power_mmio_cut,
                  &(QOSGraphTestOptions) {

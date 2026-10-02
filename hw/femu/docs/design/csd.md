@@ -48,17 +48,22 @@ collection.
    copy data     | FemuCsdState (one per controller)     |
         |        |  FDM pool, AFDM table, programs,      |
         |        |  memory range sets, groups,           |
-        |        |  compute unit busy-until times        |
+        |        |  compute unit busy-until times,       |
+        |        |  queue of Execute jobs                |
         |        +----+------------------+---------------+
-        |             | run program      | copy namespace data
-        |             v (on the poller)  v into an AFDM
-        |        host code in QEMU   memory backend
-        |
+        |             | Execute job      | copy namespace data
+        |             v                  v into an AFDM
+        |   +-------------------+    memory backend
+        |   | femu-csd-cu x     |
+        |   | nr_cu: run the    |--> completion ring of the poller
+        |   | program, charge a |    that fetched the command
+        |   | compute unit      |
+        |   +-------------------+
    +----v------------------------+
    | FTL thread: black-box FTL   |   timing for Read and Write; CSD
-   +-----------------------------+   commands pass through it too and
-                                     are charged nothing there, though
-                                     the FTL may run GC meanwhile
+   +-----------------------------+   commands other than Execute pass
+                                     through it and are charged nothing
+                                     there, though the FTL may run GC
 ```
 
 `csd_init()` runs the black-box geometry and capacity checks, builds a full
@@ -74,7 +79,8 @@ programs. A CSD namespace makes the controller start its FTL thread.
 
 ## Data structures
 
-`FemuCsdState` in `hw/femu/csd/csd.c`, guarded by one mutex:
+`FemuCsdState` in `hw/femu/csd/csd.c`, guarded by one mutex. No program
+runs under it:
 
 ```text
   FemuCsdState
@@ -89,8 +95,20 @@ programs. A CSD namespace makes the controller start its FTL thread.
   |                     deadline }                                 |
   | cu_next_avail[nr_cu]   when each compute unit is free again    |
   | prog_used              bytes held by loaded programs           |
+  | workers[nr_cu]         femu-csd-cu threads                     |
+  | pending, running       FemuCsdJob { req, poller, program,      |
+  |                          AFDMs, args, runtime }                |
   +----------------------------------------------------------------+
 ```
+
+AFDMs and programs are reference counted. The table holds one reference,
+and each Execute that is queued or running holds one on its program and on
+each AFDM it names. Deallocating an AFDM or unloading or replacing a program
+takes it out of its table at once, but its memory, and its share of the
+`fdm_size` quota or of the program limits, is given back only when the last
+Execute using it has finished. A program whose last reference goes is
+closed by a compute unit thread without the CSD lock, since closing a
+library runs its destructors.
 
 - **FDM and AFDM.** Function data memory (FDM) is the device memory pool,
   `fdm_size` MiB. An allocation from it (AFDM) is a buffer in host memory
@@ -168,11 +186,17 @@ Compare, Write Zeroes and the others) are handled by the common layer in
 ```
 
 The diagram simplifies a few edges. A load with `loff = 0` replaces
-whatever the index held, even an active program. A load with `sel=1` also
+whatever the index held, even an active program; an Execute already queued
+or running keeps the old one. A further chunk (`loff > 0`) is accepted only
+while the program is still loading, so a loaded program never changes. A load with `sel=1` also
 unloads a program that is still loading. A further chunk must repeat the size
 and type, and the `pid` only when the command's `pit` field is 1. Every
 chunk adds its byte count toward the size, so a chunk sent twice counts
-twice. When the byte count reaches the size, `csd_load_program_data()` prepares the program by type:
+twice. When the byte count reaches the size, `csd_load_program_data()` prepares the
+program by type, without the CSD lock held: opening a library runs its
+constructors, and the pollers must not wait for them. The program is still
+loading then, so nothing can run it, and admin commands, the only ones that
+change programs, run one at a time under QEMU's global lock:
 
 | Type | Value | Payload | Prepared by |
 | --- | --- | --- | --- |
@@ -211,22 +235,52 @@ option `femu_csd_ubpf`). Without it, an eBPF load fails with Invalid Field.
 ## Running a program
 
 ```text
-  Execute (0xe1) on the poller thread:
+  Execute (0xe1), on the poller thread (csd_exec):
    1. read numr inline ranges (+ optional extra data, dlen <= 1 MiB)
       from the data buffer, or take the stored set named by rsid
    2. lock; check the program exists and is active, and the group exists
-   3. map each range to its AFDM buffer (nsid 0, sb = AFDM id)
-   4. call the program, timing it with the host clock:
+   3. map each range to its AFDM buffer (nsid 0, sb = AFDM id), and take
+      a reference on each AFDM and on the program
+   4. runtime = command runtime, else program runtime; if there is one,
+      take the compute unit now (see below); unlock
+   5. hand the request to the CSD as a job (req->defer); the poller
+      moves on without sending it to the FTL thread
+
+  on one of nr_cu femu-csd-cu threads (csd_worker):
+   6. take the oldest job whose program is not running already, mark the
+      program running, and call it without the CSD lock, timing it with
+      the host clock:
         phantom    copy range 1 into range 0
         shared lib fn(&args)
         eBPF       JIT function or ubpf_exec(&args)
-   5. Dword 0 = return value (above 2^32 - 1 clamped to that; a negative
-      value keeps its low 32 bits)
-   6. runtime = command runtime, else program runtime,
-                else measured host time x scale
-   7. pick the compute unit that is free first, hold it for runtime,
-      set expire_time to the end of that hold; unlock
+   7. lock; Dword 0 = return value (above 2^32 - 1 clamped to that; a
+      negative value keeps its low 32 bits)
+   8. with no runtime from step 4: runtime = measured host time x scale,
+      and take the compute unit now
+   9. put the request on the completion ring of the poller that fetched
+      it, retrying while the ring is full; drop the references; unlock
 ```
+
+Taking the compute unit means: pick the unit that is free first, hold it
+for the runtime from the command's arrival, and set `expire_time` to the end
+of that hold. A known runtime takes its unit on the poller, in arrival
+order, so the order in which the host happens to finish programs does not
+change it; a failed run still holds it. A measured runtime is known only
+after the run, so those take their unit in the order runs end.
+
+The poller then posts the completion once `expire_time` has passed, as for
+any other command. A long program therefore holds one `femu-csd-cu` thread
+and nothing else: the pollers keep serving every queue, CSD admin commands
+and other CSD I/O commands take the CSD lock only briefly, and the vCPU
+that sends an admin command never waits for a program.
+
+When a submission queue is deleted, or the controller is reset, while one of
+its Execute commands is queued or running, `nvme_drain_sq()` first calls
+`femu_csd_drain_sq()`, which frees its queued jobs and detaches the
+request from a running one. A running program still runs to the end, but
+its result is dropped, as the specification
+allows for commands on a deleted queue, and nothing touches the freed
+request.
 
 The program sees one argument, `struct femu_csd_args`
 (`hw/femu/tests/csd/femu-csd-kernel.h`):
@@ -243,8 +297,9 @@ The program sees one argument, `struct femu_csd_args`
 
 ### Compute units and runtime scaling
 
-The program runs to completion on the host at once; the compute units only
-decide when the guest sees the completion. This is the same
+The program runs to completion on the host as soon as a `femu-csd-cu`
+thread is free; the compute units' busy-until times then decide when the
+guest sees the completion. This is the same
 "compute, then hold" approach the rest of FEMU uses
 ([timing model](../concepts/timing-model.md#compute-then-hold)).
 
@@ -314,10 +369,15 @@ The smallest device line that loads programs:
 - qtest cases in CI: `csd-program-dir`, run with the property set, checks
   that a missing file, a symbolic link out of the directory and a file that
   is not a library are refused; `csd-fuzz` fuzzes the fields of the CSD I/O
-  commands. No qtest covers the case where `csd_program_dir` is unset, or the
-  `/`, `.` and `..` name rules. No qtest loads, activates or runs a program.
-  Program execution, phantom programs included, and compute unit timing are
-  tested only in a guest.
+  commands; `csd-exec-concurrency` builds a shared-library program that
+  sleeps (it skips when the host has no C compiler), loads and runs it, and
+  checks that a read on another queue, an admin command and another
+  program complete while it runs, that a loaded program refuses a further
+  load piece, and that deleting the program's queue or disabling the
+  controller under it leaves the controller working. No qtest covers the
+  case where `csd_program_dir` is unset, or the `/`, `.` and `..` name
+  rules. Phantom and eBPF programs and compute unit timing are tested only
+  in a guest.
 - The documentation check starts each CSD example and writes and reads one
   block of the namespace.
 - Shared-library and eBPF programs run only in a guest, with
@@ -329,11 +389,16 @@ The smallest device line that loads programs:
 
 ## Limits
 
-- A program runs on the poller thread that fetched the Execute command,
-  holding the CSD lock. While it runs, that poller serves no other queue and
-  other CSD commands wait. A long program stalls I/O. A CSD admin command
-  sent meanwhile waits for the CSD lock while holding QEMU's global lock,
-  which stalls that vCPU as well; so does a slow program load.
+- Programs run on `nr_cu` host threads, one per compute unit, so at most
+  `nr_cu` run at once on the host; further Execute commands queue for a
+  thread. Two runs of the same program never overlap; different programs
+  do. A program that never returns keeps its thread and, at device removal
+  (`device_del`), keeps QEMU waiting for it; FEMU cannot stop native code
+  it has called.
+- A program runs on the AFDMs it was given while other commands may read
+  or write the same AFDMs; FEMU does not order them. Device memory freed
+  while a program uses it counts against `fdm_size` until the program
+  returns.
 - The guest's program runs in the QEMU process. Treat `csd_program_dir` as
   code you are choosing to run on the host.
 - NVM to AFDM charges one page read whatever its size, and does not queue on
@@ -348,23 +413,24 @@ Refusal messages are listed in the
 ## Extending the mode
 
 - **A new program type.** Add a case to `csd_load_program_data()` to prepare
-  it, and one to the switch in `csd_exec()` to run it.
+  it, and one to the switch in `csd_run_program()` to run it.
 - **Group scheduling.** `csd_exec()` already looks up the group. Choosing the
-  compute unit by group priority or deadline would happen where it picks the
-  unit with the smallest `cu_next_avail`.
+  compute unit by group priority or deadline would happen in
+  `csd_finish_locked()`, where it picks the unit with the smallest
+  `cu_next_avail`, and the order jobs leave the queue in `csd_worker()`.
 - **Copy cost from the FTL.** `csd_nvm_to_afdm()` has the mapped page count
   from `csd_check_nvm_ftl_range()`; charging each mapped page through the
   media model (`ssd_advance_status()`) instead of one `pg_rd_lat` would add
   LUN and channel contention.
-- **Running programs off the poller.** Moving step 4 of Execute to a worker
-  thread, completing the request when it returns, would stop long programs
-  from stalling the poller.
+- **Preemption.** A compute unit thread runs a program to the end. A time
+  slice, which CEMU's `time_slice` and `context_switch_time` describe, would
+  need programs that yield.
 
 ## Source map
 
 | File | Contents |
 | --- | --- |
-| [`hw/femu/csd/csd.c`](../../csd/csd.c) | state, every CSD command, program loading, execution, compute units |
+| [`hw/femu/csd/csd.c`](../../csd/csd.c) | state, every CSD command, program loading, compute unit threads, execution |
 | [`hw/femu/csd/csd.h`](../../csd/csd.h) | command layouts, opcodes, program types |
 | [`hw/femu/tests/csd/`](../../tests/csd/README.md) | guest tool, example programs, program ABI |
 | [`hw/femu/bbssd/`](../../bbssd/ftl.c) | the black-box FTL under the namespace |

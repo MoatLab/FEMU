@@ -39,7 +39,7 @@ the media time itself before the access completes (see
 | --- | --- | --- |
 | NoSSD | nothing | n/a |
 | BBSSD | NAND reads, programs and erases; write buffer and read cache hits; DFTL mapping misses; GC; deallocate (`trim_lat_ns`) | `FEMU-FTL-Thread` |
-| CSD | as BBSSD, plus program run time on a compute unit and copies into device memory | FTL thread; compute units and copies in the poller |
+| CSD | as BBSSD, plus program run time on a compute unit and copies into device memory | FTL thread; compute units on the `femu-csd-cu` threads; copies in the poller |
 | ZNS | NAND reads, programs and erases; write cache accesses | `FEMU-FTL-Thread` |
 | KV | NAND reads and programs for values, erases on reclaim, and a fixed per-command cost of one page read | poller |
 | OCSSD | NAND reads, programs and erases, optional channel transfer | poller |

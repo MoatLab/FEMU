@@ -22,14 +22,29 @@ typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 #define CSD_PROGRAM_MAX (16U << 20)
 #define CSD_PROGRAM_TOTAL_MAX (64U << 20)
 
+typedef struct FemuCsdState FemuCsdState;
+
+/*
+ * Device memory and programs are counted references: the table holds one, and
+ * each Execute in flight holds one per range or program it uses, so freeing
+ * one does not pull it out from under a program still running on it. The
+ * quota they count against is given back only when the last one goes.
+ */
 typedef struct FemuCsdAfdm {
     uint32_t id;
+    uint32_t refs;
     uint64_t size;
     uint8_t *data;
+    FemuCsdState *csd;
 } FemuCsdAfdm;
 
 typedef struct FemuCsdProgram {
     uint32_t id;
+    uint32_t refs;
+    FemuCsdState *csd;
+    /* running on a compute unit; runs of one program take turns */
+    bool busy;
+    QSLIST_ENTRY(FemuCsdProgram) dead;
     uint8_t type;
     bool active;
     bool indirect;
@@ -62,7 +77,22 @@ typedef struct FemuCsdMrs {
     NvmeCsdMemoryRange *ranges;
 } FemuCsdMrs;
 
-typedef struct FemuCsdState {
+/* an Execute handed from the poller to a compute unit thread */
+typedef struct FemuCsdJob {
+    NvmeRequest *req;           /* NULL once its submission queue is gone */
+    int poller;                 /* whose completion ring it goes back on */
+    int64_t arrival;
+    uint64_t runtime;
+    int64_t reserved_end;       /* compute unit hold taken at submission */
+    FemuCsdProgram *program;
+    FemuCsdAfdm **afdms;
+    FemuCsdArgs args;
+    uint8_t *data;
+    QTAILQ_ENTRY(FemuCsdJob) entry;
+} FemuCsdJob;
+
+struct FemuCsdState {
+    FemuCtrl *n;
     CsdCtrlParams params;
     uint64_t fdm_capacity;
     uint64_t fdm_used;
@@ -76,7 +106,17 @@ typedef struct FemuCsdState {
     GHashTable *mrs;
     QemuMutex lock;
     uint64_t *cu_next_avail;    /* when each compute unit is free again */
-} FemuCsdState;
+    QemuThread *workers;        /* one per compute unit */
+    QemuCond job_cond;
+    QTAILQ_HEAD(, FemuCsdJob) pending;
+    QTAILQ_HEAD(, FemuCsdJob) running;
+    /* programs whose last reference went, destroyed by a worker unlocked */
+    QSLIST_HEAD(, FemuCsdProgram) dead;
+    bool stopping;
+};
+
+static void *csd_worker(void *opaque);
+static void csd_job_free_locked(FemuCsdJob *job);
 
 static void csd_check_size(void)
 {
@@ -100,14 +140,16 @@ static FemuCsdState *csd_state(FemuCtrl *n)
     return n->csd_ctrl_state;
 }
 
-static void csd_afdm_free(gpointer opaque)
+/* callers hold csd->lock, the tables included */
+static void csd_afdm_unref(gpointer opaque)
 {
     FemuCsdAfdm *afdm = opaque;
 
-    if (!afdm) {
+    if (!afdm || --afdm->refs) {
         return;
     }
 
+    afdm->csd->fdm_used -= afdm->size;
     g_free(afdm->data);
     g_free(afdm);
 }
@@ -129,17 +171,30 @@ static void csd_program_unload(FemuCsdProgram *program)
 #endif
 }
 
-static void csd_program_free(gpointer opaque)
+static void csd_program_destroy(FemuCsdProgram *program)
 {
-    FemuCsdProgram *program = opaque;
-
-    if (!program) {
-        return;
-    }
-
     csd_program_unload(program);
     g_free(program->data);
     g_free(program);
+}
+
+/*
+ * Closing a library runs its destructors, which may take any time, so the
+ * last reference only queues the program; a worker closes it unlocked.
+ */
+static void csd_program_unref(gpointer opaque)
+{
+    FemuCsdProgram *program = opaque;
+    FemuCsdState *csd;
+
+    if (!program || --program->refs) {
+        return;
+    }
+
+    csd = program->csd;
+    csd->prog_used -= program->size;
+    QSLIST_INSERT_HEAD(&csd->dead, program, dead);
+    qemu_cond_signal(&csd->job_cond);
 }
 
 static void csd_mrs_free(gpointer opaque)
@@ -168,6 +223,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     FemuCsdState *csd;
     struct ssd *ssd;
+    uint32_t i;
 
     csd_check_size();
 
@@ -237,15 +293,25 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     csd->next_group_id = 1;
     csd->next_rsid = 1;
     csd->afdms = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
-                                       csd_afdm_free);
+                                       csd_afdm_unref);
     csd->programs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
-                                          csd_program_free);
+                                          csd_program_unref);
     csd->groups = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                         g_free);
     csd->mrs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      csd_mrs_free);
     csd->cu_next_avail = g_new0(uint64_t, csd->params.nr_cu);
     qemu_mutex_init(&csd->lock);
+    csd->n = n;
+    qemu_cond_init(&csd->job_cond);
+    QTAILQ_INIT(&csd->pending);
+    QTAILQ_INIT(&csd->running);
+    QSLIST_INIT(&csd->dead);
+    csd->workers = g_new0(QemuThread, csd->params.nr_cu);
+    for (i = 0; i < csd->params.nr_cu; i++) {
+        qemu_thread_create(&csd->workers[i], "femu-csd-cu", csd_worker, csd,
+                           QEMU_THREAD_JOINABLE);
+    }
     n->csd_ctrl_state = csd;
 
     femu_log("%s,CSD mode initialized: fdm=%" PRIu64 "MB, "
@@ -283,11 +349,36 @@ static void csd_exit(FemuCtrl *n)
         return;
     }
 
+    /* a program still running holds up teardown until it returns */
+    qemu_mutex_lock(&csd->lock);
+    csd->stopping = true;
+    qemu_cond_broadcast(&csd->job_cond);
+    qemu_mutex_unlock(&csd->lock);
+    for (i = 0; i < csd->params.nr_cu; i++) {
+        qemu_thread_join(&csd->workers[i]);
+    }
+    qemu_mutex_lock(&csd->lock);
+    while (!QTAILQ_EMPTY(&csd->pending)) {
+        FemuCsdJob *job = QTAILQ_FIRST(&csd->pending);
+
+        QTAILQ_REMOVE(&csd->pending, job, entry);
+        csd_job_free_locked(job);
+    }
+    qemu_mutex_unlock(&csd->lock);
+
     g_hash_table_destroy(csd->afdms);
     g_hash_table_destroy(csd->programs);
     g_hash_table_destroy(csd->groups);
     g_hash_table_destroy(csd->mrs);
+    while (!QSLIST_EMPTY(&csd->dead)) {
+        FemuCsdProgram *program = QSLIST_FIRST(&csd->dead);
+
+        QSLIST_REMOVE_HEAD(&csd->dead, dead);
+        csd_program_destroy(program);
+    }
     qemu_mutex_destroy(&csd->lock);
+    qemu_cond_destroy(&csd->job_cond);
+    g_free(csd->workers);
     g_free(csd->cu_next_avail);
     g_free(csd);
     n->csd_ctrl_state = NULL;
@@ -599,7 +690,6 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
             qemu_mutex_unlock(&csd->lock);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        csd->prog_used -= program->size;
         g_hash_table_remove(csd->programs, GUINT_TO_POINTER((uint32_t)pind));
         qemu_mutex_unlock(&csd->lock);
         return NVME_SUCCESS;
@@ -607,12 +697,16 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
 
     if (loff == 0) {
         FemuCsdProgram *held = csd_get_program_locked(csd, pind);
+        uint64_t used = csd->prog_used;
 
-        /* the replace below frees whatever this index already held */
-        if (held) {
-            csd->prog_used -= held->size;
+        /*
+         * The replace below frees whatever this index already held, unless an
+         * Execute still holds it, in which case it counts until that returns.
+         */
+        if (held && held->refs == 1) {
+            used -= held->size;
         }
-        if (psize > CSD_PROGRAM_TOTAL_MAX - csd->prog_used) {
+        if (psize > CSD_PROGRAM_TOTAL_MAX - used) {
             qemu_mutex_unlock(&csd->lock);
             return NVME_CAP_EXCEEDED | NVME_DNR;
         }
@@ -620,6 +714,8 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
 
         program = g_new0(FemuCsdProgram, 1);
         program->id = pind;
+        program->refs = 1;
+        program->csd = csd;
         program->type = load->ptype;
         program->runtime = le32_to_cpu(load->runtime);
         program->runtime_scale = le16_to_cpu(load->runtime_scale);
@@ -633,8 +729,9 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
         g_hash_table_replace(csd->programs, GUINT_TO_POINTER((uint32_t)pind),
                              program);
     } else {
+        /* a loaded program is immutable: Execute may be running it */
         program = csd_get_program_locked(csd, pind);
-        if (!program || program->size != psize ||
+        if (!program || !program->loading || program->size != psize ||
             (load->pit == 1 && program->pid != pid) ||
             program->type != load->ptype) {
             qemu_mutex_unlock(&csd->lock);
@@ -652,11 +749,21 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     if (program->load_size == program->size) {
+        /*
+         * Opening a library runs its constructors, which may take any time.
+         * Keep the lock free for the pollers meanwhile; the program is still
+         * loading, so nothing runs it, and admin commands, the only ones that
+         * change programs, are serialized by the BQL.
+         */
+        program->refs++;
+        qemu_mutex_unlock(&csd->lock);
         status = csd_load_program_data(n, program, load->jit);
+        qemu_mutex_lock(&csd->lock);
         if (!status) {
             program->loading = false;
             program->active = false;
         }
+        csd_program_unref(program);
     }
 
     qemu_mutex_unlock(&csd->lock);
@@ -772,15 +879,14 @@ static uint16_t csd_mrs_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
 }
 
+/* map each range to its AFDM, holding a reference on each for the job */
 static uint16_t csd_build_exec_args_locked(FemuCsdState *csd,
                                            NvmeCsdMemoryRange *ranges,
-                                           uint32_t numr,
-                                           FemuCsdArgs *args,
-                                           void ***mr_addrp,
-                                           long long **mr_lenp)
+                                           uint32_t numr, FemuCsdJob *job)
 {
     void **mr_addr = g_new0(void *, numr);
     long long *mr_len = g_new0(long long, numr);
+    FemuCsdAfdm **afdms = g_new0(FemuCsdAfdm *, numr);
 
     for (uint32_t i = 0; i < numr; i++) {
         uint32_t nsid = le32_to_cpu(ranges[i].nsid);
@@ -789,39 +895,290 @@ static uint16_t csd_build_exec_args_locked(FemuCsdState *csd,
         FemuCsdAfdm *afdm;
 
         if (nsid != NVME_CSD_MR_AFDM_NSID) {
-            g_free(mr_addr);
-            g_free(mr_len);
-            return NVME_INVALID_FIELD | NVME_DNR;
+            goto invalid;
         }
 
         afdm = csd_get_afdm_locked(csd, sb);
         if (!afdm) {
-            g_free(mr_addr);
-            g_free(mr_len);
-            return NVME_INVALID_FIELD | NVME_DNR;
+            goto invalid;
         }
         if (len == 0) {
             len = afdm->size > UINT32_MAX ? UINT32_MAX : afdm->size;
         }
         if (len > afdm->size) {
-            g_free(mr_addr);
-            g_free(mr_len);
-            return NVME_INVALID_FIELD | NVME_DNR;
+            goto invalid;
         }
 
         mr_addr[i] = afdm->data;
         mr_len[i] = len;
+        afdms[i] = afdm;
     }
 
-    args->numr = numr;
-    args->mr_addr = mr_addr;
-    args->mr_len = mr_len;
-    *mr_addrp = mr_addr;
-    *mr_lenp = mr_len;
+    for (uint32_t i = 0; i < numr; i++) {
+        afdms[i]->refs++;
+    }
+    job->args.numr = numr;
+    job->args.mr_addr = mr_addr;
+    job->args.mr_len = mr_len;
+    job->afdms = afdms;
 
     return NVME_SUCCESS;
+
+invalid:
+    g_free(mr_addr);
+    g_free(mr_len);
+    g_free(afdms);
+    return NVME_INVALID_FIELD | NVME_DNR;
 }
 
+static void csd_job_free_locked(FemuCsdJob *job)
+{
+    for (int i = 0; job->afdms && i < job->args.numr; i++) {
+        csd_afdm_unref(job->afdms[i]);
+    }
+    csd_program_unref(job->program);
+    g_free(job->afdms);
+    g_free(job->args.mr_addr);
+    g_free(job->args.mr_len);
+    g_free(job->data);
+    g_free(job);
+}
+
+static uint16_t csd_run_program(FemuCsdProgram *program, FemuCsdArgs *args,
+                                int64_t *result)
+{
+    uint64_t copy_size;
+
+    switch (program->type) {
+    case NVME_CSD_CSF_TYPE_PHANTOM:
+        if (args->numr >= 2) {
+            copy_size = MIN(args->mr_len[0], args->mr_len[1]);
+            memcpy(args->mr_addr[0], args->mr_addr[1], copy_size);
+            *result = copy_size > INT64_MAX ? INT64_MAX : copy_size;
+        }
+        return NVME_SUCCESS;
+    case NVME_CSD_CSF_TYPE_SHARED_LIB:
+        if (!program->shared_lib_fn) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        *result = program->shared_lib_fn(args);
+        return NVME_SUCCESS;
+    case NVME_CSD_CSF_TYPE_EBPF:
+#ifdef CONFIG_FEMU_CSD_UBPF
+        if (!program->ubpf_vm) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (program->ubpf_jit_fn) {
+            *result = program->ubpf_jit_fn((struct ubpf_jit_args *)args);
+        } else {
+            uint64_t ubpf_result;
+
+            if (ubpf_exec(program->ubpf_vm, (struct ubpf_jit_args *)args,
+                          &ubpf_result) < 0) {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+            *result = ubpf_result;
+        }
+        return NVME_SUCCESS;
+#else
+        return NVME_INVALID_FIELD | NVME_DNR;
+#endif
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
+/*
+ * Hold the compute unit that frees up first for runtime from start, and
+ * return when the hold ends; nr_cu bounds how many programs run at once.
+ */
+static int64_t csd_hold_cu_locked(FemuCsdState *csd, uint64_t start,
+                                  uint64_t runtime)
+{
+    uint32_t cu = 0;
+    uint32_t i;
+
+    for (i = 1; i < csd->params.nr_cu; i++) {
+        if (csd->cu_next_avail[i] < csd->cu_next_avail[cu]) {
+            cu = i;
+        }
+    }
+    if (csd->cu_next_avail[cu] > start) {
+        start = csd->cu_next_avail[cu];
+    }
+    csd->cu_next_avail[cu] = start + runtime;
+    return csd->cu_next_avail[cu];
+}
+
+/* Set the result and completion time of a run. */
+static void csd_finish_locked(FemuCsdState *csd, FemuCsdJob *job,
+                              uint16_t status, int64_t result, int64_t host_ns)
+{
+    NvmeRequest *req = job->req;
+    uint64_t runtime = job->runtime;
+
+    req->status = status;
+    if (!status) {
+        req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
+    }
+
+    if (job->reserved_end) {
+        /* a known runtime took its unit in arrival order at submission */
+        req->expire_time = job->reserved_end;
+    } else if (!status) {
+        /*
+         * A program that names no runtime is charged the time it took the
+         * host to run it, scaled: by the program's own factor (tenths) when
+         * it gave one, else by the device's csf_runtime_scale. Its unit is
+         * known only now.
+         */
+        uint64_t scale10 = job->program->runtime_scale ?
+                           job->program->runtime_scale :
+                           (uint64_t)csd->params.csf_runtime_scale * 10;
+
+        runtime = host_ns > 0 ? host_ns * scale10 / 10 : 0;
+        if (runtime) {
+            req->expire_time = csd_hold_cu_locked(csd, job->arrival, runtime);
+        }
+    }
+    req->reqlat = req->expire_time - job->arrival;
+}
+
+/* the first pending job whose program is not running, or NULL */
+static FemuCsdJob *csd_next_job_locked(FemuCsdState *csd)
+{
+    FemuCsdJob *job;
+
+    QTAILQ_FOREACH(job, &csd->pending, entry) {
+        if (!job->req || !job->program->busy) {
+            return job;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * One thread per compute unit runs the programs, so a long one holds neither
+ * a poller nor any lock the pollers or the admin queue take.
+ */
+static void *csd_worker(void *opaque)
+{
+    FemuCsdState *csd = opaque;
+    FemuCtrl *n = csd->n;
+    FemuCsdProgram *dead;
+    FemuCsdJob *job;
+    struct rte_ring *ring;
+    int64_t result, host_ns;
+    uint16_t status;
+
+    qemu_mutex_lock(&csd->lock);
+    while (!csd->stopping) {
+        dead = QSLIST_FIRST(&csd->dead);
+        if (dead) {
+            QSLIST_REMOVE_HEAD(&csd->dead, dead);
+            qemu_mutex_unlock(&csd->lock);
+            csd_program_destroy(dead);
+            qemu_mutex_lock(&csd->lock);
+            continue;
+        }
+
+        job = csd_next_job_locked(csd);
+        if (!job) {
+            qemu_cond_wait(&csd->job_cond, &csd->lock);
+            continue;
+        }
+        QTAILQ_REMOVE(&csd->pending, job, entry);
+        if (!job->req) {
+            csd_job_free_locked(job);
+            continue;
+        }
+
+        QTAILQ_INSERT_TAIL(&csd->running, job, entry);
+        job->program->busy = true;
+        qemu_mutex_unlock(&csd->lock);
+
+        result = 0;
+        host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        status = csd_run_program(job->program, &job->args, &result);
+        host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
+
+        qemu_mutex_lock(&csd->lock);
+        job->program->busy = false;
+        /* the next run of this program may be waiting for this one */
+        qemu_cond_broadcast(&csd->job_cond);
+        if (job->req) {
+            csd_finish_locked(csd, job, status, result, host_ns);
+        }
+
+        /*
+         * Hand the request to the poller that fetched it. Its ring is shared
+         * with the FTL thread and may be full for a moment; keep the job on
+         * the running list meanwhile, so a queue deletion can still drop it.
+         */
+        ring = n->use_ftl_thread ? n->to_poller[job->poller] :
+                                   n->to_ftl[job->poller];
+        while (job->req && !csd->stopping &&
+               femu_ring_enqueue(ring, (void *)&job->req, 1) != 1) {
+            qemu_mutex_unlock(&csd->lock);
+            g_usleep(100);
+            qemu_mutex_lock(&csd->lock);
+        }
+        QTAILQ_REMOVE(&csd->running, job, entry);
+        csd_job_free_locked(job);
+    }
+    qemu_mutex_unlock(&csd->lock);
+
+    return NULL;
+}
+
+/* called by the poller once it has finished with the request */
+static void csd_exec_defer(FemuCtrl *n, NvmeRequest *req, int poller)
+{
+    FemuCsdState *csd = csd_state(n);
+    FemuCsdJob *job = req->opaque;
+
+    req->opaque = NULL;
+    job->poller = poller;
+    qemu_mutex_lock(&csd->lock);
+    QTAILQ_INSERT_TAIL(&csd->pending, job, entry);
+    qemu_cond_signal(&csd->job_cond);
+    qemu_mutex_unlock(&csd->lock);
+}
+
+/*
+ * A submission queue is about to be freed with the dataplane paused. Forget
+ * its requests held by Execute jobs, so a program that returns later does not
+ * complete into freed memory; the caller then drains the rings, which covers
+ * any completion posted before this.
+ */
+void femu_csd_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
+{
+    FemuCsdState *csd = csd_state(n);
+    FemuCsdJob *job, *next;
+
+    if (!csd) {
+        return;
+    }
+
+    qemu_mutex_lock(&csd->lock);
+    QTAILQ_FOREACH_SAFE(job, &csd->pending, entry, next) {
+        if (job->req && job->req->sq == sq) {
+            QTAILQ_REMOVE(&csd->pending, job, entry);
+            csd_job_free_locked(job);
+        }
+    }
+    QTAILQ_FOREACH(job, &csd->running, entry) {
+        if (job->req && job->req->sq == sq) {
+            job->req = NULL;
+        }
+    }
+    qemu_mutex_unlock(&csd->lock);
+}
+
+/*
+ * Check the command and take what the program needs here on the poller, then
+ * leave the run itself to a compute unit thread.
+ */
 static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     FemuCsdState *csd = csd_state(n);
@@ -830,21 +1187,14 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint16_t rsid = le16_to_cpu(exec->rsid);
     uint32_t numr = le32_to_cpu(exec->numr);
     uint32_t dlen = le32_to_cpu(exec->dlen);
-    uint64_t cparam1 = le64_to_cpu(exec->cparam1);
-    uint64_t cparam2 = le64_to_cpu(exec->cparam2);
     uint32_t group_id = exec->group;
     uint64_t runtime = le32_to_cpu(exec->runtime);
     FemuCsdProgram *program;
-    FemuCsdMrs *mrs = NULL;
-    uint64_t copy_size;
+    FemuCsdMrs *mrs;
     uint8_t *data = NULL;
     NvmeCsdMemoryRange *ranges = NULL;
-    void **mr_addr = NULL;
-    long long *mr_len = NULL;
-    FemuCsdArgs args = { 0 };
-    int64_t result = 0;
-    int64_t host_ns;
-    uint16_t status = NVME_SUCCESS;
+    FemuCsdJob *job;
+    uint16_t status;
 
     if (dlen == 0 && numr > 0) {
         dlen = numr * sizeof(NvmeCsdMemoryRange);
@@ -871,23 +1221,13 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         ranges = (NvmeCsdMemoryRange *)data;
     }
 
+    job = g_new0(FemuCsdJob, 1);
     qemu_mutex_lock(&csd->lock);
     program = csd_get_program_locked(csd, pind);
-    if (!program) {
-        qemu_mutex_unlock(&csd->lock);
+    if (!program || !program->active ||
+        (group_id != 0 && !csd_get_group_locked(csd, group_id))) {
         status = NVME_INVALID_FIELD | NVME_DNR;
-        goto out;
-    }
-    if (!program->active) {
-        qemu_mutex_unlock(&csd->lock);
-        status = NVME_INVALID_FIELD | NVME_DNR;
-        goto out;
-    }
-
-    if (group_id != 0 && !csd_get_group_locked(csd, group_id)) {
-        qemu_mutex_unlock(&csd->lock);
-        status = NVME_INVALID_FIELD | NVME_DNR;
-        goto out;
+        goto fail;
     }
 
     if (runtime == 0) {
@@ -897,117 +1237,47 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (rsid) {
         mrs = csd_get_mrs_locked(csd, rsid);
         if (!mrs) {
-            qemu_mutex_unlock(&csd->lock);
             status = NVME_INVALID_FIELD | NVME_DNR;
-            goto out;
+            goto fail;
         }
         ranges = mrs->ranges;
         numr = mrs->numr;
         dlen = 0;
     }
 
-    status = csd_build_exec_args_locked(csd, ranges, numr, &args,
-                                        &mr_addr, &mr_len);
+    status = csd_build_exec_args_locked(csd, ranges, numr, job);
     if (status) {
-        qemu_mutex_unlock(&csd->lock);
-        goto out;
+        goto fail;
     }
-    args.cparam1 = cparam1;
-    args.cparam2 = cparam2;
-    args.data_buffer = data && dlen > numr * sizeof(NvmeCsdMemoryRange) ?
-                       data + numr * sizeof(NvmeCsdMemoryRange) : NULL;
-    args.buffer_len = args.data_buffer ?
-                      dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
-
-    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    switch (program->type) {
-    case NVME_CSD_CSF_TYPE_PHANTOM:
-        if (args.numr >= 2) {
-            copy_size = MIN(args.mr_len[0], args.mr_len[1]);
-            memcpy(args.mr_addr[0], args.mr_addr[1], copy_size);
-            result = copy_size > INT64_MAX ? INT64_MAX : copy_size;
-        }
-        break;
-    case NVME_CSD_CSF_TYPE_SHARED_LIB:
-        if (!program->shared_lib_fn) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-            break;
-        }
-        result = program->shared_lib_fn(&args);
-        break;
-    case NVME_CSD_CSF_TYPE_EBPF:
-#ifdef CONFIG_FEMU_CSD_UBPF
-        if (!program->ubpf_vm) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-            break;
-        }
-        if (program->ubpf_jit_fn) {
-            result = program->ubpf_jit_fn((struct ubpf_jit_args *)&args);
-        } else {
-            uint64_t ubpf_result;
-
-            if (ubpf_exec(program->ubpf_vm, (struct ubpf_jit_args *)&args,
-                          &ubpf_result) < 0) {
-                status = NVME_INVALID_FIELD | NVME_DNR;
-                break;
-            }
-            result = ubpf_result;
-        }
-#else
-        status = NVME_INVALID_FIELD | NVME_DNR;
-#endif
-        break;
-    default:
-        status = NVME_INVALID_FIELD | NVME_DNR;
-        break;
-    }
-    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
-    if (!status) {
-        req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
-    }
-    g_free(mr_addr);
-    g_free(mr_len);
-
+    program->refs++;
     /*
-     * A program that names no runtime is charged the time it took the host
-     * to run it, scaled: by the program's own factor (tenths) when it gave
-     * one, else by the device's csf_runtime_scale.
+     * A known runtime takes its compute unit now, in arrival order, so the
+     * order the host happens to finish programs in does not change it.
      */
-    if (!status && !runtime) {
-        uint64_t scale10 = program->runtime_scale ? program->runtime_scale :
-                           (uint64_t)csd->params.csf_runtime_scale * 10;
-
-        runtime = host_ns > 0 ? host_ns * scale10 / 10 : 0;
-    }
-
-    /*
-     * The program runs on the compute unit that frees up first, and holds
-     * it for its runtime; nr_cu bounds how many run at once.
-     */
-    if (!status && runtime) {
-        uint64_t start = req->expire_time;
-        uint32_t cu = 0;
-        uint32_t i;
-
-        for (i = 1; i < csd->params.nr_cu; i++) {
-            if (csd->cu_next_avail[i] < csd->cu_next_avail[cu]) {
-                cu = i;
-            }
-        }
-        if (csd->cu_next_avail[cu] > start) {
-            start = csd->cu_next_avail[cu];
-        }
-        csd->cu_next_avail[cu] = start + runtime;
-        req->reqlat += csd->cu_next_avail[cu] - req->expire_time;
-        req->expire_time = csd->cu_next_avail[cu];
+    if (runtime) {
+        job->reserved_end = csd_hold_cu_locked(csd, req->expire_time, runtime);
     }
     qemu_mutex_unlock(&csd->lock);
 
-    if (status) {
-        goto out;
-    }
+    job->program = program;
+    job->args.cparam1 = le64_to_cpu(exec->cparam1);
+    job->args.cparam2 = le64_to_cpu(exec->cparam2);
+    job->args.data_buffer = data && dlen > numr * sizeof(NvmeCsdMemoryRange) ?
+                            data + numr * sizeof(NvmeCsdMemoryRange) : NULL;
+    job->args.buffer_len = job->args.data_buffer ?
+                           dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
+    job->data = data;
+    job->runtime = runtime;
+    job->arrival = req->expire_time;
+    job->req = req;
+    req->opaque = job;
+    req->defer = csd_exec_defer;
 
-out:
+    return NVME_SUCCESS;
+
+fail:
+    qemu_mutex_unlock(&csd->lock);
+    g_free(job);
     g_free(data);
     return status;
 }
@@ -1133,6 +1403,8 @@ static uint16_t csd_alloc_fdm(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     afdm = g_new0(FemuCsdAfdm, 1);
     afdm->id = id;
+    afdm->refs = 1;
+    afdm->csd = csd;
     afdm->size = size;
     afdm->data = g_malloc0(size);
 
@@ -1158,7 +1430,6 @@ static uint16_t csd_dealloc_afdm(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    csd->fdm_used -= afdm->size;
     g_hash_table_remove(csd->afdms, GUINT_TO_POINTER(id));
     qemu_mutex_unlock(&csd->lock);
 
