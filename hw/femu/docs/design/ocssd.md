@@ -448,8 +448,10 @@ mode does report:
 - 2.0 does not model page types or channel transfer, and charges one page
   time per chunk run regardless of how many pages the run covers.
 - 2.0 does not store per-sector metadata.
-- The vendor admin command 0xEE writes latency fields that the timing path
-  does not read. Timing comes only from the `flash_type` table.
+- The vendor admin command 0xEE can change the read, program and erase
+  times of the lower and upper pages and the channel time at run time, but
+  not those of the centre pages of TLC and QLC
+  ([0xEE](nand-timing.md#runtime-switches)).
 - The Get L2P Table command of 1.2 always returns unmapped entries.
 - Data lives only in host memory and is lost when QEMU exits.
 

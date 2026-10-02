@@ -33,34 +33,37 @@ bool oc_timing_geometry_ok(FemuCtrl *n, Error **errp)
 
 void set_latency(FemuCtrl *n)
 {
-    if (n->flash_type == TLC) {
-        n->upg_rd_lat_ns = TLC_UPPER_PAGE_READ_LATENCY_NS;
-        n->cpg_rd_lat_ns = TLC_CENTER_PAGE_READ_LATENCY_NS;
-        n->lpg_rd_lat_ns = TLC_LOWER_PAGE_READ_LATENCY_NS;
-        n->upg_wr_lat_ns = TLC_UPPER_PAGE_WRITE_LATENCY_NS;
-        n->cpg_wr_lat_ns = TLC_CENTER_PAGE_WRITE_LATENCY_NS;
-        n->lpg_wr_lat_ns = TLC_LOWER_PAGE_WRITE_LATENCY_NS;
-        n->blk_er_lat_ns = TLC_BLOCK_ERASE_LATENCY_NS;
-        n->chnl_pg_xfer_lat_ns = TLC_CHNL_PAGE_TRANSFER_LATENCY_NS;
-    } else if (n->flash_type == QLC) {
-        n->upg_rd_lat_ns  = QLC_UPPER_PAGE_READ_LATENCY_NS;
-        n->cupg_rd_lat_ns = QLC_CENTER_UPPER_PAGE_READ_LATENCY_NS;
-        n->clpg_rd_lat_ns = QLC_CENTER_LOWER_PAGE_READ_LATENCY_NS;
-        n->lpg_rd_lat_ns  = QLC_LOWER_PAGE_READ_LATENCY_NS;
-        n->upg_wr_lat_ns  = QLC_UPPER_PAGE_WRITE_LATENCY_NS;
-        n->cupg_wr_lat_ns = QLC_CENTER_UPPER_PAGE_WRITE_LATENCY_NS;
-        n->clpg_wr_lat_ns = QLC_CENTER_LOWER_PAGE_WRITE_LATENCY_NS;
-        n->lpg_wr_lat_ns  = QLC_LOWER_PAGE_WRITE_LATENCY_NS;
-        n->blk_er_lat_ns  = QLC_BLOCK_ERASE_LATENCY_NS;
-        n->chnl_pg_xfer_lat_ns = QLC_CHNL_PAGE_TRANSFER_LATENCY_NS;
-    } else if (n->flash_type == MLC) {
-        n->upg_rd_lat_ns = MLC_UPPER_PAGE_READ_LATENCY_NS;
-        n->lpg_rd_lat_ns = MLC_LOWER_PAGE_READ_LATENCY_NS;
-        n->upg_wr_lat_ns = MLC_UPPER_PAGE_WRITE_LATENCY_NS;
-        n->lpg_wr_lat_ns = MLC_LOWER_PAGE_WRITE_LATENCY_NS;
-        n->blk_er_lat_ns = MLC_BLOCK_ERASE_LATENCY_NS;
-        n->chnl_pg_xfer_lat_ns = MLC_CHNL_PAGE_TRANSFER_LATENCY_NS;
+    int ft = n->flash_type;
+
+    init_nand_flash(n);
+    for (int p = 0; p < MAX_FLASH_TYPE; p++) {
+        n->oc_pg_rd_lat[p] = nand_flash_timing.pg_rd_lat[ft][p];
+        n->oc_pg_wr_lat[p] = nand_flash_timing.pg_wr_lat[ft][p];
     }
+    n->oc_blk_er_lat = nand_flash_timing.blk_er_lat[ft];
+    n->oc_chnl_pg_xfer_lat = n->bb_params.ch_xfer_lat ?
+                             n->bb_params.ch_xfer_lat :
+                             nand_flash_timing.chnl_pg_xfer_lat[ft];
+}
+
+/*
+ * Vendor admin command 0xEE: set this controller's NAND times at run time.
+ * A cell holds flash_type bits, so its lowest page type is the lower page and
+ * page type flash_type - 1 the upper one; the centre pages of TLC and QLC keep
+ * their times. SLC has a single page type, which takes the lower page times.
+ */
+void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
+                    uint32_t wr_upper, uint32_t wr_lower, uint32_t erase,
+                    uint32_t xfer)
+{
+    int upper = n->flash_type - 1;
+
+    n->oc_pg_rd_lat[upper] = rd_upper;
+    n->oc_pg_wr_lat[upper] = wr_upper;
+    n->oc_pg_rd_lat[0] = rd_lower;
+    n->oc_pg_wr_lat[0] = wr_lower;
+    n->oc_blk_er_lat = erase;
+    n->oc_chnl_pg_xfer_lat = xfer;
 }
 
 typedef struct OcChannelReservation {
@@ -143,14 +146,14 @@ int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
     switch (opcode) {
     case NVME_CMD_OC_READ:
     case NVME_CMD_READ:
-        lat = get_page_read_latency(n->flash_type, page_type);
+        lat = n->oc_pg_rd_lat[page_type];
         break;
     case NVME_CMD_OC_WRITE:
     case NVME_CMD_WRITE:
-        lat = get_page_write_latency(n->flash_type, page_type);
+        lat = n->oc_pg_wr_lat[page_type];
         break;
     case NVME_CMD_OC_ERASE:
-        lat = get_blk_erase_latency(n->flash_type);
+        lat = n->oc_blk_er_lat;
         break;
     default:
         assert(0);

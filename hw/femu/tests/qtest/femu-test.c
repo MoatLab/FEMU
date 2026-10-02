@@ -11219,6 +11219,91 @@ static void femu_test_kv_compaction_time(void *obj, void *data,
     guest_free(alloc, raw);
 }
 
+/*
+ * Vendor admin command 0xEE sets the NAND times of an Open-Channel device.
+ * It wrote fields no timing code read; now an erase takes the time it sets.
+ * Other modes have no use for it and refuse it.
+ */
+static void femu_test_oc_set_latency(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t geo, buf;
+    uint8_t g[128];
+    uint8_t sec_len;
+    uint16_t want, got;
+    int64_t start;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = 0xee;
+    cmd.cdw10 = cpu_to_le32(64000);         /* upper page read */
+    cmd.cdw11 = cpu_to_le32(48000);         /* lower page read */
+    cmd.cdw12 = cpu_to_le32(2300000);       /* upper page program */
+    cmd.cdw13 = cpu_to_le32(850000);        /* lower page program */
+    cmd.cdw14 = cpu_to_le32(40000000);      /* block erase, 40 ms */
+    cmd.cdw15 = cpu_to_le32(52433);         /* channel transfer */
+    if (!data) {
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+        femu_disable(&c);
+        return;
+    }
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    femu_create_io_queues(&c);
+    geo = guest_alloc(alloc, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(geo);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, geo, g, sizeof(g));
+    sec_len = g[11];
+
+    buf = guest_alloc(alloc, 4096);
+    for (i = 0; i < 4; i++) {
+        uint64_t chunk = (uint64_t)(i + 1) << sec_len;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_OC20_VECT_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)chunk);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(chunk >> 32));
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+    }
+
+    start = g_get_monotonic_time();
+    for (i = 0; i < 4; i++) {
+        uint64_t chunk = (uint64_t)(i + 1) << sec_len;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_OC20_VECT_ERASE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw10 = cpu_to_le32((uint32_t)chunk);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(chunk >> 32));
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+    }
+    /* four 40 ms erases of one unit; the default MLC erase is 3 ms */
+    g_assert_cmpint(g_get_monotonic_time() - start, >, 160000);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    guest_free(alloc, geo);
+}
+
 static void femu_test_namespace_failed_identity(void *obj, void *data,
                                                  QGuestAllocator *alloc)
 {
@@ -18712,6 +18797,16 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
     });
+    qos_add_test("oc-set-latency", "femu", femu_test_oc_set_latency,
+                 &(QOSGraphTestOptions) {
+        /* the oc20-vector-io geometry, eight backed chunks per unit */
+        .edge.extra_device_opts =
+            "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1",
+        .arg = (void *)1,
+    });
+    qos_add_test("oc-set-latency-refused", "femu", femu_test_oc_set_latency,
+                 NULL);
     qos_add_test("namespace-sizes-rounding", "femu",
                  femu_test_namespace_sizes_rounding, NULL);
     qos_add_test("fdp-csd-knobs", "femu", femu_test_fdp_csd_knobs, NULL);

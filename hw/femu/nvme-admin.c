@@ -3714,16 +3714,17 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_NS_ATTACHMENT:
         return nvme_ns_attachment(n, cmd);
     case NVME_ADM_CMD_FEMU_DEBUG:
-        n->upg_rd_lat_ns = le64_to_cpu(cmd->cdw10);
-        n->lpg_rd_lat_ns = le64_to_cpu(cmd->cdw11);
-        n->upg_wr_lat_ns = le64_to_cpu(cmd->cdw12);
-        n->lpg_wr_lat_ns = le64_to_cpu(cmd->cdw13);
-        n->blk_er_lat_ns = le64_to_cpu(cmd->cdw14);
-        n->chnl_pg_xfer_lat_ns = le64_to_cpu(cmd->cdw15);
-        femu_log("tRu=%" PRId64 ", tRl=%" PRId64 ", tWu=%" PRId64 ", "
-                "tWl=%" PRId64 ", tBERS=%" PRId64 ", tCHNL=%" PRId64 "\n",
-                n->upg_rd_lat_ns, n->lpg_rd_lat_ns, n->upg_wr_lat_ns,
-                n->lpg_wr_lat_ns, n->blk_er_lat_ns, n->chnl_pg_xfer_lat_ns);
+        /* Only the Open-Channel timing model reads these times. */
+        if (!OCSSD(n)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        oc_set_latency(n, le32_to_cpu(cmd->cdw10), le32_to_cpu(cmd->cdw11),
+                       le32_to_cpu(cmd->cdw12), le32_to_cpu(cmd->cdw13),
+                       le32_to_cpu(cmd->cdw14), le32_to_cpu(cmd->cdw15));
+        femu_log("tRu=%u, tRl=%u, tWu=%u, tWl=%u, tBERS=%u, tCHNL=%u\n",
+                 le32_to_cpu(cmd->cdw10), le32_to_cpu(cmd->cdw11),
+                 le32_to_cpu(cmd->cdw12), le32_to_cpu(cmd->cdw13),
+                 le32_to_cpu(cmd->cdw14), le32_to_cpu(cmd->cdw15));
         return NVME_SUCCESS;
     case NVME_ADM_CMD_DELETE_SQ:
         femu_debug("admin cmd,del_sq\n");

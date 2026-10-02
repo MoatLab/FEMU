@@ -180,7 +180,8 @@ then programs the chip; a read occupies the chip, then moves its data out.
 Open-Channel 1.2 charges channel transfer only with `oc12_channel_timing=on`,
 using `ch_xfer_lat` per page or the `flash_type` table value when that is 0.
 Open-Channel 2.0 charges no channel time. Read, program and erase times come
-from the `flash_type` table (SLC, MLC, TLC, QLC).
+from the `flash_type` table (SLC, MLC, TLC, QLC) and can be changed at run
+time with vendor admin command 0xEE.
 
 Properties: [OCSSD](../reference/properties.md#ocssd-open-channel).
 

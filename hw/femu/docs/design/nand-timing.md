@@ -681,9 +681,21 @@ sudo nvme admin-passthru /dev/nvme0 --opcode=0xef --cdw10=2   # stop charging GC
 sudo nvme admin-passthru /dev/nvme0 --opcode=0xef --cdw10=4   # zero NAND times
 ```
 
-The vendor command 0xEE (`NVME_ADM_CMD_FEMU_DEBUG`) writes six OCSSD latency
-fields in `FemuCtrl`. No timing code reads those fields, so it has no effect
-on timing.
+The vendor command 0xEE (`NVME_ADM_CMD_FEMU_DEBUG`) sets an Open-Channel
+controller's NAND times at run time, in nanoseconds: CDW10 upper page read,
+CDW11 lower page read, CDW12 upper page program, CDW13 lower page program,
+CDW14 block erase and CDW15 channel transfer per page. The lower page is
+page type 0 and the upper page the highest page type of `flash_type`; the
+centre pages of TLC and QLC keep their table times, and SLC, with one page
+type, takes the lower page values. The times belong to that controller
+(`FemuCtrl.oc_pg_rd_lat` and the fields beside it, filled from the
+`flash_type` table by `set_latency()`), so other devices are not affected.
+Other modes refuse 0xEE with Invalid Field.
+
+```sh
+sudo nvme admin-passthru /dev/nvme0 --opcode=0xee --cdw10=64000 --cdw11=48000 \
+    --cdw12=2300000 --cdw13=850000 --cdw14=3000000 --cdw15=52433
+```
 
 ## Parameters
 

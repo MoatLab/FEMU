@@ -10,5 +10,8 @@ int64_t advance_read_channel_timestamp(FemuCtrl *n, int ch, uint64_t now,
 int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
                                uint8_t page_type);
 void set_latency(FemuCtrl *n);
+void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
+                    uint32_t wr_upper, uint32_t wr_lower, uint32_t erase,
+                    uint32_t xfer);
 bool oc_timing_geometry_ok(FemuCtrl *n, Error **errp);
 #endif

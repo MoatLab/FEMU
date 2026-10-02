@@ -461,9 +461,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         int64_t chip_end_ts;
 
         if (n->oc_params.channel_timing) {
-            uint64_t page_ns = n->bb_params.ch_xfer_lat ?
-                n->bb_params.ch_xfer_lat :
-                nand_flash_timing.chnl_pg_xfer_lat[n->flash_type];
+            uint64_t page_ns = n->oc_chnl_pg_xfer_lat;
 
             /* One page per plane; partial pages pay only for their sectors. */
             transfer_ns = DIV_ROUND_UP(page_ns * addr_bucket[i].cnt,

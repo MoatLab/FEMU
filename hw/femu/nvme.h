@@ -2268,19 +2268,14 @@ typedef struct FemuCtrl {
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];
     GArray *chnl_reservations[FEMU_MAX_NUM_CHNLS];
 
-    /* Latency numbers for whitebox-mode only */
-    int64_t upg_rd_lat_ns; /* upper page in MLC/TLC/QLC */
-    int64_t cpg_rd_lat_ns; /* center page in TLC */
-    int64_t cupg_rd_lat_ns; /* center-upper page in QLC */
-    int64_t clpg_rd_lat_ns; /* center-lower page in QLC */
-    int64_t lpg_rd_lat_ns; /* lower page in MLC/TLC/QLC */
-    int64_t upg_wr_lat_ns;
-    int64_t cpg_wr_lat_ns;
-    int64_t cupg_wr_lat_ns;
-    int64_t clpg_wr_lat_ns;
-    int64_t lpg_wr_lat_ns;
-    int64_t blk_er_lat_ns;
-    int64_t chnl_pg_xfer_lat_ns;
+    /*
+     * Open-Channel NAND times, indexed by page type, copied from the
+     * flash_type table at init. Vendor admin command 0xEE rewrites them.
+     */
+    int64_t oc_pg_rd_lat[MAX_FLASH_TYPE];
+    int64_t oc_pg_wr_lat[MAX_FLASH_TYPE];
+    int64_t oc_blk_er_lat;
+    int64_t oc_chnl_pg_xfer_lat;
 
     BbCtrlParams bb_params;
 

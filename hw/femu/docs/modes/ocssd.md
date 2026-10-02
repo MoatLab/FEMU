@@ -81,7 +81,9 @@ with `oc12_channel_timing`.
 Read, program and erase times come from the `flash_type` table: 1 SLC,
 2 MLC (the default), 3 TLC or 4 QLC. Open-Channel 1.2 also charges channel
 transfer time when `oc12_channel_timing=on`, using `ch_xfer_lat` per page or
-the table value when it is 0. Open-Channel 2.0 charges no channel time. See
+the table value when it is 0. Open-Channel 2.0 charges no channel time.
+Vendor admin command 0xEE changes these times at run time
+([NAND timing](../design/nand-timing.md#runtime-switches)). See
 the [timing model](../concepts/timing-model.md#ocssd).
 
 ### Other
