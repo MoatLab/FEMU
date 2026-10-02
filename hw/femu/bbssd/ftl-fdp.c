@@ -1996,6 +1996,9 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                          ssd->ruhs[i].curr_ru);
         }
         ssd->ruhs[i].curr_ru = NULL;
+        /* every unit was handed back above; count only the ones taken below */
+        ssd->ruhs[i].ru_in_use_cnt = 0;
+        ssd->ruhs[i].ruh_live_pages_cnt = 0;
         for (rg_idx = 0; rg_idx < (int)ssd->nrg; rg_idx++) {
             ssd->ruhs[i].rus[rg_idx] =
                 fdp_get_new_ru(ssd, rg_idx, ssd->ruhs[i].ruhid);
