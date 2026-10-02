@@ -40,10 +40,10 @@ then run in two stages:
      cannot plug where it lands fails here. The backends they need are
      replaced by stand-ins: each -drive by a null block device with the same
      id and interface, each -netdev and -net user by user networking with no
-     forwarded ports. Options that need a guest or a host resource
-     (-enable-kvm, -cpu, -qmp, -m) are dropped. QMP must report every femu, femu-subsys
-     and femu-cxl-ssd the example creates, query-pci must list each femu as
-     an NVMe controller, and QEMU must print nothing on stderr except
+     forwarded ports. Options that need a host resource (-enable-kvm,
+     -cpu, -qmp, -m) are dropped. QMP must report every femu, femu-subsys
+     and femu-cxl-ssd the example creates, query-pci must list each femu
+     as an NVMe controller, and QEMU must print nothing on stderr except
      FEMU's informational "[FEMU] Log:" lines, the memory-pinning notice
      (the run lowers RLIMIT_MEMLOCK so it never pins) and the example's
      allow-warning text. Any QEMU warning or "[FEMU] Err:" line fails.
