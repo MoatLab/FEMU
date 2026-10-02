@@ -793,6 +793,12 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     set_maptbl_ent(ssd, lpn, &new_ppa);
     set_rmap_ent(ssd, lpn, &new_ppa);
     mark_page_valid_fdp(ssd, &new_ppa, dest_ru);
+    /*
+     * Retire the old copy now: a victim that cannot be emptied is requeued,
+     * and a copy still marked valid would be moved again over newer data.
+     */
+    mark_page_invalid_fdp(ssd, old_ppa);
+    set_rmap_ent(ssd, INVALID_LPN, old_ppa);
     ssd->gc_write_pages++; /* a page the device relocated itself */
 
     // FDP_TRACE(ssd, "GC_MIGRATE lpn=%lu src(ch=%u/lun=%u/blk=%u/pg=%u) "
@@ -830,9 +836,12 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
              * Advancing clears the handle's host write frontier when it cannot
              * allocate, but what ran out here is the collection frontier. Put
              * the host's back: cleared, the next host write to this handle
-             * would take a null unit into the page allocator.
+             * would take a null unit into the page allocator. The collection
+             * unit is retired and its pointer wrapped to page 0, so drop it:
+             * kept, the next relocation would program a written page.
              */
             dest_ru->ruh->curr_ru = host_ru;
+            dest_ruh->gc_ru = NULL;
         }
     } else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
         int gcruh_id = ssd->nruhs - 1;
@@ -875,12 +884,12 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
  *          Replace ru based parameter which makes ruh->curr_ru or ruh->gc_ru dangling
  *          
  */
-static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
-                                     FemuRuHandle *dest_ruh)
+static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
+                                      FemuRuHandle *dest_ruh, int *moved)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter;
-    int cnt = 0;
+
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
@@ -893,14 +902,26 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
              * to keep theirs, so the block must not be erased.
              */
             if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh)) {
-                return -1;
+                return false;
             }
-            cnt++;
+            (*moved)++;
         }
     }
 
-    ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
-    return cnt;
+    ftl_assert(get_blk(ssd, ppa)->vpc == 0);
+    return true;
+}
+
+/* charge relocated pages to MBMW, also when a pass stops part way */
+static void fdp_count_gc_writes(struct ssd *ssd, FemuReclaimUnit *victim_ru,
+                                int pages)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t gc_bytes = (uint64_t)pages * spp->secsz * spp->secs_per_pg;
+
+    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, gc_bytes);
+    nvme_fdp_stat_inc(&victim_ru->ruh->mbmw, gc_bytes);
+    nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbmw, gc_bytes);
 }
 
 /*
@@ -1059,7 +1080,31 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
               (victim_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) ?
               "PI" : "II", (force) ? "FORCE" : "BACK" );
 
-    /* migrate valid pages from victim RU */
+    /*
+     * Migrate every valid page before erasing any block. If the destination
+     * runs out part way, the victim goes back on the queue holding what was
+     * not moved; a block erased before that point would be counted erased
+     * again when the unit is next collected.
+     */
+    for (int i = 0; i < spp->lines_per_ru; i++) {
+        ppa.g.blk = victim_ru->lines[i]->id;
+        for (int ch = 0; ch < spp->nchs; ch++) {
+            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                ppa.g.ch = ch;
+                ppa.g.lun = lun;
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    ppa.g.pl = pl;
+                    if (!clean_one_block_fdp_style(ssd, &ppa, dest_ruh,
+                                                   &vpc_cnt)) {
+                        fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
+                        reinsert_victim_ru(ssd, victim_ru);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < spp->lines_per_ru; i++) {
         struct line *victim_line = victim_ru->lines[i];
         ppa.g.blk = victim_line->id;
@@ -1073,20 +1118,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                 lunp = get_lun(ssd, &ppa);
 
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    int moved;
-
                     ppa.g.pl = pl;
-                    moved = clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
-                    if (moved < 0) {
-                        /*
-                         * The destination ran out part way. Leave the rest of
-                         * the victim where it is and put it back on the queue
-                         * rather than erasing a block that still holds data.
-                         */
-                        reinsert_victim_ru(ssd, victim_ru);
-                        return -1;
-                    }
-                    vpc_cnt += moved;
                     blk_cnt++;
                     mark_block_free(ssd, &ppa);
                     ppas[pl] = ppa;
@@ -1114,9 +1146,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     FDP_TRACE(ssd, "GC_DONE victim_ru=%u pages_migrated=%d "
               "blocks_erased=%d mbmw_delta=%lu mbe_delta=%lu\n",
               victim_ru->ruidx, vpc_cnt, blk_cnt, gc_bytes, erase_bytes);
-    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, gc_bytes);
-    nvme_fdp_stat_inc(&victim_ru->ruh->mbmw, gc_bytes);
-    nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbmw, gc_bytes);
+    fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
     nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbe, erase_bytes);
@@ -1124,7 +1154,6 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     if (ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt > 0) {
         ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt--;
     }
-    ssd->ruhs[victim_ru->ruh->ruhid].ruh_live_pages_cnt -= vpc_cnt;
 
     /* generate controller event for RU change due to GC */
     if (ssd->n->subsys) {
@@ -1154,6 +1183,20 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     return 0;
 }
 
+static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
+{
+    uint64_t fg_gc_iters = 0;
+    uint64_t max_fg_gc = (uint64_t)ssd->nrg * ssd->rg[0].ru_mgmt->tt_rus +
+                         ssd->nrg;
+
+    while (should_gc_high_fdp_style(ssd) >= 0 && fg_gc_iters < max_fg_gc) {
+        if (do_gc_fdp_style(ssd, rgid, ruhid, true) == -1) {
+            break;
+        }
+        fg_gc_iters++;
+    }
+}
+
 /*
  * ssd_stream_write - FDP write path: placement-aware page allocation
  */
@@ -1178,7 +1221,6 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     uint64_t written = 0;
-    int r;
 
     /* parse placement info from request */
     uint16_t pid = req->fdp_dspec;
@@ -1281,21 +1323,16 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
      * only a guard against an unexpected non-terminating condition, bounded by
      * the total reclaim-unit population so it never trips during real progress.
      */
-    {
-        uint64_t fg_gc_iters = 0;
-        uint64_t max_fg_gc = (uint64_t)ssd->nrg * ssd->rg[0].ru_mgmt->tt_rus
-                             + ssd->nrg;
-        while (should_gc_high_fdp_style(ssd) >= 0 &&
-               fg_gc_iters < max_fg_gc) {
-            r = do_gc_fdp_style(ssd, rgid, ruhid, true);
-            if (r == -1) {
-                break;
-            }
-            fg_gc_iters++;
-        }
-    }
+    fdp_gc_until_clear(ssd, rgid, ruhid);
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        /*
+         * And per page: one command can take more units than the watermark
+         * keeps free, and once the handle's last unit is gone collection has
+         * nowhere to move pages to.
+         */
+        fdp_gc_until_clear(ssd, rgid, ruhid);
+
         /*
          * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
          */

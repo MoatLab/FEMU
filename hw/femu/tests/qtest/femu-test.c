@@ -19088,6 +19088,14 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "hot_cold_sep=on"
     });
+    /* placement keeps a unit open per handle, so it needs more lines */
+    qos_add_test("gc-no-destination-fdp", "femu", femu_test_gc_no_destination,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub"
+    });
     qos_add_test("media-counters", "femu", femu_test_media_counters,
                  &(QOSGraphTestOptions) {
         /*

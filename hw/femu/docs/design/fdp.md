@@ -123,8 +123,10 @@ The order inside `ssd_stream_write_lpns()` is:
    full.
 2. Run foreground GC while the free-unit count is at or below the high
    watermark (see [Garbage collection](#garbage-collection)).
-3. Place the pages. If the device runs out part way, the command completes
-   with Capacity Exceeded and only the pages already placed count.
+3. Place the pages, running foreground GC again before each one: a command
+   can take more units than the watermark keeps free. If the device runs out
+   part way, the command completes with Capacity Exceeded and only the pages
+   already placed count.
 
 Writes of different handles never share an RU, but they share the NAND:
 every RU spans all channels, so concurrent handles compete for the same
@@ -201,9 +203,9 @@ the RUAMW of the handle's current unit.
   `(1 - gc_thres_pcent / 100) * units`, it runs one pass. A background pass
   puts its victim back, whatever the policy, unless the victim is empty or
   at least 1/8 of its pages are invalid.
-- Foreground: before a placed write, while free units are at or below
-  `(1 - gc_thres_pcent_high / 100) * units`, it runs passes until the
-  pressure clears or no victim is left. The host write waits for them.
+- Foreground: before a placed write and before each of its pages, while
+  free units are at or below `(1 - gc_thres_pcent_high / 100) * units`, it
+  runs passes until the pressure clears or no victim is left. The host write waits for them.
   Foreground passes, and the pass RUH Update may run, always collect their
   victim.
 
@@ -238,13 +240,14 @@ With the default `fdp.isolation_mode=0` every handle is Persistently
 Isolated. With it set, only the last handle is Initially Isolated, so its
 relocated data goes back into its own current unit.
 
-A pass copies every valid page of the victim, erases the planes of each LUN
-as one multi-plane erase when `enable_gc_delay` is on (the default), adds the
-copied bytes to MBMW and the erased bytes to MBE, records a controller event
-for the handle, and returns the unit to the free list. If the destination
-runs out of space part way, the pass stops: blocks already emptied stay
-erased, the block being cleaned and those after it keep their data, and the
-victim goes back on the queue.
+A pass copies every valid page of the victim, invalidating each old copy as
+it goes, and only then erases the planes of each LUN as one multi-plane
+erase when `enable_gc_delay` is on (the default). It adds the copied bytes
+to MBMW and the erased bytes to MBE, records a controller event for the
+handle, and returns the unit to the free list. If the destination runs out
+of space part way, the pass stops before erasing anything: the pages already
+moved live at their new location, the rest stay in the victim, and the
+victim goes back on the queue to be finished by a later pass.
 
 ### Deallocate
 
