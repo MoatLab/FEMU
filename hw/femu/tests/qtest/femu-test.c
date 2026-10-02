@@ -2944,6 +2944,52 @@ static void femu_test_fdp_capacity_refused(void *obj, void *data,
 }
 
 /*
+ * The capacity check sizes one namespace against the whole reclaim unit pool,
+ * which holds only while nothing else can draw on that pool: a second
+ * namespace on the controller, or a second controller in the subsystem. Two
+ * 1 MiB namespaces on 25 lines would each fit and together overcommit it.
+ */
+static void femu_test_fdp_single_pool(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'fdp-two','addr':'5',"
+                    "'devsz_mb':2,'namespaces':2,'femu_mode':1,'secsz':512,"
+                    "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+                    "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,"
+                    "'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"), "single namespace"));
+    qobject_unref(rsp);
+
+    /* one namespace that fits is accepted; a second controller is not */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'fdp-one','addr':'5',"
+                    "'devsz_mb':1,'femu_mode':1,'secsz':512,"
+                    "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+                    "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,"
+                    "'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'fdp-other','addr':'6',"
+                    "'devsz_mb':1,'femu_mode':1,'secsz':512,"
+                    "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+                    "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,"
+                    "'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"), "single controller"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
+/*
  * Flush drains the write buffer whether or not a volatile write cache is
  * advertised: vwc only decides whether the host can turn the buffer off.
  */
@@ -19422,6 +19468,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("fdp-capacity-refused", "femu",
                  femu_test_fdp_capacity_refused, NULL);
+    qos_add_test("fdp-single-pool", "femu", femu_test_fdp_single_pool, NULL);
     /* forced only with no unit free, so a frontier can be dropped */
     qos_add_test("fdp-gc-recover", "femu", femu_test_fdp_gc_recover,
                  &(QOSGraphTestOptions) {

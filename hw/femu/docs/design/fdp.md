@@ -102,7 +102,9 @@ namespace as for a bbssd one, since CSD runs the same FTL
   ```
 
   The Initially Isolated handle collects into its open unit and adds
-  nothing. A 1 MiB namespace on 64 KiB superblocks with four Persistently
+  nothing. One namespace is checked against the whole pool because nothing
+  else can draw on it: FDP takes a single namespace and a single controller,
+  and namespace management is refused with it. A 1 MiB namespace on 64 KiB superblocks with four Persistently
   Isolated handles needs 16 + 4 + 4 + 1 = 25 units; with 19 or 23 lines,
   both accepted before, random writes over all four handles failed nearly
   all of them. A partly exposed last page counts as a whole one. bbssd
