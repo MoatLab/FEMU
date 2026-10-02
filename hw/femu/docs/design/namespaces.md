@@ -66,9 +66,16 @@ percent of the exposed size (`op_pcent=25` exposes 80 % of the NAND).
 
 - `namespace_sizes` unset: the exposed capacity is split evenly, each share rounded
   down to 512 bytes.
-- `namespace_sizes` set: one size per namespace, each rounded down to
-  512 bytes and at least one sector; the sum must fit in the exposed capacity (`devsz_mb`, or the
-  over-provisioned NAND capacity with `op_pcent`).
+- `namespace_sizes` set: one size per namespace, each at least one 512-byte
+  sector; the sum must fit in the exposed capacity (`devsz_mb`, or the
+  over-provisioned NAND capacity with `op_pcent`), all of it, whatever the
+  namespace count.
+
+Either way each size is then rounded down to whole logical blocks of the
+format `lba_index` selects (`512 << lba_index` bytes), so no slice ends in
+part of a block the host cannot address and every slice starts on a block
+boundary. A KV namespace is sized in bytes and is rounded to 512 bytes only.
+A size smaller than one logical block leaves an empty namespace.
 
 `nvme_init_namespaces()` packs the slices in NSID order. Each namespace
 records where its slice starts in `backend_offset`, and every data path
@@ -95,7 +102,8 @@ measures its capacity in bytes.
 
 The pool reported to the host is the sum of the boot slices: TNVMCAP is the
 pool size and UNVMCAP the part no namespace holds. Backend space past the
-last boot slice is not in the pool.
+last boot slice, including what the rounding above leaves, is not in the
+pool and no namespace uses it.
 
 ## Per-namespace modes
 
@@ -322,7 +330,8 @@ A NoSSD namespace and a ZNS namespace of different sizes on one controller:
 qtest cases in `hw/femu/tests/qtest/femu-test.c`:
 
 - layout and modes: `namespace-capacity`, `namespace-identity`,
-  `namespace-mixed-identity`, `namespace-large`, `namespace-empty-slice`,
+  `namespace-mixed-identity` and its `-bbssd` and `-kv` variants,
+  `namespace-sizes-rounding`, `namespace-large`, `namespace-empty-slice`,
   `namespace-kv-byte-capacity`, `kv-namespaces`, `namespace-sparse`;
 - management: the `ns-mgmt-*` cases (lifecycle, capacity, `bbssd_ns_limit`,
   notices, validation, unsupported modes and FDP), `namespace-lifecycle`,

@@ -11000,6 +11000,50 @@ static const FemuIdentity femu_id_kvssd = {
 };
 
 /*
+ * namespace_sizes may take the whole of devsz_mb even when the namespace
+ * count does not divide it, and each size is rounded down to whole logical
+ * blocks: 6 KiB of 4 KiB blocks is one block, and the capacity the controller
+ * reports is what the namespaces can address.
+ */
+static void femu_test_namespace_sizes_rounding(void *obj, void *data,
+                                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'sizes-whole','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':2,'namespaces':3,"
+                    "'namespace_sizes':'32M,16M,16M'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'sizes-lba','addr':'6',"
+                    "'devsz_mb':64,'femu_mode':2,'namespaces':2,"
+                    "'lba_index':3,'namespace_sizes':'6K,8K'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 1);             /* NSZE */
+    g_assert_cmpint(femu_identify(&c, 2, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 2);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 280), ==, 12 * 1024); /* TNVMCAP */
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
+/*
  * A computational storage namespace runs the black-box FTL, and under FDP
  * its write path, so the knobs that path ignores are refused for it as they
  * are for black box. It used to accept them silently.
@@ -18668,6 +18712,8 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
     });
+    qos_add_test("namespace-sizes-rounding", "femu",
+                 femu_test_namespace_sizes_rounding, NULL);
     qos_add_test("fdp-csd-knobs", "femu", femu_test_fdp_csd_knobs, NULL);
     qos_add_test("fdp-csd-runs", "femu", femu_test_fdp_csd_runs,
                  &(QOSGraphTestOptions) {

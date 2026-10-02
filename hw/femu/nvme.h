@@ -2125,6 +2125,7 @@ typedef struct FemuCtrl {
     uint32_t    nr_io_queues;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
+    uint64_t    ns_capacity;    /* bytes the boot namespaces may take */
     uint8_t     db_stride;
     uint8_t     aerl;
     uint8_t     acl;

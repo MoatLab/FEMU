@@ -60,8 +60,13 @@ Properties: [mode, capacity and namespaces](../reference/properties.md#mode-capa
 - `namespaces`: 1 to 256 namespaces.
 - `namespace_sizes`: the size of each namespace, in bytes or with a QEMU
   size suffix (`4G`, `512M`). One entry per namespace, each at least one
-  512-byte sector; the sum must fit in `devsz_mb`, rounded down to a
-  multiple of `namespaces` bytes. Sizes are rounded down to 512 bytes. Unset, `devsz_mb` is split evenly.
+  512-byte sector; the sum may be all of `devsz_mb`. Unset, `devsz_mb` is
+  split evenly, each share rounded down to 512 bytes. Each size, given or
+  split, is then rounded down to whole logical blocks (`512 << lba_index`
+  bytes; 512 bytes for a KV namespace), and a size under one block makes an
+  empty namespace. Capacity that no namespace takes, because the sizes sum
+  to less than `devsz_mb` or because of this rounding, stays unused and is
+  not reported in `tnvmcap`.
 - `namespace_modes`: the mode of each namespace, one of `nossd`, `bbssd`,
   `znssd`, `ocssd`, `csd` and `kvssd`, one entry per namespace. Unset, every
   namespace runs `femu_mode`.

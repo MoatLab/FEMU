@@ -1332,13 +1332,26 @@ static int nvme_resolve_ns_modes(FemuCtrl *n, uint8_t *out_modes, Error **errp)
 }
 
 /*
- * Resolve each namespace's byte size. With namespace_sizes unset the backend is
- * split equally, which for a single namespace hands it the whole backend. When
- * set, it is a comma-separated per-namespace list (e.g. "8G,4G") whose count must
- * equal namespaces, each entry at least one sector, and whose sum must fit the
- * backend. Sizes are rounded down to a sector so slices stay sector-aligned.
+ * Resolve each namespace's byte size. With namespace_sizes unset the exposed
+ * capacity is split equally, which for a single namespace hands it the whole
+ * of it. When set, it is a comma-separated per-namespace list (e.g. "8G,4G")
+ * whose count must equal namespaces, each entry at least one sector, and whose
+ * sum must fit the exposed capacity. Each size is then rounded down to whole
+ * logical blocks, so no slice ends in part of a block the host cannot address
+ * and every slice starts on a block boundary. A key-value namespace is sized
+ * in bytes, so it is rounded to a sector only. A size below one block leaves
+ * an empty namespace. Capacity no namespace takes stays unused.
  */
-static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_sizes,
+static uint64_t nvme_ns_size_align(FemuCtrl *n, uint8_t mode)
+{
+    if (mode == FEMU_KVSSD_MODE) {
+        return 1ULL << BDRV_SECTOR_BITS;
+    }
+    return 1ULL << (BDRV_SECTOR_BITS + n->lba_index);
+}
+
+static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total,
+                                 const uint8_t *modes, uint64_t *out_sizes,
                                  Error **errp)
 {
     char *dup, *saveptr = NULL, *tok;
@@ -1355,7 +1368,8 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
             return -1;
         }
         for (i = 0; i < n->num_namespaces; i++) {
-            out_sizes[i] = each;
+            out_sizes[i] = QEMU_ALIGN_DOWN(each,
+                                           nvme_ns_size_align(n, modes[i]));
         }
         return 0;
     }
@@ -1371,14 +1385,14 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
             g_free(dup);
             return -1;
         }
-        sz &= ~((uint64_t)(1 << BDRV_SECTOR_BITS) - 1);
-        if (sz == 0) {
+        if (sz < (1ULL << BDRV_SECTOR_BITS)) {
             error_setg(errp, "namespace_sizes: '%s' is smaller than a sector", tok);
             g_free(dup);
             return -1;
         }
+        sz = QEMU_ALIGN_DOWN(sz, nvme_ns_size_align(n, modes[i]));
         out_sizes[i++] = sz;
-        sum += sz;
+        sum = sz > UINT64_MAX - sum ? UINT64_MAX : sum + sz;
         tok = strtok_r(NULL, ",", &saveptr);
     }
     if (i != n->num_namespaces || tok) {
@@ -1454,7 +1468,6 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
     uint8_t *ns_modes;
-    uint64_t backend_total = n->ns_size * (uint64_t)n->num_namespaces;
     uint64_t running_offset = 0;
     int i;
 
@@ -1472,8 +1485,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 
     ns_sizes = g_new0(uint64_t, n->num_namespaces);
     ns_modes = g_new0(uint8_t, n->num_namespaces);
-    if (nvme_resolve_ns_sizes(n, backend_total, ns_sizes, errp) ||
-        nvme_resolve_ns_modes(n, ns_modes, errp)) {
+    if (nvme_resolve_ns_modes(n, ns_modes, errp) ||
+        nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;
@@ -2388,10 +2401,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->reg_size = MAX(16 * KiB, pow2ceil(0x1000 + 2 * (n->nr_io_queues + 1) *
                                          (4 << n->db_stride)));
     /* ns_size is the per-namespace share of the exposed capacity */
-    n->ns_size = bs_size / (uint64_t)n->num_namespaces;
+    n->ns_capacity = bs_size;
     if (BBSSD(n) && n->op_pcent) {
-        n->ns_size = (nand_cap * 100 / (100ULL + n->op_pcent)) /
-                     (uint64_t)n->num_namespaces;
+        n->ns_capacity = nand_cap * 100 / (100ULL + n->op_pcent);
+    }
+    n->ns_size = n->ns_capacity / (uint64_t)n->num_namespaces;
+    if (BBSSD(n) && n->op_pcent) {
         n->ns_size &= ~((1ULL << BDRV_SECTOR_BITS) - 1);
     }
 
