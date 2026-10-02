@@ -217,6 +217,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Controller DMA from device threads is restricted to directly reachable memory, which avoids a VM hang on data pointers into device registers (fbfe674c2, 60e4b2d5d).
 - Report and log buffers are bounded and their lengths checked before transfer (608749b8d, 40656e5a1, 062bcdb02, 0ddcc33bd, 3106c1205).
 - CSD program loads are bounded and confined to `csd_program_dir` (f1d5f3736).
+- CSD programs run on `nr_cu` compute unit threads (`femu-csd-cu`) instead of the poller, so a long program no longer stalls I/O on every queue or the vCPU that sends a CSD admin command; a loaded program can no longer be reloaded in place while it runs, and deleting a queue or resetting the controller under a running program drops its result safely (4596ba498).
 - Running out of lines refuses the write instead of aborting, and FDP reports device full instead of asserting or following a null reclaim unit (49ada8834, e1c4e9174, 59128ab66, e7913d89c, c0ae29cb4, cbda78bf6, 37b9b84f9, f05f128a9).
 - Zone state is locked, reset zones are erased on the media thread, and asynchronous events are raised from the main loop (fe8e931e3, 5001ae15c, 89e1c4b04).
 - FDP event rings are serialized and the written and uncorrectable bitmaps are updated atomically across pollers (645424c86, daaa6a3db).
@@ -280,7 +281,10 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - `make-guest-image.sh` builds an Ubuntu 24.04 guest image, and the run scripts accept `IMGDIR`, `OSIMGF` and another SSH port (e877f2dc0, e74535012, 66bb3068e).
 - The build script fails on a compile error, and the config self-test fails when FEMU does not survive (a1bf37caf, da7c1fcfe).
 - A key-value probe tool and a corrected KV wire format description (9ab75f5dc).
-- `pin.sh` no longer names a CPU past the last one, and now pins the pollers and the FTL thread as well as the vCPUs (e29fe6ee2).
+- `pin.sh` no longer names a CPU past the last one, and now pins the pollers, the FTL thread and the CXL SSD's `femu-cxl-ftl` and `femu-cxl-cca` threads as well as the vCPUs (e29fe6ee2, 56e0e2f27).
+- Every launcher, the legacy scripts and `make-guest-image.sh` name QEMU's threads with `debug-threads=on` (e29fe6ee2, 56e0e2f27).
+- The documentation example check realizes the guest's disks and NICs too, with stand-in backends, so a device the machine cannot plug (a NIC without `bus=pcie.0` on a `cxl=on` machine) fails the check (ac5a152fe).
+- `kv-probe.c` comments describe what it checks and which device nodes it can use (dfc1bd606).
 - GitHub Actions CI on several Ubuntu releases, with pinned actions, a read-only token, sanitizer builds, link checks and steps that can actually fail (3b4708763, daf890b7f, c613ae5ac, 4164e551b, 8d4762608, 89ff3ed38, e3700422c).
 - qtests and unit tests for FEMU now live under `hw/femu/tests/`, including a NAND media unit test run by meson and FTL checks turned on in CI (d72e30a34, 6549d6094, cc926e1e9, 8241ccc7f).
 - Seeded fuzzers for admin, I/O, zoned, FDP, KV, Open-Channel 2.0 and CSD commands, run on sanitizer builds in CI (8a57a3e27, 6d6d927d0, 9798a6574, dff3d9f72, 28eaf2afa, 2dbb18a82, 243fc0b66, 2f1208402, 692d9a106).
