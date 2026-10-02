@@ -153,6 +153,7 @@ was not doing anything.
 - Unknown `mapping` or `gc_policy` names, and a negative suspend overhead (29c397f38, 2ae58aa55).
 - A CSD controller with more than one namespace (b425007c2).
 - FDP with more than one reclaim group, and other placement configurations the device cannot serve (f08762450, 8ed17a495).
+- An FDP namespace larger than what is left once each handle has a reclaim unit open, each Persistently Isolated handle one to collect into, and forced GC its free units. Such a namespace was accepted and then failed most random writes. A partly exposed last page now counts as a whole one in this check, with or without placement.
 - Open-Channel namespaces on a controller in another mode, and OCSSD geometries the timing model cannot index (8cd92eec5, 598498e93, f4e85634a, 707d8c8c1).
 - Controller memory buffer settings that do not fit, including any CMB BAR other than 2 (1c3a5a2a2, 9d6e13cd3).
 - Queue entry sizes other than 64 and 16 bytes (23b21cc38).
@@ -191,6 +192,7 @@ was not doing anything.
 - Failure to lock the backend memory is a warning instead of a fatal error (847864637).
 - The media counters moved from the SMART log's temperature fields to vendor log page C0h (4cb1f9ba7).
 - The register BAR is at least 16 KiB (01c79c442).
+- Under FDP, forced GC keeps at least one reclaim unit free unless `gc_thres_pcent_high` is 100. Below 20 units the watermark rounded to none, and a pass that filled its destination part way had no unit to go on with.
 - With `hot_cold_sep`, Streams, or a `hybrid` or `fast` mapping, forced GC keeps at least one line free. Below 20 lines, where the watermark used to round to zero, such a namespace can expose one line less (5a81d02cd).
 - OC 1.2 Identify no longer advertises hybrid commands, and unsupported OC 1.2 block opcodes are rejected (f5fc7d573, 6b5081821).
 - The `run-*.sh` launchers name QEMU's threads (`-name ...,debug-threads=on`), so `ps -T` and `top -H` show `femu-poller`, `FEMU-FTL-Thread` and `CPU N/KVM` (e29fe6ee2).

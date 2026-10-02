@@ -26,6 +26,24 @@ int bb_gc_forced_lines(FemuCtrl *n)
 }
 
 /*
+ * Free reclaim units, out of @units, at or below which placement collection is
+ * forced. Collection moves a victim into a frontier that can fill part way
+ * through, and with no free unit to follow it the victim stays where it is:
+ * so it has to start while one is left, and a percentage that rounds to none
+ * keeps one back. A threshold of 100 forces it only once no unit is free.
+ */
+uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units)
+{
+    int high = n->bb_params.gc_thres_pcent_high;
+    uint64_t kept = (uint64_t)((1 - high / 100.0) * units);
+
+    if (!kept && high < 100) {
+        kept = 1;
+    }
+    return kept;
+}
+
+/*
  * Validate the configured geometry before any of it is used to size an
  * allocation or drive the datapath.
  *

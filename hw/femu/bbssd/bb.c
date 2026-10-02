@@ -72,6 +72,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                                           tt_lines;
         uint64_t needed = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg +
                           endgrp->fdp.nruh + 1;
+        uint64_t reserve;
 
         /*
          * The FTL's reclaim unit is one superblock, and the host sizes its
@@ -92,10 +93,38 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                        endgrp->fdp.nrg, pool);
             return -1;
         }
+
+        /*
+         * Placement draws from the units alone, so they are what bounds the
+         * namespace: one held open per handle and group, one more per
+         * persistently isolated handle to collect into (the initially
+         * isolated handle collects into its open one), and the free units
+         * forced collection keeps. The data pointer line counted above is
+         * not used under placement.
+         */
+        pool = endgrp->fdp.nrg * (pool / endgrp->fdp.nrg);
+        reserve = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg;
+        reserve += endgrp->fdp.nruh -
+                   (n->subsys->params.fdp.isolation_mode ? 1 : 0);
+        reserve += endgrp->fdp.nrg *
+                   bb_fdp_forced_units(n, pool / endgrp->fdp.nrg);
+        usable_pgs = pool > reserve ? (pool - reserve) * pgs_per_line : 0;
+        exposed_pgs = DIV_ROUND_UP(ns->size, page_bytes);
+        if (exposed_pgs > usable_pgs) {
+            error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64
+                       " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
+                       " reclaim units for %u handles and collection, leaving "
+                       "%" PRIu64 " KiB; lower devsz_mb or fdp.nruh, raise "
+                       "blks_per_pl, or raise op_pcent", ns->id,
+                       ns->size >> 10, reserve, pool, endgrp->fdp.nruh,
+                       (usable_pgs * page_bytes) >> 10);
+            return -1;
+        }
+        return 0;
     }
 
     usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
-    exposed_pgs = ns->size / page_bytes;
+    exposed_pgs = DIV_ROUND_UP(ns->size, page_bytes);
 
     if (exposed_pgs > usable_pgs) {
         error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64 " MiB of "

@@ -65,7 +65,12 @@ Properties: [Flexible Data Placement](../reference/properties.md#flexible-data-p
 - `fdp.nru`: reclaim units per reclaim group (default 128). FEMU uses at most
   one per superblock, so the effective count is the smaller of `fdp.nru` and
   `blks_per_pl`. It needs at least `2 * fdp.nruh + 1` of them: one open unit
-  per handle, one spare per handle for GC, and one more.
+  per handle, one spare per handle for GC, and one more. The namespace gets
+  what is left once each handle has a unit open, each Persistently Isolated
+  handle one to collect into, and forced GC its free units (at least one
+  unless `gc_thres_pcent_high` is 100);
+  a larger `devsz_mb` is refused. See
+  [the reserve](../design/fdp.md#configuration).
 - `fdp.nrg`: reclaim groups. Must be 1.
 - `fdp.runs`: reclaim unit size in bytes. Leave it at 0, or set it to the
   size of one superblock: `nchs * luns_per_ch * pls_per_lun * pgs_per_blk *
@@ -165,6 +170,7 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4
 | `fdp.nruh (200) must not exceed fdp.nru (128)` | More handles than reclaim units. |
 | `fdp.nrg must be 1: placement into a reclaim group other than the first is not implemented` | Leave `fdp.nrg` at 1. |
 | `FEMU bbssd: placement needs N reclaim units for M handles across 1 groups and this geometry gives K; raise blks_per_pl or fdp.nru, or lower fdp.nruh` | Too few reclaim units for the handles. |
+| `FEMU bbssd: namespace 1 exposes 1024 KiB, but placement keeps 9 of the 24 reclaim units for 4 handles and collection, leaving 960 KiB; lower devsz_mb or fdp.nruh, raise blks_per_pl, or raise op_pcent` | The namespace does not fit in what placement leaves. |
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of this geometry, or unset` | `fdp.runs` does not match the geometry. |
 | `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | `namespaces` above 1. |
 | `femu-subsys with fdp=on takes a single controller` | A second controller joins the FDP subsystem. |

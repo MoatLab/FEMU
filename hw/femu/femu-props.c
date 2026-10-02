@@ -50,7 +50,9 @@ static const FemuPropDesc femu_subsys_descs[] = {
     { "fdp.nru",
       "Number of reclaim units in each reclaim group, from fdp.nruh to "
       "65536; bbssd uses at most one per superblock and needs at least 2 "
-      "* fdp.nruh + 1 of them" },
+      "* fdp.nruh + 1 of them, and the namespace must fit in the units "
+      "left once each handle has one open, each Persistently Isolated "
+      "handle one to collect into, and forced collection its free ones" },
     { "fdp.isolation_mode",
       "0 makes every reclaim unit handle Persistently Isolated; any other "
       "value makes the last handle Initially Isolated" },
@@ -357,7 +359,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "NAND usable for values" },
     { "gc_thres_pcent_high",
       "bbssd, CSD: percent of lines in use at which garbage collection is "
-      "forced, from gc_thres_pcent to 100" },
+      "forced, from gc_thres_pcent to 100; under FDP it keeps at least one "
+      "reclaim unit free unless it is 100" },
     { "gc_policy",
       "bbssd, CSD without FDP: line victim policy, one of greedy, random, "
       "cost-benefit, fifo or d-choice; unset is greedy" },

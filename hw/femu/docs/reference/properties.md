@@ -154,7 +154,7 @@ Devices:
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; KV uses it only as the fraction of NAND usable for values |
-| `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100 |
+| `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100; under FDP it keeps at least one reclaim unit free unless it is 100 |
 | `gc_policy` | `str` | unset | bbssd, CSD without FDP: line victim policy, one of greedy, random, cost-benefit, fifo or d-choice; unset is greedy |
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle |
 | `mapping` | `str` | unset | bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, hybrid or fast; unset is page, and FDP supports only page |
@@ -258,7 +258,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `fdp.runs` | `size` | `0` | Reclaim unit size in bytes; 0 means 96 MiB, and a bbssd controller accepts only 0 or the size of one superblock, which it then uses |
 | `fdp.nrg` | `uint32` | `1` | Number of FDP reclaim groups; must be 1, placement into other groups is not implemented |
 | `fdp.nruh` | `uint16` | `0` | Number of FDP reclaim unit handles (placement handles), from 1 to fdp.nru; must be set when fdp=on |
-| `fdp.nru` | `uint64` | `128` | Number of reclaim units in each reclaim group, from fdp.nruh to 65536; bbssd uses at most one per superblock and needs at least 2 * fdp.nruh + 1 of them |
+| `fdp.nru` | `uint64` | `128` | Number of reclaim units in each reclaim group, from fdp.nruh to 65536; bbssd uses at most one per superblock and needs at least 2 * fdp.nruh + 1 of them, and the namespace must fit in the units left once each handle has one open, each Persistently Isolated handle one to collect into, and forced collection its free ones |
 | `fdp.isolation_mode` | `uint32` | `0` | 0 makes every reclaim unit handle Persistently Isolated; any other value makes the last handle Initially Isolated |
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD

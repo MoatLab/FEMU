@@ -87,7 +87,27 @@ namespace as for a bbssd one, since CSD runs the same FTL
 - It needs at least `fdp.nruh * fdp.nrg + fdp.nruh + 1` units: one open unit
   per handle, one collection unit per handle, and one spare.
 - `gc_thres_pcent` and `gc_thres_pcent_high` set the free-unit watermarks
-  instead of free-line watermarks.
+  instead of free-line watermarks. The forced watermark keeps at least one
+  unit free, even where the percentage rounds to none, unless
+  `gc_thres_pcent_high` is 100 (`bb_fdp_forced_units()`): a pass can fill its
+  destination part way through a victim and needs a free unit to go on.
+- The namespace must fit in the units left after the reserve
+  (`bb_check_capacity()`), or the controller is refused at realize:
+
+  ```text
+  reserve = fdp.nruh * fdp.nrg          one open unit per handle and group
+          + Persistently Isolated handles one collection unit each
+          + forced watermark            free units forced GC keeps
+  usable  = (units - reserve) * superblock size
+  ```
+
+  The Initially Isolated handle collects into its open unit and adds
+  nothing. A 1 MiB namespace on 64 KiB superblocks with four Persistently
+  Isolated handles needs 16 + 4 + 4 + 1 = 25 units; with 19 or 23 lines,
+  both accepted before, random writes over all four handles failed nearly
+  all of them. A partly exposed last page counts as a whole one. bbssd
+  refuses a namespace that does not fit rather than shrink
+  it, as it does without placement and with `op_pcent`.
 
 ## Placement of writes
 
@@ -205,7 +225,8 @@ because its last unit filled with no free unit to follow it.
   puts its victim back, whatever the policy, unless the victim is empty or
   at least 1/8 of its pages are invalid.
 - Foreground: before a placed write and before each of its pages, while
-  free units are at or below `(1 - gc_thres_pcent_high / 100) * units`, it
+  free units are at or below `(1 - gc_thres_pcent_high / 100) * units` (at
+  least one unless `gc_thres_pcent_high` is 100), it
   runs passes until the pressure clears or no victim is left. The host write waits for them.
   Foreground passes, and the pass RUH Update may run, always collect their
   victim.

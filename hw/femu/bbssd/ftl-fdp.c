@@ -1614,8 +1614,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                 (uint64_t)((1 - rg->ru_mgmt->gc_thres_pcent) *
                            rg->tt_nru);
             rg->ru_mgmt->gc_thres_rus_high =
-                (uint64_t)((1 - rg->ru_mgmt->gc_thres_pcent_high) *
-                           rg->tt_nru);
+                bb_fdp_forced_units(n, rg->tt_nru);
             ftl_log("rg[%d] gc threshold (%d%%) %lu/%d RU\n",
                     i, n->bb_params.gc_thres_pcent,
                     rg->ru_mgmt->gc_thres_rus, rg->tt_nru);

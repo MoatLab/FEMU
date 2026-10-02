@@ -2717,6 +2717,63 @@ static void femu_ftl_check(QTestState *qts, uint64_t *mapped, uint64_t *lost,
     qobject_unref(rsp);
 }
 
+/*
+ * Random writes spread over every placement handle of a namespace the device
+ * accepted. Each handle keeps a unit open and each persistently isolated
+ * handle another to collect into, so a namespace that fits only once those
+ * are left out cannot take this.
+ */
+static void femu_test_fdp_gc_handles(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    const int handles = 4;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lost, mapped, orphans;
+    uint32_t seed = 7;
+    uint32_t full = 0;
+    uint16_t status;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        (i / 64) % handles)),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < 1200; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        status = FEMU_SC(femu_write_pages_placed(&c, page, npages, buf, list,
+                                                 (seed >> 4) % handles));
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        full += status == NVME_CAP_EXCEEDED;
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_test_message("capacity exceeded %u times, %" PRIu64 " of %" PRIu64
+                   " mappings lost, %" PRIu64 " orphans", full, lost, mapped,
+                   orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(full, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 /* deallocate @npages 4 KiB pages from @page */
 static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
                                    uint32_t npages, uint64_t buf)
@@ -2844,6 +2901,46 @@ static void femu_test_fdp_gc_recover(void *obj, void *data,
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+}
+
+/*
+ * A namespace must fit in what placement leaves: 24 lines of 64 KiB with four
+ * persistently isolated handles leave 960 KiB for a 1 MiB namespace once each
+ * handle holds a unit open, each has another to collect into and one is kept
+ * free. On 19 or 23 lines, both accepted before, random writes over all four
+ * handles failed nearly every time. 25 lines take it (fdp-capacity).
+ */
+static void femu_test_fdp_capacity_refused(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    /* the last one exposes 256 pages and part of another (op_pcent) */
+    const struct {
+        const char *subsys;
+        int blks;
+        int op;
+    } cases[] = {
+        { "fdpsub", 19, 0 }, { "fdpsub", 24, 0 }, { "fdpsub-ii", 23, 0 },
+        { "fdpsub", 25, 56 },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'fdp-cap','addr':'5',"
+                        "'devsz_mb':1,'femu_mode':1,'secsz':512,"
+                        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':%d,"
+                        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,"
+                        "'op_pcent':%d,'subsys':%s}}", cases[i].blks,
+                        cases[i].op, cases[i].subsys);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), "fdp.nruh"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
 }
 
 /*
@@ -19289,14 +19386,42 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "hot_cold_sep=on"
     });
-    /* placement keeps a unit open per handle, so it needs more lines */
+    /*
+     * placement keeps a unit open per handle and one to collect into per
+     * handle, so it needs more lines
+     */
     qos_add_test("gc-no-destination-fdp", "femu", femu_test_gc_no_destination,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
-            "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub"
     });
+    /* the smallest geometries a 1 MiB namespace on four handles fits */
+    qos_add_test("fdp-capacity", "femu", femu_test_fdp_gc_handles,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub"
+    });
+    qos_add_test("fdp-capacity-ii", "femu", femu_test_fdp_gc_handles,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub-ii"
+    });
+    /* 128 KiB units: the forced percentage rounds to no unit at all */
+    qos_add_test("fdp-capacity-small", "femu", femu_test_fdp_gc_handles,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,blks_per_pl=17,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub"
+    });
+    qos_add_test("fdp-capacity-refused", "femu",
+                 femu_test_fdp_capacity_refused, NULL);
     /* forced only with no unit free, so a frontier can be dropped */
     qos_add_test("fdp-gc-recover", "femu", femu_test_fdp_gc_recover,
                  &(QOSGraphTestOptions) {
