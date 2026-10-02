@@ -6,7 +6,8 @@ unit handles, how a write is placed, how reclaim units map onto the BlackBox
 FTL's NAND, how garbage collection works under placement, and what the FDP
 log pages and features report. To launch an FDP device and write with
 placement identifiers from a guest, read the [FDP feature guide](../features/fdp.md)
-first.
+first. FEMU's FDP support comes from WARP (FAST '26); the guide has its
+[citation](../features/fdp.md#citation).
 
 ## Purpose
 

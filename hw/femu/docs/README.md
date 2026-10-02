@@ -132,3 +132,6 @@ when the two differ.
 If you use FEMU in your research, cite the FAST '18 paper. The BibTeX entry
 is in [the README](../../../README.md#primary-citation), and
 [CITATION.cff](../../../CITATION.cff) has the same entry for citation tools.
+If you use FDP, the CXL SSD or CSD, also cite the paper that mode comes from:
+[WARP](features/fdp.md#citation) (FAST '26), [Cylon](modes/cxl-ssd.md#citation)
+(FAST '26) or [CEMU](modes/csd.md#citation) (ASPLOS '26).

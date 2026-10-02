@@ -10,6 +10,8 @@ finds it mostly invalid and copies less, so write amplification drops.
 FDP is not a `femu_mode`. It is a property of an NVMe subsystem,
 `femu-subsys`, which a [BlackBox](../modes/blackbox.md) controller joins.
 In FEMU a reclaim unit is one superblock (line) of the BlackBox FTL.
+FEMU's FDP support comes from WARP; if you use it, cite WARP as well as FEMU
+([citation](#citation)).
 
 Use it to measure how placement hints from an application, a file system or
 fio change write amplification and tail latency.
@@ -213,6 +215,23 @@ writes succeed once it has.
   `--ioengine=io_uring_cmd --fdp=1`.
 
 Related issues: #153, #186, #189, #191.
+
+## Citation
+
+FDP support in FEMU comes from WARP, the FDP SSD emulator described in
+[Characterizing and Emulating FDP SSDs with WARP](https://www.usenix.org/conference/fast26/presentation/song)
+(FAST '26). If you use the FDP mode, please also cite:
+
+```bibtex
+@inproceedings{Song+26-WARP,
+  author    = {Inho Song and Shoaib Asif Qazi and Javier Gonz{\'a}lez and
+               Matias Bj{\o}rling and Sam H. Noh and Huaicheng Li},
+  title     = {{Characterizing and Emulating FDP SSDs with WARP}},
+  booktitle = {24th USENIX Conference on File and Storage Technologies (FAST 26)},
+  pages     = {347--362},
+  year      = {2026},
+}
+```
 
 ## Related pages
 

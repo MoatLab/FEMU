@@ -14,7 +14,8 @@ program.
 
 This page shows how to run it. The [design note](../cxlssd.md) explains how it
 works inside, and the [property reference](../reference/properties.md#femu-cxl-ssd-cxl-type-3-ssd)
-lists every property.
+lists every property. The device comes from Cylon (FAST '26); if you use it,
+cite Cylon as well as FEMU ([citation](#citation)).
 
 Related pages:
 
@@ -527,6 +528,23 @@ them as differences between two reads. The full list is in
 - Direct mapping needs the single-endpoint topology above.
 - With `der=off`, every access costs an exit to QEMU; large workloads take
   hours. Use a small device and cache when you only need correct behaviour.
+
+## Citation
+
+`femu-cxl-ssd` comes from Cylon, described in
+[Cylon: Fast and Accurate Full-System Emulation of CXL-SSDs](https://www.usenix.org/conference/fast26/presentation/yoon)
+(FAST '26). If you use the CXL SSD mode, please also cite:
+
+```bibtex
+@inproceedings{Yoon+26-Cylon,
+  author    = {Dongha Yoon and Hansen Idden and Jinshu Liu and Berkay Inceisci and
+               Sam H. Noh and Huaicheng Li},
+  title     = {{Cylon: Fast and Accurate Full-System Emulation of CXL-SSDs}},
+  booktitle = {24th USENIX Conference on File and Storage Technologies (FAST 26)},
+  pages     = {313--327},
+  year      = {2026},
+}
+```
 
 ## Related pages
 

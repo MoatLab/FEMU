@@ -4,6 +4,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # CXL SSD (`femu-cxl-ssd`)
 
+The device comes from Cylon (FAST '26); the user guide has its
+[citation](../modes/cxl-ssd.md#citation).
+
 This chapter describes the CXL SSD as a component: where it sits, what state
 it keeps, how an access moves through it, which thread charges which cost,
 and which parameters and counters belong to it. It ties together three

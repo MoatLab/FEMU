@@ -317,7 +317,11 @@ repository":
 }
 ```
 
-If you use the CSD mode, also cite [CEMU](hw/femu/docs/modes/csd.md#citation).
+If you use one of these modes, also cite the paper it comes from:
+
+- FDP: [WARP](hw/femu/docs/features/fdp.md#citation), *Characterizing and Emulating FDP SSDs with WARP* (FAST '26).
+- CXL SSD (`femu-cxl-ssd`): [Cylon](hw/femu/docs/modes/cxl-ssd.md#citation), *Cylon: Fast and Accurate Full-System Emulation of CXL-SSDs* (FAST '26).
+- CSD: [CEMU](hw/femu/docs/modes/csd.md#citation), *CEMU: Enabling Full-System Emulation of Computational Storage Beyond Hardware Limits* (ASPLOS '26).
 
 ### [Related Publications](https://github.com/MoatLab/FEMU/wiki/Research-Papers-using-FEMU)
 
