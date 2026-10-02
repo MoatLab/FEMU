@@ -74,7 +74,9 @@ handle in order: placement handle `i` is RUH `i`, the namespace's ENDGID is
 CTRATT bits 4 (Endurance Groups) and 19 (FDP) and ENDGIDMAX = 1, and the
 effects log lists I/O Management Send and Receive.
 
-The BlackBox side (`bb.c`, `ftl-fdp.c`) adds:
+The BlackBox side (`bb.c`, `ftl-fdp.c`) adds the following, for a CSD
+namespace as for a bbssd one, since CSD runs the same FTL
+(`bb_init_fdp()`):
 
 - RUNS is overwritten with the bytes of one superblock:
   `nchs * luns_per_ch * pls_per_lun * pgs_per_blk * secs_per_pg * secsz`.
@@ -382,7 +384,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-csd-runs` |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
@@ -396,8 +398,8 @@ last:
 - Only bbssd places data. A NoSSD, ZNS or OCSSD controller in an FDP
   subsystem answers the log pages and features, and RUH Update resets
   the handle's RUAMW and records event 0h if the unit still had room; no
-  data is placed. CSD uses the bbssd path but is not
-  tested with FDP. KV is refused.
+  data is placed. CSD uses the bbssd path, with the same refused knobs and
+  RUNS. KV is refused.
 - Page mapping only, no write buffer, no read reclaim or retention model
   under FDP.
 - EARUTR is always 0; there is no active reclaim unit time limit, so event

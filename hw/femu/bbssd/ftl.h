@@ -559,6 +559,8 @@ struct ssd {
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
+int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
+                Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
 void ssd_free(struct ssd *ssd);
 

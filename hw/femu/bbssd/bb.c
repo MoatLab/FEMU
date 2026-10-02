@@ -111,6 +111,51 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
+/*
+ * FDP keeps its own write and reclaim path, which none of the knobs below
+ * reach; refuse them rather than accept them silently. Every mode that runs
+ * this FTL under FDP needs the refusal and the reclaim unit size, not only
+ * bbssd. A no-op without FDP.
+ */
+int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
+                Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    const char *knob = NULL;
+
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+        return 0;
+    }
+
+    if (p->buffer_size) {
+        knob = "buffer_size";
+    } else if (p->hot_cold_sep) {
+        knob = "hot_cold_sep";
+    } else if (p->read_reclaim_limit) {
+        knob = "read_reclaim_limit";
+    } else if (p->retention_limit_sec) {
+        knob = "retention_limit_sec";
+    } else if (p->ecc_retention_sec) {
+        knob = "ecc_retention_sec";
+    } else if (p->trim_lat_ns) {
+        knob = "trim_lat_ns";
+    } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
+        knob = "mapping";
+    } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
+        knob = "gc_policy";
+    }
+    if (knob) {
+        error_setg(errp, "FEMU %s: %s has no effect under FDP", mode, knob);
+        return -1;
+    }
+
+    n->subsys->endgrp.fdp.runs = (uint64_t)p->nchs * p->luns_per_ch *
+                                 p->pls_per_lun * p->pgs_per_blk *
+                                 p->secs_per_pg * p->secsz;
+    nvme_ns_refresh_fdp(ns);
+    return 0;
+}
+
 /* bb <=> black-box */
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
@@ -133,44 +178,8 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
-    /*
-     * FDP keeps its own write and reclaim path, which none of these knobs
-     * reach; refuse them rather than accept them silently.
-     */
-    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
-        const BbCtrlParams *p = &n->bb_params;
-        const char *knob = NULL;
-
-        if (p->buffer_size) {
-            knob = "buffer_size";
-        } else if (p->hot_cold_sep) {
-            knob = "hot_cold_sep";
-        } else if (p->read_reclaim_limit) {
-            knob = "read_reclaim_limit";
-        } else if (p->retention_limit_sec) {
-            knob = "retention_limit_sec";
-        } else if (p->ecc_retention_sec) {
-            knob = "ecc_retention_sec";
-        } else if (p->trim_lat_ns) {
-            knob = "trim_lat_ns";
-        } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
-            knob = "mapping";
-        } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
-            knob = "gc_policy";
-        }
-        if (knob) {
-            error_setg(errp, "FEMU bbssd: %s has no effect under FDP", knob);
-            return;
-        }
-    }
-
-    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
-        const BbCtrlParams *p = &n->bb_params;
-
-        n->subsys->endgrp.fdp.runs = (uint64_t)p->nchs * p->luns_per_ch *
-                                     p->pls_per_lun * p->pgs_per_blk *
-                                     p->secs_per_pg * p->secsz;
-        nvme_ns_refresh_fdp(ns);
+    if (bb_init_fdp(n, ns, "bbssd", errp)) {
+        return;
     }
 
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));

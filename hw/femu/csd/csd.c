@@ -188,6 +188,11 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    /* It also takes the black-box FDP write path, so the same refusals. */
+    if (bb_init_fdp(n, ns, "csd", errp)) {
+        return;
+    }
+
     if (n->csd_params.fdm_size_mb == 0) {
         error_setg(errp, "CSD mode requires fdm_size to be non-zero");
         return;

@@ -168,7 +168,7 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of this geometry, or unset` | `fdp.runs` does not match the geometry. |
 | `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | `namespaces` above 1. |
 | `femu-subsys with fdp=on takes a single controller` | A second controller joins the FDP subsystem. |
-| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. The same message names `hot_cold_sep`, `read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec`, `trim_lat_ns`, a `mapping` other than `page` and a `gc_policy` other than `greedy`. |
+| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. The same message names `hot_cold_sep`, `read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec`, `trim_lat_ns`, a `mapping` other than `page` and a `gc_policy` other than `greedy`. A CSD controller gets the same messages with `FEMU csd:`. |
 | `meta: not supported with placement (fdp)` | `meta` (with a valid `mc`) under FDP. |
 | `streams requires bbssd or NoSSD with FDP disabled` | `streams=on` under FDP. |
 | `the key-value command set and FDP cannot share a controller: ...` | A KV namespace under FDP. |
@@ -177,7 +177,8 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4
 
 NoSSD, ZNS and OCSSD controllers accept an FDP subsystem, report FDP to the
 host, and ignore it for placement. KV is refused. CSD goes through the
-BlackBox FDP write path, but that combination is not tested.
+BlackBox FDP write path, with the same refusals and reclaim unit size as
+BlackBox.
 
 When every reclaim unit is in use and GC cannot free one, a write fails with
 Capacity Exceeded and QEMU prints `ssd_stream_write: device full, no RU for

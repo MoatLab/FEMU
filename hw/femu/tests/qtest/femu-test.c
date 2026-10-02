@@ -10999,6 +10999,62 @@ static const FemuIdentity femu_id_kvssd = {
     "vKVSSD0", "FEMU KV-SSD Controller"
 };
 
+/*
+ * A computational storage namespace runs the black-box FTL, and under FDP
+ * its write path, so the knobs that path ignores are refused for it as they
+ * are for black box. It used to accept them silently.
+ */
+static void femu_test_fdp_csd_knobs(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *knobs[] = { "buffer_size", "trim_lat_ns" };
+    unsigned values[] = { 16, 1000 };
+    int modes[] = { 1, 4 };
+    QDict *rsp;
+
+    for (int m = 0; m < ARRAY_SIZE(modes); m++) {
+        for (int k = 0; k < ARRAY_SIZE(knobs); k++) {
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'fdp-knob','addr':'5',"
+                            "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
+                            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                            "'blks_per_pl':80,'pls_per_lun':1,"
+                            "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
+                            "%s:%u}}", modes[m], knobs[k], values[k]);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                                                                  "error"),
+                                                  "desc"),
+                                    "has no effect under FDP"));
+            qobject_unref(rsp);
+        }
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * The reclaim unit the host is told about is the FTL's superblock, for a
+ * computational storage controller as for a black-box one: four channels of
+ * four LUNs of sixteen 4 KiB pages make 1 MiB, not the 96 MiB default.
+ */
+static void femu_test_fdp_csd_runs(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_endgrp_log(&c, NVME_LOG_FDP_CONFS, 0, buf, 64), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(c.pdev->bus->qts, buf + 16 + 16), ==,
+                     1024 * 1024);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* the device's index hash, so a test can pick keys for given LUNs */
 static uint32_t femu_kv_fnv1a(uint64_t key)
 {
@@ -18611,6 +18667,14 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
+    });
+    qos_add_test("fdp-csd-knobs", "femu", femu_test_fdp_csd_knobs, NULL);
+    qos_add_test("fdp-csd-runs", "femu", femu_test_fdp_csd_runs,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=4,fdm_size=16,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,"
+            "nchs=4,subsys=fdpsub"
     });
     qos_add_test("namespace-kv-byte-capacity", "femu",
                  femu_test_namespace_kv_byte_capacity, NULL);

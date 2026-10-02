@@ -201,6 +201,7 @@ BlackBox ([log pages and counters](../reference/log-pages-and-counters.md#vendor
 | `CSD csf_runtime_scale must be non-zero` | `csf_runtime_scale=0`. |
 | `csd supports at most one namespace per controller` | Two CSD namespaces, from `namespace_modes` or from `femu_mode=4` with `namespaces` above 1. Other namespaces of the controller may use other modes. |
 | `FEMU bbssd: namespace 1 exposes ...` | The namespace does not fit the NAND geometry; see the [BlackBox limits](blackbox.md#limits-and-refusals). |
+| `FEMU csd: buffer_size has no effect under FDP` | A knob the FDP write path ignores, on a controller in an FDP subsystem; the same list as for BlackBox ([FDP](../features/fdp.md)). |
 
 A program load that fails returns Invalid Field to the guest, or Capacity
 Exceeded when the program table is full. For a missing or bad program file,
