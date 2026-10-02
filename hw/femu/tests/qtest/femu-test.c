@@ -10958,6 +10958,9 @@ static void femu_test_ns_mgmt_default(void *obj, void *data,
 typedef struct FemuIdentity {
     const char *serial;
     const char *model;
+    /* a mode the controller did not take its name from, and its next serial */
+    int other_mode;
+    const char *other_serial;
 } FemuIdentity;
 
 /*
@@ -10986,6 +10989,33 @@ static void femu_test_namespace_mixed_identity(void *obj, void *data,
     g_assert_cmpstr(serial, ==, want->serial);
     g_assert_cmpstr(model, ==, want->model);
     femu_disable(&c);
+
+    /*
+     * The namespace of the other mode still took a serial from its mode's
+     * counter, so the next controller of that mode gets the one after it.
+     */
+    if (want->other_serial) {
+        QTestState *qts = femu->dev.bus->qts;
+        QPCIDevice *pdev;
+        QDict *rsp;
+
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'next','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':%d}}", want->other_mode);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+        g_assert_nonnull(pdev);
+        memset(&c, 0, sizeof(c));
+        femu_enable(&c, pdev, alloc);
+        g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf + 4, serial, 20);
+        g_strchomp(serial);
+        g_assert_cmpstr(serial, ==, want->other_serial);
+        femu_disable(&c);
+        g_free(pdev);
+        qos_invalidate_command_line();
+    }
     guest_free(alloc, buf);
 }
 
@@ -10993,7 +11023,7 @@ static const FemuIdentity femu_id_nossd = {
     "vNoSSD0", "FEMU NoSSD NVMe Controller"
 };
 static const FemuIdentity femu_id_bbssd = {
-    "vSSD0", "FEMU BlackBox-SSD Controller"
+    "vSSD0", "FEMU BlackBox-SSD Controller", 2, "vNoSSD1"
 };
 static const FemuIdentity femu_id_kvssd = {
     "vKVSSD0", "FEMU KV-SSD Controller"
