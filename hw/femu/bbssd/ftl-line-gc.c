@@ -206,8 +206,8 @@ static struct ppa ssd_stream_pointer_page(struct ssd *ssd,
 
 bool ssd_out_of_lines(struct ssd *ssd)
 {
-    /* Format or GC may have freed space since the ordinary frontier filled. */
-    if (ssd->n->streams && !ssd->wp.curline && ssd->lm.free_line_cnt) {
+    /* Format, trim or GC may have freed space since the frontier filled. */
+    if (!ssd->wp.curline && ssd->lm.free_line_cnt) {
         ssd_stream_pointer_page(ssd, &ssd->wp, 0);
     }
     return ssd->wp.curline == NULL;
@@ -529,6 +529,8 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     if (tag) {
         stream_wp = ssd_stream_gc_pointer(ssd, tag);
         new_ppa = ssd_stream_pointer_page(ssd, stream_wp, tag);
+    } else if (!ssd->wp.curline) {
+        new_ppa = ssd_stream_pointer_page(ssd, &ssd->wp, 0);
     } else {
         new_ppa = get_new_page(ssd);
     }
@@ -543,6 +545,13 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     }
     /* commit the relocated mapping through the active scheme (maptbl + rmap) */
     ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, &new_ppa);
+    /*
+     * Retire the old copy now rather than at the erase: if the line cannot be
+     * emptied it goes back to the victim queue, and its counts must then say
+     * what it still holds.
+     */
+    mark_page_invalid(ssd, old_ppa);
+    set_rmap_ent(ssd, INVALID_LPN, old_ppa);
     if (exp_lpn_watched(lpn)) {
         exp_watch_blk[new_ppa.g.blk] = 1; /* track the new block too */
         EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
@@ -779,12 +788,11 @@ bool femu_ftl_policy_known(const char *name)
     return false;
 }
 
-/* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
+/* move a block's valid pages out; false when one had nowhere to go */
+static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
-    int cnt = 0;
 
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
@@ -793,16 +801,14 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
-            /* delay the maptbl update until "write" happens */
             if (!gc_write_page(ssd, ppa)) {
-                /* nowhere to put it; leave the rest of the line alone */
-                return;
+                return false;
             }
-            cnt++;
         }
     }
 
-    ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
+    ftl_assert(get_blk(ssd, ppa)->vpc == 0);
+    return true;
 }
 
 void mark_line_free(struct ssd *ssd, struct ppa *ppa)
@@ -828,13 +834,32 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-/* relocate a line's valid pages, erase it, and return it to the free list */
-static void reclaim_line(struct ssd *ssd, struct line *victim_line)
+/* return a line that could not be emptied to the list its counts call for */
+static void requeue_line(struct ssd *ssd, struct line *line)
+{
+    struct line_mgmt *lm = &ssd->lm;
+
+    if (line->vpc == ssd->sp.pgs_per_line) {
+        QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
+        lm->full_line_cnt++;
+    } else {
+        pqueue_insert(lm->victim_line_pq, line);
+        lm->victim_line_cnt++;
+    }
+}
+
+/*
+ * Relocate a line's valid pages, erase it, and return it to the free list.
+ * Every page is moved before any block is erased: with nowhere left to put
+ * one, the line is requeued as it stands and false returned. Erasing then
+ * would destroy the pages still in it while their mappings point there.
+ */
+static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lunp;
     struct ppa ppa;
-    int ch, lun;
+    int ch, lun, pl;
 
     /*
      * Only some fields are filled in below, so start from zero rather than
@@ -847,11 +872,23 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
     ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
 
-    /* copy back valid data */
+    for (ch = 0; ch < spp->nchs && victim_line->vpc; ch++) {
+        for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            ppa.g.ch = ch;
+            ppa.g.lun = lun;
+            for (pl = 0; pl < spp->pls_per_lun; pl++) {
+                ppa.g.pl = pl;
+                if (!clean_one_block(ssd, &ppa)) {
+                    requeue_line(ssd, victim_line);
+                    return false;
+                }
+            }
+        }
+    }
+
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
             struct ppa ppas[1 << PL_BITS];
-            int pl;
 
             ppa.g.ch = ch;
             ppa.g.lun = lun;
@@ -860,7 +897,6 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
 
             for (pl = 0; pl < spp->pls_per_lun; pl++) {
                 ppa.g.pl = pl;
-                clean_one_block(ssd, &ppa);
                 mark_block_free(ssd, &ppa);
                 ppas[pl] = ppa;
             }
@@ -883,6 +919,7 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
 
     /* update line status */
     mark_line_free(ssd, &ppa);
+    return true;
 }
 
 int do_gc(struct ssd *ssd, bool force)
@@ -894,22 +931,19 @@ int do_gc(struct ssd *ssd, bool force)
         return -1;
     }
 
-    if (ssd->n->streams && victim_line->vpc) {
-        if (!ssd->lm.free_line_cnt) {
-            pqueue_insert(ssd->lm.victim_line_pq, victim_line);
-            ssd->lm.victim_line_cnt++;
-            return -1;
-        }
-        if (!victim_line->stream_tag && !ssd->wp.curline) {
-            ssd_stream_pointer_page(ssd, &ssd->wp, 0);
-        }
+    if (ssd->n->streams && victim_line->vpc && !ssd->lm.free_line_cnt) {
+        pqueue_insert(ssd->lm.victim_line_pq, victim_line);
+        ssd->lm.victim_line_cnt++;
+        return -1;
     }
 
     ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
               victim_line->id, victim_line->ipc, ssd->lm.victim_line_cnt,
               ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
 
-    reclaim_line(ssd, victim_line);
+    if (!reclaim_line(ssd, victim_line)) {
+        return -1;
+    }
 
     /* Distinct retired streams may occupy lines that cannot be combined. */
     if (ssd->n->streams && ssd->lm.free_line_cnt <= free_lines) {
@@ -984,7 +1018,10 @@ int do_read_reclaim(struct ssd *ssd)
     }
 
     line->reclaiming = true;
-    reclaim_line(ssd, line);
+    if (!reclaim_line(ssd, line)) {
+        line->reclaiming = false;
+        return -1;
+    }
     line->reclaiming = false;
     if (by_age) {
         ssd->retention_refreshes++;

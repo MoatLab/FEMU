@@ -2594,6 +2594,100 @@ static void femu_test_buffer_counters(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* Write @npages 4 KiB pages from @page, every one of them taken from @data. */
+static uint16_t femu_write_pages(FemuCtrlState *c, uint64_t page,
+                                 uint32_t npages, uint64_t data, uint64_t list)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+    uint32_t i;
+
+    g_assert_cmpuint(npages, >=, 1);
+    g_assert_cmpuint(npages, <=, 4096 / 8 + 1);
+    for (i = 0; i + 1 < npages; i++) {
+        qtest_writeq(c->pdev->bus->qts, list + i * 8, data);
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list : npages == 2 ? data : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(npages * (4096 / c->lba_size) - 1);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
+/*
+ * Collection on a device with few lines. Below twenty lines the forced
+ * watermark rounds to zero free lines, so a large write could take the last
+ * line part way through, and collection then had nowhere to put what it
+ * moved: it erased the pages anyway, leaving their mappings pointing at erased
+ * pages, and every later write failed. Collection must never erase what it
+ * did not move, and a namespace within its capacity must never run out.
+ */
+static void femu_test_gc_no_destination(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lost, mapped, orphans;
+    uint32_t seed = 1;
+    uint32_t full = 0;
+    uint16_t status;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    /* scattered single pages leave every line part valid, then large writes */
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        status = FEMU_SC(femu_write_pages(&c, page, npages, buf, list));
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        full += status == NVME_CAP_EXCEEDED;
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_test_message("capacity exceeded %u times, %" PRIu64 " of %" PRIu64
+                   " mappings lost, %" PRIu64 " orphans", full, lost, mapped,
+                   orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(full, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static uint16_t femu_delete_sq(FemuCtrlState *c, uint16_t qid)
 {
     NvmeCmd cmd;
@@ -14012,6 +14106,70 @@ static void femu_test_streams_recovery(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * A stream frontier on a device whose forced watermark would round to zero.
+ * Spread the data so every line keeps most of its pages valid, then rewrite
+ * it through a stream: the stream takes the last free lines, and collection,
+ * which refuses a victim with valid pages when no line is free, could then
+ * never run again.
+ */
+static void femu_test_streams_gc_floor(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    QDict *rsp;
+    unsigned i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                    ==, NVME_SUCCESS);
+    for (i = 0; i < 256; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, ((17 * i) % 256) * 8, buf,
+                                          0, 0), ==, NVME_SUCCESS);
+    }
+    /* 128 pages per command: no background collection in between */
+    for (i = 0; i < 128; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    for (i = 0; i < 256; i += 128) {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.dptr.prp2 = cpu_to_le64(list);
+        cmd.cdw10 = cpu_to_le32(i * (4096 / c.lba_size));
+        cmd.cdw12 = cpu_to_le32((128 * (4096 / c.lba_size) - 1) | (1u << 20));
+        cmd.cdw13 = cpu_to_le32(1u << 16);
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 typedef struct FemuPauseDeadline {
     GMutex lock;
     GCond cond;
@@ -18580,6 +18738,13 @@ static void femu_register_nodes(void)
             "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=24,"
             "pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
+    qos_add_test("streams-gc-floor", "femu", femu_test_streams_gc_floor,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,streams=on,streams.max=1,devsz_mb=1,femu_mode=1,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=8,blks_per_pl=12,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
     qos_add_test("streams-subpage", "femu", femu_test_streams_subpage,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -18907,6 +19072,21 @@ static void femu_register_nodes(void)
     qos_add_test("oc20-log-length", "femu", femu_test_oc20_log_length,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=2"
+    });
+    /* 19 lines of 16 pages: the forced watermark is zero free lines */
+    qos_add_test("gc-no-destination", "femu", femu_test_gc_no_destination,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("gc-no-destination-hot-cold", "femu",
+                 femu_test_gc_no_destination,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "hot_cold_sep=on"
     });
     qos_add_test("media-counters", "femu", femu_test_media_counters,
                  &(QOSGraphTestOptions) {

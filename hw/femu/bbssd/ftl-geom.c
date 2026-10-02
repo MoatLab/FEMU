@@ -8,6 +8,24 @@
 #include "ftl-internal.h"
 
 /*
+ * Free lines at or below which collection is forced. A second frontier (hot
+ * data, a stream, or the log of a log-block mapping) takes lines by itself, so
+ * it can take the last one while the data frontier, which collection writes
+ * into, is nearly full. Keep a line back then, so collection always has one.
+ */
+int bb_gc_forced_lines(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    int lines = (int)((1 - p->gc_thres_pcent_high / 100.0) * p->blks_per_pl);
+
+    if (!lines && (p->hot_cold_sep || n->streams ||
+                   femu_mapping_name_uses_log_class(p->mapping_scheme))) {
+        lines = 1;
+    }
+    return lines;
+}
+
+/*
  * Validate the configured geometry before any of it is used to size an
  * allocation or drive the datapath.
  *
@@ -262,7 +280,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_pcent = n->bb_params.gc_thres_pcent/100.0;
     spp->gc_thres_lines = (int)((1 - spp->gc_thres_pcent) * spp->tt_lines);
     spp->gc_thres_pcent_high = n->bb_params.gc_thres_pcent_high/100.0;
-    spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
+    spp->gc_thres_lines_high = bb_gc_forced_lines(n);
     spp->enable_gc_delay = true;
 
 

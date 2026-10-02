@@ -15,7 +15,8 @@ DEVICES = [
         "type": "femu",
         "title": "NVMe controller",
         "parent": "pci-device",
-        "test_only": ["x-ns-test", "x-oc12-clock", "x-stream-test"],
+        "test_only": ["x-ftl-check", "x-ns-test", "x-oc12-clock",
+                      "x-stream-test"],
         "topics": [
             {
                 "title": "Mode, capacity and namespaces",

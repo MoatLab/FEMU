@@ -395,6 +395,16 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     return lat;
 }
 
+/* force collection while free lines sit at the watermark, or until it stalls */
+static void ssd_gc_until_clear(struct ssd *ssd)
+{
+    while (should_gc_high(ssd)) {
+        if (do_gc(ssd, true) == -1) {
+            break;
+        }
+    }
+}
+
 /*
  * Write buffered pages back to the media. This is the one place a buffered page
  * becomes a programmed one, and it owns everything that owning a host write
@@ -423,36 +433,22 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
             break;
         }
 
-        if (!ssd->n->power_loss && !buffer_select_victim(ssd, &lpn)) {
-            break;
-        }
-
         /*
          * Free space is consumed as pages are programmed, not as they are
          * accepted, so a long write-back has to keep checking rather than rely
          * on the single check the host write already made.
-         *
-         * A GC that cannot make progress leaves nowhere to put the page. The
-         * buffer holds page numbers rather than data and the backend already
-         * has the contents, so stopping here costs the timing of a program,
-         * not the write itself.
          */
-        while (should_gc_high(ssd)) {
-            if (do_gc(ssd, true) == -1) {
-                break;
-            }
-        }
+        ssd_gc_until_clear(ssd);
         /*
-         * The collection above is what consumes the last line, so ask again:
-         * the check at the top of the pass was made before it ran. The page
-         * stays selected and its contents are already in the backend, so what
-         * is lost is the timing of a program, not the write.
+         * The collection above can consume the last line, so ask again, and
+         * only then take a page out of the buffer: one taken out with nowhere
+         * to program it would never reach the media or the mapping.
          */
         if (ssd_out_of_lines(ssd)) {
             break;
         }
 
-        if (ssd->n->power_loss && !buffer_select_victim(ssd, &lpn)) {
+        if (!buffer_select_victim(ssd, &lpn)) {
             break;
         }
 
@@ -699,13 +695,20 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        /*
-         * Garbage collection above could not free a line, so there is nowhere
-         * to put this page. Tell the host instead of programming through a
-         * write pointer that no longer addresses anything.
-         */
         struct ppa target = { .ppa = INVALID_PPA };
 
+        /*
+         * Collect per page, as write-back does: one command can span more
+         * lines than the watermark keeps free, and a collection that starts
+         * after the last line is gone has nowhere to move pages to.
+         */
+        ssd_gc_until_clear(ssd);
+
+        /*
+         * Garbage collection could not free a line, so there is nowhere to
+         * put this page. Tell the host instead of programming through a write
+         * pointer that no longer addresses anything.
+         */
         if (stream >= 0) {
             target = ssd_stream_page(ssd, stream,
                                      ssd->n->stream_slots[stream].tag);
@@ -863,6 +866,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         }
 
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            /* per page, for the reason ssd_write() gives */
+            ssd_gc_until_clear(ssd);
             if (ssd_out_of_lines(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;

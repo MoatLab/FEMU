@@ -33,7 +33,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * leaves a device that hot/cold separation or a log-block scheme can run
      * out of lines on, which used to be fatal and is now a refused write.
      */
-    reserve_lines = (uint64_t)((1 - p->gc_thres_pcent_high / 100.0) * tt_lines);
+    reserve_lines = bb_gc_forced_lines(n);
     reserve_lines += 1;                      /* the data write pointer */
     if (n->streams) {
         reserve_lines += n->streams_max + 1;

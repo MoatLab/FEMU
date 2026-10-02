@@ -544,14 +544,16 @@ GC operations go through the same timelines as host operations, with
 
 - `gc_read_page()` charges a read of each valid page, `gc_write_page()` a
   program at its new location, and `reclaim_line()` one multi-plane erase
-  per LUN (`bbssd/ftl-line-gc.c`). FDP GC does the same in `bbssd/ftl-fdp.c`.
+  per LUN (`bbssd/ftl-line-gc.c`). All of a victim's pages are moved before
+  any of its blocks is erased, so the erases follow the last relocation.
+  FDP GC does the same in `bbssd/ftl-fdp.c`.
 - The returned latency is discarded. GC never adds to a command's latency
   directly. It makes LUNs and channels busy, and the host operations that
   need them afterwards wait.
 - **Foreground GC** runs when the share of used lines has reached
-  `gc_thres_pcent_high`: at the start of `ssd_write()`, of a write buffer
-  destage and of a Write Zeroes (`bbssd/ftl-datapath.c`), until the share
-  drops below it. The command's own programs then queue behind the
+  `gc_thres_pcent_high`: at the start of `ssd_write()`, and before each page
+  that a write, a write buffer destage or a Write Zeroes programs
+  (`bbssd/ftl-datapath.c`), until the share drops below it. The command's own programs then queue behind the
   GC operations on the LUNs they share.
 - **Read reclaim** (`read_reclaim_limit`, `retention_limit_sec`) rewrites one
   queued line through `reclaim_line()` at the start of a write, charged the

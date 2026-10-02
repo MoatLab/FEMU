@@ -3051,6 +3051,27 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     }
 }
 
+/* The FTL's mapping of namespace 1 against its media; see ssd_check_mapping */
+static char *femu_test_ftl_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "FTL check requires a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd_check_mapping(ns->ssd, &mapped, &lost, &orphans);
+    nvme_resume_pollers(n, resume);
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64,
+                           mapped, lost, orphans);
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -3104,6 +3125,7 @@ static void femu_instance_init(Object *obj)
                                  femu_test_oc12_clock);
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
+        object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
     }
 }
 

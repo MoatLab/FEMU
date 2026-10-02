@@ -442,16 +442,30 @@ The two watermarks are stored as free-line counts:
 
 ```text
   gc_thres_lines      = (int)((1 - gc_thres_pcent/100)      * tt_lines)
-  gc_thres_lines_high = (int)((1 - gc_thres_pcent_high/100) * tt_lines)
+  gc_thres_lines_high = (int)((1 - gc_thres_pcent_high/100) * tt_lines),
+                        at least 1 with hot_cold_sep, Streams, or a hybrid
+                        or fast mapping (bb_gc_forced_lines())
 ```
+
+The floor matters below 20 lines, where the default high watermark rounds to
+zero. A second write pointer can then take the last free line while the data
+pointer, which GC writes into, is nearly full, and GC would have nowhere to
+put a victim's pages (with Streams, GC refuses such a victim outright). One
+free line always holds a whole victim. The floor costs those small
+geometries one line of exposable capacity.
 
 | Kind | When | Where | Victim filter | How many |
 | --- | --- | --- | --- | --- |
 | Background | free lines <= `gc_thres_lines` | after every request that reaches the FTL without an error, any opcode | the chosen line must have at least 1/8 of its pages invalid | one line |
-| Foreground (forced) | free lines <= `gc_thres_lines_high` | at the start of a write, a write-back of the buffer, and Write Zeroes without Deallocate | none | repeats until above the watermark or no victim |
+| Foreground (forced) | free lines <= `gc_thres_lines_high` | at the start of a write, and before every page that a write, a write-back of the buffer, or Write Zeroes without Deallocate programs | none | repeats until above the watermark or no victim |
 
-A GC step returns -1 when there is no victim, or when the background filter
-rejects it; the forced loop then stops. With Streams on, a step also fails
+Forced GC runs per page, not once per command: one command can program more
+lines than the watermark keeps free, and a collection that starts after the
+last line is gone has nowhere to move pages to.
+
+A GC step returns -1 when there is no victim, when the background filter
+rejects it, or when the victim's valid pages cannot all be moved; the forced
+loop then stops. With Streams on, a step also fails
 when it frees nothing, because lines of distinct retired streams cannot be
 combined, or when the victim holds valid pages and no line is free.
 
@@ -482,17 +496,21 @@ when the order of collections, and of other `rand()` users, repeats.
   victim = policy->select_victim_line(force)  -- none? return -1
     |
     v
-  for ch in 0..nchs-1, lun in 0..luns_per_ch-1:
-    for pl in 0..pls_per_lun-1:
-      for each page of block (ch, lun, pl, victim->id):
-        if VALID:
-          NAND read at the old page              (GC_IO)
-          lpn = rmap[old]
-          new = next page of the data pointer    (stream pointer for
-          maptbl[lpn] = new, rmap[new] = lpn      Streams data)
-          NAND program at the new page           (GC_IO)
-          gc_write_pages++
-      mark the block free: erase_cnt++, read_cnt = 0
+  move: for ch, lun, pl, each page of block (ch, lun, pl, victim->id):
+    if VALID:
+      new = next page of the data pointer        (stream pointer for
+            (takes a free line if it has none)    Streams data)
+      none? requeue the victim, return -1
+      NAND read at the old page                  (GC_IO)
+      lpn = rmap[old]
+      maptbl[lpn] = new, rmap[new] = lpn
+      old page -> INVALID, rmap[old] = none
+      NAND program at the new page               (GC_IO)
+      gc_write_pages++
+    |
+    v
+  erase: for ch in 0..nchs-1, lun in 0..luns_per_ch-1:
+    mark each plane's block free: erase_cnt++, read_cnt = 0
     one multi-plane erase of the LUN's blocks    (GC_IO, tplebsy between
                                                   planes)
     |
@@ -501,11 +519,14 @@ when the order of collections, and of other `rand()` users, repeats.
 ```
 
 The relocated page goes wherever the data pointer is, not to the victim's
-LUN: the model has no copyback. If the data pointer has no line left, the
-relocation of that block stops, but `reclaim_line()` still erases the block
-and frees the line, so the pages it did not move keep mappings to erased
-pages. The capacity reserve exists so that a valid configuration never gets
-there.
+LUN: the model has no copyback. Every valid page is moved before any block
+is erased. If the data pointer runs out of lines part way, the victim goes
+back to the victim queue (or the full list, if nothing was moved from a full
+line) holding the pages it still has, and nothing is erased. The pages that
+were moved are already invalid in the victim, so its counts stay true and a
+later step moves only what is left. Writes that then find no line fail with
+Capacity Exceeded. The watermark floor, per-page forced GC and the capacity
+reserve keep a valid configuration from getting there.
 
 ### How GC time is charged
 
@@ -736,7 +757,7 @@ Write Zeroes and Copy are never failed.
 leave GC no room. The reserve, in lines:
 
 ```text
-  reserve = (int)((1 - gc_thres_pcent_high/100) * blks_per_pl)
+  reserve = gc_thres_lines_high      forced watermark, with its floor
           + 1                        data pointer
           + 1 if hot_cold_sep        hot pointer
           + 1 if mapping is hybrid or fast   log pointer
@@ -975,6 +996,7 @@ What the automated tests check:
 | C0h counters | qtest `media-counters` | host and NAND page counts and the WAF move with writes |
 | Write buffer | qtest `buffer-counters` and `power-loss-*` | hit counts; Flush, FUA, write-back, cache disable, shutdown and power-cut rollback |
 | Streams | qtest `streams-gc` and the other `streams-*` cases | stream placement and GC of stream lines |
+| GC with no free line | qtests `gc-no-destination`, `gc-no-destination-hot-cold`, `streams-gc-floor` | on a geometry whose forced watermark rounds to zero, random single-page and 64-page writes never fail, no mapping names an erased page and no valid page is orphaned (read through the qtest-only `x-ftl-check` property) |
 | Format, Sanitize | qtests `format-ftl`, `sanitize` | after Format, GC relocates nothing; Sanitize status and zeroed data (the FTL state is not checked) |
 | Robustness | qtests `io-fuzz`, `io-fuzz-fdp`, `config-refused` | malformed I/O, refused configurations |
 | Start-up | `doc-examples` | every tagged example on this page and the BlackBox guide starts and moves one block |
@@ -1001,9 +1023,6 @@ calibrated against a specific commercial drive.
 - `d-choice` GC is not reproducible run to run, and `random` only when
   everything else that calls `rand()` repeats too.
 - An injected write fault still programs and maps the data.
-- GC that finds no destination line erases the victim anyway (see
-  [Collecting a line](#collecting-a-line)); only the capacity reserve keeps
-  this from happening.
 - FAST merge counts and DFTL and read cache hit rates are not exported.
 - Each namespace's FTL is built from the whole geometry, so host memory for
   the FTL grows with the namespace count.

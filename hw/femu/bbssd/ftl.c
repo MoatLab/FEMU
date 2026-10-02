@@ -199,6 +199,61 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
     return ssd->nand_write_pages;
 }
 
+/*
+ * Check the mapping against the media. @lost counts logical pages whose
+ * mapping names a page that does not hold them: one not valid, or one the
+ * reverse map gives to another page. @orphans counts valid pages that no
+ * mapping names. Collection that erases a block it has not emptied leaves the
+ * first; a relocated copy left marked valid leaves the second.
+ */
+void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
+                       uint64_t *orphans)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa owner;
+    uint64_t lpn;
+    struct ppa ppa;
+
+    *mapped = *lost = *orphans = 0;
+    for (lpn = 0; lpn < spp->tt_pgs; lpn++) {
+        ppa = get_maptbl_ent(ssd, lpn);
+        if (!mapped_ppa(&ppa)) {
+            continue;
+        }
+        (*mapped)++;
+        if (get_pg(ssd, &ppa)->status != PG_VALID ||
+            get_rmap_ent(ssd, &ppa) != lpn) {
+            (*lost)++;
+        }
+    }
+
+    ppa.ppa = 0;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        ppa.g.ch = ch;
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            ppa.g.lun = lun;
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                ppa.g.pl = pl;
+                for (int blk = 0; blk < spp->blks_per_pl; blk++) {
+                    ppa.g.blk = blk;
+                    for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
+                        ppa.g.pg = pg;
+                        if (get_pg(ssd, &ppa)->status != PG_VALID) {
+                            continue;
+                        }
+                        lpn = get_rmap_ent(ssd, &ppa);
+                        owner.ppa = UNMAPPED_PPA;
+                        if (lpn < spp->tt_pgs) {
+                            owner = get_maptbl_ent(ssd, lpn);
+                        }
+                        *orphans += owner.ppa != ppa.ppa;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* Lines rewritten because a block of theirs passed the read stress limit. */
 /*
  * Copy: read every source range, then program the destination as one write.
