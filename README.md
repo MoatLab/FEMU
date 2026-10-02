@@ -4,7 +4,7 @@
 
 [![FEMU Version](https://img.shields.io/badge/FEMU-v10.1-brightgreen)](https://github.com/MoatLab/FEMU/releases)
 [![Build Status](https://github.com/MoatLab/FEMU/workflows/CI/badge.svg)](https://github.com/MoatLab/FEMU/actions)
-[![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+[![License: GPL v2+](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
 
 ```
@@ -360,7 +360,7 @@ have one; consider contributing it.
 
 ## License
 
-FEMU is released under the **GNU General Public License v2.0**.
+FEMU is released under the **GNU General Public License v2.0 or later**.
 
 ```
 Copyright (C) 2018-2024 Virginia Tech and Contributors

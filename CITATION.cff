@@ -3,6 +3,7 @@ message: "If you use FEMU in your research, please cite the FAST '18 paper below
 title: "FEMU"
 type: software
 repository-code: "https://github.com/MoatLab/FEMU"
+license: GPL-2.0-or-later
 authors:
   - family-names: Li
     given-names: Huaicheng
