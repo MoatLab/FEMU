@@ -11174,7 +11174,9 @@ static void femu_test_kv_base_spread(void *obj, void *data,
         femu_submit(&c, &c.io, &cmd);
     }
     for (int i = 0; i < 8; i++) {
-        femu_complete(&c, &c.io, NULL, NULL);
+        /* a lookup that charged nothing would pass the bound below too */
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        0x87);              /* KV Key Does Not Exist */
     }
     /* one 25 ms read each, on eight LUNs: about 25 ms, not 200 */
     g_assert_cmpint(g_get_monotonic_time() - start, <, 100000);

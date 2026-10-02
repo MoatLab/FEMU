@@ -748,6 +748,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         if (status) {
             s->value_next = off;            /* roll back the append */
             qemu_mutex_unlock(&s->lock);
+            kv_apply_lat(req, lat);         /* any compaction still ran */
             return status;
         }
     }
@@ -757,6 +758,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     if (status) {
         s->value_next = off;
         qemu_mutex_unlock(&s->lock);
+        kv_apply_lat(req, lat);
         return status;
     }
 
@@ -770,6 +772,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         g_free(new_ppas);
         s->value_next = off;
         qemu_mutex_unlock(&s->lock);
+        kv_apply_lat(req, lat);
         return status;
     }
     if (existing >= 0) {
