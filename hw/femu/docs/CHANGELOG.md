@@ -238,6 +238,10 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A Format rebuilds per-block state (a79474e73, 7e7e36161).
 - Writes clear the invalid status set by Write Uncorrectable (026eb0ef0).
 - CSD and KV commands address the namespace they name, and each namespace gets its own mode state (a93de9d54, aa6a5a8f7, d2a770601, ce5ad913f).
+- A KV command completes when its last NAND operation does: a Store that compacts no longer counts the compaction wait twice, and still pays for it when it then fails. The per-command index read is charged on a LUN chosen by the key's hash instead of always on the LUN at address 0, which had every KV command queue on one LUN (4ca11c2a0, 1e5385ae4).
+- Vendor admin command 0xEE sets an Open-Channel controller's read, program, erase and channel times; it used to write fields nothing read. Other modes refuse it with Invalid Field (949d01eb9, cdbd5bb36).
+- `namespace_sizes` may add up to all of `devsz_mb` when the namespace count does not divide it, and each size is rounded down to whole logical blocks, so TNVMCAP counts only addressable capacity (d8cdd4d22).
+- A CSD controller in an FDP subsystem refuses the same knobs as a BlackBox one and reports the superblock as its reclaim unit size, instead of 96 MiB (207bb12d4).
 
 #### Spec conformance and host compatibility
 
@@ -257,6 +261,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - KV list entries are padded to 4 bytes, NVM-only commands are refused on KV namespaces, and KV Identify requires a KV namespace (240e21c43, f5a7d7bc8, 5ec9ee859).
 - FDP reports the reclaim unit size the FTL uses and moves a handle to a new reclaim unit on update (7fe32c556, 78de60448).
 - The FDP Reclaim Unit Handle Usage log uses 8 byte descriptors, so `nvme fdp usage` reports every handle as host specified instead of reading some as unused, and the placement logs store their fields little endian (ca844c994, a85b869fc).
+- With `namespace_modes`, the controller's model number and serial come from its own `femu_mode` instead of the namespace brought up last (efdb98643, c3f968029).
 - SMART wear counters are summed across namespaces (4a4f0d9bf).
 - Counters fixed to move in every mode: FDP and KV write amplification and bytes, KV relocations, FDP erases (f4b3ac376, 980fb7886, 37464e4bd, ce20d8c06, 4c7d9c22a, 749e09fef, 2a16553c9, ba0c49338).
 
