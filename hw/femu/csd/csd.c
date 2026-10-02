@@ -160,7 +160,7 @@ static void csd_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *mn = "FEMU Computational Storage Controller";
     const char *sn = "vCSD";
 
-    nvme_set_ctrl_name(n, mn, sn, &csd_id);
+    nvme_set_ctrl_name(n, ns, mn, sn, &csd_id);
 }
 
 static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)

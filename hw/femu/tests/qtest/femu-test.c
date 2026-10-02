@@ -10955,22 +10955,49 @@ static void femu_test_ns_mgmt_default(void *obj, void *data,
     femu_disable(&c);
 }
 
+typedef struct FemuIdentity {
+    const char *serial;
+    const char *model;
+} FemuIdentity;
+
+/*
+ * With mixed namespace modes the controller is named by its own femu_mode.
+ * It used to take the name of whichever namespace was brought up last, so a
+ * black-box controller with a NoSSD namespace last called itself a NoSSD
+ * controller. A controller with no namespace of its own mode is named from
+ * that mode too.
+ */
 static void femu_test_namespace_mixed_identity(void *obj, void *data,
                                                 QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
+    const FemuIdentity *want = data;
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     char serial[21] = { 0 };
+    char model[41] = { 0 };
 
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
     qtest_memread(c.pdev->bus->qts, buf + 4, serial, 20);
+    qtest_memread(c.pdev->bus->qts, buf + 24, model, 40);
     g_strchomp(serial);
-    g_assert_cmpstr(serial, ==, "vCSD0");
+    g_strchomp(model);
+    g_assert_cmpstr(serial, ==, want->serial);
+    g_assert_cmpstr(model, ==, want->model);
     femu_disable(&c);
     guest_free(alloc, buf);
 }
+
+static const FemuIdentity femu_id_nossd = {
+    "vNoSSD0", "FEMU NoSSD NVMe Controller"
+};
+static const FemuIdentity femu_id_bbssd = {
+    "vSSD0", "FEMU BlackBox-SSD Controller"
+};
+static const FemuIdentity femu_id_kvssd = {
+    "vKVSSD0", "FEMU KV-SSD Controller"
+};
 
 /* the device's index hash, so a test can pick keys for given LUNs */
 static uint32_t femu_kv_fnv1a(uint64_t key)
@@ -18552,7 +18579,24 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "namespaces=2,namespace_modes=nossd,,csd,fdm_size=16,"
             "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
-            "pls_per_lun=1,luns_per_ch=4,nchs=4"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4",
+        .arg = (void *)&femu_id_nossd,
+    });
+    qos_add_test("namespace-mixed-identity-bbssd", "femu",
+                 femu_test_namespace_mixed_identity, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,namespaces=2,namespace_modes=bbssd,,nossd,"
+            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4",
+        .arg = (void *)&femu_id_bbssd,
+    });
+    qos_add_test("namespace-mixed-identity-kv", "femu",
+                 femu_test_namespace_mixed_identity, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=5,namespaces=2,namespace_modes=bbssd,,kvssd,"
+            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4",
+        .arg = (void *)&femu_id_kvssd,
     });
     qos_add_test("kv-base-spread", "femu", femu_test_kv_base_spread,
                  &(QOSGraphTestOptions) {

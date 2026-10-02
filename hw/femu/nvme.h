@@ -2567,7 +2567,8 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n);
 uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       cqid, uint16_t vector, uint16_t size, uint16_t
                       irq_enabled, int contig);
-void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id);
+void nvme_set_ctrl_name(FemuCtrl *n, NvmeNamespace *ns, const char *mn,
+                        const char *sn, int *dev_id);
 
 /* Public APIs from intr.c for interrupt operations */
 void nvme_isr_notify_admin(void *opaque);

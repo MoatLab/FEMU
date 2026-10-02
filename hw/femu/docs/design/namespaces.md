@@ -126,6 +126,13 @@ At run time the mode is chosen per command, not per controller:
   I/O Command Set list; only the Changed Zone List entry in the supported
   log pages depends on a zoned namespace being present.
 
+The controller's model number and serial come from its own `femu_mode`.
+Every namespace still advances its mode's serial counter as it starts, so
+serials keep their values, but only a namespace of the controller's mode
+names the controller. When none does (a KV controller whose KV namespace is
+not namespace 1, for example), the controller is named from `femu_mode` once
+its namespaces are up (`nvme_set_ctrl_name()`).
+
 Each namespace keeps its own mode state. Every bbssd or CSD namespace has a
 complete FTL with the full NAND geometry, and must fit in that geometry on
 its own with room for GC. Every ZNS namespace builds its own zones from the

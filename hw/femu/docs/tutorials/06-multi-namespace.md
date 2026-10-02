@@ -51,10 +51,10 @@ sudo nvme list-ns /dev/nvme0
 ```text
 Node                  Generic               SN                   Model                                    Namespace  Usage                      Format           FW Rev
 --------------------- --------------------- -------------------- ---------------------------------------- ---------- -------------------------- ---------------- --------
-/dev/nvme0n1          /dev/ng0n1            vNoSSD0              FEMU NoSSD NVMe Controller               0x1        536.87  MB / 536.87  MB    512   B +  0 B   1.0
-/dev/nvme0n2          /dev/ng0n2            vNoSSD0              FEMU NoSSD NVMe Controller               0x2        536.87  MB / 536.87  MB    512   B +  0 B   1.0
-/dev/nvme0n3          /dev/ng0n3            vNoSSD0              FEMU NoSSD NVMe Controller               0x3        536.87  MB / 536.87  MB    512   B +  0 B   1.0
-nvme0n4               /dev/ng0n4            vNoSSD0              FEMU NoSSD NVMe Controller               0x4        536.87  MB /   0.00   B    512   B +  0 B   1.0
+/dev/nvme0n1          /dev/ng0n1            vSSD0                FEMU BlackBox-SSD Controller             0x1        536.87  MB / 536.87  MB    512   B +  0 B   1.0
+/dev/nvme0n2          /dev/ng0n2            vSSD0                FEMU BlackBox-SSD Controller             0x2        536.87  MB / 536.87  MB    512   B +  0 B   1.0
+/dev/nvme0n3          /dev/ng0n3            vSSD0                FEMU BlackBox-SSD Controller             0x3        536.87  MB / 536.87  MB    512   B +  0 B   1.0
+nvme0n4               /dev/ng0n4            vSSD0                FEMU BlackBox-SSD Controller             0x4        536.87  MB /   0.00   B    512   B +  0 B   1.0
 [   0]:0x1
 [   1]:0x2
 [   2]:0x3
@@ -65,10 +65,8 @@ Namespaces 1 to 3 have block devices. Namespace 4, the KV one, has only
 the generic character device `/dev/ng0n4`: Linux has no block driver for
 the key-value command set.
 
-The model and serial number are the controller's, and with mixed modes
-they do not tell you the modes: the namespaces' modes set the controller
-strings as they start, and the last one wins (NoSSD here; a KV namespace
-sets them only when it is namespace 1). Tell
+The model and serial number are the controller's, and they come from its
+own `femu_mode` (BlackBox here), not from the namespaces' modes. Tell
 the namespaces apart by what they report:
 
 ```sh

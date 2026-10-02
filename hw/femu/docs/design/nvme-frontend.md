@@ -464,7 +464,7 @@ A mode is a `FemuExtCtrlOps` table (`hw/femu/nvme.h`):
 | Hook | Called from | For |
 | --- | --- | --- |
 | `init` | realize, once per namespace of that mode, and Namespace Management create | build the mode's state for the namespace |
-| `init_ctrl_name` | realize, only with `ns_mgmt` (otherwise each mode's `init` sets the name) | Identify model number and serial |
+| `init_ctrl_name` | realize, only with `ns_mgmt` (otherwise each mode's `init` sets the name); only a namespace of the controller's `femu_mode` names it, and the controller's own table names it when no namespace does | Identify model number and serial |
 | `start_ctrl` | controller enable, once per distinct mode | refuse settings the mode cannot serve; derive values from CC |
 | `io_cmd` | poller, for opcodes the frontend does not handle | the mode's I/O commands |
 | `admin_cmd`, `admin_cmd_cqe` | vCPU, for admin opcodes the frontend does not handle | mode admin commands, such as the Open-Channel commands, BBSSD 0xEF and the CSD commands |

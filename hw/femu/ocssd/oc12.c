@@ -1361,7 +1361,7 @@ static void oc12_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *vocssd12_mn = "FEMU OpenChannel-SSD Controller (v1.2)";
     const char *vocssd12_sn   = "vOCSSD";
 
-    nvme_set_ctrl_name(n, vocssd12_mn, vocssd12_sn, &fsid_voc12);
+    nvme_set_ctrl_name(n, ns, vocssd12_mn, vocssd12_sn, &fsid_voc12);
 }
 
 static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)

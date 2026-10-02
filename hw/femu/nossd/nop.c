@@ -6,7 +6,7 @@ static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *vnossd_mn = "FEMU NoSSD NVMe Controller";
     const char *vnossd_sn = "vNoSSD";
 
-    nvme_set_ctrl_name(n, vnossd_mn, vnossd_sn, &fsid_vno);
+    nvme_set_ctrl_name(n, ns, vnossd_mn, vnossd_sn, &fsid_vno);
 }
 
 static uint16_t nop_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

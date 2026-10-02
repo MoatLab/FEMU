@@ -1553,7 +1553,7 @@ static void oc20_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *vocssd20_mn = "FEMU OpenChannel-SSD Controller (v2.0)";
     const char *vocssd20_sn = "vOCSSD";
 
-    nvme_set_ctrl_name(n, vocssd20_mn, vocssd20_sn, &fsid_voc20);
+    nvme_set_ctrl_name(n, ns, vocssd20_mn, vocssd20_sn, &fsid_voc20);
 }
 
 static void oc20_release_locks(FemuCtrl *n)

@@ -2494,6 +2494,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
+    /* No namespace runs the controller's own mode: name it from that mode. */
+    if (!n->shared_storage && n->num_namespaces && !n->devname[0] &&
+        n->ext_ops.init_ctrl_name) {
+        n->ext_ops.init_ctrl_name(n, NULL);
+    }
+
     /* Validate retention before starting threads that would need unwinding. */
     if (!femu_pel_init(n, errp)) {
         femu_realize_undo(n);

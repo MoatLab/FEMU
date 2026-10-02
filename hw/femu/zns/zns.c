@@ -1874,7 +1874,7 @@ static void zns_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *zns_mn = "FEMU ZMS-SSD Controller [by Misao]";
     const char *zns_sn = "vZNSSD";
 
-    nvme_set_ctrl_name(n, zns_mn, zns_sn, &fsid_zns);
+    nvme_set_ctrl_name(n, ns, zns_mn, zns_sn, &fsid_zns);
 }
 
 static void zns_set_ctrl(FemuCtrl *n)

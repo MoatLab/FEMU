@@ -7,7 +7,7 @@ static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *vbbssd_mn = "FEMU BlackBox-SSD Controller";
     const char *vbbssd_sn = "vSSD";
 
-    nvme_set_ctrl_name(n, vbbssd_mn, vbbssd_sn, &fsid_vbb);
+    nvme_set_ctrl_name(n, ns, vbbssd_mn, vbbssd_sn, &fsid_vbb);
 }
 
 /*

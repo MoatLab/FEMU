@@ -286,8 +286,8 @@ static void kvssd_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     const char *mn = "FEMU KV-SSD Controller";
     const char *sn = "vKVSSD";
 
-    if (ns == &n->namespaces[0]) {
-        nvme_set_ctrl_name(n, mn, sn, &kvssd_id);
+    if (!ns || ns == &n->namespaces[0]) {
+        nvme_set_ctrl_name(n, ns, mn, sn, &kvssd_id);
     }
 }
 

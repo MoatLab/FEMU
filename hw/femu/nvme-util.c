@@ -909,7 +909,14 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
     }
 }
 
-void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id)
+/*
+ * Every namespace a mode brings up takes a serial from that mode's counter,
+ * so serials stay where they were. Only a namespace of the controller's own
+ * femu_mode, or no namespace at all, names the controller: with mixed modes
+ * the last namespace brought up used to decide its model and serial.
+ */
+void nvme_set_ctrl_name(FemuCtrl *n, NvmeNamespace *ns, const char *mn,
+                        const char *sn, int *dev_id)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
     char *subnqn;
@@ -922,6 +929,9 @@ void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id
     sprintf(dev_id_str, "%d", *dev_id);
     strcat(serial, dev_id_str);
     (*dev_id)++;
+    if (ns && ns->femu_mode != n->femu_mode) {
+        return;
+    }
     strpadcpy((char *)id->mn, sizeof(id->mn), mn, ' ');
 
     memset(n->devname, 0, MN_MAX_LEN);

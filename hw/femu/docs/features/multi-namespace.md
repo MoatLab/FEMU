@@ -65,6 +65,7 @@ Properties: [mode, capacity and namespaces](../reference/properties.md#mode-capa
 - `namespace_modes`: the mode of each namespace, one of `nossd`, `bbssd`,
   `znssd`, `ocssd`, `csd` and `kvssd`, one entry per namespace. Unset, every
   namespace runs `femu_mode`.
+  The controller's model number and serial still come from `femu_mode`.
 
 The namespaces are packed one after another in the controller's memory, so
 none can overwrite another.
