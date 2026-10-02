@@ -144,9 +144,9 @@ Properties: [garbage collection, mapping and caches](../reference/properties.md#
 `buffer_size` is the DRAM write buffer capacity in NAND pages, not bytes.
 Once the buffer is `buffer_thres_pcent` full, the next write programs a batch
 of the least recently written pages. A write the buffer absorbs costs no
-NAND time; the cost moves to the write that evicts it. Set `vwc=1` so that
-the guest sees a volatile write cache: Flush then drains the buffer, and the
-guest can turn the buffer off with feature 06h. A read of a page the buffer
+NAND time; the cost moves to the write that evicts it. Flush drains the
+buffer. Set `vwc=1` so that the guest sees a volatile write cache: Linux
+then sends Flush, and the guest can turn the buffer off with feature 06h. A read of a page the buffer
 still holds costs no NAND time, and deallocating such a page drops it
 instead of writing it out later.
 

@@ -994,7 +994,7 @@ What the automated tests check:
 | Victim queue | unit test `test-femu-pqueue` | priority queue operations, including random pop |
 | NAND timing | unit test `test-femu-nand-media` | the media layer the FTL calls |
 | C0h counters | qtest `media-counters` | host and NAND page counts and the WAF move with writes |
-| Write buffer | qtest `buffer-counters` and `power-loss-*` | hit counts; Flush, FUA, write-back, cache disable, shutdown and power-cut rollback |
+| Write buffer | qtest `buffer-counters`, `flush-without-vwc` and `power-loss-*` | hit counts; Flush (also with `vwc=0`), FUA, write-back, cache disable, shutdown and power-cut rollback |
 | Streams | qtest `streams-gc` and the other `streams-*` cases | stream placement and GC of stream lines |
 | GC with no free line | qtests `gc-no-destination`, `gc-no-destination-hot-cold`, `streams-gc-floor`, `gc-no-destination-fdp` | on a geometry whose forced watermark rounds to zero, random single-page and 64-page writes never fail, no mapping names an erased page and no valid page is orphaned (read through the qtest-only `x-ftl-check` property) |
 | Format, Sanitize | qtests `format-ftl`, `sanitize` | after Format, GC relocates nothing; Sanitize status and zeroed data (the FTL state is not checked) |

@@ -2688,6 +2688,47 @@ static void femu_test_gc_no_destination(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Flush drains the write buffer whether or not a volatile write cache is
+ * advertised: vwc only decides whether the host can turn the buffer off.
+ */
+static void femu_test_flush_without_vwc(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t page[512];
+    uint16_t got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    /* held in the buffer, not yet programmed */
+    g_assert_cmpuint(ldq_le_p(page + 24), ==, 0);
+
+    femu_submit(&c, &c.io, &flush);
+    g_assert_cmphex(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 24), ==, 4);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static uint16_t femu_delete_sq(FemuCtrlState *c, uint16_t qid)
 {
     NvmeCmd cmd;
@@ -19095,6 +19136,13 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub"
+    });
+    qos_add_test("flush-without-vwc", "femu", femu_test_flush_without_vwc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,vwc=0,"
+            "buffer_size=16"
     });
     qos_add_test("media-counters", "femu", femu_test_media_counters,
                  &(QOSGraphTestOptions) {

@@ -181,7 +181,7 @@ Reference: [controller identity and capabilities](properties.md#controller-ident
 | `mdts` | power of two | 0 to 255; 0 = no limit | largest transfer, 2^(12 + `mpsmin` + `mdts`) bytes |
 | `mpsmin`, `mpsmax` | power of two | `mpsmin` <= `mpsmax` <= 15 | host memory page sizes the controller accepts, 2^(12 + n) bytes |
 | `cqr` | 0 or 1 | 0, 1 | 1 requires physically contiguous queues |
-| `vwc` | 0 or 1 | 0, 1 | advertise a volatile write cache; makes Flush drain the write buffer and feature 06h usable |
+| `vwc` | 0 or 1 | 0, 1 | advertise a volatile write cache and make feature 06h usable; Flush drains the write buffer either way |
 | `oacs` | bit mask | only bit 1 (0x2) | Format NVM support; clearing it refuses Format NVM |
 | `oncs` | bit mask | 0x1 Compare, 0x2 Write Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 Save/Select, 0x80 Verify, 0x100 Copy | optional NVM commands; Timestamp is always added |
 | `sgl` | bool | `on`, `off` | accept scatter gather lists; OCSSD ignores it |
@@ -192,8 +192,10 @@ Reference: [controller identity and capabilities](properties.md#controller-ident
 Interactions:
 
 - Write Zeroes, Compare, Copy and Verify are unreachable until you set
-  their `oncs` bit, and Flush does nothing without `vwc=1`. A test of those
-  commands on a default controller tests nothing.
+  their `oncs` bit. A test of those commands on a default controller tests
+  nothing. Flush is always accepted and drains the bbssd write buffer even
+  with `vwc=0`, though Linux sends no Flush to a controller that advertises
+  no cache.
 - With ZNS, `mdts` also caps Zone Append when `zns_zasl_bs=0`.
 
 ### 3.3 LBA formats, metadata and protection
@@ -348,8 +350,8 @@ Design: [the BlackBox FTL](../design/ftl.md).
 Interactions:
 
 - The write buffer models timing; the data lives in the backend. With
-  `vwc=1` the guest sees a volatile write cache: Flush drains the buffer,
-  FUA writes skip it, and feature 06h turns it off. With `power_loss=on`
+  `vwc=1` the guest sees a volatile write cache and feature 06h turns it
+  off. Flush drains the buffer and FUA writes skip it with either setting. With `power_loss=on`
   the buffer also holds data, which `simulate-power-loss` drops.
 - `hybrid` and `fast` reserve one more line and count merges in log page
   C0h; `hot_cold_sep` reserves one more line.

@@ -66,7 +66,7 @@ Devices:
 | `did` | `uint16` | `7967` | PCI device ID of the controller function |
 | `acl` | `uint8` | `3` | Abort Command Limit reported in Identify Controller (0's based); it does not change how Abort is handled |
 | `cqr` | `uint8` | `1` | CAP.CQR: 1 requires physically contiguous queues, 0 allows PRP-list queues |
-| `vwc` | `uint8` | `0` | 1 advertises a volatile write cache: Flush then drains the bbssd write buffer and the host can turn the buffer off with feature 06h; 0 makes Flush a no-op and refuses feature 06h; 0 or 1 |
+| `vwc` | `uint8` | `0` | 1 advertises a volatile write cache, which the host can turn off with feature 06h to stop bbssd buffering writes; 0 advertises none and refuses feature 06h. Flush drains the bbssd write buffer either way; 0 or 1 |
 | `temperature` | `uint16` | `323` | Composite temperature in kelvin reported by the SMART log and compared with the temperature threshold feature; default 323 (50 C) |
 | `mpsmin` | `uint8` | `0` | CAP.MPSMIN: smallest host memory page size as 2^(12 + mpsmin) bytes; must not exceed mpsmax |
 | `mpsmax` | `uint8` | `0` | CAP.MPSMAX: largest host memory page size as 2^(12 + mpsmax) bytes, from mpsmin to 15 |

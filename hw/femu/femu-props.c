@@ -156,9 +156,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "CAP.CQR: 1 requires physically contiguous queues, 0 allows "
       "PRP-list queues" },
     { "vwc",
-      "1 advertises a volatile write cache: Flush then drains the bbssd "
-      "write buffer and the host can turn the buffer off with feature "
-      "06h; 0 makes Flush a no-op and refuses feature 06h; 0 or 1" },
+      "1 advertises a volatile write cache, which the host can turn off "
+      "with feature 06h to stop bbssd buffering writes; 0 advertises none "
+      "and refuses feature 06h. Flush drains the bbssd write buffer either "
+      "way; 0 or 1" },
     { "temperature",
       "Composite temperature in kelvin reported by the SMART log and "
       "compared with the temperature threshold feature; default 323 (50 C)" },
