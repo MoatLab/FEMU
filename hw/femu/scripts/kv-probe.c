@@ -1,15 +1,21 @@
 /*
- * KV passthru probe: drive FEMU's NVMe-KV mode end-to-end via the IO passthru
- * ioctl on the controller node (/dev/nvme0). Linux has no key-value command
- * set, so a CSI=01h namespace never gets a block device; Linux 6.0 and later
- * expose it only as the generic node /dev/ngXnY. Issues a full KV
- * lifecycle against the spec wire format: Store 01h, Exist 14h, Retrieve 02h
- * (full + short read), Delete 10h, then Retrieve-miss; checks status + data.
+ * KV passthru probe: drive FEMU's NVMe-KV mode end to end with the I/O
+ * passthrough ioctl. Linux has no key-value command set, so a CSI 01h
+ * namespace never gets a block device; Linux 6.0 and later give it only the
+ * generic node /dev/ngXnY. The node to use is the first argument (default
+ * /dev/nvme0, the controller node); every command names namespace 1.
  *
- * Key per NVMe-KV: CDW2/CDW3 = key[63:0], CDW14/CDW15 = key[127:64]; Key Length
- * in CDW11[7:0]; Value Size / Host Buffer Size in CDW10; value via DPTR.
+ * Checks status and data of: Store 01h, Exist 14h, Retrieve 02h (full, then
+ * into an 8-byte buffer), Store with "only if the key is absent" on the
+ * stored key, Delete 10h, Retrieve of the deleted key, Store with "only if
+ * the key exists" on it, and Store with a 17-byte key.
+ *
+ * NVMe-KV wire format: CDW2/CDW3 = key bytes 0-7, CDW14/CDW15 = key bytes
+ * 8-15; Key Length in CDW11[7:0], Store options in CDW11[15:8]; Value Size
+ * (Store) or Host Buffer Size (Retrieve) in CDW10; the value through DPTR.
  *
  * Build (in guest): gcc -O2 -o kv-probe kv-probe.c
+ * Run:              sudo ./kv-probe [/dev/nvme0 | /dev/ngXnY]
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -24,10 +30,12 @@
  * Self-contained passthru struct/ioctl (avoid depending on header version).
  *
  * This uses the 32-bit NVME_IOCTL_IO_CMD rather than the 64-bit variant on
- * purpose. A key-value namespace reports CSI 01h, which the kernel's NVM driver
- * does not attach, so there is no namespace node to send an I/O command to and
- * the controller node is the only way in -- and nvme_dev_ioctl() wires
- * NVME_IOCTL_IO_CMD there but not NVME_IOCTL_IO64_CMD, which returns ENOTTY.
+ * purpose, so the same call works on both nodes. A KV namespace has no block
+ * node, which leaves the controller node and, from Linux 6.0, the generic
+ * node. The generic node takes both forms, but nvme_dev_ioctl() wires only
+ * NVME_IOCTL_IO_CMD on the controller node (NVME_IOCTL_IO64_CMD returns
+ * ENOTTY there), and refuses even that when the controller has more than one
+ * namespace.
  */
 struct nvme_passthru_cmd {
     uint8_t  opcode;
@@ -61,7 +69,10 @@ static int fails;
 static void set_key(struct nvme_passthru_cmd *c, const uint8_t *k, int kl)
 {
     uint8_t b[16] = {0};
-    /* the wire still carries KL=kl in cdw11 */
+    /*
+     * The command has room for 16 key bytes. A longer key is cut to fit, but
+     * CDW11 still carries its real length, which the device must refuse.
+     */
     int copy = kl > 16 ? 16 : kl;
     memcpy(b, k, copy);
     c->cdw2  = (uint32_t)b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
@@ -91,7 +102,7 @@ static int kv_cmd(uint8_t op, const uint8_t *key, int kl, void *buf,
     if (result) {
         *result = c.result;
     }
-    return ret;            /* >=0: NVMe status code; <0: ioctl/errno failure */
+    return ret;     /* >=0: NVMe status, DNR included; <0: ioctl failed */
 }
 
 /*
@@ -188,7 +199,7 @@ int main(int argc, char **argv)
     st = kv_cmd(KV_STORE, key, kl, wbuf, vlen, vlen, 0x01 /*SIKE*/, &result);
     check("store(SIKE,absent)", st, 0x87);
 
-    /* 9. Over-long key (>16) -> Invalid Field (0x2) */
+    /* 9. Key longer than 16 bytes -> Invalid Field in Command (0x2) */
     {
         uint8_t big[17] = {0};
         memset(big, 'x', 17);

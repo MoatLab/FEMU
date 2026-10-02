@@ -139,9 +139,11 @@ per key: a 2-byte key length and the key, each entry padded to 4 bytes.
 ### With kv-probe
 
 `hw/femu/scripts/kv-probe.c` runs the whole lifecycle: store, exist,
-retrieve (full and short), the conditional stores, delete, and the retrieve
-that must then miss. It checks status and data. From `build-femu/` on the
-host, copy it to the guest and run it:
+retrieve (full and short), the conditional stores, delete, the retrieve
+that must then miss, and a key longer than 16 bytes. It checks status and
+data. It takes the node to use as its argument (default `/dev/nvme0`) and
+always addresses namespace 1. From `build-femu/` on the host, copy it to
+the guest and run it:
 
 ```sh
 scp -P 8080 -i ~/images/femu-guest-key ../femu-scripts/kv-probe.c femu@localhost:
