@@ -191,6 +191,7 @@ was not doing anything.
 - Failure to lock the backend memory is a warning instead of a fatal error (847864637).
 - The media counters moved from the SMART log's temperature fields to vendor log page C0h (4cb1f9ba7).
 - The register BAR is at least 16 KiB (01c79c442).
+- With `hot_cold_sep`, Streams, or a `hybrid` or `fast` mapping, forced GC keeps at least one line free. Below 20 lines, where the watermark used to round to zero, such a namespace can expose one line less (5a81d02cd).
 - OC 1.2 Identify no longer advertises hybrid commands, and unsupported OC 1.2 block opcodes are rejected (f5fc7d573, 6b5081821).
 - The `run-*.sh` launchers name QEMU's threads (`-name ...,debug-threads=on`), so `ps -T` and `top -H` show `femu-poller`, `FEMU-FTL-Thread` and `CPU N/KVM` (e29fe6ee2).
 
@@ -243,6 +244,8 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Vendor admin command 0xEE sets an Open-Channel controller's read, program, erase and channel times; it used to write fields nothing read. Other modes refuse it with Invalid Field (949d01eb9, cdbd5bb36).
 - `namespace_sizes` may add up to all of `devsz_mb` when the namespace count does not divide it, and each size is rounded down to whole logical blocks, so TNVMCAP counts only addressable capacity (d8cdd4d22).
 - A CSD controller in an FDP subsystem refuses the same knobs as a BlackBox one and reports the superblock as its reclaim unit size, instead of 96 MiB (207bb12d4).
+- bbssd GC no longer erases a line it could not empty, which left mappings pointing at erased pages and made every later write fail. Forced GC runs before every page a command programs, so a large write on a device with fewer than 20 lines no longer runs it out of space (5a81d02cd).
+- FDP GC moves all of a reclaim unit's pages before erasing any block, retires each moved page's old copy, and runs foreground GC per page. A pass that stopped part way used to leave the unit with erased blocks counted again later (c7b373186).
 
 #### Spec conformance and host compatibility
 
@@ -273,6 +276,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A property reference generated from the binary and checked in CI, with every device property described in its help text (a6118d051, 9489cf692, 37aaccf27, c2a12a2eb).
 - The mode table is generated from `modes.py`, and every documented command line is tested (6a97f8755, 12361d7f7, 573da0a1b).
 - Refusals and behaviour changes that affect existing command lines are listed (9e93cb94f); that list is now part of this changelog.
+- The `vwc` description no longer claims `vwc=0` makes Flush a no-op: Flush drains the bbssd write buffer either way (f48a6bc6f).
 - Documentation of the SMART vendor area, vendor log page, endurance rating, mapping schemes, GC and cache options (4e1f5bce5, 77fa23981, 9f52a098d, 658e4c9e6).
 - README refreshed: build hosts for the QEMU 10.1 base, binary path, guest image steps, namespace and plane limits, debugging switches, and links to the new docs (4f327242c, a967b15fa, 4dbeea46d, b5c68a96f, f2d9dee99, b2ae45483, 65332b21a, 10f30e231).
 - Added CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CITATION.cff and ROADMAP files (599a36676, da692f5d9).
