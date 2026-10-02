@@ -153,7 +153,7 @@ was not doing anything.
 - Unknown `mapping` or `gc_policy` names, and a negative suspend overhead (29c397f38, 2ae58aa55).
 - A CSD controller with more than one namespace (b425007c2).
 - FDP with more than one reclaim group, and other placement configurations the device cannot serve (f08762450, 8ed17a495).
-- An FDP namespace larger than what is left once each handle has a reclaim unit open, each Persistently Isolated handle one to collect into, and forced GC its free units. Such a namespace was accepted and then failed most random writes. A partly exposed last page now counts as a whole one in this check, with or without placement.
+- An FDP namespace larger than what is left once each handle has a reclaim unit open, each Persistently Isolated handle one to collect into, and forced GC its free units. Such a namespace was accepted and then failed most random writes. A partly exposed last page now counts as a whole one in this check, with or without placement (89f34939f).
 - Open-Channel namespaces on a controller in another mode, and OCSSD geometries the timing model cannot index (8cd92eec5, 598498e93, f4e85634a, 707d8c8c1).
 - Controller memory buffer settings that do not fit, including any CMB BAR other than 2 (1c3a5a2a2, 9d6e13cd3).
 - Queue entry sizes other than 64 and 16 bytes (23b21cc38).
@@ -192,7 +192,7 @@ was not doing anything.
 - Failure to lock the backend memory is a warning instead of a fatal error (847864637).
 - The media counters moved from the SMART log's temperature fields to vendor log page C0h (4cb1f9ba7).
 - The register BAR is at least 16 KiB (01c79c442).
-- Under FDP, forced GC keeps at least one reclaim unit free unless `gc_thres_pcent_high` is 100. Below 20 units the watermark rounded to none, and a pass that filled its destination part way had no unit to go on with.
+- Under FDP, forced GC keeps at least one reclaim unit free unless `gc_thres_pcent_high` is 100. Below 20 units the watermark rounded to none, and a pass that filled its destination part way had no unit to go on with (89f34939f).
 - With `hot_cold_sep`, Streams, or a `hybrid` or `fast` mapping, forced GC keeps at least one line free. Below 20 lines, where the watermark used to round to zero, such a namespace can expose one line less (5a81d02cd).
 - OC 1.2 Identify no longer advertises hybrid commands, and unsupported OC 1.2 block opcodes are rejected (f5fc7d573, 6b5081821).
 - The `run-*.sh` launchers name QEMU's threads (`-name ...,debug-threads=on`), so `ps -T` and `top -H` show `femu-poller`, `FEMU-FTL-Thread` and `CPU N/KVM` (e29fe6ee2).
@@ -248,7 +248,8 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A CSD controller in an FDP subsystem refuses the same knobs as a BlackBox one and reports the superblock as its reclaim unit size, instead of 96 MiB (207bb12d4).
 - bbssd GC no longer erases a line it could not empty, which left mappings pointing at erased pages and made every later write fail. Forced GC runs before every page a command programs, so a large write on a device with fewer than 20 lines no longer runs it out of space (5a81d02cd).
 - FDP GC moves all of a reclaim unit's pages before erasing any block, retires each moved page's old copy, and runs foreground GC per page. A pass that stopped part way used to leave the unit with erased blocks counted again later (c7b373186).
-- FDP GC takes a new unit for a collection destination that was dropped when it filled with nothing free, and collects a unit with no valid pages without one. GC used to stop for good once the destination was gone, so a full device stayed full even after the host deallocated everything.
+- FDP GC takes a new unit for a collection destination that was dropped when it filled with nothing free, and collects a unit with no valid pages without one. GC used to stop for good once the destination was gone, so a full device stayed full even after the host deallocated everything (22a0fc5ee).
+- An FDP handle whose last unit filled with nothing free reports no room in RUH Status. It used to report the room of its retired unit, which GC could free and give to another handle (4e7a06666).
 
 #### Spec conformance and host compatibility
 
