@@ -188,7 +188,9 @@ Properties: [OCSSD](../reference/properties.md#ocssd-open-channel).
 
 KV computes its latency in the poller with the BBSSD NAND model: value
 pages are read and programmed, reclaim erases are charged to the command that
-triggers them, and every command pays one page read for the index lookup.
+triggers them, and every command pays one page read for the index lookup,
+on a LUN chosen by the key's hash. A command completes when its last NAND
+operation does.
 
 CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time

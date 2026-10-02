@@ -10972,6 +10972,126 @@ static void femu_test_namespace_mixed_identity(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* the device's index hash, so a test can pick keys for given LUNs */
+static uint32_t femu_kv_fnv1a(uint64_t key)
+{
+    uint8_t b[8];
+    uint32_t h = 2166136261u;
+
+    stq_le_p(b, key);
+    for (int i = 0; i < 8; i++) {
+        h ^= b[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static uint16_t femu_kv_store(FemuCtrlState *c, uint64_t key, uint64_t buf,
+                              uint32_t len)
+{
+    NvmeCmd cmd;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_STORE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.res1 = cpu_to_le64(key);
+    cmd.cdw10 = cpu_to_le32(len);
+    cmd.cdw11 = cpu_to_le32(8);
+    femu_submit(c, &c->io, &cmd);
+    status = FEMU_SC(femu_complete(c, &c->io, &got, NULL));
+    g_assert_cmpint(got, ==, want);
+    return status;
+}
+
+/*
+ * Every KV command pays one page read for its index lookup. The index is
+ * spread over the LUNs by key, so lookups of keys on eight different LUNs run
+ * side by side and take one read time between them. Charged on the LUN at
+ * address 0, as they were, they queued behind each other and took eight.
+ */
+static void femu_test_kv_base_spread(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t keys[8];
+    bool taken[8] = { false };
+    int found = 0;
+    int64_t start;
+    NvmeCmd cmd;
+
+    for (uint64_t k = 1; found < 8; k++) {
+        uint32_t lun = femu_kv_fnv1a(k) % 8;
+
+        if (!taken[lun]) {
+            taken[lun] = true;
+            keys[found++] = k;
+        }
+    }
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    start = g_get_monotonic_time();
+    for (int i = 0; i < 8; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_EXIST;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.res1 = cpu_to_le64(keys[i]);
+        cmd.cdw11 = cpu_to_le32(8);
+        femu_submit(&c, &c.io, &cmd);
+    }
+    for (int i = 0; i < 8; i++) {
+        femu_complete(&c, &c.io, NULL, NULL);
+    }
+    /* one 25 ms read each, on eight LUNs: about 25 ms, not 200 */
+    g_assert_cmpint(g_get_monotonic_time() - start, <, 100000);
+    femu_disable(&c);
+}
+
+/*
+ * A Store that has to compact first relocates every live value and then
+ * programs its own, all on one LUN here. Its own programs wait behind the
+ * relocation, so their completion already includes it: 254 relocated pages
+ * and 2 of its own take 256 program times. Adding the relocation time on top
+ * again made it look like 510.
+ */
+static void femu_test_kv_compaction_time(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t start, took;
+    uint64_t k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(femu->dev.bus->qts, buf, 0x5a, 8192);
+
+    /* 127 values of 8 KiB and one rewrite fill the 1 MiB value space */
+    for (k = 1; k <= 127; k++) {
+        g_assert_cmpint(femu_kv_store(&c, k, buf, 8192), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_kv_store(&c, 1, buf, 8192), ==, NVME_SUCCESS);
+
+    start = g_get_monotonic_time();
+    g_assert_cmpint(femu_kv_store(&c, 2, buf, 8192), ==, NVME_SUCCESS);
+    took = g_get_monotonic_time() - start;
+
+    /* 256 programs of 2 ms is 512 ms; counted twice it was over 1 s */
+    g_assert_cmpint(took, >=, 500000);
+    g_assert_cmpint(took, <, 760000);
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
 static void femu_test_namespace_failed_identity(void *obj, void *data,
                                                  QGuestAllocator *alloc)
 {
@@ -18433,6 +18553,20 @@ static void femu_register_nodes(void)
             "namespaces=2,namespace_modes=nossd,,csd,fdm_size=16,"
             "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
             "pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("kv-base-spread", "femu", femu_test_kv_base_spread,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8,pg_rd_lat=25000000"
+    });
+    qos_add_test("kv-compaction-time", "femu", femu_test_kv_compaction_time,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
     });
     qos_add_test("namespace-kv-byte-capacity", "femu",
                  femu_test_namespace_kv_byte_capacity, NULL);

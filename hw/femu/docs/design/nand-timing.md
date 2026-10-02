@@ -573,9 +573,9 @@ GC operations go through the same timelines as host operations, with
 ```
 
 KV is different. Its reclaim erases and compaction moves are stamped with
-the triggering command's `stime`, their latency is added to that command
-(`kvssd/kvssd-ftl.c`), and 0xEF does not apply to KV, so they cannot be
-switched off.
+the triggering command's `stime`, the command completes when the last of
+them and of its own operations does (`kvssd/kvssd-ftl.c`), and 0xEF does not
+apply to KV, so they cannot be switched off.
 
 ZNS has no device GC. A Zone Reset charges one erase per block of the zone on
 every plane it spans, with the command's `stime`, and returns the largest

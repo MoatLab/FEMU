@@ -190,8 +190,8 @@ read and write EDNEK.
         get_new_page(); mark valid; charge a NAND program
         kv_advance_write_pointer()  (channel, LUN, plane, then page)
    6. index upsert; invalidate the old value's pages, count its bytes dead
-   7. latency: a compaction in step 3 has already added its own time;
-      then max(base cost, page programs + reclaim erases)
+   7. latency: whichever ends last of the compaction in step 3, the base
+      cost, the page programs and the reclaim erases
 ```
 
 The write pointer walks a line the way the black-box FTL does: across
@@ -224,24 +224,29 @@ like a black-box I/O. The NAND timing properties
 set the costs.
 
 Every command that reaches the index pays a **base cost**: one NAND page
-read, charged at physical address 0 as a mapping read. It stands for the
+read, charged as a mapping read on the LUN that holds the key's part of the
+index (`kv_index_ppa()`). The index is spread over every LUN by the key's
+FNV-1a hash, LUN `hash % (nchs * luns_per_ch)`, so lookups of different keys
+run in parallel; a List uses its start key. The cost stands for the
 controller's index work, so that commands that touch no value are not free.
 The index itself adds no reads. Commands refused for their fields, and most
 error paths after the index lookup, are charged nothing.
 
 | Command | Charged |
 | --- | --- |
-| Store | the time of any compaction it triggers, plus the longer of the base cost and its page programs (with any reclaim erases added in) |
+| Store | whichever ends last of any compaction it triggers, the base cost, its page programs and any reclaim erases |
 | Retrieve | the reads of the value pages that are transferred, and the base cost; the longest of them |
 | Exist | the base cost |
-| Delete, List | the base cost plus the index cost, which is 0 for the hash index |
+| Delete, List | the longer of the base cost and the index cost, which is 0 for the hash index |
 | a missing key, a conditional Store that does not apply, a full index or a full value space | the base cost |
 
-All costs are measured from the command's arrival time, so a chip that is
-already busy makes the command wait. The result is added to the request's
-`expire_time` (`kv_apply_lat()`). Both compaction and the Store's own cost
-are measured from the arrival time, so a Store that triggers compaction may
-count part of the same wait twice. The host-link and firmware models
+All costs are measured from the command's arrival time on the LUN
+timelines, so a LUN that is already busy makes the command wait, and a
+stage that queues behind an earlier stage of the same command already
+contains that wait. The command therefore ends with its last stage, and
+costs never add up: a Store whose own programs follow its compaction on a LUN
+completes when they do. The result is added to the request's
+`expire_time` (`kv_apply_lat()`). The host-link and firmware models
 ([host link and controller firmware](../reference/properties.md#host-link-and-controller-firmware))
 also charge Store and Retrieve as they charge Write and Read. The
 [timing model page](../concepts/timing-model.md#kv-and-csd) gives the same
@@ -293,7 +298,8 @@ bytes actually moved.
 - qtest cases in `hw/femu/tests/qtest/femu-test.c`, run in CI:
   `kv-discovery` (the command set list and its command effects log),
   `kv-namespaces` (separate key spaces), `kv-accounting` (SMART bytes and
-  the most-read block figure), `namespace-kv-byte-capacity`, `kv-mdts` and
+  the most-read block figure), `kv-base-spread` and `kv-compaction-time`
+  (timing), `namespace-kv-byte-capacity`, `kv-mdts` and
   `kv-list-mdts0` (transfer limits), `kv-identify-reserved` (Identify
   layout), `sgl-kv`, and `kv-fuzz`, a fuzzer over the command fields.
 - The documentation check stores and retrieves one value in each example
@@ -315,8 +321,8 @@ bytes actually moved.
   that leaves every line partly valid pays compaction in one command instead
   of steady background GC, or gets Capacity Exceeded when the NAND runs out
   first.
-- The base cost is charged on the LUN at physical address 0, so under load
-  every command queues on that one LUN for it.
+- The base cost of a key always falls on the same LUN, so a workload that
+  hammers one key queues on that LUN.
 - List order follows the hash table, not key order.
 - Not with FDP or `meta`. A controller with a KV namespace offers no
   namespace management: it needs a NoSSD or black-box controller whose
@@ -330,9 +336,9 @@ Refusal messages are listed in the
 - **Another index.** `FemuKvIndexOps` in `kvssd.h` is a small table of
   `find`, `upsert`, `remove` and `probe_reads`. An index kept on flash, such
   as an LSM tree, returns the number of page reads one lookup costs from
-  `probe_reads`, and `kv_charge_index()` charges them. It charges them as
-  user reads of physical address 0, so they also raise the most-read block
-  counter; give them real addresses. Set `s->index` to the
+  `probe_reads`, and `kv_charge_index()` charges them as mapping reads on the
+  key's index LUN, like the base cost; an index with real page addresses
+  should charge those instead. Set `s->index` to the
   new table in `kvssd_ftl_alloc()`.
 - **Background reclaim.** Valid-page relocation from partly valid lines would
   replace whole-arena compaction; the black-box GC in `hw/femu/bbssd/` shows

@@ -232,7 +232,7 @@ static bool kv_ensure_write_pointer(FemuKvssdState *s, NvmeRequest *req,
         return true;
     }
     if (lat) {
-        *lat += kv_reclaim_empty_lines(s, req);
+        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
     } else {
         kv_reclaim_empty_lines(s, req);
     }
@@ -275,7 +275,7 @@ static uint64_t kv_physical_pages_available(FemuKvssdState *s, NvmeRequest *req,
     uint64_t avail;
 
     if (lat) {
-        *lat += kv_reclaim_empty_lines(s, req);
+        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
     } else {
         kv_reclaim_empty_lines(s, req);
     }
@@ -334,7 +334,7 @@ static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
 
     wpp->curline = NULL;
     if (lat) {
-        *lat += kv_reclaim_empty_lines(s, req);
+        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
     } else {
         kv_reclaim_empty_lines(s, req);
     }
@@ -461,57 +461,74 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
     return NVME_SUCCESS;
 }
 
-/* fixed-cost per-command controller/index base latency so metadata-only ops
- * (exist/delete/miss) are never free. One NAND-page-read worth on the current
- * geometry, charged via the media model on a synthetic ppa (no write pointer
- * advance, no page marked valid -- a base cost, not real placement). */
-static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req)
+/*
+ * The LUN that holds a key's part of the index. The index is spread over
+ * every LUN by the key's hash, so lookups of different keys proceed in
+ * parallel the way value pages do. Charging them all on the LUN at address 0
+ * made every command of the device wait for every other one.
+ */
+static struct ppa kv_index_ppa(FemuKvssdState *s, const uint8_t *key,
+                               uint8_t kl)
 {
-    struct ssd *ssd = s->ssd;
-    /*
-     * A cost, not a read of a block: the address is a placeholder, so charge it
-     * the way a translation-page read is charged. As user traffic it counted
-     * against block zero's read total, which is what the most-read-block figure
-     * reports, so a command that touches no data -- an exist for a key that is
-     * not there -- drove that figure up.
-     */
-    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
-                          .stime = req->stime };
+    struct ssdparams *spp = &s->ssd->sp;
+    uint32_t luns = (uint32_t)spp->nchs * spp->luns_per_ch;
+    uint32_t i = kv_fnv1a(key, kl) % luns;
     struct ppa ppa = { .ppa = 0 };
-    return ssd_advance_status(ssd, &ppa, &c);
+
+    ppa.g.ch = i % spp->nchs;
+    ppa.g.lun = i / spp->nchs;
+    return ppa;
 }
 
-/* index-probe latency: a flash-resident index (probe_reads>0) pays N page reads
- * on the index structure; a DRAM-resident index (hash) pays nothing extra. Models
- * reads via ssd_advance_status on a synthetic ppa -- no data write pointer advance
- * and no page marked valid (those would consume value-space placement). */
+/*
+ * Fixed per-command cost of the controller's index work, so metadata-only
+ * commands (exist, delete, a miss) are never free: one page read on the LUN
+ * that holds the key's part of the index. It is charged as a mapping read,
+ * since it reads no data block, and places nothing.
+ */
+static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req,
+                               const uint8_t *key, uint8_t kl)
+{
+    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
+                          .stime = req->stime };
+    struct ppa ppa = kv_index_ppa(s, key, kl);
+
+    return ssd_advance_status(s->ssd, &ppa, &c);
+}
+
+/*
+ * Index-probe cost: a flash-resident index (probe_reads > 0) pays N page
+ * reads on the LUN that holds the key's part of the index; a DRAM-resident
+ * index (hash) pays nothing extra.
+ */
 static uint64_t kv_charge_index(FemuKvssdState *s, NvmeRequest *req,
                                 const uint8_t *key, uint8_t kl)
 {
     int reads = (s->index->probe_reads && key) ?
                 s->index->probe_reads(s, key, kl) : 0;
-    struct ssd *ssd = s->ssd;
-    struct nand_cmd c = { .type = USER_IO, .cmd = NAND_READ, .stime = req->stime };
+    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
+                          .stime = req->stime };
     uint64_t maxlat = 0;
 
     for (int i = 0; i < reads; i++) {
-        struct ppa ppa = { .ppa = 0 };
-        uint64_t sub = ssd_advance_status(ssd, &ppa, &c);
-        maxlat = sub > maxlat ? sub : maxlat;
+        struct ppa ppa = kv_index_ppa(s, key, kl);
+        uint64_t sub = ssd_advance_status(s->ssd, &ppa, &c);
+
+        maxlat = MAX(maxlat, sub);
     }
     return maxlat;
 }
 
 /*
- * The base cost and the index probe both measure from the request's own start
- * time, so each already contains any wait the chip was under. Adding them
- * counted that wait twice, which made the modelled latency grow faster than the
- * load. The command costs the longer of the two.
+ * Every cost is measured from the request's own start time on the LUN
+ * timelines, so each already contains any wait the LUN was under, including
+ * a wait for an earlier stage of the same command. Adding them would count
+ * that wait twice; the command completes when its last stage does.
  */
 static uint64_t kv_charge_stages(FemuKvssdState *s, NvmeRequest *req,
                                  const uint8_t *key, uint8_t kl)
 {
-    uint64_t base = kv_charge_base(s, req);
+    uint64_t base = kv_charge_base(s, req, key, kl);
     uint64_t index = kv_charge_index(s, req, key, kl);
 
     return MAX(base, index);
@@ -534,15 +551,15 @@ static int kv_entry_value_off_cmp(const void *a, const void *b)
 /*
  * Real value-log compaction: walk live index entries, copy their value bytes down
  * to a fresh frontier in old-offset order, and update each entry's value_off.
- * Charges the relocated live pages as GC writes through the NAND model. Called
- * with the lock held when the append frontier cannot fit a new value but dead
- * space exists.
+ * Charges the relocated live pages as GC writes through the NAND model and
+ * folds their time into *lat, the triggering command's own. Called with the
+ * lock held when the append frontier cannot fit a new value but dead space
+ * exists.
  */
-static bool kv_compact(FemuKvssdState *s, NvmeRequest *req)
+static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
 {
     uint64_t frontier = 0;
     uint64_t live_bytes = 0;
-    uint64_t lat = 0;
     uint64_t live_pages = 0;
     uint32_t live_nr = 0;
     FemuKvssdMappingEntry **live;
@@ -560,7 +577,7 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req)
         live_bytes += e->length;
         live_pages += kv_value_pages(s, e->length);
     }
-    if (kv_physical_pages_available(s, req, &lat) < live_pages) {
+    if (kv_physical_pages_available(s, req, lat) < live_pages) {
         g_free(live);
         return false;
     }
@@ -575,7 +592,7 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req)
 
         old = *e;
         status = kv_program_ppas(s, req, e->length, GC_IO, &new_ppas,
-                                 &new_nr_ppas, &lat);
+                                 &new_nr_ppas, lat);
         if (status) {
             g_free(live);
             return false;
@@ -590,7 +607,6 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req)
         frontier += e->length;
     }
     g_free(live);
-    kv_apply_lat(req, lat);
 
     s->value_next = frontier;
     s->value_reclaimable = 0;
@@ -604,7 +620,7 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req)
  * live data plus the new value would exceed capacity (true Capacity Exceeded).
  */
 static bool kv_value_alloc(FemuKvssdState *s, NvmeRequest *req, uint64_t len,
-                           uint64_t *off)
+                           uint64_t *off, uint64_t *lat)
 {
     if (s->value_next <= s->value_capacity &&
         len <= s->value_capacity - s->value_next) {
@@ -613,7 +629,7 @@ static bool kv_value_alloc(FemuKvssdState *s, NvmeRequest *req, uint64_t len,
         return true;
     }
     if (s->value_reclaimable > 0) {
-        if (!kv_compact(s, req)) {
+        if (!kv_compact(s, req, lat)) {
             return false;
         }
         if (s->value_next <= s->value_capacity &&
@@ -718,8 +734,9 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
 
-    if (!kv_value_alloc(s, req, vsize, &off)) {
+    if (!kv_value_alloc(s, req, vsize, &off, &lat)) {
         qemu_mutex_unlock(&s->lock);
+        kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
 
@@ -807,7 +824,7 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
 
     /* base + read of the value pages actually touched (the transferred span) */
-    lat = MAX(lat, kv_charge_base(s, req));
+    lat = MAX(lat, kv_charge_base(s, req, key, kl));
     status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat);
     if (status) {
         qemu_mutex_unlock(&s->lock);
@@ -852,7 +869,7 @@ bool kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
             s->key_used -= old.key_len;
         }
     }
-    lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl); /* metadata */
+    lat = kv_charge_stages(s, req, key, kl);
     qemu_mutex_unlock(&s->lock);
 
     kv_apply_lat(req, lat);
@@ -961,7 +978,7 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         qemu_mutex_unlock(&s->lock);
         return status;
     }
-    lat = kv_charge_base(s, req) + kv_charge_index(s, req, NULL, 0);
+    lat = kv_charge_stages(s, req, start_key, start_len);
     qemu_mutex_unlock(&s->lock);
 
     status = dma_read_cmd(n, &req->cmd, buf, len);
@@ -1191,7 +1208,7 @@ static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
     if (!kv_logical_capacity_ok(s, existing >= 0 ? &old : NULL, kl, len)) {
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
-    if (!kv_value_alloc(s, req, len, &off)) {
+    if (!kv_value_alloc(s, req, len, &off, &lat)) {
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
     if (len) {
