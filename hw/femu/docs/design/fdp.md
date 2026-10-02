@@ -249,6 +249,14 @@ of space part way, the pass stops before erasing anything: the pages already
 moved live at their new location, the rest stay in the victim, and the
 victim goes back on the queue to be finished by a later pass.
 
+Both destinations can be left without a unit: one that fills with no free
+unit to follow it is dropped. The next pass with a page to move takes a free
+unit for it from the victim's reclaim group, whatever state the handle's
+own current unit is in. A victim with no valid page left needs no
+destination, so it is collected even when no unit is free; that is how a
+device that ran out gets a unit back once the host deallocates or
+overwrites data.
+
 ### Deallocate
 
 Dataset Management deallocate on an FDP namespace unmaps the given ranges;

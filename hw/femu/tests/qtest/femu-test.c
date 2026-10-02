@@ -2594,9 +2594,13 @@ static void femu_test_buffer_counters(void *obj, void *data,
     femu_disable(&c);
 }
 
-/* Write @npages 4 KiB pages from @page, every one of them taken from @data. */
-static uint16_t femu_write_pages(FemuCtrlState *c, uint64_t page,
-                                 uint32_t npages, uint64_t data, uint64_t list)
+/*
+ * Write @npages 4 KiB pages from @page, every one of them taken from @data,
+ * into placement identifier @pid, or unplaced when @pid is negative.
+ */
+static uint16_t femu_write_pages_placed(FemuCtrlState *c, uint64_t page,
+                                        uint32_t npages, uint64_t data,
+                                        uint64_t list, int pid)
 {
     NvmeRwCmd rw;
     uint16_t want = c->cid;
@@ -2616,11 +2620,21 @@ static uint16_t femu_write_pages(FemuCtrlState *c, uint64_t page,
     rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list : npages == 2 ? data : 0);
     rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
     rw.nlb = cpu_to_le16(npages * (4096 / c->lba_size) - 1);
+    if (pid >= 0) {
+        rw.control = cpu_to_le16(2 << 4);
+        rw.dspec = cpu_to_le16(pid);
+    }
     femu_submit(c, &c->io, (NvmeCmd *)&rw);
     status = femu_complete(c, &c->io, &got, NULL);
     g_assert_cmpint(got, ==, want);
 
     return status;
+}
+
+static uint16_t femu_write_pages(FemuCtrlState *c, uint64_t page,
+                                 uint32_t npages, uint64_t data, uint64_t list)
+{
+    return femu_write_pages_placed(c, page, npages, data, list, -1);
 }
 
 /*
@@ -2682,6 +2696,116 @@ static void femu_test_gc_no_destination(void *obj, void *data,
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
     g_assert_cmpuint(full, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* x-ftl-check: mappings held, mappings to a page not holding them, orphans */
+static void femu_ftl_check(QTestState *qts, uint64_t *mapped, uint64_t *lost,
+                           uint64_t *orphans)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-ftl-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           mapped, lost, orphans), ==, 3);
+    qobject_unref(rsp);
+}
+
+/* deallocate @npages 4 KiB pages from @page */
+static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
+                                   uint32_t npages, uint64_t buf)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, npages * (4096 / c->lba_size));
+    stq_le_p(range + 8, page * (4096 / c->lba_size));
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+}
+
+/*
+ * With forced collection held off, random writes over every handle leave the
+ * device with no free unit and a collection frontier dropped part way through
+ * a victim. Deallocating the whole namespace then leaves only units with
+ * nothing valid in them. Collection used to need a frontier before it looked
+ * at the victim, and could only derive one from the handle's active unit, so
+ * once both were gone it never ran again and the empty namespace took no
+ * write.
+ */
+static void femu_test_fdp_gc_recover(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    const int handles = 4;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lost, mapped, orphans;
+    uint32_t seed = 7;
+    uint32_t full = 0;
+    uint16_t status;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        (i / 64) % handles)),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < 2000 && full < 16; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        status = FEMU_SC(femu_write_pages_placed(&c, page, npages, buf, list,
+                                                 (seed >> 4) % handles));
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        full += status == NVME_CAP_EXCEEDED;
+    }
+    g_test_message("placed %d writes, %u refused", i, full);
+    g_assert_cmpuint(full, >, 0);
+
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, pages, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    full = 0;
+    for (i = 0; i < pages; i += 64) {
+        status = FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                 (i / 64) % handles));
+        full += status == NVME_CAP_EXCEEDED;
+    }
+    for (i = 0; i < 64; i++) {
+        seed = seed * 1103515245 + 12345;
+        status = FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) % pages, 1,
+                                                 buf, list, handles - 1));
+        full += status == NVME_CAP_EXCEEDED;
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_test_message("recovered: capacity exceeded %u times, %" PRIu64 " of %"
+                   PRIu64 " mappings lost, %" PRIu64 " orphans", full, lost,
+                   mapped, orphans);
+    g_assert_cmpuint(full, ==, 0);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
 
     guest_free(alloc, list);
     guest_free(alloc, buf);
@@ -18462,7 +18586,9 @@ static void femu_register_nodes(void)
          * not name it.
          */
         .before_cmd_line =
-            "-device femu-subsys,id=fdpsub,nqn=fdpsub,fdp=on,fdp.nruh=4",
+            "-device femu-subsys,id=fdpsub,nqn=fdpsub,fdp=on,fdp.nruh=4 "
+            "-device femu-subsys,id=fdpsub-ii,nqn=fdpsub-ii,fdp=on,fdp.nruh=4,"
+            "fdp.isolation_mode=1",
     };
 
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
@@ -19136,6 +19262,21 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub"
+    });
+    /* forced collection off, so a frontier can be dropped */
+    qos_add_test("fdp-gc-recover", "femu", femu_test_fdp_gc_recover,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=24,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub"
+    });
+    qos_add_test("fdp-gc-recover-ii", "femu", femu_test_fdp_gc_recover,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=23,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub-ii"
     });
     qos_add_test("flush-without-vwc", "femu", femu_test_flush_without_vwc,
                  &(QOSGraphTestOptions) {

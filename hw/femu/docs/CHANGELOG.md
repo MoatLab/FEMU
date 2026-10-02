@@ -246,6 +246,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A CSD controller in an FDP subsystem refuses the same knobs as a BlackBox one and reports the superblock as its reclaim unit size, instead of 96 MiB (207bb12d4).
 - bbssd GC no longer erases a line it could not empty, which left mappings pointing at erased pages and made every later write fail. Forced GC runs before every page a command programs, so a large write on a device with fewer than 20 lines no longer runs it out of space (5a81d02cd).
 - FDP GC moves all of a reclaim unit's pages before erasing any block, retires each moved page's old copy, and runs foreground GC per page. A pass that stopped part way used to leave the unit with erased blocks counted again later (c7b373186).
+- FDP GC takes a new unit for a collection destination that was dropped when it filled with nothing free, and collects a unit with no valid pages without one. GC used to stop for good once the destination was gone, so a full device stayed full even after the host deallocated everything.
 
 #### Spec conformance and host compatibility
 

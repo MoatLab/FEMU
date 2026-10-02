@@ -482,50 +482,37 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
     
 }
 
-//check ru->gc_write_ptr to check or align. 
-static int check_gc_ruh_available(struct ssd *ssd, FemuRuHandle * ruh){
-    /*
-     * The destination RG is derived from ruh->curr_ru; if this RUH has no active
-     * RU (fill exhausted it), there is nothing to derive it from and no space to
-     * reclaim into, so report failure instead of dereferencing NULL.
-     */
-    if (ruh->curr_ru == NULL) {
-        return -1;
-    }
-    if(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
-        FemuRuHandle *gcruh = &ssd->ruhs[ssd->nruhs - 1];
+/*
+ * The unit collection relocates into for @ruh, taking a free one from @rgidx
+ * when the frontier has none. A persistently isolated handle collects into a
+ * unit of its own; the initially isolated one shares its active unit with the
+ * host. Either is dropped when it fills with no free unit to follow it, and is
+ * picked up again here once collection has freed one, without looking at the
+ * handle's active unit: that may be the one dropped.
+ */
+static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
+                                        uint16_t rgidx)
+{
+    FemuReclaimUnit *ru;
 
-        if (gcruh->curr_ru == NULL) {
-            /*
-             * The unit belongs to the collection handle, so it is allocated
-             * under that handle's identifier -- charged to the victim's, every
-             * page later relocated into it counted against a handle the data
-             * does not belong to. And the result is tested before it is used:
-             * the test used to come two dereferences too late.
-             */
-            FemuReclaimUnit *new_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx,
-                                                     gcruh->ruhid);
+    if (ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        if (!ruh->gc_ru) {
+            ruh->gc_ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
+        }
+        return ruh->gc_ru;
+    }
 
-            if (!new_ru) {
-                return -1;
-            }
-            gcruh->curr_ru = new_ru;
-            gcruh->rus[new_ru->rgidx] = new_ru;
-            gcruh->ruh->rus[new_ru->rgidx] = new_ru->nvme_ru;
+    ftl_assert(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED);
+    if (!ruh->curr_ru) {
+        ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
+        if (!ru) {
+            return NULL;
         }
+        ruh->curr_ru = ru;
+        ruh->rus[rgidx] = ru;
+        ruh->ruh->rus[rgidx] = ru->nvme_ru;
     }
-    else if(ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED){
-        if(ruh->gc_ru == NULL){
-            ruh->gc_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
-            if (ruh->gc_ru == NULL){
-                return -1;
-            }
-        }
-    }else{
-        ftl_err("Unsupported RUH type : %d\n",ruh->ruh_type);
-        ftl_assert(false && __LINE__); 
-    }
-    return 0;
+    return ruh->curr_ru;
 }
 
 /*
@@ -759,7 +746,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
  * is: the caller must then not erase the block it came from.
  */
 static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
-                                    FemuRuHandle *dest_ruh)
+                                    FemuRuHandle *dest_ruh, uint16_t rgidx)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -768,23 +755,9 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     FemuReclaimUnit *ret_ru=NULL;
     ftl_assert(valid_lpn(ssd, lpn));
     ftl_assert(dest_ruh!=NULL);
-    /* gc_write_page_fdp_style() guarantees ruh->curr_ru or ->gc_ru wtpr, not new_ru. */
-    if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED)
-    {
-        dest_ru = dest_ruh->gc_ru;
-    }else if( dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED && dest_ruh->ruhid == ssd->ruhs[ssd->nruhs-1].ruhid ){
-        dest_ru = dest_ruh->curr_ru;
-    }else{
-        ftl_err("Unidentified ruht. ");
-        ftl_assert(false && __LINE__);
-    }
 
-    /*
-     * An earlier pass can have left the frontier without a unit: advancing it
-     * hands back nothing when the free list is empty. There is no page to take,
-     * and the only thing between here and a null pointer was an assertion that
-     * is compiled out.
-     */
+    /* the frontier may have been dropped by this or an earlier pass */
+    dest_ru = fdp_gc_frontier(ssd, dest_ruh, rgidx);
     if (!dest_ru) {
         return false;
     }
@@ -885,7 +858,8 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
  *          
  */
 static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
-                                      FemuRuHandle *dest_ruh, int *moved)
+                                      FemuRuHandle *dest_ruh, uint16_t rgidx,
+                                      int *moved)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter;
@@ -901,7 +875,7 @@ static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
              * moved keep their new home, and the ones still in this block have
              * to keep theirs, so the block must not be erased.
              */
-            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh)) {
+            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh, rgidx)) {
                 return false;
             }
             (*moved)++;
@@ -1007,7 +981,6 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     struct ppa ppa;
     int vpc_cnt = 0;
     int blk_cnt = 0;
-    int ret = 0;
     victim_ru = select_victim_ru(ssd, rgid, ruhid, force);
     if (!victim_ru) {
         //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
@@ -1015,55 +988,32 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     }
 
     /*
-     * Select GC destination RU based on RUH isolation type:
-     * - Initially Isolated (II): GC writes go to the last RUH (GC RUH)
-     * - Persistently Isolated (PI): GC writes go to same RUH's gc_ru
-     */
-    /*
-     * Select GC destination RU.
-     *
-     * Design principle: GC writes compete for the same write frontier
-     * as host writes.  We use the victim RUH's current active RU
-     * (curr_ru) as the GC destination.  This avoids allocating a
-     * dedicated gc_ru, which would consume a free RU and could cause
-     * deadlock when free_ru_cnt is low.
-     *
-     * For PI (Persistently Isolated) RUHs: write migrated pages back
-     * into the same RUH's curr_ru, maintaining stream isolation.
-     * For II (Initially Isolated) RUHs: write to the last RUH's curr_ru
-     * (the convention for II GC isolation).
-     *
-     * If curr_ru is the same as victim_ru (the RUH only has one RU),
-     * we cannot GC without first getting a free RU.  In that case,
-     * if no free RU is available, we skip this victim.
+     * Where the victim's pages go depends on its handle's isolation: a
+     * persistently isolated handle relocates into a unit of its own (gc_ru),
+     * so collected data never mixes with another handle's; the initially
+     * isolated one, always the last handle, relocates into its active unit.
      */
     FemuRuHandle *victim_ruh = victim_ru->ruh;
     FemuRuHandle *dest_ruh = NULL;
 
     if (victim_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
         dest_ruh = victim_ruh;
-        /* PI RUH: GC writes go to a dedicated gc_ru, distinct from curr_ru. */
-        if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
-            /*
-             * No free RU for the GC destination means the device is genuinely
-             * out of reclaimable space. Put the victim back and fail the GC pass
-             * rather than aborting the emulator; the caller degrades to a normal
-             * device-full write outcome.
-             */
-            reinsert_victim_ru(ssd, victim_ru);
-            return -1;
-        }
-
-    } else if (victim_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
-        /* II RUH: GC writes go to the last RUH's curr_ru. */
+    } else if (victim_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
         dest_ruh = &ssd->ruhs[ssd->nruhs - 1];
-        if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
-            reinsert_victim_ru(ssd, victim_ru);
-            return -1;
-        }
-    }else {
+    } else {
         ftl_err("Undefined RUHT.");
         ftl_assert(false && __LINE__);
+    }
+
+    /*
+     * A victim with pages to move needs somewhere to put them; with no free
+     * unit for the frontier, put it back and fail the pass, and the caller
+     * degrades to a device-full write. One with none needs nowhere, and must
+     * be collected even then: it is what gives the frontier a unit again.
+     */
+    if (victim_ru->vpc && !fdp_gc_frontier(ssd, dest_ruh, victim_ru->rgidx)) {
+        reinsert_victim_ru(ssd, victim_ru);
+        return -1;
     }
     ftl_assert(dest_ruh!=NULL);
     /* sanity: don't GC an active RU */
@@ -1095,6 +1045,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                     ppa.g.pl = pl;
                     if (!clean_one_block_fdp_style(ssd, &ppa, dest_ruh,
+                                                   victim_ru->rgidx,
                                                    &vpc_cnt)) {
                         fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
                         reinsert_victim_ru(ssd, victim_ru);

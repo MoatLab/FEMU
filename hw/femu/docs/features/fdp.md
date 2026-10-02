@@ -182,7 +182,8 @@ BlackBox.
 
 When every reclaim unit is in use and GC cannot free one, a write fails with
 Capacity Exceeded and QEMU prints `ssd_stream_write: device full, no RU for
-ruh N`.
+ruh N`. Deallocating or overwriting data gives GC units to free again, and
+writes succeed once it has.
 
 ## Verify
 
