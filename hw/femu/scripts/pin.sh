@@ -2,8 +2,10 @@
 # Huaicheng Li <huaicheng@cs.uchicago.edu>
 #
 # Pin a running FEMU VM's threads to host CPUs, one thread per CPU: the vCPUs
-# first, then FEMU's pollers and FTL threads, starting at FIRST_CPU. The other
-# QEMU threads (main loop, I/O, CXL workers) go to the CPUs after those.
+# first, then FEMU's pollers and FTL threads (femu-poller, FEMU-FTL-Thread, and
+# for a CXL SSD femu-cxl-ftl and femu-cxl-cca), starting at FIRST_CPU. The
+# other QEMU threads (main loop, I/O, CSD compute units) go to the CPUs after
+# those.
 #
 # Threads are found by name, which Linux shows only when QEMU runs with
 # -name NAME,debug-threads=on (the run-*.sh launchers pass it). The pollers
@@ -41,7 +43,8 @@ vcpus=$(ps -T -p "$pid" -o tid=,comm= |
         awk '$2 == "CPU" && $3 ~ /^[0-9]+\// {split($3, a, "/"); print a[1], $1}' |
         sort -n | awk '{print $2}')
 femu=$(ps -T -p "$pid" -o tid=,comm= |
-       awk '$2 == "femu-poller" || $2 == "FEMU-FTL-Thread" {print $1}')
+       awk '$2 == "femu-poller" || $2 == "FEMU-FTL-Thread" ||
+            $2 == "femu-cxl-ftl" || $2 == "femu-cxl-cca" {print $1}')
 
 [[ -n $vcpus ]] ||
     die "no 'CPU N/...' threads in $pid; start QEMU with -name NAME,debug-threads=on"

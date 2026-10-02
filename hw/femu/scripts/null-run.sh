@@ -32,7 +32,7 @@ sudo rm -rf /mnt/tmpfs/test1.raw
 
     #-device nvme,drive=null0,serial=serial0,id=nvme0 \
 sudo x86_64-softmmu/qemu-system-x86_64 \
-    -name "nvme-FEMU-test" \
+    -name "nvme-FEMU-test",debug-threads=on \
     -smp 4 \
     -m 8192 \
     -cpu host \

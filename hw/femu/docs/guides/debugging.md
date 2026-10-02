@@ -74,8 +74,10 @@ sudo gdb -p "$(pgrep -x qemu-system-x86)" -ex "handle SIGUSR1 nostop noprint pas
 ```
 
 When QEMU crashes, `thread apply all bt` in gdb prints every thread's
-stack. Add `,debug-threads=on` to the launcher's `-name` option first, so
-that `info threads` shows the `femu-poller` and `FEMU-FTL-Thread` names
+stack. The launchers pass `-name NAME,debug-threads=on`, so `info threads`
+shows FEMU's thread names (`femu-poller`, `FEMU-FTL-Thread`,
+`femu-csd-cu`, `femu-cxl-ftl`, `femu-cxl-cca`); add it to a QEMU command
+line of your own
 ([performance tuning](performance-tuning.md#threads-and-cores)).
 
 ## Debug builds and compile-time switches

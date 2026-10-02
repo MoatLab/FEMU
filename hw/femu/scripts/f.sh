@@ -29,7 +29,7 @@ sudo rm -rf /mnt/tmpfs/test1.raw
     #-device pc-dimm,id=dimm1,memdev=mem1 \
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
-    -name "nvme-FEMU-test" \
+    -name "nvme-FEMU-test",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp 4 \

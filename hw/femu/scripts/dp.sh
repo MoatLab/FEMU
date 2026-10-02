@@ -25,7 +25,7 @@ sudo rm -rf /mnt/tmpfs/test1.raw
     #-trace events=/tmp/events \
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
-    -name "nvme-FEMU-test" \
+    -name "nvme-FEMU-test",debug-threads=on \
     -smp 4 \
     -m 8192 \
     -cpu host \

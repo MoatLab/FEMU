@@ -29,6 +29,7 @@ reference. Do not use them.
 
 Run each NVMe launcher from `build-femu/` after `femu-copy-scripts.sh`. They
 start `./qemu-system-x86_64` with `sudo`, KVM, `-cpu host`, `-nographic`,
+`-name NAME,debug-threads=on` (so the host shows FEMU's thread names),
 a virtio-scsi boot disk and user networking that forwards host port
 `SSH_PORT` to the guest's port 22. `run-cxlssd.sh` is different: it is not
 copied, so run it as `../femu-scripts/run-cxlssd.sh`, and it adds no disk,
@@ -177,7 +178,7 @@ Copy these into the guest and run them there. The C programs build with
 | Script | What it does |
 | --- | --- |
 | `ftk/qmp-vcpu-pin -s SOCKET CPU...` | Pins each vCPU thread to a host CPU with `taskset`, using QMP `query-cpus-fast` on `SOCKET`; vCPU i goes to the i-th CPU in the list, wrapping around. It imports `ftk/qmp.py`. Run it with `sudo` when QEMU runs as root. A Unix socket path longer than about 107 bytes fails with `AF_UNIX path too long`. |
-| `pin.sh [FIRST_CPU]` | Pins each vCPU thread, then each `femu-poller` and `FEMU-FTL-Thread`, to its own host CPU, starting at `FIRST_CPU` (default 0), and moves the other QEMU threads to the CPUs after those. It finds the threads by name, so QEMU must run with `-name NAME,debug-threads=on` (the launchers pass it), and it finds QEMU with `pgrep -x qemu-system-x86`; set `QEMU_PID` when several run. Run it after the guest has booted: the pollers start when the guest enables the controller. It stops if the host has too few CPUs. See [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
+| `pin.sh [FIRST_CPU]` | Pins each vCPU thread, then each `femu-poller`, `FEMU-FTL-Thread`, `femu-cxl-ftl` and `femu-cxl-cca`, to its own host CPU, starting at `FIRST_CPU` (default 0), and moves the other QEMU threads, `femu-csd-cu` included, to the CPUs after those. It finds the threads by name, so QEMU must run with `-name NAME,debug-threads=on` (the launchers pass it), and it finds QEMU with `pgrep -x qemu-system-x86`; set `QEMU_PID` when several run. Run it after the guest has booted: the pollers start when the guest enables the controller. It stops if the host has too few CPUs. See [performance tuning](../guides/performance-tuning.md#pin-the-threads). |
 | `set_cpu_perf_mode.sh` | Sets every CPU's cpufreq scaling policy to `performance` through sysfs. Run it as root. |
 
 ## Documentation tooling

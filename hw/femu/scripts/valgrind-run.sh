@@ -42,7 +42,7 @@ sudo rm -rf /mnt/tmpfs/test1.raw
 
 
 sudo valgrind x86_64-softmmu/qemu-system-x86_64 \
-    -name "nvme-FEMU-test" \
+    -name "nvme-FEMU-test",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp 16 \

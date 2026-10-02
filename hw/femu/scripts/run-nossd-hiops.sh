@@ -38,7 +38,7 @@ echo "  femu queues: $FEMU_QUEUES (multipoller=$FEMU_MULTIPOLLER)"
 echo "  ssh fwd    : tcp::${SSH_PORT}-:22"
 
 sudo ./qemu-system-x86_64 \
-    -name "FEMU-NoSSD-hiops" \
+    -name "FEMU-NoSSD-MQ-VM",debug-threads=on \
     -enable-kvm \
     -cpu host \
     -smp $VM_SMP \

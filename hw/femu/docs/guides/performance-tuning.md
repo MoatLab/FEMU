@@ -112,9 +112,10 @@ has booted:
 ./pin.sh 4      # vCPUs, then pollers and FTL threads, from host CPU 4
 ```
 
-It gives each vCPU, `femu-poller` and `FEMU-FTL-Thread` a CPU of its own,
-starting at the CPU you name (default 0), and moves the other QEMU threads
-to the CPUs after those. It finds the threads by name, so it stops with an
+It gives each vCPU, `femu-poller`, `FEMU-FTL-Thread`, `femu-cxl-ftl` and
+`femu-cxl-cca` a CPU of its own, starting at the CPU you name (default 0),
+and moves the other QEMU threads, `femu-csd-cu` included, to the CPUs after
+those. It finds the threads by name, so it stops with an
 error when QEMU runs without `debug-threads=on`. Set `QEMU_PID` when more
 than one QEMU runs ([scripts reference](../reference/scripts.md#host-tuning-helpers)).
 

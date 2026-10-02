@@ -315,7 +315,7 @@ provision() {
 	info "provisioning (log: $log); this takes a few minutes"
 	local rc=0
 	timeout -k 10 "$timeout_s" "$qemu" \
-		-name femu-guest-provision \
+		-name femu-guest-provision,debug-threads=on \
 		"${accel[@]}" -smp 2 -m 2G \
 		-nodefaults -display none -no-reboot \
 		-serial "file:$log" \
