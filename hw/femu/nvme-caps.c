@@ -340,6 +340,35 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
 }
 
 /*
+ * Whether Get Log Page answers @lid at all: a page any command set lists is
+ * answered whichever set the command names. The placement pages also answer
+ * while placement is off, with FDP Disabled, as long as there is an
+ * endurance group.
+ */
+bool nvme_log_answered(FemuCtrl *n, uint8_t lid)
+{
+    static const uint8_t csis[] = {
+        NVME_CSI_NVM, NVME_CSI_KV, NVME_CSI_ZONED,
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(csis); i++) {
+        if (nvme_log_support(n, csis[i], lid)) {
+            return true;
+        }
+    }
+
+    switch (lid) {
+    case NVME_LOG_FDP_CONFS:
+    case NVME_LOG_FDP_RUH_USAGE:
+    case NVME_LOG_FDP_STATS:
+    case NVME_LOG_FDP_EVENTS:
+        return n->subsys;
+    default:
+        return false;
+    }
+}
+
+/*
  * The Identify Controller fields that sum up the logs: OACS from the admin
  * commands, ONCS and OCFS from the NVM command set, LPA from the log pages and
  * SANICAP from Sanitize.

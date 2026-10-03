@@ -2946,6 +2946,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return status;
     }
 
+    /* a page log 00h lists for no command set is not answered */
+    if (!nvme_log_answered(n, lid)) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+
     switch (lid) {
     case NVME_LOG_SUPPORTED:
         return nvme_supported_log_pages(n, cmd, len, off);

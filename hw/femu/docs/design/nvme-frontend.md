@@ -559,6 +559,11 @@ Namespace Management.
 | Chunk Information | CAh | Open-Channel 2.0, from the mode |
 | FEMU media counters | C0h | WAF and FTL counters |
 
+Get Log Page refuses an id that log 00h lists for no command set with
+Invalid Log Page (`nvme_log_answered()`). The one exception is the FDP pages
+on a controller with a subsystem: while FDP is off they are not listed but
+still answer, with FDP Disabled.
+
 Get and Set Features answer Arbitration (01h), Power Management (02h, one
 power state), LBA Range Type (03h), Temperature Threshold (04h), Error
 Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
@@ -728,7 +733,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | --- | --- |
 | `hw/femu/femu.c` | `nvme_init_pci()`, `nvme_init_cmb()`, `nvme_init_ctrl()` (Identify Controller, CAP), `nvme_check_constraints()`, `nvme_mmio_write()`, `nvme_write_bar()`, `nvme_process_db_admin()`, `nvme_process_db_io()`, `nvme_start_ctrl()`, `nvme_clear_ctrl()`, `nvme_reset_features()`, `femu_ftl_thread()`, `femu_ftl_process_req()`, `femu_needs_ftl_thread()`, `nvme_register_extensions()`, `nvme_register_extensions_ns()`, `femu_realize()`, `femu_exit()` |
 | `hw/femu/nvme-admin.c` | `nvme_create_sq()`, `nvme_create_cq()`, `nvme_del_sq()`, `nvme_del_cq()`, `nvme_init_poller()`, `nvme_start_dataplane()`, `nvme_set_db_memory()`, `nvme_identify()`, `nvme_get_feature()`, `nvme_set_feature()`, `nvme_get_log()`, `nvme_abort_req()`, `nvme_admin_cmd()`, `nvme_process_aers()`, `nvme_process_sq_admin()` |
-| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_ns_io_effects()`, `nvme_log_support()`, `nvme_caps_id_ctrl()` |
+| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_ns_io_effects()`, `nvme_log_support()`, `nvme_log_answered()`, `nvme_caps_id_ctrl()` |
 | `hw/femu/nvme-io.c` | `nvme_poller()`, `nvme_process_sq_io()`, `nvme_update_sq_eventidx()`, `nvme_process_cq_cpl()`, `nvme_post_cqe()`, `nvme_rw()`, `nvme_io_cmd()` |
 | `hw/femu/nvme-util.c` | `nvme_pause_pollers()`, `nvme_resume_pollers()`, `nvme_update_sq_tail()`, `nvme_update_cq_head()`, `nvme_update_cq_eventidx()`, `nvme_init_sq()`, `nvme_init_cq()` |
 | `hw/femu/intr.c` | `nvme_isr_notify_io()`, `nvme_isr_notify_admin()`, `nvme_irq_update()`, `nvme_irq_mask_changed()`, `nvme_setup_virq()`, vector notifiers |

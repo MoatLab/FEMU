@@ -294,8 +294,8 @@ only its range.
 ## Log pages and features
 
 All four FDP log pages take endurance group 1 in the Log Specific
-Identifier, and need a subsystem; 21h, 22h and 23h fail with FDP Disabled
-when FDP is off. The supported log pages list (00h) shows them only while
+Identifier, and need a subsystem (without one they fail with Invalid Log
+Page); 21h, 22h and 23h fail with FDP Disabled when FDP is off. The supported log pages list (00h) shows them only while
 FDP is on.
 
 | Log | Content | Code |

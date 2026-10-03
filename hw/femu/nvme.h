@@ -2402,6 +2402,7 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc);
 uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc);
 uint32_t nvme_ns_io_effects(FemuCtrl *n, NvmeNamespace *ns, uint8_t opc);
 uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid);
+bool nvme_log_answered(FemuCtrl *n, uint8_t lid);
 void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id);
 void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id);
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);
