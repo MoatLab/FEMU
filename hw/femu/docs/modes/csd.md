@@ -67,6 +67,15 @@ The FEMU device in that script is:
 -device femu,devsz_mb=4096,namespaces=1,femu_mode=4,secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=256,pls_per_lun=1,luns_per_ch=8,nchs=8,pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000,ch_xfer_lat=0,gc_thres_pcent=75,gc_thres_pcent_high=95,fdm_size=64,nr_cu=4,nr_thread=4,time_slice=200000,context_switch_time=200,csf_runtime_scale=3
 ```
 
+The preset `hw/femu/scripts/configs/csd.conf` describes the same device
+without the three scheduler properties that have no effect.
+[`ssd-config.sh`](../tutorials/09-ssd-config-files.md) expands it to:
+
+<!-- femu-example: csd-preset -->
+```
+-device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=256,pls_per_lun=1,luns_per_ch=8,nchs=8,pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000,gc_thres_pcent=75,gc_thres_pcent_high=95,fdm_size=64,nr_cu=4,csf_runtime_scale=3,femu_mode=4
+```
+
 `run-csd.sh` does not set `csd_program_dir`, so it runs phantom programs
 only. To load your own programs, add the directory after the other
 `FEMU_OPTIONS` lines in `run-csd.sh`:

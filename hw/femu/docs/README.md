@@ -35,7 +35,7 @@ and what the guest needs. In short:
 | A conventional SSD with a device FTL, GC and WAF | BlackBox SSD (`femu_mode=1`) | `run-blackbox.sh` | [BlackBox](modes/blackbox.md) |
 | A Zoned Namespace SSD | ZNS (`femu_mode=3`) | `run-zns.sh` | [ZNS](modes/zns.md) |
 | A host-managed OpenChannel SSD | OCSSD (`femu_mode=0`) | `run-whitebox.sh` | [OCSSD](modes/ocssd.md) |
-| A key-value SSD | KV (`femu_mode=5`) | none | [KV](modes/kvssd.md) |
+| A key-value SSD | KV (`femu_mode=5`) | `run-kvssd.sh` | [KV](modes/kvssd.md) |
 | Computational storage | CSD (`femu_mode=4`) | `run-csd.sh` | [CSD](modes/csd.md), [CSD guest tools](../tests/csd/README.md) |
 | Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | [FDP](features/fdp.md) |
 | Create and delete namespaces from the guest | NoSSD or BBSSD with `ns_mgmt=on` | none | [Namespace management](features/ns-management-and-pi.md#namespace-management) |

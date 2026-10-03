@@ -143,7 +143,7 @@ MODES = [
                         "`/dev/ngXnY`",
         "guest_tools": "nvme-cli `io-passthru`, `hw/femu/scripts/kv-probe.c`",
         "host": "none beyond the common ones",
-        "launcher": None,
+        "launcher": "run-kvssd.sh",
         "guide": "hw/femu/docs/modes/kvssd.md",
         "guest_check": None,
     },

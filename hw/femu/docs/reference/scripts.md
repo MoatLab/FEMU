@@ -16,7 +16,7 @@ reference. Do not use them.
 | --- | --- | --- |
 | `pkgdep.sh` | anywhere, as root | Installs the build dependencies with `apt-get` on Debian and Ubuntu. Exits with `pkgdep: unsupported system type` elsewhere. CI does not run it. |
 | `femu-compile.sh` | `build-femu/` | Runs `make clean`, then `../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp --disable-libnfs --disable-libiscsi --disable-curl`, then `make` with one job per CPU. `--enable-csd-ubpf` adds uBPF CSD programs, `--enable-csd-ubpf=PATH` uses the uBPF tree at `PATH`. Any other argument is an error. See [build.md](../getting-started/build.md). |
-| `femu-copy-scripts.sh` | `build-femu/` | Copies `pkgdep.sh`, `femu-compile.sh`, `make-guest-image.sh`, `run-guest-ssh.sh`, the `run-blackbox.sh`, `run-blackbox-fdp.sh`, `run-whitebox.sh`, `run-nossd.sh`, `run-zns.sh` and `run-csd.sh` launchers, `pin.sh` and `ftk/` into the current directory, overwriting earlier copies. It does not copy `run-cxlssd.sh`, `ssd-config.sh`, `configs/` or the guest tools; run those from `../femu-scripts/`. |
+| `femu-copy-scripts.sh` | `build-femu/` | Copies `pkgdep.sh`, `femu-compile.sh`, `make-guest-image.sh`, `run-guest-ssh.sh`, the `run-blackbox.sh`, `run-blackbox-fdp.sh`, `run-whitebox.sh`, `run-nossd.sh`, `run-zns.sh`, `run-csd.sh` and `run-kvssd.sh` launchers, `pin.sh` and `ftk/` into the current directory, overwriting earlier copies. It does not copy `run-cxlssd.sh`, `ssd-config.sh`, `configs/` or the guest tools; run those from `../femu-scripts/`. |
 
 ## Guest image and access
 
@@ -52,6 +52,7 @@ script. Edit them there; they are not read from the environment.
 | `run-zns.sh` | ZNS, 4 GiB, QLC timing, 16 zones of 256 MiB ([ZNS](../modes/zns.md)) | 4 vCPUs, 4 GiB | `log`, `qmp-sock` |
 | `run-whitebox.sh` | Open-Channel 2.0 (`OCVER=2` in the script; 1 selects 1.2), 4 GiB ([OCSSD](../modes/ocssd.md)) | 4 vCPUs, 4 GiB | `qmp-sock` |
 | `run-csd.sh` | Computational storage, 4 GiB, 4 compute units ([CSD](../modes/csd.md)). It does not set `csd_program_dir`, so only the built-in program type loads | 4 vCPUs, 4 GiB | `log`, `qmp-sock` |
+| `run-kvssd.sh` | Key-value SSD, 4 GiB of value space on the BlackBox geometry ([KV](../modes/kvssd.md)); the guest needs Linux 6.0 or newer | 4 vCPUs, 4 GiB | `log`, `qmp-sock` |
 | `run-cxlssd.sh` | One `femu-cxl-ssd` below a CXL host bridge ([CXL SSD](../modes/cxl-ssd.md)) | 4 vCPUs, 4 GiB, no disk and no network unless you add them | `cxlssd-stats.log`, `cxlssd-io-N.log` and `cxlssd-spt.log` in `LOG_DIR` when the guest asks for them through `lsa-control` |
 
 `run-blackbox.sh` also passes `FEMU_EXP_LOG`, `FEMU_SECRET` and
@@ -109,8 +110,12 @@ The files in `configs/`:
 | --- | --- |
 | `bbssd.conf` | BlackBox, 4 GiB, 8 channels of 8 LUNs |
 | `bbssd-overprovisioned.conf` | BlackBox sized with `op_pcent=10` |
+| `csd.conf` | Computational storage, the device of `run-csd.sh` without its no-effect scheduler properties |
 | `fdp.conf` | BlackBox with FDP on a `[subsys]` section |
 | `heterogeneous.conf` | One controller with a BlackBox, a ZNS and a NoSSD namespace |
+| `kvssd.conf` | Key-value SSD, the device of `run-kvssd.sh` |
+| `nossd.conf` | NoSSD with link and firmware time from the NVMeCHA controller ([NoSSD](../modes/nossd.md#host-link-and-controller-firmware)) |
+| `ocssd.conf` | Open-Channel 2.0, the device of `run-whitebox.sh`; `lver = 1` selects 1.2 |
 | `qlc.conf` | BlackBox with QLC per-page-type timing |
 | `write-buffer.conf` | BlackBox with a 2048-page write buffer, `vwc=1` and Write Zeroes |
 | `zns.conf` | ZNS, 16 zones of 256 MiB, at most 16 active and 8 open |

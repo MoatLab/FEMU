@@ -139,6 +139,11 @@ controller joined to it:
 -device femu-subsys,id=femu-subsys-0,nqn=subsys0,fdp=on,fdp.nruh=4,fdp.nrg=1,fdp.nru=256 -device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=256,pls_per_lun=1,luns_per_ch=8,nchs=8,femu_mode=1,subsys=femu-subsys-0
 ```
 
+Every mode has a file to start from: `bbssd.conf`, `zns.conf`,
+`nossd.conf`, `ocssd.conf`, `csd.conf` and `kvssd.conf`. The
+[scripts reference](../reference/scripts.md#configuration-files) lists
+them all.
+
 ## 5. Boot it
 
 The launchers take no arguments, so put the expansion on your own QEMU

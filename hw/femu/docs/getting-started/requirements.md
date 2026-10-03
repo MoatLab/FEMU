@@ -69,7 +69,7 @@ host RAM needed = devsz_mb (the emulated SSD) + guest RAM (-m) + about 1 GiB for
 | Launcher | `devsz_mb` | Guest `-m` | Free host RAM needed |
 | --- | --- | --- | --- |
 | `run-blackbox.sh` (BBSSD) | 12288 | 4G | about 17 GiB |
-| `run-nossd.sh`, `run-zns.sh`, `run-whitebox.sh`, `run-csd.sh` | 4096 | 4G | about 9 GiB |
+| `run-nossd.sh`, `run-zns.sh`, `run-whitebox.sh`, `run-csd.sh`, `run-kvssd.sh` | 4096 | 4G | about 9 GiB |
 
 To fit a smaller host, lower `ssd_size` in `run-blackbox.sh` and the geometry
 with it (see [the property reference](../reference/properties.md)).

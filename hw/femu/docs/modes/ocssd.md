@@ -57,6 +57,15 @@ changes `lver`:
 `num_chips_per_channel`. Keep the other values unless you have a reason to
 change them.
 
+The same Open-Channel 2.0 device is the preset `hw/femu/scripts/configs/ocssd.conf`
+(set `lver = 1` in it for 1.2). [`ssd-config.sh`](../tutorials/09-ssd-config-files.md)
+expands it to:
+
+<!-- femu-example: ocssd-preset -->
+```
+-device femu,id=nvme0,lver=2,devsz_mb=4096,namespaces=1,lnum_ch=2,lnum_lun=4,lnum_pln=2,lpgs_per_blk=512,lsecs_per_pg=4,lsec_size=4096,lmetasize=16,nlbaf=5,lba_index=3,mdts=10,femu_mode=0
+```
+
 ## Configuration
 
 Properties: [OCSSD](../reference/properties.md#ocssd-open-channel). The

@@ -33,12 +33,34 @@ key-value devices, without key-value hardware.
 
 ## Launch
 
-There is no KV launcher. Start from `run-nossd.sh` or `run-blackbox.sh` and
-replace the FEMU device with:
+From `build-femu/`:
+
+<!-- femu-example: kvssd-launcher -->
+```bash
+./run-kvssd.sh
+```
+
+The FEMU device in that script is:
+
+<!-- femu-example: kvssd-launcher-device -->
+```
+-device femu,devsz_mb=4096,namespaces=1,femu_mode=5,secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=256,pls_per_lun=1,luns_per_ch=8,nchs=8,pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000,gc_thres_pcent=75
+```
+
+The geometry and timing above are the defaults, so the shortest KV device
+is:
 
 <!-- femu-example: kvssd-device -->
 ```
 -device femu,devsz_mb=4096,namespaces=1,femu_mode=5
+```
+
+The preset `hw/femu/scripts/configs/kvssd.conf` describes the launcher's
+device; [`ssd-config.sh`](../tutorials/09-ssd-config-files.md) expands it to:
+
+<!-- femu-example: kvssd-preset -->
+```
+-device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=256,pls_per_lun=1,luns_per_ch=8,nchs=8,pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000,gc_thres_pcent=75,femu_mode=5
 ```
 
 ## Configuration
