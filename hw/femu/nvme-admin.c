@@ -3025,53 +3025,96 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+/* where slot @slot of @sq lives in host memory */
+static hwaddr nvme_sq_slot_addr(FemuCtrl *n, NvmeSQueue *sq, uint32_t slot)
+{
+    if (sq->phys_contig) {
+        return sq->dma_addr + slot * n->sqe_size;
+    }
+    return nvme_discontig(sq->prp_list, slot, n->page_size, n->sqe_size);
+}
+
+/*
+ * Abort commands still in the admin queue. Admin commands run one at a time,
+ * so with the one running these are all the Aborts the host has submitted
+ * and not yet seen complete.
+ */
+static uint32_t nvme_aborts_queued(FemuCtrl *n)
+{
+    NvmeSQueue *sq = n->sq[0];
+    uint32_t nr = 0;
+    uint32_t index;
+
+    for (index = 0; index < sq->size; index++) {
+        uint32_t slot = (sq->head + index) % sq->size;
+        uint8_t opcode;
+
+        if (slot == sq->tail) {
+            break;
+        }
+        nvme_addr_read(n, nvme_sq_slot_addr(n, sq, slot), &opcode,
+                       sizeof(opcode));
+        nr += opcode == NVME_ADM_CMD_ABORT;
+    }
+    return nr;
+}
+
+/*
+ * Abort (Base 2.3, 5.2.1). A command still in its submission queue is marked
+ * in controller state; the fetch path then completes it with Command Abort
+ * Requested without running it, so it has no effects after this completes and
+ * the abort counts as immediate. The host's queue is never written. A command
+ * already fetched has run or is running and is left alone.
+ *
+ * More than ACL + 1 Aborts outstanding at once is refused: the one running is
+ * failed while more than ACL others wait behind it.
+ */
 static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
 {
-    uint32_t index = 0;
     uint16_t sqid = le32_to_cpu(cmd->cdw10) & 0xffff;
     uint16_t cid = (le32_to_cpu(cmd->cdw10) >> 16) & 0xffff;
     NvmeSQueue *sq;
+    uint32_t index;
+    bool resume;
 
-    *result = 1;
+    *result = 1;    /* Immediate Abort Not Performed */
+    if (nvme_aborts_queued(n) > n->acl) {
+        return NVME_ACL_EXCEEDED;
+    }
     if (nvme_check_sqid(n, sqid)) {
         return NVME_SUCCESS;
     }
 
     sq = n->sq[sqid];
 
+    /* a poller must not fetch from the queue while it is read and marked */
+    resume = nvme_pause_pollers(n);
+
     /*
      * Step at most once round the ring: the modulo index below only ever takes
      * values inside it, so a tail outside it would never be reached and this
      * runs on the thread holding the big lock.
      */
-    while (index < sq->size && (sq->head + index) % sq->size != sq->tail) {
-        NvmeCmd abort_cmd;
-        hwaddr addr;
+    for (index = 0; index < sq->size; index++) {
+        uint32_t slot = (sq->head + index) % sq->size;
+        NvmeCmd entry;
 
-        if (sq->phys_contig) {
-            addr = sq->dma_addr + ((sq->head + index) % sq->size) *
-                n->sqe_size;
-        } else {
-            addr = nvme_discontig(sq->prp_list, (sq->head + index) % sq->size,
-                n->page_size, n->sqe_size);
+        if (slot == sq->tail) {
+            break;
         }
-        nvme_addr_read(n, addr, (void *)&abort_cmd, sizeof(abort_cmd));
-        if (abort_cmd.cid == cid) {
-            /*
-             * Mark the entry; the poller completes it as aborted when it
-             * reaches it, with a request taken from the free list then.
-             */
+        nvme_addr_read(n, nvme_sq_slot_addr(n, sq, slot), &entry,
+                       sizeof(entry));
+        if (le16_to_cpu(entry.cid) == cid) {
+            if (!sq->abort_cid[slot]) {
+                sq->abort_cid[slot] = NVME_ABORT_MARKED | entry.cid;
+                sq->nr_aborts++;
+            }
             *result = 0;
-            abort_cmd.opcode = NVME_OP_ABORTED;
-            nvme_addr_write(n, addr, (void *)&abort_cmd,
-                sizeof(abort_cmd));
-
-            return NVME_SUCCESS;
+            break;
         }
-
-        ++index;
     }
 
+    nvme_resume_pollers(n, resume);
     return NVME_SUCCESS;
 }
 
@@ -3994,6 +4037,7 @@ void nvme_process_sq_admin(void *opaque)
     hwaddr addr;
     NvmeCmd cmd;
     NvmeCqe cqe;
+    bool aborted;
 
     /*
      * A command is only fetched while its completion has somewhere to go. The
@@ -4008,11 +4052,12 @@ void nvme_process_sq_admin(void *opaque)
                     n->sqe_size);
         }
         nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
+        aborted = sq->nr_aborts && nvme_take_abort(sq, cmd.cid);
         nvme_inc_sq_head(sq);
 
         memset(&cqe, 0, sizeof(cqe));
 
-        status = nvme_admin_cmd(n, &cmd, &cqe);
+        status = aborted ? NVME_CMD_ABORT_REQ : nvme_admin_cmd(n, &cmd, &cqe);
         if (status == NVME_NO_COMPLETE) {
             /*
              * Held pending: no completion now. An Async Event Request is

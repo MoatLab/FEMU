@@ -458,7 +458,7 @@ enum NvmeCapMask {
 #define NVME_TEMPERATURE        0x143
 #define NVME_TEMPERATURE_WARNING  0x157     /* 70 C */
 #define NVME_TEMPERATURE_CRITICAL 0x175     /* 100 C */
-#define NVME_OP_ABORTED         0xff
+#define NVME_ABORT_MARKED       (1u << 16)
 
 #define NVME_CAP_MQES(cap)  (((cap) >> CAP_MQES_SHIFT)   & CAP_MQES_MASK)
 #define NVME_CAP_CQR(cap)   (((cap) >> CAP_CQR_SHIFT)    & CAP_CQR_MASK)
@@ -1702,6 +1702,13 @@ typedef struct NvmeSQueue {
     uint64_t    eventidx_addr;
     uint64_t    eventidx_addr_hva;
     bool        is_active;
+    /*
+     * Commands an Abort found still queued, by slot: the CID as it appears
+     * in the entry, with NVME_ABORT_MARKED set. Kept here because only the
+     * host writes the queue itself.
+     */
+    uint32_t    *abort_cid;
+    uint32_t    nr_aborts;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -2561,6 +2568,7 @@ void nvme_streams_release(NvmeNamespace *ns, bool resources);
 uint16_t nvme_directive(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
+bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags
                       prio, int contig);

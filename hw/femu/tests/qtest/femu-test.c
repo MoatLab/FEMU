@@ -19042,6 +19042,234 @@ static void femu_test_doc_examples(void *obj, void *data,
     g_assert_cmpint(ran, >, 0);
 }
 
+#define FEMU_CMD_ABORT_REQ      0x007
+#define FEMU_ACL_EXCEEDED       0x103
+#define FEMU_ID_ACL             258     /* Identify Controller byte offsets */
+#define FEMU_ID_FRMW            260
+
+/* queue an entry without ringing, so several are fetched in one go */
+static void femu_queue_only(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
+{
+    cmd->cid = cpu_to_le16(c->cid++);
+    qtest_memwrite(c->pdev->bus->qts,
+                   q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmd,
+                   sizeof(*cmd));
+    q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+}
+
+static void femu_queue_read(FemuCtrlState *c, FemuQueue *q, uint64_t buf)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_queue_only(c, q, (NvmeCmd *)&rw);
+}
+
+/* the command in slot @slot of @q is still the one the host wrote */
+static void femu_check_sqe(FemuCtrlState *c, FemuQueue *q, uint16_t slot,
+                           uint8_t opcode, uint16_t cid)
+{
+    NvmeCmd back;
+
+    qtest_memread(c->pdev->bus->qts, q->sq_addr + slot * sizeof(NvmeCmd),
+                  &back, sizeof(back));
+    g_assert_cmphex(back.opcode, ==, opcode);
+    g_assert_cmpint(le16_to_cpu(back.cid), ==, cid);
+}
+
+/*
+ * Abort (Base 2.3, 5.2.1) marks a queued command in the controller: the host's
+ * submission queue is never written, and the command completes with Command
+ * Abort Requested when fetched, without running. ACL + 2 Aborts and their
+ * targets go into the admin queue under one doorbell, so all the Aborts are
+ * outstanding together and one is refused with Abort Command Limit Exceeded,
+ * while every target is still queued when the Abort naming it runs.
+ */
+static void femu_test_abort(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t abort_sc[FEMU_QSIZE], target_sc[FEMU_QSIZE];
+    uint32_t ianp[FEMU_QSIZE];
+    uint16_t first, start, cid, target, head;
+    uint8_t phase;
+    uint32_t result;
+    uint64_t buf;
+    NvmeCmd cmd;
+    NvmeCqe cqe;
+    int acl, nr, i, waited, aborted;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    acl = qtest_readb(qts, buf + FEMU_ID_ACL);
+    nr = acl + 2;
+    g_assert_cmpint(2 * nr, <, FEMU_QSIZE);
+
+    start = c.admin.sq_tail;
+    first = c.cid;
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_ABORT;
+        cmd.cdw10 = cpu_to_le32((uint32_t)(first + nr + i) << 16);
+        femu_queue_only(&c, &c.admin, &cmd);
+    }
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(NVME_NUMBER_OF_QUEUES);
+        femu_queue_only(&c, &c.admin, &cmd);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 0), c.admin.sq_tail);
+
+    for (i = 0; i < nr; i++) {
+        abort_sc[i] = FEMU_SC(femu_complete(&c, &c.admin, &cid, &ianp[i]));
+        g_assert_cmpint(cid, ==, first + i);
+    }
+    for (i = 0; i < nr; i++) {
+        target_sc[i] = FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL));
+        g_assert_cmpint(cid, ==, first + nr + i);
+    }
+
+    /* the host's queue still holds exactly what the host wrote */
+    for (i = 0; i < nr; i++) {
+        femu_check_sqe(&c, &c.admin, (start + nr + i) % FEMU_QSIZE,
+                       NVME_ADM_CMD_GET_FEATURES, first + nr + i);
+    }
+
+    /*
+     * The first Abort ran with ACL + 1 more behind it, one more than the limit,
+     * so it is refused and its target runs. The rest abort theirs at once.
+     */
+    g_assert_cmphex(abort_sc[0], ==, FEMU_ACL_EXCEEDED);
+    g_assert_cmphex(target_sc[0], ==, NVME_SUCCESS);
+    for (i = 1; i < nr; i++) {
+        g_assert_cmphex(abort_sc[i], ==, NVME_SUCCESS);
+        g_assert_cmpint(ianp[i] & 1, ==, 0);
+        g_assert_cmphex(target_sc[i], ==, FEMU_CMD_ABORT_REQ);
+    }
+
+    /* one Abort at a time is never over the limit, however many are run */
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_ABORT;
+        cmd.cdw10 = cpu_to_le32((uint32_t)(c.cid + 1) << 16);
+        femu_queue_only(&c, &c.admin, &cmd);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(NVME_NUMBER_OF_QUEUES);
+        femu_queue_only(&c, &c.admin, &cmd);
+        qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 0),
+                       c.admin.sq_tail);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, NULL, &result)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpint(result & 1, ==, 0);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, NULL, NULL)), ==,
+                        FEMU_CMD_ABORT_REQ);
+    }
+
+    /*
+     * An I/O queue. Its completion queue holds three entries, so once three
+     * reads have completed the rest wait for room, each holding one of the
+     * queue's requests, and when those run out the last reads stay queued.
+     */
+    femu_queue_init(&c, &c.io, 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_SMALL_CQ - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    first = c.cid;
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        femu_queue_read(&c, &c.io, buf);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), c.io.sq_tail);
+    for (waited = 0;; waited++) {
+        qtest_memread(qts, c.io.cq_addr + (FEMU_SMALL_CQ - 2) * sizeof(cqe),
+                      &cqe, sizeof(cqe));
+        if (le16_to_cpu(cqe.status) & 1) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    /* let the poller take every request it can */
+    g_usleep(200 * 1000);
+    for (i = 0; i < 6; i++) {
+        femu_queue_read(&c, &c.io, buf);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), c.io.sq_tail);
+    g_usleep(200 * 1000);
+
+    target = c.cid - 1;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ABORT;
+    cmd.cdw10 = cpu_to_le32(((uint32_t)target << 16) | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 0);
+    femu_check_sqe(&c, &c.io, (c.io.sq_tail + FEMU_QSIZE - 1) % FEMU_QSIZE,
+                   NVME_CMD_READ, target);
+
+    /* return the slots one at a time; only the target is aborted */
+    head = 0;
+    phase = 1;
+    aborted = 0;
+    for (i = 0; i < FEMU_QSIZE - 1 + 6; i++) {
+        uint64_t slot = c.io.cq_addr + head * sizeof(cqe);
+
+        for (waited = 0;; waited++) {
+            qtest_memread(qts, slot, &cqe, sizeof(cqe));
+            if ((le16_to_cpu(cqe.status) & 1) == phase) {
+                break;
+            }
+            g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+            g_usleep(1000);
+        }
+        cid = le16_to_cpu(cqe.cid);
+        g_assert_cmpint(cid, >=, first);
+        g_assert_cmpint(cid, <=, target);
+        if (cid == target) {
+            g_assert_cmphex(FEMU_SC(le16_to_cpu(cqe.status) >> 1), ==,
+                            FEMU_CMD_ABORT_REQ);
+            aborted++;
+        } else {
+            g_assert_cmphex(le16_to_cpu(cqe.status) >> 1, ==, NVME_SUCCESS);
+        }
+        head = (head + 1) % FEMU_SMALL_CQ;
+        if (head == 0) {
+            phase ^= 1;
+        }
+        qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, 1), head);
+    }
+    g_assert_cmpint(aborted, ==, 1);
+
+    /* a command not queued cannot be aborted at once */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ABORT;
+    cmd.cdw10 = cpu_to_le32(((uint32_t)target << 16) | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 1);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -20438,6 +20666,13 @@ static void femu_register_nodes(void)
     qos_add_test("verify", "femu", femu_test_verify,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"
+    });
+    qos_add_test("abort", "femu", femu_test_abort,
+                 &(QOSGraphTestOptions) {
+        /* a mode with an FTL, whose poller fetches while completions wait */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {

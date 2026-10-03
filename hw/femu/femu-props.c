@@ -153,7 +153,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "PCI device ID of the controller function" },
     { "acl",
       "Abort Command Limit reported in Identify Controller (0's based); "
-      "it does not change how Abort is handled" },
+      "an Abort run with more than acl others queued behind it fails" },
     { "cqr",
       "CAP.CQR: 1 requires physically contiguous queues, 0 allows "
       "PRP-list queues" },

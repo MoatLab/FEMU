@@ -712,6 +712,23 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
     }
 }
 
+/*
+ * Whether an Abort marked the command at @sq's head, which is being fetched.
+ * The mark goes either way, since the slot is consumed now. Only the thread
+ * fetching from @sq calls this; an Abort adds marks with the pollers held off.
+ */
+bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid)
+{
+    uint32_t mark = sq->abort_cid[sq->head];
+
+    if (!mark) {
+        return false;
+    }
+    sq->abort_cid[sq->head] = 0;
+    sq->nr_aborts--;
+    return mark == (NVME_ABORT_MARKED | cid);
+}
+
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
 {
     n->sq[sq->sqid] = NULL;
@@ -726,6 +743,9 @@ void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
         nvme_req_release_ranges(&sq->io_req[i]);
     }
     g_free(sq->io_req);
+    g_free(sq->abort_cid);
+    sq->abort_cid = NULL;
+    sq->nr_aborts = 0;
     if (sq->prp_list) {
         g_free(sq->prp_list);
     }
@@ -750,6 +770,7 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     sq->size = size;
     sq->cqid = cqid;
     sq->head = sq->tail = 0;
+    sq->nr_aborts = 0;
     sq->phys_contig = contig;
     if (sq->phys_contig) {
         void *hva = dma_memory_map(as, dma_addr, &sqsz, 0,
@@ -779,6 +800,7 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     }
 
     sq->io_req = g_malloc0(sq->size * sizeof(*sq->io_req));
+    sq->abort_cid = g_new0(uint32_t, sq->size);
     QTAILQ_INIT(&sq->req_list);
     QTAILQ_INIT(&sq->out_req_list);
     for (int i = 0; i < sq->size; i++) {

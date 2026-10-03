@@ -64,7 +64,7 @@ Devices:
 | --- | --- | --- | --- |
 | `vid` | `uint16` | `7453` | PCI vendor ID, also reported as the Identify Controller PCI Vendor ID |
 | `did` | `uint16` | `7967` | PCI device ID of the controller function |
-| `acl` | `uint8` | `3` | Abort Command Limit reported in Identify Controller (0's based); it does not change how Abort is handled |
+| `acl` | `uint8` | `3` | Abort Command Limit reported in Identify Controller (0's based); an Abort run with more than acl others queued behind it fails |
 | `cqr` | `uint8` | `1` | CAP.CQR: 1 requires physically contiguous queues, 0 allows PRP-list queues |
 | `vwc` | `uint8` | `0` | 1 advertises a volatile write cache, which the host can turn off with feature 06h to stop bbssd buffering writes; 0 advertises none and refuses feature 06h. Flush drains the bbssd write buffer either way; 0 or 1 |
 | `temperature` | `uint16` | `323` | Composite temperature in kelvin reported by the SMART log and compared with the temperature threshold feature; default 323 (50 C) |

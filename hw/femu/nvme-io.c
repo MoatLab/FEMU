@@ -162,6 +162,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     NvmeCmd cmd;
     NvmeRequest *req;
     int processed = 0;
+    bool aborted;
 
     /*
      * Inline completion fast path (NoSSD only). NoSSD has a no-op timing model
@@ -223,6 +224,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                                   n->sqe_size);
             nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         }
+        aborted = sq->nr_aborts && nvme_take_abort(sq, cmd.cid);
         nvme_inc_sq_head(sq);
 
         req = QTAILQ_FIRST(&sq->req_list);
@@ -261,10 +263,13 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         req->write_data = NULL;
-        if (n->power_loss) {
+        if (n->power_loss && !aborted) {
             req->ns = nvme_ns(n, le32_to_cpu(cmd.nsid));
         }
-        if (n->power_loss && req->ns) {
+        if (aborted) {
+            /* an Abort found it queued, so it completes without running */
+            status = NVME_CMD_ABORT_REQ;
+        } else if (n->power_loss && req->ns) {
             status = NVME_SUCCESS;
         } else {
             if (nvme_ns_shared(n)) {
@@ -1943,8 +1948,6 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 
     switch (cmd->opcode) {
-    case NVME_OP_ABORTED:
-        return NVME_CMD_ABORT_REQ;
     case NVME_CMD_FLUSH:
         if (!n->vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;

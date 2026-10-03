@@ -361,9 +361,16 @@ Things to note:
   submission order.
 - **Full completion queues.** A due completion whose CQ has no free slot waits
   in the poller's backlog, and the poller retries it every sweep.
-- **Abort** marks a command that is still in the SQ (not yet fetched) so that
-  it completes as aborted when fetched. A command already fetched is not
-  aborted.
+- **Abort** looks for the command in the SQ between head and tail with the
+  pollers paused. If it is there, the controller records it in its own state
+  (the SQ itself is never written) and the Abort completes with dword 0 bit 0
+  clear; the command then completes with Command Abort Requested when it is
+  fetched, without running. A command already fetched is not aborted, and the
+  Abort completes with bit 0 set. Admin commands run one at a time, so the
+  Aborts outstanding together are the one running and those still in the
+  admin SQ; with more than `acl` of them waiting, the running one fails with
+  Abort Command Limit Exceeded. A command queued behind an Abort on the admin
+  queue can be aborted too.
 
 ## Completion timing
 
@@ -615,6 +622,7 @@ registers with no guest. Cases that target this chapter include:
 | `cq-full` | completions wait for CQ space |
 | `delete-sq-in-flight`, `ns-retire-pollers` | queue and namespace removal with I/O in flight |
 | `aer-limit` | the AER limit |
+| `abort` | Abort leaves the SQ unwritten, aborts queued admin and I/O commands, and enforces ACL |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
