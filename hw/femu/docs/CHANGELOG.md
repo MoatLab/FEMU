@@ -274,6 +274,11 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - SMART wear counters are summed across namespaces (4a4f0d9bf).
 - Counters fixed to move in every mode: FDP and KV write amplification and bytes, KV relocations, FDP erases (f4b3ac376, 980fb7886, 37464e4bd, ce20d8c06, 4c7d9c22a, 749e09fef, 2a16553c9, ba0c49338).
 - OC 1.2 enforces its bad block table: a write or erase that names a factory bad, grown bad or device reserved block fails with Write Fault. Set Bad Block Table marks the plane it is given instead of another block's plane, and keeps the table's counts current (933addb72).
+- Abort no longer rewrites the aborted command in the host's submission queue: the controller marks it and completes it with Command Abort Requested when fetched. An Abort run with more than `acl` others queued behind it fails with Abort Command Limit Exceeded (7b7eaf133).
+- Logs 12h (Feature Identifiers Supported and Effects) and 13h (NVMe-MI Commands Supported and Effects) are answered and listed in log 00h. A feature that needs something absent, such as Volatile Write Cache without `vwc=1`, is an invalid field for every selector (7b36b4c25).
+- Enabling with a CC.CSS value that CAP.CSS does not offer fails the controller, and admin commands that name SGLs are refused (992dc9911, 2ff5e3925).
+- Every Unrecovered Read Error and Compare Failure sets Do Not Retry (f8efff85a).
+- Identify reports one read-only firmware slot, matching the firmware log (989df3cea).
 
 ### Documentation and tooling
 
