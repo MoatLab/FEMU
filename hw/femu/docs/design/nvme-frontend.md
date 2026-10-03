@@ -517,6 +517,18 @@ Verify, Write Uncorrectable) only where `nvme_io_effects()` lists it for the
 namespace's command set. Features follow the same rule through
 `nvme_fid_supported()`, which Get Features, Set Features and log 12h share.
 
+The `caps-*` qtests check the registry against dispatch. Four differences are
+known and left for a decision, and the test holds each to its current
+answer: I/O Management Send and Receive take their no-operation on every
+namespace though log 05h lists them only for NVM with FDP on; 0xEE answers
+Invalid Field outside Open-Channel; the Changed Zone List (BFh) and Chunk
+Information (CAh) pages answer when the command names another command set;
+and with a subsystem whose FDP is off the FDP pages answer FDP Disabled
+without being listed. Outside the test's reach, log 00h takes its command
+set from CDW14 even when CC.CSS selects NVM only, Get Features serves the
+Select field while ONCS bit 4 is clear, and CNS 1Ch always lists the NVM,
+zoned and key value sets.
+
 ### Namespace routing
 
 `nvme_ns()` maps an NSID to a namespace that is both allocated and attached
@@ -671,6 +683,8 @@ registers with no guest. Cases that target this chapter include:
 | `media-dnr` | Unrecovered Read and Compare Failure set DNR |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `frmw` | FRMW and the firmware slot log agree |
+| `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for |
+| `ns-mgmt-before-identify` | a managed bbssd namespace is addressed correctly before the host reads Identify Controller |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 

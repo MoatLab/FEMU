@@ -19673,6 +19673,577 @@ static void femu_test_frmw(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * Capability agreement. Identify, the Supported Log Pages, Commands Supported
+ * and Effects and FID Supported and Effects logs all describe what the
+ * controller handles, and each is checked here against what it does: every
+ * admin and I/O opcode, every log identifier for each command set, and the
+ * Identify bits that summarise them. A command or page that answers without
+ * being listed, or is listed and refused, fails the test.
+ */
+#define FEMU_CAPS_NCSI      3
+#define FEMU_CAPS_MAX_NS    8
+#define FEMU_NIDT_CSI       0x04
+
+static const uint8_t femu_caps_csi[FEMU_CAPS_NCSI] = {
+    NVME_CSI_NVM, FEMU_CSI_KV, FEMU_CSI_ZONED,
+};
+
+typedef struct FemuCapsCfg {
+    const char *name;
+    const char *opts;
+    uint16_t oncs;          /* the optional NVM commands it turns on */
+    bool format;            /* whether Format NVM is offered */
+} FemuCapsCfg;
+
+typedef struct FemuCaps {
+    NvmeIdCtrl id;
+    uint32_t acs[256];
+    uint32_t iocs[FEMU_CAPS_NCSI][256];
+    uint32_t lids[FEMU_CAPS_NCSI][256];
+    uint32_t fis[FEMU_CAPS_NCSI][256];
+    uint8_t cmd_sets[8];
+    uint32_t nsid[FEMU_CAPS_MAX_NS];
+    int csi_idx[FEMU_CAPS_MAX_NS];
+    int nr_ns;
+    GString *bad;
+} FemuCaps;
+
+static void G_GNUC_PRINTF(2, 3) femu_caps_bad(FemuCaps *k, const char *fmt,
+                                              ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    g_string_append_vprintf(k->bad, fmt, ap);
+    va_end(ap);
+    g_string_append_c(k->bad, '\n');
+}
+
+static bool femu_caps_on(const uint32_t *tbl, uint8_t i)
+{
+    return le32_to_cpu(tbl[i]) & 1;
+}
+
+static void femu_caps_bit(FemuCaps *k, const char *field, uint32_t bit,
+                          bool set, bool want)
+{
+    if (set != want) {
+        femu_caps_bad(k, "%s bit 0x%x is %d, the logs say %d", field, bit,
+                      set, want);
+    }
+}
+
+/* the active namespaces and the command set each belongs to */
+static void femu_caps_namespaces(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t list[FEMU_CAPS_MAX_NS];
+    int i;
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmpint(femu_identify(c, 0, NVME_ID_CNS_NS_ACTIVE_LIST, 0, buf),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, list, sizeof(list));
+    for (i = 0; i < FEMU_CAPS_MAX_NS && list[i]; i++) {
+        uint8_t d[4096];
+        int off = 0;
+        int idx = -1;
+
+        k->nsid[i] = le32_to_cpu(list[i]);
+        g_assert_cmpint(femu_identify(c, k->nsid[i], NVME_ID_CNS_NS_DESCR_LIST,
+                                      0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, d, sizeof(d));
+        while (off + 4 < sizeof(d) && d[off]) {
+            if (d[off] == FEMU_NIDT_CSI) {
+                for (int j = 0; j < FEMU_CAPS_NCSI; j++) {
+                    if (femu_caps_csi[j] == d[off + 4]) {
+                        idx = j;
+                    }
+                }
+            }
+            off += 4 + d[off + 1];
+        }
+        g_assert_cmpint(idx, >=, 0);
+        k->csi_idx[i] = idx;
+    }
+    k->nr_ns = i;
+    g_assert_cmpint(k->nr_ns, >, 0);
+}
+
+static void femu_caps_read(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t page[4096];
+    int i;
+
+    g_assert_cmpint(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &k->id, sizeof(k->id));
+    g_assert_cmpint(femu_identify(c, 0, FEMU_CNS_IO_CMD_SET, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, k->cmd_sets, sizeof(k->cmd_sets));
+
+    for (i = 0; i < FEMU_CAPS_NCSI; i++) {
+        uint32_t csi = (uint32_t)femu_caps_csi[i] << 24;
+
+        g_assert_cmpint(femu_log_cmd(c, NVME_NSID_BROADCAST, FEMU_LOG_SUPPORTED,
+                                     csi, buf, 1024), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, k->lids[i], 1024);
+        g_assert_cmpint(femu_log_cmd(c, NVME_NSID_BROADCAST,
+                                     FEMU_LOG_CMD_EFFECTS, csi, buf, 4096),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, page, sizeof(page));
+        if (i == 0) {
+            memcpy(k->acs, page, sizeof(k->acs));
+        } else {
+            /* the admin half does not depend on the command set */
+            g_assert_cmpint(memcmp(k->acs, page, sizeof(k->acs)), ==, 0);
+        }
+        memcpy(k->iocs[i], page + 1024, sizeof(k->iocs[i]));
+        g_assert_cmpint(femu_log_cmd(c, NVME_NSID_BROADCAST,
+                                     FEMU_LOG_FID_EFFECTS, csi, buf, 1024),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, k->fis[i], sizeof(k->fis[i]));
+    }
+}
+
+/* a feature Get Features serves is listed in log 12h for some command set */
+static void femu_caps_features(FemuCtrlState *c, FemuCaps *k)
+{
+    for (int fid = 0; fid < 256; fid++) {
+        uint16_t sc = FEMU_SC(femu_get_feature(c, fid, NVME_GETFEAT_SELECT_CAP,
+                                               k->nsid[0], 0, NULL));
+        bool adv = false;
+
+        for (int i = 0; i < FEMU_CAPS_NCSI; i++) {
+            adv |= femu_caps_on(k->fis[i], fid);
+        }
+        if ((sc == NVME_SUCCESS) != adv) {
+            femu_caps_bad(k, "feature 0x%02x answers 0x%x, log 12h %s it", fid,
+                          sc, adv ? "lists" : "does not list");
+        }
+    }
+}
+
+/* a listed entry carries its effects only alongside CSUPP or LSUPP */
+static void femu_caps_entries(FemuCaps *k, const char *what,
+                              const uint32_t *tbl)
+{
+    for (int i = 0; i < 256; i++) {
+        uint32_t e = le32_to_cpu(tbl[i]);
+
+        if (e && !(e & 1)) {
+            femu_caps_bad(k, "%s entry 0x%02x is 0x%x without bit 0", what, i,
+                          e);
+        }
+    }
+}
+
+/*
+ * Every admin opcode, with a zeroed command. A handled command may refuse its
+ * fields; only Invalid Command Opcode means it is not handled. An Asynchronous
+ * Event Request is held, so it is checked from the log alone. The timing
+ * command 0xEE answers Invalid Field outside Open-Channel, which its own test
+ * holds, so there it must stay unlisted and answer exactly that.
+ */
+static void femu_caps_admin(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    for (int opc = 0; opc < 256; opc++) {
+        bool adv = femu_caps_on(k->acs, opc);
+        NvmeCmd cmd;
+        uint16_t sc;
+
+        if (opc == NVME_ADM_CMD_ASYNC_EV_REQ) {
+            if (!adv) {
+                femu_caps_bad(k, "admin 0x%02x is not listed", opc);
+            }
+            continue;
+        }
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = opc;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
+        sc = FEMU_SC(femu_admin(c, &cmd));
+        if (opc == FEMU_ADM_DEBUG && !adv && sc == NVME_INVALID_FIELD) {
+            continue;
+        }
+        if ((sc != NVME_INVALID_OPCODE) != adv) {
+            femu_caps_bad(k, "admin 0x%02x answers 0x%x, log 05h %s it", opc,
+                          sc, adv ? "lists" : "does not list");
+        }
+    }
+}
+
+/*
+ * Every I/O opcode on every namespace. A namespace may handle only what its
+ * command set lists, and each listed command must be handled by a namespace
+ * of that set. I/O Management Send and Receive are listed only for NVM with
+ * FDP on, but every namespace takes their no-operation; that stays as it is
+ * until it is decided which side should change.
+ */
+static void femu_caps_io(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    bool any[FEMU_CAPS_NCSI][256] = { { false } };
+    bool present[FEMU_CAPS_NCSI] = { false };
+
+    for (int i = 0; i < k->nr_ns; i++) {
+        int x = k->csi_idx[i];
+
+        present[x] = true;
+        for (int opc = 0; opc < 256; opc++) {
+            NvmeCmd cmd;
+            uint16_t sc;
+
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.opcode = opc;
+            cmd.nsid = cpu_to_le32(k->nsid[i]);
+            cmd.dptr.prp1 = cpu_to_le64(buf);
+            qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
+            sc = femu_io(c, &cmd);
+            if ((opc == FEMU_CMD_IO_MGMT_RECV ||
+                 opc == FEMU_CMD_IO_MGMT_SEND) &&
+                !femu_caps_on(k->iocs[x], opc)) {
+                if (sc != NVME_SUCCESS) {
+                    femu_caps_bad(k, "namespace %u: unlisted I/O 0x%02x "
+                                  "answers 0x%x, not its no-operation",
+                                  k->nsid[i], opc, sc);
+                }
+                continue;
+            }
+            if (sc == NVME_INVALID_OPCODE) {
+                continue;
+            }
+            any[x][opc] = true;
+            if (!femu_caps_on(k->iocs[x], opc)) {
+                femu_caps_bad(k, "namespace %u (CSI %u) answers I/O 0x%02x "
+                              "with 0x%x; log 05h does not list it",
+                              k->nsid[i], femu_caps_csi[x], opc, sc);
+            }
+        }
+    }
+    for (int x = 0; x < FEMU_CAPS_NCSI; x++) {
+        for (int opc = 0; present[x] && opc < 256; opc++) {
+            if (femu_caps_on(k->iocs[x], opc) && !any[x][opc]) {
+                femu_caps_bad(k, "log 05h lists I/O 0x%02x for CSI %u; no "
+                              "namespace handles it", opc, femu_caps_csi[x]);
+            }
+        }
+    }
+}
+
+/*
+ * Every log identifier for each command set, addressed to a namespace of
+ * that set when there is one, since a namespace's own pages need it. A page
+ * listed for a command set answers for it, and a page that answers is listed
+ * for it, except that a mode's own page (BFh, CAh) still answers when the
+ * command names another set; that is left for a decision.
+ */
+static void femu_caps_logs(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    for (int x = 0; x < FEMU_CAPS_NCSI; x++) {
+        uint32_t nsid = NVME_NSID_BROADCAST;
+
+        for (int i = k->nr_ns - 1; i >= 0; i--) {
+            if (k->csi_idx[i] == x) {
+                nsid = k->nsid[i];
+            }
+        }
+        for (int lid = 0; lid < 256; lid++) {
+            bool adv = femu_caps_on(k->lids[x], lid);
+            uint16_t sc = femu_log_cmd(c, nsid, lid,
+                                       (uint32_t)femu_caps_csi[x] << 24, buf,
+                                       512);
+            bool listed = false;
+
+            for (int y = 0; y < FEMU_CAPS_NCSI; y++) {
+                listed |= femu_caps_on(k->lids[y], lid);
+            }
+            /* only a mode's own page may answer for another set */
+            if (lid != 0xbf && lid != 0xca) {
+                listed = false;
+            }
+            if (adv ? sc == NVME_INVALID_LOG_ID :
+                      sc != NVME_INVALID_LOG_ID && !listed) {
+                femu_caps_bad(k, "log 0x%02x for CSI %u answers 0x%x, log 00h "
+                              "%s it", lid, femu_caps_csi[x], sc,
+                              adv ? "lists" : "does not list");
+            }
+        }
+    }
+}
+
+/* the Identify bits that summarise the logs, and the behaviour behind them */
+static void femu_caps_identify(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    const uint32_t *acs = k->acs;
+    const uint32_t *nvm = k->iocs[0];
+    const uint32_t *lids = k->lids[0];
+    uint16_t oacs = le16_to_cpu(k->id.oacs);
+    uint16_t oncs = le16_to_cpu(k->id.oncs);
+    uint8_t lpa = k->id.lpa;
+    bool copy = femu_caps_on(nvm, NVME_CMD_COPY);
+    NvmeIdNs idns;
+    int i;
+
+    femu_caps_bit(k, "OACS", 1 << 0, oacs & (1 << 0),
+                  femu_caps_on(acs, 0x81) && femu_caps_on(acs, 0x82));
+    femu_caps_bit(k, "OACS", 1 << 1, oacs & (1 << 1), femu_caps_on(acs, 0x80));
+    femu_caps_bit(k, "OACS", 1 << 2, oacs & (1 << 2),
+                  femu_caps_on(acs, 0x10) && femu_caps_on(acs, 0x11));
+    femu_caps_bit(k, "OACS", 1 << 3, oacs & (1 << 3),
+                  femu_caps_on(acs, 0x0d) && femu_caps_on(acs, 0x15));
+    femu_caps_bit(k, "OACS", 1 << 4, oacs & (1 << 4), femu_caps_on(acs, 0x14));
+    femu_caps_bit(k, "OACS", 1 << 5, oacs & (1 << 5),
+                  femu_caps_on(acs, 0x19) && femu_caps_on(acs, 0x1a));
+    femu_caps_bit(k, "OACS", 1 << 8, oacs & (1 << 8), femu_caps_on(acs, 0x7c));
+    femu_caps_bit(k, "OACS", 1 << 9, oacs & (1 << 9), femu_caps_on(acs, 0x86));
+
+    femu_caps_bit(k, "ONCS", 1 << 0, oncs & (1 << 0), femu_caps_on(nvm, 0x05));
+    femu_caps_bit(k, "ONCS", 1 << 1, oncs & (1 << 1), femu_caps_on(nvm, 0x04));
+    femu_caps_bit(k, "ONCS", 1 << 2, oncs & (1 << 2), femu_caps_on(nvm, 0x09));
+    femu_caps_bit(k, "ONCS", 1 << 3, oncs & (1 << 3), femu_caps_on(nvm, 0x08));
+    femu_caps_bit(k, "ONCS", 1 << 5, oncs & (1 << 5), femu_caps_on(nvm, 0x0d));
+    femu_caps_bit(k, "ONCS", 1 << 6, oncs & (1 << 6),
+                  femu_caps_on(k->fis[0], 0x0e));
+    femu_caps_bit(k, "ONCS", 1 << 7, oncs & (1 << 7), femu_caps_on(nvm, 0x0c));
+    femu_caps_bit(k, "ONCS", 1 << 8, oncs & (1 << 8), copy);
+    if (oncs & (1 << 9)) {
+        femu_caps_bit(k, "ONCS", 1 << 9, true, copy);
+    }
+    femu_caps_bit(k, "OCFS", 0xffff, le16_to_cpu(k->id.ocfs) != 0, copy);
+
+    femu_caps_bit(k, "LPA", 1 << 1, lpa & (1 << 1),
+                  femu_caps_on(lids, NVME_LOG_CMD_EFFECTS));
+    femu_caps_bit(k, "LPA", 1 << 3, lpa & (1 << 3),
+                  femu_caps_on(lids, 0x07) && femu_caps_on(lids, 0x08));
+    femu_caps_bit(k, "LPA", 1 << 4, lpa & (1 << 4),
+                  femu_caps_on(lids, 0x0d));
+    /* SMART for one namespace, which LPA bit 0 offers */
+    femu_caps_bit(k, "LPA", 1 << 0, lpa & 1,
+                  femu_log_cmd(c, k->nsid[0], NVME_LOG_SMART_INFO, 0, buf,
+                               512) == NVME_SUCCESS);
+
+    femu_caps_bit(k, "SANICAP", 0xffffffff, le32_to_cpu(k->id.sanicap) != 0,
+                  femu_caps_on(acs, 0x84));
+    femu_caps_bit(k, "LID 81h", 1, femu_caps_on(lids, 0x81),
+                  femu_caps_on(acs, 0x84));
+    femu_caps_bit(k, "VWC", 1, k->id.vwc & 1, femu_caps_on(k->fis[0], 0x06));
+
+    /* one slot, read only, so nothing downloads or commits firmware */
+    g_assert_cmpint(k->id.frmw & 0xf, ==, 0x3);
+    femu_caps_bit(k, "FRMW", 1, k->id.frmw & 1, !(oacs & (1 << 2)));
+
+    for (i = 0; i < FEMU_CAPS_NCSI; i++) {
+        bool any = false;
+
+        for (int opc = 0; opc < 256; opc++) {
+            any |= femu_caps_on(k->iocs[i], opc);
+        }
+        femu_caps_bit(k, "CNS 1Ch", femu_caps_csi[i],
+                      k->cmd_sets[0] & (1 << femu_caps_csi[i]), any);
+    }
+
+    /* each block namespace's Copy limits come and go with Copy for its set */
+    for (i = 0; i < k->nr_ns; i++) {
+        if (femu_caps_csi[k->csi_idx[i]] == FEMU_CSI_KV) {
+            continue;
+        }
+        copy = femu_caps_on(k->iocs[k->csi_idx[i]], NVME_CMD_COPY);
+        g_assert_cmpint(femu_identify(c, k->nsid[i], NVME_ID_CNS_NS, 0, buf),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, &idns, sizeof(idns));
+        if ((idns.mssrl != 0) != copy || (idns.mcl != 0) != copy ||
+            (idns.msrc != 0) != copy) {
+            femu_caps_bad(k, "namespace %u: Copy limits %u/%u/%u, Copy %s",
+                          k->nsid[i], le16_to_cpu(idns.mssrl),
+                          le32_to_cpu(idns.mcl), idns.msrc,
+                          copy ? "listed" : "not listed");
+        }
+    }
+}
+
+/*
+ * SGLS bit 0 against a read through a one-block SGL on the first block
+ * namespace that handles Read.
+ */
+static void femu_caps_sgl(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    bool sgls = le32_to_cpu(k->id.sgls) & 1;
+    uint64_t list = buf + 2048;
+
+    for (int i = 0; i < k->nr_ns; i++) {
+        NvmeIdNs idns;
+        uint32_t lbads;
+        NvmeCmd cmd;
+        uint16_t sc;
+
+        if (femu_caps_csi[k->csi_idx[i]] == FEMU_CSI_KV ||
+            !femu_caps_on(k->iocs[k->csi_idx[i]], NVME_CMD_READ)) {
+            continue;
+        }
+        g_assert_cmpint(femu_identify(c, k->nsid[i], NVME_ID_CNS_NS, 0, buf),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, &idns, sizeof(idns));
+        lbads = idns.lbaf[idns.flbas & 0xf].ds;
+        if (lbads > 11) {
+            continue;
+        }
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_READ;
+        cmd.nsid = cpu_to_le32(k->nsid[i]);
+        femu_sgl_segment(c, &cmd, list, buf, 1u << lbads);
+        sc = femu_io(c, &cmd);
+        if (sgls ? sc == NVME_INVALID_FIELD : sc != NVME_INVALID_FIELD) {
+            femu_caps_bad(k, "SGLS bit 0 is %d; an SGL read on namespace %u "
+                          "answers 0x%x", sgls, k->nsid[i], sc);
+        }
+        return;
+    }
+}
+
+static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const FemuCapsCfg *cfg = data;
+    QFemu *femu = obj;
+    FemuCtrlState c = { .pdev = &femu->dev, .alloc = alloc };
+    g_autofree FemuCaps *k = g_new0(FemuCaps, 1);
+    uint64_t buf;
+    int i;
+
+    k->bad = g_string_new(NULL);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, &femu->dev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
+    buf = guest_alloc(alloc, 4096);
+
+    femu_caps_read(&c, k, buf);
+    femu_caps_namespaces(&c, k, buf);
+    femu_caps_entries(k, "admin", k->acs);
+    for (i = 0; i < FEMU_CAPS_NCSI; i++) {
+        femu_caps_entries(k, "I/O", k->iocs[i]);
+        femu_caps_entries(k, "log", k->lids[i]);
+    }
+    femu_caps_identify(&c, k, buf);
+    /* the masks the configuration asks for, independent of the registry */
+    if ((le16_to_cpu(k->id.oncs) & 0x19f) != cfg->oncs) {
+        femu_caps_bad(k, "ONCS is 0x%x; the configuration asks for 0x%x",
+                      le16_to_cpu(k->id.oncs) & 0x19f, cfg->oncs);
+    }
+    femu_caps_bit(k, "OACS (configured)", 1 << 1,
+                  le16_to_cpu(k->id.oacs) & (1 << 1), cfg->format);
+    femu_caps_features(&c, k);
+
+    femu_create_io_queues(&c);
+    femu_caps_sgl(&c, k, buf);
+    femu_caps_io(&c, k, buf);
+    femu_caps_logs(&c, k, buf);
+    /* last, since a zeroed admin command may format or reset something */
+    femu_caps_admin(&c, k, buf);
+
+    if (k->bad->len) {
+        g_test_message("%s mismatches", cfg->name);
+        g_test_message("%s", k->bad->str);
+    }
+    g_assert_cmpstr(k->bad->str, ==, "");
+    g_string_free(k->bad, true);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A managed bbssd namespace addresses its own FTL from block zero, and the
+ * FTL decides that from the controller's capabilities. Those must be in
+ * place from realize: with them filled in only by Identify Controller, a
+ * host that wrote before asking addressed the second namespace at its
+ * backend offset and was refused near its end.
+ */
+static void femu_test_ns_mgmt_before_identify(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeIdNs id;
+    NvmeCmd cmd;
+    uint64_t nsze;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 2, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    nsze = le64_to_cpu(id.nsze);
+    g_assert_cmpuint(nsze, >, 0);
+
+    for (int op = 0; op < 2; op++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = op ? NVME_CMD_READ : NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(2);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)(nsze - 1));
+        cmd.cdw11 = cpu_to_le32((uint32_t)((nsze - 1) >> 32));
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+#define FEMU_CAPS_GEO \
+    "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
+    "luns_per_ch=4,nchs=4"
+#define FEMU_ONCS_DEFAULT   0x14    /* the oncs property's default */
+
+/*
+ * Every mode, and the properties that change what is advertised. The
+ * optional commands each configuration turns on are stated here as well, so
+ * the registry is held to the configuration and not only to itself.
+ */
+static const FemuCapsCfg femu_caps_cfgs[] = {
+    { "caps-nossd", "", FEMU_ONCS_DEFAULT, true },
+    { "caps-nossd-all", "oncs=0x19f,vwc=1,sgl=on", 0x19f, true },
+    { "caps-nossd-bare", "oncs=0,oacs=0", 0, false },
+    { "caps-nossd-compare-copy", "oncs=0x101", 0x101, true },
+    { "caps-nossd-wu-wz-verify", "oncs=0x8a", 0x8a, true },
+    { "caps-nossd-ns-mgmt", "ns_mgmt=on,namespaces=2", FEMU_ONCS_DEFAULT,
+      true },
+    { "caps-nossd-streams", "streams=on", FEMU_ONCS_DEFAULT, true },
+    { "caps-nossd-pi", "pi=on,meta=8,mc=3,oncs=0x19f,namespaces=2", 0x19f,
+      true },
+    { "caps-bbssd", "femu_mode=1," FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
+    { "caps-bbssd-all", "femu_mode=1,oncs=0x19f,vwc=1,sgl=on," FEMU_CAPS_GEO,
+      0x19f, true },
+    { "caps-bbssd-ns-mgmt", "femu_mode=1,ns_mgmt=on,namespaces=2,"
+      FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
+    { "caps-bbssd-fdp", "femu_mode=1,subsys=fdpsub," FEMU_CAPS_GEO,
+      FEMU_ONCS_DEFAULT, true },
+    { "caps-zns", "femu_mode=3,secsz=512", FEMU_ONCS_DEFAULT, true },
+    { "caps-zns-all", "femu_mode=3,secsz=512,oncs=0x19f,vwc=1,sgl=on", 0x19f,
+      true },
+    { "caps-kv", "devsz_mb=512,femu_mode=5", FEMU_ONCS_DEFAULT, true },
+    { "caps-kv-all", "devsz_mb=512,femu_mode=5,oncs=0x19f,vwc=1,sgl=on",
+      0x19f, true },
+    { "caps-csd", "femu_mode=4,fdm_size=16", FEMU_ONCS_DEFAULT, true },
+    { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_DEFAULT, true },
+    { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_DEFAULT, true },
+    { "caps-mixed", "femu_mode=1,namespaces=3,"
+      "namespace_modes=bbssd,,znssd,,kvssd," FEMU_CAPS_GEO,
+      FEMU_ONCS_DEFAULT, true },
+    { "caps-mixed-all", "femu_mode=1,namespaces=3,oncs=0x19f,"
+      "namespace_modes=bbssd,,znssd,,kvssd," FEMU_CAPS_GEO, 0x19f, true },
+    { "caps-mixed-csd", "namespaces=2,namespace_modes=nossd,,csd,"
+      "fdm_size=16," FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
+};
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -21430,6 +22001,20 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,buffer_size=64"
     });
+    qos_add_test("ns-mgmt-before-identify", "femu",
+                 femu_test_ns_mgmt_before_identify, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            /* each FTL holds 48 MiB, less than the end of namespace 2 */
+            "ns_mgmt=on,namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=48,pls_per_lun=1,luns_per_ch=4,nchs=4",
+    });
+    for (int i = 0; i < ARRAY_SIZE(femu_caps_cfgs); i++) {
+        qos_add_test(femu_caps_cfgs[i].name, "femu", femu_test_caps,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts = femu_caps_cfgs[i].opts,
+            .arg = (void *)&femu_caps_cfgs[i],
+        });
+    }
 }
 
 libqos_init(femu_register_nodes);
