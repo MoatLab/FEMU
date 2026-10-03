@@ -8,6 +8,9 @@
  */
 
 #include "./nvme.h"
+#include "./ocssd/oc12.h"
+#include "./ocssd/oc20.h"
+#include "./csd/csd.h"
 
 static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
@@ -25,15 +28,17 @@ static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_GET_LBA_STATUS]   = NVME_CMD_EFF_CSUPP,
 };
 
-/* the commands each command set always has; the optional ones are below */
-static const uint32_t nvme_cse_iocs_nvm[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+/*
+ * Each mode's own I/O commands, which nvme_io_cmd() hands to the mode. Open-
+ * Channel 1.2 takes only its vector commands; every other block mode takes
+ * the NVM Read and Write as well.
+ */
+static const uint32_t nvme_mode_io_rw[256] = {
     [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
 };
 
-static const uint32_t nvme_cse_iocs_zoned[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+static const uint32_t nvme_mode_io_zns[256] = {
     [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
     [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
@@ -45,13 +50,95 @@ static const uint32_t nvme_cse_iocs_zoned[256] = {
  * The Key Value command set. A key is not a logical block, so the commands
  * that replace or remove a value are the ones that change what a read returns.
  */
-static const uint32_t nvme_cse_iocs_kv[256] = {
+static const uint32_t nvme_mode_io_kv[256] = {
     [NVME_KV_CMD_STORE]             = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_KV_CMD_RETRIEVE]          = NVME_CMD_EFF_CSUPP,
     [NVME_KV_CMD_LIST]              = NVME_CMD_EFF_CSUPP,
     [NVME_KV_CMD_DELETE]            = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_KV_CMD_EXIST]             = NVME_CMD_EFF_CSUPP,
 };
+
+static const uint32_t nvme_mode_io_oc12[256] = {
+    [OC12_CMD_ERASE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [OC12_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [OC12_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
+};
+
+static const uint32_t nvme_mode_io_oc20[256] = {
+    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
+    [OC20_CMD_VECT_ERASE]           = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [OC20_CMD_VECT_WRITE]           = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [OC20_CMD_VECT_READ]            = NVME_CMD_EFF_CSUPP,
+};
+
+/* the device memory and program commands change no logical block */
+static const uint32_t nvme_mode_io_csd[256] = {
+    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_ALLOC_FDM]        = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_DEALLOC_AFDM]     = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_NVM_TO_AFDM]      = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_EXEC]             = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_READ_AFDM]        = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_WRITE_AFDM]       = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_CREATE_GROUP]     = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_SET_QOS]          = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_CSD_DELETE_GROUP]     = NVME_CMD_EFF_CSUPP,
+};
+
+static const uint32_t *nvme_mode_io(FemuCtrl *n, uint8_t mode)
+{
+    switch (mode) {
+    case FEMU_NOSSD_MODE:
+    case FEMU_BBSSD_MODE:
+        return nvme_mode_io_rw;
+    case FEMU_ZNSSD_MODE:
+        return nvme_mode_io_zns;
+    case FEMU_KVSSD_MODE:
+        return nvme_mode_io_kv;
+    case FEMU_CSD_MODE:
+        return nvme_mode_io_csd;
+    case FEMU_OCSSD_MODE:
+        return n->lver == OCSSD12 ? nvme_mode_io_oc12 : nvme_mode_io_oc20;
+    default:
+        return NULL;
+    }
+}
+
+/* admin commands the controller's mode adds, through its own handler table */
+static uint32_t nvme_mode_admin_effects(FemuCtrl *n, uint8_t opc)
+{
+    switch (n->femu_mode) {
+    case FEMU_BBSSD_MODE:
+        return opc == NVME_ADM_CMD_FEMU_FLIP ? NVME_CMD_EFF_CSUPP : 0;
+    case FEMU_CSD_MODE:
+        switch (opc) {
+        case NVME_ADM_CMD_CSD_MRS_MGMT:
+        case NVME_ADM_CMD_CSD_COMPUTE_LOAD:
+        case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
+        case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
+            return NVME_CMD_EFF_CSUPP;
+        }
+        return 0;
+    case FEMU_OCSSD_MODE:
+        switch (opc) {
+        case NVME_ADM_CMD_FEMU_DEBUG:
+            return NVME_CMD_EFF_CSUPP;
+        case OC12_ADM_CMD_IDENTITY:     /* the same opcode as OC 2.0 Geometry */
+            return NVME_CMD_EFF_CSUPP;
+        case OC12_ADM_CMD_GET_L2P_TBL:
+        case OC12_ADM_CMD_GET_BB_TBL:
+        case OC12_ADM_CMD_SET_BB_TBL:
+            return n->lver == OCSSD12 ? NVME_CMD_EFF_CSUPP : 0;
+        case OC20_ADM_CMD_SET_LOG_PAGE:
+            return n->lver == OCSSD20 ? NVME_CMD_EFF_CSUPP : 0;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
 
 uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
 {
@@ -72,7 +159,7 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
     case NVME_ADM_CMD_DIRECTIVE_RECV:
         return n->streams ? NVME_CMD_EFF_CSUPP : 0;
     default:
-        return nvme_cse_acs[opc];
+        return nvme_cse_acs[opc] | nvme_mode_admin_effects(n, opc);
     }
 }
 
@@ -121,8 +208,15 @@ static uint32_t nvme_optional_effects(FemuCtrl *n, uint8_t csi, uint8_t opc,
     return nvm && (n->oncs & bit) ? eff : 0;
 }
 
-uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc)
+/*
+ * What a namespace of command set @csi running @mode handles: Flush, the
+ * optional commands and I/O Management, which nvme_io_cmd() serves itself,
+ * then whatever the mode's own handler takes.
+ */
+static uint32_t nvme_mode_io_effects(FemuCtrl *n, uint8_t csi, uint8_t mode,
+                                     uint8_t opc)
 {
+    const uint32_t *tbl;
     bool optional;
     uint32_t eff = nvme_optional_effects(n, csi, opc, &optional);
 
@@ -131,22 +225,60 @@ uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc)
     }
 
     switch (opc) {
+    case NVME_CMD_FLUSH:
+        return NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
     case NVME_CMD_IO_MGMT_RECV:
     case NVME_CMD_IO_MGMT_SEND:
         return csi == NVME_CSI_NVM && n->subsys &&
                n->subsys->endgrp.fdp.enabled ? NVME_CMD_EFF_CSUPP : 0;
     }
 
+    tbl = nvme_mode_io(n, mode);
+    return tbl ? tbl[opc] : 0;
+}
+
+uint32_t nvme_ns_io_effects(FemuCtrl *n, NvmeNamespace *ns, uint8_t opc)
+{
+    return nvme_mode_io_effects(n, ns->csi, ns->femu_mode, opc);
+}
+
+/*
+ * A command set's entry is what its namespaces handle between them. With no
+ * namespace of the set, it is what one would handle: the zoned and key value
+ * modes for theirs, and the controller's mode, or NoSSD, for NVM.
+ */
+uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc)
+{
+    uint32_t eff = 0;
+    bool any = false;
+    uint8_t mode;
+
+    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->csi == csi) {
+            eff |= nvme_ns_io_effects(n, ns, opc);
+            any = true;
+        }
+    }
+    if (any) {
+        return eff;
+    }
+
     switch (csi) {
-    case NVME_CSI_NVM:
-        return nvme_cse_iocs_nvm[opc];
     case NVME_CSI_ZONED:
-        return nvme_cse_iocs_zoned[opc];
+        mode = FEMU_ZNSSD_MODE;
+        break;
     case NVME_CSI_KV:
-        return nvme_cse_iocs_kv[opc];
+        mode = FEMU_KVSSD_MODE;
+        break;
+    case NVME_CSI_NVM:
+        mode = ZNSSD(n) || KVSSD(n) ? FEMU_NOSSD_MODE : n->femu_mode;
+        break;
     default:
         return 0;
     }
+    return nvme_mode_io_effects(n, csi, mode, opc);
 }
 
 static bool nvme_has_zoned_ns(FemuCtrl *n)

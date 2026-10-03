@@ -149,6 +149,10 @@ Per namespace (`NvmeNamespace`):
 | 0xF2 | admin | `oc12_bbt_get()` | bad block table of one LUN |
 | 0xF1 | admin | `oc12_bbt_set()` | mark one or more blocks |
 
+The Commands Supported and Effects log (05h) lists these commands, the
+timing command 0xEE, and for 2.0 its own vector commands and admin 0xC1;
+for 1.2 it leaves plain Read and Write out.
+
 A vector command carries either one PPA in the command or a list of PPAs in
 host memory. Read and write accept only PRP data pointers, check the list
 against the geometry and MDTS, move the out-of-band bytes, and then copy the

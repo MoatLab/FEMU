@@ -1943,12 +1943,12 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
      * what the Commands Supported and Effects log and ONCS report.
      */
     case NVME_CMD_DSM:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             if (NS_ZNSSD(ns)) {
                 uint16_t status = zns_check_compare(ns, cmd);
 
@@ -1960,22 +1960,22 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COPY:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             return nvme_copy(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_VERIFY:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             return nvme_verify(n, ns, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;

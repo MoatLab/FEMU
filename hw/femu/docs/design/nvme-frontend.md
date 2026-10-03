@@ -498,7 +498,17 @@ handles. `nvme_admin_effects()` and `nvme_io_effects()` return the Commands
 Supported and Effects entry of an admin opcode, or of an I/O opcode in one
 command set, and zero for an opcode that is not handled.
 `nvme_log_support()` returns the Supported Log Pages entry of a log id in one
-command set. `nvme_caps_id_ctrl()` fills OACS, ONCS, OCFS, LPA and SANICAP
+command set.
+
+An I/O opcode's entry for a command set is what the namespaces of that set
+handle between them (`nvme_ns_io_effects()` for one namespace): Flush, the
+optional commands and I/O Management, which `nvme_io_cmd()` serves itself,
+and then the mode's own table, so log 05h lists the Open-Channel vector
+commands, the CSD commands and the key value commands of the modes present,
+and leaves Read and Write out for Open-Channel 1.2, which refuses them. A
+command set with no namespace reports what a namespace of it would handle.
+The admin entries add the commands of the controller's mode: BBSSD 0xEF, the
+Open-Channel and CSD admin commands. `nvme_caps_id_ctrl()` fills OACS, ONCS, OCFS, LPA and SANICAP
 from those three each time Identify Controller is answered.
 
 Logs 05h and 00h are built from the same functions, and `nvme_io_cmd()` runs
@@ -717,7 +727,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | --- | --- |
 | `hw/femu/femu.c` | `nvme_init_pci()`, `nvme_init_cmb()`, `nvme_init_ctrl()` (Identify Controller, CAP), `nvme_check_constraints()`, `nvme_mmio_write()`, `nvme_write_bar()`, `nvme_process_db_admin()`, `nvme_process_db_io()`, `nvme_start_ctrl()`, `nvme_clear_ctrl()`, `nvme_reset_features()`, `femu_ftl_thread()`, `femu_ftl_process_req()`, `femu_needs_ftl_thread()`, `nvme_register_extensions()`, `nvme_register_extensions_ns()`, `femu_realize()`, `femu_exit()` |
 | `hw/femu/nvme-admin.c` | `nvme_create_sq()`, `nvme_create_cq()`, `nvme_del_sq()`, `nvme_del_cq()`, `nvme_init_poller()`, `nvme_start_dataplane()`, `nvme_set_db_memory()`, `nvme_identify()`, `nvme_get_feature()`, `nvme_set_feature()`, `nvme_get_log()`, `nvme_abort_req()`, `nvme_admin_cmd()`, `nvme_process_aers()`, `nvme_process_sq_admin()` |
-| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_log_support()`, `nvme_caps_id_ctrl()` |
+| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_ns_io_effects()`, `nvme_log_support()`, `nvme_caps_id_ctrl()` |
 | `hw/femu/nvme-io.c` | `nvme_poller()`, `nvme_process_sq_io()`, `nvme_update_sq_eventidx()`, `nvme_process_cq_cpl()`, `nvme_post_cqe()`, `nvme_rw()`, `nvme_io_cmd()` |
 | `hw/femu/nvme-util.c` | `nvme_pause_pollers()`, `nvme_resume_pollers()`, `nvme_update_sq_tail()`, `nvme_update_cq_head()`, `nvme_update_cq_eventidx()`, `nvme_init_sq()`, `nvme_init_cq()` |
 | `hw/femu/intr.c` | `nvme_isr_notify_io()`, `nvme_isr_notify_admin()`, `nvme_irq_update()`, `nvme_irq_mask_changed()`, `nvme_setup_virq()`, vector notifiers |
