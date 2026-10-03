@@ -97,6 +97,7 @@ mapped directly and has no CMB case.
                     v                                                      |
         nvme_start_ctrl():                                                 |
           check MPS against CAP, IOSQES/IOCQES, AQA, ASQ/ACQ alignment      |
+          check CC.CSS against CAP.CSS (000b and 110b are offered)         |
           map the admin CQ and SQ                                          |
           run each distinct mode's start_ctrl hook                         |
           nvme_start_dataplane(): create pollers on the first enable,      |
@@ -519,6 +520,8 @@ Namespace Management.
 | Endurance Group | 09h | with `femu-subsys` |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
 | LBA Status | 0Eh | |
+| Feature Identifiers Supported and Effects | 12h | built from the check Get and Set Features use; per command set (CSI) when CC.CSS is 110b |
+| NVMe-MI Commands Supported and Effects | 13h | all zero: no NVMe-MI Send or Receive |
 | FDP Configurations, RUH Usage, Statistics, Events | 20h-23h | with FDP |
 | Sanitize Status | 81h | |
 | Changed Zone List | BFh | ZNS, from the mode |
@@ -626,6 +629,7 @@ registers with no guest. Cases that target this chapter include:
 | `delete-sq-in-flight`, `ns-retire-pollers` | queue and namespace removal with I/O in flight |
 | `aer-limit` | the AER limit |
 | `abort` | Abort leaves the SQ unwritten, aborts queued admin and I/O commands, and enforces ACL |
+| `cc-css` | an unoffered CC.CSS fails the enable |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |

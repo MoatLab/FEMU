@@ -612,6 +612,10 @@ static int nvme_start_ctrl(FemuCtrl *n)
         !NVME_AQA_ACQS(n->bar.aqa) || NVME_AQA_ACQS(n->bar.aqa) > 4095) {
         return -1;
     }
+    /* a command set selection CAP.CSS does not offer is reserved */
+    if (!(NVME_CAP_CSS(n->bar.cap) & (1 << NVME_CC_CSS(n->bar.cc)))) {
+        return -1;
+    }
 
     n->page_bits = page_bits;
     n->page_size = 1 << n->page_bits;

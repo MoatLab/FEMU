@@ -19467,6 +19467,66 @@ static void femu_test_fid_effects_fdp(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * CC.CSS values CAP.CSS does not offer are reserved (Base 2.3, Figure 41), so
+ * enabling with one fails the controller instead of bringing it up; a reset
+ * then recovers it, and the NVM command set still comes up.
+ */
+static void femu_test_cc_css(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t csts = 0;
+    uint64_t cap;
+    uint8_t cap_css;
+    int css, waited, refused = 0;
+
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    qpci_device_enable(c.pdev);
+    c.bar = qpci_iomap(c.pdev, 0, NULL);
+    cap = qpci_io_readq(c.pdev, c.bar, 0x0);
+    cap_css = (cap >> 37) & 0xff;
+    g_assert_cmphex(cap_css & 0x1, ==, 0x1);
+
+    for (css = 0; css < 8; css++) {
+        uint32_t want = cap_css & (1 << css) ? NVME_CSTS_READY
+                                              : NVME_CSTS_FAILED;
+
+        qpci_io_writel(c.pdev, c.bar, 0x24,
+                       ((FEMU_QSIZE - 1) << 16) | (FEMU_QSIZE - 1));
+        qpci_io_writeq(c.pdev, c.bar, 0x28, c.admin.sq_addr);
+        qpci_io_writeq(c.pdev, c.bar, 0x30, c.admin.cq_addr);
+        qpci_io_writel(c.pdev, c.bar, 0x14,
+                       (6 << 16) | (4 << 20) | (css << 4) | 1);
+        for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+            csts = qpci_io_readl(c.pdev, c.bar, 0x1c);
+            if (csts & (NVME_CSTS_READY | NVME_CSTS_FAILED)) {
+                break;
+            }
+            g_usleep(1000);
+        }
+        g_assert_cmphex(csts & (NVME_CSTS_READY | NVME_CSTS_FAILED), ==, want);
+        refused += want == NVME_CSTS_FAILED;
+
+        qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+        for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+            csts = qpci_io_readl(c.pdev, c.bar, 0x1c);
+            if (!(csts & (NVME_CSTS_READY | NVME_CSTS_FAILED))) {
+                break;
+            }
+            g_usleep(1000);
+        }
+        g_assert_cmphex(csts & (NVME_CSTS_READY | NVME_CSTS_FAILED), ==, 0);
+    }
+    /* 001b to 101b are reserved whatever CAP.CSS says */
+    g_assert_cmpint(refused, >=, 5);
+
+    femu_queue_free(&c, &c.admin);
+    qpci_iounmap(c.pdev, c.bar);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -20883,6 +20943,7 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "subsys=fdpsub"
     });
+    qos_add_test("cc-css", "femu", femu_test_cc_css, NULL);
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "aerl=255"
