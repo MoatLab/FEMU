@@ -94,8 +94,9 @@ and a source map:
   [NoSSD](design/nossd.md) and [CXL SSD](design/cxl-ssd.md).
 
 The same pages, with figures, are collected in one PDF:
-[the FEMU Manual](femu-manual.pdf). The Markdown pages are the reference
-when the two differ.
+[the FEMU Manual](https://femu-ose.github.io/pdf/femu-manual.pdf), hosted on the
+[FEMU website](https://femu-ose.github.io/). The Markdown pages are the reference when the
+two differ.
 
 ## I want to measure or tune
 

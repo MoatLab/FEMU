@@ -1,12 +1,13 @@
 # FEMU - Fast, Accurate, and Extensible NVMe SSD Emulator
 
-**Join the FEMU community on [Discord](https://discord.gg/AgPTUJCw7)** for FEMU-related discussions, questions, and ideas. Everyone is welcome!
+**Website: [femu-ose.github.io](https://femu-ose.github.io/)** · **Join the FEMU community on [Discord](https://discord.gg/AgPTUJCw7)** for FEMU-related discussions, questions, and ideas. Everyone is welcome!
 
 [![FEMU Version](https://img.shields.io/badge/FEMU-v10.1-brightgreen)](https://github.com/MoatLab/FEMU/releases)
 [![Build Status](https://github.com/MoatLab/FEMU/workflows/CI/badge.svg)](https://github.com/MoatLab/FEMU/actions)
 [![License: GPL v2+](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
-[![Manual](https://img.shields.io/badge/Manual-PDF-red)](hw/femu/docs/femu-manual.pdf)
+[![Website](https://img.shields.io/badge/Website-femu--ose.github.io-blue)](https://femu-ose.github.io/)
+[![Manual](https://img.shields.io/badge/Manual-PDF-red)](https://femu-ose.github.io/pdf/femu-manual.pdf)
 
 ```
   ______ ______ __  __ _    _
@@ -19,7 +20,7 @@
 
 **FEMU** is a fast, accurate, scalable, and extensible NVMe SSD emulator based on QEMU/KVM. It enables full-system evaluation of storage systems and supports multiple SSD architectures for systems research.
 
-> **New to FEMU? Start with [The FEMU Manual (PDF)](hw/femu/docs/femu-manual.pdf).** One
+> **New to FEMU? Start with [The FEMU Manual (PDF)](https://femu-ose.github.io/pdf/femu-manual.pdf).** One
 > document covers building and running FEMU, its architecture and the design of each
 > component, every mode and feature, every parameter, measuring, troubleshooting and
 > contributing, with diagrams throughout.
@@ -51,7 +52,7 @@ Research and Innovation*.
 [Acknowledgments](#acknowledgments)
 
 The full documentation starts at the [doc map](hw/femu/docs/README.md), and the
-same pages are collected in [the FEMU Manual (PDF)](hw/femu/docs/femu-manual.pdf). What
+same pages are collected in [the FEMU Manual (PDF)](https://femu-ose.github.io/pdf/femu-manual.pdf). What
 changed since the last release is in the [changelog](hw/femu/docs/CHANGELOG.md).
 
 ## Overview
@@ -203,7 +204,7 @@ VM down.
 
 | I want to | Read |
 | --- | --- |
-| Read everything in one document | [The FEMU Manual (PDF)](hw/femu/docs/femu-manual.pdf) |
+| Read everything in one document | [The FEMU Manual (PDF)](https://femu-ose.github.io/pdf/femu-manual.pdf) |
 | Pick a mode for my experiment | [Choosing a mode](hw/femu/docs/concepts/choosing-a-mode.md) |
 | Set up one mode or feature | the guide linked from the [Features](#features) table |
 | Look up a property, counter or script | [properties](hw/femu/docs/reference/properties.md), [runtime properties](hw/femu/docs/reference/runtime-properties.md), [log pages and counters](hw/femu/docs/reference/log-pages-and-counters.md), [scripts](hw/femu/docs/reference/scripts.md) |
