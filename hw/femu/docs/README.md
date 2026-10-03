@@ -124,6 +124,8 @@ two differ.
   explains how the parts work together.
 - [Contributing](../../../CONTRIBUTING.md): style, tests, sign-off and pull
   requests.
+- [AI policy](ai-policy.md): using AI coding tools, disclosure with
+  `Assisted-by:`, and what is not allowed.
 - `hw/femu/scripts/gen-property-docs.py` regenerates the property reference,
   and `hw/femu/scripts/check-doc-links.py` checks that every relative link in
   the docs resolves. CI runs both.

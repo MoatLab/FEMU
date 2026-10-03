@@ -42,6 +42,16 @@ expected). Use `/* */` comments that explain why, not what.
 - Sign off each commit (`git commit -s`) to certify the
   [Developer Certificate of Origin](https://developercertificate.org/).
 
+## AI tools
+You may use AI coding tools; you are the author and are responsible for every
+line. Make sure you can explain each change without the tool, run the qtests,
+`make -C hw/femu/tests check` and `make -C hw/femu/tests check-docs`, and paste
+real output. Add `Assisted-by: <tool and model>` above `Signed-off-by` in each
+commit a tool helped write; only a person signs off. Open an issue first for a
+change of more than about 300 lines or one a tool mostly wrote. Agents must not
+open issues or pull requests on their own. Read the
+[AI policy](hw/femu/docs/ai-policy.md) for the full rules.
+
 ## Pull requests
 Complete the checklist in the pull request description, say which FEMU modes
 you tested, and link the issue. A maintainer will respond within 72 hours.

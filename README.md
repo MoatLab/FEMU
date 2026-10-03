@@ -39,7 +39,8 @@ Research and Innovation*.
 > regress. Please report bugs, regressions, and feature requests through
 > [GitHub Issues](https://github.com/MoatLab/FEMU/issues) or
 > [Discord](https://discord.gg/AgPTUJCw7). Contributions made with your own coding agents are
-> welcome too: feel free to submit pull requests.
+> welcome too: feel free to submit pull requests. Please read the
+> [AI policy](hw/femu/docs/ai-policy.md) first; AI-assisted commits carry an `Assisted-by:` line.
 
 ## Table of Contents
 

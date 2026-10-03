@@ -34,6 +34,15 @@ Brief description of changes made.
 - [ ] I have updated documentation if necessary
 - [ ] No trailing whitespace or C++ style comments in C files
 
+## AI assistance
+- [ ] No generative AI tool wrote or rewrote any part of this change.
+- [ ] An AI tool was used. Each affected commit has an `Assisted-by:` line, and
+      I describe below what the tool did and what I checked by hand.
+- [ ] I understand every line of this change and can explain it in review.
+- [ ] I ran the tests myself; the output quoted here is real and unedited.
+
+See the [AI policy](../hw/femu/docs/ai-policy.md). Tool use and what I verified (if applicable):
+
 ## Related Issues
 Fixes #(issue number)
 
