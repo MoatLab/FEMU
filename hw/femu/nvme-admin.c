@@ -3878,6 +3878,11 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
+    /* admin data is always moved by PRP over PCIe */
+    if (cmd->psdt != NVME_PSDT_PRP) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DIRECTIVE_SEND:
     case NVME_ADM_CMD_DIRECTIVE_RECV:

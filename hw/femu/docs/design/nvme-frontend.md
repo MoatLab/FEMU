@@ -372,6 +372,8 @@ Things to note:
   admin SQ; with more than `acl` of them waiting, the running one fails with
   Abort Command Limit Exceeded. A command queued behind an Abort on the admin
   queue can be aborted too.
+- **Admin commands use PRPs.** An admin command whose PSDT is not 00b fails
+  with Invalid Field in Command.
 
 ## Completion timing
 
@@ -630,6 +632,7 @@ registers with no guest. Cases that target this chapter include:
 | `aer-limit` | the AER limit |
 | `abort` | Abort leaves the SQ unwritten, aborts queued admin and I/O commands, and enforces ACL |
 | `cc-css` | an unoffered CC.CSS fails the enable |
+| `admin-psdt` | admin commands naming SGLs are refused |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |

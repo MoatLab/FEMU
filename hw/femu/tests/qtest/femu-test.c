@@ -19527,6 +19527,45 @@ static void femu_test_cc_css(void *obj, void *data, QGuestAllocator *alloc)
     qpci_iounmap(c.pdev, c.bar);
 }
 
+/*
+ * PRPs are used for every admin command over PCIe (Base 2.3, Figure 91), so an
+ * admin command naming SGLs in PSDT is an invalid field, whether or not it
+ * moves data.
+ */
+static void femu_test_admin_psdt(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeCmd cmd;
+    int psdt;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    for (psdt = 1; psdt < 4; psdt++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.flags = psdt << 6;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(1);
+        g_assert_cmphex(femu_admin(&c, &cmd), ==,
+                        NVME_INVALID_FIELD | NVME_DNR);
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.flags = psdt << 6;
+        cmd.cdw10 = cpu_to_le32(NVME_NUMBER_OF_QUEUES);
+        g_assert_cmphex(femu_admin(&c, &cmd), ==,
+                        NVME_INVALID_FIELD | NVME_DNR);
+    }
+    /* the same commands with PRPs still work */
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -20944,6 +20983,7 @@ static void femu_register_nodes(void)
             "subsys=fdpsub"
     });
     qos_add_test("cc-css", "femu", femu_test_cc_css, NULL);
+    qos_add_test("admin-psdt", "femu", femu_test_admin_psdt, NULL);
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "aerl=255"
