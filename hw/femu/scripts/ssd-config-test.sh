@@ -30,9 +30,9 @@ ok()   { echo "  PASS  $*"; pass=$((pass + 1)); }
 bad()  { echo "  FAIL  $*"; fail=$((fail + 1)); }
 
 # QEMU checks -device properties before it realizes the device, so a bad property
-# or a mis-escaped comma is reported whatever the host can actually support. A
-# later failure -- no KVM, say -- means the arguments themselves were fine,
-# which is all this is testing.
+# or a mis-escaped comma is reported whatever the host can actually support.
+# With -S and no accelerator a device that realizes keeps QEMU waiting until the
+# timeout; one that refuses at realize makes QEMU exit at once with a message.
 #
 # But "no property error in the output" is not the same as "the device came up".
 # This used to decide purely by grepping, so a binary that died on a signal, an
@@ -40,8 +40,8 @@ bad()  { echo "  FAIL  $*"; fail=$((fail + 1)); }
 # no property error, and the exit status was never looked at. Report those as
 # their own outcome instead of silently counting them as success.
 #
-# Prints one word on the first line: ok, rejected, or crashed, followed by a tab
-# and the evidence.
+# Prints one word on the first line: ok, rejected, refused or crashed, followed
+# by a tab and the evidence.
 # what a crash looks like, and what a refused argument looks like
 CRASH_RE="Sanitizer|runtime error:|Assertion.*failed|core dumped"
 CRASH_MSG_RE="Sanitizer|runtime error:|Assertion|Aborted|Trace"
@@ -73,6 +73,13 @@ check_args() {
         printf 'rejected\t%s\n' "$(grep -m1 -E "$REJECT_MSG_RE" <<<"$out")"
         return
     fi
+    # Accepted names say nothing about the values: only a QEMU still running at
+    # the timeout has realized the device.
+    if (( rc != 124 )); then
+        printf 'refused\t%s\n' "$(grep -m1 'qemu-system' <<<"$out" \
+                                   || echo "exit status $rc, no message")"
+        return
+    fi
     printf 'ok\t\n'
 }
 
@@ -92,6 +99,8 @@ for conf in "$HERE"/configs/*.conf; do
         ok)       ok "$name" ;;
         rejected) bad "$name (QEMU rejected the arguments)"
                   echo "        $(evidence "$out")" ;;
+        refused)  bad "$name (the device refused the configuration)"
+                  echo "        $(evidence "$out")" ;;
         crashed)  bad "$name (QEMU did not survive the arguments)"
                   echo "        $(evidence "$out")" ;;
     esac
@@ -105,6 +114,14 @@ if [[ "$(verdict "$(check_args "$bogus")")" == rejected ]]; then
 else
     bad "a bogus property is detected -- the acceptance check is not working, \
 so the results above mean nothing"
+fi
+refusal="-device femu,id=nvme0,devsz_mb=512,femu_mode=3,zns_num_ch=2"
+refusal="$refusal,zns_num_lun=4,zns_num_plane=2,zns_num_blk=32"
+refusal="$refusal,zns_max_active=32"
+if [[ "$(verdict "$(check_args "$refusal")")" == refused ]]; then
+    ok "a configuration the device refuses at realize is detected"
+else
+    bad "a configuration the device refuses at realize is detected"
 fi
 unescaped="-device femu,id=nvme0,devsz_mb=6144,namespaces=3,femu_mode=1"
 unescaped="$unescaped,namespace_modes=bbssd,znssd,nossd"

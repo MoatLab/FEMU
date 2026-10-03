@@ -101,7 +101,7 @@ instead of off.
 | Script | What it does |
 | --- | --- |
 | `ssd-config.sh CONFIG [--device-only \| --check]` | Expands an INI-style file into `-device femu,...` arguments (and a `-device femu-subsys,...` for a `[subsys]` section). Keys are device property names; `mode = bbssd` and the like stand for `femu_mode`. With `--device-only` it omits the `-device` words; with `--check` it only validates. It checks keys against `-device femu,help` of the binary in `FEMU_BIN`, or of `build-femu/`, `build/` or `build-official/` under the source tree. |
-| `ssd-config-test.sh [QEMU]` | Expands every file in `configs/` and starts QEMU with each, and checks that the parser rejects bad input. The binary is the argument, `FEMU_BIN`, or the first one found as above. CI runs it. |
+| `ssd-config-test.sh [QEMU]` | Expands every file in `configs/`, starts QEMU with each and requires the device to come up, and checks that the parser rejects bad input. The binary is the argument, `FEMU_BIN`, or the first one found as above. CI runs it. |
 
 The files in `configs/`:
 
@@ -113,7 +113,7 @@ The files in `configs/`:
 | `heterogeneous.conf` | One controller with a BlackBox, a ZNS and a NoSSD namespace |
 | `qlc.conf` | BlackBox with QLC per-page-type timing |
 | `write-buffer.conf` | BlackBox with a 2048-page write buffer, `vwc=1` and Write Zeroes |
-| `zns.conf` | ZNS, 16 zones of 256 MiB |
+| `zns.conf` | ZNS, 16 zones of 256 MiB, at most 16 active and 8 open |
 
 Run it from `build-femu/` with `FEMU_BIN` set. Through the
 `../femu-scripts` link the script cannot find the binary on its own, and
