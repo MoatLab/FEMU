@@ -432,6 +432,7 @@ enum NvmeCapShift {
     CAP_OC_SHIFT        = 44,
     CAP_MPSMIN_SHIFT    = 48,
     CAP_MPSMAX_SHIFT    = 52,
+    CAP_CRMS_SHIFT      = 59,
 };
 
 enum NvmeCapMask {
@@ -445,6 +446,7 @@ enum NvmeCapMask {
     CAP_OC_MASK        = 0x1,
     CAP_MPSMIN_MASK    = 0xf,
     CAP_MPSMAX_MASK    = 0xf,
+    CAP_CRMS_MASK      = 0x3,
 };
 
 #define NVME_MAX_QS PCI_MSIX_FLAGS_QSIZE
@@ -470,6 +472,7 @@ enum NvmeCapMask {
 #define NVME_CAP_OC12(cap)  (((cap) >> CAP_Oc12SHIFT) & CAP_Oc12MASK)
 #define NVME_CAP_MPSMIN(cap)(((cap) >> CAP_MPSMIN_SHIFT) & CAP_MPSMIN_MASK)
 #define NVME_CAP_MPSMAX(cap)(((cap) >> CAP_MPSMAX_SHIFT) & CAP_MPSMAX_MASK)
+#define NVME_CAP_CRMS(cap)  (((cap) >> CAP_CRMS_SHIFT)   & CAP_CRMS_MASK)
 
 #define NVME_CAP_SET_MQES(cap, val)   (cap |= (uint64_t)(val & CAP_MQES_MASK)  \
                                                            << CAP_MQES_SHIFT)
@@ -491,6 +494,14 @@ enum NvmeCapMask {
                                                            << CAP_MPSMIN_SHIFT)
 #define NVME_CAP_SET_MPSMAX(cap, val) (cap |= (uint64_t)(val & CAP_MPSMAX_MASK)\
                                                             << CAP_MPSMAX_SHIFT)
+#define NVME_CAP_SET_CRMS(cap, val)   (cap |= (uint64_t)(val & CAP_CRMS_MASK) \
+                                                            << CAP_CRMS_SHIFT)
+
+/* CAP.CRMS: Controller Ready With Media Support */
+#define NVME_CAP_CRMS_CRWMS     0x1
+
+/* Controller Ready Timeouts register */
+#define NVME_REG_CRTO           0x68
 enum NvmeCsi {
     NVME_CSI_NVM                = 0x00,
     NVME_CSI_KV                 = 0x01,
@@ -1240,6 +1251,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_CS_NS_PRESENT_LIST    = 0x1a,
     NVME_ID_CNS_CS_NS_PRESENT         = 0x1b,
     NVME_ID_CNS_IO_COMMAND_SET        = 0x1c,
+    NVME_ID_CNS_NS_CS_INDEP_PRESENT   = 0x1f,
 };
 
 typedef struct QEMU_PACKED NvmeIdCtrl {
@@ -1259,7 +1271,8 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint32_t    oaes;
     uint32_t    ctratt;
     uint16_t    rrls;
-    uint8_t     rsvd102[9];
+    uint8_t     bpcap;
+    uint8_t     rsvd103[8];
     uint8_t     cntrltype;
     uint8_t     fguid[16];
     uint8_t     rsvd128[128];

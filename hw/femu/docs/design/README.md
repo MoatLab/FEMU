@@ -89,7 +89,7 @@ the same FTL and NAND timing code, each device with its own instance.
  QEMU PROCESS          v                                           v
  +-------------------------------------------+  +--------------------------------------+
  | 1. INTERFACE   -device femu               |  | 1. INTERFACE   -device femu-cxl-ssd  |
- |    PCIe NVMe controller, NVMe 1.4         |  |    CXL Type-3 volatile memory,       |
+ |    PCIe NVMe controller, NVMe 2.1         |  |    CXL Type-3 volatile memory,       |
  |    BAR0 registers + doorbells             |  |    subclass of cxl-type3             |
  |    BAR4 MSI-X, MSI, pin; BAR2 CMB         |  |    I/O overlay "femu-cxl-media" on   |
  |  -device femu-subsys (optional)           |  |    each reachable CXL window         |

@@ -704,13 +704,13 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
     }
 
     /*
-     * This structure describes the namespace's size and format, which an active
-     * namespace has whatever command set it runs, and which a host needs before
-     * it can attach the namespace and ask for the command-set-specific pages
-     * below. Report it for any active namespace rather than only for the command
-     * sets built on the NVM one, otherwise a namespace of another kind cannot be
-     * attached at all. CNS 00h does not use the CSI field.
+     * CNS 00h belongs to the NVM Command Set and the sets built on it; Base
+     * 2.0 prohibits it for any other (Figure 273 note 11). A host reads such
+     * a namespace's size and format from CNS 08h instead.
      */
+    if (ns->csi != NVME_CSI_NVM && ns->csi != NVME_CSI_ZONED) {
+        return NVME_INVALID_CMD_SET | NVME_DNR;
+    }
     return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
 }
 
@@ -889,8 +889,19 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd,
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
+    /*
+     * A set that is not supported is refused, and for the active list
+     * (5.2.13.2.7, not 1Ah) also one that is not enabled. The one
+     * combination FEMU offers enables every set when CC.CSS selects by CSI,
+     * and only NVM under CC.CSS 000b.
+     */
     if (c->csi != NVME_CSI_NVM && c->csi != NVME_CSI_ZONED &&
         c->csi != NVME_CSI_KV) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (!present && NVME_CC_CSS(n->bar.cc) != NVME_CC_CSS_CSI &&
+        (c->csi != NVME_CSI_NVM ||
+         NVME_CC_CSS(n->bar.cc) == NVME_CC_CSS_ADMIN_ONLY)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -947,7 +958,8 @@ static void nvme_ns_uuid(FemuCtrl *n, NvmeNamespace *ns, uint8_t *uuid)
  * asks for it first and takes readiness, sharing and the endurance group from
  * it, so NRDY has to be set.
  */
-static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
+                                          bool present)
 {
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
@@ -956,8 +968,16 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd)
     if (!nsid || (nsid != NVME_NSID_BROADCAST && !nvme_nsid_valid(n, nsid))) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* CNS 1Fh, mandatory with Namespace Management from 2.1 (5.2.13.2.20) */
+    if (present && nsid == NVME_NSID_BROADCAST) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
 
-    ns = nsid == NVME_NSID_BROADCAST ? NULL : nvme_ns(n, nsid);
+    if (nsid == NVME_NSID_BROADCAST) {
+        ns = NULL;
+    } else {
+        ns = present ? nvme_ns_allocated(n, nsid) : nvme_ns(n, nsid);
+    }
     if (ns) {
         id[0] = n->vwc ? 0 : 1 << 5;        /* NSFEAT.VWCNP */
         id[1] = ns->id_ns.nmic;
@@ -1087,7 +1107,9 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_ID_CNS_CTRL_LIST:
         return nvme_identify_ctrl_list(n, cmd, false);
     case NVME_ID_CNS_NS_CS_INDEP:
-        return nvme_identify_ns_cs_indep(n, cmd);
+        return nvme_identify_ns_cs_indep(n, cmd, false);
+    case NVME_ID_CNS_NS_CS_INDEP_PRESENT:
+        return nvme_identify_ns_cs_indep(n, cmd, true);
     case NVME_ID_CNS_NS:
         return nvme_identify_ns(n, cmd, false);
     case NVME_ID_CNS_NS_PRESENT:
@@ -2949,6 +2971,14 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     /* a page log 00h lists for no command set is not answered */
     if (!nvme_log_answered(n, lid)) {
         return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+
+    /* the pages that depend on CSI name a set this controller knows (Fig 268) */
+    if ((lid == NVME_LOG_SUPPORTED || lid == NVME_LOG_CMD_EFFECTS ||
+         lid == NVME_LOG_FID_EFFECTS) &&
+        NVME_CC_CSS(n->bar.cc) == NVME_CC_CSS_CSI &&
+        csi != NVME_CSI_NVM && csi != NVME_CSI_KV && csi != NVME_CSI_ZONED) {
+        return NVME_IOCS_NOT_SUPPORTED | NVME_DNR;
     }
 
     switch (lid) {

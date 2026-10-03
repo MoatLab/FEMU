@@ -49,13 +49,15 @@ vectors at config offset 0x50, a PCIe capability at 0x80, and MSI-X with
 ```text
  BAR0, reg_size bytes
  offset   register   FEMU behaviour
- 0x0000   CAP        MQES = entries, CQR = cqr, AMS = 1, TO = 0xf, DSTRD = stride,
+ 0x0000   CAP        MQES = entries, CQR = cqr, AMS = 0, TO = 0xf, DSTRD = stride,
                      NSSRS = 0, CSS = NVM + I/O command sets by CSI,
-                     MPSMIN = mpsmin, MPSMAX = mpsmax                      read only
- 0x0008   VS         0x00010400 (1.4)                                      read only
+                     MPSMIN = mpsmin, MPSMAX = mpsmax,
+                     CRMS = CRWMS (not with OCSSD)                         read only
+ 0x0008   VS         0x00020100 (2.1); 0x00010400 (1.4) with OCSSD         read only
  0x000c   INTMS      set interrupt mask bits (MSI and pin; ignored with MSI-X)
  0x0010   INTMC      clear interrupt mask bits; a held MSI is sent when unmasked
- 0x0014   CC         EN, SHN, MPS, IOSQES, IOCQES; see the state machine below
+ 0x0014   CC         EN, SHN, MPS, IOSQES, IOCQES, CSS; AMS must be 0 (round
+                     robin); see the state machine below
  0x001c   CSTS       RDY, CFS, SHST                                        read only
  0x0020   NSSR       reads 0; writes ignored (no subsystem reset)
  0x0024   AQA        admin ASQS and ACQS, 1..4095 (0's based): 2..4096 entries
@@ -63,6 +65,7 @@ vectors at config offset 0x50, a PCIe capability at 0x80, and MSI-X with
  0x0030   ACQ        admin CQ base, 64 bits, may be written as two dwords
  0x0038   CMBLOC     cmbloc                                                read only
  0x003c   CMBSZ      cmbsz                                                 read only
+ 0x0068   CRTO       CRWMT = CAP.TO, CRIMT = 0 (reads 0 with OCSSD)        read only
  0x1000   doorbells: DB = 4 << stride bytes
           0x1000 + (2 * qid)     * DB   SQ qid tail
           0x1000 + (2 * qid + 1) * DB   CQ qid head
@@ -509,7 +512,10 @@ and leaves Read and Write out for Open-Channel 1.2, which refuses them. A
 command set with no namespace reports what a namespace of it would handle.
 The admin entries add the commands of the controller's mode: BBSSD 0xEF, the
 Open-Channel and CSD admin commands. `nvme_caps_id_ctrl()` fills OACS, ONCS, OCFS, LPA and SANICAP
-from those three each time Identify Controller is answered.
+from those three each time Identify Controller is answered. LPA bit 5 stays
+clear: setting it would oblige a Command Scope in every log 05h entry, and
+Linux warns about any I/O entry bit beyond CSUPP and LBCC as an unusual
+effect.
 
 Logs 05h and 00h are built from the same functions, and `nvme_io_cmd()` runs
 an optional NVM command (Compare, Dataset Management, Write Zeroes, Copy,
@@ -560,7 +566,7 @@ Namespace Management.
 | Commands Supported and Effects | 05h | per command set (NVM, zoned, KV) |
 | Device Self-test | 06h | tests complete at once |
 | Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: header only |
-| Endurance Group | 09h | with `femu-subsys` |
+| Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID) with it |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
 | LBA Status | 0Eh | |
 | Feature Identifiers Supported and Effects | 12h | built from the check Get and Set Features use; per command set (CSI) when CC.CSS is 110b |
@@ -572,7 +578,9 @@ Namespace Management.
 | FEMU media counters | C0h | WAF and FTL counters |
 
 Get Log Page refuses an id that log 00h lists for no command set with
-Invalid Log Page (`nvme_log_answered()`). The one exception is the FDP pages
+Invalid Log Page (`nvme_log_answered()`). Logs 00h, 05h and 12h refuse a
+CSI other than NVM, KV and zoned with I/O Command Set Not Supported when
+CC.CSS selects by CSI. The one exception is the FDP pages
 on a controller with a subsystem: while FDP is off they are not listed but
 still answer, with FDP Disabled.
 
@@ -683,8 +691,10 @@ registers with no guest. Cases that target this chapter include:
 | `media-dnr` | Unrecovered Read and Compare Failure set DNR |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `frmw` | FRMW and the firmware slot log agree |
-| `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for |
+| `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for; VS, CAP.CRMS, CRTO and BPCAP match the reported version (2.1, or 1.4 for Open-Channel), CAP.AMS is 0, and LPA bit 5 and every command scope are clear |
 | `ns-mgmt-before-identify` | a managed bbssd namespace is addressed correctly before the host reads Identify Controller |
+| `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
+| `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 

@@ -19527,13 +19527,10 @@ static void femu_test_fid_effects_kv(void *obj, void *data,
     g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]), ==, 0);
     g_assert_cmphex(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE]) & 1, ==, 1);
 
-    /* a command set there is none of has only the common features */
+    /* a command set the controller does not have (Figure 321) */
     g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0x07,
-                                     buf, sizeof(fis), 0), ==, NVME_SUCCESS);
-    qtest_memread(qts, buf, fis, sizeof(fis));
-    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]), ==, 0);
-    g_assert_cmphex(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE]), ==, 0);
-    g_assert_cmphex(le32_to_cpu(fis[NVME_ARBITRATION]) & 1, ==, 1);
+                                     buf, sizeof(fis), 0), ==,
+                    NVME_IOCS_NOT_SUPPORTED);
 
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -20192,6 +20189,186 @@ static void femu_caps_sgl(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
     }
 }
 
+/*
+ * What the reported version obliges. A 2.1 controller sets CAP.CRMS.CRWMS and
+ * answers CRTO (Base 2.0c, Figure 36 and 3.1.3.21), and reports BPCAP bits
+ * 1:0 as 01b, since 00b is only for 2.0 and earlier (Base 2.3, Figure 328).
+ * Open-Channel has no NVM Read or Write and stays at 1.4, where these are
+ * reserved. LPA bit 5 stays clear, which leaves log 05h without the scopes
+ * that Linux would report as unusual effects. No configuration claims
+ * weighted round robin, which nothing arbitrates by.
+ */
+static void femu_caps_version(FemuCtrlState *c, FemuCaps *k, bool ocssd)
+{
+    uint64_t cap = qpci_io_readq(c->pdev, c->bar, 0x0);
+    uint32_t vs = qpci_io_readl(c->pdev, c->bar, 0x8);
+    uint32_t crto = qpci_io_readl(c->pdev, c->bar, 0x68);
+    uint8_t bpcap = ((uint8_t *)&k->id)[102];
+    uint32_t want = ocssd ? 0x00010400 : 0x00020100;
+    bool v2 = !ocssd;
+
+    if (vs != want || le32_to_cpu(k->id.ver) != want) {
+        femu_caps_bad(k, "VS is 0x%x, Identify VER 0x%x; expected 0x%x", vs,
+                      le32_to_cpu(k->id.ver), want);
+    }
+    if (((cap >> 59) & 0x3) != (v2 ? 0x1 : 0)) {
+        femu_caps_bad(k, "CAP.CRMS is 0x%x", (uint32_t)(cap >> 59) & 0x3);
+    }
+    if (crto != (v2 ? ((cap >> 24) & 0xff) : 0)) {
+        femu_caps_bad(k, "CRTO is 0x%x with CAP.TO 0x%x", crto,
+                      (uint32_t)(cap >> 24) & 0xff);
+    }
+    if (bpcap != (v2 ? 0x1 : 0)) {
+        femu_caps_bad(k, "BPCAP is 0x%x", bpcap);
+    }
+    femu_caps_bit(k, "CAP.AMS", 1, (cap >> 17) & 0x3, false);
+    femu_caps_bit(k, "LPA bit 5", 1 << 5, k->id.lpa & (1 << 5), false);
+    for (int i = 0; i < 256; i++) {
+        if (le32_to_cpu(k->acs[i]) >> 20) {
+            femu_caps_bad(k, "admin 0x%02x has a scope", i);
+        }
+        for (int j = 0; j < FEMU_CAPS_NCSI; j++) {
+            if (le32_to_cpu(k->iocs[j][i]) >> 20) {
+                femu_caps_bad(k, "I/O 0x%02x of set %d has a scope", i, j);
+            }
+        }
+    }
+}
+
+/*
+ * What a 2.x controller refuses (Base 2.3): a CC.AMS that CAP.AMS does not
+ * offer, Identify CNS 00h for a Key Value namespace (Invalid I/O Command Set,
+ * 5.2.13.2.1), a CSI-specific log page for a set the controller does not
+ * have (I/O Command Set Not Supported, Figure 321), and the CSI-specific
+ * namespace list for a set CC.CSS does not enable (5.2.13.2.7).
+ */
+static void femu_test_v2_refusals(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *pdev = &femu->dev;
+    FemuCtrlState c = { .pdev = pdev, .alloc = alloc };
+    uint32_t cc_nvm = (6 << 16) | (4 << 20) | 1;
+    uint32_t cc_csi = cc_nvm | (FEMU_CC_CSS_CSI << 4);
+    uint32_t csts = 0;
+    uint64_t buf;
+    int waited;
+
+    /* round robin is the only arbitration offered */
+    femu_queue_init(&c, &c.admin, 0);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    qpci_io_writel(pdev, c.bar, 0x24, ((FEMU_QSIZE - 1) << 16) |
+                   (FEMU_QSIZE - 1));
+    qpci_io_writeq(pdev, c.bar, 0x28, c.admin.sq_addr);
+    qpci_io_writeq(pdev, c.bar, 0x30, c.admin.cq_addr);
+    qpci_io_writel(pdev, c.bar, 0x14, cc_csi | (1 << 11));
+    for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+        csts = qpci_io_readl(pdev, c.bar, 0x1c);
+        if (csts & (NVME_CSTS_READY | NVME_CSTS_FAILED)) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmphex(csts & (NVME_CSTS_READY | NVME_CSTS_FAILED), ==,
+                    NVME_CSTS_FAILED);
+    femu_disable(&c);
+
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, alloc, cc_csi);
+    buf = guest_alloc(alloc, 4096);
+
+    /* namespaces 1, 2 and 3 run NVM, Zoned and Key Value */
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_identify(&c, 2, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_identify(&c, 3, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_INVALID_IOCS);
+    g_assert_cmphex(femu_identify(&c, 3, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, FEMU_CSI_KV,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, 0x3, buf, 1024,
+                                     0), ==, NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_get_log_csi(&c, 0x05, 0x3, buf, 4096, 0), ==,
+                    NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+
+    /* with CC.CSS 000b only the NVM Command Set is enabled */
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, alloc, cc_nvm);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)NVME_CSI_NVM << 24, buf), ==,
+                    NVME_SUCCESS);
+    /* the allocated list (1Ah) asks only that the set be supported */
+    g_assert_cmphex(femu_identify(&c, 0, 0x1a, (uint32_t)FEMU_CSI_KV << 24,
+                                  buf), ==, NVME_SUCCESS);
+
+    /* CNS 1Fh: CNS 08h for an allocated NSID, never the broadcast one */
+    qtest_memset(c.pdev->bus->qts, buf, 0, 4096);
+    g_assert_cmphex(femu_identify(&c, 3, 0x1f, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(c.pdev->bus->qts, buf + 14), ==, 0x1);
+    g_assert_cmphex(femu_identify(&c, 0xffffffff, 0x1f, 0, buf), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmphex(femu_identify(&c, 0, 0x1f, 0, buf), ==,
+                    NVME_INVALID_NSID);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A subsystem has one endurance group, which log 09h reports whether or not
+ * FDP is on: Identify Controller and every namespace have to say so as well,
+ * a Key Value namespace in its own Identify structure too (KV 1.3, Figure 41).
+ */
+static void femu_test_endgrp_reported(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeIdCtrl id;
+    NvmeIdNs ns;
+    uint8_t indep[4096];
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_ENDGRPS, ==,
+                    NVME_CTRATT_ENDGRPS);
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_FDPS, ==, 0);
+    g_assert_cmpuint(le16_to_cpu(id.endgidmax), ==, 1);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &ns, sizeof(ns));
+    g_assert_cmpuint(le16_to_cpu(ns.endgid), ==, 1);
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        g_assert_cmphex(femu_identify(&c, nsid, FEMU_CNS_NS_CS_INDEP, 0, buf),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, indep, sizeof(indep));
+        g_assert_cmpuint(indep[12] | indep[13] << 8, ==, 1);
+    }
+    g_assert_cmphex(femu_identify(&c, 2, NVME_ID_CNS_CS_NS,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 46), ==, 1);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     const FemuCapsCfg *cfg = data;
@@ -20215,6 +20392,7 @@ static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
         femu_caps_entries(k, "log", k->lids[i]);
     }
     femu_caps_identify(&c, k, buf);
+    femu_caps_version(&c, k, g_str_has_prefix(cfg->name, "caps-oc"));
     /* the masks the configuration asks for, independent of the registry */
     if ((le16_to_cpu(k->id.oncs) & 0x19f) != cfg->oncs) {
         femu_caps_bad(k, "ONCS is 0x%x; the configuration asks for 0x%x",
@@ -22104,6 +22282,17 @@ static void femu_register_nodes(void)
             /* each FTL holds 48 MiB, less than the end of namespace 2 */
             "ns_mgmt=on,namespaces=2,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=48,pls_per_lun=1,luns_per_ch=4,nchs=4",
+    });
+    qos_add_test("v2-refusals", "femu", femu_test_v2_refusals,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,namespaces=3,"
+            "namespace_modes=bbssd,,znssd,,kvssd," FEMU_CAPS_GEO,
+    });
+    qos_add_test("endgrp-reported", "femu", femu_test_endgrp_reported,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=nssub,namespaces=2,"
+            "namespace_modes=bbssd,,kvssd," FEMU_CAPS_GEO,
+        .before = femu_ns_subsys_before,
     });
     for (int i = 0; i < ARRAY_SIZE(femu_caps_cfgs); i++) {
         qos_add_test(femu_caps_cfgs[i].name, "femu", femu_test_caps,

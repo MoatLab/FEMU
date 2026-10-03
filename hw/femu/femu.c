@@ -11,7 +11,18 @@
 #include "./bbssd/ftl.h"
 #include "./femu-props.h"
 
-#define NVME_SPEC_VER (0x00010400)
+/*
+ * Base 2.1: FEMU already reports fields 2.0 reserves (ONCS bit 9, Copy format
+ * 2h, FDP). OCSSD has no NVM Read or Write, so it cannot claim the NVM
+ * Command Set of a 2.x controller and stays at 1.4.
+ */
+#define NVME_SPEC_VER           (0x00020100)
+#define NVME_SPEC_VER_OCSSD     (0x00010400)
+
+static uint32_t nvme_spec_ver(FemuCtrl *n)
+{
+    return OCSSD(n) ? NVME_SPEC_VER_OCSSD : NVME_SPEC_VER;
+}
 
 /* ========== NVMe Subsystem (femu-subsys) QOM Device ========== */
 
@@ -616,6 +627,10 @@ static int nvme_start_ctrl(FemuCtrl *n)
     if (!(NVME_CAP_CSS(n->bar.cap) & (1 << NVME_CC_CSS(n->bar.cc)))) {
         return -1;
     }
+    /* only round robin, which CAP.AMS does not need to list */
+    if (NVME_CC_AMS(n->bar.cc)) {
+        return -1;
+    }
 
     n->page_bits = page_bits;
     n->page_size = 1 << n->page_bits;
@@ -776,6 +791,13 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr < sizeof(n->bar)) {
         memcpy(&val, ptr + addr, MIN(size, sizeof(n->bar) - addr));
+    } else if (addr >= NVME_REG_CRTO && addr < NVME_REG_CRTO + 4 &&
+               NVME_CAP_CRMS(n->bar.cap)) {
+        /* CRWMT, in CAP.TO's 500 ms units; CRIMT is 0, as CRIMS is clear */
+        uint32_t crto = NVME_CAP_TO(n->bar.cap);
+
+        memcpy(&val, (uint8_t *)&crto + (addr - NVME_REG_CRTO),
+               MIN(size, NVME_REG_CRTO + 4 - addr));
     }
 
     return val;
@@ -1170,6 +1192,8 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
                            (n->extended << 4);
     id_ns->nmic          = nvme_ns_shared(n) ? 1 : 0;
+    /* a subsystem has one endurance group, which holds every namespace */
+    id_ns->endgid        = cpu_to_le16(n->subsys ? 1 : 0);
     id_ns->mc            = n->mc;
     id_ns->dpc           = n->pi ? (n->meta >= 8 ? 0x1f : 0) : n->dpc;
     id_ns->dps           = n->dps;
@@ -1695,13 +1719,19 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[2]      = 0xb3;
     id->cmic         = nvme_ns_shared(n) ? 2 : 0;
     id->mdts         = n->mdts;
-    id->ver          = NVME_SPEC_VER;
+    id->ver          = cpu_to_le32(nvme_spec_ver(n));
+    /* RPMB Boot Partition Write Protection: 00b is only for 2.0 and earlier */
+    id->bpcap        = nvme_spec_ver(n) >= 0x00020100 ? 0x1 : 0;
     /* OACS, ONCS, OCFS, LPA and SANICAP: nvme_caps_id_ctrl() at realize */
 
-    /* FDP: set Controller Attributes for FDP support */
-    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
-        id->ctratt = cpu_to_le32(NVME_CTRATT_ENDGRPS | NVME_CTRATT_FDPS);
-        /* the subsystem's one endurance group, which every namespace is in */
+    /*
+     * The subsystem's one endurance group, which every namespace is in and
+     * log 09h reports; FDP is a property of that group.
+     */
+    if (n->subsys) {
+        id->ctratt = cpu_to_le32(NVME_CTRATT_ENDGRPS |
+                                 (n->subsys->endgrp.fdp.enabled ?
+                                  NVME_CTRATT_FDPS : 0));
         id->endgidmax = cpu_to_le16(1);
     }
 
@@ -1743,7 +1773,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->bar.cap = 0;
     NVME_CAP_SET_MQES(n->bar.cap, n->max_q_ents);
     NVME_CAP_SET_CQR(n->bar.cap, n->cqr);
-    NVME_CAP_SET_AMS(n->bar.cap, 1);
+    /* no weighted round robin: submission queues are served in turn */
+    NVME_CAP_SET_AMS(n->bar.cap, 0);
     NVME_CAP_SET_TO(n->bar.cap, 0xf);
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
@@ -1753,8 +1784,12 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
+    /* 2.x: CC.EN=1 waits for the media; CRTO below gives how long */
+    if (nvme_spec_ver(n) >= 0x00020000) {
+        NVME_CAP_SET_CRMS(n->bar.cap, NVME_CAP_CRMS_CRWMS);
+    }
 
-    n->bar.vs = NVME_SPEC_VER;
+    n->bar.vs = nvme_spec_ver(n);
     n->bar.intmc = n->bar.intms = 0;
     /* n->temperature comes from the device property; do not overwrite it */
 }

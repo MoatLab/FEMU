@@ -72,8 +72,10 @@ with a single FDP configuration when the subsystem is realized:
 When a controller joins, `nvme_ns_init_fdp()` gives namespace 1 every
 handle in order: placement handle `i` is RUH `i`, the namespace's ENDGID is
 1, and each handle's RUAMW starts at a full unit. The controller then sets
-CTRATT bits 4 (Endurance Groups) and 19 (FDP) and ENDGIDMAX = 1, and the
-effects log lists I/O Management Send and Receive.
+CTRATT bit 19 (FDP), and the effects log lists I/O Management Send and
+Receive. CTRATT bit 4 (Endurance Groups), ENDGIDMAX = 1 and each
+namespace's ENDGID = 1 come with any subsystem, FDP or not, since its one
+endurance group is what log 09h reports.
 
 The BlackBox side (`bb.c`, `ftl-fdp.c`) adds the following, for a CSD
 namespace as for a bbssd one, since CSD runs the same FTL

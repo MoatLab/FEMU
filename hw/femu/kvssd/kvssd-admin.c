@@ -33,7 +33,13 @@ typedef struct QEMU_PACKED NvmeIdNsKv {
     uint8_t  kvfc;                      /* KV format capabilities: [3:0]=format index */
     uint8_t  rsvd30[2];
     uint32_t novg;                      /* optimal value granularity */
-    uint8_t  rsvd36[36];               /* ANAGRPID..EUI64 (unsupported -> 0) */
+    uint32_t anagrpid;
+    uint8_t  rsvd40[3];
+    uint8_t  nsattr;
+    uint16_t nvmsetid;
+    uint16_t endgid;
+    uint8_t  nguid[16];
+    uint8_t  eui64[8];
     NvmeKvFormat kvf[16];              /* bytes 72..327: KV Format 0..15 */
     uint8_t  rsvd328[3512];
     uint8_t  vs[256];
@@ -53,6 +59,7 @@ QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrlKv) != 4096);
 QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsKv, nsze) != 0);
 QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsKv, nkvf) != 25);
 QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsKv, kvfc) != 29);
+QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsKv, endgid) != 46);
 QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsKv, kvf) != 72);
 
 static void kvssd_fill_id_ns(FemuKvssdState *s, NvmeIdNsKv *id)
@@ -82,6 +89,9 @@ uint16_t kvssd_identify_ns_csi(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     qemu_mutex_lock(&s->lock);
     kvssd_fill_id_ns(s, &id);
     qemu_mutex_unlock(&s->lock);
+    /* the same sharing and endurance group CNS 08h reports */
+    id.nmic = ns->id_ns.nmic;
+    id.endgid = ns->id_ns.endgid;
     return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
 }
 

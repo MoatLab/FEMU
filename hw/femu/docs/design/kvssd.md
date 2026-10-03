@@ -171,7 +171,11 @@ namespace does not change, which is what the specification asks.
 Admin side (`hw/femu/kvssd/kvssd-admin.c`): Identify with CSI 01h answers the
 I/O command set specific Namespace and Controller structures and the format
 query (CNS 0Ah); there is one KV format with a 16-byte key, a 2 MiB value
-and the key limit above. Set and Get Features 20h (Key Value Configuration)
+and the key limit above. Identify CNS 00h belongs to the NVM Command Set, so
+for a KV namespace it fails with Invalid I/O Command Set. A host reads the
+common attributes and readiness from CNS 08h, as Linux does, and the size
+and format from the KV structure above, which reports the same NMIC and
+ENDGID. Set and Get Features 20h (Key Value Configuration)
 read and write EDNEK.
 
 ## Store, step by step

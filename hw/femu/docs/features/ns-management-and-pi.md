@@ -161,8 +161,9 @@ of a full CQ. Detach retires only the selected controllers. Reset preserves
 attachments. Transport removal stops its workers and drops its attachments
 without releasing the subsystem's namespaces.
 
-CNS 10h/11h describe the common allocated set. CNS 02h describes the issuing
-controller's attachments. CNS 12h lists attached controllers and CNS 13h
+CNS 10h/11h describe the common allocated set, and CNS 1Fh gives the
+command-set-independent structure (CNS 08h) of an allocated namespace,
+attached or not. CNS 02h describes the issuing controller's attachments. CNS 12h lists attached controllers and CNS 13h
 lists eligible controllers, in ascending order with inclusive CNTID
 filtering. Attach/detach records changes and sends enabled Attached
 Namespace Attribute Changed notices on each affected controller. Delete does
