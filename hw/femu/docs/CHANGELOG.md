@@ -279,6 +279,11 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Enabling with a CC.CSS value that CAP.CSS does not offer fails the controller, and admin commands that name SGLs are refused (992dc9911, 2ff5e3925).
 - Every Unrecovered Read Error and Compare Failure sets Do Not Retry (f8efff85a).
 - Identify reports one read-only firmware slot, matching the firmware log (989df3cea).
+- OACS, ONCS, OCFS, LPA, SANICAP and logs 00h and 05h are built from one capability registry, and a qtest checks them against what every mode answers (a1c67d97f, 933fb3f15).
+- Log 05h lists each mode's own commands (BBSSD 0xEF, the Open-Channel and CSD commands, Flush on KV namespaces) and no longer lists Read and Write for Open-Channel 1.2, which refuses them (99eabe2c1).
+- Log 00h lists the Open-Channel 2.0 chunk information page (CAh) (209b499b6).
+- Get Log Page answers a page log 00h lists for no command set with Invalid Log Page, so the endurance group and FDP pages without a subsystem no longer answer Invalid Field (87d5f1372).
+- A zoned namespace reports no Copy limits in Identify Namespace, since it refuses Copy (92b3763a3).
 
 ### Documentation and tooling
 
