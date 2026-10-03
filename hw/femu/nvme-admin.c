@@ -3951,12 +3951,8 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_dev_self_test(n, cmd);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         /*
-         * Async Event Request: the controller holds it outstanding until an
-         * async event occurs. FEMU generates no async events, so keep it
-         * pending (never complete it) by returning NVME_NO_COMPLETE. This is
-         * correct NVMe behaviour and stops drivers (e.g. SPDK) that post AERs
-         * at init from getting INVALID_OPCODE and retrying in a tight loop
-         * (which otherwise floods the controller and stalls the benchmark).
+         * Held outstanding until an event is queued for it; the fetch loop
+         * records it and nvme_process_aers() completes it.
          */
         femu_debug("admin cmd,async_event_request (held pending)\n");
         if (n->outstanding_aers > n->aerl) {
