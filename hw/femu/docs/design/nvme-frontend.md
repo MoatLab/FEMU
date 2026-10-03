@@ -517,7 +517,7 @@ Namespace Management.
 | Supported Log Pages | 00h | lists the ids the controller advertises (04h only with Namespace Management) |
 | Error Information | 01h | newest `elpe` + 1 entries |
 | SMART / Health | 02h | host totals from the pollers, media wear, `temperature` |
-| Firmware Slot | 03h | |
+| Firmware Slot | 03h | one slot, read-only; Identify FRMW reports the same |
 | Changed Namespace List | 04h | namespaces whose attributes changed |
 | Commands Supported and Effects | 05h | per command set (NVM, zoned, KV) |
 | Device Self-test | 06h | tests complete at once |
@@ -638,6 +638,7 @@ registers with no guest. Cases that target this chapter include:
 | `admin-psdt` | admin commands naming SGLs are refused |
 | `media-dnr` | Unrecovered Read and Compare Failure set DNR |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
+| `frmw` | FRMW and the firmware slot log agree |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 

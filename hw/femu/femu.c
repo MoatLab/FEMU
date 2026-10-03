@@ -1710,7 +1710,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
-    id->frmw         = 7 << 1 | 1;
+    /* one read-only slot: the firmware log fills one, and nothing updates it */
+    id->frmw         = 1 << 1 | 1;
     id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED |
                        NVME_LPA_TELEMETRY | NVME_LPA_PERSISTENT_EVENT;
     id->pels         = cpu_to_le32(1);

@@ -19635,6 +19635,44 @@ static void femu_test_media_dnr(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * FRMW reports one firmware slot, read-only, matching the firmware log, which
+ * fills slot 1 only, and the firmware commands, which are not offered.
+ */
+static void femu_test_frmw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t log[64];
+    uint64_t buf;
+    uint8_t frmw;
+    int slot, i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    frmw = qtest_readb(qts, buf + FEMU_ID_FRMW);
+    g_assert_cmpint((frmw >> 1) & 0x7, ==, 1);
+    g_assert_cmpint(frmw & 0x1, ==, 1);
+    g_assert_cmpint(qtest_readw(qts, buf + 256) & NVME_OACS_FW, ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_FW_SLOT_INFO, buf,
+                                         sizeof(log), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    g_assert_cmpint(log[0] & 0x7, ==, 1);
+    g_assert_cmpint(log[8], !=, 0);
+    for (slot = 2; slot <= 7; slot++) {
+        for (i = 0; i < 8; i++) {
+            g_assert_cmpint(log[slot * 8 + i], ==, 0);
+        }
+    }
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -21057,6 +21095,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f"
     });
+    qos_add_test("frmw", "femu", femu_test_frmw, NULL);
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "aerl=255"
