@@ -4750,6 +4750,9 @@ static void femu_sgl_segment(FemuCtrlState *c, NvmeCmd *cmd, uint64_t list,
     memcpy(&cmd->dptr.sgl, &seg, sizeof(seg));
 }
 
+/* the last femu_io() status before DNR and More were stripped */
+static uint16_t femu_io_status;
+
 static uint16_t femu_io(FemuCtrlState *c, NvmeCmd *cmd)
 {
     uint16_t want = c->cid;
@@ -4760,6 +4763,7 @@ static uint16_t femu_io(FemuCtrlState *c, NvmeCmd *cmd)
     status = femu_complete(c, &c->io, &got, NULL);
     g_assert_cmpint(got, ==, want);
 
+    femu_io_status = status;
     return FEMU_SC(status);
 }
 
@@ -7298,11 +7302,13 @@ static void femu_test_pi_compare(void *obj, void *data, QGuestAllocator *alloc)
             femu_pi_host(qts, dbuf, mbuf, d, m, 16, extended);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_COMPARE, 1, 16, 2,
                            dbuf, mbuf, 0, 16, 0, 0), ==, NVME_CMP_FAILURE);
+            g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
             m[other] ^= 1;
             d[0] ^= 1;
             femu_pi_host(qts, dbuf, mbuf, d, m, 16, extended);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_COMPARE, 1, 16, 2,
                            dbuf, mbuf, 0, 16, 0, 0), ==, NVME_CMP_FAILURE);
+            g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
             d[0] ^= 1;
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_COMPARE, 1, 16, 2,
                            dbuf, mbuf, 8, 16, 0, 0), ==,
@@ -7951,6 +7957,7 @@ static void femu_test_metadata(void *obj, void *data, QGuestAllocator *alloc)
     qtest_writeb(qts, mbuf + 9, m[9] ^ 0xff);
     g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 16, 2, dbuf, mbuf, 0),
                     ==, NVME_CMP_FAILURE);
+    g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
 
     /* copy carries it */
     g_assert_cmpint(femu_copy(&c, list, 64, cslba, cnlb, 1, 1, 0), ==,
@@ -8044,6 +8051,7 @@ static void femu_test_metadata_extended(void *obj, void *data,
     qtest_writeb(qts, buf + FEMU_MD_UNIT + 512 + 3, d[FEMU_MD_UNIT + 515] ^ 1);
     g_assert_cmpint(femu_rw_md(&c, NVME_CMD_COMPARE, 8, 2, buf, 0, 0), ==,
                     NVME_CMP_FAILURE);
+    g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
 
     /*
      * MDTS is two 4 KiB pages here: sixteen blocks are exactly that much
@@ -13322,6 +13330,11 @@ static void femu_test_power_no_drain(void *obj, void *data,
         break;
     case 13:
         status = femu_rw(&c, NVME_CMD_COMPARE, 0, buf);
+        /* a miscompare fails the same way if retried */
+        qtest_writeb(c.pdev->bus->qts, buf,
+                     qtest_readb(c.pdev->bus->qts, buf) ^ 0xff);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                        NVME_CMP_FAILURE | NVME_DNR);
         break;
     default:
         g_assert_not_reached();
@@ -13843,9 +13856,9 @@ static void femu_test_pel_file(void *obj, void *data, QGuestAllocator *alloc)
             femu_submit(&c, &c.io, &cmd);
             femu_submit(&c, &second, &cmd);
             g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==,
-                           FEMU_UNRECOVERED_READ);
+                           FEMU_UNRECOVERED_READ | NVME_DNR);
             g_assert_cmpint(femu_complete(&c, &second, NULL, NULL), ==,
-                           FEMU_UNRECOVERED_READ);
+                           FEMU_UNRECOVERED_READ | NVME_DNR);
             femu_queue_free(&c, &c.io);
             femu_queue_free(&c, &second);
         } else if (run == 1) {
@@ -13913,7 +13926,7 @@ static void femu_test_pel_file_quit(void *obj, void *data,
                            ==, NVME_SUCCESS);
             for (i = 0; i < 2; i++) {
                 g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
-                               FEMU_UNRECOVERED_READ);
+                               FEMU_UNRECOVERED_READ | NVME_DNR);
             }
         }
         g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
@@ -14111,7 +14124,7 @@ static void femu_test_pel_events(void *obj, void *data,
     t0 = g_get_monotonic_time();
     for (i = 0; i < 100; i++) {
         g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf + 4096), ==,
-                        FEMU_UNRECOVERED_READ);
+                        FEMU_UNRECOVERED_READ | NVME_DNR);
     }
     allowed = 10 + (g_get_monotonic_time() - t0) / 100000 + 1;
     g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
@@ -19566,6 +19579,62 @@ static void femu_test_admin_psdt(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * A Compare that miscompares and a read of a block made uncorrectable fail
+ * the same way if retried, so every such completion carries DNR (Base 2.3,
+ * Figure 100), on Read, Verify, Copy and Compare alike.
+ */
+static void femu_test_media_dnr(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t stride, buf, list;
+    uint64_t slba[1];
+    uint16_t nlb[1];
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    stride = FEMU_DATA_SIZE / c.lba_size;
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+
+    /* a miscompare */
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0xa5, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_CMP_FAILURE | NVME_DNR);
+
+    /* an uncorrectable block, read three ways */
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE_UNCOR, stride, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, stride, buf), ==,
+                    NVME_UNRECOVERED_READ | NVME_DNR);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_VERIFY, stride, 0), ==,
+                    NVME_UNRECOVERED_READ | NVME_DNR);
+
+    slba[0] = stride;
+    nlb[0] = 1;
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writeq(qts, list + 8, slba[0]);
+    qtest_writew(qts, list + 16, nlb[0] - 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(4 * stride);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==,
+                    NVME_UNRECOVERED_READ | NVME_DNR);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -20984,6 +21053,10 @@ static void femu_register_nodes(void)
     });
     qos_add_test("cc-css", "femu", femu_test_cc_css, NULL);
     qos_add_test("admin-psdt", "femu", femu_test_admin_psdt, NULL);
+    qos_add_test("media-dnr", "femu", femu_test_media_dnr,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x19f"
+    });
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "aerl=255"

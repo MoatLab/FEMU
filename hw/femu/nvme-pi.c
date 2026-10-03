@@ -309,7 +309,7 @@ uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (find_next_bit(ns->uncorrectable, slba + nlb, slba) < slba + nlb) {
-        return NVME_UNRECOVERED_READ;
+        return NVME_UNRECOVERED_READ | NVME_DNR;
     }
     data = g_malloc(len);
     host = g_malloc(len);
@@ -329,14 +329,14 @@ uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return status;
     }
     if (memcmp(data, host, len)) {
-        return NVME_CMP_FAILURE;
+        return NVME_CMP_FAILURE | NVME_DNR;
     }
     /* Compare only the metadata outside the checked PI tuple. */
     for (i = 0; i < nlb; i++) {
         if (memcmp(meta + i * ms, hmeta + i * ms, off) ||
             memcmp(meta + i * ms + off + 8, hmeta + i * ms + off + 8,
                    ms - off - 8)) {
-            return NVME_CMP_FAILURE;
+            return NVME_CMP_FAILURE | NVME_DNR;
         }
     }
     return NVME_SUCCESS;

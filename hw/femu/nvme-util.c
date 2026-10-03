@@ -502,7 +502,7 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
                             offsetof(NvmeRwCmd, slba), elba, ns->id);
-        return NVME_UNRECOVERED_READ;
+        return NVME_UNRECOVERED_READ | NVME_DNR;
     }
     if (!req->is_write) {
         uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);

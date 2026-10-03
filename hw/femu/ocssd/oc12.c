@@ -404,7 +404,7 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-        return NVME_UNRECOVERED_READ;
+        return NVME_UNRECOVERED_READ | NVME_DNR;
     }
 
     return 0;

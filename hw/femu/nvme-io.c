@@ -1030,7 +1030,7 @@ static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         }
     }
     if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-        return NVME_UNRECOVERED_READ;
+        return NVME_UNRECOVERED_READ | NVME_DNR;
     }
 
     status = nvme_check_dulbe(n, ns, slba, elba);
@@ -1292,7 +1292,7 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_CMD_OVERLAP_IO_RANGE | NVME_DNR;
         }
         if (find_next_bit(sns[i]->uncorrectable, elba, slba) < elba) {
-            return NVME_UNRECOVERED_READ;
+            return NVME_UNRECOVERED_READ | NVME_DNR;
         }
         status = nvme_check_dulbe(n, sns[i], slba, elba);
         if (status) {
@@ -1420,7 +1420,7 @@ static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
     for (i = 0; i < nlb && status == NVME_SUCCESS; i++) {
         if (memcmp(host + i * unit, data + i * ds, ds) ||
             memcmp(host + i * unit + ds, ns->mdata + (slba + i) * ms, ms)) {
-            status = NVME_CMP_FAILURE;
+            status = NVME_CMP_FAILURE | NVME_DNR;
         }
     }
     qemu_mutex_unlock(&ns->mdata_lock);
@@ -1482,7 +1482,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return status;
         }
         return memcmp((uint8_t *)n->mbe->logical_space + offset, host,
-                      data_size) ? NVME_CMP_FAILURE : NVME_SUCCESS;
+                      data_size) ? NVME_CMP_FAILURE | NVME_DNR : NVME_SUCCESS;
     }
     if (cmd->psdt) {
         uint16_t sc = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
@@ -1539,7 +1539,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (ns->mdata) {
                 qemu_mutex_unlock(&ns->mdata_lock);
             }
-            return NVME_CMP_FAILURE;
+            return NVME_CMP_FAILURE | NVME_DNR;
         }
         offset += len;
     }
@@ -1555,7 +1555,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (femu_dma_read(n, le64_to_cpu(rw->mptr), host, mlen)) {
             status = NVME_DATA_TRAS_ERROR | NVME_DNR;
         } else if (memcmp(ns->mdata + slba * ms, host, mlen)) {
-            status = NVME_CMP_FAILURE;
+            status = NVME_CMP_FAILURE | NVME_DNR;
         }
         qemu_mutex_unlock(&ns->mdata_lock);
         return status;

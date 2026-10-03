@@ -752,7 +752,8 @@ still open for writing when the next write checks it.
 
 `err_read_unc_ppm` and `err_write_fail_ppm` turn a rate into a period,
 `1000000 / ppm`, at least 1. Every Nth Read command completes with
-Unrecovered Read Error and every Nth Write command with Write Fault. The
+Unrecovered Read Error (with DNR, as every Unrecovered Read Error in FEMU
+is) and every Nth Write command with Write Fault. The
 counters run per namespace FTL, so a run repeats exactly. The command is
 still timed and, for a write, still programmed and mapped; only its status
 changes. The injected counts feed SMART Media and Data Integrity Errors.
