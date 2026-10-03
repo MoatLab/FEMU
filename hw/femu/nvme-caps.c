@@ -331,6 +331,9 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
     case NVME_LOG_CHANGED_ZONE_LIST:
         return csi == NVME_CSI_ZONED && nvme_has_zoned_ns(n) ?
                NVME_LIDS_LSUPP : 0;
+    case OC20_CHUNK_INFO:
+        return csi == NVME_CSI_NVM && OCSSD(n) && n->lver == OCSSD20 ?
+               NVME_LIDS_LSUPP : 0;
     default:
         return 0;
     }

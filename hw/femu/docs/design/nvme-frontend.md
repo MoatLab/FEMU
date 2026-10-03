@@ -556,6 +556,7 @@ Namespace Management.
 | FDP Configurations, RUH Usage, Statistics, Events | 20h-23h | with FDP |
 | Sanitize Status | 81h | |
 | Changed Zone List | BFh | ZNS, from the mode |
+| Chunk Information | CAh | Open-Channel 2.0, from the mode |
 | FEMU media counters | C0h | WAF and FTL counters |
 
 Get and Set Features answer Arbitration (01h), Power Management (02h, one

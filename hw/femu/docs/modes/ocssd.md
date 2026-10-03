@@ -141,7 +141,8 @@ Open-Channel support. FEMU's Open-Channel 2.0 controller also accepts the
 plain NVMe Read and Write commands that SPDK sends.
 
 The 2.0 chunk information log page (CAh) reports each chunk's state, write
-pointer and wear, 32 bytes per chunk. It needs an explicit namespace, and
+pointer and wear, 32 bytes per chunk. The Supported Log Pages log (00h)
+lists it for the NVM command set. It needs an explicit namespace, and
 `--log-len` must not exceed 32 times the chunk count. This reads the first
 128 chunks:
 
