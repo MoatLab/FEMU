@@ -127,9 +127,12 @@ still name a unit the device does not have; such an address is refused.
 
 Per namespace (`NvmeNamespace`):
 
-- `bbtbl`: one bad block table per LUN, `blocks * planes` bytes. The host
-  reads it with admin command 0xF2 and marks blocks with 0xF1, which indexes
-  by block number only and ignores the plane.
+- `bbtbl`: one bad block table per LUN, `blocks * planes` bytes, one byte
+  per plane in the order block 0 plane 0, block 0 plane 1, and so on. The
+  host reads it with admin command 0xF2 and marks blocks with 0xF1, which
+  sets the entry for the block and plane in each address and keeps the
+  header counts (factory bad, grown bad, device reserved, host reserved) in
+  step.
 - `tbl`: a table the host can read with admin command 0xEA (Get L2P Table).
   FEMU fills it with "unmapped" at start-up and never updates it.
 
@@ -163,6 +166,22 @@ Range before the backend is reached; an LBA format with metadata (`meta`)
 makes read and write fail with Invalid Field; and an address outside the
 geometry on erase or on a bad block command fails with Invalid Field.
 
+### Bad blocks
+
+Write and erase check every address against `bbtbl`. An entry with bit 0
+(factory bad), bit 1 (grown bad) or bit 2 (device reserved) set makes the
+block unusable. Bit 3 (host reserved) and bit 4 (media manager reserved)
+record the host's own allocation, so the device does not refuse them. A
+single-plane access (control bits 1:0 zero) checks the plane in the
+address; a dual- or quad-plane access checks the block on every plane.
+
+A command that names an unusable block fails as a whole with Write Fault
+(status type 2h, code 80h, the 1.2 error code for data that cannot be
+committed) and Do Not Retry. Nothing in it is written or erased, so every
+bit of the per-address status in completion dwords 0 and 1 is set. Reads
+are not checked. Clearing an entry with 0xF1 makes the block usable again.
+The table starts empty; `nand_bad_blocks` does not seed it.
+
 In both versions the generic NVM commands (Flush, Dataset Management,
 Compare, Write Zeroes, Copy, Verify, Write Uncorrectable) are handled by
 `nvme_io_cmd()` on raw LBAs before the Open-Channel handler is consulted,
@@ -178,8 +197,8 @@ when `oncs` turns them on. They do not follow the Open-Channel rules.
   `oc12_meta_blk_set_erased()`, which returns at its first line.
 - Reads do not check the state, so an unwritten sector returns whatever the
   backend holds.
-- Blocks marked bad in `bbtbl` are still read, written and erased; the table
-  is only storage for the host.
+- Blocks marked bad in `bbtbl` can still be read; write and erase are
+  refused (see [Bad blocks](#bad-blocks)).
 
 Write the host FTL as if these rules applied, because real devices apply
 them.
@@ -443,8 +462,8 @@ mode does report:
 ## Limits
 
 - One namespace per controller.
-- 1.2 does not enforce erase-before-write, does not reset sector state on
-  erase, and does not act on its bad block table (see above).
+- 1.2 does not enforce erase-before-write and does not reset sector state on
+  erase (see above). Its bad block table is enforced on write and erase only.
 - 2.0 does not model page types or channel transfer, and charges one page
   time per chunk run regardless of how many pages the run covers.
 - 2.0 does not store per-sector metadata.

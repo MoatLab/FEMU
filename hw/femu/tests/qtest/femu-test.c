@@ -9206,6 +9206,172 @@ static void femu_test_oc12_small_sectors(void *obj, void *data,
     guest_free(alloc, ppas);
 }
 
+#define FEMU_OC12_SET_BBT   0xf1
+#define FEMU_OC12_GET_BBT   0xf2
+
+typedef struct FemuOc12Ppaf {
+    uint8_t pln_off;
+    uint8_t blk_off;
+    uint8_t lun_off;
+    uint8_t num_pln;
+    uint16_t num_blk;
+} FemuOc12Ppaf;
+
+static uint64_t femu_oc12_ppa(const FemuOc12Ppaf *f, unsigned lun,
+                              unsigned blk, unsigned pln, unsigned sec)
+{
+    return ((uint64_t)lun << f->lun_off) | ((uint64_t)blk << f->blk_off) |
+           ((uint64_t)pln << f->pln_off) | sec;
+}
+
+static void femu_oc12_set_bbt(FemuCtrlState *c, uint64_t ppa, uint8_t value)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_OC12_SET_BBT;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)ppa);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(ppa >> 32));
+    cmd.cdw12 = cpu_to_le32((uint32_t)value << 16);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/* Submit one PPA command; return its status with DNR and dword 0. */
+static uint16_t femu_oc12_ppa_cmd(FemuCtrlState *c, uint8_t opcode,
+                                  uint64_t list, unsigned nppa, bool dual,
+                                  uint64_t buf, uint32_t *bitmap)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)list);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw12 = cpu_to_le32((nppa - 1) | ((dual ? 1u : 0u) << 16));
+    femu_submit(c, &c->io, &cmd);
+    status = femu_complete(c, &c->io, &got, bitmap);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
+/*
+ * Open-Channel 1.2 bad block table. A block marked factory bad, grown bad or
+ * device reserved cannot be erased or written: the command completes with
+ * Write Fault (2h/80h) and every address in it marked failed in dword 0. A
+ * host-reserved block stays usable, entries are one per plane, and clearing
+ * an entry makes the block usable again.
+ */
+static void femu_test_oc12_bad_blocks(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint16_t fault = NVME_WRITE_FAULT | NVME_DNR;
+    uint64_t id = guest_alloc(alloc, 4096);
+    uint64_t tbl = guest_alloc(alloc, 4096);
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    FemuOc12Ppaf f;
+    NvmeCmd cmd = { 0 };
+    uint8_t ident[512];
+    uint8_t hdr[64];
+    uint8_t ent[16];
+    uint32_t bitmap;
+    unsigned blk;
+    unsigned i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = (buf + 4095) & ~4095ULL;
+
+    cmd.opcode = 0xe2;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(id);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, id, ident, sizeof(ident));
+    f.lun_off = ident[12 + 2];
+    f.pln_off = ident[12 + 4];
+    f.blk_off = ident[12 + 6];
+    f.num_pln = ident[256 + 6];
+    f.num_blk = ident[256 + 8] | (ident[256 + 9] << 8);
+    g_assert_cmpuint(f.num_pln, ==, 2);
+    g_assert_cmpuint(f.num_blk, >=, 6);
+
+    /* Grown bad on plane 1 of block 1 only. */
+    femu_oc12_set_bbt(&c, femu_oc12_ppa(&f, 0, 1, 1, 0), 0x2);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC12_GET_BBT;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(tbl);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, tbl, hdr, sizeof(hdr));
+    qtest_memread(qts, tbl + 64, ent, sizeof(ent));
+    g_assert_cmpuint(ent[2], ==, 0);            /* block 1 plane 0 */
+    g_assert_cmpuint(ent[3], ==, 0x2);          /* block 1 plane 1 */
+    g_assert_cmpuint(ldl_le_p(&hdr[20]), ==, 1); /* grown bad count */
+
+    /* A single-plane erase of the good plane works; dual-plane does not. */
+    g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE,
+                                      femu_oc12_ppa(&f, 0, 1, 0, 0), 1, false,
+                                      0, &bitmap), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE,
+                                      femu_oc12_ppa(&f, 0, 1, 0, 0), 1, true,
+                                      0, &bitmap), ==, fault);
+    g_assert_cmphex(bitmap, ==, 0x1);
+    g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE,
+                                      femu_oc12_ppa(&f, 0, 1, 1, 0), 1, false,
+                                      0, &bitmap), ==, fault);
+
+    /* A list erase naming the bad block fails as a whole. */
+    qtest_writeq(qts, list, femu_oc12_ppa(&f, 0, 2, 0, 0));
+    qtest_writeq(qts, list + 8, femu_oc12_ppa(&f, 0, 1, 1, 0));
+    g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE, list, 2,
+                                      false, 0, &bitmap), ==, fault);
+    g_assert_cmphex(bitmap, ==, 0x3);
+
+    /* A write across both planes of a page: block 2 works, block 1 fails. */
+    for (blk = 2; blk >= 1; blk--) {
+        for (i = 0; i < 8; i++) {
+            qtest_writeq(qts, list + 8 * i,
+                         femu_oc12_ppa(&f, 0, blk, i / 4, i % 4));
+        }
+        bitmap = 0;
+        g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_WRITE, list, 8,
+                                          true, buf, &bitmap), ==,
+                        blk == 2 ? NVME_SUCCESS : fault);
+        g_assert_cmphex(bitmap, ==, blk == 2 ? 0 : 0xff);
+    }
+
+    /* Factory bad and device reserved fail; host reserved does not. */
+    femu_oc12_set_bbt(&c, femu_oc12_ppa(&f, 0, 3, 0, 0), 0x1);
+    femu_oc12_set_bbt(&c, femu_oc12_ppa(&f, 0, 4, 0, 0), 0x4);
+    femu_oc12_set_bbt(&c, femu_oc12_ppa(&f, 0, 5, 0, 0), 0x8);
+    for (blk = 3; blk <= 5; blk++) {
+        g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE,
+                                          femu_oc12_ppa(&f, 0, blk, 0, 0), 1,
+                                          true, 0, &bitmap), ==,
+                        blk == 5 ? NVME_SUCCESS : fault);
+    }
+
+    /* Marking the block good again makes it usable. */
+    femu_oc12_set_bbt(&c, femu_oc12_ppa(&f, 0, 1, 1, 0), 0);
+    g_assert_cmphex(femu_oc12_ppa_cmd(&c, FEMU_OC20_VECT_ERASE,
+                                      femu_oc12_ppa(&f, 0, 1, 0, 0), 1, true,
+                                      0, &bitmap), ==, NVME_SUCCESS);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, tbl);
+    guest_free(alloc, id);
+}
+
 #define FEMU_CSD_ALLOC_FDM   0xb0
 #define FEMU_CSD_DEALLOC     0xc0
 #define FEMU_CSD_NVM_TO_AFDM 0xd0
@@ -19876,6 +20042,12 @@ static void femu_register_nodes(void)
     qos_add_test("oc12-small-sectors", "femu", femu_test_oc12_small_sectors,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=1"
+    });
+    qos_add_test("oc12-bad-blocks", "femu", femu_test_oc12_bad_blocks,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=0,lver=1,lsec_size=512,lsecs_per_pg=4,lnum_pln=2,"
+            "lnum_ch=2,lnum_lun=2"
     });
     qos_add_test("oc20-sgl-refused", "femu", femu_test_oc_sgl_refused,
                  &(QOSGraphTestOptions) {

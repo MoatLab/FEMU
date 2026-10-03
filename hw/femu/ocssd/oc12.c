@@ -97,6 +97,77 @@ static bool oc12_ppa_in_geometry(Oc12Ctrl *ln, uint64_t ppa)
 }
 
 /*
+ * Bad block table entry bits (OCSSD 1.2, 2.1.3). Factory bad, grown bad and
+ * device reserved blocks cannot be used. Host reserved and media manager
+ * reserved blocks record the host's own allocation, so the device does not
+ * refuse the host access to them.
+ */
+#define OC12_BBT_FACTORY    0x1
+#define OC12_BBT_GROWN      0x2
+#define OC12_BBT_DEVICE     0x4
+#define OC12_BBT_HOST       0x8
+#define OC12_BBT_UNUSABLE   (OC12_BBT_FACTORY | OC12_BBT_GROWN | \
+                             OC12_BBT_DEVICE)
+
+/* The table holds one byte per plane: block 0 plane 0, block 0 plane 1, ... */
+static uint8_t *oc12_bbt_entry(Oc12Ctrl *ln, NvmeNamespace *ns, uint64_t ppa,
+                               uint64_t pln)
+{
+    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+    uint64_t lunid = PPA_CH(ln, ppa) * c->num_lun + PPA_LUN(ln, ppa);
+
+    return &ns->bbtbl[lunid]->blk[PPA_BLK(ln, ppa) * c->num_pln + pln];
+}
+
+/*
+ * Does the access touch a block the table marks unusable? A single-plane
+ * access touches the plane in the address; a multi-plane one (control bits
+ * 1:0 nonzero) touches the block on every plane.
+ */
+static bool oc12_ppa_is_bad(Oc12Ctrl *ln, NvmeNamespace *ns, uint64_t ppa,
+                            bool multi_plane)
+{
+    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+    uint64_t pln = PPA_PLN(ln, ppa);
+    uint64_t end = pln + 1;
+
+    if (multi_plane) {
+        pln = 0;
+        end = c->num_pln;
+    }
+    for (; pln < end; pln++) {
+        if (*oc12_bbt_entry(ln, ns, ppa, pln) & OC12_BBT_UNUSABLE) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Refuse an erase or write that names an unusable block. The command fails
+ * as a whole with Write Fault (OCSSD 1.2, 2.3.2), so no address in it was
+ * carried out and every bit of the per-address status in dword 0-1 is set.
+ */
+static uint16_t oc12_check_bad_blocks(Oc12Ctrl *ln, NvmeNamespace *ns,
+                                      NvmeRequest *req, const uint64_t *psl,
+                                      uint32_t nr_ppas, uint16_t control)
+{
+    bool multi_plane = (control & 0x3) != Oc12PMODE_SNGL;
+    uint32_t i;
+
+    for (i = 0; i < nr_ppas; i++) {
+        if (oc12_ppa_is_bad(ln, ns, psl[i], multi_plane)) {
+            req->cqe.res64 = cpu_to_le64(nr_ppas >= 64 ? ~0ULL :
+                                         (1ULL << nr_ppas) - 1);
+            return NVME_WRITE_FAULT | NVME_DNR;
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
+/*
  * ppa2secidx() hands back ~0 for an address outside the geometry. Multiplying
  * that by the entry size wraps to an offset far past the metadata buffer, and
  * these used to assert on it: a host could kill the process with one badly
@@ -159,7 +230,7 @@ static int oc12_meta_state_get(Oc12Ctrl *ln, uint64_t ppa, uint32_t *state)
 
 /*
  * Similar to oc12_meta_set_written, however, this function sets not a single
- * but multiple ppas, also checks if a block is marked bad
+ * but multiple ppas. The bad block table is checked by the callers.
  */
 static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
                                     uint64_t *psl, int nr_ppas)
@@ -225,14 +296,6 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
 
             ppa_pl = ppa & mask;
             ppa_pl |= pl << ln->ppaf.pln_offset;
-
-#if 0
-            /* Check bad-block-table to error on bad blocks */
-            if (ns->bbtbl[oc12_bbt_pos_get(ln, ppa_pl)]) {
-                printf("_erase_meta: failed -- block is bad\n");
-                return -1;
-            }
-#endif
 
             /* Check state of first sector to error on double-erase */
             if (oc12_meta_state_get(ln, ppa_pl, &cur_state)) {
@@ -667,6 +730,11 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         femu_err("oc12_write: failed nvme_rw_check (0x%x)\n", err);
         goto fail_free;
     }
+    err = oc12_check_bad_blocks(ln, ns, req, psl, nlb,
+                                le16_to_cpu(ocrw->control));
+    if (err) {
+        goto fail_free;
+    }
 
     /* Read host-passed metadata to a temporary buffer */
     if (meta) {
@@ -834,11 +902,38 @@ static uint16_t oc12_bbt_get(FemuCtrl *n, NvmeCmd *cmd)
     return ret;
 }
 
+/*
+ * Set the entry for the block and plane in @ppa, in the layout Get Bad Block
+ * Table reports, and keep the counts in the table header in step.
+ */
+static void oc12_bbt_update(Oc12Ctrl *ln, NvmeNamespace *ns, uint64_t ppa,
+                            uint8_t value)
+{
+    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+    Oc12Bbt *bbt = ns->bbtbl[PPA_CH(ln, ppa) * c->num_lun + PPA_LUN(ln, ppa)];
+    uint32_t fact = 0;
+    uint32_t grown = 0;
+    uint32_t dresv = 0;
+    uint32_t hresv = 0;
+    uint32_t i;
+
+    *oc12_bbt_entry(ln, ns, ppa, PPA_PLN(ln, ppa)) = value;
+    for (i = 0; i < (uint32_t)c->num_blk * c->num_pln; i++) {
+        fact += !!(bbt->blk[i] & OC12_BBT_FACTORY);
+        grown += !!(bbt->blk[i] & OC12_BBT_GROWN);
+        dresv += !!(bbt->blk[i] & OC12_BBT_DEVICE);
+        hresv += !!(bbt->blk[i] & OC12_BBT_HOST);
+    }
+    bbt->tfact = cpu_to_le32(fact);
+    bbt->tgrown = cpu_to_le32(grown);
+    bbt->tdresv = cpu_to_le32(dresv);
+    bbt->thresv = cpu_to_le32(hresv);
+}
+
 static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
     Oc12Ctrl *ln = n->oc12_ctrl;
-    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     Oc12BbtSet *bbt_cmd = (Oc12BbtSet *)cmd;
 
     uint32_t nsid = le32_to_cpu(bbt_cmd->nsid);
@@ -847,7 +942,6 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
     uint64_t spba = le64_to_cpu(bbt_cmd->spba);
     uint8_t value = bbt_cmd->value;
     uint64_t *ppas = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    int ch, lun, lunid, blk;
     int i;
 
     if (nsid == 0 || nsid > n->num_namespaces) {
@@ -868,11 +962,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         ppas[0] = spba;
-        ch = (ppas[0] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
-        lun = (ppas[0] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-        blk = (ppas[0] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-        lunid = ch * c->num_lun + lun;
-        ns->bbtbl[lunid]->blk[blk] = value;
+        oc12_bbt_update(ln, ns, ppas[0], value);
 
     } else {
         /* same short list as the erase path above */
@@ -890,11 +980,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
                 g_free(ppas);
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-            ch = (ppas[i] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
-            lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-            blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-            lunid = ch * c->num_lun + lun;
-            ns->bbtbl[lunid]->blk[blk] = value;
+            oc12_bbt_update(ln, ns, ppas[i], value);
         }
     }
 
@@ -941,6 +1027,7 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12RwCmd *dm = (Oc12RwCmd *)cmd;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     uint64_t *psl;
+    uint16_t err;
     uint32_t i;
 
     /*
@@ -968,6 +1055,13 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             g_free(psl);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+    }
+
+    err = oc12_check_bad_blocks(ln, ns, req, psl, nlb,
+                                le16_to_cpu(dm->control));
+    if (err) {
+        g_free(psl);
+        return err;
     }
 
     oc12_meta_blk_set_erased(ns, ln, psl, nlb);
