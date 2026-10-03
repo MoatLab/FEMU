@@ -34,6 +34,7 @@ listed one by one.
 - FDP placement features can be read and enabled by a Linux host, and the host sees its active reclaim unit and remaining space (8f00c7117, 9a66fe52d).
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
+- A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).
 - Key-value SSD mode (`femu_mode=5`) with store, retrieve, list, delete and exist commands (e72465909).
 - Every KV namespace has its own command set and key space, the KV command set is advertised to the host, and the KV Configuration feature is served (39664d242, e62db84f2, e4949509c).
 
