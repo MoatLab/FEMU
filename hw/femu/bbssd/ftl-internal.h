@@ -205,6 +205,7 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
 int do_read_reclaim(struct ssd *ssd);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
+uint64_t ftl_gc_rand(struct ssd *ssd);
 
 /* log-block mapping schemes (hw/femu/bbssd/ftl-map-hybrid.c) */
 extern const struct femu_mapping_ops femu_mapping_hybrid_ops;

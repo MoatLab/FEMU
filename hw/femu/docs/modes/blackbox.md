@@ -110,6 +110,11 @@ Background GC starts when the share of lines in use reaches
 - `d-choice`: samples 4 candidate lines at random (a line can be drawn
   twice) and takes the one with the fewest valid pages.
 
+`random` and `d-choice` draw from a generator seeded by `gc_seed` (default
+0), so the same configuration and workload pick the same victims and give the
+same write amplification on every run. Set a different `gc_seed` per run to
+vary them.
+
 ### Mapping and caches
 
 Properties: [garbage collection, mapping and caches](../reference/properties.md#garbage-collection-mapping-and-caches).

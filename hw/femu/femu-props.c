@@ -364,6 +364,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "gc_policy",
       "bbssd, CSD without FDP: line victim policy, one of greedy, random, "
       "cost-benefit, fifo or d-choice; unset is greedy" },
+    { "gc_seed",
+      "bbssd, CSD: seed for the victims the random and d-choice gc_policy "
+      "and the FDP random gc_strategy pick; the same seed and workload pick "
+      "the same victims, so vary it to vary runs" },
     { "gc_strategy",
       "bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 "
       "cost-benefit, 2 random or 4 per-handle" },

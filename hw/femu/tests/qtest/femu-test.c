@@ -2473,6 +2473,130 @@ static void femu_test_format(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_GC_SEED_WRITES  2048
+#define FEMU_GC_SEED_SAMPLE  32
+
+/*
+ * Hot-add a small black-box device: 80 lines of 16 pages behind 4 MiB, so a
+ * few thousand random page writes run garbage collection many times.
+ */
+static QPCIDevice *femu_gc_seed_add(QFemu *femu, const char *id, int slot,
+                                    const char *policy, int seed)
+{
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *addr = g_strdup_printf("%d", slot);
+    QDict *rsp;
+
+    if (seed < 0) {
+        rsp = qtest_qmp(qts,
+            "{'execute':'device_add','arguments':{'driver':'femu','id':%s,"
+            "'addr':%s,'devsz_mb':4,'femu_mode':1,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'gc_policy':%s}}",
+            id, addr, policy);
+    } else {
+        rsp = qtest_qmp(qts,
+            "{'execute':'device_add','arguments':{'driver':'femu','id':%s,"
+            "'addr':%s,'devsz_mb':4,'femu_mode':1,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'gc_policy':%s,"
+            "'gc_seed':%d}}",
+            id, addr, policy, seed);
+    }
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    return qpci_device_find(femu->dev.bus, QPCI_DEVFN(slot, 0));
+}
+
+/*
+ * Run the same random overwrite sequence and record the relocation count
+ * every FEMU_GC_SEED_SAMPLE writes. Each collection relocates its victim's
+ * valid pages, so the trace follows the victim sequence; the last entry is
+ * the write amplification.
+ */
+static void femu_gc_seed_run(QFemu *femu, QGuestAllocator *alloc,
+                             QPCIDevice *pdev, const char *id, int slot,
+                             uint64_t *trace)
+{
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t data = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint32_t lcg = 12345;
+    uint8_t page[512];
+    unsigned i;
+
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, data, 0x6b, FEMU_DATA_SIZE);
+    for (i = 0; i < FEMU_GC_SEED_WRITES; i++) {
+        lcg = lcg * 1103515245u + 12345u;
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        ((lcg >> 8) % 1024) * 8, data)), ==,
+                        NVME_SUCCESS);
+        if ((i + 1) % FEMU_GC_SEED_SAMPLE == 0) {
+            g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                                 sizeof(page), 0)), ==,
+                            NVME_SUCCESS);
+            qtest_memread(qts, log, page, sizeof(page));
+            trace[i / FEMU_GC_SEED_SAMPLE] = ldq_le_p(page + 16);
+        }
+    }
+    trace[FEMU_GC_SEED_WRITES / FEMU_GC_SEED_SAMPLE] = ldl_le_p(page);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, id, slot);
+    g_free(pdev);
+    guest_free(alloc, log);
+    guest_free(alloc, data);
+}
+
+/*
+ * The policies that sample victims draw from a generator seeded by gc_seed,
+ * so two devices with the same configuration and workload pick the same
+ * victims and report the same write amplification. A third device with
+ * another seed must differ, or the trace could not tell runs apart. FIFO
+ * takes the oldest line and must not depend on the seed at all.
+ */
+static void femu_test_gc_seed(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    const char *policy = data;
+    enum { N = FEMU_GC_SEED_WRITES / FEMU_GC_SEED_SAMPLE + 1 };
+    uint64_t a[N];
+    uint64_t b[N];
+    uint64_t other[N];
+    uint64_t digest = 0xcbf29ce484222325ULL;
+    unsigned i;
+
+    femu_gc_seed_run(femu, alloc,
+                     femu_gc_seed_add(femu, "gc-a", 5, policy, -1),
+                     "gc-a", 5, a);
+    femu_gc_seed_run(femu, alloc,
+                     femu_gc_seed_add(femu, "gc-b", 6, policy, -1),
+                     "gc-b", 6, b);
+    femu_gc_seed_run(femu, alloc,
+                     femu_gc_seed_add(femu, "gc-c", 7, policy, 7),
+                     "gc-c", 7, other);
+
+    for (i = 0; i < N; i++) {
+        digest = (digest ^ a[i]) * 0x100000001b3ULL;
+    }
+    g_test_message("%s: relocated %" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   ", WAF x1000 %" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   ", trace %016" PRIx64, policy, a[N - 2], b[N - 2],
+                   other[N - 2], a[N - 1], b[N - 1], other[N - 1], digest);
+    g_assert_cmpuint(a[N - 2], >, 0);           /* GC ran */
+    g_assert_cmpuint(a[N - 1], >, 1000);        /* WAF above 1 */
+    g_assert_cmpmem(a, sizeof(a), b, sizeof(b));
+    if (!strcmp(policy, "fifo")) {
+        /* FIFO samples nothing, so the seed cannot change its victims */
+        g_assert_cmpmem(a, sizeof(a), other, sizeof(other));
+    } else {
+        g_assert_true(memcmp(a, other, sizeof(a)) != 0);
+    }
+}
+
 /*
  * The media counters are the emulator's own numbers, and the vendor page is
  * the only place they are reported. A page that answers with zeroes looks the
@@ -19658,6 +19782,12 @@ static void femu_register_nodes(void)
             "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,vwc=0,"
             "buffer_size=16"
     });
+    qos_add_test("gc-seed-d-choice", "femu", femu_test_gc_seed,
+                 &(QOSGraphTestOptions) { .arg = (void *)"d-choice" });
+    qos_add_test("gc-seed-random", "femu", femu_test_gc_seed,
+                 &(QOSGraphTestOptions) { .arg = (void *)"random" });
+    qos_add_test("gc-seed-fifo", "femu", femu_test_gc_seed,
+                 &(QOSGraphTestOptions) { .arg = (void *)"fifo" });
     qos_add_test("media-counters", "femu", femu_test_media_counters,
                  &(QOSGraphTestOptions) {
         /*

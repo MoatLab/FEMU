@@ -35,6 +35,8 @@
 #ifndef PQUEUE_H
 #define PQUEUE_H
 
+#include <stdint.h>
+
 /** priority data type */
 typedef unsigned long long pqueue_pri_t;
 
@@ -134,11 +136,13 @@ int pqueue_remove(pqueue_t *q, void *d);
 void *pqueue_peek(pqueue_t *q);
 
 /**
- * pop a random item from the queue.
+ * pop an item chosen by a random number from the queue.
  * @param q the queue
+ * @param r a random number from the caller's generator, so that a seeded
+ *          caller sees the same picks on every run
  * @return NULL on error, otherwise the entry
  */
-void *pqueue_randpop(pqueue_t *q);
+void *pqueue_randpop(pqueue_t *q, uint64_t r);
 
 /**
  * print the queue

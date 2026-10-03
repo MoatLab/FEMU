@@ -2890,6 +2890,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
     DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
     DEFINE_PROP_STRING("gc_policy", FemuCtrl, bb_params.gc_policy),
+    DEFINE_PROP_UINT64("gc_seed", FemuCtrl, gc_seed, 0),
     DEFINE_PROP_UINT32("read_cache_mb", FemuCtrl, read_cache_mb, 0),
     DEFINE_PROP_STRING("cache_evict", FemuCtrl, bb_params.cache_evict),
     DEFINE_PROP_STRING("mapping", FemuCtrl, bb_params.mapping_scheme),

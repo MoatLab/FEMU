@@ -100,11 +100,12 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /* initialize rmap */
     ssd_init_rmap(ssd);
 
+    /* the policy orders the victim queue, so resolve it before the lines */
+    ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
+    ssd->gc_rng = n->gc_seed;
+
     /* initialize all the lines */
     ssd_init_lines(ssd);
-
-    /* resolve the base-path GC victim policy (greedy by default) */
-    ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
 
     /*
      * L2P mapping scheme: "page" (default, full DRAM L2P, bit-identical) vs "dftl"

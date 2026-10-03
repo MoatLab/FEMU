@@ -89,6 +89,8 @@ apply. Two properties are specific to FDP
 
 - `gc_strategy`: how GC picks a victim reclaim unit: 0 greedy (default),
   1 cost-benefit, 2 random, 4 per-handle. `gc_policy` does not apply under FDP.
+  The random strategy draws from a generator seeded by `gc_seed`, so it
+  repeats run to run.
 - `fdp_trim_erase_all`: non-zero makes a deallocate reset every reclaim unit
   instead of the given ranges.
 

@@ -194,16 +194,16 @@ void *pqueue_peek(pqueue_t *q)
     return d;
 }
 
-void *pqueue_randpop(pqueue_t *q)
+void *pqueue_randpop(pqueue_t *q, uint64_t r)
 {
     void *head;
-    int ra;
+    size_t ra;
 
     if (!q || q->size == 1)
         return NULL;
 
-    /* pick a random valid index in [1, size-1] */
-    ra = rand() % (q->size - 1) + 1;
+    /* map the caller's number to a valid index in [1, size-1] */
+    ra = r % (q->size - 1) + 1;
     head = q->d[ra];
 
     /* replace with last element and shrink */

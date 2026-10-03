@@ -608,7 +608,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
     }
 
     case GC_GLOBAL_RAND:
-        victim_ru = pqueue_randpop(rm->victim_ru_pq);
+        victim_ru = pqueue_randpop(rm->victim_ru_pq, ftl_gc_rand(ssd));
         break;
 
     case GC_NOISY_RUH_CUSTOM: {

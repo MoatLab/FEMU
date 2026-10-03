@@ -218,6 +218,8 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
+    /* order in which lines filled; the FIFO policy's key */
+    uint64_t close_seq;
     uint64_t stream_tag;
     /* set while the line is being rewritten, so it stays out of the lists */
     bool reclaiming;
@@ -244,6 +246,7 @@ struct line_mgmt {
     int free_line_cnt;
     int victim_line_cnt;
     int full_line_cnt;
+    uint64_t next_close_seq;
 };
 
 typedef struct buffer_entry {
@@ -361,6 +364,8 @@ struct FemuReclaimGroup {
 struct femu_ftl_policy_ops {
     const char *name;
     struct line *(*select_victim_line)(struct ssd *ssd, bool force);
+    /* the victim queue is ordered by close_seq instead of valid pages */
+    bool by_close_order;
 };
 
 /*
@@ -515,6 +520,8 @@ struct ssd {
 
     /* base-path GC victim policy (greedy by default) */
     const struct femu_ftl_policy_ops *policy;
+    /* sampling state for the random GC policies, seeded from gc_seed */
+    uint64_t gc_rng;
 
     uint32_t bad_blocks; /* factory bad-block count, reported via SMART; 0 = none */
 

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 145 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 146 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -156,6 +156,7 @@ Devices:
 | `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; KV uses it only as the fraction of NAND usable for values |
 | `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100; under FDP it keeps at least one reclaim unit free unless it is 100 |
 | `gc_policy` | `str` | unset | bbssd, CSD without FDP: line victim policy, one of greedy, random, cost-benefit, fifo or d-choice; unset is greedy |
+| `gc_seed` | `uint64` | `0` | bbssd, CSD: seed for the victims the random and d-choice gc_policy and the FDP random gc_strategy pick; the same seed and workload pick the same victims, so vary it to vary runs |
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle |
 | `mapping` | `str` | unset | bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, hybrid or fast; unset is page, and FDP supports only page |
 | `mapping_cache_mb` | `uint32` | `0` | bbssd, CSD with mapping=dftl: size of the cached mapping table in MiB; 0 means 4 |

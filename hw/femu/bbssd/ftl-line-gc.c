@@ -26,6 +26,16 @@ static inline void victim_line_set_pri(void *a, pqueue_pri_t pri)
     ((struct line *)a)->vpc = pri;
 }
 
+static inline pqueue_pri_t victim_line_get_close_seq(void *a)
+{
+    return ((struct line *)a)->close_seq;
+}
+
+static inline void victim_line_set_close_seq(void *a, pqueue_pri_t pri)
+{
+    ((struct line *)a)->close_seq = pri;
+}
+
 static inline size_t victim_line_get_pos(void *a)
 {
     return ((struct line *)a)->pos;
@@ -47,9 +57,16 @@ void ssd_init_lines(struct ssd *ssd)
     lm->lines = g_malloc0(sizeof(struct line) * lm->tt_lines);
 
     QTAILQ_INIT(&lm->free_line_list);
-    lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
-            victim_line_get_pri, victim_line_set_pri,
-            victim_line_get_pos, victim_line_set_pos);
+    if (ssd->policy->by_close_order) {
+        lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
+                victim_line_get_close_seq, victim_line_set_close_seq,
+                victim_line_get_pos, victim_line_set_pos);
+    } else {
+        lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
+                victim_line_get_pri, victim_line_set_pri,
+                victim_line_get_pos, victim_line_set_pos);
+    }
+    lm->next_close_seq = 0;
     QTAILQ_INIT(&lm->full_line_list);
 
     lm->free_line_cnt = 0;
@@ -60,6 +77,7 @@ void ssd_init_lines(struct ssd *ssd)
         line->vpc = 0;
         line->pos = 0;
         line->close_time = 0;
+        line->close_seq = 0;
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -141,6 +159,7 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
                 /* record when the line filled, for age-based GC policies */
                 wpp->curline->close_time =
                     qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                wpp->curline->close_seq = lm->next_close_seq++;
                 /* move current line to {victim,full} line list */
                 if (wpp->curline->vpc == spp->pgs_per_line) {
                     /* all pgs are still valid, move to full line list */
@@ -251,6 +270,7 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
             }
         }
         line->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        line->close_seq = ssd->lm.next_close_seq++;
         pqueue_insert(ssd->lm.victim_line_pq, line);
         ssd->lm.victim_line_cnt++;
     }
@@ -437,7 +457,7 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     line->ipc++;
     ftl_assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
     /* Adjust the position of the victime line in the pq under over-writes */
-    if (line->pos) {
+    if (line->pos && !ssd->policy->by_close_order) {
         /* Note that line->vpc will be updated by this call */
         pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
     } else {
@@ -618,7 +638,8 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 static struct line *select_victim_line_random(struct ssd *ssd, bool force)
 {
     struct line_mgmt *lm = &ssd->lm;
-    struct line *victim_line = pqueue_randpop(lm->victim_line_pq);
+    struct line *victim_line = pqueue_randpop(lm->victim_line_pq,
+                                              ftl_gc_rand(ssd));
 
     if (!victim_line) {
         return NULL;
@@ -687,29 +708,23 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
 }
 
 /*
- * FIFO victim selection: reclaim the line that was closed earliest (lowest
- * close_time), regardless of validity -- the simplest age-based policy. Iterates
- * the victim heap like cost-benefit and removes the chosen line.
+ * FIFO victim selection: reclaim the line that was closed earliest, regardless
+ * of validity -- the simplest age-based policy. Under this policy the victim
+ * queue is ordered by close_seq, which never changes while a line is queued,
+ * so the oldest line is at the top.
  */
 static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
 {
     struct line_mgmt *lm = &ssd->lm;
-    pqueue_t *pq = lm->victim_line_pq;
-    struct line *best = NULL;
+    struct line *best = pqueue_peek(lm->victim_line_pq);
 
-    for (size_t i = 1; i < pq->size; i++) {
-        struct line *ln = pq->d[i];
-        if (!best || ln->close_time < best->close_time) {
-            best = ln;
-        }
-    }
     if (!best) {
         return NULL;
     }
     if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
         return NULL;
     }
-    pqueue_remove(pq, best);
+    pqueue_pop(lm->victim_line_pq);
     best->pos = 0;
     lm->victim_line_cnt--;
     return best;
@@ -734,7 +749,7 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
         return NULL;
     }
     for (int s = 0; s < d; s++) {
-        size_t idx = 1 + (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s * 2654435761u) % n;
+        size_t idx = 1 + ftl_gc_rand(ssd) % n;
         struct line *ln = pq->d[idx];
         if (!best || ln->vpc < best->vpc) {
             best = ln;
@@ -756,9 +771,23 @@ static const struct femu_ftl_policy_ops femu_ftl_policies[] = {
     { .name = "greedy", .select_victim_line = select_victim_line },
     { .name = "random", .select_victim_line = select_victim_line_random },
     { .name = "cost-benefit", .select_victim_line = select_victim_line_cb },
-    { .name = "fifo", .select_victim_line = select_victim_line_fifo },
+    { .name = "fifo", .select_victim_line = select_victim_line_fifo,
+      .by_close_order = true },
     { .name = "d-choice", .select_victim_line = select_victim_line_dchoice },
 };
+
+/*
+ * Next number for the policies that sample victims (splitmix64). It is seeded
+ * from gc_seed, not the clock, so the same workload picks the same victims.
+ */
+uint64_t ftl_gc_rand(struct ssd *ssd)
+{
+    uint64_t z = (ssd->gc_rng += 0x9e3779b97f4a7c15ULL);
+
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
 
 /* Resolve a gc_policy name to its ops; default to greedy for NULL/empty/unknown. */
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name)

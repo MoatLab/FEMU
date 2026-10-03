@@ -2243,6 +2243,7 @@ typedef struct FemuCtrl {
     /* program/erase cycles the media is rated for; 0 takes the cell type's */
     uint32_t        pe_cycles_rated;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
+    uint64_t        gc_seed; /* seed for the GC policies that sample victims */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
     uint32_t        err_read_unc_ppm;  /* uncorrectable reads per million; 0 = off */

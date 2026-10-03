@@ -109,26 +109,45 @@ static void test_randpop_bubbles_replacement(void)
     TestNode nodes[G_N_ELEMENTS(priorities)];
     pqueue_t *queue;
     TestNode *node;
-    unsigned int seed;
 
     queue = queue_new(nodes, priorities, G_N_ELEMENTS(priorities));
     g_assert_cmpuint(nodes[3].position, ==, 4);
 
-    /* Pick position 4 without relying on a platform-specific rand() stream. */
-    for (seed = 0; seed < 10000; seed++) {
-        srand(seed);
-        if (rand() % G_N_ELEMENTS(priorities) + 1 == nodes[3].position) {
-            break;
-        }
-    }
-    g_assert_cmpuint(seed, <, 10000);
-
-    srand(seed);
-    node = pqueue_randpop(queue);
+    node = pqueue_randpop(queue, nodes[3].position - 1);
 
     g_assert_true(node == &nodes[3]);
     g_assert_true(pqueue_is_valid(queue));
     pqueue_free(queue);
+}
+
+/*
+ * The caller's number picks the entry, so the same numbers pick the same
+ * entries: a seeded caller repeats its choices run to run.
+ */
+static void test_randpop_follows_caller(void)
+{
+    const pqueue_pri_t priorities[] = { 7, 3, 9, 1, 5, 8, 2 };
+    const uint64_t draws[] = { 0x9e3779b97f4a7c15ULL, 5, 12, 0, 3 };
+    TestNode a[G_N_ELEMENTS(priorities)];
+    TestNode b[G_N_ELEMENTS(priorities)];
+    pqueue_t *qa = queue_new(a, priorities, G_N_ELEMENTS(priorities));
+    pqueue_t *qb = queue_new(b, priorities, G_N_ELEMENTS(priorities));
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(draws); i++) {
+        TestNode *na;
+        TestNode *nb;
+        size_t want = draws[i] % (qa->size - 1) + 1;
+        TestNode *at = qa->d[want];
+
+        na = pqueue_randpop(qa, draws[i]);
+        nb = pqueue_randpop(qb, draws[i]);
+        g_assert_true(na == at);
+        g_assert_cmpuint(na - a, ==, nb - b);
+        g_assert_true(pqueue_is_valid(qa));
+    }
+    pqueue_free(qa);
+    pqueue_free(qb);
 }
 
 int main(int argc, char **argv)
@@ -140,6 +159,8 @@ int main(int argc, char **argv)
                     test_change_preupdated_priority);
     g_test_add_func("/femu/pqueue/randpop-bubbles-replacement",
                     test_randpop_bubbles_replacement);
+    g_test_add_func("/femu/pqueue/randpop-follows-caller",
+                    test_randpop_follows_caller);
 
     return g_test_run();
 }
