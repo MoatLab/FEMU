@@ -530,7 +530,10 @@ Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
 Timestamp (0Eh), Host Behavior Support (16h), Command Set Profile (19h), FDP
-(1Dh, 1Eh), Key Value Configuration (20h) and Software Progress Marker (80h).
+(1Dh, 1Eh, only with `femu-subsys`), Key Value Configuration (20h, only with
+a KV namespace) and Software Progress Marker (80h). Any other identifier, or
+one of these without what it needs, fails with Invalid Field in Command, and
+log 12h lists exactly the identifiers that answer.
 Only the FDP features report a saved value: FDP Mode is fixed at realize,
 FDP Events can be changed at run time. A controller reset
 (`nvme_reset_features()`) restores Arbitration, Power Management, the
@@ -623,6 +626,7 @@ registers with no guest. Cases that target this chapter include:
 | `delete-sq-in-flight`, `ns-retire-pollers` | queue and namespace removal with I/O in flight |
 | `aer-limit` | the AER limit |
 | `abort` | Abort leaves the SQ unwritten, aborts queued admin and I/O commands, and enforces ACL |
+| `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -667,8 +671,9 @@ The documentation example above (`frontend-sharded-pollers`) is started by
   `hw/femu/nvme-admin.c`.
 - **A new admin command, feature or log page**: `nvme_admin_cmd()`,
   `nvme_set_feature()`, `nvme_get_feature()` and the support tables
-  `nvme_feature_support[]` and `nvme_feature_cap[]`, `nvme_get_log()` and
-  `nvme_supported_log_pages()`.
+  `nvme_feature_support[]` and `nvme_feature_cap[]` (with
+  `nvme_fid_supported()` for a feature that needs something else present),
+  `nvme_get_log()` and `nvme_supported_log_pages()`.
 - **A new host-side cost**: add it next to the host-link and firmware-CPU
   models in `nvme_process_cq_cpl()`.
 - **Anything that changes state the I/O path reads**: wrap it in

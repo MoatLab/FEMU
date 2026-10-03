@@ -1141,6 +1141,8 @@ enum NvmeLogIdentifier {
     NVME_LOG_TELEMETRY_CTRL = 0x08,
     NVME_LOG_PERSISTENT_EVENT = 0x0d,
     NVME_LOG_LBA_STATUS     = 0x0e,
+    NVME_LOG_FID_EFFECTS    = 0x12,
+    NVME_LOG_MI_EFFECTS     = 0x13,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_FDP_CONFS      = 0x20,
     NVME_LOG_FDP_RUH_USAGE  = 0x21,

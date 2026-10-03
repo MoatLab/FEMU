@@ -1562,10 +1562,16 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
                             NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
                     ==, NVME_INVALID_FIELD);
 
-    /* a controller-wide feature addressed to one namespace */
-    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+    /*
+     * A controller-wide feature addressed to one namespace. Volatile Write
+     * Cache is not supported without vwc=1, so it is an invalid field first.
+     */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ARBITRATION,
                             false, 1, 0, NULL)),
                     ==, NVME_FEAT_NOT_NS_SPEC);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+                            false, 1, 0, NULL)),
+                    ==, NVME_INVALID_FIELD);
 
     /*
      * A host learns it may use the Select field and the Save bit from
@@ -19270,6 +19276,197 @@ static void femu_test_abort(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_LOG_FID_EFFECTS    0x12
+#define FEMU_LOG_MI_EFFECTS     0x13
+#define FEMU_FID_FSP(fis)       (((fis) >> 20) & 0xfff)
+#define FEMU_FID_SCOPE_NS       0x1
+#define FEMU_FID_SCOPE_CTRL     0x2
+#define FEMU_FEAT_KV_CONFIG     0x20
+#define FEMU_FEAT_FDP           0x1d
+#define FEMU_FEAT_FDP_EVENTS    0x1e
+#define FEMU_FID_SCOPE_ENDGRP   0x8
+
+static uint16_t femu_get_log_csi(FemuCtrlState *c, uint8_t lid, uint8_t csi,
+                                 uint64_t buf, uint32_t len, uint64_t off)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | (((len >> 2) - 1) << 16));
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw14 = cpu_to_le32((uint32_t)csi << 24);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Check a FID Supported and Effects page against Get Features: an identifier
+ * the page lists must answer, one it leaves out must be refused, and a listed
+ * one names no effects and exactly one scope (Base 2.3, Figure 267) -- none
+ * for FDP Events, whose scope is a reclaim unit handle, which has no bit.
+ */
+static void femu_check_fid_effects(FemuCtrlState *c, const uint32_t *fis)
+{
+    int fid;
+
+    for (fid = 0; fid < 256; fid++) {
+        uint32_t e = le32_to_cpu(fis[fid]);
+        uint16_t sc = FEMU_SC(femu_get_feature(c, fid, NVME_GETFEAT_SELECT_CAP,
+                                               1, 0, NULL));
+
+        if (e & 1) {
+            g_assert_cmphex(sc, ==, NVME_SUCCESS);
+            g_assert_cmpint(FEMU_FID_FSP(e) == 0, ==,
+                            fid == FEMU_FEAT_FDP_EVENTS);
+            g_assert_cmpint(FEMU_FID_FSP(e) & (FEMU_FID_FSP(e) - 1), ==, 0);
+            g_assert_cmphex(e & 0x000ffffe, ==, 0);
+        } else {
+            g_assert_cmphex(sc, ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(e, ==, 0);
+        }
+    }
+}
+
+/*
+ * LID 12h and 13h are listed in LID 00h and answer. 12h is built from the
+ * check Get Features uses, so the two agree on every identifier; 13h is all
+ * zero because there is no NVMe-MI Send or Receive.
+ */
+static void femu_test_fid_effects(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t lids[256], fis[256];
+    g_autofree uint8_t *mi = g_malloc(4096);
+    uint64_t buf;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, 0, buf,
+                                     sizeof(lids), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, lids, sizeof(lids));
+    g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_FID_EFFECTS]) & FEMU_LIDS_LSUPP,
+                    ==, FEMU_LIDS_LSUPP);
+    g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_MI_EFFECTS]) & FEMU_LIDS_LSUPP,
+                    ==, FEMU_LIDS_LSUPP);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0, buf,
+                                     sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    femu_check_fid_effects(&c, fis);
+    g_assert_cmphex(FEMU_FID_FSP(le32_to_cpu(fis[NVME_ARBITRATION])), ==,
+                    FEMU_FID_SCOPE_CTRL);
+    g_assert_cmphex(FEMU_FID_FSP(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE])), ==,
+                    FEMU_FID_SCOPE_NS);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP_EVENTS]), ==, 0);
+    /* no volatile write cache without vwc=1 */
+    g_assert_cmphex(le32_to_cpu(fis[NVME_VOLATILE_WRITE_CACHE]), ==, 0);
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0, buf, 64,
+                                     sizeof(fis)), ==, NVME_INVALID_FIELD);
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_MI_EFFECTS, 0, buf, 4096,
+                                     0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, mi, 4096);
+    for (i = 0; i < 4096; i++) {
+        g_assert_cmpint(mi[i], ==, 0);
+    }
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_MI_EFFECTS, 0, buf, 64,
+                                     4096), ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * With a command set selected by CSI, the page names the features of the
+ * command set CDW14 asks for: the key value feature only for key value, the
+ * NVM command set's own only for NVM.
+ */
+static void femu_test_fid_effects_kv(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t fis[256];
+    uint32_t e;
+    uint64_t buf;
+
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, &femu->dev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, FEMU_CSI_KV,
+                                     buf, sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    e = le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]);
+    g_assert_cmphex(e & 1, ==, 1);
+    g_assert_cmphex(FEMU_FID_FSP(e), ==, FEMU_FID_SCOPE_NS);
+    g_assert_cmphex(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[NVME_ARBITRATION]) & 1, ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_KV_CONFIG,
+                                             NVME_GETFEAT_SELECT_CAP, 1, 0,
+                                             NULL)), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, NVME_CSI_NVM,
+                                     buf, sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE]) & 1, ==, 1);
+
+    /* a command set there is none of has only the common features */
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0x07,
+                                     buf, sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_KV_CONFIG]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[NVME_LBA_RANGE_TYPE]), ==, 0);
+    g_assert_cmphex(le32_to_cpu(fis[NVME_ARBITRATION]) & 1, ==, 1);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * With an endurance group the placement features are listed: FDP with
+ * endurance group scope, FDP Events with none, as its scope (a reclaim unit
+ * handle) has no bit. Without one, neither is.
+ */
+static void femu_test_fid_effects_fdp(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t fis[256];
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0, buf,
+                                     sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    femu_check_fid_effects(&c, fis);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP]), ==,
+                    1 | FEMU_FID_SCOPE_ENDGRP << 20);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP_EVENTS]), ==, 1);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -20673,6 +20870,18 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("fid-effects", "femu", femu_test_fid_effects, NULL);
+    qos_add_test("fid-effects-kv", "femu", femu_test_fid_effects_kv,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    });
+    qos_add_test("fid-effects-fdp", "femu", femu_test_fid_effects_fdp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "subsys=fdpsub"
     });
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {

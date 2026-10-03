@@ -54,6 +54,37 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
 };
 
+/*
+ * Whether the controller answers Get and Set Features for @fid: the table says
+ * which identifiers are implemented, and some only exist alongside what they
+ * configure. Both commands and the FID Supported and Effects log ask here, so
+ * the log cannot claim a feature the commands refuse.
+ */
+static bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
+{
+    if (!nvme_feature_support[fid]) {
+        return false;
+    }
+
+    switch (fid) {
+    case NVME_VOLATILE_WRITE_CACHE:
+        return n->vwc;
+    case NVME_FDP_MODE:
+    case NVME_FDP_EVENTS:
+        /* both name the endurance group, which comes with a subsystem */
+        return n->subsys;
+    case NVME_KV_FEAT_CONFIG:
+        for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+            if (n->namespaces[i].allocated && NS_KVSSD(&n->namespaces[i])) {
+                return true;
+            }
+        }
+        return false;
+    default:
+        return true;
+    }
+}
+
 static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_CREATE_SQ]        = NVME_CMD_EFF_CSUPP,
@@ -1342,7 +1373,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t sel = NVME_GETFEAT_SELECT(dw10);
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_fid_supported(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1505,7 +1536,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_FID_NOT_SAVEABLE | NVME_DNR;
     }
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_fid_supported(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1853,6 +1884,102 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     return status;
 }
 
+/* fields of a FID Supported and Effects entry (Base 2.3, Figure 267) */
+#define NVME_FID_FSUPP          (1u << 0)
+#define NVME_FID_SCOPE_NS       (1u << 20)
+#define NVME_FID_SCOPE_CTRL     (1u << 21)
+#define NVME_FID_SCOPE_ENDGRP   (1u << 23)
+
+/*
+ * Whether @fid belongs to command set @csi. Features an I/O command set defines
+ * are listed for that set only (Base 2.3, 5.2.12.1.18); the zoned set builds
+ * on the NVM one and has its features.
+ */
+static bool nvme_fid_in_iocs(uint8_t fid, uint8_t csi)
+{
+    switch (fid) {
+    case NVME_LBA_RANGE_TYPE:
+    case NVME_ERROR_RECOVERY:
+    case NVME_WRITE_ATOMICITY:
+        return csi == NVME_CSI_NVM || csi == NVME_CSI_ZONED;
+    case NVME_KV_FEAT_CONFIG:
+        return csi == NVME_CSI_KV;
+    default:
+        return true;
+    }
+}
+
+/*
+ * Feature Identifiers Supported and Effects (12h): one entry per FID, built
+ * from nvme_fid_supported() so it matches what Get and Set Features answer. No
+ * feature here changes user data, namespaces or controller capabilities, so
+ * an entry carries FSUPP and the scope Figure 403 gives the feature, where
+ * Figure 267 has a bit for it.
+ */
+static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
+                                 uint32_t buf_len, uint64_t off)
+{
+    uint32_t fis[256] = {};
+    uint32_t trans_len;
+    int fid;
+
+    QEMU_BUILD_BUG_ON(sizeof(fis) != 1024);
+
+    if (off >= sizeof(fis)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* the command set comes from CDW14 only when CC.CSS selects by CSI */
+    if (NVME_CC_CSS(n->bar.cc) != NVME_CC_CSS_CSI) {
+        csi = NVME_CSI_NVM;
+    }
+
+    for (fid = 0; fid < 256; fid++) {
+        uint32_t scope;
+
+        if (!nvme_fid_supported(n, fid) || !nvme_fid_in_iocs(fid, csi)) {
+            continue;
+        }
+        if (fid == NVME_FDP_MODE) {
+            scope = NVME_FID_SCOPE_ENDGRP;
+        } else if (fid == NVME_FDP_EVENTS) {
+            scope = 0;  /* a reclaim unit handle, which has no FSP bit */
+        } else if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+            scope = NVME_FID_SCOPE_NS;
+        } else {
+            scope = NVME_FID_SCOPE_CTRL;
+        }
+        fis[fid] = cpu_to_le32(NVME_FID_FSUPP | scope);
+    }
+
+    trans_len = MIN(sizeof(fis) - off, buf_len);
+
+    return dma_read_prp(n, (uint8_t *)fis + off, trans_len,
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
+/*
+ * NVMe-MI Commands Supported and Effects (13h). There is no NVMe-MI Send or
+ * Receive, so no Management Interface command is supported and the whole
+ * 4 KiB page is zero.
+ */
+static uint16_t nvme_mi_effects(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                uint64_t off)
+{
+    uint8_t page[4096] = {};
+    uint32_t trans_len;
+
+    if (off >= sizeof(page)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trans_len = MIN(sizeof(page) - off, buf_len);
+
+    return dma_read_prp(n, page + off, trans_len,
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 /*
  * Supported Log Pages (00h): one 32 bit LID Supported and Effects structure
  * per log page identifier, with bit 0 set for each identifier this controller
@@ -1892,6 +2019,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_TELEMETRY_CTRL] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_LBA_STATUS]   = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_FID_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_MI_EFFECTS]   = cpu_to_le32(NVME_LIDS_LSUPP);
     /* its LID specific parameter: Establish Context and Read Header (ECRH) */
     lids[NVME_LOG_PERSISTENT_EVENT] = cpu_to_le32(NVME_LIDS_LSUPP | 1 << 16);
     if (nvme_can_sanitize(n)) {
@@ -2984,6 +3113,10 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_telemetry_log(n, cmd, lid, len, off);
     case NVME_LOG_LBA_STATUS:
         return nvme_lba_status_log(n, cmd, len, off);
+    case NVME_LOG_FID_EFFECTS:
+        return nvme_fid_effects(n, cmd, csi, len, off);
+    case NVME_LOG_MI_EFFECTS:
+        return nvme_mi_effects(n, cmd, len, off);
     case NVME_LOG_PERSISTENT_EVENT:
         return femu_pel_get_log(n, cmd, len, off);
     case NVME_LOG_SANITIZE:
