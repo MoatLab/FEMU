@@ -1660,7 +1660,6 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     if (nvme_ns_mgmt_supported(n)) {
         n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
         n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
-        n->id_ctrl.oacs |= cpu_to_le16(NVME_OACS_NS_MGMT);
         n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_NS_ATTR);
         for (i = 0; i < n->num_namespaces; i++) {
             stq_le_p(n->namespaces[i].id_ns.nvmcap,
@@ -1683,8 +1682,6 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->rab          = 6;
     id->cntrltype    = 0x1;     /* an I/O controller */
-    /* descriptor formats 0 and 2 (the latter names a source namespace) */
-    id->ocfs         = cpu_to_le16(n->oncs & NVME_ONCS_COPY ? 0x5 : 0);
     id->wctemp       = cpu_to_le16(NVME_TEMPERATURE_WARNING);
     id->cctemp       = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
     id->ieee[0]      = 0x00;
@@ -1693,6 +1690,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cmic         = nvme_ns_shared(n) ? 2 : 0;
     id->mdts         = n->mdts;
     id->ver          = NVME_SPEC_VER;
+    /* OACS, ONCS, OCFS, LPA and SANICAP: nvme_caps_id_ctrl() at realize */
 
     /* FDP: set Controller Attributes for FDP support */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
@@ -1701,29 +1699,18 @@ static void nvme_init_ctrl(FemuCtrl *n)
         id->endgidmax = cpu_to_le16(1);
     }
 
-    id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST |
-                                   NVME_OACS_GLSS);
-    if (n->streams) {
-        id->oacs |= cpu_to_le16(NVME_OACS_DIRECTIVES);
-    }
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
     /* one read-only slot: the firmware log fills one, and nothing updates it */
     id->frmw         = 1 << 1 | 1;
-    id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED |
-                       NVME_LPA_TELEMETRY | NVME_LPA_PERSISTENT_EVENT;
     id->pels         = cpu_to_le32(1);
     id->elpe         = n->elpe;
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
-    /* a Copy's write portion is one write here, so it is single-atomic */
-    id->oncs         = cpu_to_le16(n->oncs | NVME_ONCS_TIMESTAMP |
-                                   (n->oncs & NVME_ONCS_COPY ? NVME_ONCS_NVMCSA
-                                                             : 0));
     /* the Open-Channel commands take PRPs only, so they get no SGLs */
     if (n->sgl && !OCSSD(n)) {
         id->sgls     = cpu_to_le32(0x1);   /* advertise address-SGL support */
@@ -2463,13 +2450,18 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
         n->namespace_pool_size = n->subsys->storage->namespace_pool_size;
         n->id_ctrl.nn = cpu_to_le32(n->namespace_limit);
-        n->id_ctrl.oacs |= cpu_to_le16(NVME_OACS_NS_MGMT);
         n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_NS_ATTR);
         nvme_set_ctrl_capacity(n);
     } else if (nvme_init_namespaces(n, errp)) {
         femu_realize_undo(n);
         return;
     }
+    /*
+     * Fill the capabilities once the namespaces exist, before any FTL runs:
+     * a managed bbssd namespace reads OACS to pick its addressing, and the
+     * shared storage object copies these fields.
+     */
+    nvme_caps_id_ctrl(n, &n->id_ctrl);
 
     nvme_register_extensions(n);
 

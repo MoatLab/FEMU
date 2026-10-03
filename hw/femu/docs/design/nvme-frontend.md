@@ -491,6 +491,22 @@ of its own mode, so I/O dispatches on the namespace, not the controller.
 Admin commands go to the controller's table; Get Log Page tries the named
 namespace's table first, then the controller's.
 
+### Capability registry
+
+`hw/femu/nvme-caps.c` is the one place that says what the controller
+handles. `nvme_admin_effects()` and `nvme_io_effects()` return the Commands
+Supported and Effects entry of an admin opcode, or of an I/O opcode in one
+command set, and zero for an opcode that is not handled.
+`nvme_log_support()` returns the Supported Log Pages entry of a log id in one
+command set. `nvme_caps_id_ctrl()` fills OACS, ONCS, OCFS, LPA and SANICAP
+from those three each time Identify Controller is answered.
+
+Logs 05h and 00h are built from the same functions, and `nvme_io_cmd()` runs
+an optional NVM command (Compare, Dataset Management, Write Zeroes, Copy,
+Verify, Write Uncorrectable) only where `nvme_io_effects()` lists it for the
+namespace's command set. Features follow the same rule through
+`nvme_fid_supported()`, which Get Features, Set Features and log 12h share.
+
 ### Namespace routing
 
 `nvme_ns()` maps an NSID to a namespace that is both allocated and attached
@@ -679,13 +695,13 @@ The documentation example above (`frontend-sharded-pollers`) is started by
   `femu_ftl_process_req()` if it charges time on the FTL thread. A mode that
   charges time on the poller adds it to `req->expire_time` in its `io_cmd`.
 - **A new I/O command shared by all block modes**: add it to `nvme_io_cmd()`
-  and to the Commands Supported and Effects tables at the top of
-  `hw/femu/nvme-admin.c`.
-- **A new admin command, feature or log page**: `nvme_admin_cmd()`,
-  `nvme_set_feature()`, `nvme_get_feature()` and the support tables
-  `nvme_feature_support[]` and `nvme_feature_cap[]` (with
-  `nvme_fid_supported()` for a feature that needs something else present),
-  `nvme_get_log()` and `nvme_supported_log_pages()`.
+  and to `nvme_io_effects()` in `hw/femu/nvme-caps.c`.
+- **A new admin command, feature or log page**: `nvme_admin_cmd()` and
+  `nvme_admin_effects()`; `nvme_set_feature()`, `nvme_get_feature()` and the
+  support tables `nvme_feature_support[]` and `nvme_feature_cap[]` (with
+  `nvme_fid_supported()` for a feature that needs something else present);
+  `nvme_get_log()` and `nvme_log_support()`. An Identify bit that sums up
+  commands or pages is derived in `nvme_caps_id_ctrl()`, not set by hand.
 - **A new host-side cost**: add it next to the host-link and firmware-CPU
   models in `nvme_process_cq_cpl()`.
 - **Anything that changes state the I/O path reads**: wrap it in
@@ -701,6 +717,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | --- | --- |
 | `hw/femu/femu.c` | `nvme_init_pci()`, `nvme_init_cmb()`, `nvme_init_ctrl()` (Identify Controller, CAP), `nvme_check_constraints()`, `nvme_mmio_write()`, `nvme_write_bar()`, `nvme_process_db_admin()`, `nvme_process_db_io()`, `nvme_start_ctrl()`, `nvme_clear_ctrl()`, `nvme_reset_features()`, `femu_ftl_thread()`, `femu_ftl_process_req()`, `femu_needs_ftl_thread()`, `nvme_register_extensions()`, `nvme_register_extensions_ns()`, `femu_realize()`, `femu_exit()` |
 | `hw/femu/nvme-admin.c` | `nvme_create_sq()`, `nvme_create_cq()`, `nvme_del_sq()`, `nvme_del_cq()`, `nvme_init_poller()`, `nvme_start_dataplane()`, `nvme_set_db_memory()`, `nvme_identify()`, `nvme_get_feature()`, `nvme_set_feature()`, `nvme_get_log()`, `nvme_abort_req()`, `nvme_admin_cmd()`, `nvme_process_aers()`, `nvme_process_sq_admin()` |
+| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_log_support()`, `nvme_caps_id_ctrl()` |
 | `hw/femu/nvme-io.c` | `nvme_poller()`, `nvme_process_sq_io()`, `nvme_update_sq_eventidx()`, `nvme_process_cq_cpl()`, `nvme_post_cqe()`, `nvme_rw()`, `nvme_io_cmd()` |
 | `hw/femu/nvme-util.c` | `nvme_pause_pollers()`, `nvme_resume_pollers()`, `nvme_update_sq_tail()`, `nvme_update_cq_head()`, `nvme_update_cq_eventidx()`, `nvme_init_sq()`, `nvme_init_cq()` |
 | `hw/femu/intr.c` | `nvme_isr_notify_io()`, `nvme_isr_notify_admin()`, `nvme_irq_update()`, `nvme_irq_mask_changed()`, `nvme_setup_virq()`, vector notifiers |

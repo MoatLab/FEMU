@@ -2390,6 +2390,18 @@ typedef struct NvmeDifTuple {
 #define CQ_POLLING_PERIOD_NS	(5000)
 /* Caller must stop processing and retire references before removal. */
 bool nvme_ns_mgmt_supported(FemuCtrl *n);
+bool nvme_can_sanitize(FemuCtrl *n);
+bool nvme_fid_supported(FemuCtrl *n, uint8_t fid);
+
+/*
+ * The capability registry (nvme-caps.c). Each returns the Commands Supported
+ * and Effects or LID Supported and Effects entry for one identifier, zero
+ * when it is not handled.
+ */
+uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc);
+uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc);
+uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid);
+void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id);
 void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id);
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);
 int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,

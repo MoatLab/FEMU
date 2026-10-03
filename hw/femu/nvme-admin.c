@@ -60,7 +60,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
  * configure. Both commands and the FID Supported and Effects log ask here, so
  * the log cannot claim a feature the commands refuse.
  */
-static bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
+bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
 {
     if (!nvme_feature_support[fid]) {
         return false;
@@ -84,59 +84,6 @@ static bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return true;
     }
 }
-
-static const uint32_t nvme_cse_acs[256] = {
-    [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_SQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_GET_LOG_PAGE]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DELETE_CQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_CQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_IDENTIFY]         = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_ABORT]            = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_SET_FEATURES]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_GET_FEATURES]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DEV_SELF_TEST]    = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_GET_LBA_STATUS]   = NVME_CMD_EFF_CSUPP,
-};
-
-//static const uint32_t nvme_cse_iocs_none[256];
-
-static const uint32_t nvme_cse_iocs_nvm[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE_ZEROES]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_DSM]                  = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-};
-
-/*
- * Write Zeroes and Dataset Management are left out: they change logical blocks
- * without going through the zone state machine, so a zoned namespace refuses
- * them and this log says so.
- */
-static const uint32_t nvme_cse_iocs_zoned[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_SEND]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
-};
-
-/*
- * The Key Value command set. A key is not a logical block, so the commands
- * that replace or remove a value are the ones that change what a read returns.
- */
-static const uint32_t nvme_cse_iocs_kv[256] = {
-    [NVME_KV_CMD_STORE]             = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_KV_CMD_RETRIEVE]          = NVME_CMD_EFF_CSUPP,
-    [NVME_KV_CMD_LIST]              = NVME_CMD_EFF_CSUPP,
-    [NVME_KV_CMD_DELETE]            = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_KV_CMD_EXIST]             = NVME_CMD_EFF_CSUPP,
-};
 
 static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
 {
@@ -816,7 +763,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
  * namespace, and only block namespaces can be erased the way Format erases
  * them; the other modes keep geometry of their own. Offer it only then.
  */
-static bool nvme_can_sanitize(FemuCtrl *n)
+bool nvme_can_sanitize(FemuCtrl *n)
 {
     /* A sanitize would erase the medium behind its CXL cache. */
     if (n->cxl_dev) {
@@ -837,18 +784,25 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    NvmeIdCtrl id;
 
     /* assigned when the controller joins its subsystem, after realize */
     n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
-    n->id_ctrl.sanicap = cpu_to_le32(nvme_can_sanitize(n) ? 1 << 1 : 0);
     for (int i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated && NS_ZNSSD(&n->namespaces[i])) {
             n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_ZDCN);
         }
     }
 
-    return dma_read_prp(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl),
-                             prp1, prp2);
+    /*
+     * The capabilities are derived again for the answer, which keeps it in
+     * step with logs 00h and 05h; the copy leaves the controller's own fields,
+     * which the FTL reads, untouched.
+     */
+    id = n->id_ctrl;
+    nvme_caps_id_ctrl(n, &id);
+
+    return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
 }
 
 static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
@@ -1984,11 +1938,8 @@ static uint16_t nvme_mi_effects(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
  * Supported Log Pages (00h): one 32 bit LID Supported and Effects structure
  * per log page identifier, with bit 0 set for each identifier this controller
  * answers. NVMe Base 2.3 lists the page as mandatory, and it is how a host
- * finds the vendor page without being told about it out of band.
- *
- * A page is reported as supported only where it would really answer: the
- * endurance group and placement pages need a subsystem, and the changed zone
- * list needs a zoned namespace.
+ * finds the vendor page without being told about it out of band. Which pages
+ * are listed is nvme_log_support()'s to say.
  */
 static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
                                          uint32_t buf_len, uint64_t off)
@@ -1998,7 +1949,6 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     uint32_t lids[256] = {};
     uint32_t trans_len;
     uint8_t csi = le32_to_cpu(cmd->cdw14) >> 24;
-    bool zoned = false;
     int i;
 
     QEMU_BUILD_BUG_ON(sizeof(lids) != 1024);
@@ -2007,47 +1957,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    lids[NVME_LOG_SUPPORTED]    = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_ERROR_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_SMART_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
-    if (nvme_ns_mgmt_supported(n)) {
-        lids[NVME_LOG_CHANGED_NS_LIST] = cpu_to_le32(NVME_LIDS_LSUPP);
-    }
-    lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_TELEMETRY_CTRL] = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_LBA_STATUS]   = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_FID_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
-    lids[NVME_LOG_MI_EFFECTS]   = cpu_to_le32(NVME_LIDS_LSUPP);
-    /* its LID specific parameter: Establish Context and Read Header (ECRH) */
-    lids[NVME_LOG_PERSISTENT_EVENT] = cpu_to_le32(NVME_LIDS_LSUPP | 1 << 16);
-    if (nvme_can_sanitize(n)) {
-        lids[NVME_LOG_SANITIZE] = cpu_to_le32(NVME_LIDS_LSUPP);
-    }
-    lids[NVME_LOG_FEMU_STATS]   = cpu_to_le32(NVME_LIDS_LSUPP);
-
-    if (n->subsys) {
-        lids[NVME_LOG_ENDGRP]        = cpu_to_le32(NVME_LIDS_LSUPP);
-    }
-    /* the placement pages answer only while placement is on */
-    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
-        lids[NVME_LOG_FDP_CONFS]     = cpu_to_le32(NVME_LIDS_LSUPP);
-        lids[NVME_LOG_FDP_RUH_USAGE] = cpu_to_le32(NVME_LIDS_LSUPP);
-        lids[NVME_LOG_FDP_STATS]     = cpu_to_le32(NVME_LIDS_LSUPP);
-        lids[NVME_LOG_FDP_EVENTS]    = cpu_to_le32(NVME_LIDS_LSUPP);
-    }
-
-    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        if (n->namespaces[i].allocated && NS_ZNSSD(&n->namespaces[i])) {
-            zoned = true;
-            break;
-        }
-    }
-    /* a command set's own pages are listed for that command set only */
-    if (zoned && csi == NVME_CSI_ZONED) {
-        lids[NVME_LOG_CHANGED_ZONE_LIST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    for (i = 0; i < 256; i++) {
+        lids[i] = cpu_to_le32(nvme_log_support(n, csi, i));
     }
 
     trans_len = MIN(sizeof(lids) - off, buf_len);
@@ -2638,86 +2549,30 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeEffectsLog log = {};
-    const uint32_t *src_iocs = NULL;
+    bool iocs = true;
     uint32_t trans_len;
+    int i;
 
     if (off >= sizeof(log)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    /* the command set comes from CDW14 only when CC.CSS selects by CSI */
     switch (NVME_CC_CSS(n->bar.cc)) {
     case NVME_CC_CSS_NVM:
-        src_iocs = nvme_cse_iocs_nvm;
-    case NVME_CC_CSS_ADMIN_ONLY:
+        csi = NVME_CSI_NVM;
         break;
     case NVME_CC_CSS_CSI:
-        switch (csi) {
-        case NVME_CSI_NVM:
-            src_iocs = nvme_cse_iocs_nvm;
-            break;
-        case NVME_CSI_ZONED:
-            src_iocs = nvme_cse_iocs_zoned;
-            break;
-        case NVME_CSI_KV:
-            src_iocs = nvme_cse_iocs_kv;
-            break;
-        }
+        break;
+    default:
+        iocs = false;
+        break;
     }
 
-    memcpy(log.acs, nvme_cse_acs, sizeof(nvme_cse_acs));
-    /* the optional commands are reported as OACS and ONCS actually offer them */
-    if (n->oacs & NVME_OACS_FORMAT) {
-        log.acs[NVME_ADM_CMD_FORMAT_NVM] = NVME_CMD_EFF_CSUPP |
-                                           NVME_CMD_EFF_LBCC | NVME_CMD_EFF_NCC;
-    }
-    if (nvme_can_sanitize(n)) {
-        log.acs[NVME_ADM_CMD_SANITIZE] = NVME_CMD_EFF_CSUPP |
-                                         NVME_CMD_EFF_LBCC;
-    }
-    if (nvme_ns_mgmt_supported(n)) {
-        log.acs[NVME_ADM_CMD_NS_MGMT] = NVME_CMD_EFF_CSUPP |
-                                       NVME_CMD_EFF_LBCC | NVME_CMD_EFF_NIC;
-        log.acs[NVME_ADM_CMD_NS_ATTACHMENT] = NVME_CMD_EFF_CSUPP |
-                                             NVME_CMD_EFF_NIC;
-    }
-    if (n->streams) {
-        log.acs[NVME_ADM_CMD_DIRECTIVE_SEND] = NVME_CMD_EFF_CSUPP;
-        log.acs[NVME_ADM_CMD_DIRECTIVE_RECV] = NVME_CMD_EFF_CSUPP;
-    }
-    log.acs[NVME_ADM_CMD_SET_DB_MEMORY] = NVME_CMD_EFF_CSUPP;
-
-    if (src_iocs) {
-        memcpy(log.iocs, src_iocs, sizeof(log.iocs));
-        if (!(n->oncs & NVME_ONCS_COMPARE)) {
-            log.iocs[NVME_CMD_COMPARE] = 0;
-        }
-        if (!(n->oncs & NVME_ONCS_WRITE_ZEROS)) {
-            log.iocs[NVME_CMD_WRITE_ZEROES] = 0;
-        }
-        if (!(n->oncs & NVME_ONCS_DSM)) {
-            log.iocs[NVME_CMD_DSM] = 0;
-        }
-        /* and every other command the NVM set dispatches, when it does */
-        if (src_iocs == nvme_cse_iocs_nvm) {
-            if (n->oncs & NVME_ONCS_WRITE_UNCORR) {
-                log.iocs[NVME_CMD_WRITE_UNCOR] = NVME_CMD_EFF_CSUPP |
-                                                 NVME_CMD_EFF_LBCC;
-            }
-            if (n->oncs & NVME_ONCS_COPY) {
-                log.iocs[NVME_CMD_COPY] = NVME_CMD_EFF_CSUPP |
-                                          NVME_CMD_EFF_LBCC;
-            }
-        }
-        if (src_iocs == nvme_cse_iocs_nvm || src_iocs == nvme_cse_iocs_zoned) {
-            if (n->oncs & NVME_ONCS_VERIFY) {
-                log.iocs[NVME_CMD_VERIFY] = NVME_CMD_EFF_CSUPP;
-            }
-        }
-        if (src_iocs == nvme_cse_iocs_nvm) {
-            if (n->subsys && n->subsys->endgrp.fdp.enabled) {
-                log.iocs[NVME_CMD_IO_MGMT_RECV] = NVME_CMD_EFF_CSUPP;
-                log.iocs[NVME_CMD_IO_MGMT_SEND] = NVME_CMD_EFF_CSUPP;
-            }
+    for (i = 0; i < 256; i++) {
+        log.acs[i] = cpu_to_le32(nvme_admin_effects(n, i));
+        if (iocs) {
+            log.iocs[i] = cpu_to_le32(nvme_io_effects(n, csi, i));
         }
     }
 

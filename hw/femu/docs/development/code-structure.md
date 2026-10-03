@@ -14,6 +14,7 @@ is in [architecture](../concepts/architecture.md).
 | [`femu-props.c`](../../femu-props.c) | Help text for every `femu` and `femu-subsys` property (what `-device femu,help` prints) |
 | [`nvme.h`](../../nvme.h) | NVMe structures, the `femu_mode` enum and the controller state `FemuCtrl` |
 | [`nvme-admin.c`](../../nvme-admin.c) | Admin commands, starting the pollers, namespace management, asynchronous events |
+| [`nvme-caps.c`](../../nvme-caps.c) | What the controller advertises: the Commands Supported and Effects and Supported Log Pages entries, and the Identify bits derived from them |
 | [`nvme-io.c`](../../nvme-io.c) | I/O commands and the poller loop that fetches submissions and posts completions |
 | [`nvme-util.c`](../../nvme-util.c) | Deallocation state per LBA (TRIM, Write Zeroes with deallocate, DULBE), queue head and tail and completion posting helpers, poller pause and resume, the Timestamp feature |
 | [`nvme-pel.c`](../../nvme-pel.c) | Persistent Event log and its `pel_file` |

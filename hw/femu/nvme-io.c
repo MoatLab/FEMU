@@ -7,21 +7,6 @@ static int64_t nvme_io_clock(FemuCtrl *n)
                                                 QEMU_CLOCK_REALTIME);
 }
 
-/*
- * Compare, Write Zeroes, Write Uncorrectable and Dataset Management belong to
- * the NVM command set. A key-value namespace does not implement it: these
- * opcodes were reaching the generic handlers, which addressed the value store
- * as though it were an array of logical blocks.
- *
- * Zoned namespaces are left alone. The zoned command set does include these,
- * with zone semantics on top, so refusing them there would be wrong; that they
- * currently run without updating any zone state is a separate gap.
- */
-static bool nvme_ns_has_nvm_cmd_set(NvmeNamespace *ns)
-{
-    return ns->csi != NVME_CSI_KV;
-}
-
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
@@ -1953,23 +1938,17 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return NVME_SUCCESS;
         }
         return nvme_flush(n, ns, cmd, req);
+    /*
+     * The optional commands run where the registry lists them, which is also
+     * what the Commands Supported and Effects log and ONCS report.
+     */
     case NVME_CMD_DSM:
-        /*
-         * This and the two below change logical blocks without going through
-         * the zone state machine. A deallocate over a full sequential zone
-         * zeroed its data while the descriptor still reported the zone full
-         * with its write pointer at capacity -- a rewrite out of order that
-         * the host is told nothing about. Refuse them on a zoned namespace
-         * until they honour the zone state; the zoned command effects log no
-         * longer claims them either.
-         */
-        if ((NVME_ONCS_DSM & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
-            !NS_ZNSSD(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
-        if ((NVME_ONCS_COMPARE & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             if (NS_ZNSSD(ns)) {
                 uint16_t status = zns_check_compare(ns, cmd);
 
@@ -1981,26 +1960,22 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-        if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
-            !NS_ZNSSD(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COPY:
-        /* zoned destinations carry write pointer rules this does not apply */
-        if ((NVME_ONCS_COPY & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
-            !NS_ZNSSD(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             return nvme_copy(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_VERIFY:
-        if ((NVME_ONCS_VERIFY & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             return nvme_verify(n, ns, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-        if ((NVME_ONCS_WRITE_UNCORR & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
-            !NS_ZNSSD(ns)) {
+        if (nvme_io_effects(n, ns->csi, cmd->opcode)) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
