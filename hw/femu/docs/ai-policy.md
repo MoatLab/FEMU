@@ -25,8 +25,8 @@ Assisted-by: <tool and model>
 
 You may add what it did in parentheses, for example
 `Assisted-by: <tool> (tests)`. Short autocompletion, spelling fixes and an AI
-review of your own patch need no line. If in doubt, add it, and tick the box
-in the pull request template.
+review of your own patch need no line. If in doubt, add it, and tick the AI
+assistance box in the pull request description.
 
 ## 3. Size
 
