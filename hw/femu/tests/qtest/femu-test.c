@@ -10222,6 +10222,94 @@ static void femu_csd_expect_exec(FemuCtrlState *c, FemuQueue *q)
  * and a controller disabled with a program still running must not leave the
  * program's completion pointing at a request that is gone.
  */
+/* where csd-runtime-floor sends QEMU's stderr */
+static char *femu_csd_warn_log;
+
+static void *femu_csd_warn_before(GString *cmd_line, void *arg)
+{
+    g_autofree char *quoted = g_shell_quote(femu_csd_warn_log);
+
+    g_string_append_printf(cmd_line, " 2>%s", quoted);
+    return arg;
+}
+
+/* how often @needle occurs in what QEMU has written to stderr so far */
+static int femu_csd_warn_count(const char *needle)
+{
+    g_autofree char *text = NULL;
+    const char *p;
+    int count = 0;
+
+    g_assert_true(g_file_get_contents(femu_csd_warn_log, &text, NULL, NULL));
+    for (p = strstr(text, needle); p; p = strstr(p + 1, needle)) {
+        count++;
+    }
+    return count;
+}
+
+/*
+ * A completion carries the program's result, so it cannot go out before the
+ * host has run the program. A runtime shorter than that is not reached, and
+ * QEMU says so once.
+ */
+static void femu_test_csd_runtime_floor(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const char needle[] = "took longer on the host";
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t runtime_ns[] = { 1000 * 1000 * 1000, 1000, 1000 };
+    uint32_t mr[8] = { 0 };
+    uint32_t dw[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf, ranges;
+    uint32_t id = 0;
+    int i;
+
+    if (!femu_csd_build_slow()) {
+        femu_csd_remove_slow();
+        g_test_skip("no host C compiler to build the test program");
+        return;
+    }
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    ranges = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_csd_load(&c, buf, "slow.so", "run"), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_csd_activate(&c, 1), ==, NVME_SUCCESS);
+    cmd.opcode = FEMU_CSD_ALLOC_FDM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(4096);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, &id)), ==,
+                    NVME_SUCCESS);
+    mr[2] = cpu_to_le32(id);
+    qtest_memwrite(c.pdev->bus->qts, ranges, mr, sizeof(mr));
+
+    /* 5 ms on the host: 1 s is reachable, 1 us twice is not */
+    for (i = 0; i < ARRAY_SIZE(runtime_ns); i++) {
+        dw[0] = FEMU_CSD_EXEC;
+        dw[1] = cpu_to_le32(1);
+        dw[2] = cpu_to_le32(1);
+        dw[3] = cpu_to_le32(1);
+        dw[4] = cpu_to_le32(sizeof(mr));
+        dw[6] = cpu_to_le32((uint32_t)ranges);
+        dw[7] = cpu_to_le32(ranges >> 32);
+        dw[10] = cpu_to_le32(5);
+        dw[15] = cpu_to_le32(runtime_ns[i]);
+        femu_submit(&c, &c.io, (NvmeCmd *)dw);
+        femu_csd_expect_exec(&c, &c.io);
+        g_assert_cmpint(femu_csd_warn_count(needle), ==, i ? 1 : 0);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_csd_remove_slow();
+    unlink(femu_csd_warn_log);
+}
+
 static void femu_test_csd_exec_concurrency(void *obj, void *data,
                                            QGuestAllocator *alloc)
 {
@@ -21790,6 +21878,15 @@ static void femu_register_nodes(void)
     });
     femu_csd_slow_dir = g_strdup_printf("%s/femu-csd-slow-%d",
                                         g_get_tmp_dir(), (int)getpid());
+    femu_csd_warn_log = g_strdup_printf("%s/femu-csd-warn-%d.log",
+                                        g_get_tmp_dir(), (int)getpid());
+    qos_add_test("csd-runtime-floor", "femu", femu_test_csd_runtime_floor,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = g_strdup_printf(
+            "femu_mode=4,fdm_size=16,nr_cu=1,csd_program_dir=%s",
+            femu_csd_slow_dir),
+        .before = femu_csd_warn_before,
+    });
     qos_add_test("csd-exec-concurrency", "femu",
                  femu_test_csd_exec_concurrency,
                  &(QOSGraphTestOptions) {

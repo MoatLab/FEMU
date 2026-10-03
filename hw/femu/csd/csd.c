@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include <gmodule.h>
 
 #include "csd.h"
@@ -113,6 +114,7 @@ struct FemuCsdState {
     /* programs whose last reference went, destroyed by a worker unlocked */
     QSLIST_HEAD(, FemuCsdProgram) dead;
     bool stopping;
+    bool overrun_warned;
 };
 
 static void *csd_worker(void *opaque);
@@ -1042,6 +1044,18 @@ static void csd_finish_locked(FemuCsdState *csd, FemuCsdJob *job,
         }
     }
     req->reqlat = req->expire_time - job->arrival;
+
+    /*
+     * The completion carries the program's result, so it cannot go out
+     * before the host has run the program: a runtime shorter than the host's
+     * own is not reached.
+     */
+    if (!status && !csd->overrun_warned && host_ns > 0 &&
+        runtime < (uint64_t)host_ns) {
+        csd->overrun_warned = true;
+        warn_report("femu-csd: a program took longer on the host than its "
+                    "modelled run time; its completions follow host time");
+    }
 }
 
 /* the first pending job whose program is not running, or NULL */

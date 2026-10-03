@@ -106,6 +106,9 @@ namespace; see the [BlackBox guide](blackbox.md#configuration).
 - `csf_runtime_scale`: a program that declares no run time and no scale of
   its own holds its unit for its measured host run time times this value
   (default 3).
+  A completion carries the program's result, so it never arrives before the
+  host has run the program: a run time, declared or scaled, shorter than the
+  host's own is not reached. QEMU warns once when that happens.
 - `csd_program_dir`: the host directory programs load from.
 - `nr_thread`, `time_slice` and `context_switch_time` are accepted so CEMU
   configurations still start. They have no effect, and a value other than

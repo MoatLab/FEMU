@@ -327,6 +327,12 @@ many programs run at once in device time;
 [`csf_runtime_scale`](../reference/properties.md#csd-computational-storage)
 stands for how much slower the device's cores are than the host's.
 
+The completion carries the program's return value, so the poller cannot post
+it before the worker has finished the run. A runtime shorter than the host's
+own run time, declared or scaled below 1, is therefore not reached: the guest
+sees the host's time. `csd_finish_locked()` warns once when a run's runtime
+is shorter than its measured host time.
+
 ## Parameters
 
 Properties: [CSD](../reference/properties.md#csd-computational-storage). The
