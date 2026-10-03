@@ -1645,6 +1645,12 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->cross_zone_read = n->zns_params.zns_cross_zone_read;
 
         nvme_ns_init_identify(n, &ns->id_ns);
+        /* a zoned namespace refuses Copy, so it reports no Copy limits */
+        if (!nvme_ns_io_effects(n, ns, NVME_CMD_COPY)) {
+            ns->id_ns.mssrl = 0;
+            ns->id_ns.mcl = 0;
+            ns->id_ns.msrc = 0;
+        }
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
             g_free(ns_modes);

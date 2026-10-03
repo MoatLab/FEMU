@@ -238,7 +238,9 @@ Zone Management Receive. Other I/O opcodes go through the common path in
 - Compare is checked like a Read (`zns_check_compare()`).
 - Dataset Management, Write Zeroes, Copy and Write Uncorrectable fail with
   Invalid Opcode on a zoned namespace: they would change blocks without
-  going through the state machine.
+  going through the state machine. The command effects log for CSI 2 leaves
+  them out, and Identify Namespace reports no Copy limits (MSSRL, MCL and
+  MSRC are zero) even when `oncs` turns Copy on.
 - Verify runs the common path without zone state or boundary checks.
 - Flush and the I/O Management commands behave as on any namespace.
 
