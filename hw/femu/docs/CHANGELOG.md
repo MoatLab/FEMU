@@ -250,6 +250,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - FDP GC moves all of a reclaim unit's pages before erasing any block, retires each moved page's old copy, and runs foreground GC per page. A pass that stopped part way used to leave the unit with erased blocks counted again later (c7b373186).
 - FDP GC takes a new unit for a collection destination that was dropped when it filled with nothing free, and collects a unit with no valid pages without one. GC used to stop for good once the destination was gone, so a full device stayed full even after the host deallocated everything (22a0fc5ee).
 - An FDP handle whose last unit filled with nothing free reports no room in RUH Status. It used to report the room of its retired unit, which GC could free and give to another handle (4e7a06666).
+- The `random` and `d-choice` GC policies and FDP's random reclaim strategy draw victims from a generator seeded by the new `gc_seed` property instead of the wall clock and `rand()`, so the same configuration and workload give the same victims and WAF on every run. `fifo` finds its victim at the top of a queue ordered by close order instead of scanning every line, with the same victims as before (04ba1c0aa).
 
 #### Spec conformance and host compatibility
 
@@ -272,6 +273,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - With `namespace_modes`, the controller's model number and serial come from its own `femu_mode` instead of the namespace brought up last (efdb98643, c3f968029).
 - SMART wear counters are summed across namespaces (4a4f0d9bf).
 - Counters fixed to move in every mode: FDP and KV write amplification and bytes, KV relocations, FDP erases (f4b3ac376, 980fb7886, 37464e4bd, ce20d8c06, 4c7d9c22a, 749e09fef, 2a16553c9, ba0c49338).
+- OC 1.2 enforces its bad block table: a write or erase that names a factory bad, grown bad or device reserved block fails with Write Fault. Set Bad Block Table marks the plane it is given instead of another block's plane, and keeps the table's counts current (933addb72).
 
 ### Documentation and tooling
 
@@ -288,6 +290,8 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - `femu-test.sh` checks a device from inside the guest for block, zoned, KV and CSD namespaces (9fee8190c, 2244a1b9c, c17a31ea9).
 - `make-guest-image.sh` builds an Ubuntu 24.04 guest image, and the run scripts accept `IMGDIR`, `OSIMGF` and another SSH port (e877f2dc0, e74535012, 66bb3068e).
 - The build script fails on a compile error, and the config self-test fails when FEMU does not survive (a1bf37caf, da7c1fcfe).
+- The config self-test requires each device to come up, not only its property names to be accepted. That caught `zns.conf`, which asked for more active zones than it has and was refused at every size (b509a23a5).
+- Config presets for OCSSD, CSD, KV and NoSSD (NoSSD with link and firmware time from the NVMeCHA controller), and a `run-kvssd.sh` launcher (04eb9b06d).
 - A key-value probe tool and a corrected KV wire format description (9ab75f5dc).
 - `pin.sh` no longer names a CPU past the last one, and now pins the pollers, the FTL thread and the CXL SSD's `femu-cxl-ftl` and `femu-cxl-cca` threads as well as the vCPUs (e29fe6ee2, 56e0e2f27).
 - Every launcher, the legacy scripts and `make-guest-image.sh` name QEMU's threads with `debug-threads=on` (e29fe6ee2, 56e0e2f27).
