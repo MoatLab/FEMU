@@ -134,7 +134,10 @@ use the slot's backing; see "Host kernel"). Eviction leaves a held page
 resident, and the access that needed the room goes uncached; a dirty victim
 is held while its write-back drops the BQL. The worker mutex protects the
 queue of stack-owned requests and their completions, and is released before
-reacquiring the BQL. The worker alone modifies FTL/NAND state and takes
+reacquiring the BQL. Each request carries its own condition variable on the
+caller's stack: enqueue wakes the worker on a condition variable no request
+waits on, and the worker wakes only the waiter whose request it finished, so
+a waiter never wakes for another request. The worker alone modifies FTL/NAND state and takes
 requests in arrival order; the NAND model overlaps them where they reach
 different LUNs. Each access, flush, way change and CCA chunk accumulates its
 own media time. Cache iterators, entries and payload stay stable because
@@ -144,7 +147,9 @@ It dispatches FEMU media directly, so no parent window guard remains engaged
 across a BQL wait. The component-register overlay revokes and then enters the
 parent register callback without waiting. Plain Type-3 callbacks retain their normal guard.
 Read-only QOM counters may show an operation in progress.
-The worker is joined before its state is destroyed.
+The worker is joined before its state is destroyed. Stop requires that no
+request is outstanding, because it cannot reach the waiters' condition
+variables; the gate guarantees this, and stop asserts the queue is empty.
 
 The worker receives only page numbers, operation types and timestamps. It
 never reads or writes guest memory. Payload copies remain on the vCPU thread.

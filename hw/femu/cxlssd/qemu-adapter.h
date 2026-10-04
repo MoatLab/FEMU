@@ -12,6 +12,8 @@ typedef struct FemuCxlWork {
     NvmeRequest req;
     uint64_t latency;
     bool done;
+    /* Signalled by the worker alone when this request is done. */
+    QemuCond *done_cond;
     QSIMPLEQ_ENTRY(FemuCxlWork) next;
 } FemuCxlWork;
 
@@ -108,7 +110,8 @@ struct FemuCxlMedia {
     /* How long the last switch back to the full model waited for NAND. */
     uint64_t fast_load_drain_ns;
     QemuMutex lock;
-    QemuCond wake;
+    /* Wakes the worker for new requests; no request waits on it. */
+    QemuCond worker_cond;
     QemuThread worker;
     QSIMPLEQ_HEAD(, FemuCxlWork) work;
     bool stopping;

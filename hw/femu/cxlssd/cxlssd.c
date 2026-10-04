@@ -110,7 +110,7 @@ static void *cxl_worker(void *opaque)
         FemuCxlWork *work = QSIMPLEQ_FIRST(&s->work);
 
         if (!work) {
-            qemu_cond_wait(&s->wake, &s->lock);
+            qemu_cond_wait(&s->worker_cond, &s->lock);
             continue;
         }
         QSIMPLEQ_REMOVE_HEAD(&s->work, next);
@@ -121,7 +121,8 @@ static void *cxl_worker(void *opaque)
         }
         work->latency = bb_ftl_process_req(s->ctrl, &s->ns, &work->req);
         work->done = true;
-        qemu_cond_broadcast(&s->wake);
+        /* The waiter rechecks done under @lock, so its cond outlives this. */
+        qemu_cond_signal(work->done_cond);
     }
     qemu_mutex_unlock(&s->lock);
     return NULL;
@@ -143,21 +144,25 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
             .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + op->ns,
         },
     };
+    QemuCond done_cond;
     uint64_t writes;
 
     if (!s->ftl) {
         return true;
     }
+    work.done_cond = &done_cond;
+    qemu_cond_init(&done_cond);
     bql_unlock();
     qemu_mutex_lock(&s->lock);
     QSIMPLEQ_INSERT_TAIL(&s->work, &work, next);
-    qemu_cond_broadcast(&s->wake);
+    qemu_cond_signal(&s->worker_cond);
     while (!work.done) {
-        qemu_cond_wait(&s->wake, &s->lock);
+        qemu_cond_wait(&done_cond, &s->lock);
     }
     /* A linked controller's FTL thread updates this under @lock. */
     writes = ssd_nand_write_pages(s->ns.ssd);
     qemu_mutex_unlock(&s->lock);
+    qemu_cond_destroy(&done_cond);
     bql_lock();
     s->media_ns += work.latency;
     op->ns += work.latency;
@@ -766,7 +771,7 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     s->ns.ssd->ssdname = n->devname;
     ssd_init(n, &s->ns);
     qemu_mutex_init(&s->lock);
-    qemu_cond_init(&s->wake);
+    qemu_cond_init(&s->worker_cond);
     QSIMPLEQ_INIT(&s->work);
     s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
     s->stopping = false;
@@ -792,12 +797,18 @@ void femu_cxl_stop(FemuCxlMedia *s)
     if (nvme) {
         resume = nvme_pause_pollers(nvme);
     }
+    /*
+     * Each request waits on a condition variable on its caller's stack,
+     * which stop cannot reach, so no request may be outstanding here. The
+     * gate guarantees it: teardown leaves the media to the last holder.
+     */
     qemu_mutex_lock(&s->lock);
+    assert(QSIMPLEQ_EMPTY(&s->work));
     s->stopping = true;
-    qemu_cond_broadcast(&s->wake);
+    qemu_cond_signal(&s->worker_cond);
     qemu_mutex_unlock(&s->lock);
     qemu_thread_join(&s->worker);
-    qemu_cond_destroy(&s->wake);
+    qemu_cond_destroy(&s->worker_cond);
     qemu_mutex_destroy(&s->lock);
     g_clear_pointer(&s->nvme_bh, qemu_bh_delete);
     g_array_free(s->nvme_ranges, true);

@@ -170,9 +170,9 @@ table stays empty and `cxl_ssd=` is refused.
 | --- | --- | --- |
 | `FemuCxlSsd` | `qemu-adapter.c` | `parent_obj` (the `CXLType3Dev`), `media`, `component_overlay`, `lsa_queue` (queued control commands) |
 | `FemuCxlWindow` | `qemu-adapter.c` | One per fixed window that can reach a FEMU endpoint: the window and its `io` overlay region. Shared by all FEMU devices; removed when the last one leaves |
-| `FemuCxlMedia` | `qemu-adapter.h` | `backend` (payload pointer and size), `cache`, `direct` (DER state), `cca`; the gate (`busy`, `accesses`, `exclusive_waiters`, `idle` condition variable); `pages` (pages held by accesses in progress); `invalidations` (generation); `lock`, `wake`, `work`, `worker` (the FTL worker); `ns.ssd` (the private FTL); NVMe link fields `nvme`, `nvme_ranges`, `nvme_taken`, `nvme_done`, `nvme_bh`; counters |
+| `FemuCxlMedia` | `qemu-adapter.h` | `backend` (payload pointer and size), `cache`, `direct` (DER state), `cca`; the gate (`busy`, `accesses`, `exclusive_waiters`, `idle` condition variable); `pages` (pages held by accesses in progress); `invalidations` (generation); `lock`, `worker_cond`, `work`, `worker` (the FTL worker); `ns.ssd` (the private FTL); NVMe link fields `nvme`, `nvme_ranges`, `nvme_taken`, `nvme_done`, `nvme_bh`; counters |
 | `FemuCxlOp` | `qemu-adapter.h` | One access, flush or eviction chain: the media time `ns` it has accumulated and the pages it holds itself |
-| `FemuCxlWork` | `qemu-adapter.h` | One FTL request on the worker queue: an `NvmeRequest`, the returned `latency`, `done` |
+| `FemuCxlWork` | `qemu-adapter.h` | One FTL request on the worker queue: an `NvmeRequest`, the returned `latency`, `done`, and `done_cond`, the waiter's condition variable |
 | `FemuCxlCache`, `FemuCxlSet`, `FemuCxlEntry` | `cache.h` | `nsets`, `ways`, `policy`, `entries` and `ghosts` hash tables; per set the `small`, `main`, `ghost` and `pinned` queues; per entry `lpn`, `dirty`, `freq`, `queue`, `der_hits`, `der_displaced` |
 | `FemuCxlDer` | `der.h` | `maps` (mapped pages), `available`, `cylon`, `fast` (Cylon state), `ratio`, `installed` (memslot aliases, oldest first), replacement state, DER counters |
 | `FemuCxlMap` | `qemu-adapter.c` | One memslot alias: first page, page count, alias region, queue link |
@@ -404,7 +404,11 @@ The FTL worker (`cxl_worker()` in `cxlssd.c`, thread `femu-cxl-ftl`) is the
 only thread of the device itself that changes FTL and NAND state; with a
 linked NVMe controller, that controller's FTL thread is the other one, and
 both run under `s->lock`. Callers queue a
-`FemuCxlWork` on `s->work` under `s->lock` and wait for `done`; the worker
+`FemuCxlWork` on `s->work` under `s->lock`, wake the worker on
+`s->worker_cond` and wait for `done` on the request's own `done_cond`, which
+lives on the caller's stack. The worker signals only that condition, so each
+request is woken individually and no waiter wakes for another request. The
+worker
 calls `bb_ftl_process_req()` with an 8-sector request (one 4 KiB page of
 512-byte sectors) and returns its latency. Requests are served in arrival
 order, and the NAND model overlaps them where they reach different LUNs.
