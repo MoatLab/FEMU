@@ -417,6 +417,11 @@ It needs all of these on the host; FEMU checks the ones it can:
   published CylonLinux 6.4.6 corrupts host memory with this interface. FEMU
   cannot tell the two apart, so realize fails unless you set
   `cylon-kernel-ack=on` to state that the fixed kernel is running.
+- For workloads that use vector instructions (most programs, through glibc),
+  a Cylon kernel from MoatLab/Cylon `master` at 8c13c5cf2 or later, which adds
+  `KVM_CAP_CYLON_FAULT_EXIT`. An older kernel loops forever, or crashes the
+  host, when such an instruction touches an uncached page; FEMU warns at slot
+  install when the capability is missing.
 - KVM on Intel with EPT, EPT A/D bits, the TDP MMU and MMIO caching enabled,
   4 KiB host base pages and no dirty ring.
 - A hugetlbfs memory backend with `share=on` and `prealloc=on`. The device

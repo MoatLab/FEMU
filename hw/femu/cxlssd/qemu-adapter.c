@@ -33,6 +33,7 @@
 #include "qemu/rcu.h"
 #include "system/cpus.h"
 #include "system/runstate.h"
+#include "system/reset.h"
 #include "spte.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(FemuCxlSsd, FEMU_CXL_SSD)
@@ -416,15 +417,23 @@ typedef struct FemuCxlWindow {
     QLIST_ENTRY(FemuCxlWindow) next;
 } FemuCxlWindow;
 
+/* Decoder changes a fill waits through before it gives up. */
+#define ADAPTER_FILL_REROUTES 8
+
 static QLIST_HEAD(, FemuCxlWindow) adapter_windows =
     QLIST_HEAD_INITIALIZER(adapter_windows);
 static unsigned adapter_users;
 
+/*
+ * With @mapped, fill the page instead of moving data, and report whether it
+ * is now mapped directly; anything that cannot be mapped is an error.
+ */
 static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
                                    uint64_t *data, unsigned size, bool write,
-                                   MemTxAttrs attrs)
+                                   MemTxAttrs attrs, bool *mapped)
 {
     uint64_t hpa = w->fw->base + offset;
+    unsigned reroutes = 0;
 
     for (;;) {
         PCIDevice *dev = adapter_route(w->fw, offset);
@@ -438,6 +447,10 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
          * Nothing decodes the address: answer as the window would, without
          * letting its own router see decoder values that make it assert.
          */
+        if (mapped && (!dev ||
+                       !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD))) {
+            return MEMTX_ERROR;
+        }
         if (!dev) {
             if (!write) {
                 *data = 0;
@@ -456,6 +469,10 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             return MEMTX_ERROR;
         }
         if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+            /* Disabled media keeps trapping, so it is never mapped. */
+            if (mapped) {
+                return MEMTX_ERROR;
+            }
             if (!write) {
                 qemu_guest_getrandom_nofail(data, size);
             }
@@ -483,22 +500,31 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
                 femu_cxl_leave(s);
             }
             object_unref(OBJECT(dev));
+            /* A fill is retried by its caller; never spin here for it. */
+            if (mapped && ++reroutes > ADAPTER_FILL_REROUTES) {
+                return MEMTX_ERROR;
+            }
             continue;
         }
         if (!s->started || s->closing ||
             !adapter_translate(ct3d, hpa, size, &dpa)) {
             result = MEMTX_ERROR;
         } else if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
-            if (!write) {
-                qemu_guest_getrandom_nofail(data, size);
+            if (mapped) {
+                result = MEMTX_ERROR;
+            } else {
+                if (!write) {
+                    qemu_guest_getrandom_nofail(data, size);
+                }
+                result = MEMTX_OK;
             }
-            result = MEMTX_OK;
         } else {
             /* Invalidation revoked a memslot ratio; map it again first. */
             if (s->direct.ratio && !s->direct.cylon && !s->direct.ratio_end) {
                 cxl_ratio_restore(FEMU_CXL_SSD(dev), NULL);
             }
-            result = femu_cxl_access(s, hpa, dpa, data, size, write);
+            result = mapped ? femu_cxl_fill(s, hpa, dpa, mapped) :
+                     femu_cxl_access(s, hpa, dpa, data, size, write);
         }
         if (shared) {
             femu_cxl_leave_access(s);
@@ -513,13 +539,13 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
 static MemTxResult adapter_read(void *opaque, hwaddr offset, uint64_t *data,
                                 unsigned size, MemTxAttrs attrs)
 {
-    return adapter_access(opaque, offset, data, size, false, attrs);
+    return adapter_access(opaque, offset, data, size, false, attrs, NULL);
 }
 
 static MemTxResult adapter_write(void *opaque, hwaddr offset, uint64_t data,
                                  unsigned size, MemTxAttrs attrs)
 {
-    return adapter_access(opaque, offset, &data, size, true, attrs);
+    return adapter_access(opaque, offset, &data, size, true, attrs, NULL);
 }
 
 static const MemoryRegionOps adapter_ops = {
@@ -1431,6 +1457,11 @@ static void cxl_exit(PCIDevice *dev)
     }
 }
 
+static bool cxl_der_emul_exit(Object *obj, Error **errp)
+{
+    return FEMU_CXL_SSD(obj)->media.direct.emul_exit;
+}
+
 static bool cxl_der_active(Object *obj, Error **errp)
 {
     return FEMU_CXL_SSD(obj)->media.direct.available;
@@ -1585,6 +1616,12 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_bool(obj, "der-emul-exit", cxl_der_emul_exit, NULL);
+    object_property_add_uint64_ptr(obj, "der-emul-fills",
+                                   &s->direct.emul_fills, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-emul-failures",
+                                   &s->direct.emul_failures,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-replacements",
                                    &s->direct.replacements, OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "flush-cache", NULL, cxl_flush);
@@ -1656,6 +1693,8 @@ static const Property cxl_props[] = {
                        media.direct.replace_rate, 64),
     DEFINE_PROP_BOOL("cylon-kernel-ack", FemuCxlSsd,
                      media.cylon_kernel_ack, false),
+    DEFINE_PROP_BOOL("cylon-emul-exit", FemuCxlSsd,
+                     media.cylon_emul_exit, true),
     DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
                             ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),
@@ -2568,6 +2607,331 @@ fail:
     return NULL;
 }
 
+/*
+ * Exit reason and capability of the Cylon host kernel: an access to an
+ * unmapped page of the dual-mode slot whose instruction KVM cannot emulate
+ * (VEX/EVEX, most SSE with a memory operand) returns here with the GPA.
+ */
+#define CYLON_EXIT_FAULT 0x4359
+#define CYLON_CAP_FAULT_EXIT 0x4359
+
+typedef struct CylonFault {
+    uint64_t gpa;
+    uint64_t rip;
+    uint32_t flags;
+    uint8_t insn_len;
+    uint8_t insn_bytes;
+    uint8_t pad[2];
+    uint8_t insn[16];
+} CylonFault;
+
+QEMU_BUILD_BUG_ON(sizeof(CylonFault) > sizeof(((struct kvm_run *)0)->padding));
+
+/* Retries cover a revoked entry or a decoder change during the fill. */
+#define CYLON_FAULT_TRIES 3
+/*
+ * Progress across exits. KVM reports exits, not retired instructions, so a
+ * repeat at one RIP may be a healthy loop whose page another vCPU evicted.
+ * Count consecutive exits at one RIP whose page was already filled for that
+ * RIP; the set of filled pages is cleared only when the RIP changes, so
+ * cycling through pages cannot erase it. A livelock reaches the stop bound
+ * within seconds; a healthy loop does not exit 100,000 times back to back
+ * at one RIP with no exit anywhere else.
+ */
+#define CYLON_FAULT_WARN 1000
+#define CYLON_FAULT_STOP 100000
+/* An instruction touches a few pages; the set only needs to hold those. */
+#define CYLON_FAULT_SET_MAX 4096
+#define CYLON_FAULT_RECENT 8
+
+/* Per vCPU, under the BQL. */
+typedef struct CylonFaultTrack {
+    CPUState *cpu;
+    uint64_t rip;
+    /* Page GPAs filled at @rip. */
+    GHashTable *pages;
+    uint64_t repeats;
+    /* The latest exit GPAs at @rip, for reports. */
+    uint64_t recent[CYLON_FAULT_RECENT];
+    unsigned nrecent;
+    int64_t warned_ms;
+} CylonFaultTrack;
+
+/* Sized once for every possible vCPU, so entries never move. */
+static CylonFaultTrack *cylon_fault_tracks;
+
+static void cylon_fault_track_clear(CylonFaultTrack *t)
+{
+    if (t->pages) {
+        g_hash_table_remove_all(t->pages);
+    }
+    t->rip = 0;
+    t->repeats = 0;
+    t->nrecent = 0;
+}
+
+/* A system reset restarts every vCPU. */
+static void cylon_fault_tracks_reset(void *opaque)
+{
+    unsigned i;
+
+    for (i = 0; i < current_machine->smp.max_cpus; i++) {
+        cylon_fault_track_clear(&cylon_fault_tracks[i]);
+    }
+}
+
+static CylonFaultTrack *cylon_fault_track(CPUState *cpu)
+{
+    CylonFaultTrack *t;
+
+    if (!cylon_fault_tracks) {
+        cylon_fault_tracks = g_new0(CylonFaultTrack,
+                                    current_machine->smp.max_cpus);
+        qemu_register_reset(cylon_fault_tracks_reset, NULL);
+    }
+    assert(cpu->cpu_index < current_machine->smp.max_cpus);
+    t = &cylon_fault_tracks[cpu->cpu_index];
+    if (!t->pages) {
+        t->pages = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                         g_free, NULL);
+    }
+    /* A hot-plugged vCPU can reuse the index of a removed one. */
+    if (t->cpu != cpu) {
+        cylon_fault_track_clear(t);
+        t->cpu = cpu;
+    }
+    return t;
+}
+
+/* Record an exit; returns the consecutive repeats at this RIP. */
+static uint64_t cylon_fault_note(CylonFaultTrack *t, uint64_t rip,
+                                 uint64_t gpa)
+{
+    uint64_t page = gpa & ~4095ULL;
+
+    if (t->rip != rip) {
+        cylon_fault_track_clear(t);
+        t->rip = rip;
+    }
+    t->recent[t->nrecent++ % CYLON_FAULT_RECENT] = gpa;
+    if (g_hash_table_contains(t->pages, &page)) {
+        return ++t->repeats;
+    }
+    t->repeats = 0;
+    if (g_hash_table_size(t->pages) < CYLON_FAULT_SET_MAX) {
+        g_hash_table_add(t->pages, g_memdup2(&page, sizeof(page)));
+    }
+    return 0;
+}
+
+static char *cylon_fault_recent(const CylonFaultTrack *t)
+{
+    GString *list = g_string_new(NULL);
+    unsigned n = MIN(t->nrecent, CYLON_FAULT_RECENT);
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        g_string_append_printf(list, " 0x%" PRIx64,
+                               t->recent[(t->nrecent - n + i) %
+                                         CYLON_FAULT_RECENT]);
+    }
+    if (!n) {
+        g_string_append(list, " none");
+    }
+    return g_string_free(list, false);
+}
+
+/*
+ * The BQL protects the list; the caller's RCU read section keeps the result
+ * alive across a fill that drops the BQL.
+ */
+static FemuCxlWindow *cylon_fault_window(uint64_t gpa)
+{
+    FemuCxlWindow *w;
+
+    QLIST_FOREACH(w, &adapter_windows, next) {
+        if (gpa >= w->fw->base && gpa - w->fw->base < w->fw->size) {
+            return w;
+        }
+    }
+    return NULL;
+}
+
+/* The device that decodes @gpa now, if it is a femu-cxl-ssd. */
+static FemuCxlSsd *cylon_fault_device(uint64_t gpa)
+{
+    FemuCxlWindow *w = cylon_fault_window(gpa);
+    PCIDevice *dev = w ? adapter_route(w->fw, gpa - w->fw->base) : NULL;
+
+    if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
+        return NULL;
+    }
+    return FEMU_CXL_SSD(dev);
+}
+
+static const char *cylon_fault_reason(uint64_t gpa, MemTxResult result)
+{
+    FemuCxlSsd *dev = cylon_fault_device(gpa);
+    FemuCxlMedia *s;
+    uint64_t dpa;
+    uint64_t lpn;
+
+    if (!dev) {
+        return "no femu-cxl-ssd decodes it";
+    }
+    s = &dev->media;
+    if (!adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa)) {
+        return "the endpoint decoders do not translate it";
+    }
+    lpn = dpa / 4096;
+    if (cxl_dev_media_disabled(&CXL_TYPE3(dev)->cxl_dstate)) {
+        return "the media is disabled";
+    }
+    if (!s->direct.cylon || !s->direct.available) {
+        return "Cylon direct mapping is not active";
+    }
+    if (femu_cxl_cca_uncached(&s->cca, lpn)) {
+        return "it is in a caching API uncached range";
+    }
+    if (!s->cache.nsets) {
+        return "the device has no cache";
+    }
+    if (!g_hash_table_contains(s->cache.entries, &lpn) &&
+        femu_cxl_cache_all_pinned(&s->cache, lpn)) {
+        return "every way of its cache set is pinned";
+    }
+    if (result != MEMTX_OK) {
+        return "the media read failed";
+    }
+    return "the cache could not keep it or the mapping was refused";
+}
+
+static void cylon_fault_report(CPUState *cpu, const CylonFault *f,
+                               const CylonFaultTrack *t, const char *why)
+{
+    g_autoptr(GString) bytes = g_string_new(NULL);
+    g_autofree char *recent = cylon_fault_recent(t);
+    unsigned i;
+
+    for (i = 0; i < MIN(f->insn_bytes, sizeof(f->insn)); i++) {
+        g_string_append_printf(bytes, " %02x", f->insn[i]);
+    }
+    error_report("femu-cxl-ssd: vCPU %d at RIP 0x%" PRIx64 " touched GPA "
+                 "0x%" PRIx64 " with an instruction KVM cannot decode "
+                 "(bytes:%s; latest GPAs at this RIP:%s): %s. Stopping "
+                 "the VM.", cpu->cpu_index, f->rip, f->gpa,
+                 bytes->len ? bytes->str : " none", recent, why);
+}
+
+/*
+ * Fill the page as a read miss and map it; the guest then executes the
+ * instruction again, natively. A page that must stay uncached cannot be
+ * served this way, and an instruction that keeps faulting at one RIP makes
+ * no progress: both stop the VM instead of returning to the same fault.
+ */
+static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
+{
+    CylonFault f;
+    CylonFaultTrack *t;
+    FemuCxlSsd *dev;
+    MemTxResult result = MEMTX_ERROR;
+    bool mapped = false;
+    uint64_t repeats;
+    unsigned i;
+
+    memcpy(&f, run->padding, sizeof(f));
+    bql_lock();
+    /*
+     * As for MMIO dispatch, an RCU read section keeps an unplugged window
+     * alive while the fill drops the BQL; the window is looked up again by
+     * GPA after every wait instead of trusting an earlier pointer.
+     */
+    WITH_RCU_READ_LOCK_GUARD() {
+        t = cylon_fault_track(cpu);
+        repeats = cylon_fault_note(t, f.rip, f.gpa);
+        if (repeats >= CYLON_FAULT_STOP) {
+            dev = cylon_fault_device(f.gpa);
+            if (dev) {
+                dev->media.direct.emul_failures++;
+            }
+            cylon_fault_report(cpu, &f, t, "the instruction makes no "
+                               "progress (100000 consecutive exits at this "
+                               "RIP on pages already filled for it)");
+            cylon_fault_track_clear(t);
+            break;
+        }
+        if (repeats >= CYLON_FAULT_WARN) {
+            int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+            if (now - t->warned_ms >= 1000) {
+                g_autofree char *recent = cylon_fault_recent(t);
+
+                t->warned_ms = now;
+                warn_report("femu-cxl-ssd: vCPU %d has refilled pages %"
+                            PRIu64 " times in a row at RIP 0x%" PRIx64
+                            " (latest GPAs:%s); the VM stops at %d",
+                            cpu->cpu_index, repeats, f.rip, recent,
+                            CYLON_FAULT_STOP);
+            }
+        }
+        for (i = 0; i < CYLON_FAULT_TRIES && !mapped; i++) {
+            FemuCxlWindow *w = cylon_fault_window(f.gpa);
+
+            if (!w) {
+                result = MEMTX_ERROR;
+                break;
+            }
+            result = adapter_access(w, f.gpa - w->fw->base, NULL, 1, false,
+                                    MEMTXATTRS_UNSPECIFIED, &mapped);
+            if (result != MEMTX_OK) {
+                break;
+            }
+        }
+        dev = cylon_fault_device(f.gpa);
+        if (mapped) {
+            if (dev) {
+                dev->media.direct.emul_fills++;
+            }
+        } else {
+            if (dev) {
+                dev->media.direct.emul_failures++;
+            }
+            cylon_fault_report(cpu, &f, t,
+                               cylon_fault_reason(f.gpa, result));
+            cylon_fault_track_clear(t);
+        }
+    }
+    bql_unlock();
+    return mapped;
+}
+
+/*
+ * Per VM: the first slot whose device has cylon-emul-exit on turns it on.
+ * Off, the kernel keeps stock KVM behaviour on such an access: #UD in guest
+ * user mode, an internal-error exit in guest kernel mode.
+ */
+static void cylon_fault_exit_enable(FemuCxlDer *der)
+{
+    static bool enabled;
+
+    if (!der->dev->media.cylon_emul_exit) {
+        return;
+    }
+    if (!enabled) {
+        if (kvm_check_extension(kvm_state, CYLON_CAP_FAULT_EXIT) < 1 ||
+            kvm_vm_enable_cap(kvm_state, CYLON_CAP_FAULT_EXIT, 0, 1)) {
+            warn_report_once("femu-cxl-ssd: the host kernel lacks "
+                             "KVM_CAP_CYLON_FAULT_EXIT; an instruction KVM "
+                             "cannot decode on an unmapped Cylon page fails "
+                             "in the guest");
+            return;
+        }
+        kvm_set_exit_handler(CYLON_EXIT_FAULT, cylon_fault_exit);
+        enabled = true;
+    }
+    der->emul_exit = true;
+}
+
 static bool cylon_install(FemuCxlDer *der, CXLFixedWindow *fw)
 {
     FemuCylon *c = der->fast;
@@ -2611,6 +2975,7 @@ static bool cylon_install(FemuCxlDer *der, CXLFixedWindow *fw)
         }
     }
     c->installed = true;
+    cylon_fault_exit_enable(der);
     c->spt.gfn = fw->base / CYLON_PAGE_SIZE;
     if (kvm_vm_ioctl(kvm_state, CYLON_GET_LINEAR_SPT, &c->spt) ||
         c->spt.n <= 0 || c->spt.n > CYLON_SPT_CHUNKS) {

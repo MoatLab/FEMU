@@ -297,6 +297,43 @@ The fixed kernel still requires, and does not check: SMM disabled
 no move or flag change of the dual slot. Tables that were mapped to userspace
 are never freed: about 8 bytes per 4 KiB page of the window per slot.
 
+#### Instructions KVM cannot emulate
+
+The first access to an unmapped page of the slot traps to KVM, which must
+emulate the instruction. KVM cannot decode VEX or EVEX instructions and most
+SSE instructions with a memory operand, and glibc `memcmp`, `memcpy` and
+`strlen` use them. A host kernel with `KVM_CAP_CYLON_FAULT_EXIT` (MoatLab/Cylon
+`master` 8c13c5cf2 or later) returns
+such an access to FEMU when decoding fails, before anything is emulated
+(exit `KVM_EXIT_CYLON_FAULT`, GPA, RIP and instruction bytes). FEMU enables
+the capability when it installs the slot, unless `cylon-emul-exit=off`, and
+reports it in `der-emul-exit`. The capability is per VM: once one device
+turns it on, `cylon-emul-exit=off` on another device cannot turn it off.
+Without it, KVM fails the decode as stock KVM does: a `#UD` in guest user
+mode, an internal-error exit in guest kernel mode. A failure to fetch the
+instruction bytes never takes this exit.
+
+FEMU fills the page as a read miss (cache insert, media time and delay,
+counters), maps it, and the guest runs the instruction again natively. A
+store through the new mapping sets the EPT dirty bit, which revocation reads.
+`der-emul-fills` counts serviced exits, repeats and cache hits included: not
+instructions and not unique pages. Each fill also counts as a read hit or
+miss. `der-emul-fills` and `der-emul-failures` are not cleared by
+`stats-reset`. FEMU stops the VM, counts the exit in `der-emul-failures`
+(when a device still decodes the address) and reports the address, RIP,
+instruction bytes and the latest GPAs at that RIP when:
+
+- the page must stay unmapped (caching API uncached range, every way of its
+  set pinned, media disabled or full, a refused mapping);
+- the instruction makes no progress. KVM reports exits, not retired
+  instructions, so FEMU counts consecutive exits of one vCPU at one RIP whose
+  page it already filled for that RIP. The set of filled pages is cleared only
+  when the RIP changes (and on reset or vCPU replacement), so cycling through
+  pages does not clear it. FEMU warns, at most once a second, from 1,000
+  such exits and stops the VM at 100,000. A load that spans two pages which
+  evict each other ends this way; a healthy loop whose page other vCPUs evict
+  stays far below the limit.
+
 ### SPTE encoding, dirty tracking and revocation
 
 The formats come from CylonLinux `arch/x86/kvm/mmu/spte.h`, `spte.c`, `mmu.c`

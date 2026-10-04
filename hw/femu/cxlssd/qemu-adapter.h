@@ -79,6 +79,8 @@ struct FemuCxlMedia {
     uint64_t channel_ns;
     char *der;
     bool cylon_kernel_ack;
+    /* Enable KVM_CAP_CYLON_FAULT_EXIT when the slot is installed. */
+    bool cylon_emul_exit;
     OnOffAuto concurrent;
     bool busy;
     /* Accesses sharing the gate, and operations waiting to take it alone. */
@@ -149,6 +151,8 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
+MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
+                          bool *mapped);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,

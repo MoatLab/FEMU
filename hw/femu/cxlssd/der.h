@@ -35,6 +35,11 @@ typedef struct FemuCxlDer {
     uint64_t fallbacks;
     uint64_t probes;
     uint64_t mapped;
+    /* Cylon: the host kernel hands unemulatable accesses to FEMU. */
+    bool emul_exit;
+    /* Pages filled and mapped for such accesses, and the ones that failed. */
+    uint64_t emul_fills;
+    uint64_t emul_failures;
 } FemuCxlDer;
 
 /*

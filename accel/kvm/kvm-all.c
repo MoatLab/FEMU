@@ -3217,6 +3217,18 @@ out_unref:
     return ret;
 }
 
+static uint32_t kvm_extra_exit_reason;
+static KVMExitHandler kvm_extra_exit_handler;
+
+/* One reason at a time; a device registers it when it enables the exit. */
+void kvm_set_exit_handler(uint32_t reason, KVMExitHandler handler)
+{
+    assert(!handler || !kvm_extra_exit_handler ||
+           kvm_extra_exit_reason == reason);
+    qatomic_set(&kvm_extra_exit_reason, reason);
+    qatomic_set(&kvm_extra_exit_handler, handler);
+}
+
 int kvm_cpu_exec(CPUState *cpu)
 {
     struct kvm_run *run = cpu->kvm_run;
@@ -3398,9 +3410,17 @@ int kvm_cpu_exec(CPUState *cpu)
             ret = kvm_convert_memory(run->memory_fault.gpa, run->memory_fault.size,
                                      run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PRIVATE);
             break;
-        default:
-            ret = kvm_arch_handle_exit(cpu, run);
+        default: {
+            KVMExitHandler handler = qatomic_read(&kvm_extra_exit_handler);
+
+            if (handler &&
+                run->exit_reason == qatomic_read(&kvm_extra_exit_reason)) {
+                ret = handler(cpu, run) ? 0 : -1;
+            } else {
+                ret = kvm_arch_handle_exit(cpu, run);
+            }
             break;
+        }
         }
     } while (ret == 0);
 

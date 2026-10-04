@@ -226,6 +226,14 @@ int kvm_check_extension(KVMState *s, unsigned int extension);
 
 int kvm_vm_ioctl(KVMState *s, unsigned long type, ...);
 
+struct kvm_run;
+/*
+ * Handles a KVM exit reason that QEMU itself does not know. Runs on the vCPU
+ * thread without the BQL; returning false stops the VM.
+ */
+typedef bool (*KVMExitHandler)(CPUState *cpu, struct kvm_run *run);
+void kvm_set_exit_handler(uint32_t reason, KVMExitHandler handler);
+
 void kvm_flush_coalesced_mmio_buffer(void);
 
 #ifdef COMPILING_PER_TARGET

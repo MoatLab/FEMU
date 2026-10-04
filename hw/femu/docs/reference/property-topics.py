@@ -204,7 +204,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "der", "der-replace-rate", "cylon-kernel-ack",
-                    "concurrent-misses",
+                    "cylon-emul-exit", "concurrent-misses",
                 ],
             },
             {
@@ -263,7 +263,8 @@ DEVICES = [
                 "props": [
                     "der-active", "der-probes", "der-mapped", "der-remaps",
                     "der-revocations", "der-quiet-revocations",
-                    "der-replacements", "der-fallbacks",
+                    "der-replacements", "der-fallbacks", "der-emul-exit",
+                    "der-emul-fills", "der-emul-failures",
                 ],
             },
             {

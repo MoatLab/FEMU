@@ -63,6 +63,11 @@ static const FemuPropDesc cxl_descs[] = {
     { "cylon-kernel-ack",
       "Must be on with der=cylon to state that the host runs a Cylon kernel "
       "with the dual-slot fixes; the device does not check it" },
+    { "cylon-emul-exit",
+      "With der=cylon, ask the host kernel to return accesses it cannot "
+      "decode on unmapped pages to FEMU, which maps the page; off keeps "
+      "stock KVM behaviour (a guest #UD or an internal error) only if no "
+      "other device of the VM turned the VM-wide capability on" },
     { "concurrent-misses",
       "Let misses to different pages wait for the media together; auto "
       "does so only while direct mapping is active" },
@@ -218,6 +223,16 @@ static const FemuPropDesc cxl_runtime_descs[] = {
     { "der-fallbacks",
       "Read-only: refused direct mapping attempts and device "
       "disablements" },
+    { "der-emul-exit",
+      "Read-only: whether the host kernel returns Cylon accesses it cannot "
+      "emulate to FEMU (KVM_CAP_CYLON_FAULT_EXIT)" },
+    { "der-emul-fills",
+      "Read-only: exits for an access KVM could not decode that FEMU served "
+      "by a fill and a mapping, repeats and cache hits included; not "
+      "instructions or unique pages; stats-reset keeps it" },
+    { "der-emul-failures",
+      "Read-only: such exits FEMU could not serve (unmappable page or no "
+      "progress); each one stops the VM; stats-reset keeps it" },
 
     /* caching API counters */
     { "cca-commands",

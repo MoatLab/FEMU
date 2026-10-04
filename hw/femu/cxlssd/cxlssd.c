@@ -284,8 +284,13 @@ static void cxl_media_full(FemuCxlMedia *s)
     }
 }
 
-MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
-                            uint64_t *data, unsigned size, bool write)
+/*
+ * A NULL @data fills the page without a transfer. @mapped, when given, says
+ * whether the page is now mapped directly.
+ */
+static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
+                              uint64_t *data, unsigned size, bool write,
+                              bool *mapped)
 {
     FemuCxlOp op = { .s = s };
     MemTxResult result = MEMTX_ERROR;
@@ -299,6 +304,9 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     unsigned holds = 0;
     unsigned i;
 
+    if (mapped) {
+        *mapped = false;
+    }
     if (!size || size > sizeof(*data) || dpa >= s->backend.size ||
         size > s->backend.size - dpa) {
         return MEMTX_ERROR;
@@ -404,7 +412,9 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     if (s->closing) {
         goto out;
     }
-    if (write) {
+    if (!data) {
+        /* A fill moves no data. */
+    } else if (write) {
         memcpy((uint8_t *)s->backend.logical_space + dpa, data, size);
         femu_cxl_nvme_mark(s, dpa, size);
     } else {
@@ -412,18 +422,23 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     if (first == last && (s->cache.nsets || s->direct.ratio)) {
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
+        bool direct = (e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
+                      !femu_cxl_cca_uncached(&s->cca, first) &&
+                      cxl_map(s, generation, hpa, dpa, e);
 
-        if ((e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
-            !femu_cxl_cca_uncached(&s->cca, first) &&
-            cxl_map(s, generation, hpa, dpa, e) &&
-            !s->direct.cylon && e) {
+        if (direct && !s->direct.cylon && e) {
             /* Direct writes cannot update metadata, so charge on eviction. */
             e->dirty = true;
         }
+        if (mapped) {
+            *mapped = direct;
+        }
     }
     if (s->io_log) {
+        /* A fill logs as a read of size 0. */
         int n = fprintf(s->io_log, "%" PRId64 ",%c,%" PRIu64 ",%u,%" PRIu64
-                        "\n", start, write ? 'W' : 'R', dpa, size, op.ns);
+                        "\n", start, write ? 'W' : 'R', dpa,
+                        data ? size : 0, op.ns);
 
         s->io_log_bytes += MAX(n, 0);
         /* Close at the limit; the guest can open a new file. */
@@ -440,6 +455,26 @@ out:
     }
     qemu_cond_broadcast(&s->idle);
     return result;
+}
+
+MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
+                            uint64_t *data, unsigned size, bool write)
+{
+    return cxl_access(s, hpa, dpa, data, size, write, NULL);
+}
+
+/*
+ * Bring the page at @dpa in as a read miss would (cache insert, media time,
+ * delay, counters) and map it directly, without moving data to a register.
+ * The guest then repeats the access natively. The fill counts as a read:
+ * a store through the new mapping shows up in the EPT dirty bit when the
+ * page is revoked.
+ */
+MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
+                          bool *mapped)
+{
+    return cxl_access(s, hpa & ~4095ULL, dpa & ~4095ULL, NULL, 1, false,
+                      mapped);
 }
 
 /*
