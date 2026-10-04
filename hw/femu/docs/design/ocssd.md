@@ -462,6 +462,12 @@ mode does report:
   `oc12-channel-*` cases for channel time. For 2.0: `oc20-vector-io`,
   `oc20-set-chunks`, `oc20-log-length`, `oc20-sgl-refused` and `oc20-fuzz`,
   a fuzzer over the command fields.
+- `oc12-trace-on` and `oc12-trace-off` pin the time of each 1.2 command
+  exactly, with and without channel time, through the qtest-only
+  `x-oc12-trace`. The workload uses TLC pages of each type, part pages, two
+  planes, erases of several blocks, 40 queued reads on one channel and a
+  0xEE change of the NAND times. A change to the 1.2 timing model must not
+  move these times.
 - The documentation check starts each OCSSD example in this guide and in
   the mode guide, and sends Identify; it does not move data in this mode.
 - No guest test runs in CI: LightNVM needs a guest kernel older than 5.15,

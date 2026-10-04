@@ -465,6 +465,22 @@ static void parse_ppa_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     *nr = secs_idx + 1;
 }
 
+/* Record the command's modelled time for x-oc12-trace, when a test asks. */
+static void oc12_trace(FemuCtrl *n, uint8_t opcode, NvmeRequest *req)
+{
+    FemuOc12Trace *t = n->oc12_trace;
+    uint64_t i;
+
+    if (!t) {
+        return;
+    }
+    i = qatomic_fetch_inc(&t->count);
+    if (i < FEMU_OC12_TRACE_MAX) {
+        t->opcode[i] = opcode;
+        t->ns[i] = req->expire_time - req->stime;
+    }
+}
+
 static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                NvmeRequest *req)
 {
@@ -508,6 +524,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 req->expire_time = ts;
             }
         }
+        oc12_trace(n, opcode, req);
 
         return 0;
     }
@@ -558,6 +575,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->expire_time = now + total_time_need_to_emulate;
+    oc12_trace(n, opcode, req);
     g_free(addr_bucket);
     return 0;
 }
@@ -1393,6 +1411,7 @@ static void oc12_exit(FemuCtrl *n)
     int i;
 
     oc12_release_locks(n);
+    g_clear_pointer(&n->oc12_trace, g_free);
 
     /*
      * Everything the setup allocated: the per-lun bad block tables, the

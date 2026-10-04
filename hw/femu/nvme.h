@@ -1950,6 +1950,18 @@ typedef struct NvmeParams {
 #define FEMU_MAX_NUM_CHNLS (32)
 #define FEMU_MAX_NUM_CHIPS (128)
 
+/*
+ * qtest only: the opcode and modelled time of each OC 1.2 command, in the
+ * order its time was computed. Kept while the test clock is on.
+ */
+#define FEMU_OC12_TRACE_MAX 512
+
+typedef struct FemuOc12Trace {
+    uint64_t count;
+    uint8_t opcode[FEMU_OC12_TRACE_MAX];
+    int64_t ns[FEMU_OC12_TRACE_MAX];
+} FemuOc12Trace;
+
 typedef struct BbCtrlParams {
     int secsz;
     int secs_per_pg;
@@ -2144,6 +2156,7 @@ typedef struct FemuCtrl {
     uint32_t    bbssd_ns_limit;
     bool        test_ns_seed;
     bool        test_oc12_clock;
+    FemuOc12Trace *oc12_trace;
     bool        test_ns_fail;
     uint32_t    changed_nsids[1024];
     uint16_t    changed_ns_count;

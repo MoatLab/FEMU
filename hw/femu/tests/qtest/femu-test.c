@@ -9588,6 +9588,376 @@ static void femu_test_oc12_bad_blocks(void *obj, void *data,
     guest_free(alloc, id);
 }
 
+/*
+ * A golden trace of OC 1.2 command timing (x-oc12-trace). The test clock
+ * stays still while a batch is queued, so each command's modelled time
+ * follows from the workload alone. A batch is at most 14 commands per queue
+ * pair. Before the next queue is used, a refused fence proves the device took
+ * every command of the last one, so the order across queues is fixed too.
+ */
+#define FEMU_OC12_TRACE_QUEUES  4
+#define FEMU_OC12_TRACE_LIST    256
+
+typedef struct FemuOc12Run {
+    FemuCtrlState c;
+    FemuQueue q[FEMU_OC12_TRACE_QUEUES];
+    unsigned queued[FEMU_OC12_TRACE_QUEUES];
+    FemuOc12Ppaf f;
+    uint8_t ch_off;
+    uint8_t pg_off;
+    uint64_t buf;
+    uint64_t lists;
+    unsigned nr_lists;
+    int cur;
+} FemuOc12Run;
+
+typedef struct FemuOc12TraceWant {
+    const uint64_t *trace;
+    unsigned len;
+} FemuOc12TraceWant;
+
+static uint64_t femu_oc12_trace_ppa(FemuOc12Run *t, unsigned ch,
+                                    unsigned lun, unsigned blk, unsigned pg,
+                                    unsigned sec)
+{
+    /* sectors 4..7 of a page are the same sectors of plane 1 */
+    return ((uint64_t)ch << t->ch_off) | ((uint64_t)pg << t->pg_off) |
+           femu_oc12_ppa(&t->f, lun, blk, sec / 4, sec % 4);
+}
+
+/* A refused command completes at once, after every entry ahead of it. */
+static void femu_oc12_trace_fence(FemuOc12Run *t, unsigned qi)
+{
+    NvmeCmd fence = { 0 };
+    uint16_t want = t->c.cid;
+    uint16_t got;
+
+    fence.opcode = 0x93;
+    fence.nsid = cpu_to_le32(1);
+    femu_submit(&t->c, &t->q[qi], &fence);
+    g_assert_cmpint(FEMU_SC(femu_complete(&t->c, &t->q[qi], &got, NULL)),
+                    ==, NVME_INVALID_OPCODE);
+    g_assert_cmpuint(got, ==, want);
+}
+
+static void femu_oc12_trace_cmd(FemuOc12Run *t, unsigned qi,
+                                uint8_t opcode, const uint64_t *ppas,
+                                unsigned count)
+{
+    QTestState *qts = t->c.pdev->bus->qts;
+    uint64_t list = t->lists + t->nr_lists++ * FEMU_OC12_TRACE_LIST;
+    NvmeCmd cmd = { 0 };
+    unsigned i;
+
+    if (t->cur >= 0 && t->cur != qi) {
+        femu_oc12_trace_fence(t, t->cur);
+    }
+    t->cur = qi;
+    g_assert_cmpuint(t->queued[qi], <, 14);
+    g_assert_cmpuint(t->nr_lists * FEMU_OC12_TRACE_LIST, <=, 64 * 4096);
+    for (i = 0; i < count; i++) {
+        qtest_writeq(qts, list + i * sizeof(uint64_t), ppas[i]);
+    }
+    if (count == 1) {
+        list = ppas[0];
+    }
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    if (opcode != FEMU_OC20_VECT_ERASE) {
+        cmd.dptr.prp1 = cpu_to_le64(t->buf);
+        cmd.dptr.prp2 = cpu_to_le64(t->buf + 4096);
+    }
+    cmd.cdw10 = cpu_to_le32((uint32_t)list);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw12 = cpu_to_le32(count - 1);
+    femu_submit(&t->c, &t->q[qi], &cmd);
+    t->queued[qi]++;
+}
+
+/* Fence the last queue used, then let the batch complete. */
+static void femu_oc12_trace_run(FemuOc12Run *t)
+{
+    unsigned qi;
+    unsigned i;
+
+    if (t->cur >= 0) {
+        femu_oc12_trace_fence(t, t->cur);
+        t->cur = -1;
+    }
+    qtest_clock_step(t->c.pdev->bus->qts, 1000000000);
+    for (qi = 0; qi < FEMU_OC12_TRACE_QUEUES; qi++) {
+        for (i = 0; i < t->queued[qi]; i++) {
+            g_assert_cmpint(FEMU_SC(femu_complete(&t->c, &t->q[qi], NULL,
+                                                  NULL)), ==, NVME_SUCCESS);
+        }
+        t->queued[qi] = 0;
+    }
+    t->nr_lists = 0;
+}
+
+/*
+ * Reads of pages 0..13 of block 0 on channel 0 lun 0: lower, centre and
+ * upper TLC pages, one to eight sectors, across one or both planes.
+ */
+static void femu_oc12_trace_reads(FemuOc12Run *t)
+{
+    uint64_t ppas[8];
+    unsigned pg;
+    unsigned s;
+
+    for (pg = 0; pg < 14; pg++) {
+        unsigned nr = 1 + pg % 8;
+
+        for (s = 0; s < nr; s++) {
+            ppas[s] = femu_oc12_trace_ppa(t, 0, 0, 0, pg, s);
+        }
+        femu_oc12_trace_cmd(t, 0, FEMU_OC20_VECT_READ, ppas, nr);
+    }
+    femu_oc12_trace_run(t);
+}
+
+/* Erases naming several blocks: two on one lun, and both planes of one. */
+static void femu_oc12_trace_erases(FemuOc12Run *t)
+{
+    const uint64_t a[] = {
+        femu_oc12_trace_ppa(t, 0, 0, 1, 0, 0),
+        femu_oc12_trace_ppa(t, 0, 0, 2, 0, 0),
+        femu_oc12_trace_ppa(t, 0, 1, 1, 0, 0),
+    };
+    const uint64_t b[] = {
+        femu_oc12_trace_ppa(t, 1, 0, 1, 0, 0),
+        femu_oc12_trace_ppa(t, 1, 0, 1, 0, 4),
+    };
+
+    femu_oc12_trace_cmd(t, 0, FEMU_OC20_VECT_ERASE, a, G_N_ELEMENTS(a));
+    femu_oc12_trace_cmd(t, 0, FEMU_OC20_VECT_ERASE, b, G_N_ELEMENTS(b));
+    femu_oc12_trace_run(t);
+}
+
+/*
+ * 40 one-sector reads on channel 0, all queued before any completes. The
+ * first 33 share luns 0..2; the last 7 go to the idle lun 3, so their data
+ * fits in gaps the earlier reads left on the channel. Writes on both
+ * channels, between reads on channel 1, then fit around the booked reads.
+ */
+static void femu_oc12_trace_burst(FemuOc12Run *t, unsigned blk)
+{
+    uint64_t ppas[16];
+    unsigned i;
+    unsigned s;
+
+    for (i = 0; i < 40; i++) {
+        ppas[0] = femu_oc12_trace_ppa(t, 0, i < 33 ? i % 3 : 3, 0, i % 14,
+                                      i % 8);
+        femu_oc12_trace_cmd(t, i / 14, FEMU_OC20_VECT_READ, ppas, 1);
+    }
+    for (i = 0; i < 4; i++) {
+        unsigned nr = 8 + 2 * i;
+
+        for (s = 0; s < nr; s++) {
+            ppas[s] = femu_oc12_trace_ppa(t, i % 2, i, blk, s / 8, s % 8);
+        }
+        femu_oc12_trace_cmd(t, 3, FEMU_OC20_VECT_WRITE, ppas, nr);
+        ppas[0] = femu_oc12_trace_ppa(t, 1, 0, 0, 2 * i, 0);
+        femu_oc12_trace_cmd(t, 3, FEMU_OC20_VECT_READ, ppas, 1);
+    }
+    femu_oc12_trace_run(t);
+}
+
+/*
+ * TLC, two planes: program, read, erase and a burst of queued reads, then
+ * vendor command 0xEE sets new times and the reads, erases and burst run
+ * again. The device's x-oc12-trace must match the recorded one exactly.
+ */
+static void femu_test_oc12_trace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const FemuOc12TraceWant *want = data;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuOc12Run *t = g_new0(FemuOc12Run, 1);
+    uint64_t id = guest_alloc(alloc, 4096);
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t ppas[16];
+    uint8_t ident[512];
+    NvmeCmd cmd = { 0 };
+    QDict *rsp;
+    unsigned pg;
+    unsigned s;
+    unsigned i;
+
+    femu_oc12_clock_start(&t->c, femu, alloc);
+    t->cur = -1;
+    t->q[0] = t->c.io;
+    for (i = 1; i < FEMU_OC12_TRACE_QUEUES; i++) {
+        femu_burst_queue(&t->c, &t->q[i], i + 1);
+    }
+    t->buf = (raw + 4095) & ~4095ULL;
+    t->lists = guest_alloc(alloc, 64 * 4096);
+    qtest_memset(qts, t->buf, 0x6b, 2 * 4096);
+
+    cmd.opcode = 0xe2;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(id);
+    g_assert_cmpint(femu_admin(&t->c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, id, ident, sizeof(ident));
+    t->ch_off = ident[12];
+    t->f.lun_off = ident[12 + 2];
+    t->f.pln_off = ident[12 + 4];
+    t->f.blk_off = ident[12 + 6];
+    t->pg_off = ident[12 + 8];
+    g_assert_cmpuint(ident[256 + 6], ==, 2);    /* planes */
+
+    /*
+     * Program pages 0..13 of block 0 on channel 0 lun 0, both planes of a
+     * page and then part of the next page, and on channel 1 lun 0.
+     */
+    for (pg = 0; pg < 14; pg++) {
+        unsigned nr = 8 + pg % 3;
+
+        for (s = 0; s < nr; s++) {
+            ppas[s] = femu_oc12_trace_ppa(t, 0, 0, 0, pg + s / 8, s % 8);
+        }
+        femu_oc12_trace_cmd(t, 0, FEMU_OC20_VECT_WRITE, ppas, nr);
+    }
+    for (pg = 0; pg < 14; pg++) {
+        for (s = 0; s < 8; s++) {
+            ppas[s] = femu_oc12_trace_ppa(t, 1, 0, 0, pg, s);
+        }
+        femu_oc12_trace_cmd(t, 1, FEMU_OC20_VECT_WRITE, ppas, 8);
+    }
+    femu_oc12_trace_run(t);
+    femu_oc12_trace_reads(t);
+    femu_oc12_trace_erases(t);
+    femu_oc12_trace_burst(t, 3);
+
+    /* 0xEE: odd times, so a transfer of part of a page still rounds */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = 0xee;
+    cmd.cdw10 = cpu_to_le32(90001);         /* upper page read */
+    cmd.cdw11 = cpu_to_le32(50001);         /* lower page read */
+    cmd.cdw12 = cpu_to_le32(4000001);       /* upper page program */
+    cmd.cdw13 = cpu_to_le32(700001);        /* lower page program */
+    cmd.cdw14 = cpu_to_le32(2500001);       /* block erase */
+    cmd.cdw15 = cpu_to_le32(60001);         /* channel transfer */
+    g_assert_cmpint(femu_admin(&t->c, &cmd), ==, NVME_SUCCESS);
+
+    femu_oc12_trace_reads(t);
+    femu_oc12_trace_erases(t);
+    femu_oc12_trace_burst(t, 4);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/oc12-test',"
+                    "'property':'x-oc12-trace'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-oc12-trace %s", qdict_get_str(rsp, "return"));
+    {
+        g_auto(GStrv) got = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+
+        g_assert_cmpuint(g_strv_length(got), ==, want->len);
+        for (i = 0; i < want->len; i++) {
+            uint64_t v = g_ascii_strtoull(got[i], NULL, 10);
+
+            if (v != want->trace[i]) {
+                g_test_message("x-oc12-trace entry %u (command %u) differs",
+                               i, i ? (i - 1) / 2 : 0);
+            }
+            g_assert_cmpuint(v, ==, want->trace[i]);
+        }
+    }
+    qobject_unref(rsp);
+
+    for (i = 1; i < FEMU_OC12_TRACE_QUEUES; i++) {
+        femu_queue_free(&t->c, &t->q[i]);
+    }
+    femu_queue_free(&t->c, &t->c.io);
+    femu_disable(&t->c);
+    guest_free(alloc, t->lists);
+    guest_free(alloc, raw);
+    guest_free(alloc, id);
+    g_free(t);
+}
+
+/*
+ * The command count, then the opcode and modelled time in ns of each command,
+ * as the OC 1.2 timing model computed them when this test was written. A
+ * change to that model must leave them exact.
+ */
+static const uint64_t femu_oc12_trace_on[] = {
+    156,
+    0x91, 925366, 0x91, 2566366, 0x91, 4207366, 0x91, 5027866, 0x91, 6668866,
+    0x91, 9714366, 0x91, 11939366, 0x91, 14984866, 0x91, 16625866,
+    0x91, 17446366, 0x91, 21896366, 0x91, 29855366, 0x91, 35589366,
+    0x91, 42143866, 0x91, 925366, 0x91, 1745866, 0x91, 2566366, 0x91, 3386866,
+    0x91, 4207366, 0x91, 5027866, 0x91, 7252866, 0x91, 9477866, 0x91, 10298366,
+    0x91, 11118866, 0x91, 13343866, 0x91, 15568866, 0x91, 21302866,
+    0x91, 27036866, 0x92, 69609, 0x92, 139217, 0x92, 208825, 0x92, 278433,
+    0x92, 348042, 0x92, 426692, 0x92, 518450, 0x92, 623316, 0x92, 636425,
+    0x92, 662642, 0x92, 723825, 0x92, 814433, 0x92, 933542, 0x92, 1052650,
+    0x90, 6000000, 0x90, 6000000, 0x92, 69609, 0x92, 82718, 0x92, 95827,
+    0x92, 126109, 0x92, 139218, 0x92, 152327, 0x92, 203609, 0x92, 216718,
+    0x92, 182609, 0x92, 260109, 0x92, 281109, 0x92, 294218, 0x92, 366109,
+    0x92, 387109, 0x92, 316609, 0x92, 422609, 0x92, 443609, 0x92, 400218,
+    0x92, 479109, 0x92, 500109, 0x92, 456718, 0x92, 556609, 0x92, 569718,
+    0x92, 513218, 0x92, 634109, 0x92, 647218, 0x92, 613109, 0x92, 740109,
+    0x92, 690609, 0x92, 669609, 0x92, 796609, 0x92, 753218, 0x92, 726109,
+    0x92, 108936, 0x92, 165436, 0x92, 229827, 0x92, 329718, 0x92, 342827,
+    0x92, 526327, 0x92, 539436, 0x91, 1721975, 0x92, 69609, 0x91, 1815475,
+    0x92, 213801, 0x91, 2647341, 0x92, 226910, 0x91, 1972776, 0x92, 423535,
+    0x92, 65002, 0x92, 130003, 0x92, 195004, 0x92, 260005, 0x92, 335007,
+    0x92, 425009, 0x92, 530011, 0x92, 650013, 0x92, 665014, 0x92, 695015,
+    0x92, 740016, 0x92, 800017, 0x92, 875019, 0x92, 980012, 0x90, 5000002,
+    0x90, 5000002, 0x92, 65002, 0x92, 80003, 0x92, 95004, 0x92, 115003,
+    0x92, 130004, 0x92, 145005, 0x92, 192503, 0x92, 207504, 0x92, 165004,
+    0x92, 242504, 0x92, 270003, 0x92, 285004, 0x92, 332505, 0x92, 360004,
+    0x92, 300005, 0x92, 382506, 0x92, 410005, 0x92, 425006, 0x92, 440007,
+    0x92, 460006, 0x92, 475007, 0x92, 510007, 0x92, 525008, 0x92, 490008,
+    0x92, 587507, 0x92, 602508, 0x92, 560008, 0x92, 677508, 0x92, 637508,
+    0x92, 617509, 0x92, 727509, 0x92, 692509, 0x92, 660010, 0x92, 222505,
+    0x92, 315006, 0x92, 540009, 0x92, 707510, 0x92, 742510, 0x92, 757511,
+    0x92, 772512, 0x91, 1592515, 0x92, 65002, 0x91, 1585006, 0x92, 230006,
+    0x91, 2412518, 0x92, 245007, 0x91, 1765011, 0x92, 470012,
+};
+
+static const uint64_t femu_oc12_trace_off[] = {
+    156,
+    0x91, 820500, 0x91, 2461500, 0x91, 4102500, 0x91, 4923000, 0x91, 6564000,
+    0x91, 9609500, 0x91, 11834500, 0x91, 14880000, 0x91, 16521000,
+    0x91, 17341500, 0x91, 21791500, 0x91, 29750500, 0x91, 35484500,
+    0x91, 42039000, 0x91, 820500, 0x91, 1641000, 0x91, 2461500, 0x91, 3282000,
+    0x91, 4102500, 0x91, 4923000, 0x91, 7148000, 0x91, 9373000, 0x91, 10193500,
+    0x91, 11014000, 0x91, 13239000, 0x91, 15464000, 0x91, 21198000,
+    0x91, 26932000, 0x92, 56500, 0x92, 113000, 0x92, 169500, 0x92, 226000,
+    0x92, 282500, 0x92, 339000, 0x92, 416500, 0x92, 494000, 0x92, 550500,
+    0x92, 607000, 0x92, 684500, 0x92, 762000, 0x92, 868000, 0x92, 974000,
+    0x90, 6000000, 0x90, 6000000, 0x92, 56500, 0x92, 56500, 0x92, 56500,
+    0x92, 113000, 0x92, 113000, 0x92, 113000, 0x92, 190500, 0x92, 190500,
+    0x92, 169500, 0x92, 247000, 0x92, 268000, 0x92, 247000, 0x92, 353000,
+    0x92, 374000, 0x92, 303500, 0x92, 409500, 0x92, 430500, 0x92, 360000,
+    0x92, 466000, 0x92, 487000, 0x92, 437500, 0x92, 543500, 0x92, 543500,
+    0x92, 494000, 0x92, 621000, 0x92, 621000, 0x92, 600000, 0x92, 727000,
+    0x92, 677500, 0x92, 656500, 0x92, 783500, 0x92, 734000, 0x92, 713000,
+    0x92, 56500, 0x92, 134000, 0x92, 211500, 0x92, 268000, 0x92, 324500,
+    0x92, 402000, 0x92, 479500, 0x91, 1604000, 0x92, 56500, 0x91, 1641000,
+    0x92, 113000, 0x91, 2354000, 0x92, 169500, 0x91, 1641000, 0x92, 247000,
+    0x92, 50001, 0x92, 100002, 0x92, 150003, 0x92, 200004, 0x92, 250005,
+    0x92, 300006, 0x92, 377506, 0x92, 455006, 0x92, 505007, 0x92, 555008,
+    0x92, 632508, 0x92, 710008, 0x92, 800009, 0x92, 890010, 0x90, 5000002,
+    0x90, 5000002, 0x92, 50001, 0x92, 50001, 0x92, 50001, 0x92, 100002,
+    0x92, 100002, 0x92, 100002, 0x92, 177502, 0x92, 177502, 0x92, 150003,
+    0x92, 227503, 0x92, 255002, 0x92, 227503, 0x92, 317504, 0x92, 345003,
+    0x92, 277504, 0x92, 367505, 0x92, 395004, 0x92, 327505, 0x92, 417506,
+    0x92, 445005, 0x92, 405005, 0x92, 495006, 0x92, 495006, 0x92, 455006,
+    0x92, 572506, 0x92, 572506, 0x92, 545007, 0x92, 662507, 0x92, 622507,
+    0x92, 595008, 0x92, 712508, 0x92, 672508, 0x92, 645009, 0x92, 50001,
+    0x92, 127501, 0x92, 205001, 0x92, 255002, 0x92, 305003, 0x92, 382503,
+    0x92, 460003, 0x91, 1412509, 0x92, 50001, 0x91, 1400002, 0x92, 100002,
+    0x91, 2045011, 0x92, 150003, 0x91, 1400002, 0x92, 227503,
+};
+static const FemuOc12TraceWant femu_oc12_trace_want[] = {
+    { femu_oc12_trace_on, G_N_ELEMENTS(femu_oc12_trace_on) },
+    { femu_oc12_trace_off, G_N_ELEMENTS(femu_oc12_trace_off) },
+};
+
 #define FEMU_CSD_ALLOC_FDM   0xb0
 #define FEMU_CSD_DEALLOC     0xc0
 #define FEMU_CSD_NVM_TO_AFDM 0xd0
@@ -21991,6 +22361,22 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=0,lver=1,lsec_size=512,lsecs_per_pg=4,lnum_pln=2,"
             "lnum_ch=2,lnum_lun=2"
+    });
+    qos_add_test("oc12-trace-on", "femu", femu_test_oc12_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_oc12_trace_want[0],
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,oc12_channel_timing=on,"
+            "flash_type=3,devsz_mb=16,lsec_size=512,lsecs_per_pg=4,"
+            "lnum_pln=2,lnum_ch=2,lnum_lun=4,lpgs_per_blk=64"
+    });
+    qos_add_test("oc12-trace-off", "femu", femu_test_oc12_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_oc12_trace_want[1],
+        .edge.extra_device_opts =
+            "id=oc12-test,femu_mode=0,lver=1,flash_type=3,devsz_mb=16,"
+            "lsec_size=512,lsecs_per_pg=4,lnum_pln=2,lnum_ch=2,lnum_lun=4,"
+            "lpgs_per_blk=64"
     });
     qos_add_test("oc20-sgl-refused", "femu", femu_test_oc_sgl_refused,
                  &(QOSGraphTestOptions) {

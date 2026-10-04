@@ -798,7 +798,8 @@ Give each poller and the FTL thread its own host core while measuring;
 - **qtests**: `hw/femu/tests/qtest/femu-test.c` covers the OCSSD 1.2 channel
   model (`oc12-channel-timing`, `oc12-channel-gap`, `oc12-channel-default`,
   `oc12-channel-off`, `oc12-ppa-timing`, `oc12-flash-type`, `oc12-page-count`,
-  `oc12-transfer-cost`), the warning for the timing properties that have no
+  `oc12-transfer-cost`, and the exact per-command times of `oc12-trace-on` and
+  `oc12-trace-off`), the warning for the timing properties that have no
   effect (`ignored-props`), the 0xEF flips on a linked `femu-cxl-ssd`
   (`cxl-nvme-flip`), and the two example configurations on this page
   (`doc-examples`).

@@ -3156,6 +3156,38 @@ static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
         return;
     }
     n->test_oc12_clock = value;
+    if (!value) {
+        g_clear_pointer(&n->oc12_trace, g_free);
+    } else if (!n->oc12_trace) {
+        n->oc12_trace = g_new0(FemuOc12Trace, 1);
+    }
+}
+
+/*
+ * The number of OC 1.2 commands timed while the test clock was on, then the
+ * opcode and modelled time in ns of the first FEMU_OC12_TRACE_MAX of them.
+ */
+static char *femu_test_oc12_trace(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    FemuOc12Trace *t = n->oc12_trace;
+    GString *out;
+    uint64_t nr;
+    bool resume;
+
+    if (!t) {
+        error_setg(errp, "OC 1.2 trace requires x-oc12-clock");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    nr = MIN(t->count, FEMU_OC12_TRACE_MAX);
+    out = g_string_new(NULL);
+    g_string_append_printf(out, "%" PRIu64, t->count);
+    for (uint64_t i = 0; i < nr; i++) {
+        g_string_append_printf(out, " %u %" PRId64, t->opcode[i], t->ns[i]);
+    }
+    nvme_resume_pollers(n, resume);
+    return g_string_free(out, false);
 }
 
 /* A cut resets command state; the caller must enable the controller again. */
@@ -3202,6 +3234,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
+                                NULL);
     }
 }
 
