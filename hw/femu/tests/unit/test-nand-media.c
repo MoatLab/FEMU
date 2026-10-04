@@ -583,6 +583,99 @@ static void test_pe_suspend(void)
     nand_media_destroy(&m);
 }
 
+/* one op on an idle array, moving @xfer_secs sectors of the page */
+static uint64_t partial_lat(const NandMediaConfig *cfg, NandMediaOp op,
+                            uint32_t xfer_secs)
+{
+    NandMedia m;
+    NandLoc loc;
+    uint64_t lat;
+
+    reset_timelines();
+    nand_media_init(&m, cfg);
+    memset(&loc, 0, sizeof(loc));
+    loc.xfer_secs = xfer_secs;
+    lat = nand_media_op(&m, &loc, op, 1000000000ULL).latency_ns;
+    nand_media_destroy(&m);
+    return lat;
+}
+
+/*
+ * A partial page pays its share of the page transfer, rounded up: OC 1.2
+ * charged one 512-byte sector of a four-sector page 52433 / 4 -> 13109 ns.
+ */
+static void test_partial_xfer(void)
+{
+    NandMediaConfig cfg;
+
+    printf("# data phase for part of a page\n");
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.timing.page_xfer_ns = 52433;
+    cfg.secs_per_page = 4;
+    check("read of one sector rounds the transfer up",
+          partial_lat(&cfg, NAND_MEDIA_READ, 1), 10000 + 13109);
+    check("program of one sector rounds the transfer up",
+          partial_lat(&cfg, NAND_MEDIA_PROGRAM, 1), 13109 + 40000);
+    check("two pages of sectors pay two transfers",
+          partial_lat(&cfg, NAND_MEDIA_READ, 8), 10000 + 2 * 52433);
+    check("no sector count is a whole page",
+          partial_lat(&cfg, NAND_MEDIA_READ, 0), 10000 + 52433);
+    cfg.secs_per_page = 0;
+    check("no sectors per page is a whole page",
+          partial_lat(&cfg, NAND_MEDIA_READ, 1), 10000 + 52433);
+}
+
+/*
+ * 40 reads queued on one LUN book 40 data-out windows in the future. The
+ * capped list holds 32 and books the rest from busy-until, which then holds
+ * another LUN's read off the bus; the unbounded list keeps every window.
+ */
+static uint64_t forty_windows(bool unbounded, int *booked)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    NandLoc b;
+    uint64_t last = 0;
+    uint64_t other;
+    int i;
+
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.policy.ecc_on_read = false;
+    cfg.timing.page_xfer_ns = 1000;
+    cfg.policy.bus_res_unbounded = unbounded;
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    b.lun = 1;
+    for (i = 0; i < 40; i++) {
+        last = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    }
+    check(unbounded ? "unbounded: the 40th read is 40 x tR + transfer" :
+                      "capped: the 40th read is 40 x tR + transfer",
+          last, 40 * 10000 + 1000);
+    *booked = m.bus_res[0].n;
+    other = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    nand_media_destroy(&m);
+    return other;
+}
+
+static void test_unbounded_windows(void)
+{
+    int booked;
+
+    printf("# more future read windows than the capped list holds\n");
+    check("capped: another LUN's read waits for the unbooked windows",
+          forty_windows(false, &booked), 40 * 10000 + 1000 + 1000);
+    check("capped: 32 windows booked", booked, NAND_BUS_RES_MAX);
+    check("unbounded: another LUN's read fits after the first window",
+          forty_windows(true, &booked), 10000 + 1000 + 1000);
+    check("unbounded: 40 windows booked", booked, 40);
+}
+
 int main(void)
 {
     /*
@@ -599,6 +692,8 @@ int main(void)
     test_multiplane_erase();
     test_copyback();
     test_pe_suspend();
+    test_partial_xfer();
+    test_unbounded_windows();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

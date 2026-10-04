@@ -64,6 +64,11 @@ typedef struct NandLoc {
     uint8_t  page_type;
     uint32_t pe_cycles;
     uint32_t age_sec;   /* seconds since the data was programmed; 0 = untracked */
+    /*
+     * Sectors the data phase moves, when the controller transfers part of a
+     * page (OC 1.2); 0 = the whole page. Needs cfg.secs_per_page.
+     */
+    uint32_t xfer_secs;
 } NandLoc;
 
 typedef struct NandMediaTiming {
@@ -106,6 +111,11 @@ typedef struct NandMediaPolicy {
                                    * LUN/plane (all gates, staged or plain channel) */
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
+    /*
+     * Book every read's data-out window, however many are outstanding, in a
+     * list that grows; false keeps the 32-entry list and its fallback.
+     */
+    bool            bus_res_unbounded;
 } NandMediaPolicy;
 
 /*
@@ -129,6 +139,7 @@ typedef struct NandMediaConfig {
     uint32_t nchs;
     uint32_t luns_per_ch;
     uint32_t planes_per_lun;
+    uint32_t secs_per_page;   /* divides NandLoc.xfer_secs; 0 = whole pages */
     NandMediaTiming  timing;
     NandMediaPolicy  policy;
     const NandTimelineOps *timeline;
@@ -141,7 +152,8 @@ typedef struct NandMediaConfig {
  * windows live here, per channel; the controller's ch_avail accumulator keeps
  * meaning "the bus is busy until", for phases that use it now. Bounded so the
  * lookup stays a short scan; a channel that has more reads in flight than this
- * falls back to booking the bus from now, as before.
+ * falls back to booking the bus from now, as before. policy.bus_res_unbounded
+ * lifts the bound for a controller whose model never had it.
  */
 #define NAND_BUS_RES_MAX 32
 
@@ -153,6 +165,9 @@ typedef struct NandBusRes {
 typedef struct NandBusResList {
     NandBusRes r[NAND_BUS_RES_MAX];
     int n;
+    /* policy.bus_res_unbounded: the windows live here instead of in r[] */
+    NandBusRes *grown;
+    int cap;
 } NandBusResList;
 
 /*

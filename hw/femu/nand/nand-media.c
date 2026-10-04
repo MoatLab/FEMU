@@ -22,6 +22,22 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     m->susp = NULL;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
         m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
+        /* Without its lists an unbounded bus would silently hold the bus. */
+        if (!m->bus_res && cfg->policy.bus_res_unbounded) {
+            abort();
+        }
+        if (m->bus_res && cfg->policy.bus_res_unbounded) {
+            uint32_t ch;
+
+            for (ch = 0; ch < cfg->nchs; ch++) {
+                m->bus_res[ch].cap = NAND_BUS_RES_MAX;
+                m->bus_res[ch].grown = malloc(NAND_BUS_RES_MAX *
+                                              sizeof(NandBusRes));
+                if (!m->bus_res[ch].grown) {
+                    abort();
+                }
+            }
+        }
     }
     /* suspend needs the geometry to keep its per-position state */
     if (cfg->policy.pe_suspend &&
@@ -42,6 +58,13 @@ void nand_media_destroy(NandMedia *m)
 {
     if (!m) {
         return;
+    }
+    if (m->bus_res) {
+        uint32_t ch;
+
+        for (ch = 0; ch < m->cfg.nchs; ch++) {
+            free(m->bus_res[ch].grown);
+        }
     }
     free(m->bus_res);
     m->bus_res = NULL;
@@ -65,12 +88,18 @@ static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
  * Both kinds avoid every booked window. A zero-length phase touches nothing;
  * booking it was what made a read's command wait for another read's transfer.
  */
+static NandBusRes *bus_windows(const NandBusResList *l)
+{
+    return l->grown ? l->grown : (NandBusRes *)l->r;
+}
+
 static void bus_prune(NandBusResList *l, uint64_t now)
 {
+    NandBusRes *r = bus_windows(l);
     int i, j = 0;
     for (i = 0; i < l->n; i++) {
-        if (l->r[i].end > now) {
-            l->r[j++] = l->r[i];
+        if (r[i].end > now) {
+            r[j++] = r[i];
         }
     }
     l->n = j;
@@ -79,32 +108,58 @@ static void bus_prune(NandBusResList *l, uint64_t now)
 /* earliest s >= start such that [s, s + len) overlaps no booked window */
 static uint64_t bus_fit(const NandBusResList *l, uint64_t start, uint64_t len)
 {
+    const NandBusRes *r = bus_windows(l);
     int i;
     for (i = 0; i < l->n; i++) {          /* windows are kept sorted by start */
-        if (l->r[i].end <= start) {
+        if (r[i].end <= start) {
             continue;
         }
-        if (l->r[i].start >= start + len) {
+        if (r[i].start >= start + len) {
             break;
         }
-        start = l->r[i].end;
+        start = r[i].end;
     }
     return start;
 }
 
 static bool bus_book(NandBusResList *l, uint64_t start, uint64_t end)
 {
+    NandBusRes *r;
     int i;
-    if (l->n == NAND_BUS_RES_MAX) {
+
+    if (l->grown && l->n == l->cap) {
+        r = realloc(l->grown, 2 * (size_t)l->cap * sizeof(*r));
+        if (!r) {
+            abort();
+        }
+        l->grown = r;
+        l->cap *= 2;
+    } else if (!l->grown && l->n == NAND_BUS_RES_MAX) {
         return false;
     }
-    for (i = l->n; i > 0 && l->r[i - 1].start > start; i--) {
-        l->r[i] = l->r[i - 1];
+    r = bus_windows(l);
+    for (i = l->n; i > 0 && r[i - 1].start > start; i--) {
+        r[i] = r[i - 1];
     }
-    l->r[i].start = start;
-    l->r[i].end = end;
+    r[i].start = start;
+    r[i].end = end;
     l->n++;
     return true;
+}
+
+/*
+ * A data phase's bus time: the whole page, or rounded up for the sectors of
+ * it the controller moves, as OC 1.2 charged partial pages.
+ */
+static uint64_t bus_xfer_ns(const NandMedia *m, const NandLoc *loc)
+{
+    uint64_t page = m->cfg.timing.page_xfer_ns;
+    uint64_t spp = m->cfg.secs_per_page;
+
+    if (!loc->xfer_secs || !spp) {
+        return page;
+    }
+    return (page * loc->xfer_secs + spp - 1) / spp;
 }
 
 /*
@@ -435,10 +490,10 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                     uint64_t *prr =
                         m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
                     uint64_t dout = mx(*prr, done);
-                    t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, dout, bus_xfer_ns(m, loc));
                     *prr = t;
                 } else {
-                    t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
                 }
                 t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
                 c.done_ns = t;
@@ -458,16 +513,16 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = s + rcbsy;
             uint64_t *prr = m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
             uint64_t dout = mx(*prr, done);
-            t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, dout, bus_xfer_ns(m, loc));
             *prr = t;
         } else {
-            t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
         }
         t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
         c.done_ns = t;
     } else if (op == NAND_MEDIA_PROGRAM) {
         t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
-        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.page_xfer_ns);
+        t = bus_now(m, loc->ch, stime, t, bus_xfer_ns(m, loc));
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
