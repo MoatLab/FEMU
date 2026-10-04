@@ -1619,6 +1619,9 @@ static void cxl_init(Object *obj)
     object_property_add_bool(obj, "der-emul-exit", cxl_der_emul_exit, NULL);
     object_property_add_uint64_ptr(obj, "der-emul-fills",
                                    &s->direct.emul_fills, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-emul-fetch-fills",
+                                   &s->direct.emul_fetch_fills,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-emul-failures",
                                    &s->direct.emul_failures,
                                    OBJ_PROP_FLAG_READ);
@@ -2614,6 +2617,8 @@ fail:
  */
 #define CYLON_EXIT_FAULT 0x4359
 #define CYLON_CAP_FAULT_EXIT 0x4359
+/* RIP lies on the unmapped page: map it for the code, do not emulate. */
+#define CYLON_FAULT_FETCH (1U << 1)
 
 typedef struct CylonFault {
     uint64_t gpa;
@@ -2816,10 +2821,11 @@ static void cylon_fault_report(CPUState *cpu, const CylonFault *f,
     for (i = 0; i < MIN(f->insn_bytes, sizeof(f->insn)); i++) {
         g_string_append_printf(bytes, " %02x", f->insn[i]);
     }
-    error_report("femu-cxl-ssd: vCPU %d at RIP 0x%" PRIx64 " touched GPA "
-                 "0x%" PRIx64 " with an instruction KVM cannot decode "
-                 "(bytes:%s; latest GPAs at this RIP:%s): %s. Stopping "
-                 "the VM.", cpu->cpu_index, f->rip, f->gpa,
+    error_report("femu-cxl-ssd: vCPU %d at RIP 0x%" PRIx64 " %s GPA 0x%"
+                 PRIx64 " (bytes:%s; latest GPAs at this RIP:%s): %s. "
+                 "Stopping the VM.", cpu->cpu_index, f->rip,
+                 f->flags & CYLON_FAULT_FETCH ? "executed code from" :
+                 "used an instruction KVM cannot decode on", f->gpa,
                  bytes->len ? bytes->str : " none", recent, why);
 }
 
@@ -2891,6 +2897,8 @@ static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
         if (mapped) {
             if (dev) {
                 dev->media.direct.emul_fills++;
+                dev->media.direct.emul_fetch_fills +=
+                    !!(f.flags & CYLON_FAULT_FETCH);
             }
         } else {
             if (dev) {

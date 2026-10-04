@@ -310,8 +310,18 @@ the capability when it installs the slot, unless `cylon-emul-exit=off`, and
 reports it in `der-emul-exit`. The capability is per VM: once one device
 turns it on, `cylon-emul-exit=off` on another device cannot turn it off.
 Without it, KVM fails the decode as stock KVM does: a `#UD` in guest user
-mode, an internal-error exit in guest kernel mode. A failure to fetch the
-instruction bytes never takes this exit.
+mode, an internal-error exit in guest kernel mode.
+
+Instruction fetches from unmapped Cylon pages are mapped, not emulated.
+When the guest executes code on such a page (for example a shared library
+whose page cache is on the CXL node), KVM checks before emulating anything
+whether RIP, or the tail of an instruction that crosses into the page, lies on
+the faulting page. If so, the exit carries that code page with the fetch flag,
+and FEMU fills and maps it; the direct mapping allows execution, and the
+guest runs the code natively. Emulating code instead fails on instructions
+KVM lacks: `endbr64`, the first instruction of most library functions,
+became a `#UD` (SIGILL) in the guest. `der-emul-fetch-fills` counts these
+exits (they are part of `der-emul-fills`).
 
 FEMU fills the page as a read miss (cache insert, media time and delay,
 counters), maps it, and the guest runs the instruction again natively. A

@@ -266,7 +266,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 25 properties of its own, 10 inherited from `cxl-type3` and 55 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 25 properties of its own, 10 inherited from `cxl-type3` and 56 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 

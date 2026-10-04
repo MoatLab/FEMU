@@ -264,7 +264,8 @@ DEVICES = [
                     "der-active", "der-probes", "der-mapped", "der-remaps",
                     "der-revocations", "der-quiet-revocations",
                     "der-replacements", "der-fallbacks", "der-emul-exit",
-                    "der-emul-fills", "der-emul-failures",
+                    "der-emul-fills", "der-emul-fetch-fills",
+                    "der-emul-failures",
                 ],
             },
             {

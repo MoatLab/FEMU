@@ -99,6 +99,7 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `der-fallbacks` | `uint64` | Read-only: refused direct mapping attempts and device disablements |
 | `der-emul-exit` | `bool` | Read-only: whether the host kernel returns Cylon accesses it cannot emulate to FEMU (KVM_CAP_CYLON_FAULT_EXIT) |
 | `der-emul-fills` | `uint64` | Read-only: exits for an access KVM could not decode that FEMU served by a fill and a mapping, repeats and cache hits included; not instructions or unique pages; stats-reset keeps it |
+| `der-emul-fetch-fills` | `uint64` | Read-only: the der-emul-fills exits for code the guest executed from an unmapped page; stats-reset keeps it |
 | `der-emul-failures` | `uint64` | Read-only: such exits FEMU could not serve (unmappable page or no progress); each one stops the VM; stats-reset keeps it |
 
 ### Caching API counters

@@ -40,6 +40,8 @@ typedef struct FemuCxlDer {
     /* Pages filled and mapped for such accesses, and the ones that failed. */
     uint64_t emul_fills;
     uint64_t emul_failures;
+    /* Of @emul_fills, those for code executed from an unmapped page. */
+    uint64_t emul_fetch_fills;
 } FemuCxlDer;
 
 /*

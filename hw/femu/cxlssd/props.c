@@ -230,6 +230,9 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "Read-only: exits for an access KVM could not decode that FEMU served "
       "by a fill and a mapping, repeats and cache hits included; not "
       "instructions or unique pages; stats-reset keeps it" },
+    { "der-emul-fetch-fills",
+      "Read-only: the der-emul-fills exits for code the guest executed from "
+      "an unmapped page; stats-reset keeps it" },
     { "der-emul-failures",
       "Read-only: such exits FEMU could not serve (unmappable page or no "
       "progress); each one stops the VM; stats-reset keeps it" },
