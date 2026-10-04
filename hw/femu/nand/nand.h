@@ -116,7 +116,7 @@ typedef struct NandFlashTiming {
  * Shared NAND physics state lives once in nand.c (a single compiled unit) and is
  * referenced everywhere via these extern declarations. It used to be header-static,
  * which gave every including translation unit its own zero-initialized copy: only
- * nand.c's copy was ever initialized, so other readers (oc12.c, timing.c) saw
+ * nand.c's copy was ever initialized, so other readers (oc12.c, oc-timing.c) saw
  * zeros. Making it a real linker symbol shares one initialized copy across modes.
  */
 extern struct NandFlashTiming nand_flash_timing;

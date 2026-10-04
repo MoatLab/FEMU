@@ -119,7 +119,7 @@ the same FTL and NAND timing code, each device with its own instance.
                        |
  +---------------------v---------------------------------------------------------------+
  | 5. NAND TIMING  nand-media.c: busy-until time per LUN or plane, channel bus,       |
- |                 cell-type tables, suspend, ECC     timing.c: OCSSD 0xEE times       |
+ |                 cell-type tables, suspend, ECC     oc-timing.c: OCSSD 0xEE times    |
  +-------------------------------------------------------------------------------------+
 
  6. MEMORY BACKEND (data only; layers 4 and 5 never touch it)
@@ -390,7 +390,7 @@ vCPUs keep running.
 | `hw/femu/nvme-admin.c`, `nvme-io.c`, `nvme-util.c`, `dma.c`, `intr.c` | the NVMe frontend |
 | `hw/femu/nvme-pel.c`, `nvme-pi.c`, `nvme-streams.c` | Persistent Event Log, protection information, Streams |
 | `hw/femu/nossd/`, `bbssd/`, `zns/`, `ocssd/`, `kvssd/`, `csd/` | the modes; `bbssd/` also holds the FTL |
-| `hw/femu/nand/`, `hw/femu/timing-model/` | NAND timing |
+| `hw/femu/nand/`, `hw/femu/ocssd/oc-timing.c` | NAND timing |
 | `hw/femu/backend/dram.c` | the memory backend |
 | `hw/femu/cxlssd/` | the CXL SSD |
 | `hw/femu/lib/` | rings and the priority queue |

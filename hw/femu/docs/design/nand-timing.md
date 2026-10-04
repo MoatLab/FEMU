@@ -43,17 +43,13 @@ on the emulated device, and the poller holds the completion until the host
 clock reaches that time. The NAND media model is the part of that computation
 that charges flash operations.
 
-There are two media engines:
-
-- The **media layer**, `nand_media_op()` in `hw/femu/nand/nand-media.c`.
-  BBSSD, CSD, KV, ZNS and the FTL behind a `femu-cxl-ssd` use it. It never
-  includes a controller header. Each mode decodes its own address into a
-  `NandLoc`, gives the layer a configuration, and lends it pointers to its
-  busy-until fields.
-- The **OCSSD model**. Open-Channel 1.2 and 2.0 also run on the media
-  layer; `hw/femu/timing-model/timing.c` keeps only their table times, the
-  geometry check and 0xEE. It is described in
-  [OCSSD timing model](#ocssd-timing-model).
+The **media layer**, `nand_media_op()` in `hw/femu/nand/nand-media.c`, is
+the one media engine. BBSSD, CSD, KV, ZNS, the FTL behind a `femu-cxl-ssd`,
+and Open-Channel 1.2 and 2.0 use it. It never includes a controller header.
+Each mode decodes its own address into a `NandLoc`, gives the layer a
+configuration, and lends it pointers to its busy-until fields.
+`hw/femu/ocssd/oc-timing.c` keeps the Open-Channel table times, the geometry
+check and 0xEE ([OCSSD timing model](#ocssd-timing-model)).
 
 ```text
  guest NVMe command
@@ -130,7 +126,8 @@ A field width is an upper bound on its axis. `bb_check_geometry()` in
 a geometry whose total sector count does not fit in a signed 32-bit integer.
 `zns_check_params()` bounds each ZNS axis by its field. `oc_timing_geometry_ok()`
 requires every OCSSD axis to be non-zero, `lnum_ch` at most 32 and
-`lnum_ch * lnum_lun` at most 128, the sizes of the per-chip arrays.
+`lnum_ch * lnum_lun` at most 128, the sizes of the per-channel and per-LUN
+arrays.
 
 ### How pages land on the geometry
 
@@ -886,7 +883,7 @@ make -C hw/femu/tests check
 | [`hw/femu/bbssd/bb.c`](../../bbssd/bb.c) | 0xEF handler (`bb_flip()`, `bb_flip_apply()`) |
 | [`hw/femu/zns/zftl.c`](../../zns/zftl.c) | ZNS adapter, write cache flush, zone reset erase |
 | [`hw/femu/zns/zns.c`](../../zns/zns.c), [`zns.h`](../../zns/zns.h) | ZNS timing values and property overrides (`zns_init_params()`) |
-| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | OCSSD `flash_type` times, geometry check, 0xEE |
+| [`hw/femu/ocssd/oc-timing.c`](../../ocssd/oc-timing.c) | OCSSD `flash_type` times, geometry check, 0xEE |
 | [`hw/femu/ocssd/oc12.c`](../../ocssd/oc12.c), [`oc20.c`](../../ocssd/oc20.c) | OCSSD per-command timing (`oc12_advance_status()`, `oc20_advance_status()`) |
 | [`hw/femu/femu.c`](../../femu.c) | FTL thread: `expire_time += latency`; timing properties |
 | [`hw/femu/nvme-io.c`](../../nvme-io.c) | `stime` stamp, host link and firmware CPU models, priority queue and completion |

@@ -20,7 +20,6 @@
 #include "inc/rte_ring.h"
 #include "inc/pqueue.h"
 #include "nand/nand.h"
-#include "timing-model/timing.h"
 
 typedef struct FemuCtrl FemuCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -2306,11 +2305,7 @@ typedef struct FemuCtrl {
     CsdCtrlParams   csd_params;
 
     Oc12Ctrl  *oc12_ctrl;
-    volatile int64_t chip_next_avail_time[FEMU_MAX_NUM_CHIPS];
-    pthread_spinlock_t chip_locks[FEMU_MAX_NUM_CHIPS];
-    volatile int64_t chnl_next_avail_time[FEMU_MAX_NUM_CHNLS];
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];
-    GArray *chnl_reservations[FEMU_MAX_NUM_CHNLS];
 
     /*
      * Open-Channel NAND times, indexed by page type, copied from the

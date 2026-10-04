@@ -1,4 +1,5 @@
 #include "./oc20.h"
+#include "./oc-timing.h"
 
 static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
                             int opcode);
@@ -1547,22 +1548,6 @@ static void oc20_set_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     nvme_set_ctrl_name(n, ns, vocssd20_mn, vocssd20_sn, &fsid_voc20);
 }
 
-static void oc20_release_locks(FemuCtrl *n)
-{
-    int ret;
-    int i;
-
-    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
-        ret = pthread_spin_destroy(&n->chnl_locks[i]);
-        assert(ret == 0);
-    }
-
-    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
-        ret = pthread_spin_destroy(&n->chip_locks[i]);
-        assert(ret == 0);
-    }
-}
-
 static uint64_t *oc20_tl_lun_avail(void *opaque, const NandLoc *loc)
 {
     Oc20Ctrl *ln = opaque;
@@ -1590,7 +1575,7 @@ static const NandTimelineOps oc20_timeline_ops = {
 /*
  * Open-Channel 2.0 charges each parallel unit its flat read, program or erase
  * time after whatever it is already busy with, and moves nothing over the
- * channel: the LUN-only gate with the bus off, as the open-coded chip timer did.
+ * channel: the LUN-only gate with the bus off.
  */
 static void oc20_media_init(FemuCtrl *n)
 {
@@ -1648,32 +1633,6 @@ static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
     return nand_media_op(&ln->media, &loc, op, now).done_ns;
 }
 
-static int oc20_init_misc(FemuCtrl *n)
-{
-    int ret;
-    int i;
-
-	set_latency(n);
-
-    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
-        n->chnl_next_avail_time[i] = 0;
-
-        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
-        ret = pthread_spin_init(&n->chnl_locks[i], PTHREAD_PROCESS_SHARED);
-        assert(ret == 0);
-    }
-
-    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
-        n->chip_next_avail_time[i] = 0;
-
-        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
-        ret = pthread_spin_init(&n->chip_locks[i], PTHREAD_PROCESS_SHARED);
-        assert(ret == 0);
-    }
-
-    return 0;
-}
-
 static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     (void)ns;
@@ -1698,7 +1657,7 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     init_nand_flash(n);
 
-    oc20_init_misc(n);
+    set_latency(n);
     oc20_media_init(n);
 }
 
@@ -1710,8 +1669,6 @@ static void oc20_exit(FemuCtrl *n)
         NvmeNamespace *ns = &n->namespaces[i];
         oc20_free_namespace(n, ns);
     }
-
-    oc20_release_locks(n);
 
     nand_media_destroy(&((Oc20Ctrl *)n->ext_ops.state)->media);
     g_free(n->ext_ops.state);

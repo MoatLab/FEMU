@@ -50,7 +50,7 @@ Optional host-link and firmware-CPU models apply on top of any NVMe mode (see
 ## NAND operations
 
 `nand_media_op()` in `hw/femu/nand/nand-media.c` computes one read, program or
-erase. BBSSD, CSD, KV and ZNS all use it; OCSSD uses its own older model.
+erase. BBSSD, CSD, KV, ZNS and both Open-Channel versions use it.
 
 ### Operation times
 
@@ -175,14 +175,16 @@ the program. `zns_num_wc` sets the number of caches (default:
 ## OCSSD
 
 Both Open-Channel versions keep their busy-until times in the shared media
-layer above, with the LUN gate. Open-Channel 1.2 keeps one per chip (LUN) and
-one per channel; Open-Channel 2.0 keeps one per LUN, with the bus off. A write first moves its data over the channel,
-then programs the chip; a read occupies the chip, then moves its data out.
+layer above, with the LUN gate. Open-Channel 1.2 keeps one per chip (LUN)
+and one per channel; Open-Channel 2.0 keeps one per LUN, with the bus off. A
+write first moves its data over the channel, then programs the chip; a read
+occupies the chip, then moves its data out.
 Open-Channel 1.2 charges channel transfer only with `oc12_channel_timing=on`,
 using `ch_xfer_lat` per page or the `flash_type` table value when that is 0.
 Open-Channel 2.0 charges no channel time. Read, program and erase times come
 from the `flash_type` table (SLC, MLC, TLC, QLC) and can be changed at run
-time with vendor admin command 0xEE.
+time with vendor admin command 0xEE. `hw/femu/ocssd/oc-timing.c` copies the
+table times at init and handles 0xEE.
 
 Properties: [OCSSD](../reference/properties.md#ocssd-open-channel).
 

@@ -1,4 +1,5 @@
 #include "./oc12.h"
+#include "./oc-timing.h"
 
 static inline int qemu_fls(int i)
 {
@@ -1166,13 +1167,7 @@ static void oc12_release_locks(FemuCtrl *n)
     int i;
 
     for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
-        g_clear_pointer(&n->chnl_reservations[i], g_array_unref);
         ret = pthread_spin_destroy(&n->chnl_locks[i]);
-        assert(ret == 0);
-    }
-
-    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
-        ret = pthread_spin_destroy(&n->chip_locks[i]);
         assert(ret == 0);
     }
 }
@@ -1185,18 +1180,8 @@ static int oc12_init_misc(FemuCtrl *n)
 	set_latency(n);
 
     for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
-        n->chnl_next_avail_time[i] = 0;
-
         /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
         ret = pthread_spin_init(&n->chnl_locks[i], PTHREAD_PROCESS_SHARED);
-        assert(ret == 0);
-    }
-
-    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
-        n->chip_next_avail_time[i] = 0;
-
-        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
-        ret = pthread_spin_init(&n->chip_locks[i], PTHREAD_PROCESS_SHARED);
         assert(ret == 0);
     }
 

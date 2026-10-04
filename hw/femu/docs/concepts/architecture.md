@@ -77,7 +77,7 @@ goes straight to the memory backend.
 | 2. Frontend | `hw/femu/nvme-io.c`, `hw/femu/nvme-admin.c`, `hw/femu/dma.c`, `hw/femu/lib/`, `hw/femu/cxlssd/cxlssd.c`, `hw/femu/cxlssd/cache.c` | `femu-poller`, vCPU threads |
 | 3. Mode backends | `hw/femu/nossd/`, `hw/femu/bbssd/bb.c`, `hw/femu/zns/zns.c`, `hw/femu/ocssd/`, `hw/femu/kvssd/`, `hw/femu/csd/` | `femu-poller` |
 | 4. FTL | `hw/femu/bbssd/`, `hw/femu/zns/zftl.c`, `hw/femu/kvssd/kvssd-ftl.c` | `FEMU-FTL-Thread`, `femu-poller` (KV), `femu-cxl-ftl` |
-| 5. NAND media timing | `hw/femu/nand/`, `hw/femu/timing-model/` | the caller's thread |
+| 5. NAND media timing | `hw/femu/nand/`, `hw/femu/ocssd/oc-timing.c` | the caller's thread |
 | 6. Memory backend | `hw/femu/backend/dram.c`; for CXL, a QEMU memory backend object | the thread that copies the data |
 
 ## 1. Guest-visible interface
@@ -331,7 +331,7 @@ phases is modelled only when one of those phases has a non-zero time.
 Read, program and erase times come either from flat properties or from
 built-in per-cell-type tables (`hw/femu/nand/nand.h` for BBSSD, CSD and KV;
 `hw/femu/zns/zns.h` for ZNS). OCSSD also uses the media layer, with its
-`flash_type` times set in `hw/femu/timing-model/timing.c`.
+`flash_type` times set in `hw/femu/ocssd/oc-timing.c`.
 
 [Timing model](timing-model.md) explains the rules and the properties that
 control them.

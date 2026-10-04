@@ -521,7 +521,7 @@ Refusals at realize are listed in the
 | --- | --- |
 | [`hw/femu/ocssd/oc12.c`](../../ocssd/oc12.c), [`oc12.h`](../../ocssd/oc12.h) | 1.2 commands, PPA format, sector metadata, bad block tables, init and exit |
 | [`hw/femu/ocssd/oc20.c`](../../ocssd/oc20.c), [`oc20.h`](../../ocssd/oc20.h) | 2.0 commands, chunk descriptors, write pointer rules, geometry, log page |
-| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | `flash_type` times (`set_latency()`), geometry bound check, 0xEE |
+| [`hw/femu/ocssd/oc-timing.c`](../../ocssd/oc-timing.c), [`oc-timing.h`](../../ocssd/oc-timing.h) | `flash_type` times (`set_latency()`), geometry bound check, 0xEE |
 | [`hw/femu/nand/nand-media.c`](../../nand/nand-media.c) | chip and channel busy-until times for both versions |
 | [`hw/femu/nand/nand.h`](../../nand/nand.h), [`nand.c`](../../nand/nand.c) | per-cell-type latency tables and page-type tables |
 | [`hw/femu/femu.c`](../../femu.c) | `nvme_register_extensions()`, realize-time checks |

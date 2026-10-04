@@ -1,6 +1,7 @@
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
 #include "./kvssd/kvssd.h"
+#include "./ocssd/oc-timing.h"
 #include "system/qtest.h"
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
