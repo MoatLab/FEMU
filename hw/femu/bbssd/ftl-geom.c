@@ -252,6 +252,9 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pe_suspend = n->bb_params.pe_suspend;
     spp->tsusp_ns = n->bb_params.tsusp_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
+    /* with one plane there is nothing to combine, so the flag stays clear */
+    spp->mp_program = n->bb_params.mp_program && spp->pls_per_lun > 1;
+    spp->mp_read = n->bb_params.mp_read && spp->pls_per_lun > 1;
 
     /* DRAM write buffer */
     spp->buffer_size = n->bb_params.buffer_size;

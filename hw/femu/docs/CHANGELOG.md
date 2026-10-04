@@ -107,6 +107,7 @@ listed one by one.
 - More than one plane per LUN (`pls_per_lun`) in bbssd, FDP and KV, with a line's planes erased in one operation (0f554fb7d, 3699e980d, 9c8228d28, 7276af2d8).
 - Channel bus phases (`cmd_addr_lat`, `pg_xfer_lat`, `status_lat`, `ch_xfer_lat`) are added to the timing when set (c274ba7d9).
 - A read can suspend an in-flight program or erase (`pe_suspend`, `tsusp_ns`) (9ec423985, 6a5c498a8).
+- Opt-in multi-plane program and read (`mp_program`, `mp_read`, with `pls_per_lun > 1`): host programs or reads of the same page on several planes of a LUN take one array time, plus `tplpbsy` or `tplrbsy` between planes. Placement and page counts do not change. The defaults leave the timing unchanged, FDP is not affected, and a negative busy time is refused.
 - Optional debug logging to study whether deleted data remains on the device (18ba6557c, 45e61ae41).
 
 #### Timing and fault models
@@ -166,7 +167,7 @@ was not doing anything.
 
 #### Accepted with a warning (still no effect)
 
-- `serial`, `ms`, `ms_max`, `dlfeat`, `tplpbsy`, `tplrbsy`, `trcbsy`, and the CSD `nr_thread`, `time_slice` and `context_switch_time` are still accepted, but nothing reads them, so a value other than the default now prints one warning at realize naming the property; for `ms` it points to `meta` (f67568880).
+- `serial`, `ms`, `ms_max`, `dlfeat`, `trcbsy`, and the CSD `nr_thread`, `time_slice` and `context_switch_time` are still accepted, but nothing reads them, so a value other than the default now prints one warning at realize naming the property; for `ms` it points to `meta` (f67568880). `tplpbsy` and `tplrbsy` were on this list; they now set the multi-plane program and read busy times, and warn only when set without `mp_program` or `mp_read`.
 
 #### Behaviour changes (still boots, numbers move)
 

@@ -2318,8 +2318,6 @@ static const struct {
     { "ms", "meta sets the metadata size" },
     { "ms_max", NULL },
     { "dlfeat", NULL },
-    { "tplpbsy", NULL },
-    { "tplrbsy", NULL },
     { "trcbsy", NULL },
     { "nr_thread", NULL },
     { "time_slice", NULL },
@@ -2351,6 +2349,52 @@ static void femu_warn_ignored_props(FemuCtrl *n)
                         instead ? "; " : "", instead ? instead : "");
         }
     }
+}
+
+/*
+ * Multi-plane program and read run only in the bbssd datapath (bbssd and CSD,
+ * not FDP) with more than one plane per LUN, and the busy times only inside
+ * such a command. Refuse a negative busy time, and say when a setting
+ * changes nothing rather than let it look as if it changed the timing.
+ */
+static bool femu_check_multiplane_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    bool fdp = n->subsys && n->subsys->params.fdp.enabled;
+    bool supported = (BBSSD(n) || CSD(n)) && !fdp && bp->pls_per_lun > 1;
+    const struct {
+        const char *name;
+        int value;
+    } set[] = {
+        { "mp_program", bp->mp_program },
+        { "mp_read", bp->mp_read },
+        { "tplpbsy", bp->tplpbsy },
+        { "tplrbsy", bp->tplrbsy },
+    };
+    int i;
+
+    if (bp->tplpbsy < 0 || bp->tplrbsy < 0) {
+        error_setg(errp, "femu: %s must not be negative",
+                   bp->tplpbsy < 0 ? "tplpbsy" : "tplrbsy");
+        return false;
+    }
+    if (!supported) {
+        for (i = 0; i < ARRAY_SIZE(set); i++) {
+            if (set[i].value) {
+                warn_report("femu: %s has no effect; multi-plane program and "
+                            "read need bbssd or CSD without FDP and "
+                            "pls_per_lun > 1", set[i].name);
+            }
+        }
+        return true;
+    }
+    if (bp->tplpbsy && !bp->mp_program) {
+        warn_report("femu: tplpbsy has no effect unless mp_program is set");
+    }
+    if (bp->tplrbsy && !bp->mp_read) {
+        warn_report("femu: tplrbsy has no effect unless mp_read is set");
+    }
+    return true;
 }
 
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
@@ -2395,6 +2439,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     femu_warn_ignored_props(n);
+    if (!femu_check_multiplane_props(n, errp)) {
+        return;
+    }
 
     /* Format and Sanitize would rewrite the whole medium under its cache. */
     if (n->cxl_dev) {
@@ -2969,6 +3016,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("tplrbsy", FemuCtrl, bb_params.tplrbsy, 0),
     DEFINE_PROP_INT32("tplebsy", FemuCtrl, bb_params.tplebsy, 0),
     DEFINE_PROP_INT32("trcbsy", FemuCtrl, bb_params.trcbsy, 0),
+    DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
+    DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),
     DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_INT32("pe_suspend", FemuCtrl, bb_params.pe_suspend, 0),
     DEFINE_PROP_INT32("tsusp_ns", FemuCtrl, bb_params.tsusp_ns, 0),

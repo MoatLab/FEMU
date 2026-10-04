@@ -341,7 +341,7 @@ The array gate decides which operations exclude each other:
 
 Under the LUN gate, all planes of a LUN are busy together, so
 `pls_per_lun > 1` adds capacity and line width but no single-operation
-parallelism, except for the one batched operation below.
+parallelism, except for the batched operations below.
 
 `nand_media_multiplane()` runs one operation on several planes of a LUN:
 
@@ -355,14 +355,41 @@ parallelism, except for the one batched operation below.
 | Operation | Batched across planes | Caller |
 | --- | --- | --- |
 | Erase of a line's block on every plane of a LUN | yes, one erase time plus `tplebsy` per extra plane | BBSSD GC (`bbssd/ftl-line-gc.c`), FDP GC (`bbssd/ftl-fdp.c`), KV reclaim (`kvssd/kvssd-ftl.c`) |
-| Host reads and programs | no, one operation per page | `bbssd/ftl-datapath.c` |
+| Host programs, and buffer write-back | with `mp_program`: pages of the same block and page on distinct planes of a LUN, one program time plus `tplpbsy` per extra plane | `ssd_program_lpn()` in `bbssd/ftl-datapath.c` |
+| Host reads | with `mp_read`: as above, one read time plus `tplrbsy` per extra plane | `ssd_read()` in `bbssd/ftl-datapath.c` |
+| FDP reads and writes, KV writes | no, one operation per page | `bbssd/ftl-fdp.c`, `kvssd/kvssd-ftl.c` |
 | GC page moves | no | `gc_read_page()`, `gc_write_page()` |
 | ZNS zone reset | no batching needed: each plane has its own gate, so per-plane erases overlap | `zns_zone_reset()` |
 | Copyback (`nand_media_copyback()`) | not called | none |
 
-`tplpbsy`, `tplrbsy` and `trcbsy` are accepted for compatibility and have no
-effect; setting them warns at realize. With the defaults (no bus, no
-`tplebsy`) a two-plane erase takes exactly one erase time.
+`trcbsy` is accepted for compatibility and has no effect; setting it warns
+at realize. With the defaults (no bus, no `tplebsy`) a two-plane erase
+takes exactly one erase time.
+
+### Multi-plane program and read (BBSSD, CSD)
+
+`mp_program` and `mp_read` are off by default. They have no effect with one
+plane per LUN, in other modes, or under FDP, whose reads and writes keep
+their single-page timing; each setting warns at realize in those cases. Placement does not change: the write pointer still walks
+channel, LUN, plane, page, so the pages of one block and page on the planes
+of a LUN arrive `nchs * luns_per_ch` pages apart. The datapath holds each
+LUN's pages in a batch and charges the batch through
+`ssd_advance_status_multiplane()` when one of these happens:
+
+- the batch has one page on every plane;
+- the next page for that LUN is in another block or page, or on a plane
+  the batch already has;
+- the command ends (write, Write Zeroes, buffer write-back, read);
+- garbage collection or a mapping merge is about to run.
+
+A batch of one page is an ordinary single-page operation. The media layer
+counts a batch as one command, so the read and program command counts
+drop while host, NAND, relocated-page and erase counts stay the same.
+Garbage collection moves pages one at a time.
+
+`tplpbsy` and `tplrbsy` are durations: the busy time between the planes of
+a multi-plane program or read. Each warns at realize when set without its
+enable, and realize refuses a negative value.
 
 ## Program and erase suspend
 
@@ -412,7 +439,8 @@ W2, start after 330. A suspended program or erase never makes its own
 command complete afterwards; it delays the commands that follow.
 
 `nand_media_multiplane()` does not consult the suspend state, so a read
-issued through it never suspends; only erases use it today. The state is
+issued through it never suspends; this applies to erases and to the batches
+of `mp_program` and `mp_read`. The state is
 read and written without a lock, so operations on one position must be
 serialized. BBSSD and ZNS run them on the single FTL thread. A device
 with suspend on also leaves the lock-free fast path described in
@@ -713,11 +741,11 @@ properties and states how they interact.
 
 | Group | Properties | Interactions |
 | --- | --- | --- |
-| [Geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv) | `secsz`, `secs_per_pg`, `pgs_per_blk`, `blks_per_pl`, `pls_per_lun`, `luns_per_ch`, `nchs` | `nchs * luns_per_ch` is the number of independent dies. `pls_per_lun` adds no read or program parallelism under the LUN gate. |
+| [Geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv) | `secsz`, `secs_per_pg`, `pgs_per_blk`, `blks_per_pl`, `pls_per_lun`, `luns_per_ch`, `nchs` | `nchs * luns_per_ch` is the number of independent dies. `pls_per_lun` adds no read or program parallelism under the LUN gate unless `mp_program` or `mp_read` is set. |
 | [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. `pg_rd_lat / 16` is also the cost of a write buffer hit. |
 | [Cell type](../reference/properties.md#nand-timing-bbssd-csd-kv) | `nand_cell_type`, `cell_pages`, `pgtype_lat` | `pgtype_lat` applies only with `nand_cell_type=0`. `nand_cell_type` limits `pgs_per_blk` to 512. |
 | [Bus phases](../reference/properties.md#nand-timing-bbssd-csd-kv) | `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat`, `status_lat` | Any non-zero value turns the bus on. `pg_xfer_lat` takes precedence over `ch_xfer_lat`. |
-| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy` (`tplpbsy`, `tplrbsy`, `trcbsy` have no effect) | Used only by multi-plane erase, so only with `pls_per_lun > 1`. |
+| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy` (`trcbsy` has no effect) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |
 | [Suspend](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pe_suspend`, `tsusp_ns` | `tsusp_ns` matters only with `pe_suspend`. |
 | [ECC](../reference/properties.md#reliability-and-wear) | `ecc_step_ns`, `ecc_retention_sec` | `ecc_retention_sec` matters only with `ecc_step_ns`. |
 | [Other FTL costs](../reference/properties.md#nand-timing-bbssd-csd-kv) | `trim_lat_ns` | Charged per Dataset Management range by the FTL, not by the media layer. Refused with FDP. |

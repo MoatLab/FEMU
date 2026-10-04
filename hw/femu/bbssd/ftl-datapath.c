@@ -327,6 +327,146 @@ void bbssd_power_loss(NvmeNamespace *ns)
 }
 
 /*
+ * Queue the line holding a page that has just been read for a rewrite if
+ * read stress or retention age calls for one.
+ */
+static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
+                                uint64_t stime)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    /*
+     * Enough reads against this block to be worth refreshing the line it
+     * belongs to. Only note it here -- the rewrite happens on a write,
+     * where relocation already costs something, rather than stalling this
+     * read behind a whole line of it. One line is queued at a time, which
+     * is the rate limit.
+     */
+    if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
+        get_blk(ssd, ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
+        ssd->read_reclaim_line = get_line(ssd, ppa);
+        ssd->reclaim_by_age = false;
+    }
+
+    /*
+     * Charge leaks out of a cell whether or not anything reads it, so data
+     * that has merely sat programmed long enough is refreshed as well. A
+     * line's close_time is when it was filled; one still being written has
+     * none yet and cannot be old. Queued here and rewritten on a write for
+     * the same reason as read stress: that is where relocation belongs.
+     */
+    if (spp->retention_limit_sec && !ssd->read_reclaim_line) {
+        struct line *aged = get_line(ssd, ppa);
+        uint64_t limit = (uint64_t)spp->retention_limit_sec *
+                         NANOSECONDS_PER_SECOND;
+
+        if (aged->close_time && stime > aged->close_time &&
+            stime - aged->close_time >= limit) {
+            ssd->read_reclaim_line = aged;
+            ssd->reclaim_by_age = true;
+        }
+    }
+}
+
+/*
+ * Multi-plane commands. NAND can program or read the same page of one block
+ * on several planes of a LUN with one command: the per-plane command,
+ * address and data phases still take turns on the channel, but the array
+ * work runs once on all the planes. Placement is unchanged; pages are held
+ * per LUN until they stop forming such a group, then charged together.
+ */
+/* FDP shares this read path but keeps its own timing, so it is left alone */
+static inline bool ssd_mp_reads(struct ssd *ssd)
+{
+    return ssd->sp.mp_read && !ssd->fdp_enabled;
+}
+
+static bool ssd_mp_fits(struct ssd_mp_batch *b, struct ppa *ppa,
+                        uint64_t stime)
+{
+    struct ppa *first = &b->ppa[0];
+    int i;
+
+    if (b->stime != stime || first->g.ch != ppa->g.ch ||
+        first->g.lun != ppa->g.lun || first->g.blk != ppa->g.blk ||
+        first->g.pg != ppa->g.pg) {
+        return false;
+    }
+    for (i = 0; i < b->n; i++) {
+        if (b->ppa[i].g.pl == ppa->g.pl) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* charge a LUN's held pages as one command and empty the batch */
+static uint64_t ssd_mp_charge(struct ssd *ssd, struct ssd_mp_batch *b,
+                              int cmd)
+{
+    struct nand_cmd ncmd;
+    uint64_t lat;
+    int i;
+
+    if (!b->n) {
+        return 0;
+    }
+    ncmd.type = USER_IO;
+    ncmd.cmd = cmd;
+    ncmd.stime = b->stime;
+    lat = ssd_advance_status_multiplane(ssd, b->ppa, b->n, &ncmd);
+    if (cmd == NAND_READ) {
+        for (i = 0; i < b->n; i++) {
+            ssd_read_check_wear(ssd, &b->ppa[i], b->stime);
+        }
+    }
+    b->n = 0;
+    return lat;
+}
+
+/* hold one page for a multi-plane command; returns what any charge cost */
+static uint64_t ssd_mp_add(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
+                           int cmd)
+{
+    struct nand_lun *lun = get_lun(ssd, ppa);
+    struct ssd_mp_batch *b = cmd == NAND_READ ? &lun->mp_rd : &lun->mp_prog;
+    uint64_t lat = 0;
+
+    if (b->n && !ssd_mp_fits(b, ppa, stime)) {
+        lat = ssd_mp_charge(ssd, b, cmd);
+    }
+    if (!b->n) {
+        b->stime = stime;
+    }
+    b->ppa[b->n++] = *ppa;
+    if (b->n == ssd->sp.pls_per_lun) {
+        lat = MAX(lat, ssd_mp_charge(ssd, b, cmd));
+    }
+    return lat;
+}
+
+/* charge every held page of one kind; returns the longest latency */
+static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t lat = 0;
+    int ch, lun;
+
+    if (!(cmd == NAND_READ ? ssd_mp_reads(ssd) : spp->mp_program)) {
+        return 0;
+    }
+    for (ch = 0; ch < spp->nchs; ch++) {
+        for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            struct nand_lun *l = &ssd->ch[ch].lun[lun];
+
+            lat = MAX(lat, ssd_mp_charge(ssd, cmd == NAND_READ ?
+                                         &l->mp_rd : &l->mp_prog, cmd));
+        }
+    }
+    return lat;
+}
+
+/*
  * Program one logical page: choose placement through the mapping scheme,
  * commit it, and charge the media. Shared by the ordinary write path and by
  * the eviction of a buffered page, so both cost the same.
@@ -380,29 +520,45 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         ssd_advance_write_pointer_class(ssd, plan.target_class);
     }
 
-    swr.type = USER_IO;
-    swr.cmd = NAND_WRITE;
-    swr.stime = stime;
-
-    lat = ssd_advance_status(ssd, &ppa, &swr);
+    if (ssd->sp.mp_program) {
+        lat = ssd_mp_add(ssd, &ppa, stime, NAND_WRITE);
+    } else {
+        swr.type = USER_IO;
+        swr.cmd = NAND_WRITE;
+        swr.stime = stime;
+        lat = ssd_advance_status(ssd, &ppa, &swr);
+    }
     /* A full logical log cannot accept another program in this command. */
     if (ssd->mapping->reclaim_per_page &&
         ssd->mapping->needs_reclaim(ssd)) {
-        uint64_t merge_lat = ssd->mapping->reclaim(ssd, 1);
+        uint64_t merge_lat;
 
+        /* the merge reads pages this command may still hold */
+        lat = MAX(lat, ssd_mp_flush(ssd, NAND_WRITE));
+        merge_lat = ssd->mapping->reclaim(ssd, 1);
         lat = MAX(lat, merge_lat);
     }
     return lat;
 }
 
-/* force collection while free lines sit at the watermark, or until it stalls */
-static void ssd_gc_until_clear(struct ssd *ssd)
+/*
+ * Force collection while free lines sit at the watermark, or until it stalls.
+ * Held programs are charged first, since they were issued before the
+ * collection. Returns what that charge cost.
+ */
+static uint64_t ssd_gc_until_clear(struct ssd *ssd)
 {
+    uint64_t lat = 0;
+
+    if (should_gc_high(ssd)) {
+        lat = ssd_mp_flush(ssd, NAND_WRITE);
+    }
     while (should_gc_high(ssd)) {
         if (do_gc(ssd, true) == -1) {
             break;
         }
     }
+    return lat;
 }
 
 /*
@@ -438,7 +594,8 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
          * accepted, so a long write-back has to keep checking rather than rely
          * on the single check the host write already made.
          */
-        ssd_gc_until_clear(ssd);
+        curlat = ssd_gc_until_clear(ssd);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
         /*
          * The collection above can consume the last line, so ask again, and
          * only then take a page out of the buffer: one taken out with nowhere
@@ -462,6 +619,8 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         done++;
     }
+    curlat = ssd_mp_flush(ssd, NAND_WRITE);
+    maxlat = (curlat > maxlat) ? curlat : maxlat;
 
     /*
      * Schemes without per-page reclaim get one merge per batch: for a
@@ -540,45 +699,22 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             continue;
         }
 
+        if (ssd_mp_reads(ssd)) {
+            sublat = ssd_mp_add(ssd, &ppa, req->stime, NAND_READ);
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+            continue;
+        }
+
         struct nand_cmd srd;
         srd.type = USER_IO;
         srd.cmd = NAND_READ;
         srd.stime = req->stime;
         sublat = ssd_advance_status(ssd, &ppa, &srd);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
-
-        /*
-         * Enough reads against this block to be worth refreshing the line it
-         * belongs to. Only note it here -- the rewrite happens on a write,
-         * where relocation already costs something, rather than stalling this
-         * read behind a whole line of it. One line is queued at a time, which
-         * is the rate limit.
-         */
-        if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
-            get_blk(ssd, &ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
-            ssd->read_reclaim_line = get_line(ssd, &ppa);
-            ssd->reclaim_by_age = false;
-        }
-
-        /*
-         * Charge leaks out of a cell whether or not anything reads it, so data
-         * that has merely sat programmed long enough is refreshed as well. A
-         * line's close_time is when it was filled; one still being written has
-         * none yet and cannot be old. Queued here and rewritten on a write for
-         * the same reason as read stress: that is where relocation belongs.
-         */
-        if (spp->retention_limit_sec && !ssd->read_reclaim_line) {
-            struct line *aged = get_line(ssd, &ppa);
-            uint64_t limit = (uint64_t)spp->retention_limit_sec *
-                             NANOSECONDS_PER_SECOND;
-
-            if (aged->close_time && req->stime > aged->close_time &&
-                req->stime - aged->close_time >= limit) {
-                ssd->read_reclaim_line = aged;
-                ssd->reclaim_by_age = true;
-            }
-        }
+        ssd_read_check_wear(ssd, &ppa, req->stime);
     }
+    sublat = ssd_mp_flush(ssd, NAND_READ);
+    maxlat = (sublat > maxlat) ? sublat : maxlat;
 
     return maxlat;
 }
@@ -702,7 +838,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          * lines than the watermark keeps free, and a collection that starts
          * after the last line is gone has nowhere to move pages to.
          */
-        ssd_gc_until_clear(ssd);
+        curlat = ssd_gc_until_clear(ssd);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         /*
          * Garbage collection could not free a line, so there is nowhere to
@@ -731,6 +868,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
+    curlat = ssd_mp_flush(ssd, NAND_WRITE);
+    maxlat = (curlat > maxlat) ? curlat : maxlat;
 
     /*
      * Let schemes without per-page reclaim collect once the writes have
@@ -867,7 +1006,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
 
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             /* per page, for the reason ssd_write() gives */
-            ssd_gc_until_clear(ssd);
+            curlat = ssd_gc_until_clear(ssd);
+            maxlat = (curlat > maxlat) ? curlat : maxlat;
             if (ssd_out_of_lines(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
@@ -875,6 +1015,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             curlat = ssd_program_lpn(ssd, lpn, req->stime, -1);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
         }
+        curlat = ssd_mp_flush(ssd, NAND_WRITE);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         return maxlat;
     }

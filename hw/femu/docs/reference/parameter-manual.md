@@ -580,7 +580,7 @@ to anything but its default prints a warning at realize.
 
 | Device | Properties |
 | --- | --- |
-| `femu` | `serial`, `ms`, `ms_max`, `dlfeat`, `tplpbsy`, `tplrbsy`, `trcbsy`, `nr_thread`, `time_slice`, `context_switch_time` |
+| `femu` | `serial`, `ms`, `ms_max`, `dlfeat`, `trcbsy`, `nr_thread`, `time_slice`, `context_switch_time` |
 
 `nr_thread` is still refused at 0 by CSD. Identify Controller reports a
 serial number FEMU generates, whatever `serial` says.

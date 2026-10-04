@@ -2767,6 +2767,35 @@ static uint16_t femu_write_pages(FemuCtrlState *c, uint64_t page,
     return femu_write_pages_placed(c, page, npages, data, list, -1);
 }
 
+/* Read @npages 4 KiB pages from @page, every one of them into @data. */
+static uint16_t femu_read_pages(FemuCtrlState *c, uint64_t page,
+                                uint32_t npages, uint64_t data, uint64_t list)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+    uint32_t i;
+
+    g_assert_cmpuint(npages, >=, 1);
+    g_assert_cmpuint(npages, <=, 4096 / 8 + 1);
+    for (i = 0; i + 1 < npages; i++) {
+        qtest_writeq(c->pdev->bus->qts, list + i * 8, data);
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list : npages == 2 ? data : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(npages * (4096 / c->lba_size) - 1);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
 /*
  * Collection on a device with few lines. Below twenty lines the forced
  * watermark rounds to zero free lines, so a large write could take the last
@@ -2856,9 +2885,39 @@ static void femu_ftl_check(QTestState *qts, uint64_t *mapped, uint64_t *lost,
  * the host time of the request that triggered it, so how soon the next request
  * arrives, which depends on how loaded the host is, changes how long it waits.
  */
-static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
+/*
+ * A multi-plane variant of the trace below. want and base are the traces of
+ * this device and of the same device with multi-plane commands off; seq_ns
+ * and base_seq_ns are the modelled time of the phase before any collection.
+ */
+typedef struct FtlTraceMp {
+    const char *want;
+    const char *base;
+    uint64_t seq_ns;
+    uint64_t base_seq_ns;
+} FtlTraceMp;
+
+/* field @i of x-ftl-trace on the device with id "trace" */
+static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
 {
-    const char *want = data;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-ftl-trace'}}");
+    g_auto(GStrv) v = NULL;
+    uint64_t ns;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(v), ==, 9);
+    ns = g_ascii_strtoull(v[i], NULL, 10);
+    qobject_unref(rsp);
+    return ns;
+}
+
+static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
+                               const char *want, const FtlTraceMp *mp)
+{
+    const char *base = mp ? mp->base : NULL;
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
@@ -2876,6 +2935,27 @@ static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
     for (i = 0; i < pages; i += 64) {
         g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
                         NVME_SUCCESS);
+    }
+    /*
+     * Reads long enough to cover the same page on more than one plane. No
+     * collection has run yet, so each command finds the media idle and the
+     * modelled time so far does not depend on how loaded the host is.
+     */
+    if (mp) {
+        uint32_t rseed = 7;
+        uint64_t seq_ns;
+
+        for (i = 0; i < 32; i++) {
+            rseed = rseed * 1103515245 + 12345;
+            g_assert_cmphex(femu_read_pages(&c, (rseed >> 8) % (pages - 16 + 1),
+                                            16, buf, list), ==, NVME_SUCCESS);
+        }
+        seq_ns = femu_ftl_trace_field(qts, 1);
+        g_test_message("model ns before collection %" PRIu64, seq_ns);
+        g_assert_cmpuint(seq_ns, ==, mp->seq_ns);
+        if (base) {
+            g_assert_cmpuint(seq_ns, <, mp->base_seq_ns);
+        }
     }
     for (i = 0; i < 600; i++) {
         uint32_t npages = i % 4 == 3 ? 64 : 1;
@@ -2917,6 +2997,28 @@ static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
                 g_assert_cmpuint(got[i], ==, exp[i]);
             }
         }
+        /*
+         * Against the same workload with every page charged on its own:
+         * the same commands, pages and erases, and fewer read and program
+         * commands. The modelled time is compared above, where it is exact.
+         */
+        if (base) {
+            g_auto(GStrv) basev = g_strsplit(base, " ", 0);
+            uint64_t b[9];
+
+            g_assert_cmpuint(g_strv_length(basev), ==, 9);
+            for (i = 0; i < 9; i++) {
+                b[i] = g_ascii_strtoull(basev[i], NULL, 10);
+            }
+            for (i = 0; i < 9; i++) {
+                if (i == 1 || i == 6 || i == 7) {
+                    continue;
+                }
+                g_assert_cmpuint(got[i], ==, b[i]);
+            }
+            g_assert_cmpuint(got[6], <, b[6]);
+            g_assert_cmpuint(got[7], <, b[7]);
+        }
     }
     qobject_unref(rsp);
 
@@ -2924,6 +3026,38 @@ static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
     femu_disable(&c);
 }
+
+static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_ftl_trace_run(obj, alloc, data, NULL);
+}
+
+/* two planes per LUN, with reads of several pages; data is an FtlTraceMp */
+static void femu_test_ftl_trace_mp(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    const FtlTraceMp *mp = data;
+
+    femu_ftl_trace_run(obj, alloc, mp->want, mp);
+}
+
+#define FTL_TRACE_MP_OFF \
+    "764 3450000000 10306 10306 12181 11112 12821 22487 5556"
+#define FTL_TRACE_MP_OFF_SEQ_NS 17920000
+static const FtlTraceMp ftl_trace_mp_off = {
+    .want = FTL_TRACE_MP_OFF,
+    .seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
+};
+static const FtlTraceMp ftl_trace_mp_fdp = {
+    .want = "764 2020000000 10306 10306 4593 7320 5233 14899 3660",
+    .seq_ns = 17920000,
+};
+static const FtlTraceMp ftl_trace_mp_on = {
+    .want = "764 3240000000 10306 10306 12181 11112 12619 18495 5556",
+    .base = FTL_TRACE_MP_OFF,
+    .seq_ns = 10040000,
+    .base_seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
+};
 
 /*
  * query-femu over QMP. @args is the arguments object without its braces;
@@ -4557,6 +4691,8 @@ static const struct {
     { "'femu_mode':0,'lver':2,'flash_type':5", "flash_type" },
     { "'femu_mode':0,'lver':2,'flash_type':6", "flash_type" },
     { "'femu_mode':0,'lver':2,'flash_type':255", "flash_type" },
+    { "'tplpbsy':-1", "tplpbsy" },
+    { "'tplrbsy':-1", "tplrbsy" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,
@@ -5206,6 +5342,50 @@ static uint16_t femu_io(FemuCtrlState *c, NvmeCmd *cmd)
 
     femu_io_status = status;
     return FEMU_SC(status);
+}
+
+/*
+ * Write Zeroes and a buffer write-back each program one full row: the same
+ * page on both planes of every LUN of a 2 x 2 x 2 device. With mp_program
+ * (data non-zero) that is one program command per LUN, without it one per
+ * page.
+ */
+static void femu_test_mp_program_scopes(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t want = data ? 4 : 8;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before;
+    NvmeRwCmd rw;
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    before = femu_ftl_trace_field(qts, 7);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(0);
+    rw.nlb = cpu_to_le16(8 * (4096 / c.lba_size) - 1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+
+    /* the buffer holds the eight pages; Flush writes them back */
+    before = femu_ftl_trace_field(qts, 7);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 8, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7), ==, before);
+    g_assert_cmpint(femu_io(&c, &flush), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
 }
 
 /*
@@ -20110,16 +20290,17 @@ static const struct {
     { "ms", "8", "16" },
     { "ms_max", "32", "64" },
     { "dlfeat", "0", "1" },
-    { "tplpbsy", "100", "0" },
-    { "tplrbsy", "100", "0" },
     { "trcbsy", "100", "0" },
     { "nr_thread", "8", "4" },
     { "time_slice", "1", "200000" },
     { "context_switch_time", "1", "200" },
 };
 
-/* Start a NoSSD controller with @opts and return what QEMU wrote to stderr. */
-static char *femu_realize_stderr(const char *opts)
+/*
+ * Start a NoSSD controller with @opts, after the devices in @pre, and return
+ * what QEMU wrote to stderr.
+ */
+static char *femu_realize_stderr_after(const char *pre, const char *opts)
 {
     g_autofree char *log = g_strdup("femu-ignored-XXXXXX");
     g_autofree char *quoted = NULL;
@@ -20130,12 +20311,17 @@ static char *femu_realize_stderr(const char *opts)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
     quoted = g_shell_quote(log);
-    qts = qtest_initf("-machine pc -nodefaults -device femu,addr=5,"
-                      "devsz_mb=64,femu_mode=2%s 2>%s", opts, quoted);
+    qts = qtest_initf("-machine pc -nodefaults %s -device femu,addr=5,"
+                      "devsz_mb=64,femu_mode=2%s 2>%s", pre, opts, quoted);
     qtest_quit(qts);
     g_assert_true(g_file_get_contents(log, &text, NULL, NULL));
     unlink(log);
     return text;
+}
+
+static char *femu_realize_stderr(const char *opts)
+{
+    return femu_realize_stderr_after("", opts);
 }
 
 static void femu_test_ignored_props(void *obj, void *data,
@@ -20167,6 +20353,50 @@ static void femu_test_ignored_props(void *obj, void *data,
         g_assert_null(strstr(quiet, needle));
     }
     g_assert_null(strstr(quiet, "has no effect"));
+}
+
+/*
+ * Multi-plane settings warn wherever they change nothing: a busy time
+ * without its enable, one plane per LUN, a mode other than bbssd and CSD,
+ * and FDP. The full set on two-plane bbssd is quiet.
+ */
+#define FEMU_MP_BB ",femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
+                   "blks_per_pl=19,luns_per_ch=2,nchs=2"
+#define FEMU_MP_ALL ",mp_program=1,mp_read=1,tplpbsy=100,tplrbsy=100"
+
+static void femu_test_multiplane_warnings(void *obj, void *data,
+                                          QGuestAllocator *unused)
+{
+    g_autofree char *busy = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=2,pls_per_lun=2,tplpbsy=100,tplrbsy=100");
+    g_autofree char *one = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=4,pls_per_lun=1,mp_program=1");
+    g_autofree char *nossd = femu_realize_stderr(",pls_per_lun=2" FEMU_MP_ALL);
+    g_autofree char *fdp = femu_realize_stderr_after(
+        "-device femu-subsys,id=mpsub,nqn=mpsub,fdp=on,fdp.nruh=4",
+        FEMU_MP_BB ",pgs_per_blk=2,blks_per_pl=25,pls_per_lun=2,subsys=mpsub"
+        FEMU_MP_ALL);
+    g_autofree char *full = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=2,pls_per_lun=2" FEMU_MP_ALL);
+    const char *prog = "femu: tplpbsy has no effect unless mp_program";
+    const char *read = "femu: tplrbsy has no effect unless mp_read";
+    const char *unsupported = "multi-plane program and read need bbssd";
+    const char *names[] = { "mp_program", "mp_read", "tplpbsy", "tplrbsy" };
+    int i;
+
+    g_assert_nonnull(strstr(busy, prog));
+    g_assert_nonnull(strstr(busy, read));
+    g_assert_null(strstr(busy, unsupported));
+    g_assert_nonnull(strstr(one, "femu: mp_program has no effect"));
+    g_assert_null(strstr(one, prog));
+    for (i = 0; i < ARRAY_SIZE(names); i++) {
+        g_autofree char *needle =
+            g_strdup_printf("femu: %s has no effect; multi-plane", names[i]);
+
+        g_assert_nonnull(strstr(nossd, needle));
+        g_assert_nonnull(strstr(fdp, needle));
+    }
+    g_assert_null(strstr(full, "no effect"));
 }
 
 static void femu_test_doc_examples(void *obj, void *data,
@@ -21580,6 +21810,8 @@ static void femu_register_nodes(void)
 
     qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
     qos_add_test("ignored-props", "femu", femu_test_ignored_props, NULL);
+    qos_add_test("multiplane-warnings", "femu", femu_test_multiplane_warnings,
+                 NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
                  NULL);
     qos_add_test("cxl-log-missing", "femu", femu_test_cxl_log_missing, NULL);
@@ -22292,6 +22524,62 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
+    });
+    /* one plane: multi-plane commands have nothing to combine */
+    qos_add_test("ftl-trace-mp-one-plane", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "mp_program=1,mp_read=1",
+    });
+    qos_add_test("ftl-trace-mp-off", "femu", femu_test_ftl_trace_mp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_mp_off,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2",
+    });
+    qos_add_test("ftl-trace-mp-on", "femu", femu_test_ftl_trace_mp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_mp_on,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "mp_program=1,mp_read=1",
+    });
+    /* FDP keeps its own read timing: mp_read must not move it */
+    qos_add_test("ftl-trace-mp-fdp-off", "femu", femu_test_ftl_trace_mp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_mp_fdp,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=25,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("ftl-trace-mp-fdp-read", "femu", femu_test_ftl_trace_mp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_mp_fdp,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=25,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,mp_read=1",
+    });
+    qos_add_test("mp-program-scopes-off", "femu", femu_test_mp_program_scopes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "oncs=0x1f,vwc=1,buffer_size=64",
+    });
+    qos_add_test("mp-program-scopes-on", "femu", femu_test_mp_program_scopes,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "oncs=0x1f,vwc=1,buffer_size=64,mp_program=1",
     });
     qos_add_test("gc-no-destination", "femu", femu_test_gc_no_destination,
                  &(QOSGraphTestOptions) {

@@ -106,12 +106,24 @@ struct nand_plane {
     int nblks;
 };
 
+/*
+ * Pages of one LUN waiting to be charged as a single multi-plane command:
+ * the same block and page on distinct planes, all requested at stime.
+ */
+struct ssd_mp_batch {
+    struct ppa ppa[1 << PL_BITS];
+    int n;
+    uint64_t stime;
+};
+
 struct nand_lun {
     struct nand_plane *pl;
     int npls;
     uint64_t next_lun_avail_time;
     bool busy;
     uint64_t gc_endtime;
+    struct ssd_mp_batch mp_prog;  /* programs not yet charged (mp_program) */
+    struct ssd_mp_batch mp_rd;    /* reads not yet charged (mp_read) */
 };
 
 struct ssd_channel {
@@ -153,6 +165,8 @@ struct ssdparams {
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
+    bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
+    bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */
 
     double gc_thres_pcent;
     int gc_thres_lines;

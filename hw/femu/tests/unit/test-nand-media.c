@@ -373,6 +373,60 @@ static void test_multiplane_erase(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * Program and read of the same page on two planes, as bbssd issues them with
+ * mp_program and mp_read: the per-plane bus phases and the inter-plane busy
+ * time are serial, the array time is paid once.
+ */
+static uint64_t mp_lat(NandMediaConfig *cfg, NandMediaOp op)
+{
+    NandMedia m;
+    NandLoc locs[2];
+    uint64_t lat;
+
+    reset_timelines();
+    nand_media_init(&m, cfg);
+    memset(locs, 0, sizeof(locs));
+    locs[1].pl = 1;
+    lat = nand_media_multiplane(&m, locs, 2, op, 0).latency_ns;
+    nand_media_destroy(&m);
+    return lat;
+}
+
+static void test_multiplane_program_read(void)
+{
+    NandMediaConfig cfg;
+
+    printf("# multi-plane program and read\n");
+
+    /* no bus phases: the busy time between planes, then one array op */
+    bb_config(&cfg);
+    cfg.planes_per_lun = 2;
+    cfg.timeline = &lun_only_timeline;
+    cfg.timing.tplpbsy_ns = 500;
+    cfg.timing.tplrbsy_ns = 300;
+    check("program: one array time plus tPLPBSY",
+          mp_lat(&cfg, NAND_MEDIA_PROGRAM), 500 + 40000);
+    check("the LUN is busy for one program", lun_avail[0], 500 + 40000);
+    check("read: one array time plus tPLRBSY",
+          mp_lat(&cfg, NAND_MEDIA_READ), 300 + 10000);
+
+    /*
+     * Staged bus. Program: command, address and data in per plane, with the
+     * busy time between them, then the array, then status. Read: command and
+     * address per plane, the array, status, then each plane's data out.
+     */
+    cfg.timing.cmd_addr_ns = 100;
+    cfg.timing.page_xfer_ns = 1000;
+    cfg.timing.status_ns = 50;
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    check("staged program",
+          mp_lat(&cfg, NAND_MEDIA_PROGRAM), 1100 + 500 + 1100 + 40000 + 50);
+    check("staged read",
+          mp_lat(&cfg, NAND_MEDIA_READ),
+          100 + 300 + 100 + 10000 + 50 + 2 * (100 + 1000));
+}
+
 static void test_copyback(void)
 {
     NandMediaConfig cfg;
@@ -690,6 +744,7 @@ int main(void)
     test_staged_channel();
     test_plane_gate_with_channel();
     test_multiplane_erase();
+    test_multiplane_program_read();
     test_copyback();
     test_pe_suspend();
     test_partial_xfer();

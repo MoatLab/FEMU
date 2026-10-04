@@ -905,7 +905,7 @@ does inside the FTL and what it interacts with.
 | `secsz`, `secs_per_pg` | page size; LPN = byte offset / page size | the LBA format; DFTL entries per translation page |
 | `pgs_per_blk` | pages per block and per line column; the log-block merge unit | at most 512 with `nand_cell_type` |
 | `blks_per_pl` | the number of lines | the watermarks and the reserve are fractions of it |
-| `pls_per_lun`, `luns_per_ch`, `nchs` | line width and write striping | parallelism; `tplebsy` for multi-plane erase |
+| `pls_per_lun`, `luns_per_ch`, `nchs` | line width and write striping | parallelism; `tplebsy` for multi-plane erase; `mp_program`, `mp_read` for multi-plane program and read |
 | `devsz_mb`, `namespaces`, `namespace_sizes` | the exposed capacity | must fit the usable lines per namespace |
 | `op_pcent` | exposes a fixed fraction of raw NAND | overrides `devsz_mb`; refused with `cxl_ssd` |
 
@@ -1010,6 +1010,7 @@ What the automated tests check:
 | Streams | qtest `streams-gc` and the other `streams-*` cases | stream placement and GC of stream lines |
 | GC with no free line | qtests `gc-no-destination`, `gc-no-destination-hot-cold`, `streams-gc-floor`, `gc-no-destination-fdp` | on a geometry whose forced watermark rounds to zero, random single-page and 64-page writes never fail, no mapping names an erased page and no valid page is orphaned (read through the qtest-only `x-ftl-check` property) |
 | Charged work for a fixed workload | qtests `ftl-trace-bbssd`, `ftl-trace-hot-cold`, `ftl-trace-fdp` | a seeded queue-depth-one write and read workload with collection gives exact command, host, NAND, relocated-page and erase counts and exact read, program and erase commands charged to the media layer (qtest-only `x-ftl-trace`); a refactor of the allocator, collection or media charge must not move them. A different victim policy or a dropped or duplicated charge fails it. The modelled-latency sum depends on host load and is only held to 25%, so NAND timing values are left to `test-femu-nand-media` |
+| Multi-plane program and read | qtests `ftl-trace-mp-off`, `ftl-trace-mp-on`, `ftl-trace-mp-one-plane`, `ftl-trace-mp-fdp-off`, `ftl-trace-mp-fdp-read`, `mp-program-scopes-off`, `mp-program-scopes-on`, `multiplane-warnings`, `config-refused` | with two planes per LUN and reads of 16 pages, `mp_program=1,mp_read=1` keeps every command, page and erase count of the same workload with them off, issues fewer read and program commands, and models less time before collection starts, where that time is exact; with one plane the trace equals `ftl-trace-bbssd`; under FDP the trace with `mp_read=1` equals the one without it; a full row written by Write Zeroes or by a buffer write-back takes 4 program commands instead of 8; a setting that changes nothing warns and a negative busy time is refused |
 | Format, Sanitize | qtests `format-ftl`, `sanitize` | after Format, GC relocates nothing; Sanitize status and zeroed data (the FTL state is not checked) |
 | Robustness | qtests `io-fuzz`, `io-fuzz-fdp`, `config-refused` | malformed I/O, refused configurations |
 | Start-up | `doc-examples` | every tagged example on this page and the BlackBox guide starts and moves one block |

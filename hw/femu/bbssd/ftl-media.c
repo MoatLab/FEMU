@@ -222,8 +222,9 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
 /*
  * Multi-plane variant: one command sequence addressing the same block on every
  * plane of a LUN, which real NAND runs as a single array operation rather than
- * one erase after another. GC erase is the caller that benefits -- it reclaims
- * the same block index on every plane, exactly the shape the die can batch.
+ * one erase after another. GC erase reclaims the same block index on every
+ * plane, exactly the shape the die can batch; with mp_program and mp_read the
+ * host datapath sends programs and reads of one page on several planes here.
  *
  * With one plane there is nothing to batch, so this is the ordinary single-op
  * path and the default configuration is untouched.

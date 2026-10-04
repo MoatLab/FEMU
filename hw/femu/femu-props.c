@@ -291,11 +291,21 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "status_lat",
       "bbssd, CSD, KV: status read phase on the channel bus in ns" },
     { "tplpbsy",
-      "No effect, kept for compatibility; programs are issued one plane at "
-      "a time. A value other than the default warns at realize" },
+      "bbssd, CSD: busy time in ns between the planes of a multi-plane "
+      "program; only with mp_program, and a value without it warns at "
+      "realize. Negative is refused" },
     { "tplrbsy",
-      "No effect, kept for compatibility; reads are issued one plane at a "
-      "time. A value other than the default warns at realize" },
+      "bbssd, CSD: busy time in ns between the planes of a multi-plane "
+      "read; only with mp_read, and a value without it warns at realize. "
+      "Negative is refused" },
+    { "mp_program",
+      "bbssd, CSD: non-zero charges programs of the same page on several "
+      "planes of a LUN as one multi-plane command (one array time); needs "
+      "pls_per_lun > 1 and no FDP, and warns at realize otherwise" },
+    { "mp_read",
+      "bbssd, CSD: non-zero charges host reads of the same page on several "
+      "planes of a LUN as one multi-plane command (one array time); needs "
+      "pls_per_lun > 1 and no FDP, and warns at realize otherwise" },
     { "tplebsy",
       "bbssd, CSD, KV: busy time in ns between the planes of a "
       "multi-plane erase, which garbage collection issues when "
