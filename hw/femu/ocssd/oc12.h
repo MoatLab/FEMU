@@ -2,6 +2,7 @@
 #define __FEMU_OC12_H
 
 #include "../nvme.h"
+#include "../nand/nand-media.h"
 
 enum Oc12AdminCommands {
     OC12_ADM_CMD_IDENTITY    = 0xe2,
@@ -227,7 +228,14 @@ typedef struct Oc12Ctrl {
     int         meta_tbytes;
     int         meta_len;
     uint8_t     int_meta_size;       // # of bytes for "internal" metadata
+    /* NAND timing: the shared media layer, busy-until per LUN and channel */
+    NandMedia   media;
+    uint64_t    lun_avail[FEMU_MAX_NUM_CHIPS];
+    uint64_t    ch_avail[FEMU_MAX_NUM_CHNLS];
+    int         num_lun;
 } Oc12Ctrl;
+
+void oc12_refresh_timing(FemuCtrl *n);
 
 struct oc12_metadata_format {
     uint32_t state;

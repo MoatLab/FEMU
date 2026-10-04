@@ -64,8 +64,8 @@ appears, and SPDK can drive it from user space.
             |  timing                  |  timing
             v                          v
    +---------------------------------------------+
-   | per-chip and per-channel busy-until times   |
-   | timing-model/timing.c                       |
+   | per-LUN and per-channel busy-until times    |
+   | nand/nand-media.c (shared media layer)      |
    +---------------------------------------------+
                          |
                 expire_time on the request
@@ -351,21 +351,28 @@ namespace reports 16 metadata bytes per sector.
 
 ## Timing
 
-Open-Channel 1.2 uses the busy-until model in
-`hw/femu/timing-model/timing.c`. Open-Channel 2.0 charges no channel time, so
-it uses the shared media layer (`nand_media_op()` in `hw/femu/nand/nand-media.c`)
-with the LUN gate, the bus off and flat lower-page times, through
-`oc20_chip_op()`; the arithmetic is the same as below, and vendor command 0xEE
-refreshes its times (`oc20_refresh_timing()`). For 1.2 the controller keeps one
-time per chip (LUN) and one per channel:
+Both versions use the shared media layer (`nand_media_op()` in
+`hw/femu/nand/nand-media.c`), each with its own `NandMedia` and the LUN gate.
+Open-Channel 2.0 charges no channel time and uses flat lower-page times,
+through `oc20_chip_op()`. Open-Channel 1.2 uses per-page-type tables, through
+`oc12_media_op()`; with `oc12_channel_timing=on` the bus is staged, otherwise
+it is off. Vendor command 0xEE refreshes the times of either version
+(`oc20_refresh_timing()`, `oc12_refresh_timing()`). With 1.2 channel timing on,
+one channel lock covers a page's transfer and its chip time together, so two
+commands that reach the same channel and chip at once complete in an order the
+host would also see from one queue; before, their phases could interleave. A
+single command stream gets the same times as before. The controller keeps one
+time per chip (LUN) and, for 1.2, one per channel:
 
-- `chip_next_avail_time[ch * num_lun + lun]`, at most 128 chips.
-- `chnl_next_avail_time[ch]` and a list of reserved intervals per channel,
-  at most 32 channels.
+- `lun_avail[ch * num_lun + lun]` in `Oc12Ctrl` or `Oc20Ctrl`, at most 128
+  chips.
+- `Oc12Ctrl.ch_avail[ch]`, at most 32 channels, and the media layer's list
+  of booked read windows per channel. For 1.2 the list has no cap
+  (`policy.bus_res_unbounded`).
 
-`advance_chip_timestamp()` starts an operation at the larger of "now" and the
-chip's busy-until time, adds the operation's latency, and returns the new
-busy-until time. Latencies come from the built-in table for
+An operation starts at the larger of "now" and the chip's busy-until time,
+adds the operation's latency, and the end becomes the new busy-until
+time. Latencies come from the built-in table for
 [`flash_type`](../reference/properties.md#ocssd-open-channel) (1 SLC, 2 MLC,
 3 TLC, 4 QLC) in `hw/femu/nand/nand.h`, by operation and page type. The
 NAND timing properties of the black-box mode (`pg_rd_lat` and the others)
@@ -405,8 +412,10 @@ Version differences:
   charged.
 
 The time is computed on the poller when the command arrives, and stored as
-the request's `expire_time`. Chip and channel times are protected by one spin
-lock each, so several pollers can time commands at once.
+the request's `expire_time`. For 1.2 with channel timing, the channel's spin
+lock (`chnl_locks[]`) covers the bus and its LUNs; otherwise a chip's time
+is updated with a compare-and-swap. So several pollers can time commands at
+once.
 
 ## Parameters
 
@@ -512,7 +521,8 @@ Refusals at realize are listed in the
 | --- | --- |
 | [`hw/femu/ocssd/oc12.c`](../../ocssd/oc12.c), [`oc12.h`](../../ocssd/oc12.h) | 1.2 commands, PPA format, sector metadata, bad block tables, init and exit |
 | [`hw/femu/ocssd/oc20.c`](../../ocssd/oc20.c), [`oc20.h`](../../ocssd/oc20.h) | 2.0 commands, chunk descriptors, write pointer rules, geometry, log page |
-| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | Open-Channel 1.2 chip and channel busy-until times, geometry bound check, 0xEE |
+| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | `flash_type` times (`set_latency()`), geometry bound check, 0xEE |
+| [`hw/femu/nand/nand-media.c`](../../nand/nand-media.c) | chip and channel busy-until times for both versions |
 | [`hw/femu/nand/nand.h`](../../nand/nand.h), [`nand.c`](../../nand/nand.c) | per-cell-type latency tables and page-type tables |
 | [`hw/femu/femu.c`](../../femu.c) | `nvme_register_extensions()`, realize-time checks |
 | [`hw/femu/nvme-io.c`](../../nvme-io.c) | `nvme_io_cmd()` dispatch, completion queue |

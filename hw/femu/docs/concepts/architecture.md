@@ -227,7 +227,7 @@ the controller's.
 
 | Mode | `femu_mode` | Code | What the I/O handler does | Where time is computed |
 | --- | --- | --- | --- | --- |
-| OCSSD | 0 | `hw/femu/ocssd/oc12.c` (`lver=1`), `hw/femu/ocssd/oc20.c` (`lver=2`) | Open-Channel vector commands; the host runs the FTL | in the poller, from chip and channel timestamps (`hw/femu/timing-model/timing.c`) |
+| OCSSD | 0 | `hw/femu/ocssd/oc12.c` (`lver=1`), `hw/femu/ocssd/oc20.c` (`lver=2`) | Open-Channel vector commands; the host runs the FTL | in the poller, from chip and channel busy-until times (`hw/femu/nand/nand-media.c`) |
 | BBSSD | 1 | `hw/femu/bbssd/bb.c` | Read and Write through `nvme_rw()` | FTL thread, `bb_ftl_process_req()` |
 | NoSSD | 2 | `hw/femu/nossd/nop.c` | Read and Write through `nvme_rw()` | none |
 | ZNS | 3 | `hw/femu/zns/zns.c` | zoned command set, zone state machine | FTL thread, `zns_ftl_process_req()` |
@@ -330,8 +330,8 @@ phases is modelled only when one of those phases has a non-zero time.
 
 Read, program and erase times come either from flat properties or from
 built-in per-cell-type tables (`hw/femu/nand/nand.h` for BBSSD, CSD and KV;
-`hw/femu/zns/zns.h` for ZNS). OCSSD uses the older
-chip and channel timestamp model in `hw/femu/timing-model/timing.c`.
+`hw/femu/zns/zns.h` for ZNS). OCSSD also uses the media layer, with its
+`flash_type` times set in `hw/femu/timing-model/timing.c`.
 
 [Timing model](timing-model.md) explains the rules and the properties that
 control them.

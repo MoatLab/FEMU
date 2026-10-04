@@ -481,19 +481,34 @@ static void oc12_trace(FemuCtrl *n, uint8_t opcode, NvmeRequest *req)
     }
 }
 
+/* when an op on @ch/@lun issued at @now completes, moving @xfer_secs */
+static int64_t oc12_media_op(FemuCtrl *n, int ch, int lun, uint8_t page_type,
+                             uint32_t xfer_secs, int64_t now, NandMediaOp op)
+{
+    Oc12Ctrl *ln = n->oc12_ctrl;
+    NandLoc loc = {
+        .ch = ch,
+        .lun = lun,
+        .flash_type = n->flash_type,
+        .page_type = page_type,
+        .xfer_secs = xfer_secs,
+    };
+
+    return nand_media_op(&ln->media, &loc, op, now).done_ns;
+}
+
 static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                NvmeRequest *req)
 {
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
     uint8_t opcode = ocrw->opcode;
-    int ch, lun, lunid;
+    int ch;
+    int lun;
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
     Oc12Ctrl *ln = n->oc12_ctrl;
-    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     int max_sec_per_rq = ln->params.max_sec_per_rq;
-    uint8_t page_type;
 
     int64_t now = req->stime;
     uint64_t ppa;
@@ -517,9 +532,8 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             ppa = ((uint64_t *)req->slba)[i];
             lun = PPA_LUN(ln, ppa);
             ch = PPA_CH(ln, ppa);
-            lunid = ch * c->num_lun + lun;
 
-            ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
+            ts = oc12_media_op(n, ch, lun, 0, 0, now, NAND_MEDIA_ERASE);
             if (ts > req->expire_time) {
                 req->expire_time = ts;
             }
@@ -534,38 +548,19 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     AddrBucket *addr_bucket = g_malloc0(sizeof(AddrBucket) * max_sec_per_rq);
     parse_ppa_list(n, ns, cmd, req, addr_bucket, &secs_idx);
 
-    /* Read & Write */
+    /*
+     * Read & Write. A write moves its data over the channel and then
+     * programs; a read's data-out is booked after its array time. One page
+     * per plane; partial pages pay only for their sectors.
+     */
     for (i = 0; i < secs_idx; i++) {
-        uint64_t transfer_ns = 0;
-        int64_t chnl_end_ts;
-        int64_t chip_end_ts;
+        uint32_t xfer_secs = n->oc_params.channel_timing ?
+                             addr_bucket[i].cnt : 0;
 
-        if (n->oc_params.channel_timing) {
-            uint64_t page_ns = n->oc_chnl_pg_xfer_lat;
-
-            /* One page per plane; partial pages pay only for their sectors. */
-            transfer_ns = DIV_ROUND_UP(page_ns * addr_bucket[i].cnt,
-                                      ln->params.sec_per_pg);
-        }
-
-        ch = addr_bucket[i].ch;
-        lun = addr_bucket[i].lun;
-        page_type = addr_bucket[i].page_type;
-        lunid = ch * c->num_lun + lun;
-
-        io_done_ts = 0;
-
-        if (req->is_write) {
-            /* Write data needs to be transferred through the channel first */
-            chnl_end_ts = advance_channel_timestamp(n, ch, now, transfer_ns);
-            /* Then issue NAND Program to the target flash chip */
-            io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, page_type);
-        } else {
-            chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, page_type);
-            io_done_ts = advance_read_channel_timestamp(n, ch, now,
-                                                        chip_end_ts,
-                                                        transfer_ns);
-        }
+        io_done_ts = oc12_media_op(n, addr_bucket[i].ch, addr_bucket[i].lun,
+                                   addr_bucket[i].page_type, xfer_secs, now,
+                                   req->is_write ? NAND_MEDIA_PROGRAM :
+                                                   NAND_MEDIA_READ);
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
         cur_time_need_to_emulate = io_done_ts - now;
@@ -1208,6 +1203,89 @@ static int oc12_init_misc(FemuCtrl *n)
     return 0;
 }
 
+static uint64_t *oc12_tl_lun_avail(void *opaque, const NandLoc *loc)
+{
+    Oc12Ctrl *ln = ((FemuCtrl *)opaque)->oc12_ctrl;
+
+    return &ln->lun_avail[loc->ch * ln->num_lun + loc->lun];
+}
+
+static uint64_t *oc12_tl_ch_avail(void *opaque, uint32_t ch)
+{
+    return &((FemuCtrl *)opaque)->oc12_ctrl->ch_avail[ch];
+}
+
+/* pollers time commands in parallel: one channel, bus and LUNs, at a time */
+static void oc12_tl_lock(void *opaque, const NandLoc *loc)
+{
+    pthread_spin_lock(&((FemuCtrl *)opaque)->chnl_locks[loc->ch]);
+}
+
+static void oc12_tl_unlock(void *opaque, const NandLoc *loc)
+{
+    pthread_spin_unlock(&((FemuCtrl *)opaque)->chnl_locks[loc->ch]);
+}
+
+static const NandTimelineOps oc12_timeline_ops = {
+    .ch_avail   = oc12_tl_ch_avail,
+    .lun_avail  = oc12_tl_lun_avail,
+    .lock_lun   = oc12_tl_lock,
+    .unlock_lun = oc12_tl_unlock,
+};
+
+/* Copy this flash type's page, erase and transfer times into the media. */
+static void oc12_fill_timing(FemuCtrl *n, NandMediaTiming *t)
+{
+    int ft = n->flash_type;
+    int p;
+
+    QEMU_BUILD_BUG_ON(NAND_MEDIA_MAX_PGTYPE != MAX_FLASH_TYPE);
+    QEMU_BUILD_BUG_ON(NAND_MEDIA_MAX_FLASH != MAX_FLASH_TYPE);
+    for (p = 0; p < MAX_FLASH_TYPE; p++) {
+        t->rd_table_ns[ft][p] = n->oc_pg_rd_lat[p];
+        t->wr_table_ns[ft][p] = n->oc_pg_wr_lat[p];
+    }
+    t->er_table_ns[ft] = n->oc_blk_er_lat;
+    t->page_xfer_ns = n->oc_chnl_pg_xfer_lat;
+}
+
+/*
+ * Open-Channel 1.2 charges each LUN its page-type time after whatever it is
+ * busy with. With oc12_channel_timing on, a program first moves its sectors
+ * over the channel and a read's data-out is booked in the window after its
+ * array time, with no cap on queued reads; off, the bus costs nothing.
+ */
+static void oc12_media_init(FemuCtrl *n)
+{
+    Oc12Ctrl *ln = n->oc12_ctrl;
+    NandMediaConfig cfg = {0};
+
+    ln->num_lun = n->oc_params.num_lun;
+    cfg.nchs = n->oc_params.num_ch;
+    cfg.luns_per_ch = n->oc_params.num_lun;
+    cfg.planes_per_lun = 1;
+    cfg.secs_per_page = n->oc_params.secs_per_pg;
+    oc12_fill_timing(n, &cfg.timing);
+    cfg.policy.use_flat_timing = false;
+    cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
+    cfg.policy.channel_mode = n->oc_params.channel_timing ? NAND_CH_STAGED :
+                                                            NAND_CH_OFF;
+    cfg.policy.bus_res_unbounded = true;
+    cfg.timeline = &oc12_timeline_ops;
+    cfg.timeline_opaque = n;
+    nand_media_init(&ln->media, &cfg);
+}
+
+/* Vendor command 0xEE changed the times this mode charges. */
+void oc12_refresh_timing(FemuCtrl *n)
+{
+    Oc12Ctrl *ln = n->oc12_ctrl;
+
+    if (ln) {
+        oc12_fill_timing(n, &ln->media.cfg.timing);
+    }
+}
+
 /* Pass-along the parameters from command line */
 static int oc12_init_params(FemuCtrl *n)
 {
@@ -1265,6 +1343,7 @@ static int oc12_init_more(FemuCtrl *n, Error **errp)
     }
 
     oc12_init_misc(n);
+    oc12_media_init(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
@@ -1437,6 +1516,7 @@ static void oc12_exit(FemuCtrl *n)
     if (ln) {
         g_free(ln->meta_buf);
         ln->meta_buf = NULL;
+        nand_media_destroy(&ln->media);
     }
     g_free(n->oc12_ctrl);
     n->oc12_ctrl = NULL;

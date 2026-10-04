@@ -119,7 +119,7 @@ the same FTL and NAND timing code, each device with its own instance.
                        |
  +---------------------v---------------------------------------------------------------+
  | 5. NAND TIMING  nand-media.c: busy-until time per LUN or plane, channel bus,       |
- |                 cell-type tables, suspend, ECC     timing.c: OC 1.2 timestamps      |
+ |                 cell-type tables, suspend, ECC     timing.c: OCSSD 0xEE times       |
  +-------------------------------------------------------------------------------------+
 
  6. MEMORY BACKEND (data only; layers 4 and 5 never touch it)

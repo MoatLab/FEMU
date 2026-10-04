@@ -30,7 +30,7 @@ is in [architecture](../concepts/architecture.md).
 | [`csd/`](../../csd) | Computational storage mode and its private commands |
 | [`cxlssd/`](../../cxlssd) | `femu-cxl-ssd`: QOM glue, the page cache, the DER modes, the caching API |
 | [`nand/`](../../nand) | NAND media layer: per-cell-type timing tables and the timing of each operation |
-| [`timing-model/`](../../timing-model) | Per-chip and per-channel timestamps used by Open-Channel |
+| [`timing-model/`](../../timing-model) | Open-Channel `flash_type` times, geometry check and vendor command 0xEE |
 | [`backend/`](../../backend) | The DRAM backend that holds the emulated medium |
 | [`lib/`](../../lib), [`inc/`](../../inc) | Lock-free rings and the priority queue, and their headers |
 | [`scripts/`](../../scripts) | Build and launch scripts, configs, guest tools, documentation tooling ([scripts reference](../reference/scripts.md)) |

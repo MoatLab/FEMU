@@ -7,8 +7,8 @@
  * NAND is the composable media layer: SLC/MLC/TLC/QLC/PLC chips with per-type
  * read/program/erase timing, organized across channels x LUNs x planes. The
  * bbssd FTL (with FDP, CSD, KV and CXL on top of it) and ZNS run on top and
- * talk to the NAND backend through this one interface; OCSSD keeps its own
- * model in timing-model/timing.c. The media owns the timing
+ * talk to the NAND backend through this one interface, as do Open-Channel
+ * 1.2 and 2.0. The media owns the timing
  * policy and the busy-timeline op math; it never includes any controller header and
  * never branches on controller type -- a controller normalizes its own address into a
  * NandLoc and configures the media's policy/timing to reproduce its behavior.
@@ -32,8 +32,8 @@ typedef enum NandMediaOp {
 } NandMediaOp;
 
 /*
- * Which array-level resource gates the op, set at init. OCSSD keeps its own
- * timing model (timing-model/timing.c) and uses neither enum.
+ * Which array-level resource gates the op, set at init. OCSSD uses the LUN
+ * gate.
  */
 typedef enum NandArrayGate {
     NAND_GATE_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one gate per LUN */
@@ -41,7 +41,10 @@ typedef enum NandArrayGate {
     NAND_GATE_LUN_AND_PLANE,   /* no mode selects it */
 } NandArrayGate;
 
-/* bbssd and ZNS both pick STAGED when any bus phase is set, else OFF */
+/*
+ * bbssd and ZNS both pick STAGED when any bus phase is set, else OFF; OCSSD
+ * 1.2 picks STAGED with oc12_channel_timing on.
+ */
 typedef enum NandChannelMode {
     NAND_CH_OFF = 0,           /* no channel accounting */
     NAND_CH_NOOP,              /* no mode selects it */
@@ -51,8 +54,8 @@ typedef enum NandChannelMode {
 /*
  * Normalized physical location + per-op metadata. The controller's decode() fills
  * every field: flash_type (ZNS: per-block nand_type; else the device default),
- * page_type (bbssd: pg % cell_pages; ZNS/OC20: 0), pe_cycles (bbssd blk->erase_cnt
- * for ECC wear; else 0).
+ * page_type (bbssd: pg % cell_pages; OC12: from the page; ZNS/OC20: 0),
+ * pe_cycles (bbssd blk->erase_cnt for ECC wear; else 0).
  */
 typedef struct NandLoc {
     uint32_t ch;
@@ -129,7 +132,8 @@ typedef struct NandTimelineOps {
     uint64_t *(*page_reg_ready)(void *opaque, const NandLoc *loc);
     /*
      * Optional per-LUN lock around the array reservation; both NULL = no
-     * locking. No mode sets them: bbssd and ZNS each have one FTL thread.
+     * locking. Only OCSSD 1.2 sets them, to its channel lock, since several
+     * pollers time its commands; bbssd and ZNS each have one FTL thread.
      */
     void      (*lock_lun)(void *opaque, const NandLoc *loc);
     void      (*unlock_lun)(void *opaque, const NandLoc *loc);

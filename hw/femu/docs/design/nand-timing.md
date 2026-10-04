@@ -50,9 +50,10 @@ There are two media engines:
   includes a controller header. Each mode decodes its own address into a
   `NandLoc`, gives the layer a configuration, and lends it pointers to its
   busy-until fields.
-- The **OCSSD model**, `hw/femu/timing-model/timing.c`. Open-Channel 1.2 and
-  2.0 use it. It is older, keeps its state in the controller, and is
-  described in [OCSSD timing model](#ocssd-timing-model).
+- The **OCSSD model**. Open-Channel 1.2 and 2.0 also run on the media
+  layer; `hw/femu/timing-model/timing.c` keeps only their table times, the
+  geometry check and 0xEE. It is described in
+  [OCSSD timing model](#ocssd-timing-model).
 
 ```text
  guest NVMe command
@@ -93,7 +94,7 @@ There are two media engines:
 | KV | media layer, through the BBSSD wrapper | `ssd_init()` from `kvssd/kvssd-ftl.c` | poller |
 | ZNS | media layer | `zns_nand_media_init()` in `zns/zftl.c` | FTL thread |
 | `femu-cxl-ssd` | media layer, through the BBSSD wrapper | `femu_cxl_start()` in `cxlssd/cxlssd.c` | `femu-cxl-ftl` worker |
-| OCSSD 1.2, 2.0 | `timing-model/timing.c` | `init_nand_flash()` | poller |
+| OCSSD 1.2, 2.0 | media layer | `oc12_media_init()`, `oc20_media_init()` in `ocssd/` | poller |
 | NoSSD | none | | |
 
 ## Geometry
@@ -154,7 +155,7 @@ The media layer's types are in `hw/femu/nand/nand-media.h`.
 
 | Type | Fields that matter | Role |
 | --- | --- | --- |
-| `NandLoc` | `ch`, `lun`, `pl`, `blk`, `pg`, `flash_type`, `page_type`, `pe_cycles`, `age_sec` | One operation's position and the facts timing depends on. Filled by the mode's decoder (`bb_decode_loc()`, `zns_advance_status()`). |
+| `NandLoc` | `ch`, `lun`, `pl`, `blk`, `pg`, `flash_type`, `page_type`, `pe_cycles`, `age_sec`, `xfer_secs` | One operation's position and the facts timing depends on. Filled by the mode's decoder (`bb_decode_loc()`, `zns_advance_status()`, `oc12_media_op()`). |
 | `NandMediaTiming` | `rd_ns`, `wr_ns`, `er_ns` (flat); `rd_table_ns`, `wr_table_ns`, `er_table_ns` (by cell and page type); `pgtype_mult`; `cmd_addr_ns`, `page_xfer_ns`, `status_ns`; `tplebsy_ns` and three unused multi-plane and cache-read times; `ecc_*`; `tsusp_ns` | Every duration. |
 | `NandMediaPolicy` | `array_gate`, `channel_mode`, `pe_suspend`, `ecc_on_read`, `use_flat_timing`, `cache_read` | Which mechanisms are on. |
 | `NandTimelineOps` | `ch_avail`, `lun_avail`, `plane_avail`, `page_reg_ready`, `lock_lun`, `unlock_lun` | Accessors that return pointers into the mode's own busy-until fields. |
@@ -166,8 +167,8 @@ structures, not in the media layer:
 
 | Resource | BBSSD, CSD, KV | ZNS | OCSSD |
 | --- | --- | --- | --- |
-| Channel bus | `ssd_channel.next_ch_avail_time` | `zns_ch.next_ch_avail_time` | `FemuCtrl.chnl_next_avail_time[]` plus `chnl_reservations[]` |
-| LUN (die) | `nand_lun.next_lun_avail_time` | `zns_fc.next_fc_avail_time` (never consulted) | `FemuCtrl.chip_next_avail_time[]` |
+| Channel bus | `ssd_channel.next_ch_avail_time` | `zns_ch.next_ch_avail_time` | `Oc12Ctrl.ch_avail[]` (1.2 only) |
+| LUN (die) | `nand_lun.next_lun_avail_time` | `zns_fc.next_fc_avail_time` (never consulted) | `Oc12Ctrl.lun_avail[]`, `Oc20Ctrl.lun_avail[]` |
 | Plane | not kept | `zns_plane.next_plane_avail_time` | not kept |
 
 Each mode configures the layer differently:
@@ -313,7 +314,13 @@ Two kinds of phase share a channel:
 
 Windows that ended before the current operation's `stime` are pruned. A
 channel holds at most `NAND_BUS_RES_MAX` (32) windows; when it is full, the
-data-out is charged FIFO from `ch_avail` instead.
+data-out is charged FIFO from `ch_avail` instead. With
+`policy.bus_res_unbounded` (OCSSD 1.2) the list grows and nothing falls back.
+
+A data phase moves one page in `page_xfer_ns`. When the mode sets
+`secs_per_page` and the operation's `NandLoc.xfer_secs`, it moves only those
+sectors and takes `DIV_ROUND_UP(page_xfer_ns * xfer_secs, secs_per_page)`,
+as OCSSD 1.2 charges a partial page.
 
 ```text
  channel 0 bus, cmd/addr 1 us, data 10 us (times in us)
@@ -535,7 +542,9 @@ queues.
   result as a locked read-max-add-store. Any other configuration takes the
   general path, which calls `lock_lun`/`unlock_lun` when the mode provides
   them; BBSSD and ZNS do not.
-- The OCSSD model takes a spinlock per chip and per channel.
+- OCSSD 1.2 with channel timing takes the channel's spinlock
+  (`chnl_locks[]`) through `lock_lun`/`unlock_lun`; without it, and OCSSD 2.0,
+  use the compare-and-swap path.
 
 ## How garbage collection is charged
 
@@ -623,15 +632,15 @@ the start of the media operations. The link model is enabled when either link pr
 
 ## OCSSD timing model
 
-Open-Channel devices use `hw/femu/timing-model/timing.c`:
+Open-Channel devices run on the media layer, each with its own `NandMedia`
+and the LUN gate (`oc12_media_init()`, `oc20_media_init()`):
 
-- `advance_chip_timestamp()`: per chip (flat LUN id `ch * num_lun + lun`), if
-  the chip is busy, its busy-until time grows by the operation time;
-  otherwise it becomes `now + time`. That is the same as
-  `max(now, busy) + time`. Times come from the `flash_type` table.
-- `advance_channel_timestamp()` books a transfer FIFO on the channel;
-  `advance_read_channel_timestamp()` books a read's data-out as a future
-  window, the same idea as `bus_later()`.
+- Per chip (flat LUN id `ch * num_lun + lun`), an operation ends at
+  `max(now, busy) + time`. Times come from the `flash_type` table: 1.2 as a
+  table by page type, 2.0 as flat lower-page times.
+- Open-Channel 1.2 with channel timing uses the staged bus with no command,
+  address or status phase: `bus_now()` for a program's data-in and
+  `bus_later()` for a read's data-out.
 - A write moves its data over the channel, then programs the chip. A read
   occupies the chip, then moves its data out. Erase charges each chip in the
   address list.
@@ -648,7 +657,7 @@ Open-Channel devices use `hw/femu/timing-model/timing.c`:
   into `expire_time` in the poller (`oc12_advance_status()`,
   `oc20_advance_status()`).
 - Open-Channel 1.2 keeps its data-out windows in an unbounded list per
-  channel, where the media layer caps its list at 32.
+  channel (`policy.bus_res_unbounded`), where the other modes cap it at 32.
 
 ## Runtime switches
 
@@ -877,7 +886,7 @@ make -C hw/femu/tests check
 | [`hw/femu/bbssd/bb.c`](../../bbssd/bb.c) | 0xEF handler (`bb_flip()`, `bb_flip_apply()`) |
 | [`hw/femu/zns/zftl.c`](../../zns/zftl.c) | ZNS adapter, write cache flush, zone reset erase |
 | [`hw/femu/zns/zns.c`](../../zns/zns.c), [`zns.h`](../../zns/zns.h) | ZNS timing values and property overrides (`zns_init_params()`) |
-| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | OCSSD chip and channel timestamps |
+| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | OCSSD `flash_type` times, geometry check, 0xEE |
 | [`hw/femu/ocssd/oc12.c`](../../ocssd/oc12.c), [`oc20.c`](../../ocssd/oc20.c) | OCSSD per-command timing (`oc12_advance_status()`, `oc20_advance_status()`) |
 | [`hw/femu/femu.c`](../../femu.c) | FTL thread: `expire_time += latency`; timing properties |
 | [`hw/femu/nvme-io.c`](../../nvme-io.c) | `stime` stamp, host link and firmware CPU models, priority queue and completion |
