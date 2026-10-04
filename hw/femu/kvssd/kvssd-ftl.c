@@ -166,11 +166,7 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
     uint64_t lat = 0;
-    struct nand_cmd c = {
-        .type = GC_IO,
-        .cmd = NAND_ERASE,
-        .stime = req ? req->stime : 0,
-    };
+    int64_t stime = req ? req->stime : 0;
 
     for (;;) {
         struct line *line = pqueue_peek(lm->victim_line_pq);
@@ -186,25 +182,9 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
 
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                struct nand_lun *lunp;
-                struct ppa ppas[1 << PL_BITS];
-                uint64_t sub;
-
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pl = 0;
-                lunp = get_lun(ssd, &ppa);
-                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    ppa.g.pl = pl;
-                    ppa.g.pg = 0;
-                    mark_block_free(ssd, &ppa);
-                    ppas[pl] = ppa;
-                }
-                /* same block on every plane: one erase, not one per plane */
-                sub = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
-                                                    &c);
-                lat = sub > lat ? sub : lat;
-                lunp->gc_endtime = lunp->next_lun_avail_time;
+                /* charged whatever enable_gc_delay says, from the request */
+                lat = MAX(lat, ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
+                                                   true, stime));
             }
         }
         mark_line_free(ssd, &ppa);

@@ -473,6 +473,43 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
     line->vpc++;
 }
 
+/*
+ * Free block @blk on every plane of LUN @ch/@lun and, with @charge, time them
+ * as one multi-plane erase starting at @stime (0: now): a line holds the same
+ * block index on every plane, so the die erases them together. The LUN's GC end
+ * then follows its busy-until time. Returns the erase latency, 0 if untimed.
+ */
+uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
+                             bool charge, int64_t stime)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa ppas[1 << PL_BITS];
+    struct ppa ppa = { .ppa = 0 };
+    struct nand_lun *lunp;
+    uint64_t lat = 0;
+
+    ppa.g.ch = ch;
+    ppa.g.lun = lun;
+    ppa.g.blk = blk;
+    lunp = get_lun(ssd, &ppa);
+    for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+        ppa.g.pl = pl;
+        mark_block_free(ssd, &ppa);
+        ppas[pl] = ppa;
+    }
+    if (charge) {
+        struct nand_cmd gce = {
+            .type = GC_IO,
+            .cmd = NAND_ERASE,
+            .stime = stime,
+        };
+
+        lat = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
+    }
+    lunp->gc_endtime = lunp->next_lun_avail_time;
+    return lat;
+}
+
 void mark_block_free(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -860,7 +897,6 @@ static void requeue_line(struct ssd *ssd, struct line *line)
 static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun, pl;
 
@@ -891,32 +927,8 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
 
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
-            struct ppa ppas[1 << PL_BITS];
-
-            ppa.g.ch = ch;
-            ppa.g.lun = lun;
-            ppa.g.pl = 0;
-            lunp = get_lun(ssd, &ppa);
-
-            for (pl = 0; pl < spp->pls_per_lun; pl++) {
-                ppa.g.pl = pl;
-                mark_block_free(ssd, &ppa);
-                ppas[pl] = ppa;
-            }
-
-            /*
-             * A line holds the same block index on every plane, so the die can
-             * erase them in one operation instead of one after another.
-             */
-            if (spp->enable_gc_delay) {
-                struct nand_cmd gce;
-                gce.type = GC_IO;
-                gce.cmd = NAND_ERASE;
-                gce.stime = 0;
-                ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
-            }
-
-            lunp->gc_endtime = lunp->next_lun_avail_time;
+            ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk, spp->enable_gc_delay,
+                                0);
         }
     }
 

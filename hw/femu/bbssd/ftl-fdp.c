@@ -960,7 +960,6 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     struct ssdparams *spp = &ssd->sp;
     FemuReclaimUnit *victim_ru;
     //FemuReclaimUnit *new_ru;
-    struct nand_lun *lunp;
     struct ppa ppa;
     int vpc_cnt = 0;
     int blk_cnt = 0;
@@ -1044,30 +1043,9 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         ppa.g.blk = victim_line->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                struct ppa ppas[1 << PL_BITS];
-
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pl = 0;
-                lunp = get_lun(ssd, &ppa);
-
-                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    ppa.g.pl = pl;
-                    blk_cnt++;
-                    mark_block_free(ssd, &ppa);
-                    ppas[pl] = ppa;
-                }
-
-                /* the die erases the line's planes in one operation */
-                if (spp->enable_gc_delay) {
-                    struct nand_cmd gce;
-                    gce.type = GC_IO;
-                    gce.cmd = NAND_ERASE;
-                    gce.stime = 0;
-                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
-                                                  &gce);
-                }
-                lunp->gc_endtime = lunp->next_lun_avail_time;
+                ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
+                                    spp->enable_gc_delay, 0);
+                blk_cnt += spp->pls_per_lun;
             }
         }
     }
@@ -1852,10 +1830,8 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 {
     struct ssd *ssd = n->ssd;
     struct ssdparams *spp = &ssd->sp;
-    struct ppa ppa;
     NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
     FemuReclaimUnit *v_ru;
-    struct nand_lun *lunp;
     NvmeRuHandle *ruh;
     int rg_idx;
 
@@ -1863,29 +1839,8 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int blk = 0; blk < spp->blks_per_pl; blk++) {
-                struct ppa ppas[1 << PL_BITS];
-
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pl = 0;
-                ppa.g.blk = blk;
-                lunp = get_lun(ssd, &ppa);
-
-                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    ppa.g.pl = pl;
-                    mark_block_free(ssd, &ppa);
-                    ppas[pl] = ppa;
-                }
-
-                if (spp->enable_gc_delay) {
-                    struct nand_cmd gce;
-                    gce.type = GC_IO;
-                    gce.cmd = NAND_ERASE;
-                    gce.stime = 0;
-                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
-                                                  &gce);
-                }
-                lunp->gc_endtime = lunp->next_lun_avail_time;
+                ssd_erase_lun_block(ssd, ch, lun, blk, spp->enable_gc_delay,
+                                    0);
             }
         }
     }
