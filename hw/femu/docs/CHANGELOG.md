@@ -74,6 +74,7 @@ listed one by one.
 - SMART reports host data units and command counts, available spare (with an optional `nand_bad_blocks` model), percentage used (from the cell type or `pe_cycles_rated`) and media errors (f07d117f1, a20d9ac94, a8a28d451, df8a3492a, e25ddf7be).
 - The Endurance Group log is filled in (074b63f4f).
 - Media counters (write amplification, host and relocated pages, write buffer hits, read reclaims, retention refreshes) are reported in vendor log page C0h (e57448e41, 4cb1f9ba7, e9746f6bf, e7f182b87).
+- A QMP command, `query-femu`, reports the geometry, write counters, line counts and per-line state of bbssd namespaces to the host. The FTL thread copies the state between two requests ([reference](reference/query-femu.md)).
 - Opt-in power loss model (`power_loss`) that drops data still held in the volatile write buffer and records the event in SMART and the event log (46602b0e7, 303c77aef, 7679c443d).
 
 #### ZNS

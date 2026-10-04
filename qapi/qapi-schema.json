@@ -74,4 +74,5 @@
 { 'include': 'vfio.json' }
 { 'include': 'cryptodev.json' }
 { 'include': 'cxl.json' }
+{ 'include': 'femu.json' }
 { 'include': 'uefi.json' }

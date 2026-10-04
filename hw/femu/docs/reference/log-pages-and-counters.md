@@ -38,6 +38,10 @@ They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
 the thermal transition counts.
 
+The host can read the same page counters per namespace without the guest,
+together with the line states, through the QMP command
+[query-femu](query-femu.md).
+
 The same counters can be captured through the standard Telemetry Host-Initiated
 log (07h): `nvme telemetry-log /dev/nvme0 --output-file=telemetry.bin` takes a
 snapshot and saves it. Data Area 1 is one 512-byte block laid out as above, and

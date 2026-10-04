@@ -2926,6 +2926,369 @@ static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * query-femu over QMP. @args is the arguments object without its braces;
+ * the reply is returned whole, so a caller can check "return" or "error".
+ */
+static QDict *femu_query(QTestState *qts, const char *args)
+{
+    g_autofree char *json = g_strdup_printf("{%s}", args);
+    QObject *obj = qobject_from_json(json, &error_abort);
+
+    return qtest_qmp(qts, "{'execute':'query-femu','arguments':%p}", obj);
+}
+
+/* Expect an error whose description contains @want. */
+static void femu_query_fails(QTestState *qts, const char *args,
+                             const char *want)
+{
+    QDict *rsp = femu_query(qts, args);
+    QDict *err = qdict_get_qdict(rsp, "error");
+
+    g_assert_nonnull(err);
+    g_test_message("query-femu {%s}: %s", args, qdict_get_str(err, "desc"));
+    g_assert_nonnull(strstr(qdict_get_str(err, "desc"), want));
+    qobject_unref(rsp);
+}
+
+/* The only namespace of a successful reply; the reply is handed back too. */
+static QDict *femu_query_ns(QTestState *qts, const char *args, QDict **rsp)
+{
+    QDict *ret;
+    QList *nss;
+
+    *rsp = femu_query(qts, args);
+    ret = qdict_get_qdict(*rsp, "return");
+    if (!ret) {
+        g_test_message("query-femu {%s}: %s", args,
+                       qdict_get_str(qdict_get_qdict(*rsp, "error"), "desc"));
+    }
+    g_assert_nonnull(ret);
+    nss = qdict_get_qlist(ret, "namespaces");
+    g_assert_cmpuint(qlist_size(nss), ==, 1);
+    return qobject_to(QDict, qlist_peek(nss));
+}
+
+/* The summary must report what log page C0h reports for one namespace. */
+static void femu_query_matches_c0h(FemuCtrlState *c, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t log[512];
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+    uint64_t host;
+    uint32_t waf;
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(log), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    host = ldq_le_p(log + 8);
+    waf = ldl_le_p(log);
+    g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, host);
+    g_assert_cmpuint(qdict_get_int(ctr, "gc-write-pages"), ==,
+                     ldq_le_p(log + 16));
+    g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     ldq_le_p(log + 24));
+    if (host) {
+        double got = qdict_get_double(ctr, "waf");
+
+        g_assert_cmpuint((uint32_t)(got * 1000 + 0.000001), ==, waf);
+    } else {
+        g_assert_false(qdict_haskey(ctr, "waf"));
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * Every line in one call: the valid pages summed over lines must be the
+ * mappings the FTL holds, the states must add up to the line counts, and
+ * the block erase total must lie within what the per-line wear allows.
+ */
+static void femu_query_check_lines(QTestState *qts, const char *path,
+                                   uint64_t want_valid)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'path':'%s','kind':'lines','limit':4096", path);
+    uint32_t free_lines = 0;
+    uint32_t victim = 0;
+    uint32_t full = 0;
+    uint64_t vpc = 0;
+    uint64_t erase_lo = 0;
+    uint64_t erase_hi = 0;
+    uint64_t erases;
+    uint64_t blocks;
+    uint64_t mapped, lost, orphans;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QDict *geo = qdict_get_qdict(ns, "geometry");
+    QDict *cnt = qdict_get_qdict(ns, "line-counts");
+    QList *lines = qdict_get_qlist(ns, "lines");
+    uint32_t id = 0;
+
+    g_assert_cmpuint(qlist_size(lines), ==, qdict_get_int(cnt, "total"));
+    g_assert_false(qdict_haskey(ns, "next-offset"));
+    blocks = qdict_get_int(geo, "channels") *
+             qdict_get_int(geo, "luns-per-channel") *
+             qdict_get_int(geo, "planes-per-lun");
+    QLIST_FOREACH_ENTRY(lines, e) {
+        QDict *l = qobject_to(QDict, qlist_entry_obj(e));
+        const char *st = qdict_get_str(l, "state");
+
+        g_assert_cmpuint(qdict_get_int(l, "id"), ==, id++);
+        vpc += qdict_get_int(l, "vpc");
+        g_assert_cmpuint(qdict_get_int(l, "vpc") + qdict_get_int(l, "ipc"),
+                         <=, qdict_get_int(geo, "pages-per-line"));
+        g_assert_cmpuint(qdict_get_int(l, "erase-min"), <=,
+                         qdict_get_int(l, "erase-max"));
+        erase_lo += qdict_get_int(l, "erase-min") * blocks;
+        erase_hi += qdict_get_int(l, "erase-max") * blocks;
+        free_lines += !strcmp(st, "free");
+        victim += !strcmp(st, "victim");
+        full += !strcmp(st, "full");
+        g_assert_cmpstr(st, !=, "unlisted");
+        if (!strcmp(st, "free")) {
+            g_assert_cmpuint(qdict_get_int(l, "vpc"), ==, 0);
+        }
+    }
+    g_assert_cmpuint(free_lines, ==, qdict_get_int(cnt, "free"));
+    g_assert_cmpuint(victim, ==, qdict_get_int(cnt, "victim"));
+    g_assert_cmpuint(full, ==, qdict_get_int(cnt, "full"));
+    erases = qdict_get_int(qdict_get_qdict(ns, "counters"), "block-erases");
+    g_assert_cmpuint(erase_lo, <=, erases);
+    g_assert_cmpuint(erases, <=, erase_hi);
+    qobject_unref(rsp);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{'path':%s,"
+                    "'property':'x-ftl-check'}}", path);
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_test_message("lines: %" PRIu64 " valid, %" PRIu64 " mapped, %" PRIu64
+                   " erases", vpc, mapped, erases);
+    g_assert_cmpuint(vpc, ==, mapped);
+    g_assert_cmpuint(vpc, ==, want_valid);
+}
+
+/* @lines records from @offset, and where the listing continues (0 = end) */
+static void femu_query_window(QTestState *qts, uint32_t offset, uint32_t limit,
+                              uint32_t want, uint32_t next)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'lines','offset':%u,'limit':%u", offset, limit);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QList *lines = qdict_get_qlist(ns, "lines");
+
+    g_assert_cmpuint(qlist_size(lines), ==, want);
+    g_assert_cmpuint(qdict_get_int(ns, "offset"), ==, offset);
+    if (want) {
+        QDict *first = qobject_to(QDict, qlist_peek(lines));
+
+        g_assert_cmpuint(qdict_get_int(first, "id"), ==, offset);
+    }
+    if (next) {
+        g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, next);
+    } else {
+        g_assert_false(qdict_haskey(ns, "next-offset"));
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * query-femu on a bbssd namespace of 19 lines of 16 pages: its counters
+ * agree with log page C0h before and after writes and after collection, the
+ * valid pages of its lines are the FTL's mappings, windows and selectors
+ * are checked, and queries made while writes are in flight all return.
+ */
+static void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *path = "/machine/peripheral/qf";
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint32_t seed = 1;
+    int64_t slowest = 0;
+    QDict *rsp;
+    QDict *ns;
+    QDict *geo;
+    int i;
+
+    femu_query_fails(qts, "", "not enabled");
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/qf'", &rsp);
+    g_assert_cmpstr(qdict_get_str(qdict_get_qdict(rsp, "return"), "path"), ==,
+                    path);
+    g_assert_cmpstr(qdict_get_str(qdict_get_qdict(rsp, "return"), "mode"), ==,
+                    "bbssd");
+    g_assert_cmpuint(qdict_get_int(ns, "nsid"), ==, 1);
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "bbssd");
+    g_assert_false(qdict_haskey(ns, "lines"));
+    geo = qdict_get_qdict(ns, "geometry");
+    g_assert_cmpuint(qdict_get_int(geo, "channels"), ==, 2);
+    g_assert_cmpuint(qdict_get_int(geo, "luns-per-channel"), ==, 2);
+    g_assert_cmpuint(qdict_get_int(geo, "planes-per-lun"), ==, 1);
+    g_assert_cmpuint(qdict_get_int(geo, "blocks-per-plane"), ==, 19);
+    g_assert_cmpuint(qdict_get_int(geo, "pages-per-block"), ==, 4);
+    g_assert_cmpuint(qdict_get_int(geo, "page-size"), ==, 4096);
+    g_assert_cmpuint(qdict_get_int(geo, "pages-per-line"), ==, 16);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "line-counts"),
+                                   "total"), ==, 19);
+    qobject_unref(rsp);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, 0);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "gc-write-pages"), >, 0);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "block-erases"), >, 0);
+    qobject_unref(rsp);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    /* windows */
+    femu_query_window(qts, 0, 5, 5, 5);
+    femu_query_window(qts, 5, 5, 5, 10);
+    femu_query_window(qts, 15, 10, 4, 0);
+    femu_query_window(qts, 18, 1, 1, 0);
+    femu_query_window(qts, 0, 4096, 19, 0);
+    femu_query_fails(qts, "'kind':'lines','offset':19", "past its last line");
+    femu_query_fails(qts, "'kind':'lines','limit':0", "limit must be");
+    femu_query_fails(qts, "'kind':'lines','limit':4097", "limit must be");
+    femu_query_fails(qts, "'offset':1", "only to kind");
+    femu_query_fails(qts, "'limit':1", "only to kind");
+
+    /* selectors */
+    femu_query_fails(qts, "'nsid':2", "not attached");
+    femu_query_fails(qts, "'nsid':0", "not attached");
+    femu_query_fails(qts, "'kind':'zones'", "zones");
+    femu_query_fails(qts, "'path':'/machine'", "not a femu device");
+    femu_query_fails(qts, "'path':'/machine/peripheral/none'",
+                     "not a femu device");
+    ns = femu_query_ns(qts, "'nsid':1,'kind':'summary'", &rsp);
+    g_assert_cmpuint(qdict_get_int(ns, "nsid"), ==, 1);
+    qobject_unref(rsp);
+
+    /*
+     * Queries while writes are in flight: the queue is filled, every query
+     * must return within a second, and every write must then complete.
+     */
+    for (int round = 0; round < 4; round++) {
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            NvmeRwCmd rw;
+
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64((uint64_t)((round * 31 + i * 7) % pages) *
+                                  (4096 / c.lba_size));
+            rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        for (i = 0; i < 8; i++) {
+            int64_t start = g_get_monotonic_time();
+
+            ns = femu_query_ns(qts, i % 2 ? "'kind':'lines'" : "", &rsp);
+            qobject_unref(rsp);
+            slowest = MAX(slowest, g_get_monotonic_time() - start);
+            g_assert_cmpint(slowest, <, G_USEC_PER_SEC);
+        }
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    g_test_message("slowest query with writes in flight: %" PRId64 " us",
+                   slowest);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    femu_query_fails(qts, "", "not enabled");
+}
+
+/*
+ * The device is unplugged after the FTL thread has made the copy and before
+ * the command replies (x-query-delay-ms holds it there). The reply must
+ * still come from the copy, and the command must not touch the device once
+ * it has dropped its reference; a sanitizer build reports that access.
+ */
+static void femu_test_query_unplug(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/qu',"
+                             "'property':'x-query-delay-ms','value':500}}");
+    qtest_qmp_device_del_send(qts, "qu");
+    qtest_qmp_send(qts, "{'execute':'query-femu'}");
+    /* the copy takes microseconds; the command now sleeps for 500 ms */
+    g_usleep(100 * 1000);
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    rsp = qtest_qmp_receive(qts);
+    ret = qdict_get_qdict(rsp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpstr(qdict_get_str(ret, "path"), ==,
+                    "/machine/peripheral/qu");
+    g_assert_cmpstr(qdict_get_str(ret, "mode"), ==, "bbssd");
+    qobject_unref(rsp);
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+    femu_query_fails(qts, "", "no femu device");
+    qos_invalidate_command_line();
+}
+
+/* A namespace query-femu does not cover yet fails with a clear error. */
+static void femu_test_query_unsupported(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_query_fails(femu->dev.bus->qts, "", data);
+    femu_query_fails(femu->dev.bus->qts, "'nsid':1,'kind':'lines'", data);
+    femu_disable(&c);
+}
+
+/*
  * Random writes spread over every placement handle of a namespace the device
  * accepted. Each handle keeps a unit open and each persistently isolated
  * handle another to collect into, so a namespace that fits only once those
@@ -21888,6 +22251,45 @@ static void femu_register_nodes(void)
         .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("query-bbssd", "femu", femu_test_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qf,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("query-unsupported-zns", "femu", femu_test_query_unsupported,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"does not support znssd namespaces",
+        .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
+    qos_add_test("query-unsupported-nossd", "femu",
+                 femu_test_query_unsupported, &(QOSGraphTestOptions) {
+        .arg = (void *)"does not support nossd namespaces",
+    });
+    qos_add_test("query-unsupported-ocssd", "femu",
+                 femu_test_query_unsupported, &(QOSGraphTestOptions) {
+        .arg = (void *)"does not support ocssd namespaces",
+        .edge.extra_device_opts = "femu_mode=0,lver=2"
+    });
+    qos_add_test("query-unsupported-kvssd", "femu",
+                 femu_test_query_unsupported, &(QOSGraphTestOptions) {
+        .arg = (void *)"does not support kvssd namespaces",
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    });
+    qos_add_test("query-unplug", "femu", femu_test_query_unplug,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qu,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("query-unsupported-fdp", "femu", femu_test_query_unsupported,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"does not support flexible data placement",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
     });

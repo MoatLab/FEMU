@@ -1,0 +1,272 @@
+# -*- Mode: Python -*-
+# vim: filetype=python
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+##
+# ************
+# FEMU devices
+# ************
+##
+
+##
+# @FemuMode:
+#
+# Mode of a FEMU controller or namespace, as femu_mode and
+# namespace_modes name it.
+#
+# @ocssd: OpenChannel SSD
+#
+# @bbssd: blackbox SSD with a device-side FTL
+#
+# @nossd: no FTL, memory timing only
+#
+# @znssd: zoned namespace SSD
+#
+# @csd: computational storage drive
+#
+# @kvssd: key-value SSD
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuMode',
+  'data': [ 'ocssd', 'bbssd', 'nossd', 'znssd', 'csd', 'kvssd' ] }
+
+##
+# @FemuQueryKind:
+#
+# What @query-femu reports for each namespace.
+#
+# @summary: identity, geometry, write counters and line counts
+#
+# @lines: the summary and one record per line, for a window of lines
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuQueryKind',
+  'data': [ 'summary', 'lines' ] }
+
+##
+# @FemuLineState:
+#
+# Where the flash translation layer holds a line.
+#
+# @free: on the free list, erased and ready to program
+#
+# @open: a write pointer is programming it
+#
+# @full: closed with every page valid
+#
+# @victim: closed with invalid pages, a garbage collection candidate
+#
+# @reclaiming: garbage collection is moving its valid pages
+#
+# @unlisted: on no list the FTL keeps
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuLineState',
+  'data': [ 'free', 'open', 'full', 'victim', 'reclaiming', 'unlisted' ] }
+
+##
+# @FemuGeometry:
+#
+# NAND geometry of a namespace.  A line takes the same block index in
+# every plane of every LUN of every channel.
+#
+# @channels: channels
+#
+# @luns-per-channel: LUNs per channel
+#
+# @planes-per-lun: planes per LUN
+#
+# @blocks-per-plane: blocks per plane, which is also the number of
+#     lines
+#
+# @pages-per-block: pages per block
+#
+# @page-size: bytes per page
+#
+# @pages-per-line: pages per line
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuGeometry',
+  'data': { 'channels': 'uint32', 'luns-per-channel': 'uint32',
+            'planes-per-lun': 'uint32', 'blocks-per-plane': 'uint32',
+            'pages-per-block': 'uint32', 'page-size': 'uint32',
+            'pages-per-line': 'uint32' } }
+
+##
+# @FemuWriteCounters:
+#
+# Write and erase counters of a namespace.  The page counters are the
+# ones vendor log page C0h reports, there summed over the namespaces
+# of the controller.
+#
+# @host-write-pages: pages the host asked to program
+#
+# @nand-write-pages: pages programmed on behalf of the host
+#
+# @gc-write-pages: pages relocated by garbage collection
+#
+# @block-erases: block erases, summed over every block
+#
+# @waf: write amplification factor, (@nand-write-pages +
+#     @gc-write-pages) / @host-write-pages.  Absent until the host has
+#     written a page.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuWriteCounters',
+  'data': { 'host-write-pages': 'uint64', 'nand-write-pages': 'uint64',
+            'gc-write-pages': 'uint64', 'block-erases': 'uint64',
+            '*waf': 'number' } }
+
+##
+# @FemuLineCounts:
+#
+# How many lines are in each state.
+#
+# @free: lines on the free list
+#
+# @victim: lines waiting for garbage collection
+#
+# @full: closed lines with every page valid
+#
+# @total: every line of the namespace
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuLineCounts',
+  'data': { 'free': 'uint32', 'victim': 'uint32', 'full': 'uint32',
+            'total': 'uint32' } }
+
+##
+# @FemuLineInfo:
+#
+# One line of a namespace.
+#
+# @id: line index, from 0
+#
+# @state: where the FTL holds the line
+#
+# @vpc: valid pages in the line
+#
+# @ipc: invalid pages in the line
+#
+# @erase-min: fewest erases of a block in the line
+#
+# @erase-max: most erases of a block in the line
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuLineInfo',
+  'data': { 'id': 'uint32', 'state': 'FemuLineState', 'vpc': 'uint32',
+            'ipc': 'uint32', 'erase-min': 'uint32', 'erase-max': 'uint32' } }
+
+##
+# @FemuNamespaceInfo:
+#
+# State of one namespace, copied by the FTL between two requests, so
+# the fields of one namespace agree with each other.
+#
+# @nsid: namespace identifier
+#
+# @mode: namespace mode
+#
+# @geometry: NAND geometry
+#
+# @counters: write and erase counters
+#
+# @line-counts: lines in each state
+#
+# @lines: with kind @lines, the lines from @offset, at most limit of
+#     them
+#
+# @offset: with kind @lines, the index of the first line in @lines
+#
+# @next-offset: with kind @lines, the offset that continues the
+#     listing.  Absent after the last line.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuNamespaceInfo',
+  'data': { 'nsid': 'uint32', 'mode': 'FemuMode',
+            'geometry': 'FemuGeometry',
+            'counters': 'FemuWriteCounters',
+            'line-counts': 'FemuLineCounts',
+            '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
+            '*next-offset': 'uint32' } }
+
+##
+# @FemuInfo:
+#
+# State of a FEMU NVMe controller.
+#
+# @path: canonical QOM path of the device
+#
+# @mode: controller mode
+#
+# @namespaces: the selected namespaces, in nsid order
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuInfo',
+  'data': { 'path': 'str', 'mode': 'FemuMode',
+            'namespaces': [ 'FemuNamespaceInfo' ] } }
+
+##
+# @query-femu:
+#
+# Report the flash translation layer state of a FEMU NVMe controller.
+# Only blackbox (bbssd) namespaces are supported.  A selected
+# namespace in another mode, with flexible data placement, or backed
+# by a CXL SSD medium makes the command fail.  The controller must be
+# enabled.  Two calls are two separate copies, so the lines of one
+# call and the next may not agree.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# @nsid: namespace to report.  Default every attached namespace.
+#     With kind lines, required when the controller has more than one
+#     attached namespace.
+#
+# @kind: what to report (default summary)
+#
+# @offset: the first line to report (default 0).  Only with kind
+#     lines; an error with kind summary.
+#
+# @limit: the most lines to report, 1 to 4096 (default 256).  Only
+#     with kind lines; an error with kind summary.
+#
+# Returns: the state of the controller and its selected namespaces
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu",
+#          "arguments": { "path": "/machine/peripheral/femu0" } }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "mode": "bbssd",
+#            "namespaces": [ {
+#              "nsid": 1, "mode": "bbssd",
+#              "geometry": { "channels": 8, "luns-per-channel": 8,
+#                            "planes-per-lun": 1,
+#                            "blocks-per-plane": 256,
+#                            "pages-per-block": 256, "page-size": 4096,
+#                            "pages-per-line": 16384 },
+#              "counters": { "host-write-pages": 1024,
+#                            "nand-write-pages": 1024,
+#                            "gc-write-pages": 0, "block-erases": 0,
+#                            "waf": 1.0 },
+#              "line-counts": { "free": 255, "victim": 0, "full": 0,
+#                               "total": 256 } } ] } }
+##
+{ 'command': 'query-femu',
+  'data': { '*path': 'str', '*nsid': 'uint32', '*kind': 'FemuQueryKind',
+            '*offset': 'uint32', '*limit': 'uint32' },
+  'returns': 'FemuInfo',
+  'coroutine': true }

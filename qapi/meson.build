@@ -61,6 +61,7 @@ if have_system
     'acpi',
     'audio',
     'cryptodev',
+    'femu',
     'qdev',
     'pci',
     'rocker',

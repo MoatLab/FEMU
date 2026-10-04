@@ -60,6 +60,9 @@ The guest kernel each mode needs is in
 - [Log pages and counters](reference/log-pages-and-counters.md): vendor log C0h
   (WAF and media counters), telemetry, supported log pages, asynchronous
   events, keeping the Persistent Event log in a file.
+- [QMP query-femu](reference/query-femu.md): the FTL state of a bbssd
+  namespace (geometry, write counters, line states) from the host, with no
+  guest tools.
 - [Changelog](CHANGELOG.md): what changed since femu-v9.0.1, including
   properties that are now refused and settings whose effect changed.
 - [Scripts and tools](reference/scripts.md): every shipped script and tool,

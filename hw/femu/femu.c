@@ -10,6 +10,7 @@
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
 #include "./femu-props.h"
+#include "./femu-query.h"
 
 /*
  * Base 2.1: FEMU already reports fields 2.0 reserves (ONCS bit 9, Copy format
@@ -1905,6 +1906,20 @@ static void *femu_ftl_thread(void *arg)
             continue;
         }
 
+        /* A state query, served between two requests like one of them. */
+        if (unlikely(qatomic_read(&n->query_req))) {
+            n->ftl_in_sweep = true;
+            smp_mb();   /* publish the flag before re-reading the pause state */
+            if (n->dataplane_started) {
+                FemuQueryReq *q = qatomic_xchg(&n->query_req, NULL);
+
+                if (q) {
+                    femu_query_service(n, q);
+                }
+            }
+            n->ftl_in_sweep = false;
+        }
+
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
@@ -2600,6 +2615,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
  */
 static void femu_stop_ftl_thread(FemuCtrl *n)
 {
+    FemuQueryReq *q;
+
     if (!n->ftl_thread_running) {
         return;
     }
@@ -2608,6 +2625,11 @@ static void femu_stop_ftl_thread(FemuCtrl *n)
     smp_mb();   /* publish the flag before waiting on the thread to see it */
     qemu_thread_join(&n->ftl_thread);
     n->ftl_thread_running = false;
+    /* nothing serves a query posted after the thread's last pass */
+    q = qatomic_xchg(&n->query_req, NULL);
+    if (q) {
+        femu_query_cancel(q);
+    }
 }
 
 /*
@@ -3234,6 +3256,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_uint32_ptr(obj, "x-query-delay-ms",
+                                       &FEMU(obj)->test_query_delay_ms,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
     }

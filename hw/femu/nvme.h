@@ -2358,6 +2358,13 @@ typedef struct FemuCtrl {
      */
     volatile bool   ftl_in_sweep;
     /*
+     * A query-femu request waiting for the FTL thread, which takes it between
+     * two requests. Posted and taken back with atomic exchanges.
+     */
+    struct FemuQueryReq *query_req;
+    /* qtest only: ms query-femu waits after the copy before it replies */
+    uint32_t        test_query_delay_ms;
+    /*
      * Asks the poller threads to leave their loop. They run until the device
      * goes away, so without this the join in teardown never returns.
      */

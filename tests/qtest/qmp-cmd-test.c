@@ -44,6 +44,7 @@ static int query_error_class(const char *cmd)
         /* Likewise, and require special QEMU command-line arguments: */
         { "query-acpi-ospm-status", ERROR_CLASS_GENERIC_ERROR },
         { "query-balloon", ERROR_CLASS_DEVICE_NOT_ACTIVE },
+        { "query-femu", ERROR_CLASS_GENERIC_ERROR },
         { "query-hotpluggable-cpus", ERROR_CLASS_GENERIC_ERROR },
         { "query-hv-balloon-status-report", ERROR_CLASS_GENERIC_ERROR },
         { "query-vm-generation-id", ERROR_CLASS_GENERIC_ERROR },
