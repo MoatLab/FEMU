@@ -391,7 +391,8 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         s->cache_entries = g_hash_table_size(s->cache.entries);
     }
     remaining = op.ns - (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
-    if (remaining > 0) {
+    /* Fast load leaves the media time on the NAND timelines, not the vCPU. */
+    if (remaining > 0 && !s->fast_load) {
         femu_cxl_delay(remaining);
     }
     /* Unplugged during the wait: the backend may already serve a new device. */
@@ -434,6 +435,58 @@ out:
     }
     qemu_cond_broadcast(&s->idle);
     return result;
+}
+
+/*
+ * When the modelled NAND goes idle: the latest LUN and channel busy-until
+ * time and the end of every booked data-out window. Caller holds @lock.
+ */
+static uint64_t cxl_timing_horizon(struct ssd *ssd)
+{
+    uint64_t end = 0;
+    int i;
+    int j;
+
+    for (i = 0; i < ssd->sp.nchs; i++) {
+        struct ssd_channel *ch = &ssd->ch[i];
+
+        end = MAX(end, ch->next_ch_avail_time);
+        for (j = 0; j < ch->nluns; j++) {
+            end = MAX(end, ch->lun[j].next_lun_avail_time);
+        }
+        if (ssd->media.bus_res) {
+            NandBusResList *l = &ssd->media.bus_res[i];
+
+            for (j = 0; j < l->n; j++) {
+                end = MAX(end, l->r[j].end);
+            }
+        }
+    }
+    return end;
+}
+
+/*
+ * Wait out the NAND work that accesses left queued while they skipped their
+ * completion wait, and return how long that took. The caller holds the gate
+ * alone, so no access adds to it; a linked controller still can.
+ */
+uint64_t femu_cxl_drain(FemuCxlMedia *s)
+{
+    uint64_t end;
+    int64_t now;
+
+    if (!s->ftl) {
+        return 0;
+    }
+    qemu_mutex_lock(&s->lock);
+    end = cxl_timing_horizon(s->ns.ssd);
+    qemu_mutex_unlock(&s->lock);
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (end <= now) {
+        return 0;
+    }
+    femu_cxl_delay(end - now);
+    return qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - now;
 }
 
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)

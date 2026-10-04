@@ -123,6 +123,14 @@ static const FemuPropDesc cxl_runtime_descs[] = {
     { "stats-reset",
       "Write-only: true copies the counters to the last-* properties, then "
       "clears the event counters" },
+    { "fast-load",
+      "Accesses skip only their wait for the modelled media time; the FTL, "
+      "cache and counters still run. For warmup and loading, not for "
+      "measurement. Setting false waits for the queued NAND work first; "
+      "default off, changeable with qom-set" },
+    { "fast-load-drain-ns",
+      "Read-only: ns the last fast-load switch to false waited for queued "
+      "NAND work" },
 
     /* cache counters */
     { "cache-entries",

@@ -275,6 +275,39 @@ measurement from a cold cache:
 
 The path ends with the `id=` of the device; `run-cxlssd.sh` uses `cxlssd`.
 
+### Fast load
+
+`fast-load=true` speeds up warmup and data loading phases that are not
+measured. While it is on, an access does not wait for its modelled media
+time. Everything else still runs: the FTL request, cache inserts and
+evictions, prefetch, direct mapping and every counter. The NAND timelines
+still advance, so the skipped time builds up as a backlog on the LUNs.
+
+`fast-load=false` is a barrier. It waits for the accesses in progress, then
+waits until the modelled NAND is idle, and only then returns. It does not
+flush the cache. `fast-load-drain-ns` gives the time that this wait took.
+After it returns, accesses pay the full media time again.
+
+```text
+{"execute": "qom-set", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load", "value": true}}
+{"execute": "qom-set", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load", "value": false}}
+{"execute": "qom-get", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load-drain-ns"}}
+```
+
+The contract is narrow:
+
+- Only the wait at the end of an access is skipped. Flush, `cache-ways`
+  changes, caching API commands and a linked NVMe controller keep their
+  timing.
+- A serial access sequence gives the same cache and media counters with
+  `fast-load` on or off. `media-time-ns` can differ, because accesses that
+  arrive sooner queue behind each other on a LUN.
+- With concurrent accesses, the final state is not guaranteed to be the
+  same. Shorter page holds change which evictions succeed, and a guest that
+  runs faster can issue its accesses in a different order.
+- Use it for warmup and loading only. Compare measured phases against a
+  normal run if the starting state matters.
+
 ### Prefetch
 
 On a miss, after inserting the missed page, the device inserts up to

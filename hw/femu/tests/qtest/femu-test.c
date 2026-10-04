@@ -15740,6 +15740,245 @@ static void femu_test_cxl_flush(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/*
+ * One LUN, and a first-touch read programs the page, so every miss to a new
+ * page costs FEMU_FAST_NS on the same timeline.
+ */
+#define FEMU_FAST_NS    20000000ULL
+#define FEMU_FAST_PAGES 8
+#define FEMU_FAST_DEVICE \
+    "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem," \
+    "channels=1,luns-per-channel=1,read-ns=20000000,program-ns=20000000," \
+    "cylon-first-touch-program=on"
+
+/*
+ * The first access to the window can take tens of ms on its own; pay it
+ * here, at full latency, so it does not count against a timed run.
+ */
+static void femu_fast_start(QTestState *qts)
+{
+    femu_cxl_decode(qts);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 1000 * 4096), ==, 0);
+}
+
+/* Read @n new pages from @first, one at a time; return the elapsed us. */
+static int64_t femu_fast_misses(QTestState *qts, uint64_t first, unsigned n)
+{
+    int64_t start = g_get_monotonic_time();
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW +
+                                    (first + i) * 4096), ==, 0);
+    }
+    return g_get_monotonic_time() - start;
+}
+
+/* Turn fast load off; return how long the qom-set took, in ns. */
+static int64_t femu_fast_off(QTestState *qts)
+{
+    int64_t start = g_get_monotonic_time();
+
+    femu_cxl_set(qts, "fast-load", false);
+    return (g_get_monotonic_time() - start) * 1000;
+}
+
+/*
+ * A miss to a new page right after the switch pays exactly one program: the
+ * barrier left no backlog on the LUN to queue behind.
+ */
+static void femu_fast_restored(QTestState *qts, uint64_t page)
+{
+    uint64_t media = femu_cxl_stat(qts, "media-time-ns");
+    int64_t took = femu_fast_misses(qts, page, 1);
+
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns") - media, ==,
+                     FEMU_FAST_NS);
+    g_assert_cmpint(took * 1000, >=, FEMU_FAST_NS);
+}
+
+/* Misses skip their wait while fast load is on, and pay it once it is off. */
+static void femu_test_cxl_fast_load(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE FEMU_FAST_DEVICE);
+    int64_t took;
+
+    femu_fast_start(qts);
+    g_assert_false(qtest_qom_get_bool(qts, "/machine/peripheral/ssd",
+                                      "fast-load"));
+    femu_cxl_set(qts, "fast-load", true);
+    g_assert_true(qtest_qom_get_bool(qts, "/machine/peripheral/ssd",
+                                     "fast-load"));
+    took = femu_fast_misses(qts, 0, FEMU_FAST_PAGES);
+    g_assert_cmpint(took * 1000, <, FEMU_FAST_PAGES * FEMU_FAST_NS / 2);
+    /* The FTL still ran: every miss programmed its page. */
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==,
+                     FEMU_FAST_PAGES + 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==,
+                     FEMU_FAST_PAGES + 1);
+    femu_fast_off(qts);
+    femu_fast_restored(qts, FEMU_FAST_PAGES);
+    /* Control: the same misses with it off pay each program in turn. */
+    took = femu_fast_misses(qts, FEMU_FAST_PAGES + 1, FEMU_FAST_PAGES);
+    g_assert_cmpint(took * 1000, >=, FEMU_FAST_PAGES * FEMU_FAST_NS);
+    qtest_quit(qts);
+}
+
+/* Switching off waits for the NAND work the skipped waits left queued. */
+static void femu_test_cxl_fast_load_drain(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE FEMU_FAST_DEVICE);
+    uint64_t drain;
+    int64_t took;
+
+    femu_fast_start(qts);
+    /* Control: with nothing queued the switch has nothing to wait for. */
+    femu_cxl_set(qts, "fast-load", true);
+    femu_fast_off(qts);
+    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), ==, 0);
+
+    femu_cxl_set(qts, "fast-load", true);
+    /* Setting the same value is a no-op. */
+    femu_cxl_set(qts, "fast-load", true);
+    femu_fast_misses(qts, 0, FEMU_FAST_PAGES);
+    took = femu_fast_off(qts);
+    drain = femu_cxl_stat(qts, "fast-load-drain-ns");
+    g_assert_cmpuint(drain, >, 0);
+    g_assert_cmpint(took, >=, drain);
+    /* Most of the queued programs were still ahead when the misses ended. */
+    g_assert_cmpuint(drain, >=, FEMU_FAST_PAGES * FEMU_FAST_NS / 2);
+    femu_fast_restored(qts, FEMU_FAST_PAGES);
+    /* Already off: no second wait, and the last one is still reported. */
+    took = femu_fast_off(qts);
+    g_assert_cmpint(took, <, FEMU_FAST_NS);
+    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), ==, drain);
+    qtest_quit(qts);
+}
+
+/* Counters a serial trace must leave the same with fast load on or off. */
+static const char *const femu_fast_counters[] = {
+    "read-hits", "read-misses", "write-hits", "write-misses",
+    "cache-hits", "cache-misses", "cache-inserts", "cache-evictions",
+    "cache-entries", "prefetch-inserts", "media-reads", "media-writes",
+    "media-full", "der-mapped", "der-remaps", "der-revocations",
+    "der-fallbacks",
+};
+
+#define FEMU_FAST_TRACE   96
+#define FEMU_FAST_SPAN    16
+#define FEMU_FAST_COUNTERS ARRAY_SIZE(femu_fast_counters)
+
+/*
+ * Values a serial trace leaves: every counter above, a hash of the data it
+ * read, the hit or miss of a probe read of each page afterwards (the cache
+ * contents and their order), and the programs the probe and a final flush
+ * issue (the dirty pages). media-time-ns is left out: misses that arrive sooner queue
+ * behind each other on a LUN and are charged that wait.
+ */
+typedef struct FemuFastDigest {
+    uint64_t counter[FEMU_FAST_COUNTERS];
+    uint64_t data;
+    uint64_t probe;
+    uint64_t flushed;
+} FemuFastDigest;
+
+static void femu_fast_trace(FemuFastDigest *d, uint32_t seed, bool fast)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=4,cache-ways=2,prefetch-degree=1,read-ns=200000,"
+        "program-ns=500000,cylon-first-touch-program=on");
+    uint32_t x = seed;
+    uint64_t writes;
+    unsigned i;
+
+    memset(d, 0, sizeof(*d));
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "fast-load", fast);
+    d->data = 1469598103934665603ULL;
+    for (i = 0; i < FEMU_FAST_TRACE; i++) {
+        uint64_t addr;
+
+        x = x * 1103515245 + 12345;
+        addr = FEMU_CXL_WINDOW + (x >> 16) % FEMU_FAST_SPAN * 4096;
+        if (x >> 31) {
+            qtest_writeq(qts, addr, i + 1);
+        } else {
+            d->data = (d->data ^ qtest_readq(qts, addr)) * 1099511628211ULL;
+        }
+    }
+    femu_cxl_set(qts, "fast-load", false);
+    for (i = 0; i < FEMU_FAST_COUNTERS; i++) {
+        d->counter[i] = femu_cxl_stat(qts, femu_fast_counters[i]);
+    }
+    writes = femu_cxl_stat(qts, "media-writes");
+    for (i = 0; i < FEMU_FAST_SPAN; i++) {
+        uint64_t hits = femu_cxl_stat(qts, "cache-hits");
+
+        qtest_readq(qts, FEMU_CXL_WINDOW + i * 4096);
+        d->probe |= (femu_cxl_stat(qts, "cache-hits") - hits) << i;
+    }
+    femu_cxl_set(qts, "flush-cache", true);
+    d->flushed = femu_cxl_stat(qts, "media-writes") - writes;
+    qtest_quit(qts);
+}
+
+static uint64_t femu_fast_counter(const FemuFastDigest *d, const char *name)
+{
+    unsigned i;
+
+    for (i = 0; i < FEMU_FAST_COUNTERS; i++) {
+        if (!strcmp(femu_fast_counters[i], name)) {
+            return d->counter[i];
+        }
+    }
+    g_assert_not_reached();
+}
+
+static bool femu_fast_digest_equal(const FemuFastDigest *a,
+                                   const FemuFastDigest *b)
+{
+    unsigned i;
+
+    for (i = 0; i < FEMU_FAST_COUNTERS; i++) {
+        if (a->counter[i] != b->counter[i]) {
+            g_test_message("%s: %" PRIu64 " vs %" PRIu64,
+                           femu_fast_counters[i], a->counter[i],
+                           b->counter[i]);
+            return false;
+        }
+    }
+    return a->data == b->data && a->probe == b->probe &&
+           a->flushed == b->flushed;
+}
+
+/*
+ * A serial trace ends in the same cache and media state with fast load on.
+ * Concurrent accesses carry no such promise: shorter page holds change which
+ * evictions succeed.
+ */
+static void femu_test_cxl_fast_load_state(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    FemuFastDigest normal;
+    FemuFastDigest fast;
+    FemuFastDigest other;
+
+    femu_fast_trace(&normal, 1, false);
+    femu_fast_trace(&fast, 1, true);
+    /* The trace must exercise evictions, prefetch and write-backs. */
+    g_assert_cmpuint(femu_fast_counter(&normal, "cache-evictions"), >, 0);
+    g_assert_cmpuint(femu_fast_counter(&normal, "prefetch-inserts"), >, 0);
+    g_assert_cmpuint(femu_fast_counter(&normal, "media-writes"), >, 0);
+    g_assert_cmpuint(normal.flushed, >, 0);
+    g_assert_true(femu_fast_digest_equal(&normal, &fast));
+    /* Control: another trace must change the digest, or it proves nothing. */
+    femu_fast_trace(&other, 2, false);
+    g_assert_false(femu_fast_digest_equal(&normal, &other));
+}
+
 static void femu_test_cxl_der(void *obj, void *data,
                               QGuestAllocator *alloc)
 {
@@ -20668,6 +20907,11 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-realize", "femu", femu_test_cxl_realize, NULL);
     qos_add_test("cxl-flush", "femu", femu_test_cxl_flush, NULL);
+    qos_add_test("cxl-fast-load", "femu", femu_test_cxl_fast_load, NULL);
+    qos_add_test("cxl-fast-load-drain", "femu", femu_test_cxl_fast_load_drain,
+                 NULL);
+    qos_add_test("cxl-fast-load-state", "femu", femu_test_cxl_fast_load_state,
+                 NULL);
     qos_add_test("cxl-der-default", "femu", femu_test_cxl_der_modes,
                  &(QOSGraphTestOptions) { .arg = (void *)"" });
     qos_add_test("cxl-der-off", "femu", femu_test_cxl_der_modes,

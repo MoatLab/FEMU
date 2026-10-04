@@ -27,6 +27,7 @@ listed one by one.
 - A CXL caching API is served on BAR5, with a guest library, the `ccactl` tool and a guest self-test (924714c18, 1235e87d2, ec3af4ba4, 0a357d11e, defd999b8).
 - Cache misses to different pages wait for the media together, by default only while a direct mode is active, and long media waits sleep instead of spinning (b72d14dbe, 64d424dd2, 133c553ca, 145fcfe4b).
 - A bbssd NVMe controller can share a `femu-cxl-ssd` medium through `cxl_ssd=<id>`, with writes, deallocates and flips kept consistent between the two front ends (146a240dc, d73a5b780, a7a3c5678, 353bbe107, 287e5c885, 6783d50af).
+- A runtime `fast-load` switch on `femu-cxl-ssd` lets warmup and data loading skip the wait for modelled media time while the FTL, cache and counters still run. Switching it off waits for the queued NAND work, reported in `fast-load-drain-ns`, so measurement starts on an idle model.
 
 #### New modes and data placement
 

@@ -100,6 +100,13 @@ struct FemuCxlMedia {
     uint64_t media_reads;
     uint64_t media_writes;
     uint64_t media_full;
+    /*
+     * Accesses skip their completion wait; the NAND timelines still advance.
+     * Changed only under the gate held alone. BQL.
+     */
+    bool fast_load;
+    /* How long the last switch back to the full model waited for NAND. */
+    uint64_t fast_load_drain_ns;
     QemuMutex lock;
     QemuCond wake;
     QemuThread worker;
@@ -139,6 +146,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
+uint64_t femu_cxl_drain(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);

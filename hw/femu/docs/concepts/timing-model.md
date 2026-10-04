@@ -254,6 +254,11 @@ the deadline and spins for the rest. Other properties:
 `flush-cache` (QMP) and cache control commands on BAR5 also wait for the
 media time of the write-backs they cause, on the thread that runs them.
 
+`fast-load=true` removes only the wait at the end of an access; the FTL and
+the NAND timelines still advance. Setting it back to false waits until the
+latest LUN and channel busy-until time has passed, so the next access sees
+an idle model. See [Fast load](../modes/cxl-ssd.md#fast-load).
+
 Properties: [femu-cxl-ssd
 cache](../reference/properties.md#cache), [NAND geometry and
 timing](../reference/properties.md#nand-geometry-and-timing).

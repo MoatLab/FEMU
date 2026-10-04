@@ -719,6 +719,35 @@ out:
     object_unref(obj);
 }
 
+static bool cxl_fast_load_get(Object *obj, Error **errp)
+{
+    return FEMU_CXL_SSD(obj)->media.fast_load;
+}
+
+/*
+ * Turning fast load off is a barrier: the gate waits for admitted accesses,
+ * then the NAND work they queued drains, so measurement starts on an idle
+ * model. The cache stays as loaded.
+ */
+static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+
+    object_ref(obj);
+    femu_cxl_enter(s);
+    if (value == s->fast_load) {
+        goto out;
+    }
+    if (!value) {
+        s->fast_load_drain_ns = s->started && !s->closing ?
+                                femu_cxl_drain(s) : 0;
+    }
+    s->fast_load = value;
+out:
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
 static void cxl_stats_reset(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
@@ -1522,6 +1551,11 @@ static void cxl_init(Object *obj)
     object_property_add(obj, "prefetch-stride", "uint32", cxl_runtime_get,
                         cxl_runtime_set, NULL, NULL);
     object_property_add_bool(obj, "stats-reset", NULL, cxl_stats_reset);
+    object_property_add_bool(obj, "fast-load", cxl_fast_load_get,
+                             cxl_fast_load_set);
+    object_property_add_uint64_ptr(obj, "fast-load-drain-ns",
+                                   &s->fast_load_drain_ns,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "prefetch-inserts",
                                    &s->prefetch_inserts,
                                    OBJ_PROP_FLAG_READ);

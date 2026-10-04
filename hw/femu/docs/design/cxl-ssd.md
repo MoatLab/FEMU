@@ -283,7 +283,7 @@ and the `idle` condition variable:
 | --- | --- |
 | Guest access, `concurrent-misses` in effect | Shared (`femu_cxl_enter_access()`) |
 | Guest access otherwise | Exclusive (`femu_cxl_enter()`) |
-| `flush-cache`, `stats-reset`, `cache-ways`, prefetch and `der-ratio` changes, every control command | Exclusive |
+| `flush-cache`, `stats-reset`, `fast-load`, `cache-ways`, prefetch and `der-ratio` changes, every control command | Exclusive |
 | Each caching API chunk | Exclusive |
 | The NVMe link bottom half that drops cache entries | Exclusive |
 
@@ -827,7 +827,7 @@ the binary. This table explains how they interact.
 | Cylon media switches (same table) | `cylon-first-touch-program`, `cylon-free-writeback` | Change the media model to match published Cylon experiments; off for normal use |
 | [Direct mapping](../reference/properties.md#direct-mapping-der) | `der`, `der-replace-rate`, `cylon-kernel-ack`, `concurrent-misses` | `der=memslot` is refused under TCG. `der=cylon` without `cylon-kernel-ack=on` is refused. `der-replace-rate` matters only for `memslot`. `concurrent-misses=auto` follows whether DER is available |
 | [Caching API, control channel and logs](../reference/properties.md#caching-api-control-channel-and-logs) | `cca`, `lsa-control`, `log-dir`, `tracefs-dir`, `log-limit` | `cca=off` registers no BAR5. `lsa-control=on` refuses an `lsa` backend. `log-limit=0` opens no I/O log and takes no statistics appends. `tracefs-dir` unset makes commands 91 and 81 no-ops on the host |
-| [Actions and control](../reference/runtime-properties.md#actions-and-control) | `der-ratio`, `control-command`, `control-argument`, `control-status`, `flush-cache`, `stats-reset` | Run time only. `der-ratio` needs a direct mode and no uncached ranges; `memslot` refuses a ratio that needs more aliases than are free |
+| [Actions and control](../reference/runtime-properties.md#actions-and-control) | `der-ratio`, `control-command`, `control-argument`, `control-status`, `flush-cache`, `stats-reset`, `fast-load`, `fast-load-drain-ns` | Run time only, except `fast-load`, which `-device` also accepts. `der-ratio` needs a direct mode and no uncached ranges; `memslot` refuses a ratio that needs more aliases than are free. `fast-load=false` holds the gate alone while it waits for the NAND timelines, with the BQL dropped and `lock` released |
 
 `run-cxlssd.sh` uses defaults that follow Cylon's launch script and differ
 from the device's (a cache of 1/20 of the media, direct mapped, 8 by 8
