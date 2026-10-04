@@ -351,6 +351,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                 if (cq && cq->is_active) {
                     did_isr = true;
                     n->poller_ctr[index_poller].nr_tt_ios++;
+                    n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
                 }
                 QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
             }
@@ -536,6 +537,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         processed++;
         /* per-poller counters: no shared cacheline on the hot path */
         n->poller_ctr[index_poller].nr_tt_ios++;
+        n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
         if (now - req->expire_time >= 20000) {
             n->poller_ctr[index_poller].nr_tt_late_ios++;
             if (n->print_log) {

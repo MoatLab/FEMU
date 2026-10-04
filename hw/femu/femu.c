@@ -3111,6 +3111,42 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
                            mapped, lost, orphans);
 }
 
+/*
+ * Completed commands, their summed modelled latency, namespace 1's host,
+ * NAND and relocated pages and erases, and the read, program and erase
+ * commands it charged to the media layer: a trace that pins what the FTL
+ * charged for a fixed workload.
+ */
+static char *femu_test_ftl_trace(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    struct ssd *ssd = ns ? ns->ssd : NULL;
+    int64_t ios = 0;
+    int64_t model_ns = 0;
+    char *out;
+    bool resume;
+
+    if (!ssd || !n->poller_ctr) {
+        error_setg(errp, "FTL trace requires an FTL namespace 1 and pollers");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    for (int i = 1; i <= n->nr_pollers; i++) {
+        ios += n->poller_ctr[i].nr_tt_ios;
+        model_ns += n->poller_ctr[i].nr_model_ns;
+    }
+    out = g_strdup_printf("%" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64
+                          " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                          " %" PRIu64, ios, model_ns, ssd->host_write_pages,
+                          ssd->nand_write_pages, ssd->gc_write_pages,
+                          ssd->total_erases, ssd->media_ops[NAND_MEDIA_READ],
+                          ssd->media_ops[NAND_MEDIA_PROGRAM],
+                          ssd->media_ops[NAND_MEDIA_ERASE]);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -3165,6 +3201,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
     }
 }
 

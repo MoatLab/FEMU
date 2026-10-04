@@ -15,7 +15,7 @@ DEVICES = [
         "type": "femu",
         "title": "NVMe controller",
         "parent": "pci-device",
-        "test_only": ["x-ftl-check", "x-ns-test", "x-oc12-clock",
+        "test_only": ["x-ftl-check", "x-ftl-trace", "x-ns-test", "x-oc12-clock",
                       "x-stream-test"],
         "topics": [
             {

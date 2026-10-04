@@ -2848,6 +2848,84 @@ static void femu_ftl_check(QTestState *qts, uint64_t *mapped, uint64_t *lost,
 }
 
 /*
+ * A fixed, queue-depth-one workload with collection, and what the FTL charged
+ * for it: commands, their summed modelled latency, host, NAND and relocated
+ * pages, erases, and the read, program and erase commands charged to the
+ * media layer (x-ftl-trace). Refactoring the FTL must not move these. Every
+ * count is exact. The latency sum is only held to 25%: collection starts at
+ * the host time of the request that triggered it, so how soon the next request
+ * arrives, which depends on how loaded the host is, changes how long it waits.
+ */
+static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *want = data;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint32_t seed = 1;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < 128; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, ((seed >> 8) % pages) * 8,
+                                buf), ==, NVME_SUCCESS);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/trace',"
+                    "'property':'x-ftl-trace'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-ftl-trace %s", qdict_get_str(rsp, "return"));
+    {
+        g_auto(GStrv) gotv = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+        g_auto(GStrv) expv = g_strsplit(want, " ", 0);
+        uint64_t got[9];
+        uint64_t exp[9];
+
+        g_assert_cmpuint(g_strv_length(gotv), ==, 9);
+        g_assert_cmpuint(g_strv_length(expv), ==, 9);
+        for (i = 0; i < 9; i++) {
+            got[i] = g_ascii_strtoull(gotv[i], NULL, 10);
+            exp[i] = g_ascii_strtoull(expv[i], NULL, 10);
+        }
+        for (i = 0; i < 9; i++) {
+            if (i == 1) {
+                g_assert_cmpuint(got[1], >=, exp[1] - exp[1] / 4);
+                g_assert_cmpuint(got[1], <=, exp[1] + exp[1] / 4);
+            } else {
+                g_assert_cmpuint(got[i], ==, exp[i]);
+            }
+        }
+    }
+    qobject_unref(rsp);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
  * Random writes spread over every placement handle of a namespace the device
  * accepted. Each handle keeps a unit open and each persistently isolated
  * handle another to collect into, so a namespace that fits only once those
@@ -21176,6 +21254,29 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "femu_mode=0,lver=2"
     });
     /* 19 lines of 16 pages: the forced watermark is zero free lines */
+    qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2",
+    });
+    qos_add_test("ftl-trace-hot-cold", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 9800000000 10306 10306 44095 13536 44223 54401 13536",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "hot_cold_sep=on",
+    });
+    qos_add_test("ftl-trace-fdp", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
     qos_add_test("gc-no-destination", "femu", femu_test_gc_no_destination,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

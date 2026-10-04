@@ -545,6 +545,8 @@ struct ssd {
      * device was given no endurance figure and reports no life estimate.
      */
     uint64_t total_erases;
+    /* NAND commands charged to the media layer, by NandMediaOp */
+    uint64_t media_ops[3];
     uint32_t rated_pe_cycles;
 
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */

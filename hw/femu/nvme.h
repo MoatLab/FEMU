@@ -2076,7 +2076,9 @@ typedef struct FemuPollerCtr {
     int64_t nr_host_wr_cmds;
     int64_t nr_host_rd_bytes;
     int64_t nr_host_wr_bytes;
-    char    pad[64 - 6 * sizeof(int64_t)];
+    /* modelled latency of the completed commands, for the qtest trace */
+    int64_t nr_model_ns;
+    char    pad[64 - 7 * sizeof(int64_t)];
 } QEMU_ALIGNED(64) FemuPollerCtr;
 
 typedef struct FemuCtrl {
