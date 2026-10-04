@@ -106,12 +106,7 @@ static void fdp_set_ru_write_pointer(struct ssd *ssd, FemuReclaimUnit *ru)
     struct write_pointer *wptr = ru->ssd_wptr;
 
     ftl_assert(wptr != NULL);
-    wptr->curline = ru->lines[0];
-    wptr->ch = 0;
-    wptr->lun = 0;
-    wptr->pg = 0;
-    wptr->blk = wptr->curline->id;
-    wptr->pl = 0;
+    ssd_wp_reset(wptr, ru->lines[0]);
 }
 
 /*

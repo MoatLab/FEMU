@@ -9,6 +9,17 @@ static inline void check_addr(int a, int max)
     ftl_assert(a >= 0 && a < max);
 }
 
+/* point a write pointer at the first page of @line */
+static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
+{
+    wpp->curline = line;
+    wpp->ch = 0;
+    wpp->lun = 0;
+    wpp->pl = 0;
+    wpp->pg = 0;
+    wpp->blk = line->id;
+}
+
 /*
  * Move a write pointer to the next page of its line: channel first, then LUN,
  * then plane, then page. Returns true when the step wrapped past the line's

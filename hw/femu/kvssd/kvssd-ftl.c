@@ -192,16 +192,6 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
     return lat;
 }
 
-static void kv_reset_write_pointer(struct write_pointer *wpp, struct line *line)
-{
-    wpp->curline = line;
-    wpp->ch = 0;
-    wpp->lun = 0;
-    wpp->pg = 0;
-    wpp->blk = line->id;
-    wpp->pl = 0;
-}
-
 static bool kv_ensure_write_pointer(FemuKvssdState *s, NvmeRequest *req,
                                     uint64_t *lat)
 {
@@ -220,7 +210,7 @@ static bool kv_ensure_write_pointer(FemuKvssdState *s, NvmeRequest *req,
     if (!line) {
         return false;
     }
-    kv_reset_write_pointer(&ssd->wp, line);
+    ssd_wp_reset(&ssd->wp, line);
     return true;
 }
 

@@ -99,12 +99,7 @@ void ssd_init_write_pointer(struct ssd *ssd)
     lm->free_line_cnt--;
 
     /* wpp->curline is always our next-to-write super-block */
-    wpp->curline = curline;
-    wpp->ch = 0;
-    wpp->lun = 0;
-    wpp->pg = 0;
-    wpp->blk = 0;
-    wpp->pl = 0;
+    ssd_wp_reset(wpp, curline);
 
     /* DRAM write buffer: LRU queue plus a tree for lookup by page number */
     QTAILQ_INIT(&ssd->write_buffer);
@@ -301,12 +296,7 @@ static void ssd_init_class_write_pointer(struct ssd *ssd,
         return;
     }
 
-    wpp->curline = curline;
-    wpp->ch = 0;
-    wpp->lun = 0;
-    wpp->pg = 0;
-    wpp->blk = curline->id;
-    wpp->pl = 0;
+    ssd_wp_reset(wpp, curline);
 }
 
 /* pick the write pointer an allocation class writes through */
