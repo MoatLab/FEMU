@@ -1,4 +1,5 @@
 #include "../nvme.h"
+#include "../ocssd/oc20.h"
 
 /*
  * The per-chip arrays this model locks and stamps are fixed-size members of the
@@ -66,6 +67,9 @@ void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
     n->oc_pg_wr_lat[0] = wr_lower;
     n->oc_blk_er_lat = erase;
     n->oc_chnl_pg_xfer_lat = xfer;
+    if (n->lver == OCSSD20) {
+        oc20_refresh_timing(n);
+    }
     nvme_resume_pollers(n, resume);
 }
 

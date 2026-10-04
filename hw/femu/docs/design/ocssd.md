@@ -351,9 +351,13 @@ namespace reports 16 metadata bytes per sector.
 
 ## Timing
 
-Both versions use the same busy-until model in
-`hw/femu/timing-model/timing.c`. The controller keeps one time per chip
-(LUN) and one per channel:
+Open-Channel 1.2 uses the busy-until model in
+`hw/femu/timing-model/timing.c`. Open-Channel 2.0 charges no channel time, so
+it uses the shared media layer (`nand_media_op()` in `hw/femu/nand/nand-media.c`)
+with the LUN gate, the bus off and flat lower-page times, through
+`oc20_chip_op()`; the arithmetic is the same as below, and vendor command 0xEE
+refreshes its times (`oc20_refresh_timing()`). For 1.2 the controller keeps one
+time per chip (LUN) and one per channel:
 
 - `chip_next_avail_time[ch * num_lun + lun]`, at most 128 chips.
 - `chnl_next_avail_time[ch]` and a list of reserved intervals per channel,
@@ -502,7 +506,7 @@ Refusals at realize are listed in the
 | --- | --- |
 | [`hw/femu/ocssd/oc12.c`](../../ocssd/oc12.c), [`oc12.h`](../../ocssd/oc12.h) | 1.2 commands, PPA format, sector metadata, bad block tables, init and exit |
 | [`hw/femu/ocssd/oc20.c`](../../ocssd/oc20.c), [`oc20.h`](../../ocssd/oc20.h) | 2.0 commands, chunk descriptors, write pointer rules, geometry, log page |
-| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | chip and channel busy-until times, geometry bound check |
+| [`hw/femu/timing-model/timing.c`](../../timing-model/timing.c) | Open-Channel 1.2 chip and channel busy-until times, geometry bound check, 0xEE |
 | [`hw/femu/nand/nand.h`](../../nand/nand.h), [`nand.c`](../../nand/nand.c) | per-cell-type latency tables and page-type tables |
 | [`hw/femu/femu.c`](../../femu.c) | `nvme_register_extensions()`, realize-time checks |
 | [`hw/femu/nvme-io.c`](../../nvme-io.c) | `nvme_io_cmd()` dispatch, completion queue |

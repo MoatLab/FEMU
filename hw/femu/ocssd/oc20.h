@@ -2,6 +2,7 @@
 #define __FEMU_OC20_H
 
 #include "../nvme.h"
+#include "../nand/nand-media.h"
 
 #define OC20_VID            (0x1d1d)
 #define OC20_DID            (0x1f1f)
@@ -212,7 +213,14 @@ enum Oc20LogPage {
 
 typedef struct Oc20Ctrl {
     Oc20Header blk_hdr;
+    /* NAND timing: the shared media layer, one busy-until per parallel unit */
+    NandMedia media;
+    uint64_t lun_avail[FEMU_MAX_NUM_CHIPS];
+    uint64_t unused_avail;
+    int num_lun;
 } Oc20Ctrl;
+
+void oc20_refresh_timing(FemuCtrl *n);
 
 typedef struct Oc20Namespace {
     Oc20NamespaceGeometry id_ctrl;

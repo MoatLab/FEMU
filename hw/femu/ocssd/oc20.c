@@ -1,5 +1,8 @@
 #include "./oc20.h"
 
+static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
+                            int opcode);
+
 static inline bool is_oc20_admin_cmd(uint8_t opcode)
 {
     return (opcode == OC20_ADM_CMD_IDENTIFY ||
@@ -213,11 +216,10 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     uint8_t opcode = ocrw->opcode;
     uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;    /* 0's based, reaches 65536 */
-    int ch, lun, lunid;
+    int ch, lun;
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
-    int num_lun = lns->id_ctrl.geo.num_lun;
     Oc20AddrF *addrf = &lns->lbaf;
     int i;
 
@@ -231,9 +233,8 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             lba = ((uint64_t *)req->slba)[i];
             ch = OC20_LBA_GET_GROUP(addrf, lba);
             lun = OC20_LBA_GET_PUNIT(addrf, lba);
-            lunid = ch * num_lun + lun;
 
-            int64_t ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
+            int64_t ts = oc20_chip_op(n, ch, lun, now, opcode);
             if (ts > req->expire_time) {
                 req->expire_time = ts;
             }
@@ -260,19 +261,9 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         ch = addr_bucket[i].ch;
         lun = addr_bucket[i].lun;
-        lunid = ch * num_lun + lun;
 
-        io_done_ts = 0;
-        int64_t chnl_end_ts, chip_end_ts;
-        if (req->is_write) {
-            /* Write data needs to be transferred through the channel first */
-            chnl_end_ts = advance_channel_timestamp(n, ch, now, 0);
-            /* Then issue NAND Program to the target flash chip */
-            io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, 0);
-        } else {
-            chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
-            io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts, 0);
-        }
+        /* no channel time: a program and a read are the unit's alone */
+        io_done_ts = oc20_chip_op(n, ch, lun, now, opcode);
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
         cur_time_need_to_emulate = io_done_ts - now;
@@ -1572,6 +1563,91 @@ static void oc20_release_locks(FemuCtrl *n)
     }
 }
 
+static uint64_t *oc20_tl_lun_avail(void *opaque, const NandLoc *loc)
+{
+    Oc20Ctrl *ln = opaque;
+
+    return &ln->lun_avail[loc->ch * ln->num_lun + loc->lun];
+}
+
+/* the bus is off and the gate is the LUN, so nothing reads these */
+static uint64_t *oc20_tl_unused(void *opaque, uint32_t ch)
+{
+    return &((Oc20Ctrl *)opaque)->unused_avail;
+}
+
+static uint64_t *oc20_tl_plane_unused(void *opaque, const NandLoc *loc)
+{
+    return &((Oc20Ctrl *)opaque)->unused_avail;
+}
+
+static const NandTimelineOps oc20_timeline_ops = {
+    .ch_avail    = oc20_tl_unused,
+    .lun_avail   = oc20_tl_lun_avail,
+    .plane_avail = oc20_tl_plane_unused,
+};
+
+/*
+ * Open-Channel 2.0 charges each parallel unit its flat read, program or erase
+ * time after whatever it is already busy with, and moves nothing over the
+ * channel: the LUN-only gate with the bus off, as the open-coded chip timer did.
+ */
+static void oc20_media_init(FemuCtrl *n)
+{
+    Oc20Ctrl *ln = n->ext_ops.state;
+    NandMediaConfig cfg = {0};
+
+    ln->num_lun = n->oc_params.num_lun;
+    cfg.nchs = n->oc_params.num_ch;
+    cfg.luns_per_ch = n->oc_params.num_lun;
+    cfg.planes_per_lun = 1;
+    cfg.timing.rd_ns = n->oc_pg_rd_lat[0];
+    cfg.timing.wr_ns = n->oc_pg_wr_lat[0];
+    cfg.timing.er_ns = n->oc_blk_er_lat;
+    cfg.policy.use_flat_timing = true;
+    cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
+    cfg.policy.channel_mode = NAND_CH_OFF;
+    cfg.timeline = &oc20_timeline_ops;
+    cfg.timeline_opaque = ln;
+    nand_media_init(&ln->media, &cfg);
+}
+
+/* Vendor command 0xEE changed the lower-page times this mode charges. */
+void oc20_refresh_timing(FemuCtrl *n)
+{
+    Oc20Ctrl *ln = n->ext_ops.state;
+
+    ln->media.cfg.timing.rd_ns = n->oc_pg_rd_lat[0];
+    ln->media.cfg.timing.wr_ns = n->oc_pg_wr_lat[0];
+    ln->media.cfg.timing.er_ns = n->oc_blk_er_lat;
+}
+
+/* when an op on parallel unit @ch/@lun issued at @now completes */
+static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
+                            int opcode)
+{
+    Oc20Ctrl *ln = n->ext_ops.state;
+    NandLoc loc = { .ch = ch, .lun = lun };
+    NandMediaOp op;
+
+    switch (opcode) {
+    case NVME_CMD_OC_READ:
+    case NVME_CMD_READ:
+        op = NAND_MEDIA_READ;
+        break;
+    case NVME_CMD_OC_WRITE:
+    case NVME_CMD_WRITE:
+        op = NAND_MEDIA_PROGRAM;
+        break;
+    case NVME_CMD_OC_ERASE:
+        op = NAND_MEDIA_ERASE;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    return nand_media_op(&ln->media, &loc, op, now).done_ns;
+}
+
 static int oc20_init_misc(FemuCtrl *n)
 {
     int ret;
@@ -1623,6 +1699,7 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     init_nand_flash(n);
 
     oc20_init_misc(n);
+    oc20_media_init(n);
 }
 
 static void oc20_exit(FemuCtrl *n)
@@ -1636,6 +1713,7 @@ static void oc20_exit(FemuCtrl *n)
 
     oc20_release_locks(n);
 
+    nand_media_destroy(&((Oc20Ctrl *)n->ext_ops.state)->media);
     g_free(n->ext_ops.state);
     n->ext_ops.state = NULL;
 }

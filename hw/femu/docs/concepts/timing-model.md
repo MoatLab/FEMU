@@ -174,8 +174,9 @@ the program. `zns_num_wc` sets the number of caches (default:
 
 ## OCSSD
 
-OCSSD keeps a busy-until time per chip (LUN) and per channel in
-`hw/femu/timing-model/timing.c`. A write first moves its data over the channel,
+Open-Channel 1.2 keeps a busy-until time per chip (LUN) and per channel in
+`hw/femu/timing-model/timing.c`; Open-Channel 2.0 keeps its per-LUN time in the
+shared media layer above, with the LUN gate and the bus off. A write first moves its data over the channel,
 then programs the chip; a read occupies the chip, then moves its data out.
 Open-Channel 1.2 charges channel transfer only with `oc12_channel_timing=on`,
 using `ch_xfer_lat` per page or the `flash_type` table value when that is 0.
