@@ -135,68 +135,42 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
 
-    check_addr(wpp->ch, spp->nchs);
-    wpp->ch++;
-    if (wpp->ch == spp->nchs) {
-        wpp->ch = 0;
-        check_addr(wpp->lun, spp->luns_per_ch);
-        wpp->lun++;
-        /* in this case, we should go to next lun */
-        if (wpp->lun == spp->luns_per_ch) {
-            wpp->lun = 0;
-            /* then the next plane of the LUN, before moving down the block */
-            check_addr(wpp->pl, spp->pls_per_lun);
-            wpp->pl++;
-            if (wpp->pl < spp->pls_per_lun) {
-                return;
-            }
-            wpp->pl = 0;
-            /* go to next page in the block */
-            check_addr(wpp->pg, spp->pgs_per_blk);
-            wpp->pg++;
-            if (wpp->pg == spp->pgs_per_blk) {
-                wpp->pg = 0;
-                /* record when the line filled, for age-based GC policies */
-                wpp->curline->close_time =
-                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-                wpp->curline->close_seq = lm->next_close_seq++;
-                /* move current line to {victim,full} line list */
-                if (wpp->curline->vpc == spp->pgs_per_line) {
-                    /* all pgs are still valid, move to full line list */
-                    ftl_assert(wpp->curline->ipc == 0);
-                    QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
-                    lm->full_line_cnt++;
-                } else {
-                    ftl_assert(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line);
-                    /* there must be some invalid pages in this line */
-                    ftl_assert(wpp->curline->ipc > 0);
-                    pqueue_insert(lm->victim_line_pq, wpp->curline);
-                    lm->victim_line_cnt++;
-                }
-                /* current line is used up, pick another empty line */
-                check_addr(wpp->blk, spp->blks_per_pl);
-                wpp->curline = NULL;
-                wpp->curline = get_next_free_line(ssd);
-                if (!wpp->curline) {
-                    /*
-                     * Nothing left to program into, and get_next_free_line()
-                     * has said so. Leave the pointer without a line rather
-                     * than taking the process down under a running guest: the
-                     * write paths test for that and refuse the command.
-                     */
-                    return;
-                }
-                wpp->blk = wpp->curline->id;
-                check_addr(wpp->blk, spp->blks_per_pl);
-                /* make sure we are starting from page 0 in the super block */
-                ftl_assert(wpp->pg == 0);
-                ftl_assert(wpp->lun == 0);
-                ftl_assert(wpp->ch == 0);
-                /* TODO: assume # of pl_per_lun is 1, fix later */
-                ftl_assert(wpp->pl == 0);
-            }
-        }
+    if (!ssd_wp_step(spp, wpp)) {
+        return;
     }
+    /* record when the line filled, for age-based GC policies */
+    wpp->curline->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    wpp->curline->close_seq = lm->next_close_seq++;
+    /* move current line to {victim,full} line list */
+    if (wpp->curline->vpc == spp->pgs_per_line) {
+        /* all pgs are still valid, move to full line list */
+        ftl_assert(wpp->curline->ipc == 0);
+        QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
+        lm->full_line_cnt++;
+    } else {
+        ftl_assert(wpp->curline->vpc >= 0 &&
+                   wpp->curline->vpc < spp->pgs_per_line);
+        /* there must be some invalid pages in this line */
+        ftl_assert(wpp->curline->ipc > 0);
+        pqueue_insert(lm->victim_line_pq, wpp->curline);
+        lm->victim_line_cnt++;
+    }
+    /* current line is used up, pick another empty line */
+    check_addr(wpp->blk, spp->blks_per_pl);
+    wpp->curline = get_next_free_line(ssd);
+    if (!wpp->curline) {
+        /*
+         * Nothing left to program into, and get_next_free_line() has said so.
+         * Leave the pointer without a line rather than taking the process down
+         * under a running guest: the write paths test for that and refuse the
+         * command.
+         */
+        return;
+    }
+    wpp->blk = wpp->curline->id;
+    check_addr(wpp->blk, spp->blks_per_pl);
+    /* make sure we are starting from page 0 in the super block */
+    ftl_assert(wpp->pg == 0 && wpp->lun == 0 && wpp->ch == 0 && wpp->pl == 0);
 }
 
 static struct ppa ssd_stream_pointer_page(struct ssd *ssd,

@@ -242,83 +242,50 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
     struct write_pointer *wpp = ru->ssd_wptr;
     FemuReclaimUnit *new_ru = NULL;
     bool is_full;
-    bool ru_exhausted = false; /* set when we cross the RU boundary */
 
-    check_addr(wpp->ch, spp->nchs);
-    wpp->ch++;
-    if (wpp->ch == spp->nchs) {
-        wpp->ch = 0;
-        check_addr(wpp->lun, spp->luns_per_ch);
-        wpp->lun++;
-        if (wpp->lun == spp->luns_per_ch) {
-            wpp->lun = 0;
-            /* then the next plane of the LUN, before moving down the block */
-            check_addr(wpp->pl, spp->pls_per_lun);
-            wpp->pl++;
-            if (wpp->pl < spp->pls_per_lun) {
-                return ru;
-            }
-            wpp->pl = 0;
-            check_addr(wpp->pg, spp->pgs_per_blk);
-            wpp->pg++;
-            if (wpp->pg == spp->pgs_per_blk) {
-                //if (ru->next_line_index == ru->n_lines) { - TODO when ru 1->1..* mutliple lines
-                wpp->pg = 0;
-                ru_exhausted = true;
-                is_full = fdp_retire_ru(ssd, ru);
+    /* mid-RU: the same RU keeps taking pages */
+    if (!ssd_wp_step(spp, wpp)) {
+        return ru;
+    }
+    is_full = fdp_retire_ru(ssd, ru);
 
-                /* allocate a new RU for this RUH cuase ruh->curr_ru is full */
-                if (ruh != NULL) {
-                    check_addr(wpp->blk, spp->blks_per_pl);
-                    new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
-                    if (!new_ru) {
-                        ftl_err("No free RU for ruh %d: device full - point %s L:%d\n",
-                                ruh->ruhid, __FILE__, __LINE__);
-                        /*
-                         * Signal device pressure: clear curr_ru so
-                         * callers know no active write frontier exists.
-                         * A full device is an ordinary outcome the callers
-                         * turn into a capacity error, not a bug -- the
-                         * assertion that used to stand here aborted the
-                         * process in the build that arms assertions.
-                         */
-                        ruh->curr_ru = NULL;
-                        return NULL;
-                    }
-                    FDP_TRACE(ssd, "RU_ROTATE ruhid=%u old_ru=%u "
-                              "new_ru=%u reason=%s victim_ru_cnt %d\n",
-                              ruh->ruhid, ru->ruidx, new_ru->ruidx,
-                              is_full ? "full_valid" : "full_victim",
-                              rm->victim_ru_cnt);
-                    wpp = new_ru->ssd_wptr;
-                    wpp->blk = wpp->curline->id;
-                    check_addr(wpp->blk, spp->blks_per_pl);
-                    ftl_assert(wpp->pg == 0);
-                    ftl_assert(wpp->lun == 0);
-                    ftl_assert(wpp->ch == 0);
-                    ftl_assert(wpp->pl == 0);
-                }
-            }
+    /* allocate a new RU for this RUH cuase ruh->curr_ru is full */
+    if (ruh != NULL) {
+        check_addr(wpp->blk, spp->blks_per_pl);
+        new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
+        if (!new_ru) {
+            ftl_err("No free RU for ruh %d: device full - point %s L:%d\n",
+                    ruh->ruhid, __FILE__, __LINE__);
+            /*
+             * Signal device pressure: clear curr_ru so
+             * callers know no active write frontier exists.
+             * A full device is an ordinary outcome the callers
+             * turn into a capacity error, not a bug -- the
+             * assertion that used to stand here aborted the
+             * process in the build that arms assertions.
+             */
+            ruh->curr_ru = NULL;
+            return NULL;
         }
+        FDP_TRACE(ssd, "RU_ROTATE ruhid=%u old_ru=%u "
+                  "new_ru=%u reason=%s victim_ru_cnt %d\n",
+                  ruh->ruhid, ru->ruidx, new_ru->ruidx,
+                  is_full ? "full_valid" : "full_victim",
+                  rm->victim_ru_cnt);
+        wpp = new_ru->ssd_wptr;
+        wpp->blk = wpp->curline->id;
+        check_addr(wpp->blk, spp->blks_per_pl);
+        ftl_assert(wpp->pg == 0);
+        ftl_assert(wpp->lun == 0);
+        ftl_assert(wpp->ch == 0);
+        ftl_assert(wpp->pl == 0);
     }
 
     /*
-     * Return value semantics:
-     *   new_ru non-NULL  → RU boundary crossed, new RU allocated
-     *   NULL             → RU exhausted but no free RU (device full)
-     *   ru               → mid-RU, no boundary crossed yet
-     *
-     * We use ru_exhausted to distinguish the "device full" NULL from
-     * the "mid-RU, returning same ru" case.
+     * The RU is retired (in full_ru_list or the victim queue): return the RU
+     * that replaces it, or NULL without a handle or when the device is full.
      */
-    if (new_ru != NULL) {
-        return new_ru;
-    }
-    if (ru_exhausted) {
-        /* RU is now in full_ru_list/victim_pq; signal caller via NULL */
-        return NULL;
-    }
-    return ru;
+    return new_ru;
 }
 
 /*

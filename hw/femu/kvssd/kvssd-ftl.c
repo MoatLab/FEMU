@@ -292,35 +292,9 @@ static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
     struct write_pointer *wpp = &ssd->wp;
     struct line_mgmt *lm = &ssd->lm;
 
-    check_addr(wpp->ch, spp->nchs);
-    wpp->ch++;
-    if (wpp->ch != spp->nchs) {
+    if (!ssd_wp_step(spp, wpp)) {
         return true;
     }
-    wpp->ch = 0;
-
-    check_addr(wpp->lun, spp->luns_per_ch);
-    wpp->lun++;
-    if (wpp->lun != spp->luns_per_ch) {
-        return true;
-    }
-    wpp->lun = 0;
-
-    /* then the next plane of the LUN, before moving down the block */
-    check_addr(wpp->pl, spp->pls_per_lun);
-    wpp->pl++;
-    if (wpp->pl != spp->pls_per_lun) {
-        return true;
-    }
-    wpp->pl = 0;
-
-    check_addr(wpp->pg, spp->pgs_per_blk);
-    wpp->pg++;
-    if (wpp->pg != spp->pgs_per_blk) {
-        return true;
-    }
-
-    wpp->pg = 0;
     wpp->curline->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     if (wpp->curline->vpc == spp->pgs_per_line) {
         ftl_assert(wpp->curline->ipc == 0);

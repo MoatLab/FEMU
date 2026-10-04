@@ -9,6 +9,36 @@ static inline void check_addr(int a, int max)
     ftl_assert(a >= 0 && a < max);
 }
 
+/*
+ * Move a write pointer to the next page of its line: channel first, then LUN,
+ * then plane, then page. Returns true when the step wrapped past the line's
+ * last page, leaving the pointer at page 0 for the caller to retire the line.
+ */
+static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
+{
+    check_addr(wpp->ch, spp->nchs);
+    if (++wpp->ch < spp->nchs) {
+        return false;
+    }
+    wpp->ch = 0;
+    check_addr(wpp->lun, spp->luns_per_ch);
+    if (++wpp->lun < spp->luns_per_ch) {
+        return false;
+    }
+    wpp->lun = 0;
+    check_addr(wpp->pl, spp->pls_per_lun);
+    if (++wpp->pl < spp->pls_per_lun) {
+        return false;
+    }
+    wpp->pl = 0;
+    check_addr(wpp->pg, spp->pgs_per_blk);
+    if (++wpp->pg < spp->pgs_per_blk) {
+        return false;
+    }
+    wpp->pg = 0;
+    return true;
+}
+
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
