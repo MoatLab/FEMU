@@ -155,6 +155,38 @@ QEMUBH *aio_bh_new_full(AioContext *ctx, QEMUBHFunc *cb, void *opaque,
     return bh;
 }
 
+/*
+ * How many device re-entrancy guards this thread has engaged, and which
+ * outermost guarded section it is in; sections are numbered across threads.
+ */
+QEMU_DEFINE_STATIC_CO_TLS(unsigned, guarded_io_depth)
+QEMU_DEFINE_STATIC_CO_TLS(uint64_t, guarded_io_section)
+static uint64_t guarded_io_sections;
+
+void qemu_guarded_io_enter(void)
+{
+    if (!get_guarded_io_depth()) {
+        set_guarded_io_section(qatomic_fetch_inc(&guarded_io_sections) + 1);
+    }
+    set_guarded_io_depth(get_guarded_io_depth() + 1);
+}
+
+void qemu_guarded_io_leave(void)
+{
+    assert(get_guarded_io_depth());
+    set_guarded_io_depth(get_guarded_io_depth() - 1);
+}
+
+bool qemu_in_guarded_io(void)
+{
+    return get_guarded_io_depth() != 0;
+}
+
+uint64_t qemu_guarded_io_section(void)
+{
+    return get_guarded_io_depth() ? get_guarded_io_section() : 0;
+}
+
 void aio_bh_call(QEMUBH *bh)
 {
     bool last_engaged_in_io = false;
@@ -167,11 +199,13 @@ void aio_bh_call(QEMUBH *bh)
             trace_reentrant_aio(bh->ctx, bh->name);
         }
         reentrancy_guard->engaged_in_io = true;
+        qemu_guarded_io_enter();
     }
 
     bh->cb(bh->opaque);
 
     if (reentrancy_guard) {
+        qemu_guarded_io_leave();
         reentrancy_guard->engaged_in_io = last_engaged_in_io;
     }
 }

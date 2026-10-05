@@ -551,6 +551,7 @@ static MemTxResult access_with_adjusted_size(hwaddr addr,
         }
         mr->dev->mem_reentrancy_guard.engaged_in_io = true;
         reentrancy_guard_applied = true;
+        qemu_guarded_io_enter();
     }
 
     /* FIXME: support unaligned access? */
@@ -568,6 +569,7 @@ static MemTxResult access_with_adjusted_size(hwaddr addr,
         }
     }
     if (mr->dev && reentrancy_guard_applied) {
+        qemu_guarded_io_leave();
         mr->dev->mem_reentrancy_guard.engaged_in_io = false;
     }
     return r;

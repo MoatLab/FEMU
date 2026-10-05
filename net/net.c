@@ -833,6 +833,7 @@ static ssize_t qemu_deliver_packet_iov(NetClientState *sender,
     } else {
         owned_reentrancy_guard = qemu_get_nic(nc)->reentrancy_guard;
         owned_reentrancy_guard->engaged_in_io = true;
+        qemu_guarded_io_enter();
     }
 
     if ((flags & QEMU_NET_PACKET_FLAG_RAW) && nc->vnet_hdr_len) {
@@ -851,6 +852,7 @@ static ssize_t qemu_deliver_packet_iov(NetClientState *sender,
     }
 
     if (owned_reentrancy_guard) {
+        qemu_guarded_io_leave();
         owned_reentrancy_guard->engaged_in_io = false;
     }
 

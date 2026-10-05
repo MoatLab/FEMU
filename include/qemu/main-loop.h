@@ -271,6 +271,38 @@ void rust_bql_mock_lock(void);
 bool bql_locked(void);
 
 /**
+ * qemu_guarded_io_enter: Note that this thread engaged a device's
+ * re-entrancy guard
+ *
+ * Memory dispatch, guarded bottom halves and NIC packet delivery call this
+ * when they set MemReentrancyGuard.engaged_in_io and qemu_guarded_io_leave()
+ * when they restore it.
+ */
+void qemu_guarded_io_enter(void);
+void qemu_guarded_io_leave(void);
+
+/**
+ * qemu_in_guarded_io: Return whether this thread runs inside a device's
+ * re-entrancy guard
+ *
+ * The guard is a per-device flag, not a per-thread one. Code that can be
+ * reached from a device's MMIO handler or guarded bottom half, for example
+ * through that device's DMA, must not release the BQL while this returns
+ * true: the guard stays engaged, and another thread's access to the device
+ * is then refused as re-entrant and dropped.
+ */
+bool qemu_in_guarded_io(void);
+
+/**
+ * qemu_guarded_io_section: Identify this thread's outermost guarded section
+ *
+ * Return a number, unique across threads, for the section that began when
+ * this thread engaged its first re-entrancy guard, or 0 outside any guard.
+ * One MMIO dispatch or one guarded bottom half is one section.
+ */
+uint64_t qemu_guarded_io_section(void);
+
+/**
  * bql_block: Allow/deny releasing the BQL
  *
  * The Big QEMU Lock (BQL) is used to provide interior mutability to
