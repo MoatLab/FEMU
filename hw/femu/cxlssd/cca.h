@@ -10,9 +10,10 @@
 typedef struct FemuCxlMedia FemuCxlMedia;
 
 /*
- * Device side of the caching API. The BQL protects everything here except
- * @kick and @stop, which @lock protects; nothing takes the BQL while
- * holding @lock. Cache changes also hold the device's operation gate.
+ * Device side of the caching API. The BQL and the CXL lock protect
+ * everything here except @kick and @stop, which @lock protects; nothing
+ * takes either while holding @lock. Cache changes also hold the device's
+ * operation gate. Counters that accesses update are read under the CXL lock.
  */
 typedef struct FemuCxlCca {
     MemoryRegion bar;

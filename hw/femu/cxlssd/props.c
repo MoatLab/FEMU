@@ -278,6 +278,11 @@ static const FemuPropDesc cxl_runtime_descs[] = {
     { "der-ahead-remaps",
       "Read-only: of der-revoked-ahead, pages accessed and mapped again "
       "before their eviction; stats-reset keeps it" },
+    { "der-fault-bql",
+      "Read-only: Cylon fault exits that FEMU served under the BQL instead "
+      "of the CXL lock alone (the first exit after an invalidation, a "
+      "route through a switch or to another device); stats-reset keeps "
+      "it" },
     { "der-fault-emulated",
       "Read-only: pages handed back to KVM's emulator because FEMU could "
       "not map them (uncached range, pinned set, full medium); "

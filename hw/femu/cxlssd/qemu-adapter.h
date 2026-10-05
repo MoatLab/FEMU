@@ -32,7 +32,21 @@ typedef struct FemuCxlOp {
     bool fill;
     /* A fill that must not evict pages its own vCPU protects. */
     bool keep_own;
+    /*
+     * The next media read ends the fill's media time; see cxl_fold(). The
+     * access started at @start (QEMU_CLOCK_REALTIME ns).
+     */
+    bool fold;
+    int64_t start;
 } FemuCxlOp;
+
+/* One vCPU's protection of a page; see femu_cxl_protect(). */
+typedef struct FemuCxlGuard {
+    int owner;
+    unsigned count;
+    /* When @owner last protected the page, QEMU_CLOCK_REALTIME ns. */
+    int64_t since;
+} FemuCxlGuard;
 
 /* Pages a linked NVMe command replaced. */
 typedef struct FemuCxlRange {
@@ -41,6 +55,8 @@ typedef struct FemuCxlRange {
 } FemuCxlRange;
 
 struct FemuCxlMedia {
+    /* The device, for references that bottom halves hold. */
+    Object *owner;
     FemuCtrl *ctrl;
     NvmeNamespace ns;
     SsdDramBackend backend;
@@ -103,6 +119,8 @@ struct FemuCxlMedia {
     bool closing;
     /* Set when unplug found the gate held; run by the holder as it leaves. */
     void (*release)(struct FemuCxlMedia *s);
+    /* A thread without the BQL left @release to a bottom half. */
+    bool release_scheduled;
     uint64_t invalidations;
     QemuCond idle;
     FemuCxlDer direct;
@@ -115,7 +133,7 @@ struct FemuCxlMedia {
     uint64_t media_full;
     /*
      * Accesses skip their completion wait; the NAND timelines still advance.
-     * Changed only under the gate held alone. BQL.
+     * Changed only under the gate held alone. BQL and CXL lock.
      */
     bool fast_load;
     /* How long the last switch back to the full model waited for NAND. */
@@ -129,7 +147,7 @@ struct FemuCxlMedia {
     bool started;
     bool cca_enabled;
     FemuCxlCca cca;
-    /* A linked NVMe controller and its namespace; BQL. */
+    /* A linked NVMe controller and its namespace; BQL and CXL lock. */
     FemuCtrl *nvme;
     NvmeNamespace *nvme_ns;
     Error *nvme_blocker;
@@ -137,7 +155,7 @@ struct FemuCxlMedia {
      * The NVMe FTL thread appends what its writes replaced under @lock,
      * tagging each request with the batch number @nvme_taken + 1. @nvme_bh
      * takes the batch under @lock, drops those pages from the cache under
-     * the BQL and the gate, then publishes its number in @nvme_done, which
+     * the locks and the gate, then publishes its number in @nvme_done, which
      * the NVMe completions wait for.
      */
     GArray *nvme_ranges;
@@ -152,18 +170,19 @@ struct FemuCxlMedia {
      * Pages that an instruction stopped at a Cylon fault still needs (lpn
      * to an array of per-vCPU FemuCxlGuard), so that vCPU's demand accesses
      * do not evict them, and other vCPUs' fills only after
-     * @protect_window_ns. BQL.
+     * @protect_window_ns. CXL lock.
      */
     GHashTable *protect;
     uint64_t protect_window_ns;
     /*
      * Pages mapped without a cache way for an instruction the emulator
-     * cannot run (lpn to the number of vCPUs holding it). BQL.
+     * cannot run (lpn to the number of vCPUs holding it). CXL lock.
      */
     GHashTable *overflow;
     /*
      * qtest only: the next fill protects every page of its set just before
-     * it takes a way, as another vCPU could while a media wait drops the BQL.
+     * it takes a way, as another vCPU could while a media wait drops the
+     * locks.
      */
     bool test_fill_race;
     /*
@@ -182,7 +201,7 @@ struct FemuCxlMedia {
     /*
      * qtest only: page + 1 that another access starts to fill (hold and
      * cache entry, media read pending) at the point where a prefetch of it
-     * could drop the BQL; test-prefetch-race-end then fails that fill.
+     * could drop the locks; test-prefetch-race-end then fails that fill.
      */
     uint64_t test_prefetch_race;
     uint64_t test_race_lpn;
@@ -197,6 +216,71 @@ struct FemuCxlMedia {
  * to the others for no longer than this.
  */
 #define FEMU_CXL_PROTECT_WINDOW_NS (1000 * 1000)
+
+/*
+ * The CXL lock: one lock for the state of every femu-cxl-ssd, the adapter's
+ * window list and the per-vCPU Cylon fault records. The BQL protected all of
+ * it before; the lock lets a Cylon fault exit run without the BQL. Order:
+ * BQL, then this lock, then a medium's FTL @lock, then a CCA @lock. A thread
+ * that holds it never takes the BQL; femu_cxl_drop() lets go of both first.
+ * It is recursive within a thread. See "Locking" in cxlssd.md.
+ */
+void femu_cxl_lock(void);
+void femu_cxl_unlock(void);
+bool femu_cxl_locked(void);
+
+/* What femu_cxl_drop() let go of, for femu_cxl_retake(). */
+typedef struct FemuCxlHeld {
+    unsigned depth;
+    bool bql;
+} FemuCxlHeld;
+
+/*
+ * Let go of the CXL lock completely, and of the BQL if this thread holds it,
+ * for a wait; take them back in lock order. These are the points where the
+ * BQL was dropped before, so the protected regions are unchanged.
+ */
+void femu_cxl_drop(FemuCxlHeld *held);
+void femu_cxl_retake(const FemuCxlHeld *held);
+/* Wait on @cond, which is signalled under the CXL lock, as above. */
+void femu_cxl_wait(QemuCond *cond);
+void femu_cxl_timedwait(QemuCond *cond, int ms);
+
+static inline void *femu_cxl_guard_enter(void)
+{
+    femu_cxl_lock();
+    return (void *)1;
+}
+
+static inline void femu_cxl_guard_exit(void **guard)
+{
+    if (*guard) {
+        femu_cxl_unlock();
+    }
+}
+
+/* Hold the CXL lock until the end of the enclosing scope. */
+#define FEMU_CXL_LOCK_GUARD() \
+    __attribute__((cleanup(femu_cxl_guard_exit))) G_GNUC_UNUSED void * \
+    glue(femu_cxl_guard, __COUNTER__) = femu_cxl_guard_enter()
+
+#define WITH_FEMU_CXL_LOCK_(var) \
+    for (__attribute__((cleanup(femu_cxl_guard_exit))) void *var = \
+             femu_cxl_guard_enter(); \
+         var; femu_cxl_unlock(), var = NULL)
+
+/* Hold the CXL lock for the statement or block that follows. */
+#define WITH_FEMU_CXL_LOCK() \
+    WITH_FEMU_CXL_LOCK_(glue(femu_cxl_with, __COUNTER__))
+
+/*
+ * A BQL-free thread reached an operation that needs the BQL. The operation
+ * refused or deferred itself and set this flag; the Cylon fault exit then
+ * serves the fault again under the BQL. Thread-local.
+ */
+bool femu_cxl_bql_needed(void);
+void femu_cxl_need_bql(void);
+void femu_cxl_clear_need_bql(void);
 
 void femu_cxl_enter(FemuCxlMedia *s);
 void femu_cxl_leave(FemuCxlMedia *s);
@@ -226,6 +310,7 @@ bool femu_cxl_revoke_ahead_ok(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn,
                               int64_t now);
 void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn);
 void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn);
+bool femu_cxl_protected_by(FemuCxlMedia *s, int owner, uint64_t lpn);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,

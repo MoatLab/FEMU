@@ -266,7 +266,7 @@ FemuCxlEntry *femu_cxl_cache_insert_keep(FemuCxlCache *c, uint64_t lpn,
     /* A ghost hit goes to main; take it before evictions add ghosts. */
     main = ghost_remove(c, set, lpn) && c->ways > 1;
     /*
-     * An eviction callback can drop the BQL (a write-back), and another
+     * An eviction callback can drop its locks (a write-back), and another
      * access may then insert this page or take the freed way: look again
      * after each eviction.
      */

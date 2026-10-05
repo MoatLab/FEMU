@@ -16,6 +16,8 @@ typedef struct FemuCxlDer {
     bool available;
     bool warned;
     bool cylon;
+    /* der=memslot: mappings are memory regions, changed under the BQL. */
+    bool memslot;
     FemuCylon *fast;
     FemuCxlCache *cache;
     /* Windows that route here, valid for one invalidation generation. */
@@ -55,6 +57,8 @@ typedef struct FemuCxlDer {
     uint64_t fault_conflicts;
     /* Pages mapped without a cache way for an instruction KVM cannot run. */
     uint64_t fault_overflows;
+    /* Fault exits that were served again under the BQL. */
+    uint64_t fault_bql;
     /*
      * Cylon version 2: most pages a full revocation may take (the victim
      * included), its TLB flushes, the pages revoked ahead of their
@@ -117,6 +121,9 @@ unsigned femu_cxl_der_batch(FemuCxlDer *der, uint64_t lpn);
 void femu_cxl_der_remove_batch(FemuCxlDer *der, uint64_t lpn,
                                const uint64_t *ahead, unsigned n);
 bool femu_cxl_der_sample(FemuCxlDer *der, uint64_t lpn);
+void femu_cxl_der_precheck(FemuCxlDer *der, uint64_t lpn);
+void femu_cxl_der_precheck_run(void);
+void femu_cxl_der_precheck_drop(void);
 void femu_cxl_der_clear(FemuCxlDer *der);
 void femu_cxl_der_disable(FemuCxlDer *der);
 void femu_cxl_der_fallback(FemuCxlDer *der, const char *reason);

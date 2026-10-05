@@ -15,14 +15,14 @@
 #include "hw/pci/pci.h"
 #include "qemu-adapter.h"
 
-/* Pages acted on, and pages looked up, per hold of the gate and the BQL. */
+/* Pages acted on, and pages looked up, per hold of the gate and the locks. */
 #define CCA_CHUNK       256
 #define CCA_SCAN        4096
 /* Above this many candidates, revoke every direct mapping at once. */
 #define CCA_CLEAR       64
 /* Longest sleep between checks for reset or unplug during a delay. */
 #define CCA_NAP_US      10000
-/* Commands per pass before the thread lets go of the BQL. */
+/* Commands per pass before the thread lets go of the BQL and CXL lock. */
 #define CCA_BATCH       64
 #define CCA_SPIN_NS     (100 * SCALE_US)
 
@@ -65,8 +65,9 @@ static void cca_delay(FemuCxlMedia *s, uint64_t ns, uint32_t epoch)
 {
     int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
     int64_t remaining;
+    FemuCxlHeld held;
 
-    bql_unlock();
+    femu_cxl_drop(&held);
     while ((remaining = deadline -
             qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) > 0 &&
            !cca_abandoned(s, epoch)) {
@@ -76,12 +77,12 @@ static void cca_delay(FemuCxlMedia *s, uint64_t ns, uint32_t epoch)
             cpu_relax();
         }
     }
-    bql_lock();
+    femu_cxl_retake(&held);
 }
 
 /*
- * A waiter woken by the last leave may not get the BQL before this thread
- * takes it back; let one take the gate first.
+ * A waiter woken by the last leave may not get the locks before this thread
+ * takes them back; let one take the gate first.
  */
 static void cca_yield(FemuCxlMedia *s, uint32_t epoch)
 {
@@ -89,9 +90,11 @@ static void cca_yield(FemuCxlMedia *s, uint32_t epoch)
 
     while (s->waiters && s->entries == entries && !s->busy &&
            !cca_abandoned(s, epoch)) {
-        bql_unlock();
+        FemuCxlHeld held;
+
+        femu_cxl_drop(&held);
         sched_yield();
-        bql_lock();
+        femu_cxl_retake(&held);
     }
 }
 
@@ -110,12 +113,14 @@ static bool cca_enter(CcaOp *op)
     return true;
 }
 
-/* Let vCPUs and the main loop have the BQL between bounded pieces of work. */
+/* Let vCPUs and the main loop have the locks between bounded pieces of work. */
 static void cca_breathe(void)
 {
-    bql_unlock();
+    FemuCxlHeld held;
+
+    femu_cxl_drop(&held);
     sched_yield();
-    bql_lock();
+    femu_cxl_retake(&held);
 }
 
 static void cca_leave(CcaOp *op)
@@ -361,8 +366,8 @@ static int cca_drop_page(CcaOp *op, uint64_t lpn)
 
 /*
  * Revoke the chunk's direct mappings in one memory transaction, then write
- * back if dirty and drop. Writeback can drop the BQL, which must not happen
- * with a transaction open.
+ * back if dirty and drop. Writeback can drop the locks, which must not
+ * happen with a transaction open.
  */
 static int cca_drop_batch(CcaOp *op)
 {
@@ -679,8 +684,9 @@ static void cca_apply_reset(FemuCxlMedia *s)
 }
 
 /*
- * Run up to CCA_BATCH commands with the BQL held. Returns true if more may
- * be pending, so a guest that keeps the ring full cannot hold the BQL.
+ * Run up to CCA_BATCH commands with the BQL and the CXL lock held. Returns
+ * true if more may be pending, so a guest that keeps the ring full cannot
+ * hold them.
  */
 static bool cca_run(FemuCxlMedia *s)
 {
@@ -774,7 +780,9 @@ static void *cca_thread(void *opaque)
             break;
         }
         bql_lock();
+        femu_cxl_lock();
         more = cca_run(s);
+        femu_cxl_unlock();
         bql_unlock();
         if (more) {
             sched_yield();
@@ -789,7 +797,7 @@ static void *cca_thread(void *opaque)
 }
 
 /*
- * Runs under the BQL and never waits, like any invalidation. Slots are
+ * Runs under the locks and never waits, like any invalidation. Slots are
  * cleared too, so entries a guest posts against stale indices are NOPs.
  */
 void femu_cxl_cca_reset(FemuCxlMedia *s, uint32_t kind)
@@ -846,6 +854,8 @@ static void cca_reg_write(void *opaque, hwaddr addr, uint64_t value,
     } else if (addr == CCA_REG_RESET &&
                ((uint32_t)value == CCA_RESET_RINGS ||
                 (uint32_t)value == CCA_RESET_ALL)) {
+        FEMU_CXL_LOCK_GUARD();
+
         femu_cxl_cca_reset(s, value);
     }
 }

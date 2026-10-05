@@ -16639,10 +16639,10 @@ static void femu_cxl_decode(QTestState *qts)
     femu_cxl_decode_at(qts, 52, FEMU_CXL_REGS - 0x1000, FEMU_CXL_WINDOW);
 }
 
-static void femu_cxl_unplug(QTestState *qts)
+/* The PCI Express capability of the root port on bus 52. */
+static uint8_t femu_cxl_rp_exp_cap(QTestState *qts)
 {
     uint8_t cap;
-    QDict *rsp;
 
     qtest_outl(qts, 0xcf8, 0x80340000 | PCI_CAPABILITY_LIST);
     cap = qtest_inb(qts, 0xcfc);
@@ -16654,6 +16654,14 @@ static void femu_cxl_unplug(QTestState *qts)
         cap = qtest_inb(qts, 0xcfd);
     }
     g_assert_cmpuint(cap, !=, 0);
+    return cap;
+}
+
+static void femu_cxl_unplug(QTestState *qts)
+{
+    uint8_t cap = femu_cxl_rp_exp_cap(qts);
+    QDict *rsp;
+
     qtest_qmp_assert_success(qts, "{'execute':'device_del',"
                             "'arguments':{'id':'ssd'}}");
     /* Acknowledge removal by switching off the root port slot. */
@@ -20151,6 +20159,256 @@ static void femu_test_cxl_pingpong_4(void *obj, void *data,
 }
 
 /*
+ * Fault exits served without the BQL, as KVM sends them, from @threads
+ * vCPUs at once: test-storm runs the real service in threads that act as
+ * vCPUs. Misses overlap in the gate, as with Cylon. One set of 64 ways over
+ * 128 pages, so fills evict each other, refault, protect, conflict and hand
+ * pages to the emulator, while this thread reads and writes the window
+ * through MMIO (the BQL path).
+ */
+static QTestState *femu_cxl_storm_init(const char *extra)
+{
+    g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE "-smp 8 "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=64,cache-ways=64,prefetch-degree=0,read-ns=2000,"
+        "program-ns=4000,concurrent-misses=on%s", extra);
+    QTestState *qts = qtest_init(args);
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "test-map", true);
+    return qts;
+}
+
+static void femu_cxl_storm(QTestState *qts, unsigned threads,
+                           unsigned pages, unsigned iters, unsigned mode)
+{
+    g_autofree char *spec = g_strdup_printf("%u,%u,%u,%u,7", threads, pages,
+                                            iters, mode);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':'test-storm','value':%s}}", spec);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* Join the storm; the device's shared bookkeeping must add up. */
+static void femu_cxl_storm_wait(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                          "'path':%s,'property':'test-storm-wait',"
+                          "'value':true}}", path);
+
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("%s", qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"));
+    }
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_cxl_storm_set(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_storm_init("");
+    uint64_t misses;
+    unsigned i;
+
+    femu_cxl_storm(qts, 8, 128, 4000, 0);
+    /* Version 1 accesses take the BQL, then the CXL lock, meanwhile. */
+    for (i = 0; i < 2000; i++) {
+        uint64_t gpa = FEMU_CXL_WINDOW + (i * 37 % 128) * 4096 + 8;
+
+        if (i % 2) {
+            qtest_writeq(qts, gpa, i);
+        } else {
+            qtest_readq(qts, gpa);
+        }
+        if (i == 1000) {
+            femu_cxl_set(qts, "flush-cache", true);
+        }
+        /* Counters that the faults update, read meanwhile. */
+        if (i % 100 == 0) {
+            femu_cxl_stat(qts, "read-misses");
+        }
+    }
+    femu_cxl_storm_wait(qts, "ssd");
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served"), ==, 8 * 4000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-stops"), ==, 0);
+    misses = femu_cxl_stat(qts, "read-misses") +
+             femu_cxl_stat(qts, "write-misses");
+    g_assert_cmpuint(misses, >, 1000);
+    /* Every miss read the media once; no counter update was lost. */
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, misses);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-reads") +
+                     femu_cxl_stat(qts, "der-fault-writes"), >, 7 * 4000);
+    /* Only the first exit after decoding needed the BQL (a window scan). */
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-bql"), <=, 8);
+    qtest_quit(qts);
+}
+
+/*
+ * A fill waits out its media time inside its media read, without the locks.
+ * It must take the whole read once: a 50 ms NAND read of a programmed page
+ * keeps the fault exit at least 50 ms, and well under two reads.
+ */
+static void femu_test_cxl_fill_delay(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0,read-ns=50000000");
+    uint64_t media;
+    int64_t elapsed;
+    int64_t start;
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "test-map", true);
+    /* Program page 3, then drop it from the cache. */
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 3 * 4096, 1);
+    femu_cxl_set(qts, "flush-cache", true);
+    media = femu_cxl_stat(qts, "media-time-ns");
+    start = g_get_monotonic_time();
+    femu_cxl_set_u64(qts, "test-fault-fill", FEMU_CXL_WINDOW + 3 * 4096);
+    elapsed = g_get_monotonic_time() - start;
+    g_assert_cmpint(elapsed, >=, 50000);
+    g_assert_cmpint(elapsed, <, 95000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns") - media, >=,
+                     50000000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 1);
+    qtest_quit(qts);
+}
+
+/*
+ * A local scaling check, not a pass/fail test: with FEMU_STORM_BENCH set,
+ * program 64 MiB, then serve random read faults over it through one 256-way
+ * FIFO set with 40 us NAND reads, from 1, 4, 8 and 16 vCPUs, under the BQL
+ * as before (mode 1) and without it (mode 0), and print the fault rate.
+ */
+static void femu_test_cxl_storm_bench(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    static const unsigned threads[] = { 1, 4, 8, 16 };
+    const char *iters_env = g_getenv("FEMU_STORM_BENCH");
+    unsigned iters = iters_env ? atoi(iters_env) : 0;
+    unsigned mode;
+    unsigned page;
+    unsigned i;
+
+    if (!iters) {
+        g_test_skip("set FEMU_STORM_BENCH to faults per vCPU");
+        return;
+    }
+    for (mode = 0; mode < 2; mode++) {
+        for (i = 0; i < ARRAY_SIZE(threads); i++) {
+            if (g_getenv("FEMU_STORM_ONLY") &&
+                atoi(g_getenv("FEMU_STORM_ONLY")) != threads[i] * 2 + mode) {
+                continue;
+            }
+            QTestState *qts = qtest_init(FEMU_CXL_MACHINE "-smp 16 "
+                "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+                "cache-pages=256,cache-ways=256,cache-policy=fifo,"
+                "prefetch-degree=0,read-ns=40000,concurrent-misses=on");
+            uint64_t ns;
+            uint64_t served;
+
+            femu_cxl_decode(qts);
+            femu_cxl_set(qts, "test-map", true);
+            femu_cxl_set(qts, "fast-load", true);
+            for (page = 0; page < 16384; page++) {
+                qtest_writeq(qts, FEMU_CXL_WINDOW + page * 4096, page);
+            }
+            femu_cxl_set(qts, "flush-cache", true);
+            femu_cxl_set(qts, "fast-load", false);
+            femu_cxl_storm(qts, threads[i], 16384, iters, mode);
+            femu_cxl_storm_wait(qts, "ssd");
+            ns = femu_cxl_stat(qts, "test-storm-ns");
+            served = femu_cxl_stat(qts, "test-storm-served");
+            printf("storm mode=%s threads=%u faults=%" PRIu64 " ns=%" PRIu64
+                   " rate=%.0f/s misses=%" PRIu64 " bql=%" PRIu64 "\n",
+                   mode ? "bql" : "cxl-lock", threads[i], served, ns,
+                   served * 1e9 / MAX(ns, 1),
+                   femu_cxl_stat(qts, "read-misses"),
+                   femu_cxl_stat(qts, "der-fault-bql"));
+            printf("  emulated=%" PRIu64 " conflicts=%" PRIu64 " hits=%" PRIu64
+                   " media=%" PRIu64 "\n",
+                   femu_cxl_stat(qts, "der-fault-emulated"),
+                   femu_cxl_stat(qts, "der-fault-conflicts"),
+                   femu_cxl_stat(qts, "read-hits"),
+                   femu_cxl_stat(qts, "media-reads"));
+            qtest_quit(qts);
+        }
+    }
+}
+
+/*
+ * Change the device under faults in flight: decoder commits (each an
+ * invalidation between two register writes), cache way changes and flushes
+ * (the gate taken alone) and a system reset, which clears the decoders.
+ */
+static void femu_test_cxl_storm_change(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_storm_init("");
+    unsigned i;
+
+    femu_cxl_storm(qts, 8, 128, 3000, 0);
+    for (i = 0; i < 20; i++) {
+        femu_cxl_decode(qts);
+        femu_cxl_set_u64(qts, "cache-ways", i % 2 ? 64 : 16);
+        femu_cxl_set(qts, "flush-cache", true);
+        qtest_readq(qts, FEMU_CXL_WINDOW + i * 4096);
+    }
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    femu_cxl_decode(qts);
+    femu_cxl_storm_wait(qts, "ssd");
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served") +
+                     femu_cxl_stat(qts, "test-storm-stops"), ==, 8 * 3000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served"), >, 0);
+    /* The device still serves faults after all of it. */
+    femu_cxl_storm(qts, 4, 128, 500, 0);
+    femu_cxl_storm_wait(qts, "ssd");
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-stops"), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * Unplug the device under faults in flight: accesses leave the gate, the
+ * teardown that one of them would run goes to the main loop, and nothing
+ * the faults still hold is freed under them. A new device then takes the
+ * window and the remaining faults.
+ */
+static void femu_test_cxl_storm_unplug(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_storm_init(
+        " -global cxl-rp.power_controller_present=on "
+        "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off");
+    QDict *args = qdict_new();
+
+    femu_cxl_storm(qts, 8, 128, 20000, 0);
+    qtest_readq(qts, FEMU_CXL_WINDOW);
+    femu_cxl_unplug(qts);
+    qdict_put_str(args, "driver", "femu-cxl-ssd");
+    qdict_put_str(args, "id", "ssd2");
+    qdict_put_str(args, "bus", "rp0");
+    qdict_put_str(args, "volatile-memdev", "mem");
+    qdict_put_int(args, "cache-pages", 64);
+    qdict_put_int(args, "cache-ways", 64);
+    qtest_qmp_assert_success(qts, "{'execute':'device_add','arguments':%p}",
+                             args);
+    /* Power the slot again: the unplug switched it off. */
+    femu_cxl_config(qts, 52, femu_cxl_rp_exp_cap(qts) + PCI_EXP_SLTCTL,
+                    PCI_EXP_SLTCTL_PWR_IND_ON);
+    femu_cxl_decode(qts);
+    femu_cxl_storm_wait(qts, "ssd2");
+    g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd2", "der-fault-reads"), >, 0);
+    qtest_quit(qts);
+}
+
+/*
  * A prefetch must not map a page another access is filling. The hook starts
  * a fill of page 1 (hold and entry, read pending) where the prefetch of page
  * 1 could drop the BQL, then fails that fill. No mapping may outlive the
@@ -22775,6 +23033,13 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,
                  NULL);
+    qos_add_test("cxl-storm-set", "femu", femu_test_cxl_storm_set, NULL);
+    qos_add_test("cxl-storm-change", "femu", femu_test_cxl_storm_change,
+                 NULL);
+    qos_add_test("cxl-storm-unplug", "femu", femu_test_cxl_storm_unplug,
+                 NULL);
+    qos_add_test("cxl-storm-bench", "femu", femu_test_cxl_storm_bench, NULL);
+    qos_add_test("cxl-fill-delay", "femu", femu_test_cxl_fill_delay, NULL);
     qos_add_test("cxl-cca-bql", "femu", femu_test_cca_bql, NULL);
     qos_add_test("cxl-cca-lsa-busy", "femu", femu_test_cca_lsa_busy, NULL);
     qos_add_test("cxl-cca-disable-abandon", "femu",

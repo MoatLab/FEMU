@@ -256,20 +256,29 @@ static inline bool cylon_page_address(const uint64_t *huge, uint64_t count,
  * found current (UINT64_MAX at first) and reads the pagemap once per huge
  * page instead of once per page.
  */
+/* Whether huge page @index of the backing at @ram is still at @frame. */
+static inline bool cylon_frame_current(int pagemap, uintptr_t ram,
+                                       uint64_t huge_size, uint64_t index,
+                                       uint64_t frame)
+{
+    uint64_t entry;
+    off_t at = (ram + index * huge_size) / CYLON_PAGE_SIZE * sizeof(entry);
+
+    return pread(pagemap, &entry, sizeof(entry), at) == sizeof(entry) &&
+           (entry & CYLON_PAGEMAP_PRESENT) &&
+           (entry & CYLON_PAGEMAP_PFN) * CYLON_PAGE_SIZE == frame;
+}
+
 static inline bool cylon_pfn_current(int pagemap, const uint64_t *huge,
                                      uintptr_t ram, uint64_t huge_size,
                                      uint64_t offset, uint64_t *checked)
 {
     uint64_t index = offset / huge_size;
-    uint64_t entry;
-    off_t at = (ram + index * huge_size) / CYLON_PAGE_SIZE * sizeof(entry);
 
     if (checked && *checked == index) {
         return true;
     }
-    if (pread(pagemap, &entry, sizeof(entry), at) != sizeof(entry) ||
-        !(entry & CYLON_PAGEMAP_PRESENT) ||
-        (entry & CYLON_PAGEMAP_PFN) * CYLON_PAGE_SIZE != huge[index]) {
+    if (!cylon_frame_current(pagemap, ram, huge_size, index, huge[index])) {
         return false;
     }
     if (checked) {

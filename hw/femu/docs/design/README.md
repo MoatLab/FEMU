@@ -223,12 +223,12 @@ command lifecycle.
 ### One CXL load that misses
 
 ```text
- guest vCPU           vCPU thread in QEMU (BQL)               femu-cxl-ftl worker    memory backend
+ guest vCPU           vCPU thread (BQL, CXL lock)             femu-cxl-ftl worker    memory backend
      |                         |                                      |                    |
      | load from device range  |                                      |                    |
      |------------------------>| femu-cxl-media overlay: decode HDM   |                    |
      |                         | femu_cxl_access: cache lookup, miss  |                    |
-     |                         | drop BQL, queue NAND read ---------->| FTL + NAND model   |
+     |                         | drop locks, queue NAND read -------->| FTL + NAND model   |
      |                         |<------------------- media time ------|                    |
      |                         | evict victim (dirty: write-back cost)|                    |
      |                         | femu_cxl_delay: sleep, then spin     |                    |

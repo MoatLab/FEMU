@@ -110,6 +110,7 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `der-revoke-flushes` | `uint64` | Read-only: TLB flushes that Cylon full revocations attempted (two, or one when KVM revoked every page first or the slot is deleted next), shared by every page a revocation takes; flushes after a KVM revocation found outside a full revocation are not counted; stats-reset keeps it |
 | `der-revoked-ahead` | `uint64` | Read-only: version 2 pages whose mapping a revocation took before their own eviction; they stay cached; stats-reset keeps it |
 | `der-ahead-remaps` | `uint64` | Read-only: of der-revoked-ahead, pages accessed and mapped again before their eviction; stats-reset keeps it |
+| `der-fault-bql` | `uint64` | Read-only: Cylon fault exits that FEMU served under the BQL instead of the CXL lock alone (the first exit after an invalidation, a route through a switch or to another device); stats-reset keeps it |
 | `der-emul-fills` | `uint64` | Read-only: exits for an access KVM could not decode that FEMU served by a fill and a mapping, repeats and cache hits included; not instructions or unique pages; stats-reset keeps it |
 | `der-emul-fetch-fills` | `uint64` | Read-only: the der-emul-fills exits for code the guest executed from an unmapped page; stats-reset keeps it |
 | `der-emul-failures` | `uint64` | Read-only: such exits FEMU could not serve (unmappable page or no progress); each one stops the VM; stats-reset keeps it |

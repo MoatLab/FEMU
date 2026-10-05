@@ -187,7 +187,9 @@ DEVICES = [
                       "test-prefetch-race-end", "test-protect",
                       "test-protect-window",
                       "test-slot-reservation", "test-unprotect",
-                      "test-revoke-ahead", "test-revoke-ahead-keep"],
+                      "test-revoke-ahead", "test-revoke-ahead-keep",
+                      "test-storm", "test-storm-wait", "test-storm-served",
+                      "test-storm-stops", "test-storm-ns"],
         "topics": [
             {
                 "title": "Cache",
@@ -277,7 +279,8 @@ DEVICES = [
                     "der-fault-emulated", "der-fault-unprotected",
                     "der-fault-conflicts", "der-fault-overflows",
                     "der-revoke-flushes", "der-revoked-ahead",
-                    "der-ahead-remaps", "der-emul-fills", "der-emul-fetch-fills",
+                    "der-ahead-remaps", "der-fault-bql", "der-emul-fills",
+                    "der-emul-fetch-fills",
                     "der-emul-failures",
                 ],
             },

@@ -6,14 +6,6 @@
 #include "hw/core/cpu.h"
 #include "qemu-adapter.h"
 
-/* One vCPU's protection of a page; see femu_cxl_protect(). */
-typedef struct FemuCxlGuard {
-    int owner;
-    unsigned count;
-    /* When @owner last protected the page, QEMU_CLOCK_REALTIME ns. */
-    int64_t since;
-} FemuCxlGuard;
-
 static FemuCxlGuard *cxl_guard(FemuCxlMedia *s, int owner, uint64_t lpn)
 {
     GArray *guards = s->protect ? g_hash_table_lookup(s->protect, &lpn) : NULL;
@@ -32,6 +24,11 @@ static FemuCxlGuard *cxl_guard(FemuCxlMedia *s, int owner, uint64_t lpn)
 static bool cxl_protected(FemuCxlMedia *s, int owner, uint64_t lpn)
 {
     return cxl_guard(s, owner, lpn);
+}
+
+bool femu_cxl_protected_by(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    return cxl_protected(s, owner, lpn);
 }
 
 /*
@@ -64,17 +61,138 @@ static int cxl_owner(FemuCxlMedia *s)
     return current_cpu ? current_cpu->cpu_index : s->test_owner;
 }
 
+static QemuMutex cxl_lock;
+/* How many times this thread holds @cxl_lock. */
+static __thread unsigned cxl_lock_depth;
+static __thread bool cxl_need_bql;
+
 /*
- * BQL protects the gate. Accesses share it, so misses to different pages
- * wait for the media together; flush, invalidation and teardown take it
- * alone, after the accesses in progress, and new accesses wait for them.
+ * Holds are a few microseconds and a sleeping handoff costs about as much,
+ * so let a contender spin briefly before it sleeps (glibc adaptive mutex).
+ */
+static void __attribute__((constructor)) cxl_lock_init(void)
+{
+    qemu_mutex_init(&cxl_lock);
+#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
+    {
+        pthread_mutexattr_t attr;
+
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+        pthread_mutex_destroy(&cxl_lock.lock);
+        pthread_mutex_init(&cxl_lock.lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
+#endif
+}
+
+void femu_cxl_lock(void)
+{
+    if (!cxl_lock_depth++) {
+        qemu_mutex_lock(&cxl_lock);
+    }
+}
+
+void femu_cxl_unlock(void)
+{
+    assert(cxl_lock_depth);
+    if (!--cxl_lock_depth) {
+        qemu_mutex_unlock(&cxl_lock);
+    }
+}
+
+bool femu_cxl_locked(void)
+{
+    return cxl_lock_depth;
+}
+
+void femu_cxl_drop(FemuCxlHeld *held)
+{
+    assert(cxl_lock_depth);
+    held->depth = cxl_lock_depth;
+    held->bql = bql_locked();
+    cxl_lock_depth = 0;
+    qemu_mutex_unlock(&cxl_lock);
+    if (held->bql) {
+        bql_unlock();
+    }
+}
+
+void femu_cxl_retake(const FemuCxlHeld *held)
+{
+    assert(!cxl_lock_depth);
+    if (held->bql) {
+        bql_lock();
+    }
+    qemu_mutex_lock(&cxl_lock);
+    cxl_lock_depth = held->depth;
+}
+
+/*
+ * The condition wait releases @cxl_lock atomically. A thread that also holds
+ * the BQL lets it go first and takes it back before the CXL lock, in lock
+ * order; its caller rechecks its condition in a loop either way.
+ */
+static void cxl_wait(QemuCond *cond, int ms)
+{
+    unsigned depth = cxl_lock_depth;
+    bool bql = bql_locked();
+
+    assert(depth);
+    if (bql) {
+        bql_unlock();
+    }
+    cxl_lock_depth = 0;
+    if (ms < 0) {
+        qemu_cond_wait(cond, &cxl_lock);
+    } else {
+        qemu_cond_timedwait(cond, &cxl_lock, ms);
+    }
+    if (bql) {
+        qemu_mutex_unlock(&cxl_lock);
+        bql_lock();
+        qemu_mutex_lock(&cxl_lock);
+    }
+    cxl_lock_depth = depth;
+}
+
+void femu_cxl_wait(QemuCond *cond)
+{
+    cxl_wait(cond, -1);
+}
+
+void femu_cxl_timedwait(QemuCond *cond, int ms)
+{
+    cxl_wait(cond, MAX(ms, 0));
+}
+
+bool femu_cxl_bql_needed(void)
+{
+    return cxl_need_bql;
+}
+
+void femu_cxl_need_bql(void)
+{
+    cxl_need_bql = true;
+}
+
+void femu_cxl_clear_need_bql(void)
+{
+    cxl_need_bql = false;
+}
+
+/*
+ * The CXL lock protects the gate. Accesses share it, so misses to different
+ * pages wait for the media together; flush, invalidation and teardown take
+ * it alone, after the accesses in progress, and new accesses wait for them.
  */
 void femu_cxl_enter(FemuCxlMedia *s)
 {
+    assert(femu_cxl_locked());
     s->waiters++;
     s->exclusive_waiters++;
     while (s->busy || s->accesses) {
-        qemu_cond_wait_bql(&s->idle);
+        femu_cxl_wait(&s->idle);
     }
     s->exclusive_waiters--;
     s->waiters--;
@@ -82,11 +200,43 @@ void femu_cxl_enter(FemuCxlMedia *s)
     s->busy = true;
 }
 
+/*
+ * Teardown that a fault exit without the BQL left to the main loop. It takes
+ * the gate alone, which waits only for accesses in progress: those see
+ * @closing and leave without waiting for the main loop.
+ */
+static void cxl_release_bh(void *opaque)
+{
+    FemuCxlMedia *s = opaque;
+
+    WITH_FEMU_CXL_LOCK() {
+        s->release_scheduled = false;
+        if (s->release) {
+            femu_cxl_enter(s);
+            femu_cxl_leave(s);
+        }
+    }
+    object_unref(s->owner);
+}
+
 /* The last one out of the gate runs what was deferred to it. */
 static void cxl_gate_idle(FemuCxlMedia *s)
 {
-    /* Teardown deferred by an unplug runs while the gate is still held. */
-    if (s->release) {
+    /*
+     * Teardown deferred by an unplug runs while the gate is still held. It
+     * stops threads and deletes the memory listener, which needs the BQL. A
+     * thread without it leaves the gate open and the teardown to a bottom
+     * half: holding the gate for the main loop would make a vCPU wait for
+     * it, and the main loop may be pausing vCPUs.
+     */
+    if (s->release && !bql_locked()) {
+        if (!s->release_scheduled) {
+            s->release_scheduled = true;
+            object_ref(s->owner);
+            aio_bh_schedule_oneshot(qemu_get_aio_context(), cxl_release_bh,
+                                    s);
+        }
+    } else if (s->release) {
         void (*release)(FemuCxlMedia *) = s->release;
 
         s->release = NULL;
@@ -123,9 +273,10 @@ bool femu_cxl_concurrent(FemuCxlMedia *s)
 
 void femu_cxl_enter_access(FemuCxlMedia *s)
 {
+    assert(femu_cxl_locked());
     s->waiters++;
     while (s->busy || s->exclusive_waiters) {
-        qemu_cond_wait_bql(&s->idle);
+        femu_cxl_wait(&s->idle);
     }
     s->waiters--;
     s->entries++;
@@ -143,20 +294,27 @@ void femu_cxl_leave_access(FemuCxlMedia *s)
 /* Spin only this close to the deadline; sleeps can overshoot by this much. */
 #define FEMU_CXL_SPIN_NS (100 * SCALE_US)
 
-void femu_cxl_delay(uint64_t ns)
+/* Sleep, then spin, until @deadline (QEMU_CLOCK_REALTIME ns); no locks. */
+static void cxl_sleep_until(int64_t deadline)
 {
-    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
-    int64_t remaining;
+    int64_t remaining = deadline - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
-    bql_unlock();
-    remaining = deadline - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     if (remaining > FEMU_CXL_SPIN_NS) {
         g_usleep((remaining - FEMU_CXL_SPIN_NS) / SCALE_US);
     }
     while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < deadline) {
         cpu_relax();
     }
-    bql_lock();
+}
+
+void femu_cxl_delay(uint64_t ns)
+{
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ns;
+    FemuCxlHeld held;
+
+    femu_cxl_drop(&held);
+    cxl_sleep_until(deadline);
+    femu_cxl_retake(&held);
 }
 
 /* Only metadata reaches the worker; the vCPU owns all payload access. */
@@ -204,6 +362,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
         },
     };
     QemuCond done_cond;
+    FemuCxlHeld held;
     uint64_t writes;
 
     if (!s->ftl) {
@@ -211,7 +370,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     }
     work.done_cond = &done_cond;
     qemu_cond_init(&done_cond);
-    bql_unlock();
+    femu_cxl_drop(&held);
     qemu_mutex_lock(&s->lock);
     QSIMPLEQ_INSERT_TAIL(&s->work, &work, next);
     qemu_cond_signal(&s->worker_cond);
@@ -222,7 +381,17 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     writes = ssd_nand_write_pages(s->ns.ssd);
     qemu_mutex_unlock(&s->lock);
     qemu_cond_destroy(&done_cond);
-    bql_lock();
+    /*
+     * A fill's last media read: check the frame it will map and wait out its
+     * media time here, so the fill takes the locks once more instead of
+     * twice. The time still counts from the start of the access.
+     */
+    if (op->fold && work.req.status == NVME_SUCCESS) {
+        femu_cxl_der_precheck_run();
+        cxl_sleep_until(op->start + op->ns + work.latency);
+    }
+    op->fold = false;
+    femu_cxl_retake(&held);
     s->media_ns += work.latency;
     op->ns += work.latency;
     s->media_writes = writes;
@@ -382,7 +551,7 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     if (!e->dirty || s->free_writeback) {
         return true;
     }
-    /* The write-back drops the BQL; accesses to the page wait until it ends. */
+    /* The write-back drops the locks; accesses to the page wait for it. */
     if (own) {
         return femu_cxl_media(op, e->lpn, true);
     }
@@ -434,7 +603,7 @@ void femu_cxl_nvme_mark_ratio(FemuCxlMedia *s, uint64_t first, uint64_t last)
     }
 }
 
-/* The media delay drops the BQL, so a decoder change may have intervened. */
+/* The media delay drops the locks, so a decoder change may have intervened. */
 static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
                     uint64_t dpa, FemuCxlEntry *e)
 {
@@ -457,6 +626,22 @@ static void cxl_media_full(FemuCxlMedia *s)
     if (!s->media_full++) {
         warn_report("femu-cxl-ssd: NAND is full; accesses go uncached "
                     "(add over-provisioning with blocks-per-plane)");
+    }
+}
+
+/*
+ * A one-page fill without prefetch does nothing after its media read that
+ * takes media time, so femu_cxl_media() may end its delay and check the frame
+ * it maps while it is without the locks. An access that moves data inserts
+ * its page after the read, which overlaps the delay instead.
+ */
+static void cxl_fold(FemuCxlMedia *s, FemuCxlOp *op, int64_t start,
+                     uint64_t lpn)
+{
+    op->start = start;
+    op->fold = !s->fast_load && !s->prefetch_degree;
+    if (op->fold) {
+        femu_cxl_der_precheck(&s->direct, lpn);
     }
 }
 
@@ -487,6 +672,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     bool over = false;
     unsigned i;
 
+    assert(femu_cxl_locked());
     if (mapped) {
         *mapped = false;
     }
@@ -502,7 +688,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     for (lpn = first; lpn <= last; lpn++) {
         pages[holds] = lpn;
         while (g_hash_table_contains(s->pages, &pages[holds])) {
-            qemu_cond_wait_bql(&s->idle);
+            femu_cxl_wait(&s->idle);
         }
         g_hash_table_add(s->pages, &pages[holds++]);
     }
@@ -572,12 +758,13 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             }
             /*
              * A fill takes its way before the media read, which drops the
-             * BQL: nothing can take the victim meanwhile, and a page it
+             * locks: nothing can take the victim meanwhile, and a page it
              * cannot keep is neither charged nor counted. The caller hands
              * that page to the emulator, which charges each access.
              */
             if (over) {
                 /* Charged as a fill; writes through the mapping are not. */
+                cxl_fold(s, &op, start, lpn);
                 if (!femu_cxl_media(&op, lpn, false)) {
                     goto out;
                 }
@@ -592,6 +779,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     result = MEMTX_OK;
                     goto out;
                 }
+                cxl_fold(s, &op, start, lpn);
                 if (!femu_cxl_media(&op, lpn, false)) {
                     femu_cxl_fill_failed(s, lpn, e);
                     goto out;
@@ -642,7 +830,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 }
                 /*
                  * Hold @next across insertion, whose eviction write-back can
-                 * drop the BQL, and mapping: a demand fill of it waits, so a
+                 * drop the locks, and mapping: a demand fill of it waits, so a
                  * prefetch never maps a page another access is filling.
                  */
                 g_hash_table_add(s->pages, &held);
@@ -724,6 +912,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     result = MEMTX_OK;
 out:
+    femu_cxl_der_precheck_drop();
     /* A failed fill may have evicted or removed an entry. */
     if (s->cache.entries) {
         s->cache_entries = g_hash_table_size(s->cache.entries);
@@ -773,6 +962,7 @@ void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e)
  */
 bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn)
 {
+    assert(femu_cxl_locked());
     if (femu_cxl_cca_uncached(&s->cca, lpn)) {
         return false;
     }
@@ -837,7 +1027,7 @@ static FemuCxlFillState cxl_fill_state(FemuCxlMedia *s, int owner,
 /*
  * Whether a fill of @lpn by the current vCPU keeps nothing because pages
  * that the same vCPU protects hold every way of the set that is not pinned:
- * the instruction's own pages do not fit. BQL.
+ * the instruction's own pages do not fit. CXL lock.
  */
 bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn)
 {
@@ -858,7 +1048,7 @@ bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn)
  * holding the set's pages or recent protections of other vCPUs. Returns
  * true when a new fill can keep the page, false when it cannot, the wait
  * timed out, or the device was reset, invalidated or closed meanwhile.
- * BQL; the caller holds no page and is outside the gate.
+ * CXL lock; the caller holds no page and is outside the gate.
  */
 bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
                         bool keep_own)
@@ -866,6 +1056,7 @@ bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
     uint64_t generation = s->invalidations;
     int owner = cxl_owner(s);
 
+    assert(femu_cxl_locked());
     for (;;) {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         int64_t until = deadline;
@@ -886,7 +1077,7 @@ bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
             return false;
         }
         /* A holder broadcasts when it ends; an expiry needs the timeout. */
-        qemu_cond_timedwait_bql(&s->idle,
+        femu_cxl_timedwait(&s->idle,
             MAX(1, DIV_ROUND_UP(MIN(until, deadline) - now, SCALE_MS)));
     }
 }
@@ -906,6 +1097,7 @@ void femu_cxl_protect(FemuCxlMedia *s, int owner, uint64_t lpn)
 {
     FemuCxlGuard *g;
 
+    assert(femu_cxl_locked());
     if (!s->protect) {
         s->protect = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                            g_free,
@@ -1252,6 +1444,7 @@ void femu_cxl_nvme_bh(void *opaque)
     GArray *ranges;
     uint64_t done;
     guint i;
+    FEMU_CXL_LOCK_GUARD();
 
     if (s->busy || s->accesses) {
         s->nvme_kick = true;

@@ -43,6 +43,8 @@ struct FemuCxlSsd {
     CXLType3Dev parent_obj;
     FemuCxlMedia media;
     MemoryRegion component_overlay;
+    /* The bridge above the device, set while it is in adapter_live. */
+    PCIDevice *port;
     Notifier machine_done;
     bool attached;
     bool test_change_dpa;
@@ -98,7 +100,7 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 #define FEMU_CXL_DER_CLEAN 8
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
-/* Version 2 of the Cylon fault exit is on for the VM (per VM). BQL. */
+/* Version 2 of the Cylon fault exit is on for the VM (per VM). CXL lock. */
 static bool cylon_v2;
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
                            uint64_t hpa, uint64_t dpa);
@@ -420,15 +422,113 @@ typedef struct FemuCxlWindow {
     struct rcu_head rcu;
     CXLFixedWindow *fw;
     MemoryRegion io;
+    /*
+     * The root port below the window's one passthrough host bridge, once a
+     * route under the BQL found it, else NULL. Root ports on a pxb-cxl bus
+     * take no hotplug, and a host bridge becomes passthrough at its first
+     * reset and stays so.
+     */
+    PCIDevice *port;
     QLIST_ENTRY(FemuCxlWindow) next;
 } FemuCxlWindow;
 
 /* Decoder changes a fill waits through before it gives up. */
 #define ADAPTER_FILL_REROUTES 8
+/* Not a MemTxResult: the decoders changed while the access waited. */
+#define ADAPTER_REROUTE (1U << 30)
+
+static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
+                                        FemuCxlSsd *cxl, uint64_t *data,
+                                        unsigned size, bool write,
+                                        bool *mapped, unsigned flags);
+static bool der_windows_stale(FemuCxlDer *der);
+
+static void cxl_unref_bh(void *opaque)
+{
+    object_unref(opaque);
+}
+
+/*
+ * Drop a reference that a fault exit took on @dev. The last reference
+ * finalizes the device, which needs the BQL. Until unplug sets @closing
+ * (under the CXL lock, which the caller holds) the parent holds one, so
+ * only a closing device's reference goes to a bottom half.
+ */
+static void cxl_unref(FemuCxlSsd *dev)
+{
+    assert(femu_cxl_locked());
+    if (!bql_locked() && dev->media.closing) {
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), cxl_unref_bh,
+                                OBJECT(dev));
+        return;
+    }
+    object_unref(OBJECT(dev));
+}
 
 static QLIST_HEAD(, FemuCxlWindow) adapter_windows =
     QLIST_HEAD_INITIALIZER(adapter_windows);
 static unsigned adapter_users;
+
+/*
+ * Realized femu-cxl-ssd devices, under the CXL lock: added at the end of
+ * realize, removed at the start of unplug, so one in the list is alive.
+ */
+static GPtrArray *adapter_live;
+
+static PCIDevice *adapter_pci(FemuCxlSsd *dev)
+{
+    return &dev->parent_obj.parent_obj;
+}
+
+/*
+ * adapter_route() for a thread without the BQL, under the CXL lock. It
+ * reads no decoder and no bus: a window with one passthrough host bridge
+ * routes everything to that bridge's root port, and the device there is
+ * the live femu-cxl-ssd whose parent port it is, if any. Anything else (an
+ * interleaved or decoding window, a switch, another device or none) needs
+ * the full walk under the BQL: the caller is told so with
+ * femu_cxl_need_bql().
+ */
+static PCIDevice *adapter_route_fast(FemuCxlWindow *w)
+{
+    unsigned i;
+
+    assert(femu_cxl_locked());
+    for (i = 0; w->port && adapter_live && i < adapter_live->len; i++) {
+        FemuCxlSsd *dev = g_ptr_array_index(adapter_live, i);
+
+        if (dev->port == w->port) {
+            return adapter_pci(dev);
+        }
+    }
+    femu_cxl_need_bql();
+    return NULL;
+}
+
+/* Publish @w's root port for adapter_route_fast(); BQL and CXL lock. */
+static void adapter_window_port(FemuCxlWindow *w)
+{
+    PCIHostState *hb;
+
+    if (w->port || w->fw->num_targets != 1 || !femu_cxl_locked()) {
+        return;
+    }
+    hb = adapter_host(w->fw, 0);
+    if (hb && hb->bus && pci_bus_is_cxl(hb->bus) &&
+        cxl_get_hb_passthrough(hb)) {
+        w->port = pcie_find_port_first(hb->bus);
+    }
+}
+
+/* Route with the BQL if this thread holds it, else under the CXL lock. */
+static PCIDevice *adapter_route_locked(FemuCxlWindow *w, hwaddr addr)
+{
+    if (bql_locked()) {
+        adapter_window_port(w);
+        return adapter_route(w->fw, addr);
+    }
+    return adapter_route_fast(w);
+}
 
 /*
  * With @mapped, fill the page instead of moving data, and report whether it
@@ -440,23 +540,21 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
                                    MemTxAttrs attrs, bool *mapped,
                                    unsigned flags)
 {
-    uint64_t hpa = w->fw->base + offset;
     unsigned reroutes = 0;
 
     for (;;) {
-        PCIDevice *dev = adapter_route(w->fw, offset);
-        FemuCxlMedia *s;
-        CXLType3Dev *ct3d;
-        uint64_t dpa;
+        PCIDevice *dev = adapter_route_locked(w, offset);
+        /* The route without the BQL finds only femu-cxl-ssd devices. */
+        bool femu = dev && (!bql_locked() ||
+                            object_dynamic_cast(OBJECT(dev),
+                                                TYPE_FEMU_CXL_SSD));
         MemTxResult result;
-        bool shared;
 
         /*
          * Nothing decodes the address: answer as the window would, without
          * letting its own router see decoder values that make it assert.
          */
-        if (mapped && (!dev ||
-                       !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD))) {
+        if (mapped && !femu) {
             return MEMTX_ERROR;
         }
         if (!dev) {
@@ -465,83 +563,116 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             }
             return write ? MEMTX_OK : MEMTX_ERROR;
         }
-        if (!object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
+        if (!femu) {
             return write ? memory_region_dispatch_write(&w->fw->mr, offset,
                                 *data, size_memop(size) | MO_LE, attrs) :
                            memory_region_dispatch_read(&w->fw->mr, offset,
                                 data, size_memop(size) | MO_LE, attrs);
         }
-        ct3d = CXL_TYPE3(dev);
-        s = &FEMU_CXL_SSD(dev)->media;
-        if (!adapter_translate(ct3d, hpa, size, &dpa)) {
+        femu_cxl_lock();
+        result = adapter_media_access(w, offset,
+                                      container_of(dev, FemuCxlSsd,
+                                                   parent_obj.parent_obj),
+                                      data, size, write, mapped, flags);
+        femu_cxl_unlock();
+        if (result != ADAPTER_REROUTE) {
+            return result;
+        }
+        /* A fill is retried by its caller; never spin here for it. */
+        if (mapped && ++reroutes > ADAPTER_FILL_REROUTES) {
             return MEMTX_ERROR;
         }
-        if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
-            /* Disabled media keeps trapping, so it is never mapped. */
-            if (mapped) {
-                return MEMTX_ERROR;
-            }
+    }
+}
+
+/*
+ * The part of adapter_access() for a femu-cxl-ssd, under the CXL lock.
+ * Returns ADAPTER_REROUTE when the decoders changed while it waited for the
+ * gate, so the caller routes the access again.
+ */
+static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
+                                        FemuCxlSsd *cxl, uint64_t *data,
+                                        unsigned size, bool write,
+                                        bool *mapped, unsigned flags)
+{
+    uint64_t hpa = w->fw->base + offset;
+    FemuCxlMedia *s = &cxl->media;
+    CXLType3Dev *ct3d = CXL_TYPE3(cxl);
+    MemTxResult result;
+    uint64_t dpa;
+    bool shared;
+
+    /* Memslot mappings and ratios rebuild the memory map: BQL. */
+    if (!bql_locked() && s->direct.memslot) {
+        femu_cxl_need_bql();
+        return MEMTX_ERROR;
+    }
+    if (!adapter_translate(ct3d, hpa, size, &dpa)) {
+        return MEMTX_ERROR;
+    }
+    if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+        /* Disabled media keeps trapping, so it is never mapped. */
+        if (mapped) {
+            return MEMTX_ERROR;
+        }
+        if (!write) {
+            qemu_guest_getrandom_nofail(data, size);
+        }
+        return MEMTX_OK;
+    }
+    /* Inject a decoder change while this access waits for the gate. */
+    if (cxl->test_change_dpa) {
+        uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
+
+        cxl->test_change_dpa = false;
+        stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
+    }
+    object_ref(OBJECT(cxl));
+    shared = femu_cxl_concurrent(s);
+    if (shared) {
+        femu_cxl_enter_access(s);
+    } else {
+        femu_cxl_enter(s);
+    }
+    /* Decoders may have changed while waiting; complete as they are now. */
+    if (adapter_route_locked(w, offset) != adapter_pci(cxl)) {
+        result = ADAPTER_REROUTE;
+    } else if (mapped && !bql_locked() && s->direct.fast &&
+               der_windows_stale(&s->direct)) {
+        /*
+         * An invalidation while this fill waited for the gate: its map
+         * would scan the windows, so it runs under the BQL instead, before
+         * it counts anything.
+         */
+        femu_cxl_need_bql();
+        result = MEMTX_ERROR;
+    } else if (!s->started || s->closing ||
+               !adapter_translate(ct3d, hpa, size, &dpa)) {
+        result = MEMTX_ERROR;
+    } else if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
+        if (mapped) {
+            result = MEMTX_ERROR;
+        } else {
             if (!write) {
                 qemu_guest_getrandom_nofail(data, size);
             }
-            return MEMTX_OK;
+            result = MEMTX_OK;
         }
-        /* Inject a decoder change while this access waits for the gate. */
-        if (FEMU_CXL_SSD(dev)->test_change_dpa) {
-            uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
-
-            FEMU_CXL_SSD(dev)->test_change_dpa = false;
-            stl_le_p(regs + R_CXL_HDM_DECODER0_DPA_SKIP_LO, 256 * MiB);
+    } else {
+        /* Invalidation revoked a memslot ratio; map it again first. */
+        if (s->direct.ratio && !s->direct.cylon && !s->direct.ratio_end) {
+            cxl_ratio_restore(cxl, NULL);
         }
-        object_ref(OBJECT(dev));
-        shared = femu_cxl_concurrent(s);
-        if (shared) {
-            femu_cxl_enter_access(s);
-        } else {
-            femu_cxl_enter(s);
-        }
-        /* Decoders may have changed while waiting; complete as they are now. */
-        if (adapter_route(w->fw, offset) != dev) {
-            if (shared) {
-                femu_cxl_leave_access(s);
-            } else {
-                femu_cxl_leave(s);
-            }
-            object_unref(OBJECT(dev));
-            /* A fill is retried by its caller; never spin here for it. */
-            if (mapped && ++reroutes > ADAPTER_FILL_REROUTES) {
-                return MEMTX_ERROR;
-            }
-            continue;
-        }
-        if (!s->started || s->closing ||
-            !adapter_translate(ct3d, hpa, size, &dpa)) {
-            result = MEMTX_ERROR;
-        } else if (cxl_dev_media_disabled(&ct3d->cxl_dstate)) {
-            if (mapped) {
-                result = MEMTX_ERROR;
-            } else {
-                if (!write) {
-                    qemu_guest_getrandom_nofail(data, size);
-                }
-                result = MEMTX_OK;
-            }
-        } else {
-            /* Invalidation revoked a memslot ratio; map it again first. */
-            if (s->direct.ratio && !s->direct.cylon && !s->direct.ratio_end) {
-                cxl_ratio_restore(FEMU_CXL_SSD(dev), NULL);
-            }
-            result = mapped ? femu_cxl_fill(s, hpa, dpa, mapped, flags) :
-                     femu_cxl_access(s, hpa, dpa, data, size, write);
-        }
-        if (shared) {
-            femu_cxl_leave_access(s);
-        } else {
-            femu_cxl_leave(s);
-        }
-        object_unref(OBJECT(dev));
-        return result;
+        result = mapped ? femu_cxl_fill(s, hpa, dpa, mapped, flags) :
+                 femu_cxl_access(s, hpa, dpa, data, size, write);
     }
+    if (shared) {
+        femu_cxl_leave_access(s);
+    } else {
+        femu_cxl_leave(s);
+    }
+    cxl_unref(cxl);
+    return result;
 }
 
 static MemTxResult adapter_read(void *opaque, hwaddr offset, uint64_t *data,
@@ -569,6 +700,7 @@ static void adapter_machine_done(Notifier *notifier, void *opaque)
     FemuCxlSsd *dev = container_of(notifier, FemuCxlSsd, machine_done);
     GSList *windows = cxl_fmws_get_all_sorted();
     GSList *it;
+    FEMU_CXL_LOCK_GUARD();
 
     dev->attached = true;
     adapter_users++;
@@ -601,8 +733,10 @@ static void adapter_machine_done(Notifier *notifier, void *opaque)
     g_slist_free(windows);
 }
 
+/* The CXL lock protects the window list, which BQL-free fault exits read. */
 static void adapter_detach(FemuCxlSsd *dev)
 {
+    assert(femu_cxl_locked());
     qemu_remove_machine_init_done_notifier(&dev->machine_done);
     if (dev->attached && !--adapter_users) {
         FemuCxlWindow *w;
@@ -627,17 +761,30 @@ static void cxl_invalidate(CXLType3Dev *ct3d)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(ct3d)->media;
 
+    assert(femu_cxl_locked());
     s->invalidations++;
     if (s->started) {
         femu_cxl_der_clear(&s->direct);
     }
 }
 
+/*
+ * A configuration write that changes routing runs between two
+ * invalidations. The CXL lock is not held across the parent's write, which
+ * can rebuild the memory map; a fault exit that routes while it changes
+ * installs no mapping that the second invalidation does not revoke, and one
+ * that starts after it sees the new routing.
+ */
 static void adapter_config_write(PCIDevice *dev, uint32_t addr,
                                    uint32_t value, int size)
 {
-    cxl_invalidate(CXL_TYPE3(dev));
+    WITH_FEMU_CXL_LOCK() {
+        cxl_invalidate(CXL_TYPE3(dev));
+    }
     parent_config_write(dev, addr, value, size);
+    WITH_FEMU_CXL_LOCK() {
+        cxl_invalidate(CXL_TYPE3(dev));
+    }
 }
 
 static MemTxResult adapter_component_read(void *opaque, hwaddr offset,
@@ -655,7 +802,9 @@ static MemTxResult adapter_component_write(void *opaque, hwaddr offset,
                                            MemTxAttrs attrs)
 {
     CXLType3Dev *dev = CXL_TYPE3(opaque);
+    FEMU_CXL_LOCK_GUARD();
 
+    /* The decoders change under the lock that fault exits read them with. */
     cxl_invalidate(dev);
     return memory_region_dispatch_write(&dev->cxl_cstate.crb.cache_mem, offset,
                                         data, size_memop(size) | MO_LE, attrs);
@@ -669,24 +818,42 @@ static const MemoryRegionOps adapter_component_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 8 },
 };
 
+/* Get LSA carries a control command, not a configuration change. */
+static bool adapter_command_changes(CXLCCI *cci, uint8_t set, uint8_t cmd)
+{
+    CXLType3Dev *dev = CXL_TYPE3(cci->d);
+
+    return !(cci == &dev->cci && FEMU_CXL_SSD(dev)->media.lsa_control &&
+             (set << 8 | cmd) == 0x4102);
+}
+
+/*
+ * A mailbox command runs under the CXL lock, from this hook to the post hook,
+ * so a fault exit never sees the media state or capacity it changes half
+ * way. The handlers never wait for vCPUs; a Get LSA control command that
+ * waits lets the lock go like any wait.
+ */
 static void adapter_pre_command(void *opaque, uint8_t set, uint8_t cmd)
 {
     CXLCCI *cci = opaque;
     CXLType3Dev *dev = CXL_TYPE3(cci->d);
 
-    /* Get LSA carries a control command, not a configuration change. */
-    if (cci == &dev->cci && FEMU_CXL_SSD(dev)->media.lsa_control &&
-        (set << 8 | cmd) == 0x4102) {
-        FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
-        return;
+    femu_cxl_lock();
+    if (adapter_command_changes(cci, set, cmd)) {
+        cxl_invalidate(dev);
     }
-    cxl_invalidate(dev);
     FEMU_CXL_SSD(dev)->lsa_limit = cci->payload_max;
+}
+
+static void adapter_post_command(void *opaque, uint8_t set, uint8_t cmd)
+{
+    femu_cxl_unlock();
 }
 
 static void adapter_cci_hook(CXLCCI *cci, CXLType3Dev *dev)
 {
     cci->pre_command = adapter_pre_command;
+    cci->post_command = adapter_post_command;
     cci->pre_command_opaque = cci;
 }
 
@@ -708,9 +875,11 @@ static void adapter_cci_dispose(CXLCCI *cci, bool parent_destroys)
     }
 }
 
+/* The lock covers the parent's reset too: it clears the decoders. */
 static void adapter_reset_hold(Object *obj, ResetType type)
 {
     CXLType3Dev *dev = CXL_TYPE3(obj);
+    FEMU_CXL_LOCK_GUARD();
 
     cxl_invalidate(dev);
     femu_cylon_reset(&FEMU_CXL_SSD(dev)->media.direct);
@@ -731,6 +900,7 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     FemuCxlOp op = { .s = s };
+    FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
     femu_cxl_enter(s);
@@ -755,6 +925,8 @@ out:
 
 static bool cxl_fast_load_get(Object *obj, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     return FEMU_CXL_SSD(obj)->media.fast_load;
 }
 
@@ -766,6 +938,7 @@ static bool cxl_fast_load_get(Object *obj, Error **errp)
 static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
     femu_cxl_enter(s);
@@ -785,6 +958,7 @@ out:
 static void cxl_stats_reset(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
     femu_cxl_enter(s);
@@ -812,10 +986,13 @@ static void cxl_runtime_get(Object *obj, Visitor *v, const char *name,
                             void *opaque, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
-    uint32_t value = !strcmp(name, "cache-ways") ? s->cache_ways :
-                     !strcmp(name, "prefetch-degree") ? s->prefetch_degree :
-                     s->prefetch_stride;
+    uint32_t value;
 
+    WITH_FEMU_CXL_LOCK() {
+        value = !strcmp(name, "cache-ways") ? s->cache_ways :
+                !strcmp(name, "prefetch-degree") ? s->prefetch_degree :
+                s->prefetch_stride;
+    }
     visit_type_uint32(v, name, &value, errp);
 }
 
@@ -824,6 +1001,7 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     uint32_t value;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!visit_type_uint32(v, name, &value, errp)) {
         return;
@@ -986,6 +1164,7 @@ static void cxl_stats_note(Object *obj, uint64_t command, uint64_t argument)
 static void cxl_counters_clear(Object *obj)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
     femu_cxl_enter(s);
@@ -1002,6 +1181,7 @@ static void cxl_command(Object *obj, uint64_t command, uint64_t argument,
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     FILE *file;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!s->started || s->closing) {
         error_setg(errp, "CXL control requires a realized device");
@@ -1141,10 +1321,13 @@ static void cxl_control_get(Object *obj, Visitor *v, const char *name,
                             void *opaque, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
-    uint64_t value = !strcmp(name, "der-ratio") ? s->direct.ratio :
-                     !strcmp(name, "control-command") ? s->control_command :
-                                                        s->control_argument;
+    uint64_t value;
 
+    WITH_FEMU_CXL_LOCK() {
+        value = !strcmp(name, "der-ratio") ? s->direct.ratio :
+                !strcmp(name, "control-command") ? s->control_command :
+                                                   s->control_argument;
+    }
     visit_type_uint64(v, name, &value, errp);
 }
 
@@ -1154,6 +1337,7 @@ static void cxl_control_set(Object *obj, Visitor *v, const char *name,
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     uint64_t value;
     Error *local_err = NULL;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!visit_type_uint64(v, name, &value, errp)) {
         return;
@@ -1180,7 +1364,7 @@ static void cxl_control_set(Object *obj, Visitor *v, const char *name,
 }
 
 /*
- * Commands that never drop the BQL, so they can finish inside the mailbox
+ * Commands that never drop the locks, so they can finish inside the mailbox
  * handler once the gate is free. Flushes and way changes wait for the media.
  */
 static bool cxl_lsa_inline(uint64_t command)
@@ -1207,6 +1391,7 @@ static void cxl_lsa_bh(void *opaque)
     FemuCxlSsd *dev = opaque;
     FemuCxlMedia *s = &dev->media;
     FemuCxlLsaCommand *c;
+    FEMU_CXL_LOCK_GUARD();
 
     /* Commands queued while one sleeps join this pass, in order. */
     while ((c = g_queue_pop_head(&dev->lsa_queue))) {
@@ -1235,6 +1420,7 @@ static uint64_t cxl_get_lsa(CXLType3Dev *dev, void *buf, uint64_t size,
     FemuCxlSsd *cxl = FEMU_CXL_SSD(dev);
     FemuCxlMedia *s = &cxl->media;
     Error *err = NULL;
+    FEMU_CXL_LOCK_GUARD();
 
     if (size > FEMU_CXL_SSD(dev)->lsa_limit) {
         s->control_status = 1;
@@ -1290,6 +1476,7 @@ static void cxl_set_lsa(CXLType3Dev *dev, const void *buf, uint64_t size,
                        uint64_t offset)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!s->lsa_control) {
         if (size) {
@@ -1403,10 +1590,17 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     if (s->lsa_control) {
         s->labels = g_malloc0(FEMU_CXL_LSA_SIZE);
     }
-    femu_cxl_start(s, memory_region_get_ram_ptr(mr), size, policy);
-    femu_cxl_der_init(&s->direct, FEMU_CXL_SSD(dev), s->der, &s->cache);
-    s->closing = false;
-    s->started = true;
+    WITH_FEMU_CXL_LOCK() {
+        femu_cxl_start(s, memory_region_get_ram_ptr(mr), size, policy);
+        femu_cxl_der_init(&s->direct, FEMU_CXL_SSD(dev), s->der, &s->cache);
+        s->closing = false;
+        s->started = true;
+        if (!adapter_live) {
+            adapter_live = g_ptr_array_new();
+        }
+        FEMU_CXL_SSD(dev)->port = pci_get_bus(dev)->parent_dev;
+        g_ptr_array_add(adapter_live, dev);
+    }
     memory_region_init_io(&FEMU_CXL_SSD(dev)->component_overlay, OBJECT(dev),
                           &adapter_component_ops, ct3d, "femu-cxl-component",
                           CXL2_COMPONENT_CM_REGION_SIZE);
@@ -1437,7 +1631,10 @@ static void cxl_media_release(FemuCxlMedia *s)
 static void cxl_exit(PCIDevice *dev)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(dev)->media;
+    FEMU_CXL_LOCK_GUARD();
 
+    /* A BQL-free fault exit no longer routes here; see adapter_route_fast(). */
+    g_ptr_array_remove(adapter_live, dev);
     femu_cxl_cca_stop(s);
     /*
      * A guest unplug arrives inside the host bridge's dispatch guard, so do
@@ -1473,17 +1670,23 @@ static void cxl_exit(PCIDevice *dev)
 
 static bool cxl_der_emul_exit(Object *obj, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     return FEMU_CXL_SSD(obj)->media.direct.emul_exit;
 }
 
 /* The version is per VM: every device reports the VM's state. */
 static bool cxl_der_emul_v2(Object *obj, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     return cylon_v2;
 }
 
 static bool cxl_der_active(Object *obj, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     return FEMU_CXL_SSD(obj)->media.direct.available;
 }
 
@@ -1553,6 +1756,7 @@ static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     uint64_t value;
     bool mapped;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!visit_type_uint64(v, name, &value, errp)) {
         return;
@@ -1590,6 +1794,7 @@ static void adapter_test_owner(Object *obj, Visitor *v, const char *name,
                                void *opaque, Error **errp)
 {
     int32_t value;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!visit_type_int32(v, name, &value, errp)) {
         return;
@@ -1606,6 +1811,7 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
                                         Error **errp)
 {
     uint64_t value;
+    FEMU_CXL_LOCK_GUARD();
 
     if (!visit_type_uint64(v, name, &value, errp)) {
         return;
@@ -1621,15 +1827,55 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
 static bool cylon_test_fault_fill(uint64_t gpa, Error **errp);
 static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
                              Error **errp);
+static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
+                              Error **errp);
+static void cylon_storm_wait(void);
+static const char *cylon_storm_check(FemuCxlSsd *dev);
+static uint64_t cylon_storm_result(const char *name);
+
+/*
+ * test-storm starts threads that send fault exits without the BQL (see
+ * cylon_storm_start()); test-storm-wait joins them and fails if the shared
+ * bookkeeping does not add up; test-storm-served, -stops and -ns report.
+ */
+static void adapter_test_storm(Object *obj, const char *value, Error **errp)
+{
+    cylon_storm_start(FEMU_CXL_SSD(obj), value, errp);
+}
+
+static void adapter_test_storm_wait(Object *obj, bool value, Error **errp)
+{
+    const char *why;
+
+    cylon_storm_wait();
+    WITH_FEMU_CXL_LOCK() {
+        why = cylon_storm_check(FEMU_CXL_SSD(obj));
+    }
+    if (why) {
+        error_setg(errp, "%s", why);
+    }
+}
+
+static void adapter_test_storm_get(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint64_t value = cylon_storm_result(name);
+
+    visit_type_uint64(v, name, &value, errp);
+}
 
 static void adapter_test_map(Object *obj, bool value, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     FEMU_CXL_SSD(obj)->media.test_map = value;
 }
 
 static void adapter_test_rip(Object *obj, Visitor *v, const char *name,
                              void *opaque, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     visit_type_uint64(v, name, &FEMU_CXL_SSD(obj)->media.test_rip, errp);
 }
 
@@ -1637,6 +1883,7 @@ static void adapter_test_fault(Object *obj, Visitor *v, const char *name,
                                void *opaque, Error **errp)
 {
     uint64_t gpa;
+    FEMU_CXL_LOCK_GUARD();
 
     if (visit_type_uint64(v, name, &gpa, errp)) {
         object_ref(obj);
@@ -1651,6 +1898,7 @@ static void adapter_test_fault_fill(Object *obj, Visitor *v, const char *name,
                                     void *opaque, Error **errp)
 {
     uint64_t gpa;
+    FEMU_CXL_LOCK_GUARD();
 
     if (visit_type_uint64(v, name, &gpa, errp)) {
         object_ref(obj);
@@ -1661,6 +1909,8 @@ static void adapter_test_fault_fill(Object *obj, Visitor *v, const char *name,
 
 static void adapter_test_fill_race(Object *obj, bool value, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     FEMU_CXL_SSD(obj)->media.test_fill_race = value;
 }
 
@@ -1668,6 +1918,8 @@ static void adapter_test_prefetch_race(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
                                        Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     visit_type_uint64(v, name, &FEMU_CXL_SSD(obj)->media.test_prefetch_race,
                       errp);
 }
@@ -1678,6 +1930,7 @@ static void adapter_test_prefetch_race_end(Object *obj, bool value,
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
     FemuCxlEntry *e;
+    FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
     femu_cxl_enter(s);
@@ -1695,6 +1948,8 @@ static void adapter_test_prefetch_race_end(Object *obj, bool value,
 
 static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     FEMU_CXL_SSD(obj)->test_change_dpa = value;
 }
 
@@ -1704,7 +1959,30 @@ static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
  */
 static void adapter_test_media_disabled(Object *obj, bool value, Error **errp)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     FEMU_CXL_SSD(obj)->test_media_disabled = value;
+}
+
+/*
+ * Fault exits update counters without the BQL, so a reader takes the CXL
+ * lock, as every writer holds it.
+ */
+static void cxl_counter_get(Object *obj, Visitor *v, const char *name,
+                            void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    WITH_FEMU_CXL_LOCK() {
+        value = *(uint64_t *)opaque;
+    }
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void cxl_add_counter(Object *obj, const char *name, uint64_t *counter)
+{
+    object_property_add(obj, name, "uint64", cxl_counter_get, NULL, NULL,
+                        counter);
 }
 
 static void cxl_init(Object *obj)
@@ -1747,8 +2025,18 @@ static void cxl_init(Object *obj)
                             adapter_test_prefetch_race, NULL, NULL);
         object_property_add_bool(obj, "test-prefetch-race-end", NULL,
                                  adapter_test_prefetch_race_end);
+        object_property_add_str(obj, "test-storm", NULL, adapter_test_storm);
+        object_property_add_bool(obj, "test-storm-wait", NULL,
+                                 adapter_test_storm_wait);
+        object_property_add(obj, "test-storm-served", "uint64",
+                            adapter_test_storm_get, NULL, NULL, NULL);
+        object_property_add(obj, "test-storm-stops", "uint64",
+                            adapter_test_storm_get, NULL, NULL, NULL);
+        object_property_add(obj, "test-storm-ns", "uint64",
+                            adapter_test_storm_get, NULL, NULL, NULL);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
+    s->owner = obj;
     /* No vCPU: outside qtest, accesses from other threads match nothing. */
     s->test_owner = -1;
     s->protect_window_ns = FEMU_CXL_PROTECT_WINDOW_NS;
@@ -1763,25 +2051,15 @@ static void cxl_init(Object *obj)
                         cxl_control_set, NULL, NULL);
     object_property_add(obj, "control-argument", "uint64", cxl_control_get,
                         cxl_control_set, NULL, NULL);
-    object_property_add_uint64_ptr(obj, "control-status", &s->control_status,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-read-hits", &s->snapshot[0],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-read-misses", &s->snapshot[1],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-write-hits", &s->snapshot[2],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-write-misses", &s->snapshot[3],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-inserts", &s->snapshot[4],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-evictions", &s->snapshot[5],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-entries", &s->snapshot[6],
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "last-prefetch-inserts",
-                                   &s->snapshot[7],
-                                   OBJ_PROP_FLAG_READ);
+    cxl_add_counter(obj, "control-status", &s->control_status);
+    cxl_add_counter(obj, "last-read-hits", &s->snapshot[0]);
+    cxl_add_counter(obj, "last-read-misses", &s->snapshot[1]);
+    cxl_add_counter(obj, "last-write-hits", &s->snapshot[2]);
+    cxl_add_counter(obj, "last-write-misses", &s->snapshot[3]);
+    cxl_add_counter(obj, "last-inserts", &s->snapshot[4]);
+    cxl_add_counter(obj, "last-evictions", &s->snapshot[5]);
+    cxl_add_counter(obj, "last-entries", &s->snapshot[6]);
+    cxl_add_counter(obj, "last-prefetch-inserts", &s->snapshot[7]);
     s->cache_ways = 16;
     s->prefetch_stride = 1;
     object_property_add(obj, "cache-ways", "uint32", cxl_runtime_get,
@@ -1793,120 +2071,58 @@ static void cxl_init(Object *obj)
     object_property_add_bool(obj, "stats-reset", NULL, cxl_stats_reset);
     object_property_add_bool(obj, "fast-load", cxl_fast_load_get,
                              cxl_fast_load_set);
-    object_property_add_uint64_ptr(obj, "fast-load-drain-ns",
-                                   &s->fast_load_drain_ns,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "prefetch-inserts",
-                                   &s->prefetch_inserts,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cache-entries", &s->cache_entries,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "write-misses", &s->write_misses,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "write-hits", &s->write_hits,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "read-misses", &s->read_misses,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "read-hits", &s->read_hits,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "invalidations", &s->invalidations,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "nvme-drops", &s->nvme_drops,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "log-dropped", &s->log_dropped,
-                                   OBJ_PROP_FLAG_READ);
+    cxl_add_counter(obj, "fast-load-drain-ns", &s->fast_load_drain_ns);
+    cxl_add_counter(obj, "prefetch-inserts", &s->prefetch_inserts);
+    cxl_add_counter(obj, "cache-entries", &s->cache_entries);
+    cxl_add_counter(obj, "write-misses", &s->write_misses);
+    cxl_add_counter(obj, "write-hits", &s->write_hits);
+    cxl_add_counter(obj, "read-misses", &s->read_misses);
+    cxl_add_counter(obj, "read-hits", &s->read_hits);
+    cxl_add_counter(obj, "invalidations", &s->invalidations);
+    cxl_add_counter(obj, "nvme-drops", &s->nvme_drops);
+    cxl_add_counter(obj, "log-dropped", &s->log_dropped);
     object_property_add_bool(obj, "der-active", cxl_der_active, NULL);
-    object_property_add_uint64_ptr(obj, "der-remaps", &s->direct.remaps,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-revocations",
-                                   &s->direct.revocations, OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-quiet-revocations",
-                                   &s->direct.quiet_revocations,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fallbacks", &s->direct.fallbacks,
-                                   OBJ_PROP_FLAG_READ);
+    cxl_add_counter(obj, "der-remaps", &s->direct.remaps);
+    cxl_add_counter(obj, "der-revocations", &s->direct.revocations);
+    cxl_add_counter(obj, "der-quiet-revocations", &s->direct.quiet_revocations);
+    cxl_add_counter(obj, "der-fallbacks", &s->direct.fallbacks);
     object_property_add_bool(obj, "der-emul-exit", cxl_der_emul_exit, NULL);
     object_property_add_bool(obj, "der-emul-v2", cxl_der_emul_v2, NULL);
-    object_property_add_uint64_ptr(obj, "der-fault-reads",
-                                   &s->direct.fault_reads, OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-writes",
-                                   &s->direct.fault_writes,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-fetches",
-                                   &s->direct.fault_fetches,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-page-walks",
-                                   &s->direct.fault_walks,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-emulated",
-                                   &s->direct.fault_emulated,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-unprotected",
-                                   &s->direct.fault_unprotected,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-conflicts",
-                                   &s->direct.fault_conflicts,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-fault-overflows",
-                                   &s->direct.fault_overflows,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-revoke-flushes",
-                                   &s->direct.revoke_flushes,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-revoked-ahead",
-                                   &s->direct.revoked_ahead,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-ahead-remaps",
-                                   &s->direct.ahead_remaps,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-emul-fills",
-                                   &s->direct.emul_fills, OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-emul-fetch-fills",
-                                   &s->direct.emul_fetch_fills,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-emul-failures",
-                                   &s->direct.emul_failures,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-replacements",
-                                   &s->direct.replacements, OBJ_PROP_FLAG_READ);
+    cxl_add_counter(obj, "der-fault-reads", &s->direct.fault_reads);
+    cxl_add_counter(obj, "der-fault-writes", &s->direct.fault_writes);
+    cxl_add_counter(obj, "der-fault-fetches", &s->direct.fault_fetches);
+    cxl_add_counter(obj, "der-fault-page-walks", &s->direct.fault_walks);
+    cxl_add_counter(obj, "der-fault-emulated", &s->direct.fault_emulated);
+    cxl_add_counter(obj, "der-fault-unprotected", &s->direct.fault_unprotected);
+    cxl_add_counter(obj, "der-fault-conflicts", &s->direct.fault_conflicts);
+    cxl_add_counter(obj, "der-fault-overflows", &s->direct.fault_overflows);
+    cxl_add_counter(obj, "der-revoke-flushes", &s->direct.revoke_flushes);
+    cxl_add_counter(obj, "der-revoked-ahead", &s->direct.revoked_ahead);
+    cxl_add_counter(obj, "der-ahead-remaps", &s->direct.ahead_remaps);
+    cxl_add_counter(obj, "der-fault-bql", &s->direct.fault_bql);
+    cxl_add_counter(obj, "der-emul-fills", &s->direct.emul_fills);
+    cxl_add_counter(obj, "der-emul-fetch-fills", &s->direct.emul_fetch_fills);
+    cxl_add_counter(obj, "der-emul-failures", &s->direct.emul_failures);
+    cxl_add_counter(obj, "der-replacements", &s->direct.replacements);
     object_property_add_bool(obj, "flush-cache", NULL, cxl_flush);
-    object_property_add_uint64_ptr(obj, "der-probes", &s->direct.probes,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "der-mapped", &s->direct.mapped,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "media-time-ns", &s->media_ns,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "media-reads", &s->media_reads,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "media-writes", &s->media_writes,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "media-full", &s->media_full,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cache-hits", &s->cache.hits,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cache-misses", &s->cache.misses,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cache-inserts", &s->cache.inserts,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cache-evictions", &s->cache.evictions,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-commands", &s->cca.commands,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-errors", &s->cca.errors,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-pinned", &s->cache.pinned,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-uncached", &s->cca.uncached,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-pin-fills", &s->cca.pin_fills,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-writebacks", &s->cca.writebacks,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-dropped", &s->cca.dropped,
-                                   OBJ_PROP_FLAG_READ);
-    object_property_add_uint64_ptr(obj, "cca-pinned-set-misses",
-                                   &s->cca.pinned_set_misses,
-                                   OBJ_PROP_FLAG_READ);
+    cxl_add_counter(obj, "der-probes", &s->direct.probes);
+    cxl_add_counter(obj, "der-mapped", &s->direct.mapped);
+    cxl_add_counter(obj, "media-time-ns", &s->media_ns);
+    cxl_add_counter(obj, "media-reads", &s->media_reads);
+    cxl_add_counter(obj, "media-writes", &s->media_writes);
+    cxl_add_counter(obj, "media-full", &s->media_full);
+    cxl_add_counter(obj, "cache-hits", &s->cache.hits);
+    cxl_add_counter(obj, "cache-misses", &s->cache.misses);
+    cxl_add_counter(obj, "cache-inserts", &s->cache.inserts);
+    cxl_add_counter(obj, "cache-evictions", &s->cache.evictions);
+    cxl_add_counter(obj, "cca-commands", &s->cca.commands);
+    cxl_add_counter(obj, "cca-errors", &s->cca.errors);
+    cxl_add_counter(obj, "cca-pinned", &s->cache.pinned);
+    cxl_add_counter(obj, "cca-uncached", &s->cca.uncached);
+    cxl_add_counter(obj, "cca-pin-fills", &s->cca.pin_fills);
+    cxl_add_counter(obj, "cca-writebacks", &s->cca.writebacks);
+    cxl_add_counter(obj, "cca-dropped", &s->cca.dropped);
+    cxl_add_counter(obj, "cca-pinned-set-misses", &s->cca.pinned_set_misses);
     femu_cxl_describe_runtime(obj);
 }
 
@@ -2012,6 +2228,7 @@ static bool cxl_nvme_prepare(FemuCtrl *n, Error **errp)
     FemuCxlMedia *s = &dev->media;
     uint64_t mib = s->backend.size / MiB;
     const char *id = DEVICE(n)->id ? DEVICE(n)->id : "femu";
+    FEMU_CXL_LOCK_GUARD();
 
     if (!DEVICE(dev)->realized || !s->started || s->closing) {
         error_setg(errp, "cxl_ssd must name a realized femu-cxl-ssd");
@@ -2047,6 +2264,7 @@ static bool cxl_nvme_prepare(FemuCtrl *n, Error **errp)
 static void cxl_nvme_attach(FemuCtrl *n, NvmeNamespace *ns)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(n->cxl_dev)->media;
+    FEMU_CXL_LOCK_GUARD();
 
     s->nvme_ns = ns;
     n->cxl_done = &s->nvme_done;
@@ -2062,6 +2280,7 @@ static void cxl_nvme_detach(FemuCtrl *n)
 {
     FemuCxlSsd *dev = FEMU_CXL_SSD(n->cxl_dev);
     FemuCxlMedia *s = &dev->media;
+    FEMU_CXL_LOCK_GUARD();
 
     if (s->nvme != n) {
         return;
@@ -2143,7 +2362,8 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
             femu_cxl_der_fallback(der, reason);
         }
     } else {
-        der->available = mode && !strcmp(mode, "memslot");
+        der->memslot = mode && !strcmp(mode, "memslot");
+        der->available = der->memslot;
     }
 }
 
@@ -2186,6 +2406,13 @@ out:
     g_slist_free(windows);
 }
 
+/* Whether der_window() must scan again, which needs the BQL. */
+static bool der_windows_stale(FemuCxlDer *der)
+{
+    return !der->windows_valid ||
+           der->windows_generation != der->dev->media.invalidations;
+}
+
 /*
  * Finding the windows walks the whole QOM tree, far too slow for every
  * access. Windows and topology are fixed once the machine is built, and
@@ -2196,7 +2423,12 @@ static CXLFixedWindow *der_window(FemuCxlDer *der, uint64_t hpa)
     uint64_t generation = der->dev->media.invalidations;
     unsigned i;
 
-    if (!der->windows_valid || der->windows_generation != generation) {
+    if (der_windows_stale(der)) {
+        /* The scan walks the QOM tree and the topology. */
+        if (!bql_locked()) {
+            femu_cxl_need_bql();
+            return NULL;
+        }
         der_windows_scan(der);
         der->windows_generation = generation;
         der->windows_valid = true;
@@ -2325,6 +2557,7 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
     CXLFixedWindow *fw;
     uint64_t check;
 
+    assert(femu_cxl_locked());
     /* As in Cylon, a ratio adds to cached mappings instead of limiting them. */
     if ((!der->available && !der->fast) || (hpa & 4095) != (dpa & 4095)) {
         return false;
@@ -2355,11 +2588,16 @@ bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
     }
     fw = der_window(der, hpa);
     if (!fw) {
-        der->fallbacks++;
+        der->fallbacks += !femu_cxl_bql_needed();
         return false;
     }
     if (der->cylon) {
         return femu_cylon_map(der, fw, hpa, dpa);
+    }
+    /* Alias changes rebuild the memory map. */
+    if (!bql_locked()) {
+        femu_cxl_need_bql();
+        return false;
     }
     /* One transaction, so the swap rebuilds the flat view once. */
     memory_region_transaction_begin();
@@ -2538,6 +2776,7 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
 {
     FemuCxlMap *map = g_hash_table_lookup(der->maps, &lpn);
 
+    assert(femu_cxl_locked());
     if (der->cylon) {
         femu_cylon_remove(der, lpn);
         return;
@@ -2669,12 +2908,32 @@ typedef struct CylonPage {
     uint64_t *sptep;
 } CylonPage;
 
+/*
+ * The pagemap descriptor. The slot holds one reference, and a fill that
+ * checks a frame without the locks holds another, so unplug cannot close
+ * it, and its number cannot be reused, under that read.
+ */
+typedef struct CylonPagemap {
+    int fd;
+    unsigned refs;
+} CylonPagemap;
+
+static void cylon_pagemap_put(CylonPagemap *pm)
+{
+    if (qatomic_fetch_dec(&pm->refs) == 1) {
+        close(pm->fd);
+        g_free(pm);
+    }
+}
+
 struct FemuCylon {
     struct rcu_head rcu;
     FemuCxlDer *der;
     CXLFixedWindow *pending_window;
     bool detached;
     int pagemap;
+    /* @pagemap, shared with fills that read it without the locks. */
+    struct CylonPagemap *pm;
     KVMSlotReservation *reservation;
     MemoryListener listener;
     bool installing;
@@ -2777,10 +3036,16 @@ static bool cylon_parameter(const char *path)
            (value[0] == 'Y' || value[0] == '1');
 }
 
+/*
+ * Delete the slot. A fault exit may do this without the BQL: the slot is
+ * outside QEMU's memory map (its ID is only reserved there, under the KVM
+ * slots lock), and the kernel serializes slot updates itself.
+ */
 static void cylon_release(FemuCylon *c)
 {
     unsigned i;
 
+    assert(femu_cxl_locked());
     if (c->installed) {
         struct kvm_userspace_memory_region region = {
             .slot = kvm_reserved_memslot_id(c->reservation),
@@ -2807,6 +3072,7 @@ static void cylon_release(FemuCylon *c)
 /* The kernel slot is already deleted, so give the ID back to QEMU. */
 static void cylon_unreserve(FemuCylon *c)
 {
+    assert(femu_cxl_locked());
     if (c->reservation) {
         kvm_release_memslot(c->reservation);
         c->reservation = NULL;
@@ -2908,6 +3174,9 @@ static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
         }
     }
     c->pagemap = fd;
+    c->pm = g_new(CylonPagemap, 1);
+    c->pm->fd = fd;
+    c->pm->refs = 1;
     c->listener.region_add = cylon_region_change;
     c->listener.region_del = cylon_region_change;
     c->listener.commit = cylon_listener_commit;
@@ -3018,7 +3287,7 @@ typedef struct CylonProtect {
     bool write;
 } CylonProtect;
 
-/* Per vCPU, under the BQL. */
+/* Per vCPU, under the CXL lock. */
 typedef struct CylonFaultTrack {
     CPUState *cpu;
     uint64_t rip;
@@ -3029,6 +3298,8 @@ typedef struct CylonFaultTrack {
     uint64_t unserved;
     /* The latest exit is on a page already filled at @rip. */
     bool refault;
+    /* The latest exit's type is counted (it may be served twice). */
+    bool counted;
     /* The latest exit GPAs at @rip, for reports. */
     uint64_t recent[CYLON_FAULT_RECENT];
     unsigned nrecent;
@@ -3050,14 +3321,14 @@ static void cylon_fault_unprotect(CylonFaultTrack *t)
         CylonProtect *p = &t->protect[--t->nprotect];
 
         femu_cxl_unprotect(&p->dev->media, p->owner, p->lpn);
-        object_unref(OBJECT(p->dev));
+        cxl_unref(p->dev);
     }
 }
 
 static void cylon_overflow_release(CylonProtect *p)
 {
     femu_cxl_overflow_release(&p->dev->media, p->lpn);
-    object_unref(OBJECT(p->dev));
+    cxl_unref(p->dev);
 }
 
 /* Release the overflow pages of the instruction; see cylon_fault_overflow(). */
@@ -3096,7 +3367,7 @@ static void cylon_fault_protect(CylonFaultTrack *t, FemuCxlSsd *dev,
 
         p->dev->media.direct.fault_unprotected++;
         femu_cxl_unprotect(&p->dev->media, p->owner, p->lpn);
-        object_unref(OBJECT(p->dev));
+        cxl_unref(p->dev);
         memmove(&t->protect[0], &t->protect[1],
                 --t->nprotect * sizeof(t->protect[0]));
     }
@@ -3166,6 +3437,8 @@ static void cylon_fault_forget(FemuCxlSsd *dev)
  */
 static void cylon_fault_vcpu_destroyed(CPUState *cpu)
 {
+    FEMU_CXL_LOCK_GUARD();
+
     if (cylon_fault_tracks && cpu->cpu_index < current_machine->smp.max_cpus) {
         cylon_fault_track_clear(&cylon_fault_tracks[cpu->cpu_index]);
         cylon_fault_tracks[cpu->cpu_index].cpu = NULL;
@@ -3176,9 +3449,21 @@ static void cylon_fault_vcpu_destroyed(CPUState *cpu)
 static void cylon_fault_tracks_reset(void *opaque)
 {
     unsigned i;
+    FEMU_CXL_LOCK_GUARD();
 
     for (i = 0; i < current_machine->smp.max_cpus; i++) {
         cylon_fault_track_clear(&cylon_fault_tracks[i]);
+    }
+}
+
+/* Allocated with the BQL, before the first fault exit can arrive. */
+static void cylon_fault_tracks_init(void)
+{
+    assert(bql_locked());
+    if (!cylon_fault_tracks) {
+        cylon_fault_tracks = g_new0(CylonFaultTrack,
+                                    current_machine->smp.max_cpus);
+        qemu_register_reset(cylon_fault_tracks_reset, NULL);
     }
 }
 
@@ -3186,10 +3471,9 @@ static CylonFaultTrack *cylon_fault_track(CPUState *cpu)
 {
     CylonFaultTrack *t;
 
+    assert(femu_cxl_locked());
     if (!cylon_fault_tracks) {
-        cylon_fault_tracks = g_new0(CylonFaultTrack,
-                                    current_machine->smp.max_cpus);
-        qemu_register_reset(cylon_fault_tracks_reset, NULL);
+        cylon_fault_tracks_init();
     }
     assert(cpu->cpu_index < current_machine->smp.max_cpus);
     t = &cylon_fault_tracks[cpu->cpu_index];
@@ -3220,6 +3504,7 @@ static uint64_t cylon_fault_note(CylonFaultTrack *t, uint64_t rip,
         t->rip = rip;
     }
     t->recent[t->nrecent++ % CYLON_FAULT_RECENT] = gpa;
+    t->counted = false;
     t->refault = g_hash_table_contains(t->pages, &page);
     if (t->refault) {
         return ++t->repeats;
@@ -3254,8 +3539,8 @@ static char *cylon_fault_recent(const CylonFaultTrack *t)
 }
 
 /*
- * The BQL protects the list; the caller's RCU read section keeps the result
- * alive across a fill that drops the BQL.
+ * The CXL lock protects the list; the caller's RCU read section keeps the
+ * result alive across a fill that drops the lock.
  */
 static FemuCxlWindow *cylon_fault_window(uint64_t gpa)
 {
@@ -3273,12 +3558,23 @@ static FemuCxlWindow *cylon_fault_window(uint64_t gpa)
 static FemuCxlSsd *cylon_fault_device(uint64_t gpa)
 {
     FemuCxlWindow *w = cylon_fault_window(gpa);
-    PCIDevice *dev = w ? adapter_route(w->fw, gpa - w->fw->base) : NULL;
+    PCIDevice *dev = w ? adapter_route_locked(w, gpa - w->fw->base) : NULL;
 
     if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_FEMU_CXL_SSD)) {
         return NULL;
     }
     return FEMU_CXL_SSD(dev);
+}
+
+/*
+ * Without the BQL, whether a map on @dev would first scan its windows,
+ * which needs the BQL. Checked before a fill attempt counts anything, so
+ * the attempt runs once, under the BQL, as it did before.
+ */
+static bool cylon_fault_scan_due(FemuCxlSsd *dev)
+{
+    return !bql_locked() && dev && dev->media.direct.fast &&
+           der_windows_stale(&dev->media.direct);
 }
 
 static const char *cylon_fault_reason(uint64_t gpa, MemTxResult result)
@@ -3390,7 +3686,7 @@ static bool cylon_fault_emulate(FemuCxlSsd *dev, uint64_t gpa,
  * nothing, and femu_cxl_fill_wait() found that another access or a recent
  * protection of another vCPU was the only obstacle and is gone. Before a
  * retry the page must still decode to the same device and page and be
- * admissible. @flags (FEMU_CXL_FILL_*) go to the fill. BQL, in an RCU
+ * admissible. @flags (FEMU_CXL_FILL_*) go to the fill. CXL lock, in an RCU
  * read section. Returns whether the page is mapped; @result is the last
  * access result.
  */
@@ -3411,7 +3707,7 @@ static bool cylon_fault_fill(uint64_t gpa, unsigned flags,
         FemuCxlSsd *now = cylon_fault_device(gpa);
         uint64_t dpa;
 
-        if (!w || !now || now != dev ||
+        if (!w || !now || now != dev || femu_cxl_bql_needed() ||
             !adapter_translate(CXL_TYPE3(now), gpa, 1, &dpa) ||
             (i && (dpa / 4096 != lpn ||
                    !femu_cxl_admissible(&now->media, lpn) ||
@@ -3419,19 +3715,24 @@ static bool cylon_fault_fill(uint64_t gpa, unsigned flags,
                                                      &lpn))))) {
             break;
         }
+        /* An invalidation during a wait: retry under the BQL only. */
+        if (cylon_fault_scan_due(now)) {
+            femu_cxl_need_bql();
+            break;
+        }
         lpn = dpa / 4096;
         ready = false;
         *result = adapter_access(w, gpa - w->fw->base, NULL, 1, false,
                                  MEMTXATTRS_UNSPECIFIED, &mapped, flags);
         if (*result != MEMTX_OK || mapped || i + 1 == CYLON_FAULT_TRIES ||
-            cylon_fault_device(gpa) != dev) {
+            cylon_fault_device(gpa) != dev || femu_cxl_bql_needed()) {
             break;
         }
-        /* The wait drops the BQL; the reference keeps the device. */
+        /* The wait drops the locks; the reference keeps the device. */
         object_ref(OBJECT(dev));
         ready = femu_cxl_fill_wait(&dev->media, lpn, deadline,
                                    flags & FEMU_CXL_FILL_KEEP_OWN);
-        object_unref(OBJECT(dev));
+        cxl_unref(dev);
     }
     return mapped;
 }
@@ -3505,7 +3806,8 @@ static bool cylon_fault_overflow(CylonFaultTrack *t, uint64_t gpa,
         return false;
     }
     dev = cylon_fault_device(gpa);
-    if (!dev || !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa)) {
+    if (!dev || femu_cxl_bql_needed() ||
+        !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa)) {
         return false;
     }
     lpn = dpa / 4096;
@@ -3550,11 +3852,13 @@ static bool cylon_fault_decode(CylonFaultTrack *t, const CylonFault *f,
     }
     mapped = cylon_fault_fill(f->gpa,
                               t->refault ? FEMU_CXL_FILL_KEEP_OWN : 0,
-                              result) ||
-             cylon_fault_overflow(t, f->gpa, result);
+                              result);
+    if (!mapped && !femu_cxl_bql_needed()) {
+        mapped = cylon_fault_overflow(t, f->gpa, result);
+    }
     dev = cylon_fault_device(f->gpa);
-    if (!mapped || !dev) {
-        return mapped;
+    if (!mapped || !dev || femu_cxl_bql_needed()) {
+        return mapped && !femu_cxl_bql_needed();
     }
     dev->media.direct.emul_fills++;
     dev->media.direct.emul_fetch_fills += !!(f->flags & CYLON_FAULT_FETCH);
@@ -3628,14 +3932,18 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
     uint64_t dpa;
     uint64_t old;
 
-    if (!dev || !adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa)) {
+    if (!dev || femu_cxl_bql_needed() ||
+        !adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa)) {
         *why = cylon_fault_reason(f->gpa, MEMTX_ERROR);
         return false;
     }
-    dev->media.direct.fault_reads += !!(f->flags & CYLON_FAULT_READ);
-    dev->media.direct.fault_writes += !!(f->flags & CYLON_FAULT_WRITE);
-    dev->media.direct.fault_fetches += !!(f->flags & CYLON_FAULT_FETCH);
-    dev->media.direct.fault_walks += !!(f->flags & CYLON_FAULT_PAGE_WALK);
+    if (!t->counted) {
+        t->counted = true;
+        dev->media.direct.fault_reads += !!(f->flags & CYLON_FAULT_READ);
+        dev->media.direct.fault_writes += !!(f->flags & CYLON_FAULT_WRITE);
+        dev->media.direct.fault_fetches += !!(f->flags & CYLON_FAULT_FETCH);
+        dev->media.direct.fault_walks += !!(f->flags & CYLON_FAULT_PAGE_WALK);
+    }
     /* Decide before charging media time: emulation charges each access. */
     if (!femu_cxl_admissible(&dev->media, dpa / 4096)) {
         if (cylon_fault_emulate(dev, f->gpa, &installed)) {
@@ -3649,6 +3957,10 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
                               t->refault ? FEMU_CXL_FILL_KEEP_OWN : 0,
                               &result);
     dev = cylon_fault_device(f->gpa);
+    /* Decide nothing that the run under the BQL would decide again. */
+    if (femu_cxl_bql_needed()) {
+        return false;
+    }
     if (!dev || !adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa)) {
         *why = cylon_fault_reason(f->gpa, result);
         return false;
@@ -3707,41 +4019,51 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
     return true;
 }
 
-/*
- * Fill the page as a read miss and map it; the guest then executes the
- * instruction again, natively. A page that must stay uncached cannot be
- * served this way, and an instruction that keeps faulting at one RIP makes
- * no progress: both stop the VM instead of returning to the same fault.
- */
-static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
-{
-    CylonFault f;
-    CylonFaultTrack *t;
-    FemuCxlSsd *dev;
-    MemTxResult result = MEMTX_ERROR;
-    bool mapped = false;
-    uint64_t repeats;
+typedef enum CylonServe {
+    CYLON_SERVED,
+    CYLON_STOP,
+    /* Something on the way needs the BQL; nothing was decided. */
+    CYLON_NEED_BQL,
+} CylonServe;
 
-    memcpy(&f, run->padding, sizeof(f));
-    bql_lock();
+/*
+ * Serve one fault exit under the CXL lock, with or without the BQL. The
+ * exit is recorded once (@noted), even when it is served a second time
+ * under the BQL. Reports and stops only when it decided to.
+ */
+static CylonServe cylon_fault_serve(CPUState *cpu, const CylonFault *f,
+                                    bool *noted)
+{
+    FemuCxlSsd *dev = cylon_fault_device(f->gpa);
+    MemTxResult result = MEMTX_ERROR;
+    const char *why = NULL;
+    CylonFaultTrack *t;
+    uint64_t repeats;
+    bool mapped;
+
+    assert(femu_cxl_locked());
     /*
-     * As for MMIO dispatch, an RCU read section keeps an unplugged window
-     * alive while the fill drops the BQL; the window is looked up again by
-     * GPA after every wait instead of trusting an earlier pointer.
+     * Ask for the BQL before anything is charged: a route it must walk, the
+     * first fault, or a window scan that the mapping would need (a scan can
+     * only become due with an invalidation, which also stops the mapping).
      */
-    WITH_RCU_READ_LOCK_GUARD() {
-        t = cylon_fault_track(cpu);
-        repeats = cylon_fault_note(t, f.rip, f.gpa);
+    if (femu_cxl_bql_needed() || cylon_fault_scan_due(dev) ||
+        (!bql_locked() && !cylon_fault_tracks)) {
+        return CYLON_NEED_BQL;
+    }
+    t = cylon_fault_track(cpu);
+    if (!*noted) {
+        *noted = true;
+        repeats = cylon_fault_note(t, f->rip, f->gpa);
         if (repeats >= CYLON_FAULT_STOP) {
-            dev = cylon_fault_device(f.gpa);
             if (dev) {
                 dev->media.direct.emul_failures++;
             }
-            cylon_fault_report(cpu, &f, t, "retry budget exhausted: 100000 "
+            cylon_fault_report(cpu, f, t, "retry budget exhausted: 100000 "
                                "consecutive exits at this RIP on pages "
                                "already filled for it");
             cylon_fault_track_clear(t);
-            break;
+            return CYLON_STOP;
         }
         if (repeats >= CYLON_FAULT_WARN) {
             int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -3753,37 +4075,333 @@ static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
                 warn_report("femu-cxl-ssd: vCPU %d has refilled pages %"
                             PRIu64 " times in a row at RIP 0x%" PRIx64
                             " (latest GPAs:%s); the VM stops at %d",
-                            cpu->cpu_index, repeats, f.rip, recent,
+                            cpu->cpu_index, repeats, f->rip, recent,
                             CYLON_FAULT_STOP);
             }
         }
-        if (f.flags & CYLON_FAULT_ACCESS) {
-            const char *why = NULL;
+    }
+    if (f->flags & CYLON_FAULT_ACCESS) {
+        mapped = cylon_fault_access(t, f, &why);
+    } else {
+        mapped = cylon_fault_decode(t, f, &result);
+    }
+    if (mapped) {
+        return CYLON_SERVED;
+    }
+    if (femu_cxl_bql_needed()) {
+        return CYLON_NEED_BQL;
+    }
+    dev = cylon_fault_device(f->gpa);
+    if (dev) {
+        dev->media.direct.emul_failures++;
+    }
+    cylon_fault_report(cpu, f, t, why ? why :
+                       cylon_fault_reason(f->gpa, result));
+    cylon_fault_track_clear(t);
+    return CYLON_STOP;
+}
 
-            mapped = cylon_fault_access(t, &f, &why);
-            if (!mapped) {
-                dev = cylon_fault_device(f.gpa);
-                if (dev) {
-                    dev->media.direct.emul_failures++;
-                }
-                cylon_fault_report(cpu, &f, t, why);
-                cylon_fault_track_clear(t);
-            }
-            break;
-        }
-        mapped = cylon_fault_decode(t, &f, &result);
-        dev = cylon_fault_device(f.gpa);
-        if (!mapped) {
+/*
+ * Fill the page as a read miss and map it; the guest then executes the
+ * instruction again, natively. A page that must stay uncached cannot be
+ * served this way, and an instruction that keeps faulting at one RIP makes
+ * no progress: both stop the VM instead of returning to the same fault.
+ *
+ * KVM calls this outside the BQL, and the fault is served under the CXL
+ * lock alone, so misses of different vCPUs never wait for the BQL or for
+ * each other's media time. What needs the BQL (a route through a switch or
+ * to another device, a window scan after an invalidation, deleting a failed
+ * slot) makes the service stop before it decides anything, and the fault is
+ * served again under the BQL as before. As for MMIO dispatch, an RCU read
+ * section keeps an unplugged window alive while the fill waits; the window
+ * is looked up again by GPA after every wait instead of trusting an earlier
+ * pointer.
+ */
+static bool cylon_fault_handle(CPUState *cpu, const CylonFault *f)
+{
+    bool bql = bql_locked();
+    CylonServe served;
+    bool noted = false;
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        femu_cxl_lock();
+        femu_cxl_clear_need_bql();
+        served = cylon_fault_serve(cpu, f, &noted);
+        femu_cxl_clear_need_bql();
+        if (served == CYLON_NEED_BQL) {
+            FemuCxlSsd *dev;
+
+            assert(!bql);
+            femu_cxl_unlock();
+            bql_lock();
+            femu_cxl_lock();
+            dev = cylon_fault_device(f->gpa);
             if (dev) {
-                dev->media.direct.emul_failures++;
+                dev->media.direct.fault_bql++;
             }
-            cylon_fault_report(cpu, &f, t,
-                               cylon_fault_reason(f.gpa, result));
-            cylon_fault_track_clear(t);
+            served = cylon_fault_serve(cpu, f, &noted);
+            assert(served != CYLON_NEED_BQL);
+            femu_cxl_unlock();
+            bql_unlock();
+        } else {
+            femu_cxl_unlock();
         }
     }
+    return served == CYLON_SERVED;
+}
+
+static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
+{
+    CylonFault f;
+
+    memcpy(&f, run->padding, sizeof(f));
+    return cylon_fault_handle(cpu, &f);
+}
+
+/*
+ * qtest only: threads that act as vCPUs 0..n-1 and send fault exits at
+ * random pages of a window, through the same service and locking as KVM's
+ * exits, while the test changes the device under them. Mode 0 serves them
+ * without the BQL, as KVM does; mode 1 holds the BQL for each, as before.
+ * A real vCPU cannot be unplugged inside its own exit, but these threads
+ * are not the vCPUs: a test must not unplug a vCPU during a storm.
+ */
+typedef struct CylonStorm {
+    QemuThread *threads;
+    /* vCPUs 0..n-1, referenced while the threads run. */
+    CPUState **cpus;
+    unsigned nthreads;
+    uint64_t base;
+    uint64_t pages;
+    uint64_t iters;
+    uint32_t mode;
+    uint32_t seed;
+    uint64_t served;
+    uint64_t stops;
+    int64_t start_ns;
+    uint64_t ns;
+} CylonStorm;
+
+static CylonStorm cylon_storm;
+
+static void *cylon_storm_thread(void *opaque)
+{
+    unsigned index = (uintptr_t)opaque;
+    CPUState *cpu = cylon_storm.cpus[index];
+    GRand *rand = g_rand_new_with_seed(cylon_storm.seed + index);
+    uint64_t i;
+
+    rcu_register_thread();
+    current_cpu = cpu;
+    for (i = 0; i < cylon_storm.iters; i++) {
+        uint32_t kind = g_rand_int_range(rand, 0, 16);
+        CylonFault f = {
+            .gpa = cylon_storm.base +
+                   g_rand_int_range(rand, 0, cylon_storm.pages) * 4096 +
+                   g_rand_int_range(rand, 0, 512) * 8,
+            .rip = 0x1000 + index * 64 + (kind == 0 ? 16 : 0),
+            .flags = kind == 0 ? 0 : CYLON_FAULT_ACCESS |
+                     (kind < 4 ? CYLON_FAULT_WRITE : CYLON_FAULT_READ),
+        };
+        bool ok;
+
+        if (cylon_storm.mode) {
+            bql_lock();
+        }
+        ok = cylon_fault_handle(cpu, &f);
+        if (cylon_storm.mode) {
+            bql_unlock();
+        }
+        qatomic_inc(ok ? &cylon_storm.served : &cylon_storm.stops);
+    }
+    current_cpu = NULL;
+    rcu_unregister_thread();
+    g_rand_free(rand);
+    return NULL;
+}
+
+/* "threads,pages,iters,mode,seed": start a storm on this device's window. */
+static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
+                              Error **errp)
+{
+    unsigned threads;
+    uint64_t pages;
+    uint64_t iters;
+    uint32_t mode;
+    uint32_t seed;
+    FemuCxlWindow *w;
+    unsigned i;
+
+    if (sscanf(spec, "%u,%" SCNu64 ",%" SCNu64 ",%" SCNu32 ",%" SCNu32,
+               &threads, &pages, &iters, &mode, &seed) != 5 || !threads ||
+        threads > current_machine->smp.max_cpus || !pages || mode > 1) {
+        error_setg(errp, "test-storm is threads,pages,iters,mode,seed with "
+                   "at most one thread per vCPU");
+        return;
+    }
+    if (cylon_storm.threads) {
+        error_setg(errp, "a storm is running");
+        return;
+    }
+    for (i = 0; i < threads; i++) {
+        if (!qemu_get_cpu(i)) {
+            error_setg(errp, "test-storm needs vCPU %u", i);
+            return;
+        }
+    }
+    WITH_FEMU_CXL_LOCK() {
+        w = QLIST_FIRST(&adapter_windows);
+        if (w) {
+            cylon_storm.base = w->fw->base;
+            pages = MIN(pages, w->fw->size / 4096);
+        }
+        cylon_fault_tracks_init();
+    }
+    if (!w) {
+        error_setg(errp, "no window");
+        return;
+    }
+    cylon_storm.nthreads = threads;
+    cylon_storm.pages = pages;
+    cylon_storm.iters = iters;
+    cylon_storm.mode = mode;
+    cylon_storm.seed = seed;
+    cylon_storm.served = 0;
+    cylon_storm.stops = 0;
+    cylon_storm.start_ns = get_clock();
+    cylon_storm.cpus = g_new0(CPUState *, threads);
+    for (i = 0; i < threads; i++) {
+        cylon_storm.cpus[i] = qemu_get_cpu(i);
+        object_ref(OBJECT(cylon_storm.cpus[i]));
+    }
+    cylon_storm.threads = g_new0(QemuThread, threads);
+    for (i = 0; i < threads; i++) {
+        qemu_thread_create(&cylon_storm.threads[i], "femu-cxl-storm",
+                           cylon_storm_thread, (void *)(uintptr_t)i,
+                           QEMU_THREAD_JOINABLE);
+    }
+}
+
+/* Join the storm; the threads may need the BQL meanwhile. */
+static void cylon_storm_wait(void)
+{
+    unsigned i;
+
+    if (!cylon_storm.threads) {
+        return;
+    }
     bql_unlock();
-    return mapped;
+    for (i = 0; i < cylon_storm.nthreads; i++) {
+        qemu_thread_join(&cylon_storm.threads[i]);
+    }
+    bql_lock();
+    cylon_storm.ns = get_clock() - cylon_storm.start_ns;
+    for (i = 0; i < cylon_storm.nthreads; i++) {
+        object_unref(OBJECT(cylon_storm.cpus[i]));
+    }
+    g_clear_pointer(&cylon_storm.cpus, g_free);
+    g_clear_pointer(&cylon_storm.threads, g_free);
+}
+
+static uint64_t cylon_storm_result(const char *name)
+{
+    return !strcmp(name, "test-storm-served") ?
+               qatomic_read(&cylon_storm.served) :
+           !strcmp(name, "test-storm-stops") ?
+               qatomic_read(&cylon_storm.stops) : cylon_storm.ns;
+}
+
+/*
+ * qtest only: the bookkeeping that concurrent faults share must add up once
+ * they are idle: the gate and page holds are free, every set's queues hold
+ * the cache's entries, and each protection and overflow count matches the
+ * vCPU records that own it. Returns what is wrong, or NULL.
+ */
+static const char *cylon_storm_check(FemuCxlSsd *dev)
+{
+    FemuCxlMedia *s = &dev->media;
+    uint64_t queued = 0;
+    GHashTableIter it;
+    gpointer key;
+    gpointer value;
+    unsigned i;
+    unsigned j;
+
+    assert(femu_cxl_locked());
+    if (s->busy || s->accesses || s->waiters || s->exclusive_waiters ||
+        g_hash_table_size(s->pages)) {
+        return "the gate or a page hold is still taken";
+    }
+    for (i = 0; s->started && i < s->cache.nsets; i++) {
+        FemuCxlSet *set = &s->cache.sets[i];
+        uint64_t n = set->small.length + set->main.length +
+                     set->pinned.length;
+
+        if (n > s->cache.ways) {
+            return "a set holds more entries than ways";
+        }
+        queued += n;
+    }
+    if (s->started && (queued != g_hash_table_size(s->cache.entries) ||
+                       s->cache_entries != queued)) {
+        return "the set queues and the entry table disagree";
+    }
+    if (s->protect) {
+        g_hash_table_iter_init(&it, s->protect);
+        while (g_hash_table_iter_next(&it, &key, &value)) {
+            GArray *guards = value;
+            uint64_t lpn = *(uint64_t *)key;
+
+            for (i = 0; i < guards->len; i++) {
+                FemuCxlGuard *g = &g_array_index(guards, FemuCxlGuard, i);
+                unsigned owned = 0;
+
+                if (g->owner < 0 ||
+                    g->owner >= current_machine->smp.max_cpus) {
+                    return "a protection has no vCPU";
+                }
+                for (j = 0; j < cylon_fault_tracks[g->owner].nprotect; j++) {
+                    CylonProtect *p = &cylon_fault_tracks[g->owner].protect[j];
+
+                    owned += p->dev == dev && p->lpn == lpn;
+                }
+                if (owned != g->count) {
+                    return "a protection count differs from its records";
+                }
+            }
+        }
+    }
+    for (i = 0; cylon_fault_tracks && i < current_machine->smp.max_cpus;
+         i++) {
+        CylonFaultTrack *t = &cylon_fault_tracks[i];
+
+        for (j = 0; j < t->nprotect; j++) {
+            if (t->protect[j].dev == dev &&
+                !femu_cxl_protected_by(s, i, t->protect[j].lpn)) {
+                return "a vCPU record has no protection";
+            }
+        }
+    }
+    if (s->overflow) {
+        g_hash_table_iter_init(&it, s->overflow);
+        while (g_hash_table_iter_next(&it, &key, &value)) {
+            uint64_t lpn = *(uint64_t *)key;
+            unsigned owned = 0;
+
+            for (i = 0; i < current_machine->smp.max_cpus; i++) {
+                CylonFaultTrack *t = &cylon_fault_tracks[i];
+
+                for (j = 0; j < t->noverflow; j++) {
+                    owned += t->overflow[j].dev == dev &&
+                             t->overflow[j].lpn == lpn;
+                }
+            }
+            if (owned != GPOINTER_TO_UINT(value)) {
+                return "an overflow count differs from its records";
+            }
+        }
+    }
+    return NULL;
 }
 
 /*
@@ -3828,6 +4446,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
                              "in the guest");
             return;
         }
+        cylon_fault_tracks_init();
         kvm_set_exit_handler(CYLON_EXIT_FAULT, cylon_fault_exit);
         kvm_set_vcpu_destroy_hook(cylon_fault_vcpu_destroyed);
         cylon_v2 = want_v2;
@@ -3962,7 +4581,13 @@ static void cylon_install_bh(void *opaque)
 {
     FemuCylon *c = opaque;
 
+    /*
+     * A paused vCPU is outside every fault exit, so the pause is a full
+     * barrier. Take the CXL lock only after it: a vCPU that waits for the
+     * lock cannot pause.
+     */
     pause_all_vcpus();
+    femu_cxl_lock();
     /* Checked after the pause, so changes made while it waited count. */
     if (!c->detached && !c->failed &&
         cylon_coverage(c, c->pending_window) &&
@@ -3977,10 +4602,11 @@ static void cylon_install_bh(void *opaque)
         !cxl_dev_media_disabled(&c->der->dev->parent_obj.cxl_dstate)) {
         cylon_ratio_apply(c->der, c->window);
     }
-    resume_all_vcpus();
     if (c->detached) {
         g_free_rcu(c, rcu);
     }
+    femu_cxl_unlock();
+    resume_all_vcpus();
 }
 
 static void cylon_drop(FemuCxlDer *der, CylonPage *page, bool dirty)
@@ -4001,6 +4627,85 @@ static void cylon_drop(FemuCxlDer *der, CylonPage *page, bool dirty)
     g_free(page);
     der->mapped--;
     der->revocations++;
+}
+
+/*
+ * The frame check of the page that a fill maps next, made by the fill
+ * itself while it waits for the media without the locks: a pagemap read
+ * costs about 2 us. Its inputs are copied under the CXL lock; the slot may
+ * be destroyed meanwhile, so the map trusts a passed check only if the
+ * slot's inputs are still the same, and checks again under the lock
+ * otherwise. Per thread: a thread runs one fill at a time.
+ */
+typedef struct CylonPfnCheck {
+    bool pending;
+    bool passed;
+    CylonPagemap *pm;
+    uintptr_t ram;
+    uint64_t huge_size;
+    uint64_t index;
+    uint64_t frame;
+} CylonPfnCheck;
+
+static __thread CylonPfnCheck cylon_pfn_check;
+
+/* An access ends: no later map may use its check. */
+void femu_cxl_der_precheck_drop(void)
+{
+    CylonPfnCheck *p = &cylon_pfn_check;
+
+    if (p->pending) {
+        cylon_pagemap_put(p->pm);
+    }
+    p->pending = false;
+    p->passed = false;
+    p->pm = NULL;
+}
+
+void femu_cxl_der_precheck(FemuCxlDer *der, uint64_t lpn)
+{
+    FemuCylon *c = der->fast;
+
+    assert(femu_cxl_locked());
+    femu_cxl_der_precheck_drop();
+    if (!der->cylon || !c || !c->installed || c->failed || c->batch ||
+        lpn >= c->size / CYLON_PAGE_SIZE) {
+        return;
+    }
+    qatomic_inc(&c->pm->refs);
+    cylon_pfn_check = (CylonPfnCheck) {
+        .pending = true,
+        .pm = c->pm,
+        .ram = (uintptr_t)c->ram,
+        .huge_size = c->huge_size,
+        .index = lpn * CYLON_PAGE_SIZE / c->huge_size,
+        .frame = c->huge[lpn * CYLON_PAGE_SIZE / c->huge_size],
+    };
+}
+
+/* Without locks; the reference keeps the descriptor open. */
+void femu_cxl_der_precheck_run(void)
+{
+    CylonPfnCheck *p = &cylon_pfn_check;
+
+    if (p->pending) {
+        p->pending = false;
+        p->passed = cylon_frame_current(p->pm->fd, p->ram, p->huge_size,
+                                        p->index, p->frame);
+        cylon_pagemap_put(p->pm);
+    }
+}
+
+/* Whether this thread's check covers the frame of @dpa in @c; used once. */
+static bool cylon_pfn_prechecked(FemuCylon *c, uint64_t dpa)
+{
+    CylonPfnCheck p = cylon_pfn_check;
+    uint64_t index = dpa / c->huge_size;
+
+    femu_cxl_der_precheck_drop();
+    return p.passed && p.pm == c->pm && p.ram == (uintptr_t)c->ram &&
+           p.huge_size == c->huge_size && p.index == index &&
+           p.frame == c->huge[index];
 }
 
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
@@ -4028,7 +4733,8 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
         return false;
     }
     /* A ratio batch reads the pagemap once per huge page, not per page. */
-    if (!cylon_pfn_current(c->pagemap, c->huge, (uintptr_t)c->ram,
+    if (!cylon_pfn_prechecked(c, dpa) &&
+        !cylon_pfn_current(c->pagemap, c->huge, (uintptr_t)c->ram,
                            c->huge_size, dpa,
                            c->batch ? &c->checked_huge : NULL)) {
         cylon_fail(der);
@@ -4388,6 +5094,7 @@ static void cylon_region_change(MemoryListener *listener,
     FemuCylon *c = container_of(listener, FemuCylon, listener);
     uint64_t start = section->offset_within_address_space;
     uint64_t size = int128_get64(section->size);
+    FEMU_CXL_LOCK_GUARD();
 
     if (c->installed && size && start < c->window->base + c->window->size &&
         c->window->base < start + size) {
@@ -4399,6 +5106,7 @@ static void cylon_region_change(MemoryListener *listener,
 static void cylon_listener_commit(MemoryListener *listener)
 {
     FemuCylon *c = container_of(listener, FemuCylon, listener);
+    FEMU_CXL_LOCK_GUARD();
 
     if (c->rearm && !c->detached && !c->failed && !c->installing &&
         cylon_coverage(c, c->window)) {
@@ -4410,6 +5118,7 @@ static void cylon_listener_commit(MemoryListener *listener)
 static bool cylon_log_start(MemoryListener *listener, Error **errp)
 {
     FemuCylon *c = container_of(listener, FemuCylon, listener);
+    FEMU_CXL_LOCK_GUARD();
 
     femu_cylon_clear(c->der);
     cylon_unreserve(c);
@@ -4422,6 +5131,7 @@ static bool cylon_log_start(MemoryListener *listener, Error **errp)
 static void cylon_log_stop(MemoryListener *listener)
 {
     FemuCylon *c = container_of(listener, FemuCylon, listener);
+    FEMU_CXL_LOCK_GUARD();
 
     c->logging = false;
 }
@@ -4451,7 +5161,7 @@ static void femu_cylon_destroy(FemuCxlDer *der)
             munlock(c->ram, c->size);
         }
         g_free(c->huge);
-        close(c->pagemap);
+        cylon_pagemap_put(c->pm);
         if (!c->installing) {
             g_free_rcu(c, rcu);
         }
@@ -4509,6 +5219,18 @@ static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn)
     return false;
 }
 
+void femu_cxl_der_precheck(FemuCxlDer *der, uint64_t lpn)
+{
+}
+
+void femu_cxl_der_precheck_run(void)
+{
+}
+
+void femu_cxl_der_precheck_drop(void)
+{
+}
+
 static bool cylon_test_fault_fill(uint64_t gpa, Error **errp)
 {
     error_setg(errp, "fault exits need KVM support");
@@ -4521,11 +5243,31 @@ static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
     error_setg(errp, "fault exits need KVM support");
     return false;
 }
+
+static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
+                              Error **errp)
+{
+    error_setg(errp, "fault exits need KVM support");
+}
+
+static void cylon_storm_wait(void)
+{
+}
+
+static const char *cylon_storm_check(FemuCxlSsd *dev)
+{
+    return NULL;
+}
+
+static uint64_t cylon_storm_result(const char *name)
+{
+    return 0;
+}
 #endif
 
 /*
  * A Cylon ratio maps up to one entry per media page, so stop at @limit
- * bytes: the dump runs under the BQL.
+ * bytes: the dump runs under the locks.
  */
 static void cxl_dump_spt(FemuCxlDer *der, FILE *file, uint64_t limit)
 {
