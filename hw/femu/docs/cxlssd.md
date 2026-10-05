@@ -429,6 +429,51 @@ The rules:
   earlier slots hold version 1 state; FEMU warns. Every device reports the
   VM's state in `der-emul-v2`.
 
+#### Batched revocation
+
+In version 2 the guest repeats every access natively after the fill, so
+the accessed bit is set on nearly every evicted page, and nearly every
+eviction takes the full revocation with its two flushes (see "SPTE encoding,
+dirty tracking and revocation" below). Each flush kicks every running vCPU
+and makes it run a global INVEPT, so with several busy vCPUs the flushes
+serialize them. To share the flushes, an eviction that needs them also
+revokes the mappings of the next pages its cache set evicts, up to
+`cylon-revoke-batch` pages in all (default 32, 1 to 64; 1 is one page for
+each two flushes):
+
+1. FEMU asks the cache policy for the pages it evicts after the victim if
+   no access comes first: FIFO and CLOCK in their order, S3-FIFO its small
+   queue first. LIFO evicts the page it inserts next, so it takes none. It
+   takes only pages that the eviction itself could take now: not pages that
+   an access holds, that another vCPU protected within the protection window
+   (1 ms), that the faulting vCPU protects when it refaults at one RIP, or
+   that a ratio keeps mapped. Of the rest it takes the first pages whose
+   entry is mapped with the accessed bit set (one with the bit clear still
+   revokes later without a flush).
+2. It write-protects every page, flushes once, samples each dirty bit while
+   it swaps each entry for zero, and flushes once more. The rule for the
+   dirty bit is the same as for one page: it is read only after a flush that
+   leaves no writable translation.
+3. The other pages stay in the cache, so its capacity and order do not
+   change. Their dirty state is kept in the cache entry, and their eviction
+   charges the write-back as before, needing no flush. An access before
+   that eviction exits as for a cold page and maps the page again as a hit,
+   with no media time. Such an access counts as a cache hit and, under
+   CLOCK and S3-FIFO, updates the reference state that a direct hit does
+   not update. Its fault also protects the page for the vCPU's
+   instruction, so a later fill may pass over it, under FIFO too.
+
+The batch relies on the flush covering the whole VM. KVM's flush of one
+GFN falls back to a flush of the whole VM on VMX; only on a host that runs
+on Hyper-V does it flush the one GFN, and there FEMU revokes one page at a
+time. Version 1 and memslot mode revoke one page at a time.
+`der-revoke-flushes` counts the flushes of full revocations,
+`der-revoked-ahead` the pages revoked before their own eviction, and
+`der-ahead-remaps` those mapped again before it. With random reads over a
+footprint much larger than the cache, and next victims that are mapped and
+not protected, FIFO evictions take about 2 / `cylon-revoke-batch` flushes
+each.
+
 Limits of version 2:
 
 - Pages that must stay unmapped are still served by KVM emulation: pages
@@ -473,8 +518,8 @@ EPT MMIO has W/X without R (binary 110), the guest page address and split
 memslot-generation fields (bits 3..10 and 52..62). The prototype's `0x586`
 contains generation 0xb0; it is not a timeless MMIO mask. For a populated leaf, the implementation saves the exact kernel-created
 MMIO entry, including runtime generation and host reserved-address mitigation
-bits. It restores that entry on revocation; the kernel refreshes a stale MMIO
-generation itself. Ratio application admits empty leaves by CAS and restores
+bits. Version 1 restores that entry on revocation, and the kernel refreshes a
+stale MMIO generation itself; version 2 writes zero instead. Ratio application admits empty leaves by CAS and restores
 them to zero. Unit tests check the fixed encodings, the full generation
 range, noncontiguous huge-page arithmetic and boundary/overflow rejection.
 
@@ -503,15 +548,17 @@ translations.
 
 An entry whose accessed bit is still clear at revocation has not been used by
 a page walk since it was installed, so no TLB holds a translation from it and
-its dirty bit is clear too: it is swapped for the saved MMIO SPTE without a
-flush, and counted in `der-quiet-revocations`. If the CPU sets the bit first,
-the exchange fails and the full revocation runs. The miss that installs an
-entry completes in QEMU, so an entry is used only if the guest returns to the
-page before it is evicted.
+its dirty bit is clear too: it is swapped for the cold value (the saved MMIO
+SPTE in version 1, zero in version 2) without a flush, and counted in `der-quiet-revocations`. If the CPU sets the bit first,
+the exchange fails and the full revocation runs. In version 1 the miss that
+installs an entry completes in QEMU, so an entry is used only if the guest
+returns to the page before it is evicted. In version 2 the guest repeats the
+access through the new entry, so the bit is nearly always set.
 
 Otherwise revocation first clears both EPT W and MMU-writable atomically and flushes writable TLB
-entries. It then samples the hardware dirty bit while compare-and-swapping the saved
-MMIO SPTE and flushes again. Exchanges retry hardware dirty-bit changes and
+entries. It then samples the hardware dirty bit while compare-and-swapping the
+cold value (the saved MMIO SPTE in version 1, zero in version 2) and flushes
+again. Exchanges retry hardware dirty-bit changes and
 leave concurrent KVM revocations intact. A concurrent kernel replacement makes the page
 conservatively dirty. Thus clean direct reads need no program, while writes
 and uncertain transitions do. This requires EPT A/D; hosts without it stay
@@ -523,10 +570,12 @@ reset retains volatile payload and cache/FTL contents but revokes mappings.
 Cylon deletes its slot on every invalidation, sampling tracked dirty state
 first; later eligible accesses reinstall it and cached pages map again lazily
 on their next access. Evicting a cache page revokes only that page's entry
-with the protocol above (two single-GFN flushes) and keeps the slot. The flush
-ioctl covers one GFN, so revocations cannot share a flush; a whole-slot clear
-omits each page's final flush because the slot deletion that follows flushes
-every translation. Cylon itself rewrites the evicted entry without any flush.
+with the protocol above (two flushes) and keeps the slot; version 2 shares
+the flushes with the next victims (see "Batched revocation"). The flush ioctl
+names one GFN, but on VMX KVM flushes the whole VM for it. A whole-slot
+clear omits each page's final flush because the slot deletion that follows
+flushes every translation. The unmodified Cylon prototype rewrote the evicted
+entry without any flush.
 Failure and teardown also delete the slot and release its mapped SPT VMAs. The FTL worker is joined
 before its state is destroyed. Payload backing belongs to the host memory
 backend. Direct hits do not enter QEMU or read pagemap.

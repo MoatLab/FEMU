@@ -2,6 +2,8 @@
 #include "qemu/osdep.h"
 #include "../cxlssd/cache.h"
 #include "../cxlssd/der.h"
+#include "../cxlssd/spte.h"
+#include <inttypes.h>
 
 static unsigned dirty_count;
 
@@ -563,6 +565,198 @@ static void keep_reinsert(void)
     femu_cxl_cache_destroy(&c);
 }
 
+typedef struct NextCheck {
+    FemuCxlCache *c;
+    FemuCxlEntry *predicted[16];
+    uint64_t predicted_lpn[16];
+    unsigned npredicted;
+    unsigned evictions;
+    unsigned matched;
+} NextCheck;
+
+/* Whether each eviction takes the page predicted first at the last one. */
+static bool check_next(void *opaque, FemuCxlEntry *e)
+{
+    NextCheck *n = opaque;
+    unsigned i;
+
+    if (n->npredicted) {
+        n->matched += n->predicted_lpn[0] == e->lpn;
+    }
+    n->evictions++;
+    n->npredicted = femu_cxl_cache_next_victims(n->c, e, n->predicted, 15);
+    for (i = 0; i < n->npredicted; i++) {
+        g_assert_true(n->predicted[i] != e);
+        n->predicted_lpn[i] = n->predicted[i]->lpn;
+    }
+    return true;
+}
+
+static void next_victims(FemuCxlPolicy policy)
+{
+    FemuCxlCache c;
+    NextCheck n = { .c = &c };
+    uint64_t fifo[15];
+    unsigned i;
+
+    femu_cxl_cache_init(&c, 16, 16, policy);
+    for (i = 0; i < 16; i++) {
+        femu_cxl_cache_insert(&c, i, NULL, NULL);
+    }
+    /* Referenced entries: CLOCK passes over them, S3-FIFO promotes some. */
+    for (i = 0; i < 16; i += 3) {
+        femu_cxl_cache_find(&c, i);
+        femu_cxl_cache_find(&c, i);
+    }
+    for (i = 16; i < 200; i++) {
+        g_assert_nonnull(femu_cxl_cache_insert(&c, i, check_next, &n));
+        if (i == 16 && policy == FEMU_CXL_FIFO) {
+            g_assert_cmpuint(n.npredicted, ==, 15);
+            memcpy(fifo, n.predicted_lpn, sizeof(fifo));
+        }
+    }
+    g_assert_cmpuint(n.evictions, ==, 184);
+    if (policy == FEMU_CXL_LIFO) {
+        /* The next victim is the page inserted next. */
+        g_assert_cmpuint(n.npredicted, ==, 0);
+        g_assert_cmpuint(n.matched, ==, 0);
+    } else {
+        g_assert_cmpuint(n.npredicted, ==, 15);
+        g_assert_cmpuint(n.matched, ==, n.evictions - 1);
+    }
+    if (policy == FEMU_CXL_FIFO) {
+        /* FIFO predicts the whole order: 1 to 15 after victim 0. */
+        for (i = 0; i < 15; i++) {
+            g_assert_cmpuint(fifo[i], ==, i + 1);
+        }
+    }
+    femu_cxl_cache_destroy(&c);
+}
+
+/*
+ * A model of version 2 for the flush count: every filled page is mapped and
+ * then used (A set), and an eviction that finds A set revokes the victim
+ * together with up to @batch - 1 predicted next victims, as
+ * cylon_remove_pages() does. Checks that the dirty state at eviction is
+ * exactly whether the page was written while cached.
+ */
+#define MODEL_PAGES 16384
+#define MODEL_CACHE 256
+
+typedef struct RevokeModel {
+    FemuCxlCache c;
+    uint64_t *spte;
+    bool *written;
+    unsigned batch;
+    uint64_t flushes;
+    uint64_t evictions;
+    uint64_t ahead;
+    uint64_t remaps;
+} RevokeModel;
+
+static bool model_flush(void *opaque, unsigned step)
+{
+    RevokeModel *m = opaque;
+
+    (void)step;
+    m->flushes++;
+    return true;
+}
+
+static uint64_t model_pa(uint64_t lpn)
+{
+    return 0x100000000ULL + lpn * CYLON_PAGE_SIZE;
+}
+
+static bool model_evict(void *opaque, FemuCxlEntry *e)
+{
+    RevokeModel *m = opaque;
+    FemuCxlEntry *next[2 * FEMU_CXL_REVOKE_BATCH_MAX];
+    CylonRevoke r[FEMU_CXL_REVOKE_BATCH_MAX];
+    FemuCxlEntry *entries[FEMU_CXL_REVOKE_BATCH_MAX];
+    unsigned found;
+    unsigned n = 1;
+    unsigned i;
+
+    m->evictions++;
+    if (m->spte[e->lpn] & CYLON_EPT_ACCESSED) {
+        r[0] = (CylonRevoke) { .sptep = &m->spte[e->lpn],
+                               .pa = model_pa(e->lpn) };
+        entries[0] = e;
+        found = femu_cxl_cache_next_victims(&m->c, e, next,
+                                            2 * (m->batch - 1));
+        for (i = 0; i < found && n < m->batch; i++) {
+            uint64_t lpn = next[i]->lpn;
+
+            if (m->spte[lpn] & CYLON_EPT_ACCESSED) {
+                r[n] = (CylonRevoke) { .sptep = &m->spte[lpn],
+                                       .pa = model_pa(lpn) };
+                entries[n++] = next[i];
+            }
+        }
+        g_assert_true(cylon_revoke(r, n, true, model_flush, m));
+        for (i = 0; i < n; i++) {
+            entries[i]->dirty |= r[i].dirty;
+            entries[i]->der_ahead = i;
+            g_assert_cmpuint(*r[i].sptep, ==, 0);
+        }
+        m->ahead += n - 1;
+    } else {
+        g_assert_cmpuint(m->spte[e->lpn], ==, 0);
+    }
+    g_assert_cmpint(e->dirty, ==, m->written[e->lpn]);
+    m->written[e->lpn] = false;
+    return true;
+}
+
+static void model_access(RevokeModel *m, uint64_t lpn, bool write)
+{
+    FemuCxlEntry *e = g_hash_table_lookup(m->c.entries, &lpn);
+
+    if (!e) {
+        e = femu_cxl_cache_insert(&m->c, lpn, model_evict, m);
+        g_assert_nonnull(e);
+    }
+    if (!m->spte[lpn]) {
+        /* A cold leaf exits; the fill or the hit maps the page. */
+        if (e->der_ahead) {
+            e->der_ahead = false;
+            m->remaps++;
+        }
+        m->spte[lpn] = cylon_direct_spte(model_pa(lpn));
+    }
+    /* The guest repeats the access natively. */
+    m->spte[lpn] |= CYLON_EPT_ACCESSED | (write ? CYLON_EPT_DIRTY : 0);
+    m->written[lpn] |= write;
+}
+
+static void revoke_model(unsigned batch)
+{
+    RevokeModel m = { .batch = batch };
+    uint64_t seed = 12345;
+    unsigned i;
+    double per_eviction;
+
+    m.spte = g_new0(uint64_t, MODEL_PAGES);
+    m.written = g_new0(bool, MODEL_PAGES);
+    femu_cxl_cache_init(&m.c, MODEL_CACHE, MODEL_CACHE, FEMU_CXL_FIFO);
+    for (i = 0; i < 400000; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        model_access(&m, (seed >> 33) % MODEL_PAGES, (seed >> 20) % 4 == 0);
+    }
+    per_eviction = (double)m.flushes / m.evictions;
+    printf("revocation model, batch %u: %.4f flushes per eviction, "
+           "%" PRIu64 " pages revoked ahead, %" PRIu64 " mapped again\n",
+           batch, per_eviction, m.ahead, m.remaps);
+    g_assert_cmpfloat(per_eviction, <=, 2.0 / batch * 1.1 + 0.001);
+    g_assert_cmpfloat(per_eviction, >=, 2.0 / batch * 0.9);
+    /* Random reads over 64 times the cache rarely return before eviction. */
+    g_assert_cmpuint(m.remaps, <=, m.ahead / 50 + 1);
+    g_free(m.spte);
+    g_free(m.written);
+    femu_cxl_cache_destroy(&m.c);
+}
+
 int main(void)
 {
     FemuCxlPolicy policy;
@@ -584,6 +778,13 @@ int main(void)
     for (policy = FEMU_CXL_FIFO; policy <= FEMU_CXL_S3FIFO; policy++) {
         keep_policy(policy);
     }
+    for (policy = FEMU_CXL_FIFO; policy <= FEMU_CXL_S3FIFO; policy++) {
+        next_victims(policy);
+    }
+    revoke_model(1);
+    revoke_model(8);
+    revoke_model(32);
+    revoke_model(64);
     keep_clock();
     keep_s3fifo_promote();
     keep_reinsert();
@@ -591,6 +792,7 @@ int main(void)
     rebuild();
     fully_associative_pinned();
     puts("CXL cache: ordering, large keys, dirty eviction, reset, pinning, "
-         "removal, rebuild, keep, all policies PASS");
+         "removal, rebuild, keep, next victims, batched revocation, all "
+         "policies PASS");
     return 0;
 }

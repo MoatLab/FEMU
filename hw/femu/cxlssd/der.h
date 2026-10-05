@@ -55,7 +55,19 @@ typedef struct FemuCxlDer {
     uint64_t fault_conflicts;
     /* Pages mapped without a cache way for an instruction KVM cannot run. */
     uint64_t fault_overflows;
+    /*
+     * Cylon version 2: most pages a full revocation may take (the victim
+     * included), its TLB flushes, the pages revoked ahead of their
+     * eviction, and those mapped again before it.
+     */
+    uint32_t revoke_batch;
+    uint64_t revoke_flushes;
+    uint64_t revoked_ahead;
+    uint64_t ahead_remaps;
 } FemuCxlDer;
+
+/* Upper bound of cylon-revoke-batch. */
+#define FEMU_CXL_REVOKE_BATCH_MAX 64
 
 /*
  * Cylon's direct ratios leave every period-th page on MMIO; zero means no
@@ -101,6 +113,9 @@ void femu_cxl_der_init(FemuCxlDer *der, FemuCxlSsd *dev, const char *mode,
 bool femu_cxl_der_map(FemuCxlDer *der, uint64_t hpa, uint64_t dpa,
                       FemuCxlEntry *e);
 void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn);
+unsigned femu_cxl_der_batch(FemuCxlDer *der, uint64_t lpn);
+void femu_cxl_der_remove_batch(FemuCxlDer *der, uint64_t lpn,
+                               const uint64_t *ahead, unsigned n);
 bool femu_cxl_der_sample(FemuCxlDer *der, uint64_t lpn);
 void femu_cxl_der_clear(FemuCxlDer *der);
 void femu_cxl_der_disable(FemuCxlDer *der);

@@ -17501,6 +17501,46 @@ static void femu_test_cxl_cylon_ack(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/*
+ * cylon-revoke-batch takes 1 to 64 pages. Without a Cylon slot nothing is
+ * revoked ahead and no flush is counted.
+ */
+static void femu_test_cxl_revoke_batch(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    const int bad[] = { 0, 65 };
+    QDict *rsp;
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(bad); i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+            "'driver':'femu-cxl-ssd','id':'bad','bus':'rp0',"
+            "'volatile-memdev':'mem','cylon-revoke-batch':%d}}", bad[i]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                            "desc"),
+                                "cylon-revoke-batch must be 1 to 64"));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+    qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "cache-pages=4,cache-ways=4,cylon-revoke-batch=64");
+    femu_cxl_decode(qts);
+    for (i = 0; i < 16; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i);
+    }
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + i * 4096), ==, i);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-revocations"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-revoke-flushes"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-revoked-ahead"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ahead-remaps"), ==, 0);
+    qtest_quit(qts);
+}
+
 /* A real vCPU writes CXL while qtest observes RAM under the BQL. */
 static void femu_test_cxl_wait(void *obj, void *data,
                               QGuestAllocator *alloc)
@@ -19863,6 +19903,49 @@ static void femu_test_cxl_fill_charge(void *obj, void *data,
     femu_cxl_set_u64(qts, "test-fill", 4096);
     g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
     g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 2);
+    qtest_quit(qts);
+}
+
+/* Whether a fill of test-owner may revoke @lpn ahead of its eviction. */
+static bool femu_cxl_ahead_ok(QTestState *qts, const char *name, uint64_t lpn)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/ssd',"
+                           "'property':%s,'value':%" PRIu64 "}}", name, lpn);
+    bool ok = qdict_haskey(rsp, "return");
+
+    qobject_unref(rsp);
+    return ok;
+}
+
+/*
+ * A batched revocation takes a page ahead of its eviction only where the
+ * eviction itself could take it now. A protection of another vCPU binds only
+ * within the protection window, and the vCPU's own protections only bind a
+ * refault fill. A vCPU keeps up to 64 records while it loops at one RIP, so
+ * honouring every record would keep most of the cache out of each batch.
+ */
+static void femu_test_cxl_revoke_ahead(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0");
+
+    femu_cxl_decode(qts);
+    femu_cxl_set_u64(qts, "test-protect-window", 10ULL * 1000 * 1000 * 1000);
+    femu_cxl_set_u64(qts, "test-owner", 0);
+    femu_cxl_set_u64(qts, "test-protect", 5);
+    g_assert_true(femu_cxl_ahead_ok(qts, "test-revoke-ahead", 5));
+    g_assert_false(femu_cxl_ahead_ok(qts, "test-revoke-ahead-keep", 5));
+    g_assert_true(femu_cxl_ahead_ok(qts, "test-revoke-ahead-keep", 6));
+    femu_cxl_set_u64(qts, "test-owner", 1);
+    g_assert_false(femu_cxl_ahead_ok(qts, "test-revoke-ahead", 5));
+    g_assert_true(femu_cxl_ahead_ok(qts, "test-revoke-ahead", 6));
+    /* The record stays after the window; it no longer binds vCPU 1. */
+    femu_cxl_set_u64(qts, "test-protect-window", 0);
+    g_assert_true(femu_cxl_ahead_ok(qts, "test-revoke-ahead", 5));
+    g_assert_true(femu_cxl_ahead_ok(qts, "test-revoke-ahead-keep", 5));
     qtest_quit(qts);
 }
 
@@ -22653,6 +22736,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
+    qos_add_test("cxl-revoke-batch", "femu", femu_test_cxl_revoke_batch,
+                 NULL);
+    qos_add_test("cxl-revoke-ahead", "femu", femu_test_cxl_revoke_ahead,
+                 NULL);
     qos_add_test("cxl-no-ftl", "femu", femu_test_cxl_no_ftl, NULL);
     qos_add_test("cxl-invalid", "femu", femu_test_cxl_invalid, NULL);
     qos_add_test("cxl-cca-off", "femu", femu_test_cca_off, NULL);

@@ -68,6 +68,11 @@ static const FemuPropDesc cxl_descs[] = {
       "2 of the Cylon fault exit: an access to a cold page exits with its "
       "type and FEMU maps the page, so KVM emulates only pages FEMU cannot "
       "map; per VM, set by the first Cylon device that installs its slot" },
+    { "cylon-revoke-batch",
+      "With cylon-never-emulate on, the most pages one full revocation "
+      "takes, 1 to 64: an eviction that must flush the VM's TLBs also "
+      "revokes the mappings of the pages the policy evicts next, which stay "
+      "cached; 1 revokes one page per two flushes" },
     { "cylon-emul-exit",
       "With der=cylon, ask the host kernel to return accesses it cannot "
       "decode on unmapped pages to FEMU, which maps the page; off keeps "
@@ -261,6 +266,18 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "Read-only: pages mapped without a cache way because the emulator "
       "cannot run an instruction whose pages do not fit in their set; "
       "stats-reset keeps it" },
+    { "der-revoke-flushes",
+      "Read-only: TLB flushes that Cylon full revocations attempted (two, "
+      "or one when KVM revoked every page first or the slot is deleted "
+      "next), shared by every page a revocation takes; flushes after a "
+      "KVM revocation found outside a full revocation are not counted; "
+      "stats-reset keeps it" },
+    { "der-revoked-ahead",
+      "Read-only: version 2 pages whose mapping a revocation took before "
+      "their own eviction; they stay cached; stats-reset keeps it" },
+    { "der-ahead-remaps",
+      "Read-only: of der-revoked-ahead, pages accessed and mapped again "
+      "before their eviction; stats-reset keeps it" },
     { "der-fault-emulated",
       "Read-only: pages handed back to KVM's emulator because FEMU could "
       "not map them (uncached range, pinned set, full medium); "

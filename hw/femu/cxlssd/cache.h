@@ -27,6 +27,8 @@ typedef struct FemuCxlEntry {
     unsigned der_hits;
     /* The page lost its direct mapping to a hotter one while cached. */
     bool der_displaced;
+    /* Its direct mapping was revoked before its eviction; see der.h. */
+    bool der_ahead;
     /* The entry's own node in the queue @queue, for O(1) removal. */
     GList *link;
     FemuCxlQueue queue;
@@ -69,6 +71,8 @@ FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
 FemuCxlEntry *femu_cxl_cache_insert_keep(FemuCxlCache *c, uint64_t lpn,
                                          FemuCxlEvict evict, FemuCxlKeep keep,
                                          void *opaque);
+unsigned femu_cxl_cache_next_victims(FemuCxlCache *c, FemuCxlEntry *victim,
+                                     FemuCxlEntry **out, unsigned max);
 bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque);
 void femu_cxl_cache_destroy(FemuCxlCache *c);
 

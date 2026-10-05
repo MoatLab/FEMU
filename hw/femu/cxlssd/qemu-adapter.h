@@ -222,6 +222,8 @@ void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e);
 bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
                         bool keep_own);
 void femu_cxl_protect(FemuCxlMedia *s, int owner, uint64_t lpn);
+bool femu_cxl_revoke_ahead_ok(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn,
+                              int64_t now);
 void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn);
 void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);

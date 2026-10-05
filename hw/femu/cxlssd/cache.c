@@ -183,6 +183,60 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
     return true;
 }
 
+/* Add the entries of @queue whose freq is in [lo, hi], head first. */
+static unsigned next_from(GQueue *queue, FemuCxlEntry *skip, unsigned lo,
+                          unsigned hi, FemuCxlEntry **out, unsigned n,
+                          unsigned max)
+{
+    GList *l;
+
+    for (l = queue->head; l && n < max; l = l->next) {
+        FemuCxlEntry *e = l->data;
+
+        if (e != skip && e->freq >= lo && e->freq <= hi) {
+            out[n++] = e;
+        }
+    }
+    return n;
+}
+
+/*
+ * The entries of @victim's set that the policy would evict after @victim
+ * if no access came first, at most @max, first victim first. Hits, keeps
+ * and the queue choice of S3-FIFO can change the order, so this is a
+ * prediction. LIFO evicts the next inserted page, which is not yet here,
+ * so it predicts nothing.
+ */
+unsigned femu_cxl_cache_next_victims(FemuCxlCache *c, FemuCxlEntry *victim,
+                                     FemuCxlEntry **out, unsigned max)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(c, victim->lpn);
+    unsigned n = 0;
+
+    if (!set) {
+        return 0;
+    }
+    switch (c->policy) {
+    case FEMU_CXL_FIFO:
+        n = next_from(&set->small, victim, 0, UINT_MAX, out, n, max);
+        break;
+    case FEMU_CXL_CLOCK:
+        /* Referenced entries lose their bit and come round again. */
+        n = next_from(&set->small, victim, 0, 0, out, n, max);
+        n = next_from(&set->small, victim, 1, UINT_MAX, out, n, max);
+        break;
+    case FEMU_CXL_S3FIFO:
+        /* Small entries hit more than once move to main instead. */
+        n = next_from(&set->small, victim, 0, c->ways > 1 ? 1 : UINT_MAX,
+                      out, n, max);
+        n = next_from(&set->main, victim, 0, 0, out, n, max);
+        break;
+    default:
+        break;
+    }
+    return n;
+}
+
 FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
                                    FemuCxlEvict evict, void *opaque)
 {

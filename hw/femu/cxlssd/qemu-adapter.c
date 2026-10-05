@@ -103,6 +103,9 @@ static bool cylon_v2;
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
                            uint64_t hpa, uint64_t dpa);
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn);
+static unsigned femu_cylon_batch(FemuCxlDer *der, uint64_t lpn);
+static void femu_cylon_remove_batch(FemuCxlDer *der, uint64_t lpn,
+                                    const uint64_t *ahead, unsigned n);
 static void femu_cylon_destroy(FemuCxlDer *der);
 static void femu_cylon_clear(FemuCxlDer *der);
 static void femu_cylon_reset(FemuCxlDer *der);
@@ -1366,6 +1369,12 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
                    "cache-ways");
         return;
     }
+    if (!s->direct.revoke_batch ||
+        s->direct.revoke_batch > FEMU_CXL_REVOKE_BATCH_MAX) {
+        error_setg(errp, "cylon-revoke-batch must be 1 to %d",
+                   FEMU_CXL_REVOKE_BATCH_MAX);
+        return;
+    }
     if (!femu_cxl_policy(s->cache_policy ? s->cache_policy : "fifo", &policy)) {
         error_setg(errp, "cache-policy must be fifo, lifo, clock or s3-fifo");
         return;
@@ -1532,9 +1541,11 @@ static bool adapter_reservation_test(Object *obj, Error **errp)
  * qtest hooks for the Cylon fill path: fill a page as a fault exit would
  * (test-fill, a DPA), protect or release a page (test-protect,
  * test-unprotect, an LPN), all for the vCPU that test-owner names, and race
- * the next fill (test-fill-race). test-fault-fill serves a fault exit at a
- * GPA, with its waits; test-protect-window sets how long another vCPU's
- * protection stops a fill.
+ * the next fill (test-fill-race). test-revoke-ahead and
+ * test-revoke-ahead-keep fail when a fill, or a refault fill, of test-owner
+ * could not revoke an LPN ahead of its eviction. test-fault-fill serves a
+ * fault exit at a GPA, with its waits; test-protect-window sets how long
+ * another vCPU's protection stops a fill.
  */
 static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
                               void *opaque, Error **errp)
@@ -1558,6 +1569,16 @@ static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
         }
     } else if (!strcmp(name, "test-protect")) {
         femu_cxl_protect(s, s->test_owner, value);
+    } else if (g_str_has_prefix(name, "test-revoke-ahead")) {
+        FemuCxlOp op = {
+            .s = s, .owner = s->test_owner, .demand = true, .fill = true,
+            .keep_own = !strcmp(name, "test-revoke-ahead-keep"),
+        };
+
+        if (!femu_cxl_revoke_ahead_ok(s, &op, value,
+                                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME))) {
+            error_setg(errp, "a revocation cannot take the page ahead");
+        }
     } else {
         femu_cxl_unprotect(s, s->test_owner, value);
     }
@@ -1703,6 +1724,10 @@ static void cxl_init(Object *obj)
                             adapter_test_fill, NULL, NULL);
         object_property_add(obj, "test-unprotect", "uint64", NULL,
                             adapter_test_fill, NULL, NULL);
+        object_property_add(obj, "test-revoke-ahead", "uint64", NULL,
+                            adapter_test_fill, NULL, NULL);
+        object_property_add(obj, "test-revoke-ahead-keep", "uint64", NULL,
+                            adapter_test_fill, NULL, NULL);
         object_property_add(obj, "test-owner", "int32", NULL,
                             adapter_test_owner, NULL, NULL);
         object_property_add(obj, "test-protect-window", "uint64", NULL,
@@ -1825,6 +1850,15 @@ static void cxl_init(Object *obj)
     object_property_add_uint64_ptr(obj, "der-fault-overflows",
                                    &s->direct.fault_overflows,
                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-revoke-flushes",
+                                   &s->direct.revoke_flushes,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-revoked-ahead",
+                                   &s->direct.revoked_ahead,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-ahead-remaps",
+                                   &s->direct.ahead_remaps,
+                                   OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-emul-fills",
                                    &s->direct.emul_fills, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-emul-fetch-fills",
@@ -1908,6 +1942,8 @@ static const Property cxl_props[] = {
                      media.cylon_emul_exit, true),
     DEFINE_PROP_BOOL("cylon-never-emulate", FemuCxlSsd,
                      media.cylon_never_emulate, false),
+    DEFINE_PROP_UINT32("cylon-revoke-batch", FemuCxlSsd,
+                       media.direct.revoke_batch, 32),
     DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
                             ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),
@@ -2523,6 +2559,30 @@ void femu_cxl_der_remove(FemuCxlDer *der, uint64_t lpn)
 }
 
 /*
+ * How many more pages a revocation of the victim @lpn can take with its
+ * own TLB flushes: zero unless Cylon version 2 batches revocations and
+ * @lpn is mapped with an entry that needs the flushes.
+ */
+unsigned femu_cxl_der_batch(FemuCxlDer *der, uint64_t lpn)
+{
+    return der->cylon ? femu_cylon_batch(der, lpn) : 0;
+}
+
+/*
+ * Revoke the victim @lpn and, sharing its flushes, the mappings of the
+ * pages @ahead that the cache evicts next; those stay cached.
+ */
+void femu_cxl_der_remove_batch(FemuCxlDer *der, uint64_t lpn,
+                               const uint64_t *ahead, unsigned n)
+{
+    if (der->cylon && n) {
+        femu_cylon_remove_batch(der, lpn, ahead, n);
+        return;
+    }
+    femu_cxl_der_remove(der, lpn);
+}
+
+/*
  * Whether a direct ratio page was written since the last sample. Memslot
  * cannot tell and keeps such entries dirty; Cylon reads the EPT dirty bit
  * and keeps the page mapped.
@@ -2574,6 +2634,9 @@ void femu_cxl_der_destroy(FemuCxlDer *der)
 #include <linux/magic.h>
 #include <sys/vfs.h>
 #include <sys/mman.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
 
 #include "spt.h"
 #define KVM_CYLON_DUAL_MODE (1U << 17)
@@ -2631,6 +2694,8 @@ struct FemuCylon {
     bool batch;
     /* During a batch, the last huge page whose frame was found current. */
     uint64_t checked_huge;
+    /* The flush ioctl invalidates every translation of the VM. */
+    bool flush_vm;
 };
 
 static void cylon_region_change(MemoryListener *listener,
@@ -2671,6 +2736,37 @@ static bool cylon_flush(uint64_t gpa)
     CPUState *cpu = first_cpu;
 
     return cpu && !kvm_vcpu_ioctl(cpu, CYLON_SET_SPTE_FLAG, &flag);
+}
+
+/*
+ * KVM implements the flush ioctl with kvm_flush_remote_tlbs_range(), which
+ * on VMX falls back to a flush of the whole VM: every vCPU is kicked and
+ * runs a global INVEPT before it enters the guest again. Only a host that
+ * itself runs on Hyper-V gets a flush of the one GFN, through the Hyper-V
+ * range flush; there each revocation must keep its own flushes.
+ */
+static bool cylon_flush_covers_vm(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    char vendor[13];
+
+    __cpuid(1, eax, ebx, ecx, edx);
+    if (!(ecx & (1U << 31))) {
+        return true;
+    }
+    __cpuid(0x40000000, eax, ebx, ecx, edx);
+    memcpy(vendor, &ebx, 4);
+    memcpy(vendor + 4, &ecx, 4);
+    memcpy(vendor + 8, &edx, 4);
+    vendor[12] = 0;
+    return strcmp(vendor, "Microsoft Hv");
+#else
+    return false;
+#endif
 }
 
 static bool cylon_parameter(const char *path)
@@ -2769,6 +2865,7 @@ static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason)
     c = g_new0(FemuCylon, 1);
     c->pagemap = -1;
     c->der = der;
+    c->flush_vm = cylon_flush_covers_vm();
     c->size = memory_region_size(mr);
     c->ram = memory_region_get_ram_ptr(mr);
     c->huge_size = host_memory_backend_pagesize(backend);
@@ -3990,6 +4087,15 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
     page->sptep = sptep;
     g_hash_table_insert(der->maps, &page->lpn, page);
     der->mapped++;
+    if (cylon_v2) {
+        FemuCxlEntry *entry = g_hash_table_lookup(der->cache->entries, &index);
+
+        /* Revoked ahead of an eviction that has not come. */
+        if (entry && entry->der_ahead) {
+            entry->der_ahead = false;
+            der->ahead_remaps++;
+        }
+    }
     /*
      * No flush: the replaced MMIO entry is not present, so no TLB holds a
      * translation from it. KVM does not flush when a fault fills such an entry.
@@ -4023,17 +4129,75 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw)
     }
 }
 
+typedef struct CylonRevokeFlush {
+    FemuCxlDer *der;
+    /* The victim's: where the flush covers one GFN, that is the one. */
+    uint64_t gpa;
+} CylonRevokeFlush;
+
+static bool cylon_revoke_flush(void *opaque, unsigned step)
+{
+    CylonRevokeFlush *f = opaque;
+
+    f->der->revoke_flushes++;
+    return cylon_flush(f->gpa);
+}
+
+static bool cylon_listed(CylonPage **pages, unsigned n, CylonPage *page)
+{
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        if (pages[i] == page) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /*
- * With @flush false the caller deletes the slot next, which flushes every
- * translation, so the flush after restoring MMIO would be redundant.
+ * A page that a revocation of another page can take along: tracked, cached,
+ * and mapped by our direct entry with A set (one with A clear is revoked
+ * later without a flush). Anything unexpected is left for the page's own
+ * revocation to find.
  */
-static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
+static bool cylon_ahead(FemuCxlDer *der, uint64_t lpn, CylonPage **pagep,
+                        uint64_t *pa)
+{
+    FemuCylon *c = der->fast;
+    CylonPage *page = g_hash_table_lookup(der->maps, &lpn);
+    uint64_t old;
+
+    if (!page || page->sptep != cylon_sptep(c, lpn) ||
+        !g_hash_table_contains(der->cache->entries, &lpn) ||
+        !cylon_page_address(c->huge, c->size / c->huge_size, c->huge_size,
+                            lpn * CYLON_PAGE_SIZE, pa)) {
+        return false;
+    }
+    old = qatomic_read(page->sptep);
+    *pagep = page;
+    return cylon_spte_is_direct(old, *pa) && (old & CYLON_EPT_ACCESSED);
+}
+
+/*
+ * Revoke @lpn; with @n pages @ahead (version 2 only), revoke those in the
+ * same two flushes. They keep their cache entries, with the dirty state
+ * sampled here, and their next access maps them again as a hit.
+ *
+ * With @flush false the caller deletes the slot next, which flushes every
+ * translation, so the flush after the swap would be redundant.
+ */
+static void cylon_remove_pages(FemuCxlDer *der, uint64_t lpn,
+                               const uint64_t *ahead, unsigned n, bool flush)
 {
     CylonPage *page = g_hash_table_lookup(der->maps, &lpn);
     FemuCylon *c = der->fast;
-    FemuCxlEntry *entry;
+    CylonRevoke r[FEMU_CXL_REVOKE_BATCH_MAX];
+    CylonPage *pages[FEMU_CXL_REVOKE_BATCH_MAX];
+    CylonRevokeFlush f = { .der = der };
+    unsigned count = 1;
+    unsigned i;
     uint64_t old;
-    uint64_t gpa;
     uint64_t pa;
 
     if (!page) {
@@ -4066,43 +4230,47 @@ static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
         cylon_drop(der, page, false);
         return;
     }
-    gpa = c->window->base + lpn * CYLON_PAGE_SIZE;
-    /* Stop hardware and fast-fault writes before sampling D. */
-    while (!cylon_spte_install(page->sptep, old, cylon_spte_readonly(old))) {
-        old = qatomic_read(page->sptep);
-        if (cylon_spte_revoked(old)) {
-            cylon_drop(der, page, true);
-            return;
-        }
-        if (!cylon_spte_is_direct(old, pa)) {
-            cylon_fail(der);
-            return;
+    r[0] = (CylonRevoke) { .sptep = page->sptep, .pa = pa,
+                           .cold = page->mmio };
+    pages[0] = page;
+    if (!cylon_v2 || !c->flush_vm) {
+        n = 0;
+    }
+    for (i = 0; i < n && count < MIN(der->revoke_batch,
+                                     FEMU_CXL_REVOKE_BATCH_MAX); i++) {
+        CylonPage *next;
+        uint64_t next_pa;
+
+        if (cylon_ahead(der, ahead[i], &next, &next_pa) &&
+            !cylon_listed(pages, count, next)) {
+            r[count] = (CylonRevoke) { .sptep = next->sptep, .pa = next_pa,
+                                       .cold = next->mmio };
+            pages[count++] = next;
         }
     }
-    if (!cylon_flush(gpa)) {
+    f.gpa = c->window->base + lpn * CYLON_PAGE_SIZE;
+    if (!cylon_revoke(r, count, flush, cylon_revoke_flush, &f)) {
         cylon_fail(der);
         return;
     }
-    old = qatomic_read(page->sptep);
-    while (!cylon_spte_revoked(old)) {
-        if (!cylon_spte_is_readonly_direct(old, pa)) {
-            cylon_fail(der);
-            return;
+    for (i = 0; i < count; i++) {
+        FemuCxlEntry *entry = g_hash_table_lookup(der->cache->entries,
+                                                 &pages[i]->lpn);
+
+        if (entry && r[i].dirty) {
+            entry->dirty = true;
         }
-        if (cylon_spte_install(page->sptep, old, page->mmio)) {
-            break;
+        if (entry && i) {
+            entry->der_ahead = true;
         }
-        old = qatomic_read(page->sptep);
+        cylon_drop(der, pages[i], false);
     }
-    entry = g_hash_table_lookup(der->cache->entries, &lpn);
-    if (entry && ((old & CYLON_EPT_DIRTY) || !(old & CYLON_MMU_PRESENT))) {
-        entry->dirty = true;
-    }
-    if (flush && !cylon_flush(gpa)) {
-        cylon_fail(der);
-        return;
-    }
-    cylon_drop(der, page, false);
+    der->revoked_ahead += count - 1;
+}
+
+static void cylon_remove_page(FemuCxlDer *der, uint64_t lpn, bool flush)
+{
+    cylon_remove_pages(der, lpn, NULL, 0, flush);
 }
 
 static void cylon_ratio_revoke(FemuCxlDer *der)
@@ -4140,6 +4308,40 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
 {
     if (der->fast && der->fast->installed) {
         cylon_remove_page(der, lpn, true);
+    }
+}
+
+/*
+ * Version 2 maps every filled page and the guest then uses it, so A is set
+ * at nearly every eviction and each revocation flushes the VM twice. Those
+ * flushes cover every page, so pages evicted soon after can share them.
+ */
+static unsigned femu_cylon_batch(FemuCxlDer *der, uint64_t lpn)
+{
+    FemuCylon *c = der->fast;
+    CylonPage *page;
+    uint64_t old;
+
+    if (!cylon_v2 || !c || !c->installed || !c->flush_vm ||
+        der->revoke_batch < 2) {
+        return 0;
+    }
+    page = g_hash_table_lookup(der->maps, &lpn);
+    if (!page || page->sptep != cylon_sptep(c, lpn)) {
+        return 0;
+    }
+    old = qatomic_read(page->sptep);
+    if (cylon_spte_revoked(old) || !(old & CYLON_EPT_ACCESSED)) {
+        return 0;
+    }
+    return MIN(der->revoke_batch, FEMU_CXL_REVOKE_BATCH_MAX) - 1;
+}
+
+static void femu_cylon_remove_batch(FemuCxlDer *der, uint64_t lpn,
+                                    const uint64_t *ahead, unsigned n)
+{
+    if (der->fast && der->fast->installed) {
+        cylon_remove_pages(der, lpn, ahead, n, true);
     }
 }
 
@@ -4278,6 +4480,16 @@ static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
 }
 
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
+{
+}
+
+static unsigned femu_cylon_batch(FemuCxlDer *der, uint64_t lpn)
+{
+    return 0;
+}
+
+static void femu_cylon_remove_batch(FemuCxlDer *der, uint64_t lpn,
+                                    const uint64_t *ahead, unsigned n)
 {
 }
 

@@ -309,6 +309,58 @@ static bool cxl_fill_room(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn)
     return false;
 }
 
+/*
+ * Whether a revocation for @op may take the mapping of @lpn before its
+ * eviction: only where eviction itself could take the page now (see
+ * cxl_keep()). Not a page that an access holds, that the operation holds,
+ * that another vCPU protected within the protection window, or, for a
+ * refault fill, that the operation's own vCPU protects. A vCPU keeps up to
+ * 64 protection records for one RIP until it faults at another, so a loop
+ * at one RIP would otherwise keep most of the cache out of every batch.
+ */
+bool femu_cxl_revoke_ahead_ok(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn,
+                              int64_t now)
+{
+    int64_t until = INT64_MAX;
+
+    return !cxl_op_holds(op, lpn) &&
+           !g_hash_table_contains(s->pages, &lpn) &&
+           !(op->keep_own && cxl_protected(s, op->owner, lpn)) &&
+           !cxl_protected_recently(s, op->owner, lpn, now, &until) &&
+           !femu_cxl_ratio_selected(s->direct.ratio, lpn);
+}
+
+/*
+ * Revoke the direct mapping of the victim @e. When that takes TLB flushes
+ * and the direct mapping layer can share them (femu_cxl_der_batch()), it
+ * also revokes the mappings of the pages the policy evicts next. Those stay
+ * cached; an access maps them again as a hit. The mapping layer takes the
+ * first of these candidates that are mapped and need the flushes.
+ */
+static void cxl_revoke(FemuCxlOp *op, FemuCxlEntry *e)
+{
+    FemuCxlMedia *s = op->s;
+    unsigned room = femu_cxl_der_batch(&s->direct, e->lpn);
+    FemuCxlEntry *next[2 * FEMU_CXL_REVOKE_BATCH_MAX];
+    uint64_t ahead[2 * FEMU_CXL_REVOKE_BATCH_MAX];
+    int64_t now = 0;
+    unsigned found = 0;
+    unsigned n = 0;
+    unsigned i;
+
+    room = MIN(room, FEMU_CXL_REVOKE_BATCH_MAX);
+    if (room) {
+        found = femu_cxl_cache_next_victims(&s->cache, e, next, 2 * room);
+        now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    for (i = 0; i < found; i++) {
+        if (femu_cxl_revoke_ahead_ok(s, op, next[i]->lpn, now)) {
+            ahead[n++] = next[i]->lpn;
+        }
+    }
+    femu_cxl_der_remove_batch(&s->direct, e->lpn, ahead, n);
+}
+
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 {
     FemuCxlOp *op = opaque;
@@ -322,7 +374,7 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
         return false;
     }
     if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
-        femu_cxl_der_remove(&s->direct, e->lpn);
+        cxl_revoke(op, e);
     } else if (femu_cxl_der_sample(&s->direct, e->lpn)) {
         /* The ratio keeps the page mapped; charge writes made through it. */
         e->dirty = true;

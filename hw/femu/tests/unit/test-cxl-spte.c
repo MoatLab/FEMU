@@ -5,6 +5,7 @@
 #include "../cxlssd/spte.h"
 #include "../cxlssd/spt.h"
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -118,6 +119,142 @@ static void test_spte_take_dirty(void)
     assert(spte == (cylon_direct_spte(0x400000) | CYLON_EPT_DIRTY));
 }
 
+/*
+ * A fake VM for cylon_revoke(): @spte are the leaves, and the flush
+ * callback plays the hardware and KVM between the steps.
+ */
+#define REVOKE_PAGES 4
+
+typedef struct RevokeVm {
+    uint64_t spte[REVOKE_PAGES];
+    unsigned flushes[2];
+    /* Fail the flush of this step; -1 for none. */
+    int fail_step;
+    /* Before the first flush completes: a stale writable TLB entry stores. */
+    int store_page;
+    /* KVM revokes this leaf between the two flushes. */
+    int zap_page;
+    /* Leaves seen writable at a flush. */
+    unsigned writable_at_flush;
+    /* Leaves not cold at the second flush. */
+    unsigned mapped_at_flush;
+} RevokeVm;
+
+static bool revoke_vm_flush(void *opaque, unsigned step)
+{
+    RevokeVm *vm = opaque;
+    unsigned i;
+
+    assert(step < 2);
+    vm->flushes[step]++;
+    if ((int)step == vm->fail_step) {
+        return false;
+    }
+    for (i = 0; i < REVOKE_PAGES; i++) {
+        if (!cylon_spte_revoked(vm->spte[i]) &&
+            (vm->spte[i] & (CYLON_EPT_WRITE | CYLON_MMU_WRITABLE))) {
+            vm->writable_at_flush++;
+        }
+        if (step == 1 && vm->spte[i]) {
+            vm->mapped_at_flush++;
+        }
+    }
+    if (step == 0 && vm->store_page >= 0) {
+        /* The entry is read-only, but a TLB entry from before may write. */
+        vm->spte[vm->store_page] |= CYLON_EPT_DIRTY;
+    }
+    if (step == 0 && vm->zap_page >= 0) {
+        vm->spte[vm->zap_page] = 0;
+    }
+    return true;
+}
+
+static void revoke_vm_init(RevokeVm *vm, CylonRevoke *r)
+{
+    unsigned i;
+
+    memset(vm, 0, sizeof(*vm));
+    vm->fail_step = -1;
+    vm->store_page = -1;
+    vm->zap_page = -1;
+    for (i = 0; i < REVOKE_PAGES; i++) {
+        uint64_t pa = 0x200000 + i * CYLON_PAGE_SIZE;
+
+        vm->spte[i] = cylon_direct_spte(pa) | CYLON_EPT_ACCESSED;
+        r[i] = (CylonRevoke) { .sptep = &vm->spte[i], .pa = pa };
+    }
+}
+
+static void test_revoke_batch(void)
+{
+    CylonRevoke r[REVOKE_PAGES];
+    RevokeVm vm;
+    unsigned i;
+
+    /* Four pages, two flushes; D is read after the first one. */
+    revoke_vm_init(&vm, r);
+    vm.spte[1] |= CYLON_EPT_DIRTY;
+    vm.store_page = 2;
+    assert(cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+    assert(vm.flushes[0] == 1 && vm.flushes[1] == 1);
+    assert(!vm.writable_at_flush && !vm.mapped_at_flush);
+    for (i = 0; i < REVOKE_PAGES; i++) {
+        assert(vm.spte[i] == 0);
+        assert(!r[i].lost);
+        assert(r[i].dirty == (i == 1 || i == 2));
+    }
+
+    /* A saved MMIO entry is the cold value in version 1. */
+    revoke_vm_init(&vm, r);
+    r[0].cold = cylon_mmio_spte(0x110000000, 7);
+    assert(cylon_revoke(r, 1, true, revoke_vm_flush, &vm));
+    assert(vm.spte[0] == r[0].cold && !r[0].dirty);
+
+    /* KVM revoked page 0 first: dirty, untouched, still flushed once. */
+    revoke_vm_init(&vm, r);
+    vm.spte[0] = CYLON_REMOVED_SPTE;
+    assert(cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+    assert(r[0].lost && r[0].dirty && vm.spte[0] == CYLON_REMOVED_SPTE);
+    assert(vm.flushes[0] == 1 && vm.flushes[1] == 1);
+    revoke_vm_init(&vm, r);
+    vm.spte[0] = 0;
+    assert(cylon_revoke(r, 1, true, revoke_vm_flush, &vm));
+    assert(r[0].lost && r[0].dirty);
+    assert(vm.flushes[0] == 1 && vm.flushes[1] == 0);
+
+    /* KVM revokes page 3 between the flushes: dirty, not overwritten. */
+    revoke_vm_init(&vm, r);
+    vm.zap_page = 3;
+    assert(cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+    assert(r[3].dirty && !r[3].lost && vm.spte[3] == 0);
+    assert(!r[0].dirty);
+
+    /* The slot is deleted next: one flush. */
+    revoke_vm_init(&vm, r);
+    assert(cylon_revoke(r, REVOKE_PAGES, false, revoke_vm_flush, &vm));
+    assert(vm.flushes[0] == 1 && vm.flushes[1] == 0);
+
+    /* Another frame's entry, or a failed flush, gives up. */
+    revoke_vm_init(&vm, r);
+    vm.spte[2] = cylon_direct_spte(0x800000) | CYLON_EPT_ACCESSED;
+    assert(!cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+    assert(vm.flushes[0] == 0);
+    revoke_vm_init(&vm, r);
+    vm.fail_step = 0;
+    assert(!cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+    assert(vm.flushes[1] == 0);
+    /*
+     * Write-protected but not swapped. A stale writable TLB entry may
+     * still exist, so the caller must give up direct mapping.
+     */
+    for (i = 0; i < REVOKE_PAGES; i++) {
+        assert(cylon_spte_is_readonly_direct(vm.spte[i], r[i].pa));
+    }
+    revoke_vm_init(&vm, r);
+    vm.fail_step = 1;
+    assert(!cylon_revoke(r, REVOKE_PAGES, true, revoke_vm_flush, &vm));
+}
+
 /* Store a pagemap entry for the huge page at @ram + @offset. */
 static void put_entry(int fd, uintptr_t ram, uint64_t offset, uint64_t entry)
 {
@@ -210,6 +347,7 @@ int main(void)
     test_spt_areas();
     test_spte_transitions();
     test_spte_take_dirty();
+    test_revoke_batch();
     test_pfn_current();
 
     /* spte.h: RWX, WB, IPAT, MMU-present, host/MMU writable; A, D clear. */

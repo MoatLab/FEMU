@@ -266,7 +266,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 26 properties of its own, 10 inherited from `cxl-type3` and 65 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 27 properties of its own, 10 inherited from `cxl-type3` and 68 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 
@@ -302,6 +302,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `cylon-kernel-ack` | `bool` | `off` | Must be on with der=cylon to state that the host runs a Cylon kernel with the dual-slot fixes; the device does not check it |
 | `cylon-emul-exit` | `bool` | `on` | With der=cylon, ask the host kernel to return accesses it cannot decode on unmapped pages to FEMU, which maps the page; off keeps stock KVM behaviour (a guest #UD or an internal error) only if no other device of the VM turned the VM-wide capability on |
 | `cylon-never-emulate` | `bool` | `off` | With der=cylon and cylon-emul-exit on, ask the host kernel for version 2 of the Cylon fault exit: an access to a cold page exits with its type and FEMU maps the page, so KVM emulates only pages FEMU cannot map; per VM, set by the first Cylon device that installs its slot |
+| `cylon-revoke-batch` | `uint32` | `32` | With cylon-never-emulate on, the most pages one full revocation takes, 1 to 64: an eviction that must flush the VM's TLBs also revokes the mappings of the pages the policy evicts next, which stay cached; 1 revokes one page per two flushes |
 | `concurrent-misses` | `OnOffAuto` | `auto` | Let misses to different pages wait for the media together; auto does so only while direct mapping is active |
 
 ### Caching API, control channel and logs
@@ -341,7 +342,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
 - `femu`: `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-stream-test`
-- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-fill`, `test-fill`, `test-fill-race`, `test-map`, `test-media-disabled`, `test-owner`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-rip`, `test-slot-reservation`, `test-unprotect`
+- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-fill`, `test-fill`, `test-fill-race`, `test-map`, `test-media-disabled`, `test-owner`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-unprotect`
 
 ## Environment variables
 

@@ -100,6 +100,93 @@ static inline bool cylon_spte_is_readonly_direct(uint64_t spte, uint64_t pa)
     return (spte & ~CYLON_EPT_AD) == cylon_spte_readonly(cylon_direct_spte(pa));
 }
 
+/* One page of a full revocation; see cylon_revoke(). */
+typedef struct CylonRevoke {
+    uint64_t *sptep;
+    /* The frame that the direct entry maps. */
+    uint64_t pa;
+    /* What the leaf holds afterwards: zero or the saved MMIO entry. */
+    uint64_t cold;
+    /* Out: the guest may have written the page through the entry. */
+    bool dirty;
+    /* Out: KVM revoked the entry before the write protection. */
+    bool lost;
+} CylonRevoke;
+
+/*
+ * Flush every TLB translation of the VM. @step is 0 for the flush after the
+ * write protection and 1 for the flush after the swap. False on failure.
+ */
+typedef bool (*CylonFlush)(void *opaque, unsigned step);
+
+/*
+ * Fully revoke the direct entries of @r, n >= 1, with two flushes in all:
+ *
+ * 1. Clear W and MMU-writable in each entry, so neither the CPU nor KVM's
+ *    fast fault can write through it again.
+ * 2. Flush. No TLB keeps a writable translation, so D is now final; a
+ *    KVM revocation seen in step 1 has also finished its own flush.
+ * 3. Sample D while swapping each read-only entry for its cold value.
+ * 4. With @flush, flush again, so no read-only translation outlives the
+ *    swap. A caller that deletes the slot next passes false.
+ *
+ * Each flush must cover every page of @r, not only one GFN. An entry that
+ * KVM revoked counts as dirty. False if an entry is neither the expected
+ * direct entry nor revoked, or a flush fails: the caller must then give up
+ * direct mapping, since entries may be left write-protected.
+ */
+static inline bool cylon_revoke(CylonRevoke *r, unsigned n, bool flush,
+                                CylonFlush do_flush, void *opaque)
+{
+    bool sampled = false;
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        uint64_t old = __atomic_load_n(r[i].sptep, __ATOMIC_SEQ_CST);
+
+        r[i].dirty = false;
+        r[i].lost = false;
+        for (;;) {
+            if (cylon_spte_revoked(old)) {
+                r[i].dirty = true;
+                r[i].lost = true;
+                break;
+            }
+            if (!cylon_spte_is_direct(old, r[i].pa)) {
+                return false;
+            }
+            if (cylon_spte_install(r[i].sptep, old,
+                                   cylon_spte_readonly(old))) {
+                break;
+            }
+            old = __atomic_load_n(r[i].sptep, __ATOMIC_SEQ_CST);
+        }
+    }
+    if (!do_flush(opaque, 0)) {
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        uint64_t old;
+
+        if (r[i].lost) {
+            continue;
+        }
+        old = __atomic_load_n(r[i].sptep, __ATOMIC_SEQ_CST);
+        while (!cylon_spte_revoked(old)) {
+            if (!cylon_spte_is_readonly_direct(old, r[i].pa)) {
+                return false;
+            }
+            if (cylon_spte_install(r[i].sptep, old, r[i].cold)) {
+                break;
+            }
+            old = __atomic_load_n(r[i].sptep, __ATOMIC_SEQ_CST);
+        }
+        r[i].dirty = (old & CYLON_EPT_DIRTY) || !(old & CYLON_MMU_PRESENT);
+        sampled = true;
+    }
+    return !flush || !sampled || do_flush(opaque, 1);
+}
+
 static inline uint64_t cylon_mmio_spte(uint64_t gpa, uint64_t generation)
 {
     return gpa | CYLON_MMIO_VALUE |

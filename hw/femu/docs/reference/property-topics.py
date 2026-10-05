@@ -186,7 +186,8 @@ DEVICES = [
                       "test-prefetch-race",
                       "test-prefetch-race-end", "test-protect",
                       "test-protect-window",
-                      "test-slot-reservation", "test-unprotect"],
+                      "test-slot-reservation", "test-unprotect",
+                      "test-revoke-ahead", "test-revoke-ahead-keep"],
         "topics": [
             {
                 "title": "Cache",
@@ -211,7 +212,7 @@ DEVICES = [
                 "props": [
                     "der", "der-replace-rate", "cylon-kernel-ack",
                     "cylon-emul-exit", "cylon-never-emulate",
-                    "concurrent-misses",
+                    "cylon-revoke-batch", "concurrent-misses",
                 ],
             },
             {
@@ -275,7 +276,8 @@ DEVICES = [
                     "der-fault-fetches", "der-fault-page-walks",
                     "der-fault-emulated", "der-fault-unprotected",
                     "der-fault-conflicts", "der-fault-overflows",
-                    "der-emul-fills", "der-emul-fetch-fills",
+                    "der-revoke-flushes", "der-revoked-ahead",
+                    "der-ahead-remaps", "der-emul-fills", "der-emul-fetch-fills",
                     "der-emul-failures",
                 ],
             },
