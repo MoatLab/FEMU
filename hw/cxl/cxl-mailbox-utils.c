@@ -3925,12 +3925,18 @@ int cxl_process_cci_message(CXLCCI *cci, uint8_t set, uint8_t cmd,
                 h == cmd_sanitize_overwrite ||
                 h == cmd_firmware_update_transfer ||
                 h == cmd_firmware_update_activate) {
+                if (cci->post_command) {
+                    cci->post_command(cci->pre_command_opaque, set, cmd);
+                }
                 return CXL_MBOX_MEDIA_DISABLED;
             }
         }
     }
 
     ret = (*h)(cxl_cmd, pl_in, len_in, pl_out, len_out, cci);
+    if (cci->post_command) {
+        cci->post_command(cci->pre_command_opaque, set, cmd);
+    }
     if ((cxl_cmd->effect & CXL_MBOX_BACKGROUND_OPERATION) &&
         ret == CXL_MBOX_BG_STARTED) {
         *bg_started = true;

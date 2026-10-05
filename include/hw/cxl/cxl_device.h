@@ -173,8 +173,13 @@ typedef struct CXLEventLog {
 } CXLEventLog;
 
 typedef struct CXLCCI {
-    /* Called before each command, with its command set and opcode. */
+    /*
+     * Called before and after each command that reaches its handler or is
+     * refused for disabled media, with its command set and opcode and
+     * @pre_command_opaque; every @pre_command call has its @post_command.
+     */
     void (*pre_command)(void *opaque, uint8_t set, uint8_t cmd);
+    void (*post_command)(void *opaque, uint8_t set, uint8_t cmd);
     void *pre_command_opaque;
 
     struct cxl_cmd cxl_cmd_set[256][256];
