@@ -544,7 +544,7 @@ Design: [CXL SSD](../design/cxl-ssd.md).
 | `prefetch-degree`, `prefetch-stride` | pages | up to the media page count | pages inserted after a miss, and their distance; changeable at run time |
 | `ftl` | bool | | `off` charges no media time and cannot be linked to an NVMe controller |
 | `channels`, `luns-per-channel` | count | 1 to 4096, 1 to 128 | NAND channels and LUNs (one plane each) |
-| `pages-per-block`, `blocks-per-plane` | count | 1 to 65536; blocks 2 to 65536, or 0 to size it | NAND blocks; 0 leaves spare room for GC |
+| `pages-per-block`, `blocks-per-plane` | count | 1 to 65536; blocks 2 to 65536, or 0 to size it | NAND blocks; 0 leaves spare room for GC; an explicit value must leave two more spare lines than `gc-threshold-high` keeps free |
 | `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | ns | at most one second | NAND times |
 | `gc-threshold`, `gc-threshold-high` | percent | 1 to 100, high >= low | GC watermarks |
 | `der` | name | `off`, `memslot`, `cylon` | direct mapping of cached pages into the guest |

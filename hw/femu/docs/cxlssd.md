@@ -84,7 +84,7 @@ properties (see "Geometry and timing compatibility"); the defaults are four
 channels, four LUNs per channel and 256 pages per block, and
 `blocks-per-plane=0` sizes the planes to 5/4 of the media plus four more
 blocks each, which leaves GC room. Current bbssd request processing supplies
-background and forced GC. NAND type-specific and advanced NVMe experiment
+background and forced GC. See "Full NAND" for the over-provisioning rule. NAND type-specific and advanced NVMe experiment
 properties are not exposed through this device.
 
 FIFO removes the oldest entry; LIFO removes the newest. CLOCK rotates entries
@@ -458,8 +458,10 @@ The rules:
   mapping ratio selects maps without a cache way. It writes a marker
   to the leaf, and KVM then emulates the accesses to that page as in
   version 1, one charged access at a time. `der-fault-emulated` counts these
-  pages. A full medium shows only during the fill; such a page also goes to
-  the emulator, after its read was charged.
+  pages. A media read that fails after the fill took its way also sends
+  the page to the emulator, after its read was charged. A full NAND never
+  does: a program that finds no page only loses its timing (see "Full
+  NAND").
 - KVM reports exits, not retired instructions, so FEMU cannot tell one
   execution of a RIP from the next. It records the latest 64 pages that a
   vCPU fills at one RIP (oldest released first; `der-fault-unprotected`
@@ -1122,8 +1124,9 @@ The following realize-time properties feed the existing bbssd FTL:
 eight per page, with one plane per LUN. Axis limits follow the FTL's PPA
 fields; aggregate sectors must fit its signed integer totals. Explicit NAND
 capacity must cover media capacity. Thresholds must lie in 1..100, with the
-high threshold at least the low threshold. Geometry without spare space can
-run out of writable pages; automatic geometry reserves extra space.
+high threshold at least the low threshold. With the FTL on, the NAND must
+also leave enough spare lines for garbage collection (see "Full NAND").
+Automatic geometry meets that rule.
 
 `cylon-first-touch-program=on` charges a NAND program instead of a read on
 first access to an unmapped page. `cylon-free-writeback=on` suppresses NAND
@@ -1135,6 +1138,41 @@ retain the device operation gate. They sleep until 100 us before the deadline
 and spin on the realtime clock only for that tail, which absorbs sleep timer
 slack without holding a host CPU for long waits such as a cache flush. The virtual clock cannot measure this
 host wait; qtests validate modeled timing and BQL release independently.
+
+## Full NAND
+
+A line is one block index across all channels and LUNs. Forced collection
+keeps `floor((1 - gc-threshold-high / 100) * blocks-per-plane)` lines free.
+Realize refuses a geometry whose spare lines (lines beyond the media size)
+are fewer than that reserve plus two. The error gives the smallest
+`blocks-per-plane` that meets the rule within the FTL limits, or says that
+none does. With `ftl=off` the rule does not apply.
+
+The rule removes the full-NAND case. When collection is forced, a closed
+line with an invalid page always exists, and there is room to move its
+valid pages. The guest uses the device as memory, so almost all data stays
+valid. With no spare line, every program after the first fill fails. With
+one spare line the FTL runs out of lines on the way and logs "No free
+lines". With spare lines only in the reserve, each write copies a nearly
+full line.
+
+A write that finds the free lines at the forced threshold waits for
+collection. The FTL frees the victim line in its metadata at once and books
+the copies and erases on the LUNs. The request then ends no earlier than the
+last erase on every LUN, as a real SSD blocks writes during foreground
+collection. Linked NVMe requests wait the same way. `gc-stalls` counts these
+requests, and `gc-stall-ns` adds the time from each request start to the end
+of its collection. The program of the request itself waits for its LUN, so
+the wait on every LUN adds only the difference between LUNs. With GC delay
+off (the FEMU flip command), collection books no NAND time and no request
+waits.
+
+`media-full` counts programs that still find no free page. The rule keeps it
+at 0. If one occurs, its program is not timed and the first one reports an
+error. The failure does not stop an eviction or an insert, because the
+payload is in host memory. A full NAND never sends a cacheable access
+uncached. An access goes uncached only for a caching API uncached range, a
+set whose ways are all pinned, or a victim that another access holds.
 
 ## Direct ratios
 
@@ -1201,7 +1239,7 @@ commands 1 and 5.
 | `CXL_SIZE` | `256M` | Media size, an integer with an `M` or `G` suffix |
 | `CACHE_PAGES` | `(size_mb / 20) * 256` | `cache-pages`, a cache of size/20 MiB as in Cylon |
 | `CACHE_WAYS` | 1 | `cache-ways`, direct mapped as Cylon's default `buffer_way=0`; `full` means `cache-pages` |
-| `BLOCKS_PER_PLANE` | 768 for `48G`, 1536 for `96G`, else 0 | `blocks-per-plane`; the presets leave no over-provisioning as in Cylon, and 0 lets FEMU size it |
+| `BLOCKS_PER_PLANE` | 822 for `48G`, 1644 for `96G`, else 0 | `blocks-per-plane`; the presets add 7% over-provisioning to Cylon's NAND size, and 0 lets FEMU size it |
 | `CACHE_POLICY` | `fifo` | `cache-policy` |
 | `DER` | `off` | `der` |
 | `CYLON_KERNEL_ACK` | `off` | `cylon-kernel-ack`; set `on` only on the fixed host kernel |

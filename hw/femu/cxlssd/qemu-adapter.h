@@ -21,7 +21,11 @@ typedef struct FemuCxlWork {
 typedef struct FemuCxlOp {
     FemuCxlMedia *s;
     uint64_t ns;
-    bool held;
+    /*
+     * Realtime the media time counts from, which the access sleeps against;
+     * 0 counts each request from its submission.
+     */
+    int64_t start;
     /* Pages this operation holds itself; its prefetch may evict them. */
     const uint64_t *own;
     unsigned nown;
@@ -32,12 +36,8 @@ typedef struct FemuCxlOp {
     bool fill;
     /* A fill that must not evict pages its own vCPU protects. */
     bool keep_own;
-    /*
-     * The next media read ends the fill's media time; see cxl_fold(). The
-     * access started at @start (QEMU_CLOCK_REALTIME ns).
-     */
+    /* The next media read ends the fill's media time; see cxl_fold(). */
     bool fold;
-    int64_t start;
 } FemuCxlOp;
 
 /* One vCPU's protection of a page; see femu_cxl_protect(). */
@@ -131,6 +131,12 @@ struct FemuCxlMedia {
     uint64_t media_reads;
     uint64_t media_writes;
     uint64_t media_full;
+    /* Media requests that waited for forced collection, and how long. */
+    uint64_t gc_stalls;
+    uint64_t gc_stall_ns;
+    /* The FTL threads count into these under @lock; CXL lock copies follow. */
+    uint64_t ftl_gc_stalls;
+    uint64_t ftl_gc_stall_ns;
     /*
      * Accesses skip their completion wait; the NAND timelines still advance.
      * Changed only under the gate held alone. BQL and CXL lock.

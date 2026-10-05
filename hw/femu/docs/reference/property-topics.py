@@ -264,7 +264,7 @@ DEVICES = [
                 "kind": "runtime",
                 "props": [
                     "media-time-ns", "media-reads", "media-writes",
-                    "media-full",
+                    "media-full", "gc-stalls", "gc-stall-ns",
                 ],
             },
             {

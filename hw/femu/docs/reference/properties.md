@@ -266,7 +266,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 27 properties of its own, 10 inherited from `cxl-type3` and 69 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 27 properties of its own, 10 inherited from `cxl-type3` and 71 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 
@@ -283,7 +283,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `channels` | `uint32` | `4` | Number of NAND channels, 1 to 4096 |
 | `luns-per-channel` | `uint32` | `4` | NAND LUNs per channel, 1 to 128, with one plane per LUN |
 | `pages-per-block` | `uint32` | `256` | 4 KiB pages per NAND block, 1 to 65536 |
-| `blocks-per-plane` | `uint32` | `0` | NAND blocks per plane, 2 to 65536 and enough to cover the media; 0 sizes it to 5/4 of the media plus 4 blocks per plane |
+| `blocks-per-plane` | `uint32` | `0` | NAND blocks per plane, 2 to 65536; with the FTL on, the spare lines beyond the media must exceed the free lines gc-threshold-high keeps by two; 0 sizes it to 5/4 of the media plus 4 blocks per plane, or more if that rule needs it |
 | `gc-threshold` | `uint32` | `75` | Percent of lines in use at which background garbage collection starts, 1 to 100 |
 | `gc-threshold-high` | `uint32` | `95` | Percent of lines in use at which garbage collection is forced, from gc-threshold to 100 |
 | `read-ns` | `uint64` | `40000` | NAND page read time in ns, at most one second |

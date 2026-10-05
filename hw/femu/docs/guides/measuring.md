@@ -120,7 +120,11 @@ scripts/qmp/qom-get /machine/peripheral/cxlssd.media-full
   counters (`media-reads`, `media-writes`, `media-time-ns`) or the `der-*`
   counters, so measure those as differences between two reads.
 - `media-full` must stay 0. A non-zero value means some NAND programs found
-  no free page and were not timed, and the run is not valid.
+  no free page and were not timed, and the run is not valid. The
+  over-provisioning rule at realize keeps it at 0.
+- `gc-stalls` and `gc-stall-ns` show how often and how long writes waited
+  for forced garbage collection. Take differences, as for the media
+  counters.
 - Accesses served through a direct mapping (`der=memslot` or `cylon`) never
   reach QEMU and are not counted as hits.
 

@@ -965,11 +965,11 @@ int do_gc(struct ssd *ssd, bool force)
     if (!reclaim_line(ssd, victim_line)) {
         return -1;
     }
-    if (force) {
+    if (force && ssd->sp.enable_gc_delay) {
         int ch;
         int lun;
 
-        ssd->forced_gc_lines++;
+        ssd->forced_gc_timed++;
         /* The erase is the last command collection gives each LUN. */
         for (ch = 0; ch < ssd->sp.nchs; ch++) {
             for (lun = 0; lun < ssd->sp.luns_per_ch; lun++) {

@@ -317,6 +317,31 @@ void femu_cxl_delay(uint64_t ns)
     femu_cxl_retake(&held);
 }
 
+/*
+ * A write that finds free lines at the forced threshold blocks until
+ * collection has freed one, as a real SSD's foreground collection does. The
+ * FTL frees the line in its metadata at once and books the copies and erases
+ * on the LUNs, so the request ends no earlier than the last of those erases.
+ * Caller holds @lock.
+ */
+static uint64_t cxl_ftl_request(FemuCxlMedia *s, FemuCtrl *n,
+                                NvmeNamespace *ns, NvmeRequest *req)
+{
+    struct ssd *ssd = ns->ssd;
+    uint64_t timed = ssd->forced_gc_timed;
+    uint64_t lat = bb_ftl_process_req(n, ns, req);
+    uint64_t wait;
+
+    /* Collection without GC delay books no NAND time to wait for. */
+    if (ssd->forced_gc_timed == timed || ssd->forced_gc_end <= req->stime) {
+        return lat;
+    }
+    wait = ssd->forced_gc_end - req->stime;
+    s->ftl_gc_stalls++;
+    s->ftl_gc_stall_ns += wait;
+    return MAX(lat, wait);
+}
+
 /* Only metadata reaches the worker; the vCPU owns all payload access. */
 static void *cxl_worker(void *opaque)
 {
@@ -336,13 +361,27 @@ static void *cxl_worker(void *opaque)
             s->ns.ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
             work->req.cmd.opcode = NVME_CMD_WRITE;
         }
-        work->latency = bb_ftl_process_req(s->ctrl, &s->ns, &work->req);
+        work->latency = cxl_ftl_request(s, s->ctrl, &s->ns, &work->req);
         work->done = true;
         /* The waiter rechecks done under @lock, so its cond outlives this. */
         qemu_cond_signal(work->done_cond);
     }
     qemu_mutex_unlock(&s->lock);
     return NULL;
+}
+
+/*
+ * Realize refuses NAND whose spare lines do not exceed the forced collection
+ * reserve, so collection always frees a line and no program should fail. If
+ * one still does, only its timing is lost. The payload is in host memory, so
+ * the failure never vetoes an eviction or an insert.
+ */
+static void cxl_media_full(FemuCxlMedia *s)
+{
+    if (!s->media_full++) {
+        error_report("femu-cxl-ssd: garbage collection freed no NAND page; "
+                     "a program was not timed and media-full counts it");
+    }
 }
 
 /*
@@ -358,12 +397,15 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
             .ns = &s->ns,
             .slba = lpn * 8,
             .nlb = 8,
-            .stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + op->ns,
+            .stime = (op->start ? op->start :
+                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) + op->ns,
         },
     };
     QemuCond done_cond;
     FemuCxlHeld held;
     uint64_t writes;
+    uint64_t stalls;
+    uint64_t stall_ns;
 
     if (!s->ftl) {
         return true;
@@ -379,12 +421,14 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     }
     /* A linked controller's FTL thread updates this under @lock. */
     writes = ssd_nand_write_pages(s->ns.ssd);
+    stalls = s->ftl_gc_stalls;
+    stall_ns = s->ftl_gc_stall_ns;
     qemu_mutex_unlock(&s->lock);
     qemu_cond_destroy(&done_cond);
     /*
      * A fill's last media read: check the frame it will map and wait out its
      * media time here, so the fill takes the locks once more instead of
-     * twice. The time still counts from the start of the access.
+     * twice. The time counts from @op->start, as the access sleep does.
      */
     if (op->fold && work.req.status == NVME_SUCCESS) {
         femu_cxl_der_precheck_run();
@@ -394,9 +438,18 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     femu_cxl_retake(&held);
     s->media_ns += work.latency;
     op->ns += work.latency;
-    s->media_writes = writes;
+    /* Another caller may have published a later snapshot first. */
+    s->media_writes = MAX(s->media_writes, writes);
+    s->gc_stalls = MAX(s->gc_stalls, stalls);
+    s->gc_stall_ns = MAX(s->gc_stall_ns, stall_ns);
     if (work.req.cmd.opcode == NVME_CMD_READ) {
         s->media_reads++;
+    }
+    /* A fill that first touch made a program fails only as a program. */
+    if (!write && work.req.cmd.opcode == NVME_CMD_WRITE &&
+        work.req.status != NVME_SUCCESS) {
+        cxl_media_full(s);
+        return true;
     }
     return work.req.status == NVME_SUCCESS;
 }
@@ -419,31 +472,26 @@ static bool cxl_op_holds(FemuCxlOp *op, uint64_t lpn)
  * which its own prefetch must not push out again, pages another access
  * holds, so the fill takes the victim cxl_fill_room() found, and pages
  * another vCPU protected within the protection window, whose instruction
- * may not have run again yet. A page passed over counts as held: if no
- * victim is left, the fill keeps nothing. The vCPU's own pages are passed
- * over only by a fill with keep_own: a page the vCPU faults on again at one
- * RIP, so its instruction may need both. Emulated accesses pass over
- * nothing: each completes in its exit, as in version 1, and keeping a page
- * for an instruction would only make them uncached.
+ * may not have run again yet. If no victim is left, the fill keeps
+ * nothing. The vCPU's own pages are passed over only by a fill with
+ * keep_own: a page the vCPU faults on again at one RIP, so its instruction
+ * may need both. Emulated accesses pass over nothing: each completes in its
+ * exit, as in version 1, and keeping a page for an instruction would only
+ * make them uncached.
  */
 static bool cxl_keep(void *opaque, uint64_t lpn)
 {
     FemuCxlOp *op = opaque;
     FemuCxlMedia *s = op->s;
     int64_t until = INT64_MAX;
-    bool keep;
 
     if (cxl_op_holds(op, lpn)) {
         return op->fill;
     }
-    keep = (op->keep_own && cxl_protected(s, op->owner, lpn)) ||
+    return (op->keep_own && cxl_protected(s, op->owner, lpn)) ||
            (op->fill && g_hash_table_contains(s->pages, &lpn)) ||
            (op->fill && cxl_protected_recently(s, op->owner, lpn,
                             qemu_clock_get_ns(QEMU_CLOCK_REALTIME), &until));
-    if (keep) {
-        op->held = true;
-    }
-    return keep;
 }
 
 /*
@@ -539,7 +587,6 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 
     /* Another access holds the page; keep it and let the caller go uncached. */
     if (!own && g_hash_table_contains(s->pages, &e->lpn)) {
-        op->held = true;
         return false;
     }
     if (!femu_cxl_ratio_selected(s->direct.ratio, e->lpn)) {
@@ -553,13 +600,18 @@ bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
     }
     /* The write-back drops the locks; accesses to the page wait for it. */
     if (own) {
-        return femu_cxl_media(op, e->lpn, true);
+        ok = femu_cxl_media(op, e->lpn, true);
+    } else {
+        g_hash_table_add(s->pages, &e->lpn);
+        ok = femu_cxl_media(op, e->lpn, true);
+        g_hash_table_remove(s->pages, &e->lpn);
+        qemu_cond_broadcast(&s->idle);
     }
-    g_hash_table_add(s->pages, &e->lpn);
-    ok = femu_cxl_media(op, e->lpn, true);
-    g_hash_table_remove(s->pages, &e->lpn);
-    qemu_cond_broadcast(&s->idle);
-    return ok;
+    /* A full NAND never keeps a page resident or sends an access uncached. */
+    if (!ok) {
+        cxl_media_full(s);
+    }
+    return true;
 }
 
 /*
@@ -617,28 +669,13 @@ static bool cxl_map(FemuCxlMedia *s, uint64_t generation, uint64_t hpa,
 }
 
 /*
- * NAND without over-provisioning fills up once every page is programmed, and
- * then a write-back has nowhere to go. NAND only models timing; the payload is
- * in host memory, so the access still completes, uncached.
- */
-static void cxl_media_full(FemuCxlMedia *s)
-{
-    if (!s->media_full++) {
-        warn_report("femu-cxl-ssd: NAND is full; accesses go uncached "
-                    "(add over-provisioning with blocks-per-plane)");
-    }
-}
-
-/*
  * A one-page fill without prefetch does nothing after its media read that
  * takes media time, so femu_cxl_media() may end its delay and check the frame
  * it maps while it is without the locks. An access that moves data inserts
  * its page after the read, which overlaps the delay instead.
  */
-static void cxl_fold(FemuCxlMedia *s, FemuCxlOp *op, int64_t start,
-                     uint64_t lpn)
+static void cxl_fold(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn)
 {
-    op->start = start;
     op->fold = !s->fast_load && !s->prefetch_degree;
     if (op->fold) {
         femu_cxl_der_precheck(&s->direct, lpn);
@@ -694,6 +731,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     op.own = pages;
     op.nown = holds;
+    /* Media time starts once the pages are held, not while waiting for them. */
+    op.start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     /*
      * Checked again inside the gate: a fill authorised before a cache
      * disable or pin that it waited behind must not charge a read for a
@@ -764,12 +803,11 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
              */
             if (over) {
                 /* Charged as a fill; writes through the mapping are not. */
-                cxl_fold(s, &op, start, lpn);
+                cxl_fold(s, &op, lpn);
                 if (!femu_cxl_media(&op, lpn, false)) {
                     goto out;
                 }
             } else if (!data && !to_media) {
-                op.held = false;
                 e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
                                                cxl_keep, &op);
                 /* A ratio page maps without a cache entry. */
@@ -779,7 +817,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     result = MEMTX_OK;
                     goto out;
                 }
-                cxl_fold(s, &op, start, lpn);
+                cxl_fold(s, &op, lpn);
                 if (!femu_cxl_media(&op, lpn, false)) {
                     femu_cxl_fill_failed(s, lpn, e);
                     goto out;
@@ -792,15 +830,10 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                 cxl_media_full(s);
             }
             if (!to_media && data) {
-                op.held = false;
                 e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
                                                cxl_keep, &op);
-                /* The victim was held: this access goes uncached. */
-                if (!e && op.held) {
-                    if (write && !femu_cxl_media(&op, lpn, true)) {
-                        cxl_media_full(s);
-                    }
-                } else if (!e) {
+                /* Only a held victim refuses the insert: go uncached. */
+                if (!e && write && !femu_cxl_media(&op, lpn, true)) {
                     cxl_media_full(s);
                 }
             }
@@ -863,7 +896,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
         s->cache_entries = g_hash_table_size(s->cache.entries);
     }
-    remaining = op.ns - (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
+    remaining = op.ns - (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - op.start);
     /* Fast load leaves the media time on the NAND timelines, not the vCPU. */
     if (remaining > 0 && !s->fast_load) {
         femu_cxl_delay(remaining);
@@ -958,7 +991,7 @@ void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e)
 
 /*
  * Whether a fill of @lpn can end with a direct mapping, before any media
- * time is charged. A full medium or a held victim shows only during a fill.
+ * time is charged. A held victim shows only during a fill.
  */
 bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn)
 {
@@ -1268,10 +1301,28 @@ uint64_t femu_cxl_drain(FemuCxlMedia *s)
     return qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - now;
 }
 
+/*
+ * Whether @blocks lines leave at least two spare lines more than forced
+ * collection keeps free. Collection then always finds a line with an invalid
+ * page and room to move its valid ones, so a write never finds NAND full.
+ * With less, the spare space would sit in the reserve: every write would copy
+ * a nearly full line, and with none every program after the first fill fails.
+ * The reserve is computed as bb_gc_forced_lines() computes it.
+ */
+static bool cxl_spare_enough(FemuCxlMedia *s, uint64_t size, uint64_t line,
+                             uint32_t blocks)
+{
+    uint64_t reserve = (uint64_t)((1 - s->gc_threshold_high / 100.0) * blocks);
+
+    return line * blocks >= size / 4096 + (reserve + 2) * line;
+}
+
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
 {
     uint64_t pages;
     uint64_t line;
+    uint64_t limit;
+    uint32_t need;
 
     if (!s->channels || s->channels > (1 << CH_BITS) ||
         !s->luns_per_channel || s->luns_per_channel > (1 << LUN_BITS) ||
@@ -1286,6 +1337,11 @@ bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
     line = (uint64_t)s->channels * s->luns_per_channel * s->pages_per_block;
     if (!s->blocks_per_plane) {
         s->blocks_per_plane = DIV_ROUND_UP(size / 4096 * 5 / 4, line) + 4;
+        while (s->ftl && s->blocks_per_plane < (1 << BLK_BITS) &&
+               line * (s->blocks_per_plane + 1) <= INT_MAX / 8 &&
+               !cxl_spare_enough(s, size, line, s->blocks_per_plane)) {
+            s->blocks_per_plane++;
+        }
     }
     pages = line * s->blocks_per_plane;
     if (s->blocks_per_plane > (1 << BLK_BITS) || pages > INT_MAX / 8 ||
@@ -1293,7 +1349,25 @@ bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)
         error_setg(errp, "NAND geometry must cover media and fit FTL limits");
         return false;
     }
-    return true;
+    if (!s->ftl || cxl_spare_enough(s, size, line, s->blocks_per_plane)) {
+        return true;
+    }
+    /* The smallest count that also stays within the FTL page limit. */
+    limit = MIN(1 << BLK_BITS, INT_MAX / 8 / line);
+    need = s->blocks_per_plane;
+    while (need < limit && !cxl_spare_enough(s, size, line, need)) {
+        need++;
+    }
+    if (!cxl_spare_enough(s, size, line, need)) {
+        error_setg(errp, "NAND geometry leaves too little over-provisioning "
+                   "for garbage collection at any blocks-per-plane; raise "
+                   "gc-threshold-high or use fewer pages per line");
+        return false;
+    }
+    error_setg(errp, "NAND geometry leaves too little over-provisioning for "
+               "garbage collection: blocks-per-plane must be at least %u "
+               "with gc-threshold-high=%u", need, s->gc_threshold_high);
+    return false;
 }
 
 /* Queue [slba, slba + nlb) of @ns for dropping; called under @lock. */
@@ -1357,7 +1431,7 @@ uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     if (recorded) {
         req->cxl_seq = s->nvme_taken + 1;
     }
-    lat = bb_ftl_process_req(n, ns, req);
+    lat = cxl_ftl_request(s, n, ns, req);
     qemu_mutex_unlock(&s->lock);
     if (req->cxl_seq) {
         qemu_bh_schedule(s->nvme_bh);
@@ -1471,6 +1545,8 @@ void femu_cxl_nvme_bh(void *opaque)
     s->cache_entries = g_hash_table_size(s->cache.entries);
     qemu_mutex_lock(&s->lock);
     s->media_writes = ssd_nand_write_pages(s->ns.ssd);
+    s->gc_stalls = s->ftl_gc_stalls;
+    s->gc_stall_ns = s->ftl_gc_stall_ns;
     qemu_mutex_unlock(&s->lock);
     qatomic_store_release(&s->nvme_done, done);
     femu_cxl_leave(s);

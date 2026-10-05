@@ -529,11 +529,11 @@ struct ssd {
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */
     /*
-     * Lines that forced collection freed, and when the NAND work of the last
-     * of them ends on every LUN. A front end that blocks writes until
-     * collection is done waits until then.
+     * Lines that forced collection freed with GC delay on, and when the NAND
+     * work of the last of them ends on every LUN. A front end that blocks
+     * writes until collection is done waits until then.
      */
-    uint64_t forced_gc_lines;
+    uint64_t forced_gc_timed;
     uint64_t forced_gc_end;
 
     /*

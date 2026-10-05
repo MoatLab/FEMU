@@ -911,7 +911,7 @@ static void cxl_flush(Object *obj, bool value, Error **errp)
     /* Pinned pages are written back but stay resident. */
     if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, &op) ||
         !femu_cxl_cache_clean_pinned(&s->cache, femu_cxl_evict, &op)) {
-        error_setg(errp, "CXL cache cannot flush: NAND is full");
+        error_setg(errp, "CXL cache cannot flush: a page is in use");
     }
     s->cache_entries = g_hash_table_size(s->cache.entries);
     cxl_ratio_restore(FEMU_CXL_SSD(obj), errp);
@@ -1026,7 +1026,7 @@ static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
             femu_cxl_der_clear(&s->direct);
             if (!femu_cxl_cache_clear(&s->cache, femu_cxl_evict, &op) ||
                 !femu_cxl_cache_clean_pinned(&s->cache, femu_cxl_evict, &op)) {
-                error_setg(errp, "CXL cache cannot rebuild: NAND is full");
+                error_setg(errp, "CXL cache cannot rebuild: a page is in use");
                 goto out;
             }
             /* Pinned pages never left DRAM; they return without media cost. */
@@ -2111,6 +2111,8 @@ static void cxl_init(Object *obj)
     cxl_add_counter(obj, "media-reads", &s->media_reads);
     cxl_add_counter(obj, "media-writes", &s->media_writes);
     cxl_add_counter(obj, "media-full", &s->media_full);
+    cxl_add_counter(obj, "gc-stalls", &s->gc_stalls);
+    cxl_add_counter(obj, "gc-stall-ns", &s->gc_stall_ns);
     cxl_add_counter(obj, "cache-hits", &s->cache.hits);
     cxl_add_counter(obj, "cache-misses", &s->cache.misses);
     cxl_add_counter(obj, "cache-inserts", &s->cache.inserts);
@@ -3998,7 +4000,7 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
     sptep = cylon_fault_sptep(dev, f->gpa);
     old = sptep ? qatomic_read(sptep) : 0;
     if (old != CYLON_REMOVED_SPTE && !(old & CYLON_MMU_PRESENT)) {
-        /* Also a full medium or a held victim that showed in the fill. */
+        /* Also a held victim that showed in the fill, or a failed read. */
         if (!cylon_fault_emulate(dev, f->gpa, &installed)) {
             *why = cylon_fault_reason(f->gpa, result);
             return false;

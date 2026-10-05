@@ -122,7 +122,7 @@ device's own defaults:
 | `CACHE_POLICY` | `fifo` | `fifo` | `cache-policy` |
 | `CHANNELS`, `LUNS_PER_CHANNEL` | 8, 8 | 4, 4 | `channels`, `luns-per-channel` |
 | `LSA_CONTROL` | `on` | `off` | `lsa-control` |
-| `BLOCKS_PER_PLANE` | 768 for `48G`, 1536 for `96G`, else 0 | 0 | `blocks-per-plane` |
+| `BLOCKS_PER_PLANE` | 822 for `48G`, 1644 for `96G`, else 0 | 0 | `blocks-per-plane` |
 
 The other variables (`DER`, `CYLON_KERNEL_ACK`, `PREFETCH_DEGREE`,
 `PREFETCH_STRIDE`, `PAGES_PER_BLOCK`, `READ_NS`, `PROGRAM_NS`, `ERASE_NS`,
@@ -130,9 +130,9 @@ The other variables (`DER`, `CYLON_KERNEL_ACK`, `PREFETCH_DEGREE`,
 `CYLON_FIRST_TOUCH_PROGRAM`, `CYLON_FREE_WRITEBACK`, `LOG_DIR`, `LOG_LIMIT`,
 `TRACEFS_DIR`, `CXL_BACKEND`, `ACCEL`, `CPU`, `CPUS`, `RAM`) keep the
 device defaults; the comment at the top of the script lists them all. The
-`48G` and `96G` presets leave no spare NAND blocks, as in Cylon. Without
-spare blocks the NAND fills up and accesses complete uncached (see
-[Counters](#counters), `media-full`).
+`48G` and `96G` presets add 7% over-provisioning to Cylon's NAND size.
+Cylon's own presets have no spare blocks, and the device refuses them: see
+[Full NAND](../cxlssd.md#full-nand).
 
 A property the script has no variable for can be set with `-global`, which
 applies to every `femu-cxl-ssd`:
@@ -331,7 +331,7 @@ CACHE_PAGES=4096 CACHE_WAYS=16 CACHE_POLICY=s3-fifo PREFETCH_DEGREE=4 \
 | `channels` | 4 | NAND channels, 1 to 4096 |
 | `luns-per-channel` | 4 | LUNs per channel, 1 to 128, one plane each |
 | `pages-per-block` | 256 | 4 KiB pages per block |
-| `blocks-per-plane` | 0 | 0 sizes the NAND to 5/4 of the media plus 4 blocks per plane, which leaves room for garbage collection |
+| `blocks-per-plane` | 0 | 0 sizes the NAND to 5/4 of the media plus 4 blocks per plane, which leaves room for garbage collection. An explicit value must leave two more spare lines than `gc-threshold-high` keeps free |
 | `read-ns`, `program-ns`, `erase-ns` | 40000, 200000, 2000000 | Page read, page program and block erase times, at most one second |
 | `channel-ns` | 0 | Channel transfer time per page |
 | `gc-threshold`, `gc-threshold-high` | 75, 95 | Percent of lines in use at which garbage collection starts and is forced |
@@ -548,7 +548,8 @@ The ones you need most:
 | `cache-hits`, `cache-misses`, `read-hits`, `read-misses`, `write-hits`, `write-misses` | Trapped lookups; direct hits are not counted |
 | `cache-entries`, `cache-evictions`, `prefetch-inserts` | Cache occupancy and churn |
 | `media-reads`, `media-writes`, `media-time-ns` | NAND page reads, page programs and total modelled media time |
-| `media-full` | Accesses whose NAND program found no free page. That program is not timed and the access completes uncached; a fill read already issued is still charged. A measurement is valid only while it is 0 |
+| `media-full` | NAND programs that found no free page after garbage collection. The program is not timed, and it does not stop an eviction or an insert. The over-provisioning rule keeps it at 0. A measurement is valid only while it is 0 |
+| `gc-stalls`, `gc-stall-ns` | Media requests that waited for forced garbage collection, and the total time from their start to the end of that collection on every LUN |
 | `der-active`, `der-mapped`, `der-fallbacks` | Whether direct mapping is on, how many pages are mapped now, and refused mappings |
 
 `qom-set ... stats-reset true` copies the counters to the `last-*` properties

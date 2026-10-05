@@ -28,8 +28,10 @@ static const FemuPropDesc cxl_descs[] = {
     { "pages-per-block",
       "4 KiB pages per NAND block, 1 to 65536" },
     { "blocks-per-plane",
-      "NAND blocks per plane, 2 to 65536 and enough to cover the media; 0 "
-      "sizes it to 5/4 of the media plus 4 blocks per plane" },
+      "NAND blocks per plane, 2 to 65536; with the FTL on, the spare lines "
+      "beyond the media must exceed the free lines gc-threshold-high keeps "
+      "by two; 0 sizes it to 5/4 of the media plus 4 blocks per plane, or "
+      "more if that rule needs it" },
     { "gc-threshold",
       "Percent of lines in use at which background garbage collection "
       "starts, 1 to 100" },
@@ -209,10 +211,19 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "this device, so writes from a linked NVMe controller appear after "
       "the next one" },
     { "media-full",
-      "Read-only: accesses whose NAND program found no free page; that "
-      "program is not timed and the access completes uncached, though a "
-      "fill read already issued is charged; stats-reset keeps it, and a "
-      "measurement is valid only while it is 0" },
+      "Read-only: NAND programs that found no free page after garbage "
+      "collection; the program is not timed but does not stop the eviction "
+      "or insert, and the first one reports an error; the over-provisioning "
+      "rule keeps it at "
+      "0, stats-reset keeps it, and a measurement is valid only while it "
+      "is 0" },
+    { "gc-stalls",
+      "Read-only: media requests, linked NVMe ones included, that waited "
+      "for timed forced garbage collection to free a line; refreshed with "
+      "media-writes; stats-reset keeps it" },
+    { "gc-stall-ns",
+      "Read-only: total ns from the start of those requests to the end of "
+      "the collection they waited for, on every LUN; stats-reset keeps it" },
 
     /* direct mapping counters */
     { "der-active",
@@ -285,7 +296,8 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "it" },
     { "der-fault-emulated",
       "Read-only: pages handed back to KVM's emulator because FEMU could "
-      "not map them (uncached range, pinned set, full medium); "
+      "not map them (uncached range, pinned set, a fill that kept no "
+      "way or whose media read failed); "
       "stats-reset keeps it" },
     { "der-emul-fetch-fills",
       "Read-only: the der-emul-fills exits for code the guest executed from "

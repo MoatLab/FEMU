@@ -74,7 +74,7 @@ its command line. Its settings are environment variables:
 | `CXL_SIZE` | `256M` | media size, a number followed by `M` or `G` |
 | `CACHE_PAGES` | size in MiB / 20 x 256 | `cache-pages` |
 | `CACHE_WAYS` | `1` | `cache-ways`; `full` means `CACHE_PAGES` |
-| `BLOCKS_PER_PLANE` | 768 for 48G, 1536 for 96G, else 0 | `blocks-per-plane` |
+| `BLOCKS_PER_PLANE` | 822 for 48G, 1644 for 96G, else 0 | `blocks-per-plane` |
 | `CACHE_POLICY` | `fifo` | `cache-policy` |
 | `DER` | `off` | `der` |
 | `CYLON_KERNEL_ACK` | `off` | `cylon-kernel-ack` |
@@ -94,7 +94,8 @@ its command line. Its settings are environment variables:
 These defaults follow Cylon's launch script and differ from the device's
 own defaults: one cache way instead of 16, a cache of size / 20 (3072 pages
 for 256 MiB) instead of 1024 pages, 8x8 channels and LUNs instead of 4x4,
-fixed `blocks-per-plane` for the 48G and 96G sizes, and `lsa-control` on
+fixed `blocks-per-plane` for the 48G and 96G sizes (7% more NAND than
+Cylon's, which has no spare blocks), and `lsa-control` on
 instead of off.
 
 ## Configuration files

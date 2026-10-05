@@ -428,10 +428,14 @@ NAND timing are those of the BBSSD FTL, which the
 [timing model](../concepts/timing-model.md) and the architecture page's
 [BBSSD section](../concepts/architecture.md#bbssd) describe.
 
-When NAND fills up (a geometry with no spare blocks), a write-back has
-nowhere to go. The access still completes, uncached, and `media-full`
-counts it; the refused program adds no media time, though a fill read
-already issued is charged. A measurement is valid only while `media-full` is 0.
+Realize refuses NAND whose spare lines do not exceed the forced collection
+reserve by two, so collection always frees a line. A write that finds the
+free lines at the forced threshold waits until the collection erases end on
+every LUN; `gc-stalls` and `gc-stall-ns` count the waits. `media-full`
+counts programs that still find no page. Such a program is not timed, and
+it does not stop an eviction or an insert. A full NAND never sends a
+cacheable access uncached. See
+[Full NAND](../cxlssd.md#full-nand).
 
 ## Direct mapping
 
@@ -833,7 +837,7 @@ the binary. This table explains how they interact.
 | [Backend](../reference/properties.md#inherited-from-cxl-type3) | `volatile-memdev` | Required and the only backend accepted: `memdev`, `persistent-memdev`, `volatile-dc-memdev` and `num-dc-regions` are refused, and `lsa` only with `lsa-control=off`. Size a nonzero multiple of 256 MiB, at most 120 GiB. `der=cylon` needs it hugetlbfs, `share=on`, `prealloc=on` |
 | [Cache](../reference/properties.md#cache) | `cache-pages`, `cache-policy` | `cache-pages=0` disables the cache. Otherwise at most the media page count and divisible by `cache-ways` |
 | [Cache tunables](../reference/runtime-properties.md#cache-tunables-also-accepted-on--device) | `cache-ways`, `prefetch-degree`, `prefetch-stride` | Accepted on `-device` and changeable with `qom-set`. Ways must be nonzero and divide `cache-pages`. Prefetch values are bounded by the media page count; the effective degree is capped at `cache-pages` |
-| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must cover the media. With no spare blocks, `media-full` rises. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these also apply to the NVMe namespace and the controller's own geometry and timing properties are ignored |
+| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must leave spare lines beyond the forced collection reserve. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these also apply to the NVMe namespace and the controller's own geometry and timing properties are ignored |
 | Cylon media switches (same table) | `cylon-first-touch-program`, `cylon-free-writeback` | Change the media model to match published Cylon experiments; off for normal use |
 | [Direct mapping](../reference/properties.md#direct-mapping-der) | `der`, `der-replace-rate`, `cylon-kernel-ack`, `concurrent-misses` | `der=memslot` is refused under TCG. `der=cylon` without `cylon-kernel-ack=on` is refused. `der-replace-rate` matters only for `memslot`. `concurrent-misses=auto` follows whether DER is available |
 | [Caching API, control channel and logs](../reference/properties.md#caching-api-control-channel-and-logs) | `cca`, `lsa-control`, `log-dir`, `tracefs-dir`, `log-limit` | `cca=off` registers no BAR5. `lsa-control=on` refuses an `lsa` backend. `log-limit=0` opens no I/O log and takes no statistics appends. `tracefs-dir` unset makes commands 91 and 81 no-ops on the host |
@@ -856,7 +860,7 @@ describes each one; this table says where each family comes from.
 | --- | --- | --- |
 | [Cache](../reference/runtime-properties.md#cache-counters): `cache-hits`, `cache-misses`, `read-*`, `write-*`, `cache-inserts`, `cache-evictions`, `cache-entries`, `prefetch-inserts` | `femu_cxl_access()` and the cache library | Trapped lookups only; direct hits are invisible |
 | [Snapshots](../reference/runtime-properties.md#snapshot-counters): `last-*` | `stats-reset`, control command 1 | Copies taken before the event counters are cleared |
-| [Media](../reference/runtime-properties.md#media-counters): `media-reads`, `media-writes`, `media-time-ns`, `media-full` | `femu_cxl_media()` | Never cleared by `stats-reset`; take differences. `media-writes` comes from the FTL and includes linked NVMe programs |
+| [Media](../reference/runtime-properties.md#media-counters): `media-reads`, `media-writes`, `media-time-ns`, `media-full`, `gc-stalls`, `gc-stall-ns` | `femu_cxl_media()` | Never cleared by `stats-reset`; take differences. `media-writes` comes from the FTL and includes linked NVMe programs |
 | [Direct mapping](../reference/runtime-properties.md#direct-mapping-counters): `der-active`, `der-probes`, `der-mapped`, `der-remaps`, `der-revocations`, `der-quiet-revocations`, `der-replacements`, `der-fallbacks`, `der-emul-exit`, `der-emul-fills`, `der-emul-failures` | DER code in `qemu-adapter.c` | `der-mapped` is a gauge and the evidence that mapping is active |
 | [Caching API](../reference/runtime-properties.md#caching-api-counters): `cca-*` | `cca.c` | `cca-pinned` and `cca-uncached` are gauges |
 | [Other](../reference/runtime-properties.md#other-counters): `invalidations`, `nvme-drops`, `log-dropped` | Invalidation sites, NVMe drop BH, log writers | `invalidations` is a generation, not an error count |
