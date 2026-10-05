@@ -233,6 +233,8 @@ struct kvm_run;
  */
 typedef bool (*KVMExitHandler)(CPUState *cpu, struct kvm_run *run);
 void kvm_set_exit_handler(uint32_t reason, KVMExitHandler handler);
+/* Called with the BQL when a vCPU is destroyed, before its state goes. */
+void kvm_set_vcpu_destroy_hook(void (*hook)(CPUState *cpu));
 
 void kvm_flush_coalesced_mmio_buffer(void);
 

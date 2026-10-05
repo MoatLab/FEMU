@@ -612,8 +612,18 @@ err:
     return ret;
 }
 
+static void (*kvm_vcpu_destroy_hook)(CPUState *cpu);
+
+void kvm_set_vcpu_destroy_hook(void (*hook)(CPUState *cpu))
+{
+    kvm_vcpu_destroy_hook = hook;
+}
+
 void kvm_destroy_vcpu(CPUState *cpu)
 {
+    if (kvm_vcpu_destroy_hook) {
+        kvm_vcpu_destroy_hook(cpu);
+    }
     if (do_kvm_destroy_vcpu(cpu) < 0) {
         error_report("kvm_destroy_vcpu failed");
         exit(EXIT_FAILURE);
