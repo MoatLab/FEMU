@@ -12,7 +12,10 @@ typedef struct FemuCxlWork {
     NvmeRequest req;
     uint64_t latency;
     bool done;
-    /* Signalled by the worker alone when this request is done. */
+    /*
+     * Signalled by the worker alone when this request is done. NULL for a
+     * posted request, which nobody waits for and the worker frees.
+     */
     QemuCond *done_cond;
     QSIMPLEQ_ENTRY(FemuCxlWork) next;
 } FemuCxlWork;
@@ -137,6 +140,35 @@ struct FemuCxlMedia {
     /* The FTL threads count into these under @lock; CXL lock copies follow. */
     uint64_t ftl_gc_stalls;
     uint64_t ftl_gc_stall_ns;
+    /*
+     * Accesses made inside a device's re-entrancy guard, which never wait
+     * (femu_cxl_access_nowait()), and the media operations they queued,
+     * under the CXL lock; and those operations' modelled time, which the
+     * worker adds up atomically.
+     */
+    uint64_t dma_accesses;
+    uint64_t dma_media_ops;
+    uint64_t dma_media_ns;
+    /*
+     * The last run of such accesses: its guarded section, direction, end,
+     * and the page it last queued an operation for. CXL lock.
+     */
+    uint64_t dma_run_section;
+    bool dma_run_write;
+    uint64_t dma_run_end;
+    uint64_t dma_run_posted;
+    /*
+     * Operations queued and run so far, and those NAND refused, under
+     * @lock; the refusals already counted in media-full, under the CXL
+     * lock. The worker wakes @posted_cond as it runs each one.
+     */
+    uint64_t posted;
+    uint64_t posted_done;
+    uint64_t posted_failures;
+    uint64_t posted_failures_seen;
+    QemuCond posted_cond;
+    /* Scheduled by the worker after it ran a queued operation. */
+    QEMUBH *posted_bh;
     /*
      * Accesses skip their completion wait; the NAND timelines still advance.
      * Changed only under the gate held alone. BQL and CXL lock.
@@ -298,6 +330,8 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
+MemTxResult femu_cxl_access_nowait(FemuCxlMedia *s, uint64_t dpa,
+                                   uint64_t *data, unsigned size, bool write);
 /* femu_cxl_fill() flags. */
 #define FEMU_CXL_FILL_KEEP_OWN 1
 #define FEMU_CXL_FILL_OVERFLOW 2

@@ -86,6 +86,9 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `media-full` | `uint64` | Read-only: NAND programs that found no free page after garbage collection; the program is not timed but does not stop the eviction or insert, and the first one reports an error; the over-provisioning rule keeps it at 0, stats-reset keeps it, and a measurement is valid only while it is 0 |
 | `gc-stalls` | `uint64` | Read-only: media requests, linked NVMe ones included, that waited for timed forced garbage collection to free a line; refreshed with media-writes; stats-reset keeps it |
 | `gc-stall-ns` | `uint64` | Read-only: total ns from the start of those requests to the end of the collection they waited for, on every LUN; stats-reset keeps it |
+| `dma-accesses` | `uint64` | Read-only: accesses made inside another device's MMIO handler or bottom half, typically its DMA; served without waiting, they never fill the cache and are not cache hits or misses |
+| `dma-media-ops` | `uint64` | Read-only: media operations queued for dma-accesses to uncached pages, one per run of consecutive accesses to a page within one MMIO handler or bottom half, plus one per run of writes to a page whose write-back is in progress; nobody waits for them; stays 0 with ftl=off |
+| `dma-media-time-ns` | `uint64` | Read-only: modelled media time of dma-media-ops, not part of media-time-ns; a refused program counts in media-full |
 
 ### Direct mapping counters
 

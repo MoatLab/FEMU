@@ -150,11 +150,13 @@ across a wait. The component-register overlay revokes and then enters the
 parent register callback without waiting. Plain Type-3 callbacks retain their normal guard.
 Read-only QOM counters may show an operation in progress.
 The worker is joined before its state is destroyed. Stop requires that no
-request is outstanding, because it cannot reach the waiters' condition
-variables; the gate guarantees this, and stop asserts the queue is empty.
+waited request is outstanding, because it cannot reach the waiters'
+condition variables; the gate guarantees this. A posted request (see "Device DMA into the window" below)
+has no waiter, and the worker runs and frees it before it exits.
 
 The worker receives only page numbers, operation types and timestamps. It
-never reads or writes guest memory. Payload copies remain on the vCPU thread.
+never reads or writes guest memory. Payload copies stay on the thread that
+makes the access, under the BQL.
 Any future worker-side guest-memory operation must use `femu_dma_rw()`; the
 existing NVMe poller DMA rules are unchanged.
 
@@ -233,6 +235,68 @@ saw before.
 The Cylon install bottom half pauses the vCPUs before it takes the CXL
 lock: a paused vCPU is outside every fault exit, and a vCPU that waits for
 the lock could not pause.
+
+### Device DMA into the window
+
+Another device can reach the window from inside its own re-entrancy guard.
+QEMU's NVMe controller, for example, copies data, queue entries and
+completions from guarded bottom halves. A guest whose page cache is on the
+CXL node points those copies at CXL pages. The guard is a flag on that
+device, not on the thread. If the access released the BQL there, a vCPU
+could take the BQL and write the device's doorbell. QEMU refuses that write
+as re-entrant ("Blocked re-entrant IO"), so the command is never seen and
+the guest driver times out. QEMU reports this only once per run, so later
+refusals are silent.
+
+QEMU therefore counts, per thread, the guards that memory dispatch, guarded
+bottom halves and NIC packet delivery engage (`qemu_in_guarded_io()`). An
+access made while one is engaged never releases the BQL:
+
+- The payload is copied at once, and a write marks the linked NVMe blocks.
+- A cached page is a hit, and a write marks it dirty. Nothing is inserted or
+  evicted, and the cache hit and miss counters do not change.
+- An uncached page queues one media operation, a program for a write and a
+  read otherwise (a program when `cylon-first-touch-program` finds the page
+  unwritten). It queues one per run of consecutive accesses to the page
+  within one guarded section, that is one MMIO handler or one bottom half.
+  A 4 KiB DMA copy arrives as 512 accesses of 8 bytes and so costs one
+  operation.
+- A write to a cached page whose write-back is in progress also queues a
+  program: the write-back already took its snapshot and then cleans or drops
+  the entry.
+- Nobody waits for a queued operation, but its time occupies the NAND
+  timelines, so later accesses meet it as contention. After the worker runs
+  one, a main-loop bottom half refreshes `media-writes` and counts a program
+  that NAND refused in `media-full`.
+- The access never takes the gate, never holds a page, takes no direct
+  mapping and writes no I/O log record. A fill from a fault exit is refused
+  there; fault exits never run inside a guard.
+
+`dma-accesses`, `dma-media-ops` and `dma-media-time-ns` count this traffic.
+Its modelled time is not in `media-time-ns`, and a device DMA has no latency
+of its own, as it has none for guest RAM. A medium that served such an
+access is treated as written when a linked NVMe controller attaches, as for
+any earlier CXL access. Switching `fast-load` off first waits until the
+worker has run every queued operation; device DMA that arrives during that
+wait can still add NAND work after it. The worker runs any queued operation
+before it stops.
+
+A vCPU access, a fault exit, a qtest access and a QOM command run outside
+any guard and keep the full model. Inline mailbox commands run inside this
+device's own guard and never wait (see "Thread ownership"). Under
+`der=memslot` a mapped page is guest RAM, so a DMA to it never reaches FEMU
+and is not counted; under `der=cylon` every DMA into the window reaches FEMU,
+mapped page or not, because the mappings exist only in KVM.
+
+The regression test `cxl-dma-doorbell` lets a vCPU ring the doorbell as
+soon as an NVMe copy reaches a CXL page whose miss would wait 1 s. A vCPU
+that the host does not run for that whole second would miss the window, so
+under extreme host load the test can pass on a broken build; it cannot fail
+on a correct one.
+
+A device that runs in an IOThread is outside this guarantee: memory dispatch
+takes the BQL for each MMIO fragment and releases it between fragments while
+that device's guard stays engaged, whatever FEMU does.
 
 ## Direct Endpoint Remapping
 

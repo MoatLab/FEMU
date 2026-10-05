@@ -22,6 +22,11 @@ typedef enum FemuCxlQueue {
 typedef struct FemuCxlEntry {
     uint64_t lpn;
     bool dirty;
+    /*
+     * A write-back of this page has taken its snapshot and waits for the
+     * media; the entry is cleaned or dropped when it ends. CXL lock.
+     */
+    bool writeback;
     unsigned freq;
     /* Hits served by MMIO while the direct-mapping budget was full. */
     unsigned der_hits;

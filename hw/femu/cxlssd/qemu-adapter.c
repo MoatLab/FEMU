@@ -620,6 +620,17 @@ static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
         }
         return MEMTX_OK;
     }
+    /*
+     * Inside a device's re-entrancy guard, typically another device's DMA,
+     * waiting would release the BQL, and that device would then refuse
+     * other threads' accesses as re-entrant. See femu_cxl_access_nowait().
+     */
+    if (qemu_in_guarded_io()) {
+        if (mapped || !s->started || s->closing) {
+            return MEMTX_ERROR;
+        }
+        return femu_cxl_access_nowait(s, dpa, data, size, write);
+    }
     /* Inject a decoder change while this access waits for the gate. */
     if (cxl->test_change_dpa) {
         uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
@@ -994,6 +1005,15 @@ static void cxl_runtime_get(Object *obj, Visitor *v, const char *name,
                 s->prefetch_stride;
     }
     visit_type_uint32(v, name, &value, errp);
+}
+
+/* The FTL worker adds to this without the BQL. */
+static void cxl_dma_media_ns_get(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    uint64_t value = qatomic_read(&FEMU_CXL_SSD(obj)->media.dma_media_ns);
+
+    visit_type_uint64(v, name, &value, errp);
 }
 
 static void cxl_runtime_set(Object *obj, Visitor *v, const char *name,
@@ -2113,6 +2133,10 @@ static void cxl_init(Object *obj)
     cxl_add_counter(obj, "media-full", &s->media_full);
     cxl_add_counter(obj, "gc-stalls", &s->gc_stalls);
     cxl_add_counter(obj, "gc-stall-ns", &s->gc_stall_ns);
+    cxl_add_counter(obj, "dma-accesses", &s->dma_accesses);
+    cxl_add_counter(obj, "dma-media-ops", &s->dma_media_ops);
+    object_property_add(obj, "dma-media-time-ns", "uint64",
+                        cxl_dma_media_ns_get, NULL, NULL, NULL);
     cxl_add_counter(obj, "cache-hits", &s->cache.hits);
     cxl_add_counter(obj, "cache-misses", &s->cache.misses);
     cxl_add_counter(obj, "cache-inserts", &s->cache.inserts);
@@ -2272,7 +2296,8 @@ static void cxl_nvme_attach(FemuCtrl *n, NvmeNamespace *ns)
     n->cxl_done = &s->nvme_done;
     n->cxl_media = s;
     /* The bitmap cannot tell which pages earlier CXL traffic wrote. */
-    if (s->entries || s->direct.mapped || s->direct.ratio) {
+    if (s->entries || s->dma_accesses || s->direct.mapped ||
+        s->direct.ratio) {
         femu_cxl_nvme_mark(s, 0, s->backend.size);
     }
 }

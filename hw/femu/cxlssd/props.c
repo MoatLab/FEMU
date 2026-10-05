@@ -225,6 +225,20 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "Read-only: total ns from the start of those requests to the end of "
       "the collection they waited for, on every LUN; stats-reset keeps it" },
 
+    { "dma-accesses",
+      "Read-only: accesses made inside another device's MMIO handler or "
+      "bottom half, typically its DMA; served without waiting, they never "
+      "fill the cache and are not cache hits or misses" },
+    { "dma-media-ops",
+      "Read-only: media operations queued for dma-accesses to uncached "
+      "pages, one per run of consecutive accesses to a page within one "
+      "MMIO handler or bottom half, plus one per run of writes to a page "
+      "whose write-back is in progress; nobody waits for them; stays 0 "
+      "with ftl=off" },
+    { "dma-media-time-ns",
+      "Read-only: modelled media time of dma-media-ops, not part of "
+      "media-time-ns; a refused program counts in media-full" },
+
     /* direct mapping counters */
     { "der-active",
       "Read-only: whether direct mapping is available on this device" },

@@ -18356,6 +18356,190 @@ static void femu_test_cxl_wait(void *obj, void *data,
     unlink(rom_path);
 }
 
+#define FEMU_CXL_DMA_BAR 0xa0000000u
+
+/*
+ * Wait for entry @index of the admin completion queue at @acq to post for
+ * @cid; false at @deadline.
+ */
+static bool femu_cxl_dma_cqe(QTestState *qts, uint64_t acq, unsigned index,
+                             uint16_t cid, int64_t deadline)
+{
+    while (g_get_monotonic_time() < deadline) {
+        uint32_t dw3 = qtest_readl(qts, acq + index * 16 + 12);
+
+        if ((dw3 >> 16) & 1) {
+            g_assert_cmphex(dw3 & 0xffff, ==, cid);
+            g_assert_cmphex((dw3 >> 17) & 0x7fff, ==, 0);
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return false;
+}
+
+/*
+ * QEMU's NVMe controller copies an Identify page from its submission bottom
+ * half, which holds the controller's re-entrancy guard. The copy starts in
+ * RAM and continues into a CXL page whose miss evicts a dirty page: a 1 s
+ * program. A vCPU sees the RAM part and rings the doorbell again. Had the
+ * copy released the BQL, the controller would refuse that write as
+ * re-entrant and the second command would never run. With @data 1 the CXL
+ * page is cached clean, and with 2 the admin queues live in CXL too. The
+ * vCPU's second write can only race the copy's wait; a vCPU descheduled for
+ * the whole second would miss it, so the test can pass on a broken build
+ * under extreme load, never fail on a correct one.
+ */
+static void femu_test_cxl_dma_doorbell(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    static const uint8_t reset[] = {
+        0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x0f, 0x01, 0x16, 0x00, 0x05, 0x0f, 0x20,
+        0xc0, 0x66, 0x83, 0xc8, 0x01, 0x0f, 0x22, 0xc0, 0x66, 0xea, 0x00, 0x10,
+        0x00, 0x00, 0x08, 0x00,
+    };
+    /*
+     * In 32-bit protected mode: wait for 0x6000, ring the admin doorbell with
+     * tail 1, wait for the RAM part of the copy, ring it with tail 2, mark
+     * 0x6001.
+     */
+    uint8_t code[] = {
+        0x66, 0xb8, 0x10, 0x00, 0x8e, 0xd8,
+        0x80, 0x3d, 0x00, 0x60, 0x00, 0x00, 0x01, 0x75, 0xf7,
+        0xc7, 0x05, 0, 0, 0, 0, 0x01, 0x00, 0x00, 0x00,
+        0x66, 0x81, 0x3d, 0, 0, 0, 0, 0x36, 0x1b, 0x75, 0xf5,
+        0xc7, 0x05, 0, 0, 0, 0, 0x02, 0x00, 0x00, 0x00,
+        0xc6, 0x05, 0x01, 0x60, 0x00, 0x00, 0x01,
+        0xf4, 0xeb, 0xfd,
+    };
+    const uint32_t db = FEMU_CXL_DMA_BAR + 0x1000;
+    bool cached = data == (void *)1;
+    bool queues = data == (void *)2;
+    const uint64_t asq = queues ? FEMU_CXL_WINDOW + 3 * 4096 : 0x200000;
+    const uint64_t acq = queues ? FEMU_CXL_WINDOW + 4 * 4096 : 0x201000;
+    /* The RAM part of the first copy: the last 64 bytes of this page. */
+    const uint64_t ram_part = 0x203000 + 4096 - 64;
+    const uint64_t ram_buf = 0x205000;
+    const uint64_t cxl_buf = FEMU_CXL_WINDOW + 4096;
+    const uint32_t devfn = 5 << 3;
+    g_autofree char *rom_path = g_strdup("cxl-dma-rom-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree uint8_t *rom = g_malloc0(65536);
+    int fd = g_mkstemp(rom_path);
+    QTestState *qts;
+    int64_t deadline;
+    uint64_t evictions;
+    uint8_t sqe[64];
+
+    stl_le_p(code + 17, db);
+    stl_le_p(code + 28, ram_part);
+    stl_le_p(code + 38, db);
+    g_assert_cmpint(fd, >=, 0);
+    memcpy(rom, reset, sizeof(reset));
+    memcpy(rom + 65520, (uint8_t[]) { 0xea, 0, 0, 0, 0xf0 }, 5);
+    g_assert_cmpint(write(fd, rom, 65536), ==, 65536);
+    close(fd);
+    quoted = g_shell_quote(rom_path);
+    qts = qtest_initf(FEMU_CXL_MACHINE
+        "-accel tcg,thread=multi -S -bios %s "
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=1,cache-ways=1,program-ns=1000000000 "
+        "-device nvme,id=nvme0,serial=cxldma,bus=pcie.0,addr=5", quoted);
+    femu_cxl_decode(qts);
+    /* Flat 32-bit code and data segments. */
+    qtest_writew(qts, 0x500, 31);
+    qtest_writel(qts, 0x502, 0x508);
+    qtest_writeq(qts, 0x508, 0);
+    qtest_writeq(qts, 0x510, 0x00cf9a000000ffffULL);
+    qtest_writeq(qts, 0x518, 0x00cf92000000ffffULL);
+    qtest_memwrite(qts, 0x1000, code, sizeof(code));
+
+    femu_cxl_config(qts, 0, devfn << 8 | PCI_BASE_ADDRESS_0,
+                    FEMU_CXL_DMA_BAR);
+    femu_cxl_config(qts, 0, devfn << 8 | (PCI_BASE_ADDRESS_0 + 4), 0);
+    femu_cxl_config(qts, 0, devfn << 8 | PCI_COMMAND,
+                    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    qtest_writel(qts, FEMU_CXL_DMA_BAR + NVME_REG_AQA, 3 << 16 | 3);
+    qtest_writeq(qts, FEMU_CXL_DMA_BAR + NVME_REG_ASQ, asq);
+    qtest_writeq(qts, FEMU_CXL_DMA_BAR + NVME_REG_ACQ, acq);
+    qtest_writel(qts, FEMU_CXL_DMA_BAR + NVME_REG_CC,
+                 4 << 20 | 6 << 16 | 1);
+    deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (!(qtest_readl(qts, FEMU_CXL_DMA_BAR + NVME_REG_CSTS) & 1)) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    /* Identify Controller across RAM and CXL, then into RAM. */
+    memset(sqe, 0, sizeof(sqe));
+    sqe[0] = NVME_ADM_CMD_IDENTIFY;
+    stw_le_p(sqe + 2, 1);
+    stq_le_p(sqe + 24, ram_part);
+    stq_le_p(sqe + 32, cxl_buf);
+    stl_le_p(sqe + 40, NVME_ID_CNS_CTRL);
+    qtest_memwrite(qts, asq, sqe, sizeof(sqe));
+    stw_le_p(sqe + 2, 2);
+    stq_le_p(sqe + 24, ram_buf);
+    stq_le_p(sqe + 32, 0);
+    qtest_memwrite(qts, asq + 64, sqe, sizeof(sqe));
+    if (queues) {
+        qtest_memset(qts, acq, 0, 4096);
+    }
+    /* The copy's miss must then evict this dirty page: a 1 s program. */
+    qtest_writeb(qts, FEMU_CXL_WINDOW + 2 * 4096, 0x77);
+    /* Or the copy hits: cache the CXL page clean, writing the other back. */
+    if (cached) {
+        g_assert_cmpuint(qtest_readb(qts, cxl_buf), ==, 0);
+    }
+    evictions = femu_cxl_stat(qts, "cache-evictions");
+
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    qtest_writeb(qts, 0x6000, 1);
+    deadline = g_get_monotonic_time() + 20 * G_TIME_SPAN_SECOND;
+    while (qtest_readb(qts, 0x6001) != 1) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    /* Copies into CXL change no cache state; read it before the queues. */
+    if (queues) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), ==,
+                         evictions);
+    }
+    g_assert_true(femu_cxl_dma_cqe(qts, acq, 0, 1, deadline));
+    /* The second doorbell must not be lost. */
+    g_assert_true(femu_cxl_dma_cqe(qts, acq, 1, 2, deadline));
+    if (!queues) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "cache-evictions"), ==,
+                         evictions);
+    }
+    /* One access per 8 bytes of CXL, and one program for the page. */
+    if (queues) {
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), >, 504);
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-media-ops"), >=, 2);
+    } else {
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), ==, 504);
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-media-ops"), ==, !cached);
+    }
+    while (!cached &&
+           femu_cxl_stat(qts, "dma-media-time-ns") < 1000000000) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    /* Both copies arrived, with QEMU's vendor ID. */
+    g_assert_cmphex(qtest_readw(qts, ram_part), ==, 0x1b36);
+    g_assert_cmphex(qtest_readw(qts, ram_buf), ==, 0x1b36);
+    g_assert_cmphex(qtest_readw(qts, cxl_buf), !=, 0);
+    if (cached) {
+        uint64_t writes = femu_cxl_stat(qts, "media-writes");
+
+        /* The copy dirtied the page, so evicting it programs it. */
+        g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW + 2 * 4096), ==,
+                         0x77);
+        g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, writes + 1);
+    }
+    qtest_quit(qts);
+    unlink(rom_path);
+}
+
 static void femu_test_cxl_no_ftl(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
@@ -23768,6 +23952,14 @@ static void femu_register_nodes(void)
     }
     qos_add_test("cxl-wait-queue", "femu", femu_test_cxl_wait,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-dma-doorbell", "femu", femu_test_cxl_dma_doorbell,
+                 NULL);
+    qos_add_test("cxl-dma-doorbell-cached", "femu",
+                 femu_test_cxl_dma_doorbell,
+                 &(QOSGraphTestOptions) { .arg = (void *)1 });
+    qos_add_test("cxl-dma-doorbell-queues", "femu",
+                 femu_test_cxl_dma_doorbell,
+                 &(QOSGraphTestOptions) { .arg = (void *)2 });
     qos_add_test("cxl-cylon-ack", "femu", femu_test_cxl_cylon_ack, NULL);
     qos_add_test("cxl-revoke-batch", "femu", femu_test_cxl_revoke_batch,
                  NULL);
