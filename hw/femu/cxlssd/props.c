@@ -251,8 +251,16 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "Read-only: version 2 exits for a guest page walk that read a cold "
       "page-table page; stats-reset keeps it" },
     { "der-fault-unprotected",
-      "Read-only: version 2 fills left unprotected because the instruction "
-      "already held 16 pages; stats-reset keeps it" },
+      "Read-only: version 2 protections released early because the "
+      "instruction already held 64 pages; stats-reset keeps it" },
+    { "der-fault-conflicts",
+      "Read-only: version 2 fills refused because pages that the same "
+      "instruction filled hold every way of the set; the page goes to "
+      "KVM's emulator; stats-reset keeps it" },
+    { "der-fault-overflows",
+      "Read-only: pages mapped without a cache way because the emulator "
+      "cannot run an instruction whose pages do not fit in their set; "
+      "stats-reset keeps it" },
     { "der-fault-emulated",
       "Read-only: pages handed back to KVM's emulator because FEMU could "
       "not map them (uncached range, pinned set, full medium); "

@@ -49,8 +49,12 @@ typedef struct FemuCxlDer {
     uint64_t fault_walks;
     /* Pages handed back to KVM's emulator because they cannot be mapped. */
     uint64_t fault_emulated;
-    /* Filled pages left unprotected: the instruction's bound was full. */
+    /* Protections released early: the instruction's bound was full. */
     uint64_t fault_unprotected;
+    /* Fills refused because the instruction's own pages fill the set. */
+    uint64_t fault_conflicts;
+    /* Pages mapped without a cache way for an instruction KVM cannot run. */
+    uint64_t fault_overflows;
 } FemuCxlDer;
 
 /*

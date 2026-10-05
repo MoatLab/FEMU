@@ -527,6 +527,9 @@ static int cca_prepare(CcaOp *op)
             cca->uncached += op->acted;
         }
         cca_candidates(op, false);
+        if (op->end > op->start) {
+            femu_cxl_overflow_drop(s, op->start, op->end - 1);
+        }
         /*
          * Page by page, Cylon flushes the whole VM twice per page. Many
          * pages revoke everything at once; later accesses map again.

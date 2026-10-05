@@ -19867,6 +19867,207 @@ static void femu_test_cxl_fill_charge(void *obj, void *data,
 }
 
 /*
+ * Working-set protection belongs to the vCPU that faulted (test-owner plays
+ * the vCPU). A page that vCPU 0 protected for its last instruction must not
+ * stop vCPU 1 from filling a page of the same set once the protection
+ * window has passed: a refused fill hands the page to the emulator, and with
+ * one way every emulated store to it then misses and is charged as an
+ * uncached program. Within the window another vCPU's fill waits instead of
+ * giving up, and the owner's own fills always pass over its pages.
+ */
+static void femu_test_cxl_fill_owner(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=1,cache-ways=1,prefetch-degree=0");
+    uint64_t writes;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    /* Every protection is stale at once. */
+    femu_cxl_set_u64(qts, "test-protect-window", 0);
+    femu_cxl_set_u64(qts, "test-owner", 0);
+    femu_cxl_set_u64(qts, "test-fill", 0);
+    femu_cxl_set_u64(qts, "test-protect", 0);
+    femu_cxl_set_u64(qts, "test-owner", 1);
+    femu_cxl_set_u64(qts, "test-fill", 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 1);
+    /* The guest's stores to the filled page hit and charge nothing. */
+    writes = femu_cxl_stat(qts, "media-writes");
+    for (i = 0; i < 4096 / 8; i++) {
+        qtest_writeq(qts, FEMU_CXL_WINDOW + 4096 + i * 8, i);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "write-misses"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, writes);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
+    /* vCPU 1 protects its page; its own next fill in the set is refused. */
+    femu_cxl_set_u64(qts, "test-protect", 1);
+    femu_cxl_set_u64(qts, "test-fill", 8192);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
+    /*
+     * A fault of vCPU 2 within a window longer than the 100 ms wait bound
+     * keeps nothing and charges nothing.
+     */
+    femu_cxl_set_u64(qts, "test-protect-window", 10ULL * 1000 * 1000 * 1000);
+    femu_cxl_set_u64(qts, "test-owner", 2);
+    femu_cxl_set_u64(qts, "test-fault-fill", FEMU_CXL_WINDOW + 8192);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
+    /* Within a 20 ms window it waits for the expiry, then fills once. */
+    femu_cxl_set_u64(qts, "test-protect-window", 20 * 1000 * 1000);
+    femu_cxl_set_u64(qts, "test-owner", 1);
+    femu_cxl_set_u64(qts, "test-protect", 1);
+    femu_cxl_set_u64(qts, "test-owner", 2);
+    femu_cxl_set_u64(qts, "test-fault-fill", FEMU_CXL_WINDOW + 8192);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 3);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 3);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 1);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 4096 + 8), ==, 1);
+    qtest_quit(qts);
+}
+
+static QTestState *femu_cxl_fault_init(unsigned ways)
+{
+    g_autofree char *dev = g_strdup_printf(
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=%u,cache-ways=%u,cache-policy=lifo,prefetch-degree=0",
+        2 * ways, ways);
+    g_autofree char *args = g_strconcat(FEMU_CXL_MACHINE, "-smp 2 ", dev,
+                                        NULL);
+    QTestState *qts = qtest_init(args);
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "test-map", true);
+    femu_cxl_set_u64(qts, "test-owner", 0);
+    return qts;
+}
+
+static void femu_cxl_fault(QTestState *qts, const char *kind, uint64_t page)
+{
+    femu_cxl_set_u64(qts, kind, FEMU_CXL_WINDOW + page * 4096);
+}
+
+/*
+ * One instruction whose pages conflict in the cache: @ways + 1 pages of one
+ * set (the even pages; two sets), faulted in turn at one RIP, as a rep movsb
+ * page copy whose source and destination share a 1-way set does, after many
+ * exits at that RIP. A page that the vCPU faults on again must not refill
+ * and evict another page of the instruction: it goes to the emulator, which
+ * completes the instruction. Before the fix the pages evicted each other on
+ * every exit, until 1,000 refills at one RIP (100,000 on a VM) stopped it.
+ * The rounds run past both progress budgets (1,000 exits).
+ */
+static void femu_cxl_pingpong(unsigned ways)
+{
+    QTestState *qts = femu_cxl_fault_init(ways);
+    unsigned round;
+    unsigned i;
+
+    for (i = 0; i < 70; i++) {
+        femu_cxl_fault(qts, "test-fault", 2 * i + 1);
+    }
+    for (round = 0; round < 1100 / (ways + 1) + 1; round++) {
+        for (i = 0; i <= ways; i++) {
+            femu_cxl_fault(qts, "test-fault", 2 * i);
+        }
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-conflicts"), >=,
+                     1100 / (ways + 1));
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The same with an instruction the emulator cannot decode: the page that
+ * does not fit maps outside the cache, charged as one fill, and the
+ * instruction's other pages stay resident.
+ */
+static void femu_test_cxl_overflow(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_fault_init(1);
+    uint64_t misses;
+
+    femu_cxl_fault(qts, "test-fault", 0);
+    femu_cxl_fault(qts, "test-fault", 2);
+    misses = femu_cxl_stat(qts, "read-misses");
+    femu_cxl_fault(qts, "test-fault-decode", 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, misses + 1);
+    /* Page 2 is still resident: a hit. */
+    femu_cxl_fault(qts, "test-fault", 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, misses + 1);
+    /* A new RIP releases the overflow page; the next fill is ordinary. */
+    femu_cxl_set_u64(qts, "test-rip", 0x2000);
+    femu_cxl_fault(qts, "test-fault", 4);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 1);
+    qtest_quit(qts);
+}
+
+/*
+ * Healthy loops at one RIP must not look like a conflict. A loop of
+ * undecodable loads over distinct pages of one 1-way set needs one page per
+ * instruction: each fill evicts the previous page and nothing overflows.
+ * A scalar loop over A, B, C of one set, then A and C alternately, is
+ * served by fills and emulator handoffs and never exhausts a budget; nor do
+ * two vCPUs that evict each other's page.
+ */
+static void femu_test_cxl_one_rip_loops(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_fault_init(1);
+    unsigned i;
+
+    for (i = 0; i < 40; i++) {
+        femu_cxl_fault(qts, "test-fault-decode", 2 * i);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-conflicts"), ==, 0);
+    femu_cxl_set_u64(qts, "test-rip", 0x3000);
+    femu_cxl_fault(qts, "test-fault", 100);
+    femu_cxl_fault(qts, "test-fault", 102);
+    femu_cxl_fault(qts, "test-fault", 104);
+    for (i = 0; i < 1500; i++) {
+        femu_cxl_fault(qts, "test-fault", i % 2 ? 104 : 100);
+    }
+    /*
+     * Two vCPUs, each loading its own page of one set at its own RIP, evict
+     * each other's page once the other's protection has expired: each
+     * refault refills, which is progress, not the ping-pong of one
+     * instruction, and must not reach the repeat bound.
+     */
+    femu_cxl_set_u64(qts, "test-protect-window", 0);
+    for (i = 0; i < 2200; i++) {
+        femu_cxl_set_u64(qts, "test-owner", i % 2);
+        femu_cxl_set_u64(qts, "test-rip", i % 2 ? 0x5000 : 0x4000);
+        femu_cxl_fault(qts, "test-fault", i % 2 ? 202 : 200);
+    }
+    qtest_quit(qts);
+}
+
+static void femu_test_cxl_pingpong_1(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    femu_cxl_pingpong(1);
+}
+
+static void femu_test_cxl_pingpong_2(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    femu_cxl_pingpong(2);
+}
+
+static void femu_test_cxl_pingpong_4(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    femu_cxl_pingpong(4);
+}
+
+/*
  * A prefetch must not map a page another access is filling. The hook starts
  * a fill of page 1 (hold and entry, read pending) where the prefetch of page
  * 1 could drop the BQL, then fails that fill. No mapping may outlive the
@@ -22478,6 +22679,13 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
     qos_add_test("cxl-fill-charge", "femu", femu_test_cxl_fill_charge, NULL);
+    qos_add_test("cxl-fill-owner", "femu", femu_test_cxl_fill_owner, NULL);
+    qos_add_test("cxl-pingpong-1", "femu", femu_test_cxl_pingpong_1, NULL);
+    qos_add_test("cxl-pingpong-2", "femu", femu_test_cxl_pingpong_2, NULL);
+    qos_add_test("cxl-pingpong-4", "femu", femu_test_cxl_pingpong_4, NULL);
+    qos_add_test("cxl-overflow", "femu", femu_test_cxl_overflow, NULL);
+    qos_add_test("cxl-one-rip-loops", "femu", femu_test_cxl_one_rip_loops,
+                 NULL);
     qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,
                  NULL);
     qos_add_test("cxl-cca-bql", "femu", femu_test_cca_bql, NULL);

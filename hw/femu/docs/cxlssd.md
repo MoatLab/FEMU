@@ -366,8 +366,11 @@ The rules:
 - FEMU checks before the fill whether it can map the page. It cannot map a
   page in a caching API uncached range, or a page whose set has all ways
   pinned and that no direct mapping ratio selects. It also cannot map a page
-  whose set has no victim to give: every way is protected (see below) or held
-  by another access. A fill takes its cache way before the media read, which
+  whose set has no victim to give: every way is protected (see below) or
+  held by another access. When only other accesses or recent protections of
+  other vCPUs stand in the way, FEMU waits until they end and fills again
+  instead of giving the page to the emulator (at most three tries and 100 ms
+  for one exit). A fill takes its cache way before the media read, which
   drops the BQL, so no other access can take that way meanwhile. FEMU
   charges and counts nothing for a page it cannot keep. A prefetch holds its
   page until it is mapped, so it never maps a page another access is still
@@ -377,19 +380,42 @@ The rules:
   version 1, one charged access at a time. `der-fault-emulated` counts these
   pages. A full medium shows only during the fill; such a page also goes to
   the emulator, after its read was charged.
-- The pages that FEMU fills for one instruction stay in the cache until the
-  vCPU faults at another RIP (at most 16 pages, released after 64 exits at one
-  RIP). Eviction passes over them and takes the next victim in policy order,
-  so a fill for one page of the instruction does not evict another, and a
-  fill's prefetch does not evict the page it fills. `der-fault-unprotected`
-  counts fills past the 16-page bound. A device reset or unplug, a system
-  reset, and the destruction of a vCPU drop the protection.
+- KVM reports exits, not retired instructions, so FEMU cannot tell one
+  execution of a RIP from the next. It records the latest 64 pages that a
+  vCPU fills at one RIP (oldest released first; `der-fault-unprotected`
+  counts releases), until the vCPU faults at another RIP. A fill evicts
+  these pages freely, as a loop over distinct pages at one RIP needs. When
+  the vCPU faults again on a page it already filled at that RIP, its
+  instruction may need pages that evict each other, so that fill passes
+  over the recorded pages and takes the next victim in policy order. A
+  fill's prefetch does not evict the page it fills. Fills of other vCPUs
+  pass over the recorded pages only for 1 ms after the fill (a refill
+  restarts it), which is usually longer than the vCPU needs to run the
+  instruction again. Emulated accesses pass over nothing: each completes in
+  its exit, as in version 1. A device reset or unplug, a system reset, and
+  the destruction of a vCPU drop the records.
+- An instruction whose pages do not fit in their set (more pages of one set
+  than ways, for example the source and destination of a `rep movsb` page
+  copy in one 1-way set) does not refill for ever: on the refault the fill
+  keeps nothing (`der-fault-conflicts`), and the page goes to KVM's
+  emulator, which completes the instruction with one charged access for
+  each emulated access, as a device that serves each access does. The
+  emulator reaches the instruction's other pages through host memory, so
+  FEMU first marks the resident pages that the instruction faulted on for
+  a write dirty. When the emulator cannot run the instruction (VEX, EVEX,
+  most SSE, code), FEMU maps the page without a cache way, charged as one
+  fill (`der-fault-overflows`), until the vCPU faults at another RIP or 16
+  newer overflow pages of that vCPU replace it.
 - A retry of a fill that mapped nothing runs only for a page that is now
-  resident, so it charges no media time again. After 1,000 consecutive exits
-  at one RIP that FEMU served without a mapping, FEMU stops the VM ("retry
-  budget exhausted"). Exits are not retired instructions: the 100,000-repeat
-  bound and this budget are retry budgets, not proof that an instruction did
-  not complete.
+  resident, so it charges no media time again, or after such a wait, when
+  the first fill kept and charged nothing. The page must still be
+  admissible and decode to the same device. After 1,000 consecutive exits
+  at one RIP that FEMU served with neither a mapping nor a handoff to the
+  emulator, FEMU stops the VM ("retry budget exhausted"). A handoff, and a
+  refault fill that kept the vCPU's own pages, restart both this budget and
+  the 100,000-repeat bound, so the bound is left for refills that the
+  instruction's own fills cause. Exits are not retired instructions: both
+  are retry budgets, not proof that an instruction did not complete.
 - KVM does not write the leaves itself: no fast-fault write restore, no
   asynchronous page fault, no prefetch (also not the shadow prefetch of a
   nested guest), and the changed-PTE notifier only zaps. KVM refuses the
@@ -415,8 +441,24 @@ Limits of version 2:
 - KVM fails the faults of a second MMU root role also while an old root of
   another role is being torn down. Keep one root role: the same CPUID on
   every vCPU, and no SMM.
-- The 16-page bound leaves later pages of one instruction unprotected;
-  `der-fault-unprotected` counts them.
+- The 64-page record can release a page of an instruction with a larger
+  footprint; `der-fault-unprotected` counts these.
+- A conflict costs one extra fill: the first time, a page of the
+  instruction evicts another, and only the refault shows the conflict.
+- An overflow page (`der-fault-overflows`) is a model deviation: it is
+  mapped without a cache way, so writes through it are not charged and
+  accesses of other vCPUs to it are not counted until the vCPU faults at
+  another RIP. A vCPU that then stays idle keeps it mapped. Cache disable,
+  invalidation and linked NVMe writes unmap it.
+- Emulated instructions reach their other pages through host memory, as in
+  version 1: reads and writes there are not charged. FEMU marks pages that
+  took a write fault dirty before a conflict handoff; other cases (for
+  example a page written only by the emulator) stay unmodeled.
+- Protection from other vCPUs is time-bound, not tied to retirement. If a
+  vCPU does not run its instruction again within 1 ms of the fill (for
+  example, the host preempts its thread), another vCPU's fill to the same
+  set can evict the page, and the instruction faults again. Contention for
+  one set can then repeat; it slows the vCPUs but does not stop the VM.
 
 ### SPTE encoding, dirty tracking and revocation
 

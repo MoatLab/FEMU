@@ -179,9 +179,13 @@ DEVICES = [
         "title": "CXL Type-3 SSD",
         "parent": "pci-device",
         "inherits_from": "cxl-type3",
-        "test_only": ["test-change-dpa", "test-fill", "test-fill-race",
-                      "test-media-disabled", "test-prefetch-race",
+        "test_only": ["test-change-dpa", "test-fault", "test-fault-decode",
+                      "test-fault-fill", "test-fill",
+                      "test-fill-race", "test-map", "test-media-disabled",
+                      "test-owner", "test-rip",
+                      "test-prefetch-race",
                       "test-prefetch-race-end", "test-protect",
+                      "test-protect-window",
                       "test-slot-reservation", "test-unprotect"],
         "topics": [
             {
@@ -270,6 +274,7 @@ DEVICES = [
                     "der-emul-v2", "der-fault-reads", "der-fault-writes",
                     "der-fault-fetches", "der-fault-page-walks",
                     "der-fault-emulated", "der-fault-unprotected",
+                    "der-fault-conflicts", "der-fault-overflows",
                     "der-emul-fills", "der-emul-fetch-fills",
                     "der-emul-failures",
                 ],

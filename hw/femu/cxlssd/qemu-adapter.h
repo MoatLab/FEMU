@@ -25,10 +25,13 @@ typedef struct FemuCxlOp {
     /* Pages this operation holds itself; its prefetch may evict them. */
     const uint64_t *own;
     unsigned nown;
-    /* A demand access: it must not evict a protected page. */
+    /* A demand access, for @owner (a vCPU index, or -1). */
     bool demand;
+    int owner;
     /* A fill for a Cylon fault: its prefetch must not evict its own page. */
     bool fill;
+    /* A fill that must not evict pages its own vCPU protects. */
+    bool keep_own;
 } FemuCxlOp;
 
 /* Pages a linked NVMe command replaced. */
@@ -146,15 +149,36 @@ struct FemuCxlMedia {
     bool nvme_owns_ftl;
     uint64_t nvme_drops;
     /*
-     * Pages that an instruction stopped at a Cylon fault still needs
-     * (lpn to count), so demand fills do not evict them. BQL.
+     * Pages that an instruction stopped at a Cylon fault still needs (lpn
+     * to an array of per-vCPU FemuCxlGuard), so that vCPU's demand accesses
+     * do not evict them, and other vCPUs' fills only after
+     * @protect_window_ns. BQL.
      */
     GHashTable *protect;
+    uint64_t protect_window_ns;
+    /*
+     * Pages mapped without a cache way for an instruction the emulator
+     * cannot run (lpn to the number of vCPUs holding it). BQL.
+     */
+    GHashTable *overflow;
     /*
      * qtest only: the next fill protects every page of its set just before
      * it takes a way, as another vCPU could while a media wait drops the BQL.
      */
     bool test_fill_race;
+    /*
+     * qtest only: a fill reports its page mapped when it is resident, and a
+     * page handed to the emulator counts as handed, so the fault service
+     * runs without a Cylon slot.
+     */
+    bool test_map;
+    /* qtest only: the RIP of test-fault exits. */
+    uint64_t test_rip;
+    /*
+     * The vCPU that accesses from threads without one act for: -1 (none),
+     * or in qtest the vCPU that test-owner names for hooks and accesses.
+     */
+    int test_owner;
     /*
      * qtest only: page + 1 that another access starts to fill (hold and
      * cache entry, media read pending) at the point where a prefetch of it
@@ -164,6 +188,15 @@ struct FemuCxlMedia {
     uint64_t test_race_lpn;
     bool test_race_active;
 };
+
+/*
+ * How long another vCPU's fill passes over a page that a vCPU protected.
+ * A vCPU usually runs the instruction again microseconds after its exit
+ * returns, so this normally outlasts the retry (a heuristic: host
+ * preemption can exceed it), while a vCPU that stops faulting closes a set
+ * to the others for no longer than this.
+ */
+#define FEMU_CXL_PROTECT_WINDOW_NS (1000 * 1000)
 
 void femu_cxl_enter(FemuCxlMedia *s);
 void femu_cxl_leave(FemuCxlMedia *s);
@@ -175,12 +208,22 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
+/* femu_cxl_fill() flags. */
+#define FEMU_CXL_FILL_KEEP_OWN 1
+#define FEMU_CXL_FILL_OVERFLOW 2
 MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
-                          bool *mapped);
+                          bool *mapped, unsigned flags);
+bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_overflow_add(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_overflow_release(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_overflow_drop(FemuCxlMedia *s, uint64_t first, uint64_t last);
 bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn);
 void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e);
-void femu_cxl_protect(FemuCxlMedia *s, uint64_t lpn);
-void femu_cxl_unprotect(FemuCxlMedia *s, uint64_t lpn);
+bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
+                        bool keep_own);
+void femu_cxl_protect(FemuCxlMedia *s, int owner, uint64_t lpn);
+void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn);
+void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,

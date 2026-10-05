@@ -3,7 +3,66 @@
 #include "qemu/main-loop.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "hw/core/cpu.h"
 #include "qemu-adapter.h"
+
+/* One vCPU's protection of a page; see femu_cxl_protect(). */
+typedef struct FemuCxlGuard {
+    int owner;
+    unsigned count;
+    /* When @owner last protected the page, QEMU_CLOCK_REALTIME ns. */
+    int64_t since;
+} FemuCxlGuard;
+
+static FemuCxlGuard *cxl_guard(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    GArray *guards = s->protect ? g_hash_table_lookup(s->protect, &lpn) : NULL;
+    unsigned i;
+
+    for (i = 0; guards && i < guards->len; i++) {
+        FemuCxlGuard *g = &g_array_index(guards, FemuCxlGuard, i);
+
+        if (g->owner == owner) {
+            return g;
+        }
+    }
+    return NULL;
+}
+
+static bool cxl_protected(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    return cxl_guard(s, owner, lpn);
+}
+
+/*
+ * Whether a vCPU other than @owner protected @lpn less than the protection
+ * window ago. Lowers @until to the earliest time such a protection expires.
+ */
+static bool cxl_protected_recently(FemuCxlMedia *s, int owner, uint64_t lpn,
+                                   int64_t now, int64_t *until)
+{
+    GArray *guards = s->protect ? g_hash_table_lookup(s->protect, &lpn) : NULL;
+    bool recent = false;
+    unsigned i;
+
+    for (i = 0; guards && i < guards->len; i++) {
+        FemuCxlGuard *g = &g_array_index(guards, FemuCxlGuard, i);
+        int64_t end = g->since > INT64_MAX - (int64_t)s->protect_window_ns ?
+                      INT64_MAX : g->since + (int64_t)s->protect_window_ns;
+
+        if (g->owner != owner && now < end) {
+            recent = true;
+            *until = MIN(*until, end);
+        }
+    }
+    return recent;
+}
+
+/* The vCPU an access acts for; qtest accesses act for test-owner. */
+static int cxl_owner(FemuCxlMedia *s)
+{
+    return current_cpu ? current_cpu->cpu_index : s->test_owner;
+}
 
 /*
  * BQL protects the gate. Accesses share it, so misses to different pages
@@ -186,24 +245,32 @@ static bool cxl_op_holds(FemuCxlOp *op, uint64_t lpn)
 }
 
 /*
- * Entries eviction passes over: pages a stopped instruction still needs (see
- * femu_cxl_protect()); for a fill also the page it brings in, which its own
- * prefetch must not push out again, and pages another access holds, so the
- * fill takes the victim cxl_fill_room() found. A page passed over counts as
- * held: if no victim is left, the access goes uncached, as for a held one.
+ * Entries a fill's eviction passes over: pages a stopped instruction of the
+ * same vCPU still needs (see femu_cxl_protect()), the page it brings in,
+ * which its own prefetch must not push out again, pages another access
+ * holds, so the fill takes the victim cxl_fill_room() found, and pages
+ * another vCPU protected within the protection window, whose instruction
+ * may not have run again yet. A page passed over counts as held: if no
+ * victim is left, the fill keeps nothing. The vCPU's own pages are passed
+ * over only by a fill with keep_own: a page the vCPU faults on again at one
+ * RIP, so its instruction may need both. Emulated accesses pass over
+ * nothing: each completes in its exit, as in version 1, and keeping a page
+ * for an instruction would only make them uncached.
  */
 static bool cxl_keep(void *opaque, uint64_t lpn)
 {
     FemuCxlOp *op = opaque;
     FemuCxlMedia *s = op->s;
+    int64_t until = INT64_MAX;
     bool keep;
 
     if (cxl_op_holds(op, lpn)) {
         return op->fill;
     }
-    keep = (op->demand && s->protect &&
-            g_hash_table_contains(s->protect, &lpn)) ||
-           (op->fill && g_hash_table_contains(s->pages, &lpn));
+    keep = (op->keep_own && cxl_protected(s, op->owner, lpn)) ||
+           (op->fill && g_hash_table_contains(s->pages, &lpn)) ||
+           (op->fill && cxl_protected_recently(s, op->owner, lpn,
+                            qemu_clock_get_ns(QEMU_CLOCK_REALTIME), &until));
     if (keep) {
         op->held = true;
     }
@@ -343,13 +410,19 @@ static void cxl_media_full(FemuCxlMedia *s)
 
 /*
  * A NULL @data fills the page without a transfer. @mapped, when given, says
- * whether the page is now mapped directly.
+ * whether the page is now mapped directly. @flags (FEMU_CXL_FILL_*) apply
+ * to a fill: with KEEP_OWN it does not evict pages its vCPU protects; with
+ * OVERFLOW a fill that cannot keep a way charges a read and maps the page
+ * without one.
  */
 static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                               uint64_t *data, unsigned size, bool write,
-                              bool *mapped)
+                              bool *mapped, unsigned flags)
 {
-    FemuCxlOp op = { .s = s, .demand = true, .fill = !data };
+    FemuCxlOp op = {
+        .s = s, .demand = true, .fill = !data, .owner = cxl_owner(s),
+        .keep_own = !data && (flags & FEMU_CXL_FILL_KEEP_OWN),
+    };
     MemTxResult result = MEMTX_ERROR;
     uint64_t generation = s->invalidations;
     uint64_t pages[2];
@@ -359,6 +432,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     int64_t start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t remaining;
     unsigned holds = 0;
+    bool over = false;
     unsigned i;
 
     if (mapped) {
@@ -383,6 +457,15 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     op.own = pages;
     op.nown = holds;
     /*
+     * Checked again inside the gate: a fill authorised before a cache
+     * disable or pin that it waited behind must not charge a read for a
+     * page that cannot stay.
+     */
+    if (!data && !femu_cxl_admissible(s, first)) {
+        result = MEMTX_OK;
+        goto out;
+    }
+    /*
      * A fill that could not keep its page charges and counts nothing: the
      * caller hands the page to the emulator, which charges each access.
      */
@@ -392,8 +475,12 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         !femu_cxl_cca_uncached(&s->cca, first) &&
         !femu_cxl_cache_all_pinned(&s->cache, first) &&
         !cxl_fill_room(s, &op, first)) {
-        result = MEMTX_OK;
-        goto out;
+        if (!(flags & FEMU_CXL_FILL_OVERFLOW) ||
+            (!s->direct.cylon && !s->test_map)) {
+            result = MEMTX_OK;
+            goto out;
+        }
+        over = true;
     }
     if (!data && s->test_fill_race && s->cache.nsets) {
         FemuCxlSet *set = femu_cxl_cache_set(&s->cache, first);
@@ -401,10 +488,10 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
 
         s->test_fill_race = false;
         for (l = set->small.head; l; l = l->next) {
-            femu_cxl_protect(s, ((FemuCxlEntry *)l->data)->lpn);
+            femu_cxl_protect(s, op.owner, ((FemuCxlEntry *)l->data)->lpn);
         }
         for (l = set->main.head; l; l = l->next) {
-            femu_cxl_protect(s, ((FemuCxlEntry *)l->data)->lpn);
+            femu_cxl_protect(s, op.owner, ((FemuCxlEntry *)l->data)->lpn);
         }
     }
     for (lpn = first; lpn <= last; lpn++) {
@@ -437,7 +524,12 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
              * cannot keep is neither charged nor counted. The caller hands
              * that page to the emulator, which charges each access.
              */
-            if (!data && !to_media) {
+            if (over) {
+                /* Charged as a fill; writes through the mapping are not. */
+                if (!femu_cxl_media(&op, lpn, false)) {
+                    goto out;
+                }
+            } else if (!data && !to_media) {
                 op.held = false;
                 e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
                                                cxl_keep, &op);
@@ -550,7 +642,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     if (first == last && (s->cache.nsets || s->direct.ratio)) {
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
-        bool direct = (e || femu_cxl_ratio_selected(s->direct.ratio, first)) &&
+        bool direct = (e || over ||
+                       femu_cxl_ratio_selected(s->direct.ratio, first)) &&
                       !femu_cxl_cca_uncached(&s->cca, first) &&
                       cxl_map(s, generation, hpa, dpa, e);
 
@@ -559,7 +652,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             e->dirty = true;
         }
         if (mapped) {
-            *mapped = direct;
+            *mapped = direct || (s->test_map && (e || over) &&
+                                 !femu_cxl_cca_uncached(&s->cca, first));
         }
     }
     if (s->io_log) {
@@ -592,7 +686,7 @@ out:
 MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write)
 {
-    return cxl_access(s, hpa, dpa, data, size, write, NULL);
+    return cxl_access(s, hpa, dpa, data, size, write, NULL, 0);
 }
 
 /*
@@ -603,10 +697,10 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
  * page is revoked.
  */
 MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
-                          bool *mapped)
+                          bool *mapped, unsigned flags)
 {
     return cxl_access(s, hpa & ~4095ULL, dpa & ~4095ULL, NULL, 1, false,
-                      mapped);
+                      mapped, flags);
 }
 
 /*
@@ -637,40 +731,244 @@ bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn)
     return s->cache.nsets && !femu_cxl_cache_all_pinned(&s->cache, lpn);
 }
 
+typedef enum FemuCxlFillState {
+    FEMU_CXL_FILL_READY,
+    FEMU_CXL_FILL_WAIT,
+    FEMU_CXL_FILL_BLOCKED,
+} FemuCxlFillState;
+
 /*
- * Keep @lpn in the cache while an instruction that faulted on it may still
- * need it: a fill for another page of the same instruction must not evict
- * it, or the instruction never completes. Counted, for several vCPUs.
+ * Whether a fill of @lpn by vCPU @owner can keep its page now (a free way or
+ * an evictable victim), only after other accesses end or recent protections
+ * of other vCPUs expire (lowering @until to the earliest expiry), or not at
+ * all (every candidate victim is protected by @owner, or the set is pinned).
  */
-void femu_cxl_protect(FemuCxlMedia *s, uint64_t lpn)
+static FemuCxlFillState cxl_fill_state(FemuCxlMedia *s, int owner,
+                                       uint64_t lpn, int64_t now,
+                                       int64_t *until, bool keep_own)
 {
-    uint64_t *key;
-    gpointer count;
+    FemuCxlSet *set = femu_cxl_cache_set(&s->cache, lpn);
+    GQueue *queues[2];
+    bool wait = false;
+    unsigned i;
+
+    if (!set || femu_cxl_cache_all_pinned(&s->cache, lpn)) {
+        return FEMU_CXL_FILL_BLOCKED;
+    }
+    if (g_hash_table_contains(s->cache.entries, &lpn) ||
+        set->small.length + set->main.length + set->pinned.length <
+        s->cache.ways) {
+        return FEMU_CXL_FILL_READY;
+    }
+    queues[0] = &set->small;
+    queues[1] = &set->main;
+    for (i = 0; i < 2; i++) {
+        GList *l;
+
+        for (l = queues[i]->head; l; l = l->next) {
+            FemuCxlEntry *e = l->data;
+
+            if (keep_own && cxl_protected(s, owner, e->lpn)) {
+                continue;
+            }
+            if (g_hash_table_contains(s->pages, &e->lpn) ||
+                cxl_protected_recently(s, owner, e->lpn, now, until)) {
+                wait = true;
+                continue;
+            }
+            return FEMU_CXL_FILL_READY;
+        }
+    }
+    return wait ? FEMU_CXL_FILL_WAIT : FEMU_CXL_FILL_BLOCKED;
+}
+
+/*
+ * Whether a fill of @lpn by the current vCPU keeps nothing because pages
+ * that the same vCPU protects hold every way of the set that is not pinned:
+ * the instruction's own pages do not fit. BQL.
+ */
+bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(&s->cache, lpn);
+    int64_t until = INT64_MAX;
+
+    return set && s->started && !s->closing &&
+           !femu_cxl_cache_all_pinned(&s->cache, lpn) &&
+           set->small.length + set->main.length > 0 &&
+           cxl_fill_state(s, cxl_owner(s), lpn,
+                          qemu_clock_get_ns(QEMU_CLOCK_REALTIME), &until,
+                          true) == FEMU_CXL_FILL_BLOCKED;
+}
+
+/*
+ * A fill of @lpn kept nothing. Wait, at most until @deadline
+ * (QEMU_CLOCK_REALTIME ns), while the only obstacles are other accesses
+ * holding the set's pages or recent protections of other vCPUs. Returns
+ * true when a new fill can keep the page, false when it cannot, the wait
+ * timed out, or the device was reset, invalidated or closed meanwhile.
+ * BQL; the caller holds no page and is outside the gate.
+ */
+bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
+                        bool keep_own)
+{
+    uint64_t generation = s->invalidations;
+    int owner = cxl_owner(s);
+
+    for (;;) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        int64_t until = deadline;
+
+        /* Teardown frees the cache while this waits outside the gate. */
+        if (s->closing || !s->started || s->invalidations != generation) {
+            return false;
+        }
+        switch (cxl_fill_state(s, owner, lpn, now, &until, keep_own)) {
+        case FEMU_CXL_FILL_READY:
+            return true;
+        case FEMU_CXL_FILL_BLOCKED:
+            return false;
+        default:
+            break;
+        }
+        if (now >= deadline) {
+            return false;
+        }
+        /* A holder broadcasts when it ends; an expiry needs the timeout. */
+        qemu_cond_timedwait_bql(&s->idle,
+            MAX(1, DIV_ROUND_UP(MIN(until, deadline) - now, SCALE_MS)));
+    }
+}
+
+/*
+ * Keep @lpn in the cache while an instruction of vCPU @owner that faulted on
+ * it may still need it: a fill for another page of the same instruction must
+ * not evict it, or the instruction never completes. The protection lasts
+ * until @owner exits again, which for an idle vCPU can be much later, and
+ * with one way it would close the set to every other vCPU. So other vCPUs'
+ * fills pass over it only within the protection window, which usually
+ * outlasts @owner's retry of the instruction (best effort, not a proof of
+ * retirement), and their emulated accesses not at all (they complete in one
+ * exit). Counted, for repeated protection.
+ */
+void femu_cxl_protect(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    FemuCxlGuard *g;
 
     if (!s->protect) {
         s->protect = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                           g_free, NULL);
+                                           g_free,
+                                           (GDestroyNotify)g_array_unref);
     }
-    count = g_hash_table_lookup(s->protect, &lpn);
-    key = g_memdup2(&lpn, sizeof(lpn));
-    /* The table owns its keys; replace frees the old one. */
-    g_hash_table_replace(s->protect, key,
+    g = cxl_guard(s, owner, lpn);
+    if (!g) {
+        GArray *guards = g_hash_table_lookup(s->protect, &lpn);
+        FemuCxlGuard fresh = { .owner = owner };
+
+        if (!guards) {
+            guards = g_array_new(false, false, sizeof(FemuCxlGuard));
+            g_hash_table_insert(s->protect, g_memdup2(&lpn, sizeof(lpn)),
+                                guards);
+        }
+        g_array_append_val(guards, fresh);
+        g = &g_array_index(guards, FemuCxlGuard, guards->len - 1);
+    }
+    g->count++;
+    g->since = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+}
+
+/*
+ * Overflow mappings: a page mapped without a cache way, held by one or more
+ * vCPUs for an instruction. The last holder unmaps it, unless a fill has
+ * since given it a cache way or a ratio maps it: the mapping then belongs
+ * to them.
+ */
+void femu_cxl_overflow_add(FemuCxlMedia *s, uint64_t lpn)
+{
+    gpointer count;
+
+    if (!s->overflow) {
+        s->overflow = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                            g_free, NULL);
+    }
+    count = g_hash_table_lookup(s->overflow, &lpn);
+    g_hash_table_replace(s->overflow, g_memdup2(&lpn, sizeof(lpn)),
                          GUINT_TO_POINTER(GPOINTER_TO_UINT(count) + 1));
 }
 
-void femu_cxl_unprotect(FemuCxlMedia *s, uint64_t lpn)
+static void cxl_overflow_unmap(FemuCxlMedia *s, uint64_t lpn)
 {
-    guint count;
+    if (s->started && !s->closing &&
+        !g_hash_table_contains(s->cache.entries, &lpn) &&
+        !femu_cxl_ratio_selected(s->direct.ratio, lpn)) {
+        femu_cxl_der_remove(&s->direct, lpn);
+    }
+}
 
-    if (!s->protect) {
+void femu_cxl_overflow_release(FemuCxlMedia *s, uint64_t lpn)
+{
+    guint count = s->overflow ?
+        GPOINTER_TO_UINT(g_hash_table_lookup(s->overflow, &lpn)) : 0;
+
+    if (count > 1) {
+        g_hash_table_replace(s->overflow, g_memdup2(&lpn, sizeof(lpn)),
+                             GUINT_TO_POINTER(count - 1));
+    } else if (count) {
+        g_hash_table_remove(s->overflow, &lpn);
+        cxl_overflow_unmap(s, lpn);
+    }
+}
+
+/*
+ * Range invalidation (CACHE_DISABLE, INVALIDATE, a linked NVMe write) finds
+ * mappings through cache entries; overflow pages have none, so unmap them
+ * here. Their holders still release them later.
+ */
+void femu_cxl_overflow_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
+{
+    GHashTableIter it;
+    gpointer key;
+
+    if (!s->overflow) {
         return;
     }
-    count = GPOINTER_TO_UINT(g_hash_table_lookup(s->protect, &lpn));
-    if (count <= 1) {
-        g_hash_table_remove(s->protect, &lpn);
-    } else {
-        g_hash_table_replace(s->protect, g_memdup2(&lpn, sizeof(lpn)),
-                             GUINT_TO_POINTER(count - 1));
+    g_hash_table_iter_init(&it, s->overflow);
+    while (g_hash_table_iter_next(&it, &key, NULL)) {
+        uint64_t lpn = *(uint64_t *)key;
+
+        if (lpn >= first && lpn <= last) {
+            cxl_overflow_unmap(s, lpn);
+        }
+    }
+}
+
+/* @owner filled @lpn again for the same instruction: restart its window. */
+void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    FemuCxlGuard *g = cxl_guard(s, owner, lpn);
+
+    if (g) {
+        g->since = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+}
+
+void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn)
+{
+    GArray *guards = s->protect ? g_hash_table_lookup(s->protect, &lpn) : NULL;
+    unsigned i;
+
+    for (i = 0; guards && i < guards->len; i++) {
+        FemuCxlGuard *g = &g_array_index(guards, FemuCxlGuard, i);
+
+        if (g->owner != owner) {
+            continue;
+        }
+        if (--g->count == 0) {
+            g_array_remove_index_fast(guards, i);
+        }
+        if (!guards->len) {
+            g_hash_table_remove(s->protect, &lpn);
+        }
+        return;
     }
 }
 
@@ -851,6 +1149,8 @@ static void cxl_nvme_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
             !s->direct.ratio;
     if (clear) {
         femu_cxl_der_clear(&s->direct);
+    } else {
+        femu_cxl_overflow_drop(s, first, last);
     }
     if (last - first + 1 <= g_hash_table_size(s->cache.entries)) {
         for (lpn = first; lpn <= last; lpn++) {

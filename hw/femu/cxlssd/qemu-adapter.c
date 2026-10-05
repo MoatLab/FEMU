@@ -430,10 +430,12 @@ static unsigned adapter_users;
 /*
  * With @mapped, fill the page instead of moving data, and report whether it
  * is now mapped directly; anything that cannot be mapped is an error.
+ * @flags (FEMU_CXL_FILL_*) go to the fill.
  */
 static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
                                    uint64_t *data, unsigned size, bool write,
-                                   MemTxAttrs attrs, bool *mapped)
+                                   MemTxAttrs attrs, bool *mapped,
+                                   unsigned flags)
 {
     uint64_t hpa = w->fw->base + offset;
     unsigned reroutes = 0;
@@ -526,7 +528,7 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
             if (s->direct.ratio && !s->direct.cylon && !s->direct.ratio_end) {
                 cxl_ratio_restore(FEMU_CXL_SSD(dev), NULL);
             }
-            result = mapped ? femu_cxl_fill(s, hpa, dpa, mapped) :
+            result = mapped ? femu_cxl_fill(s, hpa, dpa, mapped, flags) :
                      femu_cxl_access(s, hpa, dpa, data, size, write);
         }
         if (shared) {
@@ -542,13 +544,13 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
 static MemTxResult adapter_read(void *opaque, hwaddr offset, uint64_t *data,
                                 unsigned size, MemTxAttrs attrs)
 {
-    return adapter_access(opaque, offset, data, size, false, attrs, NULL);
+    return adapter_access(opaque, offset, data, size, false, attrs, NULL, 0);
 }
 
 static MemTxResult adapter_write(void *opaque, hwaddr offset, uint64_t data,
                                  unsigned size, MemTxAttrs attrs)
 {
-    return adapter_access(opaque, offset, &data, size, true, attrs, NULL);
+    return adapter_access(opaque, offset, &data, size, true, attrs, NULL, 0);
 }
 
 static const MemoryRegionOps adapter_ops = {
@@ -1529,7 +1531,10 @@ static bool adapter_reservation_test(Object *obj, Error **errp)
 /*
  * qtest hooks for the Cylon fill path: fill a page as a fault exit would
  * (test-fill, a DPA), protect or release a page (test-protect,
- * test-unprotect, an LPN), and race the next fill (test-fill-race).
+ * test-unprotect, an LPN), all for the vCPU that test-owner names, and race
+ * the next fill (test-fill-race). test-fault-fill serves a fault exit at a
+ * GPA, with its waits; test-protect-window sets how long another vCPU's
+ * protection stops a fill.
  */
 static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
                               void *opaque, Error **errp)
@@ -1546,16 +1551,91 @@ static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
     if (!s->started || s->closing) {
         error_setg(errp, "the device is not running");
     } else if (!strcmp(name, "test-fill")) {
-        if (femu_cxl_fill(s, value, value, &mapped) != MEMTX_OK) {
+        /* As a refault fills: the vCPU's protected pages stay. */
+        if (femu_cxl_fill(s, value, value, &mapped,
+                          FEMU_CXL_FILL_KEEP_OWN) != MEMTX_OK) {
             error_setg(errp, "the fill failed");
         }
     } else if (!strcmp(name, "test-protect")) {
-        femu_cxl_protect(s, value);
+        femu_cxl_protect(s, s->test_owner, value);
     } else {
-        femu_cxl_unprotect(s, value);
+        femu_cxl_unprotect(s, s->test_owner, value);
     }
     femu_cxl_leave(s);
     object_unref(obj);
+}
+
+static void adapter_test_owner(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    int32_t value;
+
+    if (!visit_type_int32(v, name, &value, errp)) {
+        return;
+    }
+    if (value < -1) {
+        error_setg(errp, "test-owner must be -1 or a vCPU index");
+        return;
+    }
+    FEMU_CXL_SSD(obj)->media.test_owner = value;
+}
+
+static void adapter_test_protect_window(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    /* Keeps since + window far from INT64_MAX. */
+    if (value > 3600 * NANOSECONDS_PER_SECOND) {
+        error_setg(errp, "test-protect-window is at most one hour");
+        return;
+    }
+    FEMU_CXL_SSD(obj)->media.protect_window_ns = value;
+}
+
+static bool cylon_test_fault_fill(uint64_t gpa, Error **errp);
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
+                             Error **errp);
+
+static void adapter_test_map(Object *obj, bool value, Error **errp)
+{
+    FEMU_CXL_SSD(obj)->media.test_map = value;
+}
+
+static void adapter_test_rip(Object *obj, Visitor *v, const char *name,
+                             void *opaque, Error **errp)
+{
+    visit_type_uint64(v, name, &FEMU_CXL_SSD(obj)->media.test_rip, errp);
+}
+
+static void adapter_test_fault(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    uint64_t gpa;
+
+    if (visit_type_uint64(v, name, &gpa, errp)) {
+        object_ref(obj);
+        cylon_test_fault(FEMU_CXL_SSD(obj), gpa,
+                         !strcmp(name, "test-fault-decode"), errp);
+        object_unref(obj);
+    }
+}
+
+/* Serve a fault exit at a GPA as the vCPU that test-owner names would. */
+static void adapter_test_fault_fill(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    uint64_t gpa;
+
+    if (visit_type_uint64(v, name, &gpa, errp)) {
+        object_ref(obj);
+        cylon_test_fault_fill(gpa, errp);
+        object_unref(obj);
+    }
 }
 
 static void adapter_test_fill_race(Object *obj, bool value, Error **errp)
@@ -1623,6 +1703,19 @@ static void cxl_init(Object *obj)
                             adapter_test_fill, NULL, NULL);
         object_property_add(obj, "test-unprotect", "uint64", NULL,
                             adapter_test_fill, NULL, NULL);
+        object_property_add(obj, "test-owner", "int32", NULL,
+                            adapter_test_owner, NULL, NULL);
+        object_property_add(obj, "test-protect-window", "uint64", NULL,
+                            adapter_test_protect_window, NULL, NULL);
+        object_property_add(obj, "test-fault-fill", "uint64", NULL,
+                            adapter_test_fault_fill, NULL, NULL);
+        object_property_add(obj, "test-fault", "uint64", NULL,
+                            adapter_test_fault, NULL, NULL);
+        object_property_add(obj, "test-fault-decode", "uint64", NULL,
+                            adapter_test_fault, NULL, NULL);
+        object_property_add_bool(obj, "test-map", NULL, adapter_test_map);
+        object_property_add(obj, "test-rip", "uint64", NULL,
+                            adapter_test_rip, NULL, NULL);
         object_property_add_bool(obj, "test-fill-race", NULL,
                                  adapter_test_fill_race);
         object_property_add(obj, "test-prefetch-race", "uint64", NULL,
@@ -1631,6 +1724,10 @@ static void cxl_init(Object *obj)
                                  adapter_test_prefetch_race_end);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
+    /* No vCPU: outside qtest, accesses from other threads match nothing. */
+    s->test_owner = -1;
+    s->protect_window_ns = FEMU_CXL_PROTECT_WINDOW_NS;
+    s->test_rip = 0x1000;
     qemu_cond_init(&s->idle);
     s->pages = g_hash_table_new(g_int64_hash, g_int64_equal);
     femu_cxl_cca_init(&s->cca);
@@ -1721,6 +1818,12 @@ static void cxl_init(Object *obj)
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-fault-unprotected",
                                    &s->direct.fault_unprotected,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-fault-conflicts",
+                                   &s->direct.fault_conflicts,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "der-fault-overflows",
+                                   &s->direct.fault_overflows,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "der-emul-fills",
                                    &s->direct.emul_fills, OBJ_PROP_FLAG_READ);
@@ -1852,6 +1955,7 @@ static void cxl_finalize(Object *obj)
                     g_hash_table_destroy);
     g_hash_table_destroy(FEMU_CXL_SSD(obj)->media.pages);
     g_clear_pointer(&FEMU_CXL_SSD(obj)->media.protect, g_hash_table_destroy);
+    g_clear_pointer(&FEMU_CXL_SSD(obj)->media.overflow, g_hash_table_destroy);
     qemu_cond_destroy(&FEMU_CXL_SSD(obj)->media.idle);
     femu_cxl_cca_finalize(&FEMU_CXL_SSD(obj)->media.cca);
 }
@@ -2762,8 +2866,13 @@ typedef struct CylonFault {
 
 QEMU_BUILD_BUG_ON(sizeof(CylonFault) > sizeof(((struct kvm_run *)0)->padding));
 
-/* Retries cover a revoked entry or a decoder change during the fill. */
+/*
+ * Retries cover a revoked entry, a decoder change during the fill, and a
+ * fill that waited for a way; the waits of one exit end within
+ * CYLON_FAULT_WAIT_NS, after which the page goes to the emulator.
+ */
 #define CYLON_FAULT_TRIES 3
+#define CYLON_FAULT_WAIT_NS (100 * 1000 * 1000)
 /*
  * Progress across exits. KVM reports exits, not retired instructions, so a
  * repeat at one RIP may be a healthy loop whose page another vCPU evicted.
@@ -2784,17 +2893,32 @@ QEMU_BUILD_BUG_ON(sizeof(CylonFault) > sizeof(((struct kvm_run *)0)->padding));
 #define CYLON_FAULT_UNSERVED 1000
 #define CYLON_FAULT_RECENT 8
 /*
- * Version 2 working-set protection: the pages filled for one instruction stay
- * in the cache until the vCPU faults at another RIP, so a fill for one page
- * of the instruction cannot evict another. A bound on pages and on exits at
- * one RIP keeps a stuck instruction from holding them for ever.
+ * Version 2 working-set protection. KVM reports exits, not retired
+ * instructions, so FEMU cannot tell one execution of a RIP from the next.
+ * It keeps the 64 latest pages a vCPU filled at one RIP (enough for a
+ * gather whose elements cross pages), oldest released first, and uses them
+ * only as evidence: a fill evicts them freely, as a loop over distinct
+ * pages needs, until the vCPU faults again on a page it already filled at
+ * that RIP. That refault is the sign that the instruction needs pages that
+ * evict each other; such a fill keeps the vCPU's protected pages, and a
+ * page that then cannot stay goes to the emulator, which completes the
+ * instruction. Fills of other vCPUs pass over the pages for a moment only:
+ * a vCPU that stops faulting must not close a set to the others.
  */
-#define CYLON_PROTECT_PAGES 16
-#define CYLON_PROTECT_EXITS 64
+#define CYLON_PROTECT_PAGES 64
+/*
+ * Pages mapped without a cache way for one instruction that the emulator
+ * cannot run and whose pages do not fit in their set; see
+ * cylon_fault_overflow().
+ */
+#define CYLON_OVERFLOW_PAGES 16
 
 typedef struct CylonProtect {
     FemuCxlSsd *dev;
     uint64_t lpn;
+    int owner;
+    /* The fill was for a write fault. */
+    bool write;
 } CylonProtect;
 
 /* Per vCPU, under the BQL. */
@@ -2806,14 +2930,18 @@ typedef struct CylonFaultTrack {
     GQueue order;
     uint64_t repeats;
     uint64_t unserved;
+    /* The latest exit is on a page already filled at @rip. */
+    bool refault;
     /* The latest exit GPAs at @rip, for reports. */
     uint64_t recent[CYLON_FAULT_RECENT];
     unsigned nrecent;
     int64_t warned_ms;
-    /* Exits at @rip, and the pages protected for it (version 2). */
-    uint64_t exits;
+    /* The pages protected for @rip, oldest first (version 2). */
     CylonProtect protect[CYLON_PROTECT_PAGES];
     unsigned nprotect;
+    /* Pages mapped outside the cache for the instruction at @rip. */
+    CylonProtect overflow[CYLON_OVERFLOW_PAGES];
+    unsigned noverflow;
 } CylonFaultTrack;
 
 /* Sized once for every possible vCPU, so entries never move. */
@@ -2824,32 +2952,62 @@ static void cylon_fault_unprotect(CylonFaultTrack *t)
     while (t->nprotect) {
         CylonProtect *p = &t->protect[--t->nprotect];
 
-        femu_cxl_unprotect(&p->dev->media, p->lpn);
+        femu_cxl_unprotect(&p->dev->media, p->owner, p->lpn);
         object_unref(OBJECT(p->dev));
+    }
+}
+
+static void cylon_overflow_release(CylonProtect *p)
+{
+    femu_cxl_overflow_release(&p->dev->media, p->lpn);
+    object_unref(OBJECT(p->dev));
+}
+
+/* Release the overflow pages of the instruction; see cylon_fault_overflow(). */
+static void cylon_fault_unoverflow(CylonFaultTrack *t)
+{
+    while (t->noverflow) {
+        cylon_overflow_release(&t->overflow[--t->noverflow]);
     }
 }
 
 /*
  * Protect @lpn for the instruction at the vCPU's RIP. A page already held is
- * not taken twice; past the bound, later pages stay unprotected (counted).
+ * not taken twice, but a refill restarts its window for other vCPUs; at the
+ * bound, the oldest page is released (counted).
  */
 static void cylon_fault_protect(CylonFaultTrack *t, FemuCxlSsd *dev,
-                                uint64_t lpn)
+                                uint64_t lpn, bool write)
 {
     unsigned i;
 
     for (i = 0; i < t->nprotect; i++) {
         if (t->protect[i].dev == dev && t->protect[i].lpn == lpn) {
+            CylonProtect p = t->protect[i];
+
+            /* The newest again: the window releases the oldest first. */
+            memmove(&t->protect[i], &t->protect[i + 1],
+                    (t->nprotect - i - 1) * sizeof(t->protect[0]));
+            p.write |= write;
+            t->protect[t->nprotect - 1] = p;
+            femu_cxl_protect_renew(&dev->media, p.owner, lpn);
             return;
         }
     }
     if (t->nprotect == CYLON_PROTECT_PAGES) {
-        dev->media.direct.fault_unprotected++;
-        return;
+        CylonProtect *p = &t->protect[0];
+
+        p->dev->media.direct.fault_unprotected++;
+        femu_cxl_unprotect(&p->dev->media, p->owner, p->lpn);
+        object_unref(OBJECT(p->dev));
+        memmove(&t->protect[0], &t->protect[1],
+                --t->nprotect * sizeof(t->protect[0]));
     }
-    femu_cxl_protect(&dev->media, lpn);
+    femu_cxl_protect(&dev->media, t->cpu->cpu_index, lpn);
     object_ref(OBJECT(dev));
-    t->protect[t->nprotect++] = (CylonProtect) { .dev = dev, .lpn = lpn };
+    t->protect[t->nprotect++] = (CylonProtect) {
+        .dev = dev, .lpn = lpn, .owner = t->cpu->cpu_index, .write = write,
+    };
 }
 
 static void cylon_fault_track_clear(CylonFaultTrack *t)
@@ -2859,11 +3017,12 @@ static void cylon_fault_track_clear(CylonFaultTrack *t)
     }
     g_queue_clear(&t->order);
     cylon_fault_unprotect(t);
+    cylon_fault_unoverflow(t);
     t->rip = 0;
     t->repeats = 0;
     t->unserved = 0;
+    t->refault = false;
     t->nrecent = 0;
-    t->exits = 0;
 }
 
 /* Drop every protection on @dev: it is reset or going away. BQL. */
@@ -2883,10 +3042,24 @@ static void cylon_fault_forget(FemuCxlSsd *dev)
                 j++;
                 continue;
             }
-            t->protect[j] = t->protect[--t->nprotect];
-            femu_cxl_unprotect(&dev->media, p.lpn);
+            memmove(&t->protect[j], &t->protect[j + 1],
+                    (--t->nprotect - j) * sizeof(t->protect[0]));
+            femu_cxl_unprotect(&dev->media, p.owner, p.lpn);
             object_unref(OBJECT(dev));
         }
+        /* Reset and unplug drop the mappings themselves. */
+        for (j = 0; j < t->noverflow;) {
+            if (t->overflow[j].dev != dev) {
+                j++;
+                continue;
+            }
+            memmove(&t->overflow[j], &t->overflow[j + 1],
+                    (--t->noverflow - j) * sizeof(t->overflow[0]));
+            object_unref(OBJECT(dev));
+        }
+    }
+    if (dev->media.overflow) {
+        g_hash_table_remove_all(dev->media.overflow);
     }
 }
 
@@ -2949,11 +3122,9 @@ static uint64_t cylon_fault_note(CylonFaultTrack *t, uint64_t rip,
         cylon_fault_track_clear(t);
         t->rip = rip;
     }
-    if (++t->exits > CYLON_PROTECT_EXITS) {
-        cylon_fault_unprotect(t);
-    }
     t->recent[t->nrecent++ % CYLON_FAULT_RECENT] = gpa;
-    if (g_hash_table_contains(t->pages, &page)) {
+    t->refault = g_hash_table_contains(t->pages, &page);
+    if (t->refault) {
         return ++t->repeats;
     }
     t->repeats = 0;
@@ -3085,17 +3256,260 @@ static uint64_t *cylon_fault_sptep(FemuCxlSsd *dev, uint64_t gpa)
  * accesses. Only a cold (zero) leaf changes; any other value means another
  * vCPU or a KVM update got there first, and the guest simply retries.
  */
-static bool cylon_fault_emulate(FemuCxlSsd *dev, uint64_t gpa)
+static bool cylon_fault_emulate(FemuCxlSsd *dev, uint64_t gpa,
+                                bool *installed)
 {
     uint64_t *sptep = cylon_fault_sptep(dev, gpa);
 
+    *installed = false;
+    if (!sptep && dev->media.test_map) {
+        FemuCxlWindow *w = cylon_fault_window(gpa);
+        uint64_t data;
+
+        /* qtest: the emulator's access, as an MMIO read would make it. */
+        dev->media.direct.fault_emulated++;
+        if (w) {
+            adapter_access(w, gpa - w->fw->base, &data, 8, false,
+                           MEMTXATTRS_UNSPECIFIED, NULL, 0);
+        }
+        *installed = true;
+        return true;
+    }
     if (!sptep) {
         return false;
     }
     if (cylon_spte_install(sptep, 0, CYLON_EMULATE_SPTE)) {
         dev->media.direct.fault_emulated++;
+        *installed = true;
     }
     return true;
+}
+
+/*
+ * Fill the page at @gpa as a read miss and map it, for a fault exit of the
+ * current vCPU. A retry runs for a page that is now resident, which is a
+ * cache hit and charges no media time again (a revoked leaf, a decoder
+ * change during the fill), or after a wait: a fill that kept nothing charged
+ * nothing, and femu_cxl_fill_wait() found that another access or a recent
+ * protection of another vCPU was the only obstacle and is gone. Before a
+ * retry the page must still decode to the same device and page and be
+ * admissible. @flags (FEMU_CXL_FILL_*) go to the fill. BQL, in an RCU
+ * read section. Returns whether the page is mapped; @result is the last
+ * access result.
+ */
+static bool cylon_fault_fill(uint64_t gpa, unsigned flags,
+                             MemTxResult *result)
+{
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
+                       CYLON_FAULT_WAIT_NS;
+    FemuCxlSsd *dev = cylon_fault_device(gpa);
+    bool mapped = false;
+    bool ready = false;
+    uint64_t lpn = 0;
+    unsigned i;
+
+    *result = MEMTX_ERROR;
+    for (i = 0; i < CYLON_FAULT_TRIES && !mapped; i++) {
+        FemuCxlWindow *w = cylon_fault_window(gpa);
+        FemuCxlSsd *now = cylon_fault_device(gpa);
+        uint64_t dpa;
+
+        if (!w || !now || now != dev ||
+            !adapter_translate(CXL_TYPE3(now), gpa, 1, &dpa) ||
+            (i && (dpa / 4096 != lpn ||
+                   !femu_cxl_admissible(&now->media, lpn) ||
+                   (!ready && !g_hash_table_contains(now->media.cache.entries,
+                                                     &lpn))))) {
+            break;
+        }
+        lpn = dpa / 4096;
+        ready = false;
+        *result = adapter_access(w, gpa - w->fw->base, NULL, 1, false,
+                                 MEMTXATTRS_UNSPECIFIED, &mapped, flags);
+        if (*result != MEMTX_OK || mapped || i + 1 == CYLON_FAULT_TRIES ||
+            cylon_fault_device(gpa) != dev) {
+            break;
+        }
+        /* The wait drops the BQL; the reference keeps the device. */
+        object_ref(OBJECT(dev));
+        ready = femu_cxl_fill_wait(&dev->media, lpn, deadline,
+                                   flags & FEMU_CXL_FILL_KEEP_OWN);
+        object_unref(OBJECT(dev));
+    }
+    return mapped;
+}
+
+static bool cylon_test_fault_fill(uint64_t gpa, Error **errp)
+{
+    MemTxResult result;
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        cylon_fault_fill(gpa, 0, &result);
+    }
+    if (result != MEMTX_OK) {
+        error_setg(errp, "the fill failed");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * KVM's emulator reaches the instruction's other pages through host memory,
+ * not through FEMU and not through the EPT dirty bit. Before handing a
+ * conflicting page to it, mark the resident pages that this instruction
+ * faulted on for a write dirty, so their write-back is charged as the
+ * emulated store would make it.
+ */
+static void cylon_fault_conflict_dirty(CylonFaultTrack *t, FemuCxlSsd *dev)
+{
+    unsigned i;
+
+    for (i = 0; i < t->nprotect; i++) {
+        CylonProtect *p = &t->protect[i];
+        FemuCxlEntry *e;
+
+        if (p->dev != dev || !p->write) {
+            continue;
+        }
+        e = g_hash_table_lookup(dev->media.cache.entries, &p->lpn);
+        if (e) {
+            e->dirty = true;
+        }
+    }
+}
+
+/*
+ * The emulator cannot run an instruction (undecodable, or a code fetch)
+ * whose page cannot keep a way because the instruction's own pages fill its
+ * set. Map the page without a cache way for this instruction, charged as
+ * one fill, until the vCPU faults at another RIP or 16 newer overflow pages
+ * replace it. A model deviation, counted in der-fault-overflows: writes
+ * through that mapping are not charged, and other vCPUs reach the page
+ * uncounted meanwhile. The alternative, refilling into the set, evicts a
+ * page the instruction needs and never ends.
+ */
+static bool cylon_fault_overflow(CylonFaultTrack *t, uint64_t gpa,
+                                 MemTxResult *result)
+{
+    FemuCxlSsd *dev = cylon_fault_device(gpa);
+    uint64_t dpa;
+    uint64_t lpn;
+    unsigned i;
+
+    if (!t->refault || !dev ||
+        !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa) ||
+        !femu_cxl_admissible(&dev->media, dpa / 4096) ||
+        !femu_cxl_fill_conflict(&dev->media, dpa / 4096)) {
+        return false;
+    }
+    dev->media.direct.fault_conflicts++;
+    if (!cylon_fault_fill(gpa, FEMU_CXL_FILL_KEEP_OWN |
+                          FEMU_CXL_FILL_OVERFLOW, result)) {
+        return false;
+    }
+    dev = cylon_fault_device(gpa);
+    if (!dev || !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa)) {
+        return false;
+    }
+    lpn = dpa / 4096;
+    if (g_hash_table_contains(dev->media.cache.entries, &lpn)) {
+        return true;
+    }
+    dev->media.direct.fault_overflows++;
+    for (i = 0; i < t->noverflow; i++) {
+        if (t->overflow[i].dev == dev && t->overflow[i].lpn == lpn) {
+            return true;
+        }
+    }
+    if (t->noverflow == CYLON_OVERFLOW_PAGES) {
+        cylon_overflow_release(&t->overflow[0]);
+        memmove(&t->overflow[0], &t->overflow[1],
+                --t->noverflow * sizeof(t->overflow[0]));
+    }
+    femu_cxl_overflow_add(&dev->media, lpn);
+    object_ref(OBJECT(dev));
+    t->overflow[t->noverflow++] = (CylonProtect) {
+        .dev = dev, .lpn = lpn, .owner = t->cpu->cpu_index,
+    };
+    return true;
+}
+
+/*
+ * Version 1 exit (an instruction the emulator cannot decode, or a code
+ * fetch): fill and map the page. In version 2 the page is protected for the
+ * instruction like any fill, and a refault whose instruction's own pages
+ * fill the set maps outside the cache. Returns whether the page is mapped.
+ */
+static bool cylon_fault_decode(CylonFaultTrack *t, const CylonFault *f,
+                               MemTxResult *result)
+{
+    uint64_t generation = 0;
+    FemuCxlSsd *dev = cylon_fault_device(f->gpa);
+    uint64_t dpa;
+    bool mapped;
+
+    if (dev) {
+        generation = dev->media.invalidations;
+    }
+    mapped = cylon_fault_fill(f->gpa,
+                              t->refault ? FEMU_CXL_FILL_KEEP_OWN : 0,
+                              result) ||
+             cylon_fault_overflow(t, f->gpa, result);
+    dev = cylon_fault_device(f->gpa);
+    if (!mapped || !dev) {
+        return mapped;
+    }
+    dev->media.direct.emul_fills++;
+    dev->media.direct.emul_fetch_fills += !!(f->flags & CYLON_FAULT_FETCH);
+    if (cylon_v2 && dev->media.invalidations == generation &&
+        adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa) &&
+        g_hash_table_contains(dev->media.cache.entries,
+                              &(uint64_t){dpa / 4096})) {
+        cylon_fault_protect(t, dev, dpa / 4096, false);
+    }
+    t->unserved = 0;
+    return true;
+}
+
+static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
+                               const char **why);
+
+/*
+ * A fault exit of vCPU test-owner at a fixed RIP, as KVM sends it: a
+ * version 2 read, or with @decode an instruction the emulator cannot decode.
+ */
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
+                             Error **errp)
+{
+    CPUState *cpu = qemu_get_cpu(MAX(dev->media.test_owner, 0));
+    CylonFault f = {
+        .gpa = gpa,
+        .rip = dev->media.test_rip,
+        .flags = decode ? 0 : CYLON_FAULT_ACCESS | CYLON_FAULT_READ,
+    };
+    MemTxResult result;
+    const char *why = NULL;
+    bool ok = false;
+
+    if (!cpu) {
+        error_setg(errp, "no vCPU %d", dev->media.test_owner);
+        return false;
+    }
+    WITH_RCU_READ_LOCK_GUARD() {
+        CylonFaultTrack *t = cylon_fault_track(cpu);
+
+        if (cylon_fault_note(t, f.rip, f.gpa) >= CYLON_FAULT_WARN) {
+            why = "refilled pages 1000 times in a row";
+        } else if (decode) {
+            ok = cylon_fault_decode(t, &f, &result);
+        } else {
+            ok = cylon_fault_access(t, &f, &why);
+        }
+    }
+    if (!ok) {
+        error_setg(errp, "%s", why ? why : "the fault failed");
+    }
+    return ok;
 }
 
 /*
@@ -3111,11 +3525,11 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
     FemuCxlSsd *dev = cylon_fault_device(f->gpa);
     MemTxResult result = MEMTX_ERROR;
     uint64_t generation;
-    bool mapped = false;
+    bool installed;
+    bool mapped;
     uint64_t *sptep;
     uint64_t dpa;
     uint64_t old;
-    unsigned i;
 
     if (!dev || !adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa)) {
         *why = cylon_fault_reason(f->gpa, MEMTX_ERROR);
@@ -3127,32 +3541,16 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
     dev->media.direct.fault_walks += !!(f->flags & CYLON_FAULT_PAGE_WALK);
     /* Decide before charging media time: emulation charges each access. */
     if (!femu_cxl_admissible(&dev->media, dpa / 4096)) {
-        if (cylon_fault_emulate(dev, f->gpa)) {
+        if (cylon_fault_emulate(dev, f->gpa, &installed)) {
             return true;
         }
         *why = cylon_fault_reason(f->gpa, MEMTX_ERROR);
         return false;
     }
     generation = dev->media.invalidations;
-    for (i = 0; i < CYLON_FAULT_TRIES && !mapped; i++) {
-        FemuCxlWindow *w = cylon_fault_window(f->gpa);
-        FemuCxlSsd *now = cylon_fault_device(f->gpa);
-
-        /*
-         * Retry only a page that is now resident: a retry is a cache hit
-         * and charges no media time again (a revoked leaf, a decoder
-         * change during the fill).
-         */
-        if (!w || (i && (now != dev || !g_hash_table_contains(
-                         dev->media.cache.entries, &(uint64_t){dpa / 4096})))) {
-            break;
-        }
-        result = adapter_access(w, f->gpa - w->fw->base, NULL, 1, false,
-                                MEMTXATTRS_UNSPECIFIED, &mapped);
-        if (result != MEMTX_OK) {
-            break;
-        }
-    }
+    mapped = cylon_fault_fill(f->gpa,
+                              t->refault ? FEMU_CXL_FILL_KEEP_OWN : 0,
+                              &result);
     dev = cylon_fault_device(f->gpa);
     if (!dev || !adapter_translate(CXL_TYPE3(dev), f->gpa, 1, &dpa)) {
         *why = cylon_fault_reason(f->gpa, result);
@@ -3163,29 +3561,53 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
         dev->media.direct.emul_fetch_fills += !!(f->flags & CYLON_FAULT_FETCH);
         /* A reset or decoder change during the fill: protect nothing. */
         if (dev->media.invalidations == generation) {
-            cylon_fault_protect(t, dev, dpa / 4096);
+            cylon_fault_protect(t, dev, dpa / 4096,
+                                f->flags & CYLON_FAULT_WRITE);
         }
         t->unserved = 0;
+        /*
+         * A refault fill kept the vCPU's own pages, so it is not the
+         * ping-pong the repeat bound looks for: another vCPU evicted the
+         * page, and the instruction can run.
+         */
+        if (t->refault) {
+            t->repeats = 0;
+        }
         return true;
     }
-    /* A bounded budget for exits served without a mapping. */
+    /*
+     * The instruction's own pages fill the set (more pages of one set than
+     * ways): the emulator completes it, one charged access at a time, as a
+     * device that serves each access does. Refilling here would evict a page
+     * the instruction still needs, for ever.
+     */
+    if (t->refault && femu_cxl_fill_conflict(&dev->media, dpa / 4096)) {
+        dev->media.direct.fault_conflicts++;
+        cylon_fault_conflict_dirty(t, dev);
+    }
+    /* A frozen or newly present leaf: KVM or another vCPU acted; retry. */
+    sptep = cylon_fault_sptep(dev, f->gpa);
+    old = sptep ? qatomic_read(sptep) : 0;
+    if (old != CYLON_REMOVED_SPTE && !(old & CYLON_MMU_PRESENT)) {
+        /* Also a full medium or a held victim that showed in the fill. */
+        if (!cylon_fault_emulate(dev, f->gpa, &installed)) {
+            *why = cylon_fault_reason(f->gpa, result);
+            return false;
+        }
+        /* The handoff serves the access: the budgets restart. */
+        if (installed) {
+            t->unserved = 0;
+            t->repeats = 0;
+            return true;
+        }
+    }
+    /* A bounded budget for exits served without a mapping or a handoff. */
     if (++t->unserved > CYLON_FAULT_UNSERVED) {
         *why = "retry budget exhausted: 1000 consecutive exits at this RIP "
                "served without a mapping";
         return false;
     }
-    /* A frozen or newly present leaf: KVM or another vCPU acted; retry. */
-    sptep = cylon_fault_sptep(dev, f->gpa);
-    old = sptep ? qatomic_read(sptep) : 0;
-    if (old == CYLON_REMOVED_SPTE || (old & CYLON_MMU_PRESENT)) {
-        return true;
-    }
-    /* A full medium or a held victim showed only during the fill. */
-    if (cylon_fault_emulate(dev, f->gpa)) {
-        return true;
-    }
-    *why = cylon_fault_reason(f->gpa, result);
-    return false;
+    return true;
 }
 
 /*
@@ -3202,7 +3624,6 @@ static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
     MemTxResult result = MEMTX_ERROR;
     bool mapped = false;
     uint64_t repeats;
-    unsigned i;
 
     memcpy(&f, run->padding, sizeof(f));
     bql_lock();
@@ -3253,27 +3674,9 @@ static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
             }
             break;
         }
-        for (i = 0; i < CYLON_FAULT_TRIES && !mapped; i++) {
-            FemuCxlWindow *w = cylon_fault_window(f.gpa);
-
-            if (!w) {
-                result = MEMTX_ERROR;
-                break;
-            }
-            result = adapter_access(w, f.gpa - w->fw->base, NULL, 1, false,
-                                    MEMTXATTRS_UNSPECIFIED, &mapped);
-            if (result != MEMTX_OK) {
-                break;
-            }
-        }
+        mapped = cylon_fault_decode(t, &f, &result);
         dev = cylon_fault_device(f.gpa);
-        if (mapped) {
-            if (dev) {
-                dev->media.direct.emul_fills++;
-                dev->media.direct.emul_fetch_fills +=
-                    !!(f.flags & CYLON_FAULT_FETCH);
-            }
-        } else {
+        if (!mapped) {
             if (dev) {
                 dev->media.direct.emul_failures++;
             }
@@ -3891,6 +4294,19 @@ static void femu_cylon_reset(FemuCxlDer *der)
 
 static bool femu_cylon_sample(FemuCxlDer *der, uint64_t lpn)
 {
+    return false;
+}
+
+static bool cylon_test_fault_fill(uint64_t gpa, Error **errp)
+{
+    error_setg(errp, "fault exits need KVM support");
+    return false;
+}
+
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
+                             Error **errp)
+{
+    error_setg(errp, "fault exits need KVM support");
     return false;
 }
 #endif

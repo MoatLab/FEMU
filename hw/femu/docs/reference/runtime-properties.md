@@ -104,7 +104,9 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `der-fault-fetches` | `uint64` | Read-only: version 2 exits for an instruction fetch from a cold page; stats-reset keeps it |
 | `der-fault-page-walks` | `uint64` | Read-only: version 2 exits for a guest page walk that read a cold page-table page; stats-reset keeps it |
 | `der-fault-emulated` | `uint64` | Read-only: pages handed back to KVM's emulator because FEMU could not map them (uncached range, pinned set, full medium); stats-reset keeps it |
-| `der-fault-unprotected` | `uint64` | Read-only: version 2 fills left unprotected because the instruction already held 16 pages; stats-reset keeps it |
+| `der-fault-unprotected` | `uint64` | Read-only: version 2 protections released early because the instruction already held 64 pages; stats-reset keeps it |
+| `der-fault-conflicts` | `uint64` | Read-only: version 2 fills refused because pages that the same instruction filled hold every way of the set; the page goes to KVM's emulator; stats-reset keeps it |
+| `der-fault-overflows` | `uint64` | Read-only: pages mapped without a cache way because the emulator cannot run an instruction whose pages do not fit in their set; stats-reset keeps it |
 | `der-emul-fills` | `uint64` | Read-only: exits for an access KVM could not decode that FEMU served by a fill and a mapping, repeats and cache hits included; not instructions or unique pages; stats-reset keeps it |
 | `der-emul-fetch-fills` | `uint64` | Read-only: the der-emul-fills exits for code the guest executed from an unmapped page; stats-reset keeps it |
 | `der-emul-failures` | `uint64` | Read-only: such exits FEMU could not serve (unmappable page or no progress); each one stops the VM; stats-reset keeps it |
