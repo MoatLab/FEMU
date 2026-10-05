@@ -367,7 +367,12 @@ The rules:
   page in a caching API uncached range, or a page whose set has all ways
   pinned and that no direct mapping ratio selects. It also cannot map a page
   whose set has no victim to give: every way is protected (see below) or held
-  by another access. FEMU charges nothing for such a page. It writes a marker
+  by another access. A fill takes its cache way before the media read, which
+  drops the BQL, so no other access can take that way meanwhile. FEMU
+  charges and counts nothing for a page it cannot keep. A prefetch holds its
+  page until it is mapped, so it never maps a page another access is still
+  filling, and a fill whose read fails revokes any mapping of its page. A page that a direct
+  mapping ratio selects maps without a cache way. It writes a marker
   to the leaf, and KVM then emulates the accesses to that page as in
   version 1, one charged access at a time. `der-fault-emulated` counts these
   pages. A full medium shows only during the fill; such a page also goes to
@@ -377,8 +382,8 @@ The rules:
   RIP). Eviction passes over them and takes the next victim in policy order,
   so a fill for one page of the instruction does not evict another, and a
   fill's prefetch does not evict the page it fills. `der-fault-unprotected`
-  counts fills past the 16-page bound. A device reset or unplug drops the
-  protection of its pages.
+  counts fills past the 16-page bound. A device reset or unplug, a system
+  reset, and the destruction of a vCPU drop the protection.
 - A retry of a fill that mapped nothing runs only for a page that is now
   resident, so it charges no media time again. After 1,000 consecutive exits
   at one RIP that FEMU served without a mapping, FEMU stops the VM ("retry
@@ -400,15 +405,18 @@ The rules:
 
 Limits of version 2:
 
-- The fill checks for a victim before it charges the media read, but the
-  media wait drops the BQL. If another access takes the last victim in that
-  time, the page goes to the emulator after its read was charged, and the
-  emulated access charges again.
+- Pages that must stay unmapped are still served by KVM emulation: pages
+  in a caching API uncached range, pages in a set whose ways are all pinned,
+  and misses with no victim. An instruction that the emulator cannot run
+  (VEX, EVEX, most SSE with a memory operand, code) stops the VM on such a
+  page, with the report above. This applies to those pages only.
+  `der-fault-emulated` counts the pages given to the emulator, and
+  `der-emul-failures` counts the stops.
 - KVM fails the faults of a second MMU root role also while an old root of
   another role is being torn down. Keep one root role: the same CPUID on
   every vCPU, and no SMM.
-- A removed vCPU keeps the protection of its last instruction until a vCPU
-  with the same index faults again, or until a device or system reset.
+- The 16-page bound leaves later pages of one instruction unprotected;
+  `der-fault-unprotected` counts them.
 
 ### SPTE encoding, dirty tracking and revocation
 

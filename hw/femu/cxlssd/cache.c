@@ -98,14 +98,23 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
     bool ghost = false;
     unsigned kept = 0;
     GQueue *forced = NULL;
+    /* Each entry is rotated, demoted or promoted only a few times. */
+    uint64_t budget = 8 * ((uint64_t)c->ways + 1);
 
     /*
      * @keep makes the policy pass over an entry: it goes to the far end of
      * its queue, as if just inserted, and the policy goes on with its own
      * rules. Each entry is passed over at most once in a row; when S3-FIFO
-     * finds every entry of its queue kept, it tries the other queue.
+     * finds every entry of its queue kept, it tries the other queue, until
+     * a promotion empties that one and the choice is made again.
      */
     for (;;) {
+        if (!budget--) {
+            return false;
+        }
+        if (forced && g_queue_is_empty(forced)) {
+            forced = NULL;
+        }
         if (forced) {
             queue = forced;
         } else if (c->policy == FEMU_CXL_S3FIFO && c->ways > 1) {
@@ -187,23 +196,42 @@ FemuCxlEntry *femu_cxl_cache_insert_keep(FemuCxlCache *c, uint64_t lpn,
     FemuCxlSet *set;
     FemuCxlEntry *e;
     bool main;
+    uint32_t tries;
 
     if (!c->nsets) {
         return NULL;
     }
+    set = &c->sets[lpn % c->nsets];
     e = g_hash_table_lookup(c->entries, &lpn);
     if (e) {
         return e;
     }
-    set = &c->sets[lpn % c->nsets];
-    /* A set whose every way is pinned has nothing to evict. */
     if (set->pinned.length == c->ways) {
         return NULL;
     }
+    /* A ghost hit goes to main; take it before evictions add ghosts. */
     main = ghost_remove(c, set, lpn) && c->ways > 1;
-    if (set->small.length + set->main.length + set->pinned.length ==
-        c->ways && !cache_evict(c, set, evict, keep, opaque)) {
-        return NULL;
+    /*
+     * An eviction callback can drop the BQL (a write-back), and another
+     * access may then insert this page or take the freed way: look again
+     * after each eviction.
+     */
+    for (tries = 0;; tries++) {
+        e = g_hash_table_lookup(c->entries, &lpn);
+        if (e) {
+            return e;
+        }
+        /* A set whose every way is pinned has nothing to evict. */
+        if (set->pinned.length == c->ways || tries > c->ways) {
+            return NULL;
+        }
+        if (set->small.length + set->main.length + set->pinned.length <
+            c->ways) {
+            break;
+        }
+        if (!cache_evict(c, set, evict, keep, opaque)) {
+            return NULL;
+        }
     }
     e = g_new0(FemuCxlEntry, 1);
     e->lpn = lpn;

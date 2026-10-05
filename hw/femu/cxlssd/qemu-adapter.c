@@ -1526,6 +1526,72 @@ static bool adapter_reservation_test(Object *obj, Error **errp)
 #endif
 }
 
+/*
+ * qtest hooks for the Cylon fill path: fill a page as a fault exit would
+ * (test-fill, a DPA), protect or release a page (test-protect,
+ * test-unprotect, an LPN), and race the next fill (test-fill-race).
+ */
+static void adapter_test_fill(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint64_t value;
+    bool mapped;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    object_ref(obj);
+    femu_cxl_enter(s);
+    if (!s->started || s->closing) {
+        error_setg(errp, "the device is not running");
+    } else if (!strcmp(name, "test-fill")) {
+        if (femu_cxl_fill(s, value, value, &mapped) != MEMTX_OK) {
+            error_setg(errp, "the fill failed");
+        }
+    } else if (!strcmp(name, "test-protect")) {
+        femu_cxl_protect(s, value);
+    } else {
+        femu_cxl_unprotect(s, value);
+    }
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
+static void adapter_test_fill_race(Object *obj, bool value, Error **errp)
+{
+    FEMU_CXL_SSD(obj)->media.test_fill_race = value;
+}
+
+static void adapter_test_prefetch_race(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    visit_type_uint64(v, name, &FEMU_CXL_SSD(obj)->media.test_prefetch_race,
+                      errp);
+}
+
+/* The other access's fill fails: it drops its entry and its hold. */
+static void adapter_test_prefetch_race_end(Object *obj, bool value,
+                                           Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    FemuCxlEntry *e;
+
+    object_ref(obj);
+    femu_cxl_enter(s);
+    if (s->test_race_active) {
+        s->test_race_active = false;
+        e = g_hash_table_lookup(s->cache.entries, &s->test_race_lpn);
+        femu_cxl_fill_failed(s, s->test_race_lpn, e);
+        g_hash_table_remove(s->pages, &s->test_race_lpn);
+        qemu_cond_broadcast(&s->idle);
+        s->cache_entries = g_hash_table_size(s->cache.entries);
+    }
+    femu_cxl_leave(s);
+    object_unref(obj);
+}
+
 static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
 {
     FEMU_CXL_SSD(obj)->test_change_dpa = value;
@@ -1551,6 +1617,18 @@ static void cxl_init(Object *obj)
                                  adapter_reservation_test, NULL);
         object_property_add_bool(obj, "test-media-disabled", NULL,
                                  adapter_test_media_disabled);
+        object_property_add(obj, "test-fill", "uint64", NULL,
+                            adapter_test_fill, NULL, NULL);
+        object_property_add(obj, "test-protect", "uint64", NULL,
+                            adapter_test_fill, NULL, NULL);
+        object_property_add(obj, "test-unprotect", "uint64", NULL,
+                            adapter_test_fill, NULL, NULL);
+        object_property_add_bool(obj, "test-fill-race", NULL,
+                                 adapter_test_fill_race);
+        object_property_add(obj, "test-prefetch-race", "uint64", NULL,
+                            adapter_test_prefetch_race, NULL, NULL);
+        object_property_add_bool(obj, "test-prefetch-race-end", NULL,
+                                 adapter_test_prefetch_race_end);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
     qemu_cond_init(&s->idle);
@@ -2812,6 +2890,18 @@ static void cylon_fault_forget(FemuCxlSsd *dev)
     }
 }
 
+/*
+ * A destroyed vCPU (unplug, exit) releases what its last instruction held.
+ * The next vCPU with its index starts clean, whatever its address.
+ */
+static void cylon_fault_vcpu_destroyed(CPUState *cpu)
+{
+    if (cylon_fault_tracks && cpu->cpu_index < current_machine->smp.max_cpus) {
+        cylon_fault_track_clear(&cylon_fault_tracks[cpu->cpu_index]);
+        cylon_fault_tracks[cpu->cpu_index].cpu = NULL;
+    }
+}
+
 /* A system reset restarts every vCPU. */
 static void cylon_fault_tracks_reset(void *opaque)
 {
@@ -2837,7 +2927,10 @@ static CylonFaultTrack *cylon_fault_track(CPUState *cpu)
         t->pages = g_hash_table_new_full(g_int64_hash, g_int64_equal,
                                          g_free, NULL);
     }
-    /* A hot-plugged vCPU can reuse the index of a removed one. */
+    /*
+     * The destroy hook clears a removed vCPU's track; this check only
+     * covers a vCPU that left without it.
+     */
     if (t->cpu != cpu) {
         cylon_fault_track_clear(t);
         t->cpu = cpu;
@@ -3236,6 +3329,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
             return;
         }
         kvm_set_exit_handler(CYLON_EXIT_FAULT, cylon_fault_exit);
+        kvm_set_vcpu_destroy_hook(cylon_fault_vcpu_destroyed);
         cylon_v2 = want_v2;
         enabled = true;
     }

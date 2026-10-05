@@ -179,8 +179,10 @@ DEVICES = [
         "title": "CXL Type-3 SSD",
         "parent": "pci-device",
         "inherits_from": "cxl-type3",
-        "test_only": ["test-change-dpa", "test-media-disabled",
-                      "test-slot-reservation"],
+        "test_only": ["test-change-dpa", "test-fill", "test-fill-race",
+                      "test-media-disabled", "test-prefetch-race",
+                      "test-prefetch-race-end", "test-protect",
+                      "test-slot-reservation", "test-unprotect"],
         "topics": [
             {
                 "title": "Cache",

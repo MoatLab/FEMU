@@ -150,6 +150,19 @@ struct FemuCxlMedia {
      * (lpn to count), so demand fills do not evict them. BQL.
      */
     GHashTable *protect;
+    /*
+     * qtest only: the next fill protects every page of its set just before
+     * it takes a way, as another vCPU could while a media wait drops the BQL.
+     */
+    bool test_fill_race;
+    /*
+     * qtest only: page + 1 that another access starts to fill (hold and
+     * cache entry, media read pending) at the point where a prefetch of it
+     * could drop the BQL; test-prefetch-race-end then fails that fill.
+     */
+    uint64_t test_prefetch_race;
+    uint64_t test_race_lpn;
+    bool test_race_active;
 };
 
 void femu_cxl_enter(FemuCxlMedia *s);
@@ -165,6 +178,7 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
 MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                           bool *mapped);
 bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e);
 void femu_cxl_protect(FemuCxlMedia *s, uint64_t lpn);
 void femu_cxl_unprotect(FemuCxlMedia *s, uint64_t lpn);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);

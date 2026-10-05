@@ -341,7 +341,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
 - `femu`: `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-stream-test`
-- `femu-cxl-ssd`: `test-change-dpa`, `test-media-disabled`, `test-slot-reservation`
+- `femu-cxl-ssd`: `test-change-dpa`, `test-fill`, `test-fill-race`, `test-media-disabled`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-slot-reservation`, `test-unprotect`
 
 ## Environment variables
 

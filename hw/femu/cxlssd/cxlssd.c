@@ -395,6 +395,18 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         result = MEMTX_OK;
         goto out;
     }
+    if (!data && s->test_fill_race && s->cache.nsets) {
+        FemuCxlSet *set = femu_cxl_cache_set(&s->cache, first);
+        GList *l;
+
+        s->test_fill_race = false;
+        for (l = set->small.head; l; l = l->next) {
+            femu_cxl_protect(s, ((FemuCxlEntry *)l->data)->lpn);
+        }
+        for (l = set->main.head; l; l = l->next) {
+            femu_cxl_protect(s, ((FemuCxlEntry *)l->data)->lpn);
+        }
+    }
     for (lpn = first; lpn <= last; lpn++) {
         FemuCxlEntry *e = femu_cxl_cache_find(&s->cache, lpn);
 
@@ -419,15 +431,35 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             if (s->cache.nsets && to_media && !uncached) {
                 s->cca.pinned_set_misses++;
             }
-
-            if (!femu_cxl_media(&op, lpn, write && to_media)) {
+            /*
+             * A fill takes its way before the media read, which drops the
+             * BQL: nothing can take the victim meanwhile, and a page it
+             * cannot keep is neither charged nor counted. The caller hands
+             * that page to the emulator, which charges each access.
+             */
+            if (!data && !to_media) {
+                op.held = false;
+                e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
+                                               cxl_keep, &op);
+                /* A ratio page maps without a cache entry. */
+                if (!e && !femu_cxl_ratio_selected(s->direct.ratio, lpn)) {
+                    s->read_misses--;
+                    s->cache.misses--;
+                    result = MEMTX_OK;
+                    goto out;
+                }
+                if (!femu_cxl_media(&op, lpn, false)) {
+                    femu_cxl_fill_failed(s, lpn, e);
+                    goto out;
+                }
+            } else if (!femu_cxl_media(&op, lpn, write && to_media)) {
                 /* Report failed reads; a failed program only loses timing. */
                 if (!(write && to_media)) {
                     goto out;
                 }
                 cxl_media_full(s);
             }
-            if (!to_media) {
+            if (!to_media && data) {
                 op.held = false;
                 e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
                                                cxl_keep, &op);
@@ -454,17 +486,38 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             for (next = lpn + s->prefetch_stride; next < end; next++) {
                 FemuCxlEntry *prefetched;
                 uint64_t next_hpa = hpa - dpa + next * 4096;
+                /* The prefetch's own hold on @next; see below. */
+                uint64_t held = next;
 
+                /* A held page is being filled or written back. */
                 if (g_hash_table_contains(s->cache.entries, &next) ||
+                    g_hash_table_contains(s->pages, &next) ||
                     femu_cxl_cca_uncached(&s->cca, next) ||
                     femu_cxl_cache_all_pinned(&s->cache, next)) {
                     continue;
+                }
+                /*
+                 * Hold @next across insertion, whose eviction write-back can
+                 * drop the BQL, and mapping: a demand fill of it waits, so a
+                 * prefetch never maps a page another access is filling.
+                 */
+                g_hash_table_add(s->pages, &held);
+                if (s->test_prefetch_race == next + 1) {
+                    s->test_prefetch_race = 0;
+                    if (!g_hash_table_contains(s->pages, &next)) {
+                        s->test_race_lpn = next;
+                        g_hash_table_add(s->pages, &s->test_race_lpn);
+                        femu_cxl_cache_insert(&s->cache, next, NULL, NULL);
+                        s->test_race_active = true;
+                    }
                 }
                 prefetched = femu_cxl_cache_insert_keep(&s->cache, next,
                                                         femu_cxl_evict,
                                                         cxl_keep, &op);
                 /* A prefetch is optional; never fail the demand access. */
                 if (!prefetched) {
+                    g_hash_table_remove(s->pages, &held);
+                    qemu_cond_broadcast(&s->idle);
                     break;
                 }
                 s->prefetch_inserts++;
@@ -472,6 +525,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     !s->direct.cylon) {
                     prefetched->dirty = true;
                 }
+                g_hash_table_remove(s->pages, &held);
+                qemu_cond_broadcast(&s->idle);
             }
         }
         s->cache_entries = g_hash_table_size(s->cache.entries);
@@ -523,6 +578,10 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     result = MEMTX_OK;
 out:
+    /* A failed fill may have evicted or removed an entry. */
+    if (s->cache.entries) {
+        s->cache_entries = g_hash_table_size(s->cache.entries);
+    }
     for (i = 0; i < holds; i++) {
         g_hash_table_remove(s->pages, &pages[i]);
     }
@@ -548,6 +607,18 @@ MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
 {
     return cxl_access(s, hpa & ~4095ULL, dpa & ~4095ULL, NULL, 1, false,
                       mapped);
+}
+
+/*
+ * A fill whose media read failed drops the entry it took, and first revokes
+ * any direct mapping of the page, so none outlives the entry.
+ */
+void femu_cxl_fill_failed(FemuCxlMedia *s, uint64_t lpn, FemuCxlEntry *e)
+{
+    if (e) {
+        femu_cxl_der_remove(&s->direct, lpn);
+        femu_cxl_cache_remove(&s->cache, e, NULL, NULL);
+    }
 }
 
 /*

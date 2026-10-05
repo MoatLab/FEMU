@@ -19817,6 +19817,81 @@ static void femu_test_cca_bql(void *obj, void *data, QGuestAllocator *alloc)
     femu_cca_quit(&c);
 }
 
+static void femu_cxl_set_u64(QTestState *qts, const char *name,
+                             uint64_t value)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':%s,'value':%" PRIu64 "}}", name, value);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * A Cylon fill that cannot keep its page charges no media read: the page
+ * goes to the emulator, which charges each access. With one way, protect
+ * the only resident page; then also take the victim at the point where a
+ * media wait would drop the BQL. Each failed fill must leave media-reads,
+ * read-misses and the cache as they were; a later fill charges once.
+ */
+static void femu_test_cxl_fill_charge(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=1,cache-ways=1,prefetch-degree=0");
+
+    femu_cxl_decode(qts);
+    femu_cxl_set_u64(qts, "test-fill", 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 1);
+    /* No victim when the fill starts. */
+    femu_cxl_set_u64(qts, "test-protect", 0);
+    femu_cxl_set_u64(qts, "test-fill", 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 1);
+    femu_cxl_set_u64(qts, "test-unprotect", 0);
+    /* The victim goes while the fill runs. */
+    femu_cxl_set(qts, "test-fill-race", true);
+    femu_cxl_set_u64(qts, "test-fill", 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 1);
+    femu_cxl_set_u64(qts, "test-unprotect", 0);
+    femu_cxl_set_u64(qts, "test-fill", 4096);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==, 2);
+    qtest_quit(qts);
+}
+
+/*
+ * A prefetch must not map a page another access is filling. The hook starts
+ * a fill of page 1 (hold and entry, read pending) where the prefetch of page
+ * 1 could drop the BQL, then fails that fill. No mapping may outlive the
+ * entry: every direct page has a cache entry.
+ */
+static void femu_test_cxl_prefetch_race(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
+        "cache-pages=4,cache-ways=4,prefetch-degree=1");
+
+    femu_cxl_decode(qts);
+    femu_cxl_set_u64(qts, "test-prefetch-race", 1 + 1);
+    qtest_readq(qts, FEMU_CXL_WINDOW);
+    femu_cxl_set(qts, "test-prefetch-race-end", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), <=,
+                     femu_cxl_stat(qts, "cache-entries"));
+    /* The page reads normally afterwards. */
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 4096), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), <=,
+                     femu_cxl_stat(qts, "cache-entries"));
+    qtest_quit(qts);
+}
+
 /* Commands that touch the cache refuse while media is disabled. */
 static void femu_test_cca_media(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -22402,6 +22477,9 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-cca-unplug", "femu", femu_test_cca_unplug, NULL);
     qos_add_test("cxl-cca-media", "femu", femu_test_cca_media, NULL);
+    qos_add_test("cxl-fill-charge", "femu", femu_test_cxl_fill_charge, NULL);
+    qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,
+                 NULL);
     qos_add_test("cxl-cca-bql", "femu", femu_test_cca_bql, NULL);
     qos_add_test("cxl-cca-lsa-busy", "femu", femu_test_cca_lsa_busy, NULL);
     qos_add_test("cxl-cca-disable-abandon", "femu",

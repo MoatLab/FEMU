@@ -464,6 +464,105 @@ static void keep_clock(void)
     femu_cxl_cache_destroy(&c);
 }
 
+/*
+ * S3-FIFO regression: a full 20-way set with 19 kept entries in main and
+ * one small entry of freq 2. Main is chosen, every entry is kept, small is
+ * forced; its entry is promoted and small is empty. The search must pick
+ * the queue again, not peek the empty one.
+ */
+static bool keep_set(void *opaque, uint64_t lpn)
+{
+    return g_hash_table_contains(opaque, &lpn);
+}
+
+static void keep_s3fifo_promote(void)
+{
+    g_autoptr(GHashTable) kept = g_hash_table_new(g_int64_hash,
+                                                  g_int64_equal);
+    static uint64_t lpns[20];
+    FemuCxlCache c;
+    FemuCxlSet *set;
+    uint64_t lpn;
+    unsigned i;
+
+    femu_cxl_cache_init(&c, 20, 20, FEMU_CXL_S3FIFO);
+    for (i = 0; i < 20; i++) {
+        lpns[i] = i;
+        g_assert_nonnull(femu_cxl_cache_insert(&c, lpns[i], NULL, NULL));
+    }
+    set = femu_cxl_cache_set(&c, 0);
+    for (i = 0; i < 19; i++) {
+        FemuCxlEntry *e = g_hash_table_lookup(c.entries, &lpns[i]);
+
+        g_queue_unlink(&set->small, e->link);
+        g_queue_push_tail_link(&set->main, e->link);
+        e->queue = FEMU_CXL_MAIN;
+        e->freq = 0;
+        g_hash_table_add(kept, &lpns[i]);
+    }
+    ((FemuCxlEntry *)g_hash_table_lookup(c.entries, &lpns[19]))->freq = 2;
+    lpn = 20;
+    g_assert_nonnull(femu_cxl_cache_insert_keep(&c, lpn, NULL, keep_set,
+                                                kept));
+    for (i = 0; i < 19; i++) {
+        g_assert_true(g_hash_table_contains(c.entries, &lpns[i]));
+    }
+    g_assert_false(g_hash_table_contains(c.entries, &lpns[19]));
+    check_links(&c);
+    femu_cxl_cache_destroy(&c);
+}
+
+/*
+ * Insertion must look again after an eviction callback, which can drop the
+ * BQL in FEMU: another access (a prefetch) may insert the same page, or
+ * fill the freed way. The callback below does that once, keeping the
+ * victim the outer insertion chose, as FEMU's write-back hold does.
+ */
+typedef struct ReentrantInsert {
+    FemuCxlCache *c;
+    uint64_t lpn;
+    uint64_t victim;
+    bool done;
+} ReentrantInsert;
+
+static bool keep_victim(void *opaque, uint64_t lpn)
+{
+    return lpn == ((ReentrantInsert *)opaque)->victim;
+}
+
+static bool insert_during_evict(void *opaque, FemuCxlEntry *e)
+{
+    ReentrantInsert *r = opaque;
+
+    if (!r->done) {
+        r->done = true;
+        r->victim = e->lpn;
+        g_assert_nonnull(femu_cxl_cache_insert_keep(r->c, r->lpn, NULL,
+                                                    keep_victim, r));
+    }
+    return true;
+}
+
+static void keep_reinsert(void)
+{
+    FemuCxlCache c;
+    ReentrantInsert r = { .c = &c, .lpn = 9 };
+    FemuCxlEntry *e;
+    uint64_t lpn;
+
+    /* One set of two ways, full. */
+    femu_cxl_cache_init(&c, 2, 2, FEMU_CXL_FIFO);
+    for (lpn = 0; lpn < 2; lpn++) {
+        g_assert_nonnull(femu_cxl_cache_insert(&c, lpn, NULL, NULL));
+    }
+    e = femu_cxl_cache_insert(&c, r.lpn, insert_during_evict, &r);
+    g_assert_nonnull(e);
+    g_assert_true(g_hash_table_lookup(c.entries, &r.lpn) == e);
+    g_assert_cmpuint(g_hash_table_size(c.entries), <=, 2);
+    check_links(&c);
+    femu_cxl_cache_destroy(&c);
+}
+
 int main(void)
 {
     FemuCxlPolicy policy;
@@ -486,6 +585,8 @@ int main(void)
         keep_policy(policy);
     }
     keep_clock();
+    keep_s3fifo_promote();
+    keep_reinsert();
     rotations();
     rebuild();
     fully_associative_pinned();
