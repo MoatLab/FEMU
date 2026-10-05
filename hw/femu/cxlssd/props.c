@@ -63,6 +63,11 @@ static const FemuPropDesc cxl_descs[] = {
     { "cylon-kernel-ack",
       "Must be on with der=cylon to state that the host runs a Cylon kernel "
       "with the dual-slot fixes; the device does not check it" },
+    { "cylon-never-emulate",
+      "With der=cylon and cylon-emul-exit on, ask the host kernel for version "
+      "2 of the Cylon fault exit: an access to a cold page exits with its "
+      "type and FEMU maps the page, so KVM emulates only pages FEMU cannot "
+      "map; per VM, set by the first Cylon device that installs its slot" },
     { "cylon-emul-exit",
       "With der=cylon, ask the host kernel to return accesses it cannot "
       "decode on unmapped pages to FEMU, which maps the page; off keeps "
@@ -230,6 +235,28 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "Read-only: exits for an access KVM could not decode that FEMU served "
       "by a fill and a mapping, repeats and cache hits included; not "
       "instructions or unique pages; stats-reset keeps it" },
+    { "der-emul-v2",
+      "Read-only: whether version 2 of the Cylon fault exit is on for the "
+      "VM (cylon-never-emulate)" },
+    { "der-fault-reads",
+      "Read-only: version 2 exits for a data read of a cold page; "
+      "stats-reset keeps it" },
+    { "der-fault-writes",
+      "Read-only: version 2 exits for a data write to a cold page; "
+      "stats-reset keeps it" },
+    { "der-fault-fetches",
+      "Read-only: version 2 exits for an instruction fetch from a cold "
+      "page; stats-reset keeps it" },
+    { "der-fault-page-walks",
+      "Read-only: version 2 exits for a guest page walk that read a cold "
+      "page-table page; stats-reset keeps it" },
+    { "der-fault-unprotected",
+      "Read-only: version 2 fills left unprotected because the instruction "
+      "already held 16 pages; stats-reset keeps it" },
+    { "der-fault-emulated",
+      "Read-only: pages handed back to KVM's emulator because FEMU could "
+      "not map them (uncached range, pinned set, full medium); "
+      "stats-reset keeps it" },
     { "der-emul-fetch-fills",
       "Read-only: the der-emul-fills exits for code the guest executed from "
       "an unmapped page; stats-reset keeps it" },

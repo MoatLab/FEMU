@@ -397,6 +397,73 @@ static void fully_associative_pinned(void)
     }
 }
 
+/* Eviction passes over kept entries and takes the next in policy order. */
+static bool keep_lpn(void *opaque, uint64_t lpn)
+{
+    return lpn == *(uint64_t *)opaque;
+}
+
+static bool keep_all(void *opaque, uint64_t lpn)
+{
+    (void)opaque;
+    (void)lpn;
+    return true;
+}
+
+static void keep_policy(FemuCxlPolicy policy)
+{
+    FemuCxlCache c;
+    uint64_t kept;
+    uint64_t lpn;
+
+    /* One set of four ways: lpns 0, 1, 2, 3 fill it in that order. */
+    femu_cxl_cache_init(&c, 4, 4, policy);
+    for (lpn = 0; lpn < 4; lpn++) {
+        g_assert_nonnull(femu_cxl_cache_insert(&c, lpn, NULL, NULL));
+    }
+    /* The plain policy evicts 0 (FIFO, clock, S3-FIFO) or 3 (LIFO); keep it. */
+    kept = policy == FEMU_CXL_LIFO ? 3 : 0;
+    g_assert_nonnull(femu_cxl_cache_insert_keep(&c, 4, NULL, keep_lpn,
+                                                &kept));
+    g_assert_true(g_hash_table_contains(c.entries, &kept));
+    g_assert_cmpuint(g_hash_table_size(c.entries), ==, 4);
+    /* Nothing to give: the insert fails and the set is unchanged. */
+    lpn = 5;
+    g_assert_null(femu_cxl_cache_insert_keep(&c, lpn, NULL, keep_all, NULL));
+    g_assert_false(g_hash_table_contains(c.entries, &lpn));
+    g_assert_cmpuint(g_hash_table_size(c.entries), ==, 4);
+    check_links(&c);
+    femu_cxl_cache_destroy(&c);
+}
+
+/*
+ * CLOCK keeps its second chance when it passes over a kept entry: with
+ * [A kept, B referenced, C not], it must evict C, not B.
+ */
+static void keep_clock(void)
+{
+    FemuCxlCache c;
+    uint64_t lpn;
+    uint64_t a = 0;
+    uint64_t b = 1;
+    uint64_t cold = 2;
+
+    femu_cxl_cache_init(&c, 3, 3, FEMU_CXL_CLOCK);
+    for (lpn = 0; lpn < 3; lpn++) {
+        g_assert_nonnull(femu_cxl_cache_insert(&c, lpn, NULL, NULL));
+    }
+    ((FemuCxlEntry *)g_hash_table_lookup(c.entries, &a))->freq = 0;
+    ((FemuCxlEntry *)g_hash_table_lookup(c.entries, &b))->freq = 1;
+    ((FemuCxlEntry *)g_hash_table_lookup(c.entries, &cold))->freq = 0;
+    lpn = 3;
+    g_assert_nonnull(femu_cxl_cache_insert_keep(&c, lpn, NULL, keep_lpn, &a));
+    g_assert_true(g_hash_table_contains(c.entries, &a));
+    g_assert_true(g_hash_table_contains(c.entries, &b));
+    g_assert_false(g_hash_table_contains(c.entries, &cold));
+    check_links(&c);
+    femu_cxl_cache_destroy(&c);
+}
+
 int main(void)
 {
     FemuCxlPolicy policy;
@@ -415,10 +482,14 @@ int main(void)
             remove_policy(policy, ways);
         }
     }
+    for (policy = FEMU_CXL_FIFO; policy <= FEMU_CXL_S3FIFO; policy++) {
+        keep_policy(policy);
+    }
+    keep_clock();
     rotations();
     rebuild();
     fully_associative_pinned();
     puts("CXL cache: ordering, large keys, dirty eviction, reset, pinning, "
-         "removal, rebuild, all policies PASS");
+         "removal, rebuild, keep, all policies PASS");
     return 0;
 }

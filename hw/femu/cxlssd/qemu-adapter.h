@@ -25,6 +25,10 @@ typedef struct FemuCxlOp {
     /* Pages this operation holds itself; its prefetch may evict them. */
     const uint64_t *own;
     unsigned nown;
+    /* A demand access: it must not evict a protected page. */
+    bool demand;
+    /* A fill for a Cylon fault: its prefetch must not evict its own page. */
+    bool fill;
 } FemuCxlOp;
 
 /* Pages a linked NVMe command replaced. */
@@ -79,6 +83,8 @@ struct FemuCxlMedia {
     uint64_t channel_ns;
     char *der;
     bool cylon_kernel_ack;
+    /* Ask for version 2 of the Cylon fault exit: no emulation of cold pages. */
+    bool cylon_never_emulate;
     /* Enable KVM_CAP_CYLON_FAULT_EXIT when the slot is installed. */
     bool cylon_emul_exit;
     OnOffAuto concurrent;
@@ -139,6 +145,11 @@ struct FemuCxlMedia {
     /* The device went away first and left its FTL to the controller. */
     bool nvme_owns_ftl;
     uint64_t nvme_drops;
+    /*
+     * Pages that an instruction stopped at a Cylon fault still needs
+     * (lpn to count), so demand fills do not evict them. BQL.
+     */
+    GHashTable *protect;
 };
 
 void femu_cxl_enter(FemuCxlMedia *s);
@@ -153,6 +164,9 @@ MemTxResult femu_cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                             uint64_t *data, unsigned size, bool write);
 MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                           bool *mapped);
+bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_protect(FemuCxlMedia *s, uint64_t lpn);
+void femu_cxl_unprotect(FemuCxlMedia *s, uint64_t lpn);
 uint64_t femu_cxl_drain(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,

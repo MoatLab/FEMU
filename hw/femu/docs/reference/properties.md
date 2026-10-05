@@ -266,7 +266,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 25 properties of its own, 10 inherited from `cxl-type3` and 56 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 26 properties of its own, 10 inherited from `cxl-type3` and 63 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 
@@ -301,6 +301,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `der-replace-rate` | `uint32` | `64` | With der=memslot and no free alias (1024 shared by all devices, fewer if KVM has fewer free slots), the most aliases per second a repeatedly missing page may displace; 0 disables replacement |
 | `cylon-kernel-ack` | `bool` | `off` | Must be on with der=cylon to state that the host runs a Cylon kernel with the dual-slot fixes; the device does not check it |
 | `cylon-emul-exit` | `bool` | `on` | With der=cylon, ask the host kernel to return accesses it cannot decode on unmapped pages to FEMU, which maps the page; off keeps stock KVM behaviour (a guest #UD or an internal error) only if no other device of the VM turned the VM-wide capability on |
+| `cylon-never-emulate` | `bool` | `off` | With der=cylon and cylon-emul-exit on, ask the host kernel for version 2 of the Cylon fault exit: an access to a cold page exits with its type and FEMU maps the page, so KVM emulates only pages FEMU cannot map; per VM, set by the first Cylon device that installs its slot |
 | `concurrent-misses` | `OnOffAuto` | `auto` | Let misses to different pages wait for the media together; auto does so only while direct mapping is active |
 
 ### Caching API, control channel and logs

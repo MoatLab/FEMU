@@ -89,16 +89,26 @@ static bool ghost_remove(FemuCxlCache *c, FemuCxlSet *set, uint64_t lpn)
 }
 
 static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
-                         FemuCxlEvict evict, void *opaque)
+                         FemuCxlEvict evict, FemuCxlKeep keep, void *opaque)
 {
     GQueue *queue = &set->small;
     /* Pins take ways away; size the small queue from what is left. */
     uint32_t ways = c->ways - set->pinned.length;
     FemuCxlEntry *e;
     bool ghost = false;
+    unsigned kept = 0;
+    GQueue *forced = NULL;
 
+    /*
+     * @keep makes the policy pass over an entry: it goes to the far end of
+     * its queue, as if just inserted, and the policy goes on with its own
+     * rules. Each entry is passed over at most once in a row; when S3-FIFO
+     * finds every entry of its queue kept, it tries the other queue.
+     */
     for (;;) {
-        if (c->policy == FEMU_CXL_S3FIFO && c->ways > 1) {
+        if (forced) {
+            queue = forced;
+        } else if (c->policy == FEMU_CXL_S3FIFO && c->ways > 1) {
             queue = (set->small.length >= MAX(1, ways / 10) ||
                      g_queue_is_empty(&set->main)) ? &set->small : &set->main;
         }
@@ -116,11 +126,30 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
                    queue == &set->main && e->freq) {
             e->freq--;
             g_queue_push_tail_link(queue, g_queue_pop_head_link(queue));
+        } else if (keep && keep(opaque, e->lpn)) {
+            if (++kept > queue->length) {
+                GQueue *other = queue == &set->small ? &set->main :
+                                                       &set->small;
+
+                if (forced || g_queue_is_empty(other)) {
+                    return false;
+                }
+                forced = other;
+                kept = 0;
+                continue;
+            }
+            if (c->policy == FEMU_CXL_LIFO) {
+                g_queue_push_head_link(queue, g_queue_pop_tail_link(queue));
+            } else {
+                g_queue_push_tail_link(queue, g_queue_pop_head_link(queue));
+            }
+            continue;
         } else {
-            ghost = c->policy == FEMU_CXL_S3FIFO && queue == &set->small;
             break;
         }
+        kept = 0;
     }
+    ghost = c->policy == FEMU_CXL_S3FIFO && queue == &set->small;
     /* Keep the entry resident if the media cannot accept its write. */
     if (evict && !evict(opaque, e)) {
         return false;
@@ -148,6 +177,13 @@ static bool cache_evict(FemuCxlCache *c, FemuCxlSet *set,
 FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
                                    FemuCxlEvict evict, void *opaque)
 {
+    return femu_cxl_cache_insert_keep(c, lpn, evict, NULL, opaque);
+}
+
+FemuCxlEntry *femu_cxl_cache_insert_keep(FemuCxlCache *c, uint64_t lpn,
+                                         FemuCxlEvict evict, FemuCxlKeep keep,
+                                         void *opaque)
+{
     FemuCxlSet *set;
     FemuCxlEntry *e;
     bool main;
@@ -166,7 +202,7 @@ FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
     }
     main = ghost_remove(c, set, lpn) && c->ways > 1;
     if (set->small.length + set->main.length + set->pinned.length ==
-        c->ways && !cache_evict(c, set, evict, opaque)) {
+        c->ways && !cache_evict(c, set, evict, keep, opaque)) {
         return NULL;
     }
     e = g_new0(FemuCxlEntry, 1);
@@ -189,7 +225,7 @@ bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque)
         FemuCxlSet *set = &c->sets[i];
 
         while (set->small.length + set->main.length) {
-            if (!cache_evict(c, set, evict, opaque)) {
+            if (!cache_evict(c, set, evict, NULL, opaque)) {
                 return false;
             }
         }

@@ -42,6 +42,15 @@ typedef struct FemuCxlDer {
     uint64_t emul_failures;
     /* Of @emul_fills, those for code executed from an unmapped page. */
     uint64_t emul_fetch_fills;
+    /* Version 2 (per VM, see cylon_v2): cold pages exit with their type. */
+    uint64_t fault_reads;
+    uint64_t fault_writes;
+    uint64_t fault_fetches;
+    uint64_t fault_walks;
+    /* Pages handed back to KVM's emulator because they cannot be mapped. */
+    uint64_t fault_emulated;
+    /* Filled pages left unprotected: the instruction's bound was full. */
+    uint64_t fault_unprotected;
 } FemuCxlDer;
 
 /*

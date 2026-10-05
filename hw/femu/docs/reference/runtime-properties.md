@@ -98,6 +98,13 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `der-replacements` | `uint64` | Read-only: memslot aliases displaced by a hotter page |
 | `der-fallbacks` | `uint64` | Read-only: refused direct mapping attempts and device disablements |
 | `der-emul-exit` | `bool` | Read-only: whether the host kernel returns Cylon accesses it cannot emulate to FEMU (KVM_CAP_CYLON_FAULT_EXIT) |
+| `der-emul-v2` | `bool` | Read-only: whether version 2 of the Cylon fault exit is on for the VM (cylon-never-emulate) |
+| `der-fault-reads` | `uint64` | Read-only: version 2 exits for a data read of a cold page; stats-reset keeps it |
+| `der-fault-writes` | `uint64` | Read-only: version 2 exits for a data write to a cold page; stats-reset keeps it |
+| `der-fault-fetches` | `uint64` | Read-only: version 2 exits for an instruction fetch from a cold page; stats-reset keeps it |
+| `der-fault-page-walks` | `uint64` | Read-only: version 2 exits for a guest page walk that read a cold page-table page; stats-reset keeps it |
+| `der-fault-emulated` | `uint64` | Read-only: pages handed back to KVM's emulator because FEMU could not map them (uncached range, pinned set, full medium); stats-reset keeps it |
+| `der-fault-unprotected` | `uint64` | Read-only: version 2 fills left unprotected because the instruction already held 16 pages; stats-reset keeps it |
 | `der-emul-fills` | `uint64` | Read-only: exits for an access KVM could not decode that FEMU served by a fill and a mapping, repeats and cache hits included; not instructions or unique pages; stats-reset keeps it |
 | `der-emul-fetch-fills` | `uint64` | Read-only: the der-emul-fills exits for code the guest executed from an unmapped page; stats-reset keeps it |
 | `der-emul-failures` | `uint64` | Read-only: such exits FEMU could not serve (unmappable page or no progress); each one stops the VM; stats-reset keeps it |

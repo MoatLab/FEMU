@@ -57,6 +57,8 @@ typedef struct FemuCxlCache {
 } FemuCxlCache;
 
 typedef bool (*FemuCxlEvict)(void *opaque, FemuCxlEntry *entry);
+/* Whether eviction must pass over @lpn and take the next candidate. */
+typedef bool (*FemuCxlKeep)(void *opaque, uint64_t lpn);
 
 bool femu_cxl_policy(const char *name, FemuCxlPolicy *policy);
 void femu_cxl_cache_init(FemuCxlCache *c, uint32_t pages, uint32_t ways,
@@ -64,6 +66,9 @@ void femu_cxl_cache_init(FemuCxlCache *c, uint32_t pages, uint32_t ways,
 FemuCxlEntry *femu_cxl_cache_find(FemuCxlCache *c, uint64_t lpn);
 FemuCxlEntry *femu_cxl_cache_insert(FemuCxlCache *c, uint64_t lpn,
                                    FemuCxlEvict evict, void *opaque);
+FemuCxlEntry *femu_cxl_cache_insert_keep(FemuCxlCache *c, uint64_t lpn,
+                                         FemuCxlEvict evict, FemuCxlKeep keep,
+                                         void *opaque);
 bool femu_cxl_cache_clear(FemuCxlCache *c, FemuCxlEvict evict, void *opaque);
 void femu_cxl_cache_destroy(FemuCxlCache *c);
 

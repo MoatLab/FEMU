@@ -61,6 +61,14 @@ static void test_spte_transitions(void)
     assert(cylon_spte_revoked(mmio));
     assert(cylon_spte_revoked(CYLON_REMOVED_SPTE));
     assert(!cylon_spte_revoked(direct));
+    /*
+     * The version 2 emulation marker: not present to the CPU (no R/W/X, no
+     * MMU-present bit), not an MMIO entry, not KVM's frozen value.
+     */
+    assert(cylon_spte_revoked(CYLON_EMULATE_SPTE));
+    assert(!(CYLON_EMULATE_SPTE & 7));
+    assert(!(CYLON_EMULATE_SPTE & CYLON_MMU_PRESENT));
+    assert(CYLON_EMULATE_SPTE != CYLON_REMOVED_SPTE);
     assert(!cylon_spte_install(&spte, mmio, direct));
     assert(spte == CYLON_REMOVED_SPTE);
     spte = mmio;

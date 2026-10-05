@@ -30,12 +30,17 @@
     CYLON_MMU_PRESENT | CYLON_HOST_WRITABLE | CYLON_MMU_WRITABLE)
 
 #define CYLON_REMOVED_SPTE UINT64_C(0x5a0)
+/*
+ * Version 2 of the Cylon fault exit: written to the leaf of a page FEMU cannot
+ * map directly, so KVM installs an MMIO entry and emulates its accesses.
+ */
+#define CYLON_EMULATE_SPTE UINT64_C(0x6a0)
 #define CYLON_PAGEMAP_PRESENT (UINT64_C(1) << 63)
 #define CYLON_PAGEMAP_PFN ((UINT64_C(1) << 55) - 1)
 
 static inline bool cylon_spte_revoked(uint64_t spte)
 {
-    return !spte || spte == CYLON_REMOVED_SPTE ||
+    return !spte || spte == CYLON_REMOVED_SPTE || spte == CYLON_EMULATE_SPTE ||
            ((spte & 7) == CYLON_MMIO_VALUE && !(spte & CYLON_MMU_PRESENT));
 }
 

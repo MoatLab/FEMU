@@ -293,7 +293,8 @@ used). Nonzero `KVM_SET_SPTE_FLAG` operations are refused; only the flush
 remains.
 
 The fixed kernel still requires, and does not check: SMM disabled
-(`-machine smm=off`), identical CPUID on every vCPU (one TDP root role), and
+(`-machine smm=off`, which FEMU now checks), identical CPUID on every vCPU
+(one TDP root role), and
 no move or flag change of the dual slot. Tables that were mapped to userspace
 are never freed: about 8 bytes per 4 KiB page of the window per slot.
 
@@ -343,6 +344,71 @@ instruction bytes and the latest GPAs at that RIP when:
   such exits and stops the VM at 100,000. A load that spans two pages which
   evict each other ends this way; a healthy loop whose page other vCPUs evict
   stays far below the limit.
+
+#### Version 2: no emulation of cold pages
+
+With `cylon-never-emulate=on` and a host kernel that has version 2 of
+`KVM_CAP_CYLON_FAULT_EXIT`, KVM does not emulate an access to a cold page.
+A cold page has a zero leaf. KVM installs nothing and exits to FEMU with the
+access type from the EPT violation: read, write or fetch, and whether the
+guest page walk made the access. FEMU fills the page as a read miss, maps it,
+and the guest repeats the access natively. One path serves every
+instruction: vector, atomic, string, page-crossing (one exit for each page),
+code, and guest page tables on the CXL node. `der-emul-v2` reports that the
+mode is on. `der-fault-reads`, `der-fault-writes`, `der-fault-fetches` and
+`der-fault-page-walks` count the exits by type.
+
+The rules:
+
+- Revocation writes zero, not an MMIO entry. The TLB rule does not change:
+  the full revocation flushes, and the quiet revocation runs only when an
+  atomic exchange finds the accessed bit clear.
+- FEMU checks before the fill whether it can map the page. It cannot map a
+  page in a caching API uncached range, or a page whose set has all ways
+  pinned and that no direct mapping ratio selects. It also cannot map a page
+  whose set has no victim to give: every way is protected (see below) or held
+  by another access. FEMU charges nothing for such a page. It writes a marker
+  to the leaf, and KVM then emulates the accesses to that page as in
+  version 1, one charged access at a time. `der-fault-emulated` counts these
+  pages. A full medium shows only during the fill; such a page also goes to
+  the emulator, after its read was charged.
+- The pages that FEMU fills for one instruction stay in the cache until the
+  vCPU faults at another RIP (at most 16 pages, released after 64 exits at one
+  RIP). Eviction passes over them and takes the next victim in policy order,
+  so a fill for one page of the instruction does not evict another, and a
+  fill's prefetch does not evict the page it fills. `der-fault-unprotected`
+  counts fills past the 16-page bound. A device reset or unplug drops the
+  protection of its pages.
+- A retry of a fill that mapped nothing runs only for a page that is now
+  resident, so it charges no media time again. After 1,000 consecutive exits
+  at one RIP that FEMU served without a mapping, FEMU stops the VM ("retry
+  budget exhausted"). Exits are not retired instructions: the 100,000-repeat
+  bound and this budget are retry budgets, not proof that an instruction did
+  not complete.
+- KVM does not write the leaves itself: no fast-fault write restore, no
+  asynchronous page fault, no prefetch (also not the shadow prefetch of a
+  nested guest), and the changed-PTE notifier only zaps. KVM refuses the
+  slot in the SMM address space, fails the faults of a nested guest on the
+  slot, and fails the faults of a second MMU root role (for example a root of
+  another depth). FEMU refuses `der=cylon` unless the machine has
+  `smm=off`.
+- The version is per VM and fixed by the first Cylon device that installs
+  its slot, also when that device has `cylon-emul-exit=off`. A later device
+  with `cylon-never-emulate=on` cannot turn it on, because the pages of the
+  earlier slots hold version 1 state; FEMU warns. Every device reports the
+  VM's state in `der-emul-v2`.
+
+Limits of version 2:
+
+- The fill checks for a victim before it charges the media read, but the
+  media wait drops the BQL. If another access takes the last victim in that
+  time, the page goes to the emulator after its read was charged, and the
+  emulated access charges again.
+- KVM fails the faults of a second MMU root role also while an old root of
+  another role is being torn down. Keep one root role: the same CPUID on
+  every vCPU, and no SMM.
+- A removed vCPU keeps the protection of its last instruction until a vCPU
+  with the same index faults again, or until a device or system reset.
 
 ### SPTE encoding, dirty tracking and revocation
 

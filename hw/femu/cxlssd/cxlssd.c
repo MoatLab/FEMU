@@ -185,6 +185,63 @@ static bool cxl_op_holds(FemuCxlOp *op, uint64_t lpn)
     return false;
 }
 
+/*
+ * Entries eviction passes over: pages a stopped instruction still needs (see
+ * femu_cxl_protect()); for a fill also the page it brings in, which its own
+ * prefetch must not push out again, and pages another access holds, so the
+ * fill takes the victim cxl_fill_room() found. A page passed over counts as
+ * held: if no victim is left, the access goes uncached, as for a held one.
+ */
+static bool cxl_keep(void *opaque, uint64_t lpn)
+{
+    FemuCxlOp *op = opaque;
+    FemuCxlMedia *s = op->s;
+    bool keep;
+
+    if (cxl_op_holds(op, lpn)) {
+        return op->fill;
+    }
+    keep = (op->demand && s->protect &&
+            g_hash_table_contains(s->protect, &lpn)) ||
+           (op->fill && g_hash_table_contains(s->pages, &lpn));
+    if (keep) {
+        op->held = true;
+    }
+    return keep;
+}
+
+/*
+ * Whether a fill of @lpn can insert it without charging media time for a
+ * page that then cannot stay: a free way, or a victim that is neither kept
+ * nor held by another access.
+ */
+static bool cxl_fill_room(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn)
+{
+    FemuCxlSet *set = femu_cxl_cache_set(&s->cache, lpn);
+    GQueue *queues[2];
+    unsigned i;
+
+    if (!set || set->small.length + set->main.length + set->pinned.length <
+        s->cache.ways) {
+        return true;
+    }
+    queues[0] = &set->small;
+    queues[1] = &set->main;
+    for (i = 0; i < 2; i++) {
+        GList *l;
+
+        for (l = queues[i]->head; l; l = l->next) {
+            FemuCxlEntry *e = l->data;
+
+            if (!cxl_keep(op, e->lpn) &&
+                !g_hash_table_contains(s->pages, &e->lpn)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e)
 {
     FemuCxlOp *op = opaque;
@@ -292,7 +349,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                               uint64_t *data, unsigned size, bool write,
                               bool *mapped)
 {
-    FemuCxlOp op = { .s = s };
+    FemuCxlOp op = { .s = s, .demand = true, .fill = !data };
     MemTxResult result = MEMTX_ERROR;
     uint64_t generation = s->invalidations;
     uint64_t pages[2];
@@ -325,6 +382,19 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     }
     op.own = pages;
     op.nown = holds;
+    /*
+     * A fill that could not keep its page charges and counts nothing: the
+     * caller hands the page to the emulator, which charges each access.
+     */
+    if (!data && s->cache.nsets &&
+        !g_hash_table_contains(s->cache.entries, &first) &&
+        !femu_cxl_ratio_selected(s->direct.ratio, first) &&
+        !femu_cxl_cca_uncached(&s->cca, first) &&
+        !femu_cxl_cache_all_pinned(&s->cache, first) &&
+        !cxl_fill_room(s, &op, first)) {
+        result = MEMTX_OK;
+        goto out;
+    }
     for (lpn = first; lpn <= last; lpn++) {
         FemuCxlEntry *e = femu_cxl_cache_find(&s->cache, lpn);
 
@@ -349,6 +419,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             if (s->cache.nsets && to_media && !uncached) {
                 s->cca.pinned_set_misses++;
             }
+
             if (!femu_cxl_media(&op, lpn, write && to_media)) {
                 /* Report failed reads; a failed program only loses timing. */
                 if (!(write && to_media)) {
@@ -358,7 +429,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
             }
             if (!to_media) {
                 op.held = false;
-                e = femu_cxl_cache_insert(&s->cache, lpn, femu_cxl_evict, &op);
+                e = femu_cxl_cache_insert_keep(&s->cache, lpn, femu_cxl_evict,
+                                               cxl_keep, &op);
                 /* The victim was held: this access goes uncached. */
                 if (!e && op.held) {
                     if (write && !femu_cxl_media(&op, lpn, true)) {
@@ -388,8 +460,9 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                     femu_cxl_cache_all_pinned(&s->cache, next)) {
                     continue;
                 }
-                prefetched = femu_cxl_cache_insert(&s->cache, next,
-                                                   femu_cxl_evict, &op);
+                prefetched = femu_cxl_cache_insert_keep(&s->cache, next,
+                                                        femu_cxl_evict,
+                                                        cxl_keep, &op);
                 /* A prefetch is optional; never fail the demand access. */
                 if (!prefetched) {
                     break;
@@ -475,6 +548,59 @@ MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
 {
     return cxl_access(s, hpa & ~4095ULL, dpa & ~4095ULL, NULL, 1, false,
                       mapped);
+}
+
+/*
+ * Whether a fill of @lpn can end with a direct mapping, before any media
+ * time is charged. A full medium or a held victim shows only during a fill.
+ */
+bool femu_cxl_admissible(FemuCxlMedia *s, uint64_t lpn)
+{
+    if (femu_cxl_cca_uncached(&s->cca, lpn)) {
+        return false;
+    }
+    if (g_hash_table_contains(s->cache.entries, &lpn) ||
+        femu_cxl_ratio_selected(s->direct.ratio, lpn)) {
+        return true;
+    }
+    return s->cache.nsets && !femu_cxl_cache_all_pinned(&s->cache, lpn);
+}
+
+/*
+ * Keep @lpn in the cache while an instruction that faulted on it may still
+ * need it: a fill for another page of the same instruction must not evict
+ * it, or the instruction never completes. Counted, for several vCPUs.
+ */
+void femu_cxl_protect(FemuCxlMedia *s, uint64_t lpn)
+{
+    uint64_t *key;
+    gpointer count;
+
+    if (!s->protect) {
+        s->protect = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                           g_free, NULL);
+    }
+    count = g_hash_table_lookup(s->protect, &lpn);
+    key = g_memdup2(&lpn, sizeof(lpn));
+    /* The table owns its keys; replace frees the old one. */
+    g_hash_table_replace(s->protect, key,
+                         GUINT_TO_POINTER(GPOINTER_TO_UINT(count) + 1));
+}
+
+void femu_cxl_unprotect(FemuCxlMedia *s, uint64_t lpn)
+{
+    guint count;
+
+    if (!s->protect) {
+        return;
+    }
+    count = GPOINTER_TO_UINT(g_hash_table_lookup(s->protect, &lpn));
+    if (count <= 1) {
+        g_hash_table_remove(s->protect, &lpn);
+    } else {
+        g_hash_table_replace(s->protect, g_memdup2(&lpn, sizeof(lpn)),
+                             GUINT_TO_POINTER(count - 1));
+    }
 }
 
 /*
