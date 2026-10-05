@@ -192,7 +192,8 @@ DEVICES = [
                       "test-slot-reservation", "test-unprotect",
                       "test-revoke-ahead", "test-revoke-ahead-keep",
                       "test-storm", "test-storm-wait", "test-storm-served",
-                      "test-storm-stops", "test-storm-ns"],
+                      "test-storm-stops", "test-storm-ns",
+                      "test-lock-mutex"],
         "topics": [
             {
                 "title": "Cache",

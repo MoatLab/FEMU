@@ -266,6 +266,12 @@ struct FemuCxlMedia {
 void femu_cxl_lock(void);
 void femu_cxl_unlock(void);
 bool femu_cxl_locked(void);
+/*
+ * Until femu_cxl_lock_bql_free() runs, every holder of the CXL lock holds
+ * the BQL too, and the lock costs nothing; after it, it is a mutex.
+ */
+bool femu_cxl_lock_is_bql_free(void);
+void femu_cxl_lock_bql_free(void);
 
 /* What femu_cxl_drop() let go of, for femu_cxl_retake(). */
 typedef struct FemuCxlHeld {

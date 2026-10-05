@@ -1844,6 +1844,12 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
     FEMU_CXL_SSD(obj)->media.protect_window_ns = value;
 }
 
+/* qtest only: whether the CXL lock is a mutex yet. */
+static bool adapter_test_lock_mutex(Object *obj, Error **errp)
+{
+    return femu_cxl_lock_is_bql_free();
+}
+
 static bool cylon_test_fault_fill(uint64_t gpa, Error **errp);
 static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
                              Error **errp);
@@ -2054,6 +2060,8 @@ static void cxl_init(Object *obj)
                             adapter_test_storm_get, NULL, NULL, NULL);
         object_property_add(obj, "test-storm-ns", "uint64",
                             adapter_test_storm_get, NULL, NULL, NULL);
+        object_property_add_bool(obj, "test-lock-mutex",
+                                 adapter_test_lock_mutex, NULL);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
     s->owner = obj;
@@ -4134,22 +4142,28 @@ static CylonServe cylon_fault_serve(CPUState *cpu, const CylonFault *f,
  * served this way, and an instruction that keeps faulting at one RIP makes
  * no progress: both stop the VM instead of returning to the same fault.
  *
- * KVM calls this outside the BQL, and the fault is served under the CXL
- * lock alone, so misses of different vCPUs never wait for the BQL or for
- * each other's media time. What needs the BQL (a route through a switch or
- * to another device, a window scan after an invalidation, deleting a failed
- * slot) makes the service stop before it decides anything, and the fault is
- * served again under the BQL as before. As for MMIO dispatch, an RCU read
- * section keeps an unplugged window alive while the fill waits; the window
- * is looked up again by GPA after every wait instead of trusting an earlier
- * pointer.
+ * KVM calls this outside the BQL. With version 2 the fault is served under
+ * the CXL lock alone, so misses of different vCPUs never wait for the BQL
+ * or for each other's media time. Version 1 exits are rare and take the
+ * BQL, so the CXL lock takes no mutex for version 1 MMIO. What needs the
+ * BQL (a route through a switch or to another device, a window scan after
+ * an invalidation) makes the service stop before it decides anything, and
+ * the fault is served again under the BQL as before. As for MMIO dispatch,
+ * an RCU read section keeps an unplugged window alive while the fill
+ * waits; the window is looked up again by GPA after every wait instead of
+ * trusting an earlier pointer.
  */
 static bool cylon_fault_handle(CPUState *cpu, const CylonFault *f)
 {
-    bool bql = bql_locked();
+    /* Without version 2 the CXL lock is the BQL's (femu_cxl_lock()). */
+    bool take = !bql_locked() && !femu_cxl_lock_is_bql_free();
+    bool bql = bql_locked() || take;
     CylonServe served;
     bool noted = false;
 
+    if (take) {
+        bql_lock();
+    }
     WITH_RCU_READ_LOCK_GUARD() {
         femu_cxl_lock();
         femu_cxl_clear_need_bql();
@@ -4173,6 +4187,9 @@ static bool cylon_fault_handle(CPUState *cpu, const CylonFault *f)
         } else {
             femu_cxl_unlock();
         }
+    }
+    if (take) {
+        bql_unlock();
     }
     return served == CYLON_SERVED;
 }
@@ -4247,6 +4264,8 @@ static void *cylon_storm_thread(void *opaque)
     return NULL;
 }
 
+static void cylon_lock_bql_free(void);
+
 /* "threads,pages,iters,mode,seed": start a storm on this device's window. */
 static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
                               Error **errp)
@@ -4283,6 +4302,10 @@ static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
             pages = MIN(pages, w->fw->size / 4096);
         }
         cylon_fault_tracks_init();
+        /* Mode 0 serves exits without the BQL, as version 2 does. */
+        if (w && !mode) {
+            cylon_lock_bql_free();
+        }
     }
     if (!w) {
         error_setg(errp, "no window");
@@ -4432,6 +4455,28 @@ static const char *cylon_storm_check(FemuCxlSsd *dev)
 }
 
 /*
+ * Let fault exits take the CXL lock without the BQL. Until now a thread
+ * asleep in a gate, page or fill wait sleeps on the BQL; wake every such
+ * thread, so that it waits on the CXL lock's mutex from now on. BQL and CXL
+ * lock.
+ */
+static void cylon_lock_bql_free(void)
+{
+    unsigned i;
+
+    assert(femu_cxl_locked());
+    if (femu_cxl_lock_is_bql_free()) {
+        return;
+    }
+    femu_cxl_lock_bql_free();
+    for (i = 0; adapter_live && i < adapter_live->len; i++) {
+        FemuCxlSsd *dev = g_ptr_array_index(adapter_live, i);
+
+        qemu_cond_broadcast(&dev->media.idle);
+    }
+}
+
+/*
  * Per VM: the first slot whose device has cylon-emul-exit on turns it on.
  * Off, the kernel keeps stock KVM behaviour on such an access: #UD in guest
  * user mode, an internal-error exit in guest kernel mode. A device with
@@ -4462,6 +4507,14 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
                              "of KVM_CAP_CYLON_FAULT_EXIT; cylon-never-emulate "
                              "is off and KVM emulates cold pages");
             want_v2 = false;
+        }
+        /*
+         * Version 2 exits run without the BQL. Version 1 exits are rare
+         * (undecodable instructions) and take the BQL, so with version 1
+         * every holder of the CXL lock holds the BQL.
+         */
+        if (want_v2) {
+            cylon_lock_bql_free();
         }
         if (version < 1 ||
             kvm_vm_enable_cap(kvm_state, CYLON_CAP_FAULT_EXIT, 0,

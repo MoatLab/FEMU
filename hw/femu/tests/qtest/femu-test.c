@@ -21204,6 +21204,65 @@ static void femu_test_cxl_storm_set(void *obj, void *data,
     qtest_quit(qts);
 }
 
+static bool femu_cxl_lock_mutex(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':'test-lock-mutex'}}");
+    bool value;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    value = qdict_get_bool(rsp, "return");
+    qobject_unref(rsp);
+    return value;
+}
+
+/* MMIO from this thread (the BQL path) while a storm runs. */
+static void femu_cxl_storm_mmio(QTestState *qts, unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        uint64_t gpa = FEMU_CXL_WINDOW + (i * 37 % 128) * 4096 + 8;
+
+        if (i % 2) {
+            qtest_writeq(qts, gpa, i);
+        } else {
+            qtest_readq(qts, gpa);
+        }
+    }
+}
+
+/*
+ * Until exits run without the BQL, the CXL lock is not a mutex: holders
+ * hold the BQL and waits sleep on it. Exits that hold the BQL (as version 1
+ * exits do) and MMIO must then still keep every count, and the first storm
+ * without the BQL must turn the lock into a mutex under waiters and keep
+ * every count too.
+ */
+static void femu_test_cxl_storm_bql(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = femu_cxl_storm_init("");
+    unsigned mode;
+
+    for (mode = 1; mode != UINT_MAX; mode--) {
+        uint64_t misses;
+
+        femu_cxl_storm(qts, 8, 128, 2000, mode);
+        femu_cxl_storm_mmio(qts, 1000);
+        femu_cxl_storm_wait(qts, "ssd");
+        g_assert_true(femu_cxl_lock_mutex(qts) == !mode);
+        g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served"), ==,
+                         8 * 2000);
+        g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-stops"), ==, 0);
+        misses = femu_cxl_stat(qts, "read-misses") +
+                 femu_cxl_stat(qts, "write-misses");
+        g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, misses);
+    }
+    qtest_quit(qts);
+}
+
 /*
  * A fill waits out its media time inside its media read, without the locks.
  * It must take the whole read once: a 50 ms NAND read of a programmed page
@@ -24001,6 +24060,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,
                  NULL);
     qos_add_test("cxl-storm-set", "femu", femu_test_cxl_storm_set, NULL);
+    qos_add_test("cxl-storm-bql", "femu", femu_test_cxl_storm_bql, NULL);
     qos_add_test("cxl-storm-change", "femu", femu_test_cxl_storm_change,
                  NULL);
     qos_add_test("cxl-storm-unplug", "femu", femu_test_cxl_storm_unplug,

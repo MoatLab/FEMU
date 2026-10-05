@@ -62,8 +62,18 @@ static int cxl_owner(FemuCxlMedia *s)
 }
 
 static QemuMutex cxl_lock;
-/* How many times this thread holds @cxl_lock. */
+/*
+ * Whether a thread may take the CXL lock without the BQL: set under the BQL
+ * by femu_cxl_lock_bql_free(), never cleared. Until then every holder also
+ * holds the BQL, which already serializes them, so a hold only counts its
+ * depth and a wait sleeps on the BQL, as before the lock existed. Version 1
+ * accesses, which always arrive under the BQL, then pay nothing for it.
+ */
+static bool cxl_lock_live;
+/* How many times this thread holds the CXL lock. */
 static __thread unsigned cxl_lock_depth;
+/* Whether this thread's hold owns @cxl_lock or only the BQL. */
+static __thread bool cxl_lock_owned;
 static __thread bool cxl_need_bql;
 
 /*
@@ -86,10 +96,29 @@ static void __attribute__((constructor)) cxl_lock_init(void)
 #endif
 }
 
+/* Take the mutex if threads without the BQL can hold the lock. */
+static void cxl_lock_own(void)
+{
+    cxl_lock_owned = qatomic_load_acquire(&cxl_lock_live);
+    if (cxl_lock_owned) {
+        qemu_mutex_lock(&cxl_lock);
+    } else {
+        assert(bql_locked());
+    }
+}
+
+static void cxl_lock_disown(void)
+{
+    if (cxl_lock_owned) {
+        cxl_lock_owned = false;
+        qemu_mutex_unlock(&cxl_lock);
+    }
+}
+
 void femu_cxl_lock(void)
 {
     if (!cxl_lock_depth++) {
-        qemu_mutex_lock(&cxl_lock);
+        cxl_lock_own();
     }
 }
 
@@ -97,7 +126,7 @@ void femu_cxl_unlock(void)
 {
     assert(cxl_lock_depth);
     if (!--cxl_lock_depth) {
-        qemu_mutex_unlock(&cxl_lock);
+        cxl_lock_disown();
     }
 }
 
@@ -106,13 +135,37 @@ bool femu_cxl_locked(void)
     return cxl_lock_depth;
 }
 
+bool femu_cxl_lock_is_bql_free(void)
+{
+    return qatomic_load_acquire(&cxl_lock_live);
+}
+
+/*
+ * From now on the CXL lock is a mutex, so a thread without the BQL can take
+ * it. Called under the BQL, so no other thread holds the lock (its holders
+ * hold the BQL) and none is about to wait on the BQL for a condition. A
+ * thread already asleep in such a wait wakes on the caller's broadcast of
+ * the condition (see femu_cxl_wait()) and owns the mutex after it.
+ */
+void femu_cxl_lock_bql_free(void)
+{
+    assert(bql_locked());
+    if (cxl_lock_live) {
+        return;
+    }
+    qatomic_store_release(&cxl_lock_live, true);
+    if (cxl_lock_depth) {
+        cxl_lock_own();
+    }
+}
+
 void femu_cxl_drop(FemuCxlHeld *held)
 {
     assert(cxl_lock_depth);
     held->depth = cxl_lock_depth;
     held->bql = bql_locked();
     cxl_lock_depth = 0;
-    qemu_mutex_unlock(&cxl_lock);
+    cxl_lock_disown();
     if (held->bql) {
         bql_unlock();
     }
@@ -124,14 +177,15 @@ void femu_cxl_retake(const FemuCxlHeld *held)
     if (held->bql) {
         bql_lock();
     }
-    qemu_mutex_lock(&cxl_lock);
+    cxl_lock_own();
     cxl_lock_depth = held->depth;
 }
 
 /*
- * The condition wait releases @cxl_lock atomically. A thread that also holds
- * the BQL lets it go first and takes it back before the CXL lock, in lock
- * order; its caller rechecks its condition in a loop either way.
+ * The condition wait releases the lock it sleeps on atomically: @cxl_lock,
+ * or the BQL while the CXL lock is not a mutex yet. A thread that holds both
+ * lets the BQL go first and takes it back before the CXL lock, in lock
+ * order. Its caller rechecks its condition in a loop either way.
  */
 static void cxl_wait(QemuCond *cond, int ms)
 {
@@ -139,10 +193,21 @@ static void cxl_wait(QemuCond *cond, int ms)
     bool bql = bql_locked();
 
     assert(depth);
+    cxl_lock_depth = 0;
+    if (!cxl_lock_owned) {
+        assert(bql);
+        if (ms < 0) {
+            qemu_cond_wait_bql(cond);
+        } else {
+            qemu_cond_timedwait_bql(cond, ms);
+        }
+        cxl_lock_own();
+        cxl_lock_depth = depth;
+        return;
+    }
     if (bql) {
         bql_unlock();
     }
-    cxl_lock_depth = 0;
     if (ms < 0) {
         qemu_cond_wait(cond, &cxl_lock);
     } else {
