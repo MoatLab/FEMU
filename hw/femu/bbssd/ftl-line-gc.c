@@ -965,6 +965,21 @@ int do_gc(struct ssd *ssd, bool force)
     if (!reclaim_line(ssd, victim_line)) {
         return -1;
     }
+    if (force) {
+        int ch;
+        int lun;
+
+        ssd->forced_gc_lines++;
+        /* The erase is the last command collection gives each LUN. */
+        for (ch = 0; ch < ssd->sp.nchs; ch++) {
+            for (lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
+                struct nand_lun *l = &ssd->ch[ch].lun[lun];
+
+                ssd->forced_gc_end = MAX(ssd->forced_gc_end,
+                                         l->next_lun_avail_time);
+            }
+        }
+    }
 
     /* Distinct retired streams may occupy lines that cannot be combined. */
     if (ssd->n->streams && ssd->lm.free_line_cnt <= free_lines) {
