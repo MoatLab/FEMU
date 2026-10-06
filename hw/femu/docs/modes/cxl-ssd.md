@@ -549,7 +549,7 @@ The ones you need most:
 | `cache-entries`, `cache-evictions`, `prefetch-inserts` | Cache occupancy and churn |
 | `media-reads`, `media-writes`, `media-time-ns` | NAND page reads, page programs and total modelled media time |
 | `media-full` | NAND programs that found no free page after garbage collection. The program is not timed, and it does not stop an eviction or an insert. The over-provisioning rule keeps it at 0. A measurement is valid only while it is 0 |
-| `gc-stalls`, `gc-stall-ns` | Media requests that waited for forced garbage collection, and the total time from their start to the end of that collection on every LUN |
+| `gc-stalls`, `gc-stall-ns`, `gc-stall-max-ns` | Media requests that waited for forced garbage collection, the total time from their start to the end of that collection on every LUN, and the longest single wait. A wait over one second warns once: add over-provisioning (about 7%) with `blocks-per-plane` |
 | `der-active`, `der-mapped`, `der-fallbacks` | Whether direct mapping is on, how many pages are mapped now, and refused mappings |
 
 `qom-set ... stats-reset true` copies the counters to the `last-*` properties

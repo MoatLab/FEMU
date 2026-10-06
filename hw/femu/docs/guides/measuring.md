@@ -124,7 +124,9 @@ scripts/qmp/qom-get /machine/peripheral/cxlssd.media-full
   over-provisioning rule at realize keeps it at 0.
 - `gc-stalls` and `gc-stall-ns` show how often and how long writes waited
   for forced garbage collection. Take differences, as for the media
-  counters.
+  counters. `gc-stall-max-ns` is the longest single wait. Waits of a second
+  or more mean that `blocks-per-plane` leaves little spare NAND; use about
+  7% over-provisioning.
 - Accesses served through a direct mapping (`der=memslot` or `cylon`) never
   reach QEMU and are not counted as hits.
 

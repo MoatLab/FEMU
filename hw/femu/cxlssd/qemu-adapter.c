@@ -2348,6 +2348,7 @@ static void cxl_init(Object *obj)
     cxl_add_counter(obj, "media-full", &s->media_full);
     cxl_add_counter(obj, "gc-stalls", &s->gc_stalls);
     cxl_add_counter(obj, "gc-stall-ns", &s->gc_stall_ns);
+    cxl_add_counter(obj, "gc-stall-max-ns", &s->gc_stall_max_ns);
     cxl_add_counter(obj, "dma-accesses", &s->dma_accesses);
     cxl_add_counter(obj, "dma-media-ops", &s->dma_media_ops);
     object_property_add(obj, "dma-media-time-ns", "uint64",

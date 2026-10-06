@@ -412,6 +412,47 @@ void femu_cxl_delay(uint64_t ns)
     femu_cxl_retake(&held);
 }
 
+/* Over-provisioning that keeps forced collection stalls short. */
+#define FEMU_CXL_OP_PERCENT 7
+
+/*
+ * Report the first stall over a second, once per device. Such stalls
+ * usually mean little spare NAND: nearly every line that collection takes
+ * is still full of valid pages. With enough spare NAND, the NAND timing or
+ * queued NAND work sets them. Under the CXL lock and the BQL, from the main
+ * loop: the FTL threads must not report while they hold @lock.
+ */
+static void cxl_gc_stall_warn(FemuCxlMedia *s)
+{
+    uint64_t wait = qatomic_read(&s->gc_stall_long_ns);
+    uint64_t line = (uint64_t)s->channels * s->luns_per_channel *
+                    s->pages_per_block;
+    uint64_t want = DIV_ROUND_UP(s->backend.size / 4096 *
+                                 (100 + FEMU_CXL_OP_PERCENT), 100 * line);
+
+    if (!wait || s->gc_stall_warned) {
+        return;
+    }
+    s->gc_stall_warned = true;
+    if (s->blocks_per_plane < want) {
+        warn_report("femu-cxl-ssd: a media request was charged %" PRIu64
+                    " ms for forced garbage collection; blocks-per-plane=%"
+                    PRIu32 " leaves little spare NAND, and about %u%% "
+                    "over-provisioning (blocks-per-plane=%" PRIu64 ") "
+                    "usually keeps such stalls short (gc-stall-max-ns)",
+                    wait / SCALE_MS, s->blocks_per_plane,
+                    FEMU_CXL_OP_PERCENT, want);
+    } else {
+        warn_report("femu-cxl-ssd: a media request was charged %" PRIu64
+                    " ms for forced garbage collection with "
+                    "blocks-per-plane=%" PRIu32 " (at least %u%% "
+                    "over-provisioning); the NAND timing or queued NAND "
+                    "work sets this stall (gc-stall-max-ns)",
+                    wait / SCALE_MS, s->blocks_per_plane,
+                    FEMU_CXL_OP_PERCENT);
+    }
+}
+
 /*
  * A write that finds free lines at the forced threshold blocks until
  * collection has freed one, as a real SSD's foreground collection does. The
@@ -434,6 +475,11 @@ static uint64_t cxl_ftl_request(FemuCxlMedia *s, FemuCtrl *n,
     wait = ssd->forced_gc_end - req->stime;
     s->ftl_gc_stalls++;
     s->ftl_gc_stall_ns += wait;
+    s->ftl_gc_stall_max_ns = MAX(s->ftl_gc_stall_max_ns, wait);
+    if (wait > NANOSECONDS_PER_SECOND && !s->gc_stall_long_ns) {
+        qatomic_set(&s->gc_stall_long_ns, wait);
+        qemu_bh_schedule(s->posted_bh);
+    }
     return MAX(lat, wait);
 }
 
@@ -580,6 +626,7 @@ static void *cxl_worker(void *opaque)
             qatomic_set(&s->posted_writes, ssd_nand_write_pages(ssd));
             qatomic_set(&s->posted_stalls, s->ftl_gc_stalls);
             qatomic_set(&s->posted_stall_ns, s->ftl_gc_stall_ns);
+            qatomic_set(&s->posted_stall_max_ns, s->ftl_gc_stall_max_ns);
             qemu_mutex_lock(&s->post_lock);
             s->posted_done++;
             qemu_cond_broadcast(&s->posted_cond);
@@ -633,6 +680,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     uint64_t writes;
     uint64_t stalls;
     uint64_t stall_ns;
+    uint64_t stall_max_ns;
 
     if (!s->ftl) {
         return true;
@@ -651,6 +699,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     writes = ssd_nand_write_pages(s->ns.ssd);
     stalls = s->ftl_gc_stalls;
     stall_ns = s->ftl_gc_stall_ns;
+    stall_max_ns = s->ftl_gc_stall_max_ns;
     qemu_mutex_unlock(&s->lock);
     qemu_cond_destroy(&done_cond);
     /*
@@ -670,6 +719,7 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     s->media_writes = MAX(s->media_writes, writes);
     s->gc_stalls = MAX(s->gc_stalls, stalls);
     s->gc_stall_ns = MAX(s->gc_stall_ns, stall_ns);
+    s->gc_stall_max_ns = MAX(s->gc_stall_max_ns, stall_max_ns);
     if (work.req.cmd.opcode == NVME_CMD_READ) {
         s->media_reads++;
     }
@@ -928,6 +978,9 @@ static void cxl_posted_bh(void *opaque)
     s->media_writes = MAX(s->media_writes, qatomic_read(&s->posted_writes));
     s->gc_stalls = MAX(s->gc_stalls, qatomic_read(&s->posted_stalls));
     s->gc_stall_ns = MAX(s->gc_stall_ns, qatomic_read(&s->posted_stall_ns));
+    s->gc_stall_max_ns = MAX(s->gc_stall_max_ns,
+                             qatomic_read(&s->posted_stall_max_ns));
+    cxl_gc_stall_warn(s);
     while (s->posted_failures_seen < failures) {
         s->posted_failures_seen++;
         cxl_media_full(s);
@@ -1908,6 +1961,7 @@ void femu_cxl_nvme_bh(void *opaque)
     s->media_writes = ssd_nand_write_pages(s->ns.ssd);
     s->gc_stalls = s->ftl_gc_stalls;
     s->gc_stall_ns = s->ftl_gc_stall_ns;
+    s->gc_stall_max_ns = s->ftl_gc_stall_max_ns;
     qemu_mutex_unlock(&s->lock);
     qatomic_store_release(&s->nvme_done, done);
     femu_cxl_leave(s);

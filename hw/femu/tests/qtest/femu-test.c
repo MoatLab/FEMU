@@ -18804,11 +18804,70 @@ static void femu_test_cxl_gc_stall(void *obj, void *data,
                    femu_cxl_stat(qts, "media-time-ns"));
     g_assert_cmpuint(femu_cxl_stat(qts, "gc-stalls"), >, 0);
     g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-ns"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), <=,
+                     femu_cxl_stat(qts, "gc-stall-ns"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), <,
+                     NANOSECONDS_PER_SECOND);
     qtest_quit(qts);
     g_assert_true(g_file_get_contents(path, &errors, NULL, NULL));
     g_assert_null(strstr(errors, "No free lines"));
+    g_assert_null(strstr(errors, "forced garbage collection"));
     unlink(path);
     rmdir(dir);
+}
+
+/*
+ * A stall over one second warns once, with the geometry and the
+ * over-provisioning that keeps stalls short. One-second erases make the
+ * first forced collection stall that long; fast-load lets the accesses run
+ * on without waiting for it. 256 lines of media at 271 blocks per plane,
+ * the least realize accepts; 7% is 274.
+ */
+static void femu_test_cxl_gc_stall_warn(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    g_autofree char *log = g_strdup("cxl-gc-warn-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree char *args = NULL;
+    g_autofree char *text = NULL;
+    int fd = g_mkstemp(log);
+    uint64_t pages = 256 * 1024 * 1024 / 4096;
+    QTestState *qts;
+    uint64_t i;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    quoted = g_shell_quote(log);
+    args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
+        "pages-per-block=16,blocks-per-plane=271,read-ns=1000,"
+        "program-ns=1000,erase-ns=1000000000 2>%s", quoted);
+    qts = qtest_init(args);
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "fast-load", true);
+    for (i = 0; i < 2 * pages; i++) {
+        uint64_t lpn = i < pages ? i : i * 4099 % pages;
+
+        qtest_writeq(qts, FEMU_CXL_WINDOW + lpn * 4096, i);
+        if (i > pages && i % 1024 == 0 &&
+            femu_cxl_stat(qts, "gc-stall-max-ns") > NANOSECONDS_PER_SECOND) {
+            break;
+        }
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), >,
+                     NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), <=,
+                     femu_cxl_stat(qts, "gc-stall-ns"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), ==, 0);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(log, &text, NULL, NULL));
+    unlink(log);
+    g_assert_cmpuint(femu_cxl_count(text, "forced garbage collection"), ==,
+                     1);
+    g_assert_nonnull(strstr(text, "blocks-per-plane=271 "));
+    g_assert_nonnull(strstr(text, "blocks-per-plane=274)"));
 }
 
 /*
@@ -24201,6 +24260,8 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-gc-stall", "femu", femu_test_cxl_gc_stall, NULL);
     qos_add_test("cxl-gc-wait", "femu", femu_test_cxl_gc_wait, NULL);
+    qos_add_test("cxl-gc-stall-warn", "femu", femu_test_cxl_gc_stall_warn,
+                 NULL);
     qos_add_test("cxl-prefetch-clamp", "femu", femu_test_cxl_prefetch_clamp,
                  NULL);
     qos_add_test("cxl-stats", "femu", femu_test_cxl_stats, NULL);

@@ -232,6 +232,10 @@ static const FemuPropDesc cxl_runtime_descs[] = {
     { "gc-stall-ns",
       "Read-only: total ns from the start of those requests to the end of "
       "the collection they waited for, on every LUN; stats-reset keeps it" },
+    { "gc-stall-max-ns",
+      "Read-only: the longest of those waits in ns; one over a second warns "
+      "once per device, with the blocks-per-plane for about 7% "
+      "over-provisioning when the NAND has less; stats-reset keeps it" },
 
     { "dma-accesses",
       "Read-only: accesses made inside another device's MMIO handler or "

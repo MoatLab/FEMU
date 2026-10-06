@@ -273,6 +273,7 @@ DEVICES = [
                 "props": [
                     "media-time-ns", "media-reads", "media-writes",
                     "media-full", "gc-stalls", "gc-stall-ns",
+                    "gc-stall-max-ns",
                     "dma-accesses", "dma-media-ops", "dma-media-time-ns",
                 ],
             },

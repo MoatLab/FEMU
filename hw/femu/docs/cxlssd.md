@@ -386,13 +386,27 @@ stall like a version 1 access, and the realize rule for spare lines applies
 to both versions.
 
 The FTL mutex itself can be held for a whole collection, and two paths
-take it while they hold the CXL lock and the BQL. Each can block for a
-collection that the worker or a linked NVMe request runs at that time:
+take it while they hold the CXL lock and the BQL. A collection holds the
+mutex only for its computation: it books the copies and erases on the LUN
+timelines and returns, and the request that waits for them sleeps that
+time after the mutex is released (`cxl_ftl_request()` in `cxlssd.c`). So
+these paths block for the computation of a collection, not for its
+modelled stall. That computation took about 2 ms for one 64 MiB line (8
+channels, 8 LUNs, 256-page blocks) in an optimized build. Each can block
+for a collection that the worker or a linked NVMe request runs at that
+time:
 
 - The linked-NVMe bottom half, to take the ranges that NVMe writes
   replaced.
 - Teardown, to stop the worker. A teardown that would start inside a
   device's re-entrancy guard (a guest unplug) goes to a bottom half.
+  Teardown also joins the worker, which first runs every device DMA
+  operation still queued, so it waits for the computation of that whole
+  backlog, collections included, with the BQL and the CXL lock held.
+
+The qtest hooks `test-ftl-hold` and `test-ftl-delay` sleep in real time
+under the FTL mutex; only tests set them. The warning for a long stall
+(see "Full NAND") is reported from the main loop, not under the FTL mutex.
 
 The `fast-load` switch-off releases both locks before it takes the FTL
 mutex to read the NAND horizon.
@@ -621,7 +635,8 @@ emulates cold pages and fails on instructions KVM cannot emulate (for
 example `cmpxchg16b`, or AVX on an uncached page). With a kernel without
 the capability, FEMU warns as before ("Instructions KVM cannot emulate").
 `=on` also warns when the kernel lacks version 2 and then uses version 1;
-`=off` always uses version 1 and does not warn.
+`=off` on the first Cylon device keeps version 1 and does not warn about
+version 2; the per-VM rule below decides for later devices.
 A cold page has a zero leaf. KVM installs nothing and exits to FEMU with the
 access type from the EPT violation: read, write or fetch, and whether the
 guest page walk made the access. FEMU fills the page as a read miss, maps it,
@@ -1360,10 +1375,23 @@ collection. Linked NVMe requests wait the same way, and operations that
 device DMA queued count the same way, though nobody waits for them (see
 "Locking"). No lock is held during the wait. `gc-stalls` counts these
 requests, and `gc-stall-ns` adds the time from each request start to the end
-of its collection. The program of the request itself waits for its LUN, so
-the wait on every LUN adds only the difference between LUNs. With GC delay
-off (the FEMU flip command), collection books no NAND time and no request
-waits.
+of its collection. `gc-stall-max-ns` is the longest single wait. The
+program of the request itself waits for its LUN, so the wait on every LUN
+adds only the difference between LUNs. With GC delay off (the FEMU flip
+command), collection books no NAND time and no request waits.
+
+The minimum that realize accepts keeps NAND from filling, not stalls short.
+Near it, nearly every line that collection takes is still full of valid
+pages, so each collection copies a line and erases it on every LUN, and
+writes wait hundreds of milliseconds to seconds. FEMU warns once per device
+when a request is charged more than one second of collection (device DMA
+operations and `fast-load` accesses are charged without waiting). With
+less than about 7% over-provisioning (lines beyond the media), the warning
+names the current `blocks-per-plane` and the value for 7%; otherwise it
+says that the NAND timing or queued NAND work sets the stall. Use at least 7% for measurements, as the `run-cxlssd.sh`
+presets do (822 blocks per plane at 48 GiB and 1644 at 96 GiB, with 8
+channels, 8 LUNs and 256-page blocks), and report `gc-stalls` and
+`gc-stall-max-ns` with the results.
 
 `media-full` counts programs that still find no free page. The rule keeps it
 at 0. If one occurs, its program is not timed and the first one reports an

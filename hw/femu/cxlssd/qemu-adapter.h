@@ -139,12 +139,23 @@ struct FemuCxlMedia {
     uint64_t media_reads;
     uint64_t media_writes;
     uint64_t media_full;
-    /* Media requests that waited for forced collection, and how long. */
+    /*
+     * Media requests that waited for forced collection, how long in all,
+     * and the longest wait.
+     */
     uint64_t gc_stalls;
     uint64_t gc_stall_ns;
+    uint64_t gc_stall_max_ns;
     /* The FTL threads count into these under @lock; CXL lock copies follow. */
     uint64_t ftl_gc_stalls;
     uint64_t ftl_gc_stall_ns;
+    uint64_t ftl_gc_stall_max_ns;
+    /*
+     * The first stall over one second, set under @lock and read
+     * atomically; and whether @posted_bh reported it, under the CXL lock.
+     */
+    uint64_t gc_stall_long_ns;
+    bool gc_stall_warned;
     /*
      * Accesses made inside a device's re-entrancy guard, which never wait
      * (femu_cxl_access_nowait()), and the media operations they queued,
@@ -187,6 +198,7 @@ struct FemuCxlMedia {
     uint64_t posted_writes;
     uint64_t posted_stalls;
     uint64_t posted_stall_ns;
+    uint64_t posted_stall_max_ns;
     uint64_t posted_failures;
     uint64_t posted_failures_seen;
     QEMUBH *posted_bh;
