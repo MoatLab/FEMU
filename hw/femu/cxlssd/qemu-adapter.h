@@ -105,8 +105,11 @@ struct FemuCxlMedia {
     uint64_t channel_ns;
     char *der;
     bool cylon_kernel_ack;
-    /* Ask for version 2 of the Cylon fault exit: no emulation of cold pages. */
-    bool cylon_never_emulate;
+    /*
+     * Version 2 of the Cylon fault exit (no emulation of cold pages): on,
+     * off, or auto, which takes it when the host kernel offers it.
+     */
+    OnOffAuto cylon_never_emulate;
     /* Enable KVM_CAP_CYLON_FAULT_EXIT when the slot is installed. */
     bool cylon_emul_exit;
     OnOffAuto concurrent;

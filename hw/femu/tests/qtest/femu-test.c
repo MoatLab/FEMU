@@ -18091,6 +18091,108 @@ static void femu_test_cxl_der_modes(void *obj, void *data,
     unlink(log);
 }
 
+/* How often @needle occurs in @text. */
+static unsigned femu_cxl_count(const char *text, const char *needle)
+{
+    unsigned n = 0;
+
+    while ((text = strstr(text, needle))) {
+        n++;
+        text++;
+    }
+    return n;
+}
+
+static void femu_cxl_set_u64(QTestState *qts, const char *name,
+                             uint64_t value);
+
+/*
+ * Start a der=cylon device with cylon-never-emulate @mode (NULL: unset),
+ * let it choose the fault exit version as if the host kernel offered
+ * @version of KVM_CAP_CYLON_FAULT_EXIT (-1: do not choose, as on this host,
+ * which has no Cylon), and return der-emul-v2 and what QEMU wrote to
+ * stderr.
+ */
+static bool femu_cxl_version(const char *mode, int version, char **text)
+{
+    g_autofree char *log = g_strdup("cxl-version-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree char *args = NULL;
+    int fd = g_mkstemp(log);
+    QTestState *qts;
+    QDict *rsp;
+    bool v2;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    quoted = g_shell_quote(log);
+    args = g_strdup_printf(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=cylon,"
+        "cylon-kernel-ack=on%s%s 2>%s", mode ? ",cylon-never-emulate=" : "",
+        mode ? mode : "", quoted);
+    qts = qtest_init(args);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'cylon-never-emulate'}}");
+    g_assert_cmpstr(qdict_get_str(rsp, "return"), ==, mode ? mode : "auto");
+    qobject_unref(rsp);
+    if (version >= 0) {
+        femu_cxl_set_u64(qts, "test-fault-version", version);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'der-emul-v2'}}");
+    v2 = qdict_get_bool(rsp, "return");
+    qobject_unref(rsp);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(log, text, NULL, NULL));
+    unlink(log);
+    return v2;
+}
+
+/*
+ * cylon-never-emulate defaults to auto: version 2 when the host kernel
+ * offers it, otherwise version 1 with one warning. on warns when it cannot
+ * have version 2, as before; off never asks for it.
+ */
+static void femu_test_cxl_never_emulate(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const char auto_warning[] = "offers only version 1";
+    static const char on_warning[] = "lacks version 2";
+    static const char cap[] = "KVM_CAP_CYLON_FAULT_EXIT";
+    char *text;
+
+    /* This host has no Cylon: the default resolves to version 1. */
+    g_assert_false(femu_cxl_version(NULL, -1, &text));
+    g_assert_cmpuint(femu_cxl_count(text, auto_warning), ==, 0);
+    g_free(text);
+    g_assert_false(femu_cxl_version(NULL, 1, &text));
+    g_assert_cmpuint(femu_cxl_count(text, auto_warning), ==, 1);
+    g_assert_cmpuint(femu_cxl_count(text, on_warning), ==, 0);
+    g_free(text);
+    /* No capability at all: its own warning comes when the slot enables. */
+    g_assert_false(femu_cxl_version("auto", 0, &text));
+    g_assert_cmpuint(femu_cxl_count(text, auto_warning), ==, 0);
+    g_free(text);
+    g_assert_true(femu_cxl_version("auto", 2, &text));
+    g_assert_cmpuint(femu_cxl_count(text, cap), ==, 0);
+    g_free(text);
+    g_assert_false(femu_cxl_version("on", 1, &text));
+    g_assert_cmpuint(femu_cxl_count(text, on_warning), ==, 1);
+    g_assert_cmpuint(femu_cxl_count(text, auto_warning), ==, 0);
+    g_free(text);
+    g_assert_true(femu_cxl_version("on", 2, &text));
+    g_assert_cmpuint(femu_cxl_count(text, cap), ==, 0);
+    g_free(text);
+    g_assert_false(femu_cxl_version("off", 2, &text));
+    g_assert_cmpuint(femu_cxl_count(text, cap), ==, 0);
+    g_free(text);
+    g_assert_false(femu_cxl_version("off", 1, &text));
+    g_assert_cmpuint(femu_cxl_count(text, cap), ==, 0);
+    g_free(text);
+}
+
 static void femu_test_cxl_der_invalid(void *obj, void *data,
                                       QGuestAllocator *alloc)
 {
@@ -24024,6 +24126,8 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
     qos_add_test("cxl-lsa-queue", "femu", femu_test_cxl_lsa_queue, NULL);
+    qos_add_test("cxl-never-emulate", "femu", femu_test_cxl_never_emulate,
+                 NULL);
     qos_add_test("cxl-ratio-dirty", "femu", femu_test_cxl_ratio_dirty, NULL);
     qos_add_test("cxl-control-qom", "femu", femu_test_cxl_control, NULL);
     qos_add_test("cxl-control-lsa", "femu", femu_test_cxl_control,

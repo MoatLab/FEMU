@@ -102,6 +102,8 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 /* Version 2 of the Cylon fault exit is on for the VM (per VM). CXL lock. */
 static bool cylon_v2;
+/* The first Cylon slot of the VM chose the fault exit version. CXL lock. */
+static bool cylon_version_fixed;
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
                            uint64_t hpa, uint64_t dpa);
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn);
@@ -492,6 +494,49 @@ static void adapter_lock_bql_free(void)
 
         qemu_cond_broadcast(&dev->media.idle);
     }
+}
+
+/*
+ * Whether the slot that @m installs asks for version 2 of the Cylon fault
+ * exit, when the host kernel offers @version of KVM_CAP_CYLON_FAULT_EXIT
+ * (0 for none). Only the first slot of the VM chooses: the pages of its
+ * slot hold version 1 state otherwise. cylon-never-emulate=auto takes
+ * version 2 when the kernel offers it; on also does, and warns when it
+ * cannot. A kernel without the capability gets its own warning when the
+ * slot enables it.
+ */
+static bool cylon_fault_version(const FemuCxlMedia *m, int version)
+{
+    bool first = !cylon_version_fixed;
+
+    cylon_version_fixed = true;
+    if (!first) {
+        if (m->cylon_never_emulate == ON_OFF_AUTO_ON && !cylon_v2) {
+            warn_report_once("femu-cxl-ssd: cylon-never-emulate must be on "
+                             "for the first Cylon device of the VM; it stays "
+                             "off");
+        }
+        return false;
+    }
+    if (m->cylon_never_emulate == ON_OFF_AUTO_OFF || !m->cylon_emul_exit) {
+        return false;
+    }
+    if (version >= 2) {
+        return true;
+    }
+    if (m->cylon_never_emulate == ON_OFF_AUTO_ON) {
+        warn_report_once("femu-cxl-ssd: the host kernel lacks version 2 of "
+                         "KVM_CAP_CYLON_FAULT_EXIT; cylon-never-emulate is "
+                         "off and KVM emulates cold pages");
+    } else if (version == 1) {
+        warn_report_once("femu-cxl-ssd: the host kernel offers only version "
+                         "1 of KVM_CAP_CYLON_FAULT_EXIT, so KVM emulates "
+                         "accesses to cold pages, and instructions it cannot "
+                         "emulate can fail in the guest; version 2 needs a "
+                         "Cylon kernel that reports it (cylon-never-emulate="
+                         "off hides this warning)");
+    }
+    return false;
 }
 
 static PCIDevice *adapter_pci(FemuCxlSsd *dev)
@@ -1936,6 +1981,28 @@ static void adapter_test_posted_done(Object *obj, Visitor *v,
     visit_type_uint64(v, name, &value, errp);
 }
 
+/*
+ * Choose the fault exit version as the first Cylon slot of the VM does, as
+ * if the host kernel offered the given version of KVM_CAP_CYLON_FAULT_EXIT.
+ * KVM is not asked or changed.
+ */
+static void adapter_test_fault_version(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    int64_t version;
+    FEMU_CXL_LOCK_GUARD();
+
+    if (!visit_type_int64(v, name, &version, errp)) {
+        return;
+    }
+    if (cylon_fault_version(&FEMU_CXL_SSD(obj)->media,
+                            MIN(MAX(version, 0), 2))) {
+        adapter_lock_bql_free();
+        cylon_v2 = true;
+    }
+}
+
 static bool adapter_test_lock_mutex(Object *obj, Error **errp)
 {
     return femu_cxl_lock_is_bql_free();
@@ -2171,6 +2238,8 @@ static void cxl_init(Object *obj)
                                  adapter_test_ftl_holding, NULL);
         object_property_add(obj, "test-posted-done", "uint64",
                             adapter_test_posted_done, NULL, NULL, NULL);
+        object_property_add(obj, "test-fault-version", "int64", NULL,
+                            adapter_test_fault_version, NULL, NULL);
         object_property_add_bool(obj, "test-lock-mutex",
                                  adapter_test_lock_mutex,
                                  adapter_test_lock_mutex_set);
@@ -2302,8 +2371,8 @@ static const Property cxl_props[] = {
                      media.cylon_kernel_ack, false),
     DEFINE_PROP_BOOL("cylon-emul-exit", FemuCxlSsd,
                      media.cylon_emul_exit, true),
-    DEFINE_PROP_BOOL("cylon-never-emulate", FemuCxlSsd,
-                     media.cylon_never_emulate, false),
+    DEFINE_PROP_ON_OFF_AUTO("cylon-never-emulate", FemuCxlSsd,
+                            media.cylon_never_emulate, ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT32("cylon-revoke-batch", FemuCxlSsd,
                        media.direct.revoke_batch, 32),
     DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
@@ -4573,35 +4642,20 @@ static const char *cylon_storm_check(FemuCxlSsd *dev)
 /*
  * Per VM: the first slot whose device has cylon-emul-exit on turns it on.
  * Off, the kernel keeps stock KVM behaviour on such an access: #UD in guest
- * user mode, an internal-error exit in guest kernel mode. A device with
- * cylon-never-emulate on also turns version 2 on, for every slot of the VM;
- * a device without it cannot turn version 2 off again.
+ * user mode, an internal-error exit in guest kernel mode. The first slot
+ * also fixes the version, even with exits off (cylon_fault_version()); a
+ * later device cannot change it.
  */
 static void cylon_fault_exit_enable(FemuCxlDer *der)
 {
     static bool enabled;
-    /* The first installed slot fixes the version, even with exits off. */
-    static bool fixed;
-    bool want_v2 = der->dev->media.cylon_never_emulate &&
-                   der->dev->media.cylon_emul_exit && !fixed;
+    int version = kvm_check_extension(kvm_state, CYLON_CAP_FAULT_EXIT);
+    bool want_v2 = cylon_fault_version(&der->dev->media, version);
 
-    if (fixed && der->dev->media.cylon_never_emulate && !cylon_v2) {
-        warn_report_once("femu-cxl-ssd: cylon-never-emulate must be on for "
-                         "the first Cylon device of the VM; it stays off");
-    }
-    fixed = true;
     if (!der->dev->media.cylon_emul_exit) {
         return;
     }
     if (!enabled) {
-        int version = kvm_check_extension(kvm_state, CYLON_CAP_FAULT_EXIT);
-
-        if (want_v2 && version < 2) {
-            warn_report_once("femu-cxl-ssd: the host kernel lacks version 2 "
-                             "of KVM_CAP_CYLON_FAULT_EXIT; cylon-never-emulate "
-                             "is off and KVM emulates cold pages");
-            want_v2 = false;
-        }
         /*
          * Version 2 exits run without the BQL. Version 1 exits are rare
          * (undecodable instructions) and take the BQL, so with version 1

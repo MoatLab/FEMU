@@ -208,7 +208,7 @@ The rules:
 #### When the CXL lock is a mutex
 
 The CXL lock is a mutex only after version 2 of the Cylon fault exit is on
-(`cylon-never-emulate=on` on a host kernel that has it). Version 2 exits
+(`cylon-never-emulate` auto or on, on a host kernel that has it). Version 2 exits
 are the only callers that take the lock without the BQL. Until then every
 holder also holds the BQL, which already serializes the holders. So a hold
 only counts its depth in a thread-local variable and reads a flag that does
@@ -600,8 +600,15 @@ instruction bytes and the latest GPAs at that RIP when:
 
 #### Version 2: no emulation of cold pages
 
-With `cylon-never-emulate=on` and a host kernel that has version 2 of
-`KVM_CAP_CYLON_FAULT_EXIT`, KVM does not emulate an access to a cold page.
+With a host kernel that has version 2 of `KVM_CAP_CYLON_FAULT_EXIT`, KVM
+does not emulate an access to a cold page. `cylon-never-emulate=auto` (the
+default) turns version 2 on when the kernel reports it. With a kernel that
+reports only version 1, it uses version 1 and warns once, because version 1
+emulates cold pages and fails on instructions KVM cannot emulate (for
+example `cmpxchg16b`, or AVX on an uncached page). With a kernel without
+the capability, FEMU warns as before ("Instructions KVM cannot emulate").
+`=on` also warns when the kernel lacks version 2 and then uses version 1;
+`=off` always uses version 1 and does not warn.
 A cold page has a zero leaf. KVM installs nothing and exits to FEMU with the
 access type from the EPT violation: read, write or fetch, and whether the
 guest page walk made the access. FEMU fills the page as a read miss, maps it,
@@ -681,10 +688,11 @@ The rules:
   another depth). FEMU refuses `der=cylon` unless the machine has
   `smm=off`.
 - The version is per VM and fixed by the first Cylon device that installs
-  its slot, also when that device has `cylon-emul-exit=off`. A later device
-  with `cylon-never-emulate=on` cannot turn it on, because the pages of the
-  earlier slots hold version 1 state; FEMU warns. Every device reports the
-  VM's state in `der-emul-v2`.
+  its slot, also when that device has `cylon-emul-exit=off` or
+  `cylon-never-emulate=off`. A later device with `cylon-never-emulate=on`
+  cannot turn it on, because the pages of the earlier slots hold version 1
+  state; FEMU warns. A later device with `auto` takes the VM's version
+  without a warning. Every device reports the VM's state in `der-emul-v2`.
 
 #### Batched revocation
 

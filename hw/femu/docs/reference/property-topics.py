@@ -195,7 +195,8 @@ DEVICES = [
                       "test-storm-stops", "test-storm-ns",
                       "test-guarded-write", "test-ftl-hold",
                       "test-ftl-delay", "test-ftl-holding",
-                      "test-posted-done", "test-lock-mutex"],
+                      "test-posted-done", "test-lock-mutex",
+                      "test-fault-version"],
         "topics": [
             {
                 "title": "Cache",

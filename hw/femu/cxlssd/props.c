@@ -66,10 +66,12 @@ static const FemuPropDesc cxl_descs[] = {
       "Must be on with der=cylon to state that the host runs a Cylon kernel "
       "with the dual-slot fixes; the device does not check it" },
     { "cylon-never-emulate",
-      "With der=cylon and cylon-emul-exit on, ask the host kernel for version "
-      "2 of the Cylon fault exit: an access to a cold page exits with its "
-      "type and FEMU maps the page, so KVM emulates only pages FEMU cannot "
-      "map; per VM, set by the first Cylon device that installs its slot" },
+      "With der=cylon and cylon-emul-exit on, version 2 of the Cylon fault "
+      "exit: an access to a cold page exits with its type and FEMU maps the "
+      "page, so KVM emulates only pages FEMU cannot map; auto (the default) "
+      "uses it when the host kernel offers it and otherwise warns once and "
+      "uses version 1, on also warns when it cannot, off keeps version 1; "
+      "per VM, set by the first Cylon device that installs its slot" },
     { "cylon-revoke-batch",
       "With cylon-never-emulate on, the most pages one full revocation "
       "takes, 1 to 64: an eviction that must flush the VM's TLBs also "

@@ -310,7 +310,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `der-replace-rate` | `uint32` | `64` | With der=memslot and no free alias (1024 shared by all devices, fewer if KVM has fewer free slots), the most aliases per second a repeatedly missing page may displace; 0 disables replacement |
 | `cylon-kernel-ack` | `bool` | `off` | Must be on with der=cylon to state that the host runs a Cylon kernel with the dual-slot fixes; the device does not check it |
 | `cylon-emul-exit` | `bool` | `on` | With der=cylon, ask the host kernel to return accesses it cannot decode on unmapped pages to FEMU, which maps the page; off keeps stock KVM behaviour (a guest #UD or an internal error) only if no other device of the VM turned the VM-wide capability on |
-| `cylon-never-emulate` | `bool` | `off` | With der=cylon and cylon-emul-exit on, ask the host kernel for version 2 of the Cylon fault exit: an access to a cold page exits with its type and FEMU maps the page, so KVM emulates only pages FEMU cannot map; per VM, set by the first Cylon device that installs its slot |
+| `cylon-never-emulate` | `OnOffAuto` | `auto` | With der=cylon and cylon-emul-exit on, version 2 of the Cylon fault exit: an access to a cold page exits with its type and FEMU maps the page, so KVM emulates only pages FEMU cannot map; auto (the default) uses it when the host kernel offers it and otherwise warns once and uses version 1, on also warns when it cannot, off keeps version 1; per VM, set by the first Cylon device that installs its slot |
 | `cylon-revoke-batch` | `uint32` | `32` | With cylon-never-emulate on, the most pages one full revocation takes, 1 to 64: an eviction that must flush the VM's TLBs also revokes the mappings of the pages the policy evicts next, which stay cached; 1 revokes one page per two flushes |
 | `concurrent-misses` | `OnOffAuto` | `auto` | Let misses to different pages wait for the media together; auto does so only while direct mapping is active |
 
@@ -351,7 +351,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
 - `femu`: `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-stream-test`
-- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-fill`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-map`, `test-media-disabled`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-unprotect`
+- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-fill`, `test-fault-version`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-map`, `test-media-disabled`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-unprotect`
 
 ## Environment variables
 
