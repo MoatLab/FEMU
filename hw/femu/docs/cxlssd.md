@@ -804,8 +804,8 @@ dirty tracking and revocation" below). Each flush kicks every running vCPU
 and makes it run a global INVEPT, so with several busy vCPUs the flushes
 serialize them. To share the flushes, an eviction that needs them also
 revokes the mappings of the next pages its cache set evicts, up to
-`cylon-revoke-batch` pages in all (default 32, 1 to 64; 1 is one page for
-each two flushes):
+`cylon-revoke-batch` pages in all (default 64, 1 to 256; 1 is one page
+for each two flushes):
 
 1. FEMU asks the cache policy for the pages it evicts after the victim if
    no access comes first: FIFO and CLOCK in their order, S3-FIFO its small
@@ -839,6 +839,15 @@ time. Version 1 and memslot mode revoke one page at a time.
 footprint much larger than the cache, and next victims that are mapped and
 not protected, FIFO evictions take about 2 / `cylon-revoke-batch` flushes
 each.
+
+The default is 64 from a d760 sweep (Redis-style random reads, version 2,
+the CXL lock without the BQL, two boots each). At 16, 32 and 64 pages, 8
+vCPUs reached 98.5k, 104.2k and 111.7k operations per second, and 16 vCPUs
+98.7k, 101.6k and 104.1k. Flushes per eviction were 0.126, 0.063 and
+0.032. Pages mapped again before their own eviction stayed small: 0.18%
+(32) and 0.33% (64) of the pages revoked ahead with 8 vCPUs, and 0.13% and
+0.28% with 16. The maximum is 256 for larger caches; the batch arrays are
+on the stack of the evicting thread, about 18 KiB at 256.
 
 Limits of version 2:
 

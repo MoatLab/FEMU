@@ -640,7 +640,7 @@ static void next_victims(FemuCxlPolicy policy)
  * cylon_remove_pages() does. Checks that the dirty state at eviction is
  * exactly whether the page was written while cached.
  */
-#define MODEL_PAGES 16384
+#define MODEL_PAGES 65536
 #define MODEL_CACHE 256
 
 typedef struct RevokeModel {
@@ -750,7 +750,7 @@ static void revoke_model(unsigned batch)
            batch, per_eviction, m.ahead, m.remaps);
     g_assert_cmpfloat(per_eviction, <=, 2.0 / batch * 1.1 + 0.001);
     g_assert_cmpfloat(per_eviction, >=, 2.0 / batch * 0.9);
-    /* Random reads over 64 times the cache rarely return before eviction. */
+    /* Random reads over 256 times the cache rarely return before eviction. */
     g_assert_cmpuint(m.remaps, <=, m.ahead / 50 + 1);
     g_free(m.spte);
     g_free(m.written);
@@ -785,6 +785,7 @@ int main(void)
     revoke_model(8);
     revoke_model(32);
     revoke_model(64);
+    revoke_model(256);
     keep_clock();
     keep_s3fifo_promote();
     keep_reinsert();

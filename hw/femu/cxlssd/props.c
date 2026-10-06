@@ -80,9 +80,9 @@ static const FemuPropDesc cxl_descs[] = {
       "100000" },
     { "cylon-revoke-batch",
       "With cylon-never-emulate on, the most pages one full revocation "
-      "takes, 1 to 64: an eviction that must flush the VM's TLBs also "
-      "revokes the mappings of the pages the policy evicts next, which stay "
-      "cached; 1 revokes one page per two flushes" },
+      "takes, 1 to 256 (default 64): an eviction that must flush the VM's "
+      "TLBs also revokes the mappings of the pages the policy evicts next, "
+      "which stay cached; 1 revokes one page per two flushes" },
     { "cylon-emul-exit",
       "With der=cylon, ask the host kernel to return accesses it cannot "
       "decode on unmapped pages to FEMU, which maps the page; off keeps "

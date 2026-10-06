@@ -18638,14 +18638,14 @@ static void femu_test_cxl_cylon_ack(void *obj, void *data,
 }
 
 /*
- * cylon-revoke-batch takes 1 to 64 pages. Without a Cylon slot nothing is
+ * cylon-revoke-batch takes 1 to 256 pages. Without a Cylon slot nothing is
  * revoked ahead and no flush is counted.
  */
 static void femu_test_cxl_revoke_batch(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
-    const int bad[] = { 0, 65 };
+    const int bad[] = { 0, 257 };
     QDict *rsp;
     unsigned i;
 
@@ -18656,13 +18656,13 @@ static void femu_test_cxl_revoke_batch(void *obj, void *data,
         g_assert_true(qdict_haskey(rsp, "error"));
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
                                             "desc"),
-                                "cylon-revoke-batch must be 1 to 64"));
+                                "cylon-revoke-batch must be 1 to 256"));
         qobject_unref(rsp);
     }
     qtest_quit(qts);
     qts = qtest_init(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,der=memslot,"
-        "cache-pages=4,cache-ways=4,cylon-revoke-batch=64");
+        "cache-pages=4,cache-ways=4,cylon-revoke-batch=256");
     femu_cxl_decode(qts);
     for (i = 0; i < 16; i++) {
         qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i);

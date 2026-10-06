@@ -2410,7 +2410,7 @@ static const Property cxl_props[] = {
     DEFINE_PROP_UINT32("cylon-fault-stop", FemuCxlSsd,
                        media.cylon_fault_stop, CYLON_FAULT_STOP),
     DEFINE_PROP_UINT32("cylon-revoke-batch", FemuCxlSsd,
-                       media.direct.revoke_batch, 32),
+                       media.direct.revoke_batch, 64),
     DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
                             ON_OFF_AUTO_AUTO),
     DEFINE_PROP_UINT64("read-ns", FemuCxlSsd, media.read_ns, 40000),

@@ -86,7 +86,7 @@ typedef struct FemuCxlDer {
 } FemuCxlDer;
 
 /* Upper bound of cylon-revoke-batch. */
-#define FEMU_CXL_REVOKE_BATCH_MAX 64
+#define FEMU_CXL_REVOKE_BATCH_MAX 256
 
 /*
  * Cylon's direct ratios leave every period-th page on MMIO; zero means no
