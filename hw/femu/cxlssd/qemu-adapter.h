@@ -158,16 +158,32 @@ struct FemuCxlMedia {
     uint64_t dma_run_end;
     uint64_t dma_run_posted;
     /*
-     * Operations queued and run so far, and those NAND refused, under
-     * @lock; the refusals already counted in media-full, under the CXL
-     * lock. The worker wakes @posted_cond as it runs each one.
+     * Such operations wait in @post until the worker takes them, after the
+     * waited requests in @work. @post_lock is held only to add or take one
+     * and to count, so a guarded access never waits for @lock, which the
+     * FTL holds for a whole request, garbage collection included. Order:
+     * @lock, then @post_lock. @posted counts them, written under @post_lock
+     * and read atomically; @posted_taken counts those taken, under both;
+     * @posted_done counts those run, under @post_lock, which the worker
+     * wakes @posted_cond for.
      */
+    QemuMutex post_lock;
+    QSIMPLEQ_HEAD(, FemuCxlWork) post;
     uint64_t posted;
+    uint64_t posted_taken;
     uint64_t posted_done;
+    QemuCond posted_cond;
+    /*
+     * After each one the worker publishes the FTL program and collection
+     * counts and the programs NAND refused, atomically, for @posted_bh,
+     * which must not wait for @lock either. The refusals already counted in
+     * media-full are under the CXL lock.
+     */
+    uint64_t posted_writes;
+    uint64_t posted_stalls;
+    uint64_t posted_stall_ns;
     uint64_t posted_failures;
     uint64_t posted_failures_seen;
-    QemuCond posted_cond;
-    /* Scheduled by the worker after it ran a queued operation. */
     QEMUBH *posted_bh;
     /*
      * Accesses skip their completion wait; the NAND timelines still advance.
@@ -177,8 +193,15 @@ struct FemuCxlMedia {
     /* How long the last switch back to the full model waited for NAND. */
     uint64_t fast_load_drain_ns;
     QemuMutex lock;
+    /*
+     * Threads that found @lock taken, and waited requests that are done but
+     * whose callers have not taken @lock back (under @lock); both read
+     * atomically by the worker, which lets them in before device DMA work.
+     */
+    unsigned lock_wanted;
+    unsigned done_unclaimed;
     /* Wakes the worker for new requests; no request waits on it. */
-    QemuCond worker_cond;
+    QemuEvent worker_event;
     QemuThread worker;
     QSIMPLEQ_HEAD(, FemuCxlWork) work;
     bool stopping;
@@ -244,6 +267,15 @@ struct FemuCxlMedia {
     uint64_t test_prefetch_race;
     uint64_t test_race_lpn;
     bool test_race_active;
+    /*
+     * qtest only, atomic: the worker holds @lock in its next request until
+     * this is 0 again or this many ms passed, and @test_ftl_holding says
+     * whether it holds; each device DMA operation takes @test_ftl_delay_ms
+     * more under @lock. Both act as a long garbage collection does.
+     */
+    uint64_t test_ftl_hold_ms;
+    bool test_ftl_holding;
+    uint64_t test_ftl_delay_ms;
 };
 
 /*
@@ -331,6 +363,7 @@ void femu_cxl_leave(FemuCxlMedia *s);
 bool femu_cxl_concurrent(FemuCxlMedia *s);
 void femu_cxl_enter_access(FemuCxlMedia *s);
 void femu_cxl_leave_access(FemuCxlMedia *s);
+void femu_cxl_release_later(FemuCxlMedia *s);
 void femu_cxl_delay(uint64_t ns);
 bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write);
 bool femu_cxl_evict(void *opaque, FemuCxlEntry *e);

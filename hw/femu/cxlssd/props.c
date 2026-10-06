@@ -218,9 +218,9 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "0, stats-reset keeps it, and a measurement is valid only while it "
       "is 0" },
     { "gc-stalls",
-      "Read-only: media requests, linked NVMe ones included, that waited "
-      "for timed forced garbage collection to free a line; refreshed with "
-      "media-writes; stats-reset keeps it" },
+      "Read-only: media requests, linked NVMe and device DMA ones "
+      "included, that waited for timed forced garbage collection to free a "
+      "line; refreshed with media-writes; stats-reset keeps it" },
     { "gc-stall-ns",
       "Read-only: total ns from the start of those requests to the end of "
       "the collection they waited for, on every LUN; stats-reset keeps it" },

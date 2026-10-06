@@ -193,7 +193,9 @@ DEVICES = [
                       "test-revoke-ahead", "test-revoke-ahead-keep",
                       "test-storm", "test-storm-wait", "test-storm-served",
                       "test-storm-stops", "test-storm-ns",
-                      "test-lock-mutex"],
+                      "test-guarded-write", "test-ftl-hold",
+                      "test-ftl-delay", "test-ftl-holding",
+                      "test-posted-done", "test-lock-mutex"],
         "topics": [
             {
                 "title": "Cache",

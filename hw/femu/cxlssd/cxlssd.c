@@ -159,9 +159,27 @@ void femu_cxl_lock_bql_free(void)
     }
 }
 
+/*
+ * A wait releases the BQL. Inside a device's re-entrancy guard the device
+ * would then refuse other threads' accesses as re-entrant, so such accesses
+ * never wait (femu_cxl_access_nowait()). Debug builds check that no path
+ * breaks this; the check costs a call, so release builds skip it.
+ */
+static inline void cxl_wait_check(void)
+{
+#ifdef FEMU_FTL_ASSERT
+    if (qemu_in_guarded_io()) {
+        error_report("femu-cxl-ssd: a wait inside a device's re-entrancy "
+                     "guard");
+        abort();
+    }
+#endif
+}
+
 void femu_cxl_drop(FemuCxlHeld *held)
 {
     assert(cxl_lock_depth);
+    cxl_wait_check();
     held->depth = cxl_lock_depth;
     held->bql = bql_locked();
     cxl_lock_depth = 0;
@@ -193,6 +211,7 @@ static void cxl_wait(QemuCond *cond, int ms)
     bool bql = bql_locked();
 
     assert(depth);
+    cxl_wait_check();
     cxl_lock_depth = 0;
     if (!cxl_lock_owned) {
         assert(bql);
@@ -284,6 +303,21 @@ static void cxl_release_bh(void *opaque)
     object_unref(s->owner);
 }
 
+/*
+ * Leave the teardown in @release to a bottom half, which takes the gate
+ * alone. Teardown stops the worker, which can be in a long collection, and
+ * a thread inside a device's re-entrancy guard must not wait for that.
+ */
+void femu_cxl_release_later(FemuCxlMedia *s)
+{
+    assert(femu_cxl_locked() && s->release);
+    if (!s->release_scheduled) {
+        s->release_scheduled = true;
+        object_ref(s->owner);
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), cxl_release_bh, s);
+    }
+}
+
 /* The last one out of the gate runs what was deferred to it. */
 static void cxl_gate_idle(FemuCxlMedia *s)
 {
@@ -292,15 +326,11 @@ static void cxl_gate_idle(FemuCxlMedia *s)
      * stops threads and deletes the memory listener, which needs the BQL. A
      * thread without it leaves the gate open and the teardown to a bottom
      * half: holding the gate for the main loop would make a vCPU wait for
-     * it, and the main loop may be pausing vCPUs.
+     * it, and the main loop may be pausing vCPUs. So does a thread inside
+     * a device's re-entrancy guard (see femu_cxl_release_later()).
      */
-    if (s->release && !bql_locked()) {
-        if (!s->release_scheduled) {
-            s->release_scheduled = true;
-            object_ref(s->owner);
-            aio_bh_schedule_oneshot(qemu_get_aio_context(), cxl_release_bh,
-                                    s);
-        }
+    if (s->release && (!bql_locked() || qemu_in_guarded_io())) {
+        femu_cxl_release_later(s);
     } else if (s->release) {
         void (*release)(FemuCxlMedia *) = s->release;
 
@@ -407,40 +437,159 @@ static uint64_t cxl_ftl_request(FemuCxlMedia *s, FemuCtrl *n,
     return MAX(lat, wait);
 }
 
-/* Only metadata reaches the worker; the vCPU owns all payload access. */
+/*
+ * Take @lock as every thread but the worker does. One that finds it taken
+ * says so, so that the worker lets it in before its next device DMA
+ * operation (cxl_worker_yield()).
+ */
+static void cxl_ftl_lock(FemuCxlMedia *s)
+{
+    if (qemu_mutex_trylock(&s->lock)) {
+        qatomic_inc(&s->lock_wanted);
+        qemu_mutex_lock(&s->lock);
+        qatomic_dec(&s->lock_wanted);
+    }
+}
+
+/*
+ * Whether device DMA queued operations that the worker has not taken. The
+ * count needs no lock, so a worker that serves only waited requests takes
+ * no other lock for each one. Under @lock.
+ */
+static bool cxl_posted_pending(FemuCxlMedia *s)
+{
+    return qatomic_read(&s->posted) != s->posted_taken;
+}
+
+/* Take the oldest operation that device DMA queued; under @lock. */
+static FemuCxlWork *cxl_take_posted(FemuCxlMedia *s)
+{
+    FemuCxlWork *work;
+
+    qemu_mutex_lock(&s->post_lock);
+    work = QSIMPLEQ_FIRST(&s->post);
+    if (work) {
+        QSIMPLEQ_REMOVE_HEAD(&s->post, next);
+        s->posted_taken++;
+    }
+    qemu_mutex_unlock(&s->post_lock);
+    return work;
+}
+
+/* qtest hooks that keep the worker in a request, under @lock. */
+static void cxl_test_hold(FemuCxlMedia *s, FemuCxlWork *work)
+{
+    uint64_t ms = qatomic_read(&s->test_ftl_hold_ms);
+
+    if (unlikely(ms)) {
+        int64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + ms * SCALE_MS;
+
+        qatomic_set(&s->test_ftl_holding, true);
+        while (qatomic_read(&s->test_ftl_hold_ms) &&
+               qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < end) {
+            g_usleep(1000);
+        }
+        qatomic_set(&s->test_ftl_hold_ms, 0);
+        qatomic_set(&s->test_ftl_holding, false);
+    }
+    ms = qatomic_read(&s->test_ftl_delay_ms);
+    if (unlikely(ms) && !work->done_cond) {
+        g_usleep(ms * SCALE_MS / SCALE_US);
+    }
+}
+
+/* How long the worker waits for threads it lets in before device DMA work. */
+#define FEMU_CXL_YIELD_NS (1000 * SCALE_US)
+
+/*
+ * The worker holds @lock while it has work. Waited requests need @lock to
+ * be queued, so they cannot keep it busy, but device DMA queues without
+ * it. So before each device DMA operation, let in the threads that wait
+ * for @lock: callers whose requests are done and that must take @lock
+ * back, and threads that want to queue or run a request. The wait is
+ * bounded, so a thread that the host does not run cannot stop the worker.
+ * Under @lock.
+ */
+static void cxl_worker_yield(FemuCxlMedia *s)
+{
+    int64_t deadline;
+
+    if (!s->done_unclaimed && !qatomic_read(&s->lock_wanted)) {
+        return;
+    }
+    qemu_mutex_unlock(&s->lock);
+    deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + FEMU_CXL_YIELD_NS;
+    while ((qatomic_read(&s->done_unclaimed) ||
+            qatomic_read(&s->lock_wanted)) &&
+           qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < deadline) {
+        cpu_relax();
+    }
+    qemu_mutex_lock(&s->lock);
+}
+
+/*
+ * Only metadata reaches the worker; the vCPU owns all payload access.
+ * Waited requests run first, in arrival order; device DMA operations run
+ * when none is queued.
+ */
 static void *cxl_worker(void *opaque)
 {
     FemuCxlMedia *s = opaque;
+    struct ssd *ssd = s->ns.ssd;
 
     qemu_mutex_lock(&s->lock);
     for (;;) {
         FemuCxlWork *work = QSIMPLEQ_FIRST(&s->work);
 
+        if (work) {
+            QSIMPLEQ_REMOVE_HEAD(&s->work, next);
+        } else if (cxl_posted_pending(s)) {
+            cxl_worker_yield(s);
+            /* A thread let in may have queued a waited request. */
+            if (!QSIMPLEQ_EMPTY(&s->work)) {
+                continue;
+            }
+            work = cxl_take_posted(s);
+        }
         /* Posted requests may remain at stop; run them before leaving. */
         if (!work) {
             if (s->stopping) {
                 break;
             }
-            qemu_cond_wait(&s->worker_cond, &s->lock);
+            /* Reset before the last look: work queued after it wakes us. */
+            qemu_event_reset(&s->worker_event);
+            if (QSIMPLEQ_EMPTY(&s->work) && !cxl_posted_pending(s) &&
+                !s->stopping) {
+                qemu_mutex_unlock(&s->lock);
+                qemu_event_wait(&s->worker_event);
+                qemu_mutex_lock(&s->lock);
+            }
             continue;
         }
-        QSIMPLEQ_REMOVE_HEAD(&s->work, next);
         if (s->first_touch_program &&
             work->req.cmd.opcode == NVME_CMD_READ &&
-            s->ns.ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
+            ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
             work->req.cmd.opcode = NVME_CMD_WRITE;
         }
+        cxl_test_hold(s, work);
         work->latency = cxl_ftl_request(s, s->ctrl, &s->ns, &work->req);
         if (!work->done_cond) {
             qatomic_set(&s->dma_media_ns, s->dma_media_ns + work->latency);
-            s->posted_failures += work->req.status != NVME_SUCCESS;
+            qatomic_set(&s->posted_failures, s->posted_failures +
+                        (work->req.status != NVME_SUCCESS));
+            qatomic_set(&s->posted_writes, ssd_nand_write_pages(ssd));
+            qatomic_set(&s->posted_stalls, s->ftl_gc_stalls);
+            qatomic_set(&s->posted_stall_ns, s->ftl_gc_stall_ns);
+            qemu_mutex_lock(&s->post_lock);
             s->posted_done++;
             qemu_cond_broadcast(&s->posted_cond);
+            qemu_mutex_unlock(&s->post_lock);
             qemu_bh_schedule(s->posted_bh);
             g_free(work);
             continue;
         }
         work->done = true;
+        qatomic_set(&s->done_unclaimed, s->done_unclaimed + 1);
         /* The waiter rechecks done under @lock, so its cond outlives this. */
         qemu_cond_signal(work->done_cond);
     }
@@ -491,12 +640,13 @@ bool femu_cxl_media(FemuCxlOp *op, uint64_t lpn, bool write)
     work.done_cond = &done_cond;
     qemu_cond_init(&done_cond);
     femu_cxl_drop(&held);
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     QSIMPLEQ_INSERT_TAIL(&s->work, &work, next);
-    qemu_cond_signal(&s->worker_cond);
+    qemu_event_set(&s->worker_event);
     while (!work.done) {
         qemu_cond_wait(&done_cond, &s->lock);
     }
+    qatomic_set(&s->done_unclaimed, s->done_unclaimed - 1);
     /* A linked controller's FTL thread updates this under @lock. */
     writes = ssd_nand_write_pages(s->ns.ssd);
     stalls = s->ftl_gc_stalls;
@@ -766,26 +916,18 @@ static void cxl_fold(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn)
  * Publish what queued operations did, once the worker has run them: the FTL
  * program and collection counts, and programs NAND refused, reported as
  * accesses report theirs. The worker cannot take the CXL lock, which comes
- * before @lock, so this runs from the main loop.
+ * before @lock, so this runs from the main loop. It reads what the worker
+ * published instead of taking @lock, which a collection can hold for long.
  */
 static void cxl_posted_bh(void *opaque)
 {
     FemuCxlMedia *s = opaque;
-    uint64_t failures;
-    uint64_t writes;
-    uint64_t stalls;
-    uint64_t stall_ns;
+    uint64_t failures = qatomic_read(&s->posted_failures);
     FEMU_CXL_LOCK_GUARD();
 
-    qemu_mutex_lock(&s->lock);
-    writes = ssd_nand_write_pages(s->ns.ssd);
-    stalls = s->ftl_gc_stalls;
-    stall_ns = s->ftl_gc_stall_ns;
-    failures = s->posted_failures;
-    qemu_mutex_unlock(&s->lock);
-    s->media_writes = MAX(s->media_writes, writes);
-    s->gc_stalls = MAX(s->gc_stalls, stalls);
-    s->gc_stall_ns = MAX(s->gc_stall_ns, stall_ns);
+    s->media_writes = MAX(s->media_writes, qatomic_read(&s->posted_writes));
+    s->gc_stalls = MAX(s->gc_stalls, qatomic_read(&s->posted_stalls));
+    s->gc_stall_ns = MAX(s->gc_stall_ns, qatomic_read(&s->posted_stall_ns));
     while (s->posted_failures_seen < failures) {
         s->posted_failures_seen++;
         cxl_media_full(s);
@@ -1090,11 +1232,11 @@ static void cxl_media_post(FemuCxlMedia *s, uint64_t lpn, bool write)
     work->req.slba = lpn * 8;
     work->req.nlb = 8;
     work->req.stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    qemu_mutex_lock(&s->lock);
-    QSIMPLEQ_INSERT_TAIL(&s->work, work, next);
-    s->posted++;
-    qemu_cond_signal(&s->worker_cond);
-    qemu_mutex_unlock(&s->lock);
+    qemu_mutex_lock(&s->post_lock);
+    QSIMPLEQ_INSERT_TAIL(&s->post, work, next);
+    qatomic_set(&s->posted, s->posted + 1);
+    qemu_mutex_unlock(&s->post_lock);
+    qemu_event_set(&s->worker_event);
     s->dma_media_ops++;
 }
 
@@ -1500,13 +1642,15 @@ uint64_t femu_cxl_drain(FemuCxlMedia *s)
      * of both.
      */
     femu_cxl_drop(&held);
-    qemu_mutex_lock(&s->lock);
     /* Only what is queued now: device DMA keeps queueing meanwhile. */
+    qemu_mutex_lock(&s->post_lock);
     target = s->posted;
     waited = s->posted_done < target;
     while (s->posted_done < target) {
-        qemu_cond_wait(&s->posted_cond, &s->lock);
+        qemu_cond_wait(&s->posted_cond, &s->post_lock);
     }
+    qemu_mutex_unlock(&s->post_lock);
+    cxl_ftl_lock(s);
     end = cxl_timing_horizon(s->ns.ssd);
     qemu_mutex_unlock(&s->lock);
     femu_cxl_retake(&held);
@@ -1618,7 +1762,7 @@ uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     int i;
 
     assert(!bql_locked());
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     /*
      * The poller already changed the payload, whatever the FTL decides.
      * Record from the command: the FTL frees DSM ranges as it trims.
@@ -1742,7 +1886,7 @@ void femu_cxl_nvme_bh(void *opaque)
         return;
     }
     femu_cxl_enter(s);
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     ranges = s->nvme_ranges;
     s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
     done = ++s->nvme_taken;
@@ -1760,7 +1904,7 @@ void femu_cxl_nvme_bh(void *opaque)
     }
     g_array_free(ranges, true);
     s->cache_entries = g_hash_table_size(s->cache.entries);
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     s->media_writes = ssd_nand_write_pages(s->ns.ssd);
     s->gc_stalls = s->ftl_gc_stalls;
     s->gc_stall_ns = s->ftl_gc_stall_ns;
@@ -1780,7 +1924,7 @@ void femu_cxl_nvme_flip(FemuCtrl *n, int64_t cdw10)
     struct ssdparams *sp = &s->ns.ssd->sp;
     bool zero = cdw10 == FEMU_DISABLE_DELAY_EMU;
 
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     switch (cdw10) {
     case FEMU_ENABLE_GC_DELAY:
     case FEMU_DISABLE_GC_DELAY:
@@ -1841,10 +1985,12 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     s->ns.ssd->ssdname = n->devname;
     ssd_init(n, &s->ns);
     qemu_mutex_init(&s->lock);
-    qemu_cond_init(&s->worker_cond);
+    qemu_mutex_init(&s->post_lock);
+    qemu_event_init(&s->worker_event, false);
     qemu_cond_init(&s->posted_cond);
     s->posted_bh = qemu_bh_new(cxl_posted_bh, s);
     QSIMPLEQ_INIT(&s->work);
+    QSIMPLEQ_INIT(&s->post);
     s->nvme_ranges = g_array_new(false, false, sizeof(FemuCxlRange));
     s->stopping = false;
     qemu_thread_create(&s->worker, "femu-cxl-ftl", cxl_worker, s,
@@ -1856,6 +2002,8 @@ void femu_cxl_stop(FemuCxlMedia *s)
     FemuCtrl *nvme = s->nvme;
     bool resume = false;
 
+    /* Stopping waits for the worker and the pollers: never in a guard. */
+    cxl_wait_check();
     if (!s->ftl) {
         s->started = false;
         femu_cxl_cache_destroy(&s->cache);
@@ -1875,14 +2023,15 @@ void femu_cxl_stop(FemuCxlMedia *s)
      * guarantees it: teardown leaves the media to the last holder. Posted
      * requests may be queued; the worker runs them before it exits.
      */
-    qemu_mutex_lock(&s->lock);
+    cxl_ftl_lock(s);
     s->stopping = true;
-    qemu_cond_signal(&s->worker_cond);
+    qemu_event_set(&s->worker_event);
     qemu_mutex_unlock(&s->lock);
     qemu_thread_join(&s->worker);
     /* Publish what the last queued operations did before the BH goes. */
     cxl_posted_bh(s);
-    qemu_cond_destroy(&s->worker_cond);
+    qemu_event_destroy(&s->worker_event);
+    qemu_mutex_destroy(&s->post_lock);
     qemu_cond_destroy(&s->posted_cond);
     g_clear_pointer(&s->posted_bh, qemu_bh_delete);
     qemu_mutex_destroy(&s->lock);

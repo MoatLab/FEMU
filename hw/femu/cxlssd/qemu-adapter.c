@@ -475,6 +475,28 @@ static unsigned adapter_users;
  */
 static GPtrArray *adapter_live;
 
+/*
+ * Let fault exits take the CXL lock without the BQL. Until now a thread
+ * asleep in a gate, page or fill wait sleeps on the BQL; wake every such
+ * thread, so that it waits on the CXL lock's mutex from now on. BQL and CXL
+ * lock.
+ */
+static void adapter_lock_bql_free(void)
+{
+    unsigned i;
+
+    assert(femu_cxl_locked());
+    if (femu_cxl_lock_is_bql_free()) {
+        return;
+    }
+    femu_cxl_lock_bql_free();
+    for (i = 0; adapter_live && i < adapter_live->len; i++) {
+        FemuCxlSsd *dev = g_ptr_array_index(adapter_live, i);
+
+        qemu_cond_broadcast(&dev->media.idle);
+    }
+}
+
 static PCIDevice *adapter_pci(FemuCxlSsd *dev)
 {
     return &dev->parent_obj.parent_obj;
@@ -1660,11 +1682,17 @@ static void cxl_exit(PCIDevice *dev)
      * A guest unplug arrives inside the host bridge's dispatch guard, so do
      * not wait for an access sleeping in its media delay. Revoke now; that
      * access holds a reference and frees the media as it leaves the gate.
+     * With the gate idle, the teardown still waits for the worker, which
+     * can be in device DMA work and a long collection: inside a guard, a
+     * bottom half runs it.
      */
     s->closing = true;
-    if (s->busy || s->accesses) {
+    if (s->busy || s->accesses || qemu_in_guarded_io()) {
         femu_cxl_der_disable(&s->direct);
         s->release = cxl_media_release;
+        if (!s->busy && !s->accesses) {
+            femu_cxl_release_later(s);
+        }
     } else {
         s->busy = true;
         cxl_media_release(s);
@@ -1844,10 +1872,86 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
     FEMU_CXL_SSD(obj)->media.protect_window_ns = value;
 }
 
-/* qtest only: whether the CXL lock is a mutex yet. */
+/*
+ * qtest only. test-guarded-write writes the GPA as its own value inside a
+ * re-entrancy guard, as a device's DMA does. test-ftl-hold makes the
+ * worker hold the FTL mutex in its next request until it is set to 0 (or
+ * for at most that many ms), and test-ftl-holding reports whether it
+ * holds. test-ftl-delay makes each device DMA operation take that many ms
+ * more under the FTL mutex. test-posted-done counts device DMA operations
+ * run. test-lock-mutex reports whether the CXL lock is a mutex, and
+ * setting it makes it one, as version 2 does.
+ */
+static void adapter_test_guarded_write(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    uint64_t value;
+    MemTxResult result;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    qemu_guarded_io_enter();
+    address_space_stq_le(&address_space_memory, value, value,
+                         MEMTXATTRS_UNSPECIFIED, &result);
+    qemu_guarded_io_leave();
+    if (result != MEMTX_OK) {
+        error_setg(errp, "the guarded write failed");
+    }
+}
+
+static void adapter_test_ftl_hold(Object *obj, Visitor *v, const char *name,
+                                  void *opaque, Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint64_t *ms = !strcmp(name, "test-ftl-hold") ? &s->test_ftl_hold_ms :
+                                                    &s->test_ftl_delay_ms;
+    uint64_t value;
+
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    if (value > 60000) {
+        error_setg(errp, "%s is at most 60000 ms", name);
+        return;
+    }
+    qatomic_set(ms, value);
+}
+
+static bool adapter_test_ftl_holding(Object *obj, Error **errp)
+{
+    return qatomic_read(&FEMU_CXL_SSD(obj)->media.test_ftl_holding);
+}
+
+static void adapter_test_posted_done(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    uint64_t value = 0;
+
+    if (s->ftl && s->started) {
+        qemu_mutex_lock(&s->post_lock);
+        value = s->posted_done;
+        qemu_mutex_unlock(&s->post_lock);
+    }
+    visit_type_uint64(v, name, &value, errp);
+}
+
 static bool adapter_test_lock_mutex(Object *obj, Error **errp)
 {
     return femu_cxl_lock_is_bql_free();
+}
+
+static void adapter_test_lock_mutex_set(Object *obj, bool value,
+                                        Error **errp)
+{
+    FEMU_CXL_LOCK_GUARD();
+
+    if (value) {
+        adapter_lock_bql_free();
+    }
 }
 
 static bool cylon_test_fault_fill(uint64_t gpa, Error **errp);
@@ -2060,8 +2164,19 @@ static void cxl_init(Object *obj)
                             adapter_test_storm_get, NULL, NULL, NULL);
         object_property_add(obj, "test-storm-ns", "uint64",
                             adapter_test_storm_get, NULL, NULL, NULL);
+        object_property_add(obj, "test-guarded-write", "uint64", NULL,
+                            adapter_test_guarded_write, NULL, NULL);
+        object_property_add(obj, "test-ftl-hold", "uint64", NULL,
+                            adapter_test_ftl_hold, NULL, NULL);
+        object_property_add(obj, "test-ftl-delay", "uint64", NULL,
+                            adapter_test_ftl_hold, NULL, NULL);
+        object_property_add_bool(obj, "test-ftl-holding",
+                                 adapter_test_ftl_holding, NULL);
+        object_property_add(obj, "test-posted-done", "uint64",
+                            adapter_test_posted_done, NULL, NULL, NULL);
         object_property_add_bool(obj, "test-lock-mutex",
-                                 adapter_test_lock_mutex, NULL);
+                                 adapter_test_lock_mutex,
+                                 adapter_test_lock_mutex_set);
     }
     FEMU_CXL_SSD(obj)->lsa_limit = CXL_MAILBOX_MAX_PAYLOAD_SIZE;
     s->owner = obj;
@@ -4206,7 +4321,9 @@ static bool cylon_fault_exit(CPUState *cpu, struct kvm_run *run)
  * qtest only: threads that act as vCPUs 0..n-1 and send fault exits at
  * random pages of a window, through the same service and locking as KVM's
  * exits, while the test changes the device under them. Mode 0 serves them
- * without the BQL, as KVM does; mode 1 holds the BQL for each, as before.
+ * without the BQL, as KVM does with version 2; mode 1 holds the BQL for
+ * each, as before; mode 2 calls the service without the BQL, as KVM does
+ * with version 1, and leaves the CXL lock as it is.
  * A real vCPU cannot be unplugged inside its own exit, but these threads
  * are not the vCPUs: a test must not unplug a vCPU during a storm.
  */
@@ -4249,11 +4366,11 @@ static void *cylon_storm_thread(void *opaque)
         };
         bool ok;
 
-        if (cylon_storm.mode) {
+        if (cylon_storm.mode == 1) {
             bql_lock();
         }
         ok = cylon_fault_handle(cpu, &f);
-        if (cylon_storm.mode) {
+        if (cylon_storm.mode == 1) {
             bql_unlock();
         }
         qatomic_inc(ok ? &cylon_storm.served : &cylon_storm.stops);
@@ -4263,8 +4380,6 @@ static void *cylon_storm_thread(void *opaque)
     g_rand_free(rand);
     return NULL;
 }
-
-static void cylon_lock_bql_free(void);
 
 /* "threads,pages,iters,mode,seed": start a storm on this device's window. */
 static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
@@ -4280,7 +4395,7 @@ static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
 
     if (sscanf(spec, "%u,%" SCNu64 ",%" SCNu64 ",%" SCNu32 ",%" SCNu32,
                &threads, &pages, &iters, &mode, &seed) != 5 || !threads ||
-        threads > current_machine->smp.max_cpus || !pages || mode > 1) {
+        threads > current_machine->smp.max_cpus || !pages || mode > 2) {
         error_setg(errp, "test-storm is threads,pages,iters,mode,seed with "
                    "at most one thread per vCPU");
         return;
@@ -4302,9 +4417,13 @@ static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
             pages = MIN(pages, w->fw->size / 4096);
         }
         cylon_fault_tracks_init();
-        /* Mode 0 serves exits without the BQL, as version 2 does. */
+        /*
+         * Mode 0 serves exits without the BQL, as version 2 does; mode 2
+         * leaves the CXL lock as it is, so while it is no mutex the exits
+         * take the BQL themselves, as version 1 exits do.
+         */
         if (w && !mode) {
-            cylon_lock_bql_free();
+            adapter_lock_bql_free();
         }
     }
     if (!w) {
@@ -4455,28 +4574,6 @@ static const char *cylon_storm_check(FemuCxlSsd *dev)
 }
 
 /*
- * Let fault exits take the CXL lock without the BQL. Until now a thread
- * asleep in a gate, page or fill wait sleeps on the BQL; wake every such
- * thread, so that it waits on the CXL lock's mutex from now on. BQL and CXL
- * lock.
- */
-static void cylon_lock_bql_free(void)
-{
-    unsigned i;
-
-    assert(femu_cxl_locked());
-    if (femu_cxl_lock_is_bql_free()) {
-        return;
-    }
-    femu_cxl_lock_bql_free();
-    for (i = 0; adapter_live && i < adapter_live->len; i++) {
-        FemuCxlSsd *dev = g_ptr_array_index(adapter_live, i);
-
-        qemu_cond_broadcast(&dev->media.idle);
-    }
-}
-
-/*
  * Per VM: the first slot whose device has cylon-emul-exit on turns it on.
  * Off, the kernel keeps stock KVM behaviour on such an access: #UD in guest
  * user mode, an internal-error exit in guest kernel mode. A device with
@@ -4514,7 +4611,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
          * every holder of the CXL lock holds the BQL.
          */
         if (want_v2) {
-            cylon_lock_bql_free();
+            adapter_lock_bql_free();
         }
         if (version < 1 ||
             kvm_vm_enable_cap(kvm_state, CYLON_CAP_FAULT_EXIT, 0,

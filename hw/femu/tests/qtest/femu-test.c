@@ -21204,19 +21204,6 @@ static void femu_test_cxl_storm_set(void *obj, void *data,
     qtest_quit(qts);
 }
 
-static bool femu_cxl_lock_mutex(QTestState *qts)
-{
-    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
-                          "'path':'/machine/peripheral/ssd',"
-                          "'property':'test-lock-mutex'}}");
-    bool value;
-
-    g_assert_true(qdict_haskey(rsp, "return"));
-    value = qdict_get_bool(rsp, "return");
-    qobject_unref(rsp);
-    return value;
-}
-
 /* MMIO from this thread (the BQL path) while a storm runs. */
 static void femu_cxl_storm_mmio(QTestState *qts, unsigned n)
 {
@@ -21233,33 +21220,161 @@ static void femu_cxl_storm_mmio(QTestState *qts, unsigned n)
     }
 }
 
+static bool femu_cxl_flag(QTestState *qts, const char *name)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                          "'path':'/machine/peripheral/ssd',"
+                          "'property':%s}}", name);
+    bool value;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    value = qdict_get_bool(rsp, "return");
+    qobject_unref(rsp);
+    return value;
+}
+
+/* The storm's bookkeeping after a join: every exit served, counts kept. */
+static void femu_cxl_storm_check(QTestState *qts, uint64_t exits)
+{
+    uint64_t misses = femu_cxl_stat(qts, "read-misses") +
+                      femu_cxl_stat(qts, "write-misses");
+
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served"), ==, exits);
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-stops"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, misses);
+}
+
 /*
  * Until exits run without the BQL, the CXL lock is not a mutex: holders
- * hold the BQL and waits sleep on it. Exits that hold the BQL (as version 1
- * exits do) and MMIO must then still keep every count, and the first storm
- * without the BQL must turn the lock into a mutex under waiters and keep
- * every count too.
+ * hold the BQL and waits sleep on it. Version 1 exits (mode 2) take the
+ * BQL themselves then, and with MMIO they must keep every count. The lock
+ * then becomes a mutex in the middle of such a storm, with exits waiting
+ * on the BQL and exits in flight; later exits run without the BQL. Last, a
+ * version 2 storm (mode 0).
  */
 static void femu_test_cxl_storm_bql(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
     QTestState *qts = femu_cxl_storm_init("");
-    unsigned mode;
 
-    for (mode = 1; mode != UINT_MAX; mode--) {
-        uint64_t misses;
+    femu_cxl_storm(qts, 8, 128, 2000, 2);
+    femu_cxl_storm_mmio(qts, 1000);
+    femu_cxl_storm_wait(qts, "ssd");
+    g_assert_false(femu_cxl_flag(qts, "test-lock-mutex"));
+    femu_cxl_storm_check(qts, 8 * 2000);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-bql"), ==, 0);
 
-        femu_cxl_storm(qts, 8, 128, 2000, mode);
-        femu_cxl_storm_mmio(qts, 1000);
-        femu_cxl_storm_wait(qts, "ssd");
-        g_assert_true(femu_cxl_lock_mutex(qts) == !mode);
-        g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-served"), ==,
-                         8 * 2000);
-        g_assert_cmpuint(femu_cxl_stat(qts, "test-storm-stops"), ==, 0);
-        misses = femu_cxl_stat(qts, "read-misses") +
-                 femu_cxl_stat(qts, "write-misses");
-        g_assert_cmpuint(femu_cxl_stat(qts, "media-reads"), ==, misses);
+    femu_cxl_storm(qts, 8, 128, 8000, 2);
+    femu_cxl_storm_mmio(qts, 300);
+    femu_cxl_set(qts, "test-lock-mutex", true);
+    femu_cxl_storm_mmio(qts, 300);
+    femu_cxl_storm_wait(qts, "ssd");
+    g_assert_true(femu_cxl_flag(qts, "test-lock-mutex"));
+    femu_cxl_storm_check(qts, 8 * 8000);
+
+    femu_cxl_storm(qts, 8, 128, 2000, 0);
+    femu_cxl_storm_mmio(qts, 1000);
+    femu_cxl_storm_wait(qts, "ssd");
+    femu_cxl_storm_check(qts, 8 * 2000);
+    qtest_quit(qts);
+}
+
+/* Wait until a qtest flag reads @value, at most 10 s. */
+static void femu_cxl_wait_flag(QTestState *qts, const char *name, bool value)
+{
+    int64_t deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+
+    while (femu_cxl_flag(qts, name) != value) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
     }
+}
+
+/*
+ * Device DMA queues its media time without waiting for the FTL mutex, which
+ * the worker holds for a whole request, a long collection included. The
+ * worker holds it in the first queued operation until the test lets go; a
+ * second guarded write must return meanwhile. Once with the CXL lock as no
+ * mutex, once as a mutex.
+ */
+static void femu_test_cxl_dma_queue(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0");
+    int64_t deadline;
+    unsigned round;
+
+    femu_cxl_decode(qts);
+    for (round = 0; round < 2; round++) {
+        uint64_t first = FEMU_CXL_WINDOW + (1 + 4 * round) * 4096;
+        uint64_t second = FEMU_CXL_WINDOW + (3 + 4 * round) * 4096;
+
+        g_assert_true(femu_cxl_flag(qts, "test-lock-mutex") == round);
+        femu_cxl_set_u64(qts, "test-ftl-hold", 30000);
+        femu_cxl_set_u64(qts, "test-guarded-write", first);
+        femu_cxl_wait_flag(qts, "test-ftl-holding", true);
+        femu_cxl_set_u64(qts, "test-guarded-write", second);
+        /* The second write returned while the worker held the mutex. */
+        g_assert_true(femu_cxl_flag(qts, "test-ftl-holding"));
+        femu_cxl_set_u64(qts, "test-ftl-hold", 0);
+        deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+        while (femu_cxl_stat(qts, "test-posted-done") < 2 * (round + 1)) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), ==,
+                         2 * (round + 1));
+        g_assert_cmpuint(femu_cxl_stat(qts, "dma-media-ops"), ==,
+                         2 * (round + 1));
+        g_assert_cmphex(qtest_readq(qts, first), ==, first);
+        g_assert_cmphex(qtest_readq(qts, second), ==, second);
+        femu_cxl_set(qts, "test-lock-mutex", true);
+    }
+    /* The programs show in media-writes once the bottom half ran. */
+    deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    while (femu_cxl_stat(qts, "media-writes") < 4) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_cxl_stat(qts, "dma-media-time-ns"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * Device DMA queues without the FTL mutex, so it alone could keep the
+ * worker busy, and the worker holds the mutex while busy. A waited request
+ * must still get in. Ten operations are queued while the worker holds the
+ * mutex in the first; each then takes 1 s more. A read miss that arrives
+ * meanwhile must complete after at most a few of them, not after all ten.
+ */
+static void femu_test_cxl_dma_fair(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0");
+    uint64_t done;
+    unsigned i;
+
+    femu_cxl_decode(qts);
+    femu_cxl_set_u64(qts, "test-ftl-delay", 1000);
+    /* The hold ends by itself after 2 s, while this thread reads. */
+    femu_cxl_set_u64(qts, "test-ftl-hold", 2000);
+    for (i = 0; i < 10; i++) {
+        femu_cxl_set_u64(qts, "test-guarded-write",
+                         FEMU_CXL_WINDOW + (16 + i) * 4096);
+    }
+    femu_cxl_wait_flag(qts, "test-ftl-holding", true);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 64 * 4096), ==, 0);
+    done = femu_cxl_stat(qts, "test-posted-done");
+    g_test_message("device DMA operations run before the miss: %" PRIu64,
+                   done);
+    g_assert_cmpuint(done, <=, 5);
+    /* The rest run at once, so the teardown does not wait for them. */
+    femu_cxl_set_u64(qts, "test-ftl-delay", 0);
     qtest_quit(qts);
 }
 
@@ -21300,6 +21415,9 @@ static void femu_test_cxl_fill_delay(void *obj, void *data,
  * program 64 MiB, then serve random read faults over it through one 256-way
  * FIFO set with 40 us NAND reads, from 1, 4, 8 and 16 vCPUs, under the BQL
  * as before (mode 1) and without it (mode 0), and print the fault rate.
+ * With FEMU_STORM_LIVE set, mode 1 runs with the CXL lock as a mutex, as
+ * it is once version 2 is on; without it, mode 1 has the lock as version 1
+ * has it, so the two show what the mutex costs exits that hold the BQL.
  */
 static void femu_test_cxl_storm_bench(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -21336,13 +21454,18 @@ static void femu_test_cxl_storm_bench(void *obj, void *data,
             }
             femu_cxl_set(qts, "flush-cache", true);
             femu_cxl_set(qts, "fast-load", false);
+            if (mode && g_getenv("FEMU_STORM_LIVE")) {
+                femu_cxl_set(qts, "test-lock-mutex", true);
+            }
             femu_cxl_storm(qts, threads[i], 16384, iters, mode);
             femu_cxl_storm_wait(qts, "ssd");
             ns = femu_cxl_stat(qts, "test-storm-ns");
             served = femu_cxl_stat(qts, "test-storm-served");
-            printf("storm mode=%s threads=%u faults=%" PRIu64 " ns=%" PRIu64
+            printf("storm mode=%s%s threads=%u faults=%" PRIu64 " ns=%" PRIu64
                    " rate=%.0f/s misses=%" PRIu64 " bql=%" PRIu64 "\n",
-                   mode ? "bql" : "cxl-lock", threads[i], served, ns,
+                   mode ? "bql" : "cxl-lock",
+                   mode && g_getenv("FEMU_STORM_LIVE") ? "+mutex" : "",
+                   threads[i], served, ns,
                    served * 1e9 / MAX(ns, 1),
                    femu_cxl_stat(qts, "read-misses"),
                    femu_cxl_stat(qts, "der-fault-bql"));
@@ -24061,6 +24184,8 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-storm-set", "femu", femu_test_cxl_storm_set, NULL);
     qos_add_test("cxl-storm-bql", "femu", femu_test_cxl_storm_bql, NULL);
+    qos_add_test("cxl-dma-queue", "femu", femu_test_cxl_dma_queue, NULL);
+    qos_add_test("cxl-dma-fair", "femu", femu_test_cxl_dma_fair, NULL);
     qos_add_test("cxl-storm-change", "femu", femu_test_cxl_storm_change,
                  NULL);
     qos_add_test("cxl-storm-unplug", "femu", femu_test_cxl_storm_unplug,
