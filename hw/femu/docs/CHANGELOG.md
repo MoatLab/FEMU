@@ -247,6 +247,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Data correctness
 
+- A CXL memory device (`cxl-type3` and `femu-cxl-ssd`) disables its media while a Sanitize command runs, as the CXL specification says. The media check read the first mailbox register instead of the memory device status, so media was never disabled; it now reads the status atomically, so `femu-cxl-ssd` fault exits without the BQL read it without a data race.
 - Compare reads the stored data instead of a zeroed buffer (7589ee012).
 - FDP TRIM honours the requested LBA ranges instead of erasing the whole device (0cc20e897).
 - Fixed FDP victim accounting, foreground GC under write pressure, the initial reclaim unit, and the FDP Events log offset (cee9670a5, 247151a16, f9fc94d4f, 438e485a1).

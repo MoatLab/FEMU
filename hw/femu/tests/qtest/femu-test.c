@@ -19393,6 +19393,76 @@ static void femu_test_cxl_lsa_normal(void *obj, void *data,
 }
 
 /*
+ * Sanitize disables the media while its background operation runs: reads
+ * return no data that was written, writes are dropped, and afterwards the
+ * media is enabled again and reads zero.
+ */
+static void femu_test_cxl_sanitize_media(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem");
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+    uint64_t sts;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeedfacecafef00dULL);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, 0x4400);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    sts = qtest_readq(qts, mbox + A_CXL_DEV_MAILBOX_STS);
+    /* Background operation started. */
+    g_assert_cmphex(sts >> 32 & 0xffff, ==, 0x1);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), !=,
+                    0xfeedfacecafef00dULL);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 8, 0x1234);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8), !=, 0x1234);
+    /* 256 MiB sanitize in 4 s of virtual time. */
+    qtest_clock_step(qts, 5 * NANOSECONDS_PER_SECOND);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), ==, 0);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 8, 0x1234);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8), ==, 0x1234);
+    qtest_quit(qts);
+}
+
+/*
+ * A flush during a sanitize restores no direct ratio, and a der-ratio write
+ * is refused: an alias would let accesses reach the media while it is
+ * disabled. The first access after the sanitize maps the ratio again.
+ */
+static void femu_test_cxl_sanitize_ratio(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "der=memslot");
+    uint64_t mbox = 0x90010000 + CXL_MAILBOX_REGISTERS_OFFSET;
+
+    femu_cxl_decode(qts);
+    femu_cxl_config(qts, 53, 0x18, 0x90010000);
+    femu_cxl_config(qts, 53, 0x1c, 0);
+    femu_cxl_number(qts, "der-ratio", 100, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), >, 0);
+    qtest_writeq(qts, FEMU_CXL_WINDOW, 0xfeedfacecafef00dULL);
+    qtest_writeq(qts, mbox + A_CXL_DEV_MAILBOX_CMD, 0x4400);
+    qtest_writel(qts, mbox + A_CXL_DEV_MAILBOX_CTRL, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    femu_cxl_number(qts, "der-ratio", 100, false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW), !=,
+                    0xfeedfacecafef00dULL);
+    qtest_writeq(qts, FEMU_CXL_WINDOW + 8, 0x1234);
+    qtest_clock_step(qts, 5 * NANOSECONDS_PER_SECOND);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 8), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-ratio"), ==, 100);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-mapped"), >, 0);
+    qtest_quit(qts);
+}
+
+/*
  * The mailbox handler holds the device's re-entrancy guard, so a Get LSA
  * flush must not wait out its media time there; it runs afterwards.
  */
@@ -24247,6 +24317,10 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-lsa-bounds", "femu", femu_test_cxl_lsa_bounds, NULL);
     qos_add_test("cxl-lsa-queue", "femu", femu_test_cxl_lsa_queue, NULL);
+    qos_add_test("cxl-sanitize-media", "femu", femu_test_cxl_sanitize_media,
+                 NULL);
+    qos_add_test("cxl-sanitize-ratio", "femu", femu_test_cxl_sanitize_ratio,
+                 NULL);
     qos_add_test("cxl-never-emulate", "femu", femu_test_cxl_never_emulate,
                  NULL);
     qos_add_test("cxl-ratio-dirty", "femu", femu_test_cxl_ratio_dirty, NULL);

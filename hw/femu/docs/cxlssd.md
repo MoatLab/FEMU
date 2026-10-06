@@ -280,13 +280,26 @@ exit never sees them half done. A configuration write runs between two
 invalidations, without the CXL lock across the parent's write, which can
 rebuild the memory map. A fault exit that routes while it changes cannot
 keep its mapping: the second invalidation revokes it, or the changed
-generation stops it. `cxl_dev_media_disabled()` reads a word of mailbox
-register storage that only mailbox MMIO writes, under the BQL alone, and
-that no command sets (see "Caching API"). A fault exit without the BQL that
-reads it races that write: it is a data race in C, and a race detector
-reports it. On x86 hosts an aligned word read gives the old or the new
-value, but C does not promise that. A fix needs the parent's mailbox writes under the CXL lock or a
-published copy of the status; it is left for a QEMU change.
+generation stops it. `cxl_dev_media_disabled()` reads the memory device
+status, which sanitize sets to "disabled" while its background operation
+runs. Only threads that hold the BQL write the status, and every write and
+this read are atomic, so a fault exit without the BQL reads it without a
+data race. (Earlier, the check read the first word of the mailbox registers
+instead, so media was never disabled.)
+
+While media is disabled, MMIO reads return random data and writes are
+dropped, as in `cxl-type3`, and FEMU maps nothing. A `der-ratio` write
+other than 0 is refused. A flush or a way change keeps the ratio set but
+maps none of it; the first access after the sanitize maps a `der=memslot`
+ratio again, and a `der=cylon` ratio maps page by page as the guest
+touches it, or all at once at the next flush. A Cylon fault exit that needs a
+mapping during a sanitize (an instruction KVM cannot emulate, or code on
+the window) stops the VM, as for any page that must stay unmapped (see
+"Instructions KVM cannot emulate"); `cylon-fault-stop` does not change
+this. The normal Linux path sends Sanitize only when no HDM decoder of the
+device is committed (`cxl_mem_sanitize()` in `drivers/cxl/core/mbox.c`), so
+no window then reaches the device; raw mailbox commands and other guests
+are not bound by that.
 
 #### Device DMA into the window
 
@@ -1040,9 +1053,9 @@ device that turns it red. A standalone test runs the guest library against
 the device's ring consumer and fuzzes every guest-writable index under a
 sanitizer. Guest enumeration of BAR5 under `pxb-cxl`, `resource5` mapping
 and the latency effects of pinning need a guest run (`run-guest-tests.sh`).
-In this QEMU, `cxl_dev_media_disabled()` reads a mailbox register that
-sanitize never sets, so the qtest reaches the `-ENODEV` path through a
-qtest-only property.
+Sanitize disables the media only while its background operation runs, so
+the qtest reaches the `-ENODEV` path through a qtest-only property that
+keeps it disabled.
 
 ## NVMe front end
 

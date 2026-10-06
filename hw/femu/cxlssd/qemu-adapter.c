@@ -2172,8 +2172,8 @@ static void adapter_test_change_dpa(Object *obj, bool value, Error **errp)
 }
 
 /*
- * cxl_dev_media_disabled() reads a mailbox register that sanitize never
- * sets, so no command can disable media here; let tests do it for CCA.
+ * Sanitize disables the media only while its background operation runs;
+ * let tests keep it disabled for the caching API.
  */
 static void adapter_test_media_disabled(Object *obj, bool value, Error **errp)
 {
@@ -2947,6 +2947,15 @@ static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
         error_setg(errp, "DER ratio requires a decoded linear window");
         return false;
     }
+    /*
+     * Disabled media must keep trapping. The ratio stays set: the first
+     * access after the media is enabled maps a memslot ratio again, and a
+     * Cylon ratio maps page by page on access, or all at once at the next
+     * flush.
+     */
+    if (cxl_dev_media_disabled(&dev->parent_obj.cxl_dstate)) {
+        return true;
+    }
     if (der->cylon) {
         cylon_ratio_apply(der, fw);
         return true;
@@ -2998,6 +3007,11 @@ static void cxl_ratio(FemuCxlSsd *dev, uint64_t ratio, Error **errp)
     if (ratio && s->cca.uncached) {
         error_setg(errp, "a direct ratio cannot be set while CCA uncached "
                    "ranges exist");
+        goto out;
+    }
+    if (ratio && cxl_dev_media_disabled(&dev->parent_obj.cxl_dstate)) {
+        error_setg(errp, "a direct ratio cannot be set while the media is "
+                   "disabled (sanitize)");
         goto out;
     }
     if (der->cylon) {
@@ -3838,7 +3852,7 @@ static const char *cylon_fault_reason(uint64_t gpa, MemTxResult result)
     }
     lpn = dpa / 4096;
     if (cxl_dev_media_disabled(&CXL_TYPE3(dev)->cxl_dstate)) {
-        return "the media is disabled";
+        return "the media is disabled while a sanitize runs";
     }
     if (!s->direct.cylon || !s->direct.available) {
         return "Cylon direct mapping is not active";
