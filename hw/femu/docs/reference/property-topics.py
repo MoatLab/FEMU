@@ -196,7 +196,7 @@ DEVICES = [
                       "test-guarded-write", "test-ftl-hold",
                       "test-ftl-delay", "test-ftl-holding",
                       "test-posted-done", "test-lock-mutex",
-                      "test-fault-version"],
+                      "test-fault-version", "test-fault-repeats"],
         "topics": [
             {
                 "title": "Cache",
@@ -221,7 +221,8 @@ DEVICES = [
                 "props": [
                     "der", "der-replace-rate", "cylon-kernel-ack",
                     "cylon-emul-exit", "cylon-never-emulate",
-                    "cylon-revoke-batch", "concurrent-misses",
+                    "cylon-fault-stop", "cylon-revoke-batch",
+                    "concurrent-misses",
                 ],
             },
             {

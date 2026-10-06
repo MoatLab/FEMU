@@ -72,6 +72,12 @@ static const FemuPropDesc cxl_descs[] = {
       "uses it when the host kernel offers it and otherwise warns once and "
       "uses version 1, on also warns when it cannot, off keeps version 1; "
       "per VM, set by the first Cylon device that installs its slot" },
+    { "cylon-fault-stop",
+      "With der=cylon, stop the VM after this many consecutive fault exits "
+      "of one vCPU at one RIP on pages already filled for that RIP; a "
+      "watchdog that counts exits, not instructions, so a healthy loop over "
+      "more pages than the cache holds can reach it; 0 only warns; default "
+      "100000" },
     { "cylon-revoke-batch",
       "With cylon-never-emulate on, the most pages one full revocation "
       "takes, 1 to 64: an eviction that must flush the VM's TLBs also "

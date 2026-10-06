@@ -594,9 +594,22 @@ instruction bytes and the latest GPAs at that RIP when:
   page it already filled for that RIP. The set of filled pages is cleared only
   when the RIP changes (and on reset or vCPU replacement), so cycling through
   pages does not clear it. FEMU warns, at most once a second, from 1,000
-  such exits and stops the VM at 100,000. A load that spans two pages which
-  evict each other ends this way; a healthy loop whose page other vCPUs evict
-  stays far below the limit.
+  such exits and stops the VM at `cylon-fault-stop` (default 100,000; 0
+  only warns). A load that spans two pages which evict each other ends this
+  way; a healthy loop whose page other vCPUs evict stays far below the
+  limit.
+
+`cylon-fault-stop` is a watchdog: it counts exits, not retired
+instructions, so it can stop a healthy VM. The known case is a loop at one
+RIP of an instruction that exits on each page (version 1: one that KVM
+cannot decode) over a working set larger than the cache but at most 4,096
+pages, the size of the set of filled pages that FEMU keeps for one RIP.
+Each page is evicted before the loop comes back to it and is still in the
+set, so every exit after the first round counts as a repeat. A smaller
+working set stays mapped and does not exit; a larger one drops its pages
+from the set before they come back. With the default cache sizes this is
+rare. If a VM stops with "retry budget exhausted" and the GPAs in the
+report cycle over many pages, raise `cylon-fault-stop` or set it to 0.
 
 #### Version 2: no emulation of cold pages
 
@@ -677,7 +690,7 @@ The rules:
   at one RIP that FEMU served with neither a mapping nor a handoff to the
   emulator, FEMU stops the VM ("retry budget exhausted"). A handoff, and a
   refault fill that kept the vCPU's own pages, restart both this budget and
-  the 100,000-repeat bound, so the bound is left for refills that the
+  the `cylon-fault-stop` bound, so the bound is left for refills that the
   instruction's own fills cause. Exits are not retired instructions: both
   are retry budgets, not proof that an instruction did not complete.
 - KVM does not write the leaves itself: no fast-fault write restore, no

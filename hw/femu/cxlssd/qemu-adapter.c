@@ -49,6 +49,8 @@ struct FemuCxlSsd {
     bool attached;
     bool test_change_dpa;
     bool test_media_disabled;
+    /* How often the next test-fault or test-fault-decode exit repeats. */
+    uint64_t test_fault_repeats;
     size_t lsa_limit;
     /* Get LSA control commands left to a bottom half, oldest first. */
     GQueue lsa_queue;
@@ -98,6 +100,9 @@ static void cylon_ratio_apply(FemuCxlDer *der, CXLFixedWindow *fw);
  */
 #define FEMU_CXL_DER_BACKOFF 8
 #define FEMU_CXL_DER_CLEAN 8
+
+/* Default cylon-fault-stop: repeated exits at one RIP that stop the VM. */
+#define CYLON_FAULT_STOP 100000
 
 static FemuCylon *femu_cylon_prepare(FemuCxlDer *der, const char **reason);
 /* Version 2 of the Cylon fault exit is on for the VM (per VM). CXL lock. */
@@ -2080,10 +2085,29 @@ static void adapter_test_fault(Object *obj, Visitor *v, const char *name,
     FEMU_CXL_LOCK_GUARD();
 
     if (visit_type_uint64(v, name, &gpa, errp)) {
+        FemuCxlSsd *dev = FEMU_CXL_SSD(obj);
+        uint64_t n = MAX(dev->test_fault_repeats, 1);
+
+        dev->test_fault_repeats = 0;
         object_ref(obj);
-        cylon_test_fault(FEMU_CXL_SSD(obj), gpa,
-                         !strcmp(name, "test-fault-decode"), errp);
+        while (n-- && cylon_test_fault(dev, gpa,
+                                       !strcmp(name, "test-fault-decode"),
+                                       errp)) {
+            continue;
+        }
         object_unref(obj);
+    }
+}
+
+static void adapter_test_fault_repeats(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    uint64_t n;
+    FEMU_CXL_LOCK_GUARD();
+
+    if (visit_type_uint64(v, name, &n, errp)) {
+        FEMU_CXL_SSD(obj)->test_fault_repeats = n;
     }
 }
 
@@ -2210,6 +2234,8 @@ static void cxl_init(Object *obj)
                             adapter_test_fault, NULL, NULL);
         object_property_add(obj, "test-fault-decode", "uint64", NULL,
                             adapter_test_fault, NULL, NULL);
+        object_property_add(obj, "test-fault-repeats", "uint64", NULL,
+                            adapter_test_fault_repeats, NULL, NULL);
         object_property_add_bool(obj, "test-map", NULL, adapter_test_map);
         object_property_add(obj, "test-rip", "uint64", NULL,
                             adapter_test_rip, NULL, NULL);
@@ -2373,6 +2399,8 @@ static const Property cxl_props[] = {
                      media.cylon_emul_exit, true),
     DEFINE_PROP_ON_OFF_AUTO("cylon-never-emulate", FemuCxlSsd,
                             media.cylon_never_emulate, ON_OFF_AUTO_AUTO),
+    DEFINE_PROP_UINT32("cylon-fault-stop", FemuCxlSsd,
+                       media.cylon_fault_stop, CYLON_FAULT_STOP),
     DEFINE_PROP_UINT32("cylon-revoke-batch", FemuCxlSsd,
                        media.direct.revoke_batch, 32),
     DEFINE_PROP_ON_OFF_AUTO("concurrent-misses", FemuCxlSsd, media.concurrent,
@@ -3461,11 +3489,11 @@ QEMU_BUILD_BUG_ON(sizeof(CylonFault) > sizeof(((struct kvm_run *)0)->padding));
  * Count consecutive exits at one RIP whose page was already filled for that
  * RIP; the set of filled pages is cleared only when the RIP changes, so
  * cycling through pages cannot erase it. A livelock reaches the stop bound
- * within seconds; a healthy loop does not exit 100,000 times back to back
- * at one RIP with no exit anywhere else.
+ * (cylon-fault-stop, by default CYLON_FAULT_STOP) within seconds; a healthy
+ * loop rarely exits that often back to back at one RIP with no exit
+ * anywhere else. It is a watchdog, not proof: see cxlssd.md.
  */
 #define CYLON_FAULT_WARN 1000
-#define CYLON_FAULT_STOP 100000
 /*
  * The pages filled at one RIP, oldest dropped first: a set that is full
  * still records each new page, so a page that keeps failing is always in it.
@@ -3848,6 +3876,55 @@ static void cylon_fault_report(CPUState *cpu, const CylonFault *f,
                  bytes->len ? bytes->str : " none", recent, why);
 }
 
+/*
+ * Count an exit of @cpu against the repeat bound of its RIP. From
+ * CYLON_FAULT_WARN repeats warn, at most once a second; at @dev's
+ * cylon-fault-stop (never when it is 0) report, count a failure, and
+ * return false: the VM must stop.
+ */
+static bool cylon_fault_budget(CPUState *cpu, const CylonFault *f,
+                               CylonFaultTrack *t, FemuCxlSsd *dev)
+{
+    uint32_t stop = dev ? dev->media.cylon_fault_stop : CYLON_FAULT_STOP;
+    uint64_t repeats = cylon_fault_note(t, f->rip, f->gpa);
+
+    if (stop && repeats >= stop) {
+        g_autofree char *why = g_strdup_printf(
+            "retry budget exhausted: %" PRIu64 " consecutive exits at this "
+            "RIP on pages already filled for it (cylon-fault-stop)", repeats);
+
+        if (dev) {
+            dev->media.direct.emul_failures++;
+        }
+        cylon_fault_report(cpu, f, t, why);
+        cylon_fault_track_clear(t);
+        return false;
+    }
+    if (repeats >= CYLON_FAULT_WARN) {
+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+        if (now - t->warned_ms >= 1000) {
+            g_autofree char *recent = cylon_fault_recent(t);
+
+            t->warned_ms = now;
+            if (stop) {
+                warn_report("femu-cxl-ssd: vCPU %d has refilled pages %"
+                            PRIu64 " times in a row at RIP 0x%" PRIx64
+                            " (latest GPAs:%s); the VM stops at %" PRIu32
+                            " (cylon-fault-stop)", cpu->cpu_index, repeats,
+                            f->rip, recent, stop);
+            } else {
+                warn_report("femu-cxl-ssd: vCPU %d has refilled pages %"
+                            PRIu64 " times in a row at RIP 0x%" PRIx64
+                            " (latest GPAs:%s); cylon-fault-stop is 0, so "
+                            "the VM does not stop", cpu->cpu_index, repeats,
+                            f->rip, recent);
+            }
+        }
+    }
+    return true;
+}
+
 /* The leaf of @gpa in the Cylon slot of @dev, if the slot is installed. */
 static uint64_t *cylon_fault_sptep(FemuCxlSsd *dev, uint64_t gpa)
 {
@@ -4115,8 +4192,8 @@ static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
     WITH_RCU_READ_LOCK_GUARD() {
         CylonFaultTrack *t = cylon_fault_track(cpu);
 
-        if (cylon_fault_note(t, f.rip, f.gpa) >= CYLON_FAULT_WARN) {
-            why = "refilled pages 1000 times in a row";
+        if (!cylon_fault_budget(cpu, &f, t, dev)) {
+            why = "retry budget exhausted (cylon-fault-stop)";
         } else if (decode) {
             ok = cylon_fault_decode(t, &f, &result);
         } else {
@@ -4254,7 +4331,6 @@ static CylonServe cylon_fault_serve(CPUState *cpu, const CylonFault *f,
     MemTxResult result = MEMTX_ERROR;
     const char *why = NULL;
     CylonFaultTrack *t;
-    uint64_t repeats;
     bool mapped;
 
     assert(femu_cxl_locked());
@@ -4270,30 +4346,8 @@ static CylonServe cylon_fault_serve(CPUState *cpu, const CylonFault *f,
     t = cylon_fault_track(cpu);
     if (!*noted) {
         *noted = true;
-        repeats = cylon_fault_note(t, f->rip, f->gpa);
-        if (repeats >= CYLON_FAULT_STOP) {
-            if (dev) {
-                dev->media.direct.emul_failures++;
-            }
-            cylon_fault_report(cpu, f, t, "retry budget exhausted: 100000 "
-                               "consecutive exits at this RIP on pages "
-                               "already filled for it");
-            cylon_fault_track_clear(t);
+        if (!cylon_fault_budget(cpu, f, t, dev)) {
             return CYLON_STOP;
-        }
-        if (repeats >= CYLON_FAULT_WARN) {
-            int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-
-            if (now - t->warned_ms >= 1000) {
-                g_autofree char *recent = cylon_fault_recent(t);
-
-                t->warned_ms = now;
-                warn_report("femu-cxl-ssd: vCPU %d has refilled pages %"
-                            PRIu64 " times in a row at RIP 0x%" PRIx64
-                            " (latest GPAs:%s); the VM stops at %d",
-                            cpu->cpu_index, repeats, f->rip, recent,
-                            CYLON_FAULT_STOP);
-            }
         }
     }
     if (f->flags & CYLON_FAULT_ACCESS) {

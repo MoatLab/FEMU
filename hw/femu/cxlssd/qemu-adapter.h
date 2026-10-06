@@ -112,6 +112,8 @@ struct FemuCxlMedia {
     OnOffAuto cylon_never_emulate;
     /* Enable KVM_CAP_CYLON_FAULT_EXIT when the slot is installed. */
     bool cylon_emul_exit;
+    /* Repeated exits at one RIP that stop the VM; 0 only warns. */
+    uint32_t cylon_fault_stop;
     OnOffAuto concurrent;
     bool busy;
     /* Accesses sharing the gate, and operations waiting to take it alone. */

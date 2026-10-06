@@ -21083,8 +21083,8 @@ static QTestState *femu_cxl_fault_init(unsigned ways)
 {
     g_autofree char *dev = g_strdup_printf(
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
-        "cache-pages=%u,cache-ways=%u,cache-policy=lifo,prefetch-degree=0",
-        2 * ways, ways);
+        "cache-pages=%u,cache-ways=%u,cache-policy=lifo,prefetch-degree=0,"
+        "cylon-fault-stop=1000", 2 * ways, ways);
     g_autofree char *args = g_strconcat(FEMU_CXL_MACHINE, "-smp 2 ", dev,
                                         NULL);
     QTestState *qts = qtest_init(args);
@@ -21196,6 +21196,68 @@ static void femu_test_cxl_one_rip_loops(void *obj, void *data,
         femu_cxl_fault(qts, "test-fault", i % 2 ? 202 : 200);
     }
     qtest_quit(qts);
+}
+
+/*
+ * cylon-fault-stop: exits of one vCPU at one RIP on a page it already
+ * filled for that RIP stop the VM at that many repeats; with 0 they only
+ * warn, from 1000 repeats, also past the default bound of 100,000.
+ */
+static void femu_test_cxl_fault_stop(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    g_autofree char *log = g_strdup("cxl-fault-stop-XXXXXX");
+    g_autofree char *quoted = NULL;
+    g_autofree char *args = NULL;
+    g_autofree char *text = NULL;
+    int fd = g_mkstemp(log);
+    QTestState *qts;
+    QDict *rsp;
+    unsigned i;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    quoted = g_shell_quote(log);
+    for (i = 0; i < 2; i++) {
+        args = g_strdup_printf(FEMU_CXL_MACHINE "-smp 2 "
+            "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+            "cache-pages=2,cache-ways=1,prefetch-degree=0,"
+            "cylon-fault-stop=%u 2>%s", i ? 0 : 3, quoted);
+        qts = qtest_init(args);
+        g_clear_pointer(&args, g_free);
+        femu_cxl_decode(qts);
+        femu_cxl_set(qts, "test-map", true);
+        femu_cxl_set_u64(qts, "test-owner", 0);
+        if (!i) {
+            /* The fill, then three repeats: the third stops. */
+            femu_cxl_fault(qts, "test-fault-decode", 0);
+            femu_cxl_fault(qts, "test-fault-decode", 0);
+            femu_cxl_fault(qts, "test-fault-decode", 0);
+            rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                            "'path':'/machine/peripheral/ssd',"
+                            "'property':'test-fault-decode','value':%"
+                            PRIu64 "}}", (uint64_t)FEMU_CXL_WINDOW);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            qobject_unref(rsp);
+            g_assert_cmpuint(femu_cxl_stat(qts, "der-emul-failures"), ==, 1);
+        } else {
+            femu_cxl_set_u64(qts, "test-fault-repeats", 100100);
+            femu_cxl_fault(qts, "test-fault-decode", 0);
+            g_assert_cmpuint(femu_cxl_stat(qts, "der-emul-failures"), ==, 0);
+        }
+        qtest_quit(qts);
+        g_assert_true(g_file_get_contents(log, &text, NULL, NULL));
+        if (!i) {
+            g_assert_nonnull(strstr(text, "3 consecutive exits"));
+        } else {
+            /* At most one a second. */
+            g_assert_cmpuint(femu_cxl_count(text, "the VM does not stop"),
+                             >=, 1);
+            g_assert_null(strstr(text, "retry budget exhausted"));
+        }
+        g_clear_pointer(&text, g_free);
+    }
+    unlink(log);
 }
 
 static void femu_test_cxl_pingpong_1(void *obj, void *data,
@@ -24287,6 +24349,7 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,
                  NULL);
     qos_add_test("cxl-storm-set", "femu", femu_test_cxl_storm_set, NULL);
+    qos_add_test("cxl-fault-stop", "femu", femu_test_cxl_fault_stop, NULL);
     qos_add_test("cxl-storm-bql", "femu", femu_test_cxl_storm_bql, NULL);
     qos_add_test("cxl-dma-queue", "femu", femu_test_cxl_dma_queue, NULL);
     qos_add_test("cxl-dma-fair", "femu", femu_test_cxl_dma_fair, NULL);
