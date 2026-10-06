@@ -556,6 +556,9 @@ static int cca_prepare(CcaOp *op)
             g_clear_pointer(&cca->uncached_map, g_free);
             cca->uncached = 0;
         }
+        if (before) {
+            femu_cxl_der_unmark(&s->direct);
+        }
         return 1;
     case CCA_CTRL_QUERY:
         op->uncached = cca_uncached_count(cca, op->start, op->end);
@@ -640,6 +643,12 @@ static bool cca_exec(FemuCxlMedia *s, CcaOp *op, struct cca_ctrl_resp_s *resp)
             }
             if (!done) {
                 return false;
+            }
+            /* Unpinned sets take fills again: once per command. */
+            if (op->cmd.cmd == CCA_CTRL_UNPIN && op->acted &&
+                cca_enter(op)) {
+                femu_cxl_der_unmark(&s->direct);
+                cca_leave(op);
             }
         }
     }

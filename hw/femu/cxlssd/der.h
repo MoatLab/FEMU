@@ -9,6 +9,12 @@ typedef struct FemuCxlSsd FemuCxlSsd;
 typedef struct FemuCxlDer {
     FemuCxlSsd *dev;
     GHashTable *maps;
+    /*
+     * Cylon version 2: pages whose leaf got the emulation marker, because
+     * the caching API kept them uncached. Their leaves go back to zero when
+     * they become admissible again; see femu_cxl_der_unmark().
+     */
+    GHashTable *marked;
     uint64_t ratio;
     uint64_t ratio_end;
     /* A restore failed and was reported; cleared once it maps again. */
@@ -55,8 +61,17 @@ typedef struct FemuCxlDer {
     uint64_t fault_unprotected;
     /* Fills refused because the instruction's own pages fill the set. */
     uint64_t fault_conflicts;
-    /* Pages mapped without a cache way for an instruction KVM cannot run. */
+    /*
+     * Pages mapped without a cache way for an instruction KVM cannot run,
+     * or (version 2) for any page that cannot keep a way.
+     */
     uint64_t fault_overflows;
+    /* Of @fault_overflows, uncached pages mapped for a walk or a delivery. */
+    uint64_t fault_forced;
+    /* Version 2 exits made by an event delivery. */
+    uint64_t fault_deliveries;
+    /* Emulation markers refused by the version 2 rule (a defect if not 0). */
+    uint64_t fault_marker_refused;
     /* Fault exits that were served again under the BQL. */
     uint64_t fault_bql;
     /*
@@ -125,6 +140,7 @@ void femu_cxl_der_precheck(FemuCxlDer *der, uint64_t lpn);
 void femu_cxl_der_precheck_run(void);
 void femu_cxl_der_precheck_drop(void);
 void femu_cxl_der_clear(FemuCxlDer *der);
+void femu_cxl_der_unmark(FemuCxlDer *der);
 void femu_cxl_der_disable(FemuCxlDer *der);
 void femu_cxl_der_fallback(FemuCxlDer *der, const char *reason);
 void femu_cxl_der_destroy(FemuCxlDer *der);

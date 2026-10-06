@@ -109,10 +109,13 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `der-fault-writes` | `uint64` | Read-only: version 2 exits for a data write to a cold page; stats-reset keeps it |
 | `der-fault-fetches` | `uint64` | Read-only: version 2 exits for an instruction fetch from a cold page; stats-reset keeps it |
 | `der-fault-page-walks` | `uint64` | Read-only: version 2 exits for a guest page walk that read a cold page-table page; stats-reset keeps it |
-| `der-fault-emulated` | `uint64` | Read-only: pages handed back to KVM's emulator because FEMU could not map them (uncached range, pinned set, a fill that kept no way or whose media read failed); stats-reset keeps it |
+| `der-fault-emulated` | `uint64` | Read-only: version 2 pages handed back to KVM's emulator for a data access: only pages that the caching API keeps uncached (uncached range, every way of the set pinned); stats-reset keeps it |
 | `der-fault-unprotected` | `uint64` | Read-only: version 2 protections released early because the instruction already held 64 pages; stats-reset keeps it |
-| `der-fault-conflicts` | `uint64` | Read-only: version 2 fills refused because pages that the same instruction filled hold every way of the set; the page goes to KVM's emulator; stats-reset keeps it |
-| `der-fault-overflows` | `uint64` | Read-only: pages mapped without a cache way because the emulator cannot run an instruction whose pages do not fit in their set; stats-reset keeps it |
+| `der-fault-conflicts` | `uint64` | Read-only: fills refused because pages that the same instruction filled hold every way of the set; the page maps outside the cache (der-fault-overflows); stats-reset keeps it |
+| `der-fault-overflows` | `uint64` | Read-only: pages mapped without a cache way for one instruction: in version 2 every page that cannot keep a way, in version 1 an instruction the emulator cannot run whose pages do not fit in their set; stats-reset keeps it |
+| `der-fault-forced` | `uint64` | Read-only: of der-fault-overflows, pages that the caching API keeps uncached, mapped because a guest page walk or an event delivery touched them, which the emulator cannot serve; stats-reset keeps it |
+| `der-fault-deliveries` | `uint64` | Read-only: version 2 exits made while the CPU delivered an interrupt or exception (KVM_CYLON_FAULT_DELIVERY; host kernel candidate 3); stats-reset keeps it |
+| `der-fault-marker-refused` | `uint64` | Read-only: version 2 emulation markers that FEMU refused to write because the rule allows them only for data accesses to uncached pages; nonzero is a defect, and the exit stops the VM; stats-reset keeps it |
 | `der-revoke-flushes` | `uint64` | Read-only: TLB flushes that Cylon full revocations attempted (two, or one when KVM revoked every page first or the slot is deleted next), shared by every page a revocation takes; flushes after a KVM revocation found outside a full revocation are not counted; stats-reset keeps it |
 | `der-revoked-ahead` | `uint64` | Read-only: version 2 pages whose mapping a revocation took before their own eviction; they stay cached; stats-reset keeps it |
 | `der-ahead-remaps` | `uint64` | Read-only: of der-revoked-ahead, pages accessed and mapped again before their eviction; stats-reset keeps it |

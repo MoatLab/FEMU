@@ -1044,14 +1044,23 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
      * page that cannot stay.
      */
     if (!data && !femu_cxl_admissible(s, first)) {
-        result = MEMTX_OK;
-        goto out;
+        /*
+         * A guest page walk or an event delivery cannot be emulated: map
+         * the page outside the cache for the instruction, as an overflow.
+         */
+        if (!(flags & FEMU_CXL_FILL_FORCE) ||
+            (!s->direct.cylon && !s->test_map)) {
+            result = MEMTX_OK;
+            goto out;
+        }
+        over = true;
     }
     /*
      * A fill that could not keep its page charges and counts nothing: the
-     * caller hands the page to the emulator, which charges each access.
+     * caller maps it outside the cache (version 2) or hands it to the
+     * emulator, which charges each access.
      */
-    if (!data && s->cache.nsets &&
+    if (!over && !data && s->cache.nsets &&
         !g_hash_table_contains(s->cache.entries, &first) &&
         !femu_cxl_ratio_selected(s->direct.ratio, first) &&
         !femu_cxl_cca_uncached(&s->cca, first) &&
@@ -1218,11 +1227,12 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     } else {
         memcpy(data, (uint8_t *)s->backend.logical_space + dpa, size);
     }
-    if (first == last && (s->cache.nsets || s->direct.ratio)) {
+    if (first == last && (s->cache.nsets || s->direct.ratio || over)) {
         FemuCxlEntry *e = g_hash_table_lookup(s->cache.entries, &first);
+        /* Only a forced overflow maps an uncached page. */
         bool direct = (e || over ||
                        femu_cxl_ratio_selected(s->direct.ratio, first)) &&
-                      !femu_cxl_cca_uncached(&s->cca, first) &&
+                      (over || !femu_cxl_cca_uncached(&s->cca, first)) &&
                       cxl_map(s, generation, hpa, dpa, e);
 
         if (direct && !s->direct.cylon && e) {
@@ -1231,7 +1241,8 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
         }
         if (mapped) {
             *mapped = direct || (s->test_map && (e || over) &&
-                                 !femu_cxl_cca_uncached(&s->cca, first));
+                                 (over ||
+                                  !femu_cxl_cca_uncached(&s->cca, first)));
         }
     }
     if (s->io_log) {

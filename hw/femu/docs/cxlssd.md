@@ -657,7 +657,9 @@ and the guest repeats the access natively. One path serves every
 instruction: vector, atomic, string, page-crossing (one exit for each page),
 code, and guest page tables on the CXL node. `der-emul-v2` reports that the
 mode is on. `der-fault-reads`, `der-fault-writes`, `der-fault-fetches` and
-`der-fault-page-walks` count the exits by type. FEMU serves the exits
+`der-fault-page-walks` count the exits by type, and `der-fault-deliveries`
+the exits made while the CPU delivered an interrupt or exception (see
+"Event delivery and guest page tables" below). FEMU serves the exits
 without the BQL (see "Locking"); `der-fault-bql` counts the exits it had to
 serve under the BQL.
 
@@ -677,14 +679,16 @@ The rules:
   drops the locks, so no other access can take that way meanwhile. FEMU
   charges and counts nothing for a page it cannot keep. A prefetch holds its
   page until it is mapped, so it never maps a page another access is still
-  filling, and a fill whose read fails revokes any mapping of its page. A page that a direct
-  mapping ratio selects maps without a cache way. It writes a marker
-  to the leaf, and KVM then emulates the accesses to that page as in
-  version 1, one charged access at a time. `der-fault-emulated` counts these
-  pages. A media read that fails after the fill took its way also sends
-  the page to the emulator, after its read was charged. A full NAND never
-  does: a program that finds no page only loses its timing (see "Full
-  NAND").
+  filling, and a fill whose read fails revokes any mapping of its page. A
+  page that a direct mapping ratio selects maps without a cache way. For a
+  data access (not a guest page walk, not an event delivery) to a page that
+  the caching API keeps uncached, FEMU writes a marker to the leaf, and KVM
+  then emulates the accesses to that page as in version 1, one charged
+  access at a time. `der-fault-emulated` counts these pages. No other page
+  ever gets the marker: an admissible page that cannot keep a way maps
+  outside the cache (below), and a media read that fails stops the VM with
+  the reason. A full NAND never fails a read: a program that finds no page
+  only loses its timing (see "Full NAND").
 - KVM reports exits, not retired instructions, so FEMU cannot tell one
   execution of a RIP from the next. It records the latest 64 pages that a
   vCPU fills at one RIP (oldest released first; `der-fault-unprotected`
@@ -701,26 +705,30 @@ The rules:
   the destruction of a vCPU drop the records.
 - An instruction whose pages do not fit in their set (more pages of one set
   than ways, for example the source and destination of a `rep movsb` page
-  copy in one 1-way set) does not refill for ever: on the refault the fill
-  keeps nothing (`der-fault-conflicts`), and the page goes to KVM's
-  emulator, which completes the instruction with one charged access for
-  each emulated access, as a device that serves each access does. The
-  emulator reaches the instruction's other pages through host memory, so
-  FEMU first marks the resident pages that the instruction faulted on for
-  a write dirty. When the emulator cannot run the instruction (VEX, EVEX,
-  most SSE, code), FEMU maps the page without a cache way, charged as one
-  fill (`der-fault-overflows`), until the vCPU faults at another RIP or 16
-  newer overflow pages of that vCPU replace it.
+  copy in one 1-way set, or a data page and the guest page-table page that
+  maps it) does not refill for ever: on the refault the fill keeps nothing
+  (`der-fault-conflicts`), and FEMU maps the page without a cache way,
+  charged as one fill (`der-fault-overflows`), until the vCPU faults at
+  another RIP or 64 newer overflow pages of that vCPU replace it; the leaf
+  then goes back to zero. The same holds for a fill that kept nothing
+  because a victim stayed held after the waits. Earlier candidates gave
+  such a page to KVM's emulator; the marker then stayed in the leaf as an
+  MMIO SPTE, and an interrupt delivered through it ended the VM (see
+  below).
 - A retry of a fill that mapped nothing runs only for a page that is now
   resident, so it charges no media time again, or after such a wait, when
   the first fill kept and charged nothing. The page must still be
   admissible and decode to the same device. After 1,000 consecutive exits
   at one RIP that FEMU served with neither a mapping nor a handoff to the
-  emulator, FEMU stops the VM ("retry budget exhausted"). A handoff, and a
+  emulator, FEMU stops the VM ("retry budget exhausted"). A handoff, an
+  overflow mapping that releases no older overflow page of the RIP, and a
   refault fill that kept the vCPU's own pages, restart both this budget and
   the `cylon-fault-stop` bound, so the bound is left for refills that the
-  instruction's own fills cause. Exits are not retired instructions: both
-  are retry budgets, not proof that an instruction did not complete.
+  instruction's own fills cause. An instruction that needs more than 64
+  overflow pages releases its own pages in a cycle; FEMU stops the VM after
+  `cylon-fault-stop` such releases at one RIP. Exits are not retired
+  instructions: these are retry budgets, not proof that an instruction did
+  not complete.
 - KVM does not write the leaves itself: no fast-fault write restore, no
   asynchronous page fault, no prefetch (also not the shadow prefetch of a
   nested guest), and the changed-PTE notifier only zaps. KVM refuses the
@@ -734,6 +742,58 @@ The rules:
   cannot turn it on, because the pages of the earlier slots hold version 1
   state; FEMU warns. A later device with `auto` takes the VM's version
   without a warning. Every device reports the VM's state in `der-emul-v2`.
+
+#### Event delivery and guest page tables
+
+When the guest onlines the CXL memory in a normal zone, its kernel puts
+page tables, kernel stacks and descriptor tables there. A guest kernel with
+memory auto-online (the default of common distributions) does so without
+being asked. The CPU then touches cold pages while it delivers an
+interrupt or exception: it walks the guest page tables, reads the IDT, GDT
+and TSS, and pushes the frame on the stack. KVM refuses an EPT
+misconfiguration (an MMIO SPTE) during event delivery: the VM ends with
+"KVM internal error. Suberror: 3" (`KVM_INTERNAL_ERROR_DELIVERY_EV`). An
+EPT violation (a zero leaf) is allowed. The rule for version 2:
+
+- A dual-mode leaf is never an MMIO-class SPTE, except for a page that the
+  caching API keeps uncached after a data access to it. FEMU refuses any
+  other marker (`der-fault-marker-refused`, which must stay 0) and stops
+  the VM instead. FEMU records the marked pages; when `CACHE_ENABLE` or an
+  unpin makes one admissible again, it sets its leaf back to zero.
+- A guest page walk (`der-fault-page-walks`) or an event delivery
+  (`der-fault-deliveries`) is served only by a mapping, as a data access
+  is: fill and map, or map outside the cache on a conflict. On an uncached
+  page it maps the page outside the cache for the instruction
+  (`der-fault-forced`), charged as one read; this is a model deviation of
+  the caching API.
+- A host kernel with Cylon kernel candidate 3 exits with
+  `KVM_CYLON_FAULT_DELIVERY` instead of ending the VM when a delivery meets
+  the marker of an uncached page, and when an EPT violation by a delivery
+  or a guest page walk meets it. A misconfiguration outside delivery does
+  not report a page walk, so a walk that meets the MMIO SPTE of an uncached
+  page is still emulated: the emulator walks the page tables in host
+  memory, uncharged. An older version 2 kernel ends the VM when a delivery
+  meets such a page; with no uncached range there is no marker.
+
+Version 1 cannot follow this rule: every cold page is an MMIO SPTE, so the
+first interrupt that the CPU delivers through a cold page table, stack or
+descriptor table ends the VM. Use version 1 only with the CXL memory
+online as movable memory, which the guest kernel never uses for those:
+
+1. Disable auto-online in the guest: boot with `memhp_default_state=offline`
+   and remove any udev rule that onlines hot-added memory.
+2. Online the memory as movable: `daxctl online-memory --movable <device>`,
+   or write `online_movable` to each
+   `/sys/devices/system/memory/memoryN/state` of the CXL node.
+
+FEMU warns once when a `der=cylon` device installs its slot without
+version 2; the configurations below never install one and get no warning.
+
+The same applies wherever the CXL memory is served without a direct
+mapping, because KVM then serves every access to it as MMIO: `der=off`,
+the cold pages of `der=memslot`, and `der=cylon` with `cache-pages=0` and
+no direct ratio, whose slot is never installed. Online the memory as
+movable in these configurations too.
 
 #### Batched revocation
 
@@ -782,13 +842,13 @@ each.
 
 Limits of version 2:
 
-- Pages that must stay unmapped are still served by KVM emulation: pages
-  in a caching API uncached range, pages in a set whose ways are all pinned,
-  and misses with no victim. An instruction that the emulator cannot run
-  (VEX, EVEX, most SSE with a memory operand, code) stops the VM on such a
-  page, with the report above. This applies to those pages only.
-  `der-fault-emulated` counts the pages given to the emulator, and
-  `der-emul-failures` counts the stops.
+- Data accesses to pages that the caching API keeps uncached (an uncached
+  range, or a set whose ways are all pinned) are still served by KVM
+  emulation. An instruction that the emulator cannot run (VEX, EVEX, most
+  SSE with a memory operand, code) stops the VM on such a page, with the
+  report above. This applies to those pages only. `der-fault-emulated`
+  counts the pages given to the emulator, and `der-emul-failures` counts
+  the stops. A walk or a delivery maps the page instead (above).
 - KVM fails the faults of a second MMU root role also while an old root of
   another role is being torn down. Keep one root role: the same CPUID on
   every vCPU, and no SMM.
@@ -799,12 +859,15 @@ Limits of version 2:
 - An overflow page (`der-fault-overflows`) is a model deviation: it is
   mapped without a cache way, so writes through it are not charged and
   accesses of other vCPUs to it are not counted until the vCPU faults at
-  another RIP. A vCPU that then stays idle keeps it mapped. Cache disable,
+  another RIP. Version 2 uses it for every conflict, where earlier
+  candidates emulated with one charged access each, so a workload with
+  many conflicts charges fewer accesses than before. A vCPU that then stays idle keeps it mapped. Cache disable,
   invalidation and linked NVMe writes unmap it.
-- Emulated instructions reach their other pages through host memory, as in
-  version 1: reads and writes there are not charged. FEMU marks pages that
-  took a write fault dirty before a conflict handoff; other cases (for
-  example a page written only by the emulator) stay unmodeled.
+- Emulated instructions (uncached pages only) reach their other pages
+  through host memory, as in version 1: reads and writes there are not
+  charged. FEMU marks pages that took a write fault dirty before a
+  handoff; other cases (for example a page written only by the emulator)
+  stay unmodeled.
 - Protection from other vCPUs is time-bound, not tied to retirement. If a
   vCPU does not run its instruction again within 1 ms of the fill (for
   example, the host preempts its thread), another vCPU's fill to the same

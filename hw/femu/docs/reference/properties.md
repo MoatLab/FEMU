@@ -275,7 +275,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 28 properties of its own, 10 inherited from `cxl-type3` and 75 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 28 properties of its own, 10 inherited from `cxl-type3` and 78 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 
@@ -352,7 +352,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
 - `femu`: `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-stream-test`
-- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-map`, `test-media-disabled`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-unprotect`
+- `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-map`, `test-media-disabled`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-unprotect`
 
 ## Environment variables
 

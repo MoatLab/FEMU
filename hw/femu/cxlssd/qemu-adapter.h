@@ -391,6 +391,8 @@ MemTxResult femu_cxl_access_nowait(FemuCxlMedia *s, uint64_t dpa,
 /* femu_cxl_fill() flags. */
 #define FEMU_CXL_FILL_KEEP_OWN 1
 #define FEMU_CXL_FILL_OVERFLOW 2
+/* With OVERFLOW, also map a page that the caching API keeps uncached. */
+#define FEMU_CXL_FILL_FORCE 4
 MemTxResult femu_cxl_fill(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
                           bool *mapped, unsigned flags);
 bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn);

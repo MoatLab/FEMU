@@ -21234,10 +21234,12 @@ static void femu_cxl_fault(QTestState *qts, const char *kind, uint64_t page)
  * set (the even pages; two sets), faulted in turn at one RIP, as a rep movsb
  * page copy whose source and destination share a 1-way set does, after many
  * exits at that RIP. A page that the vCPU faults on again must not refill
- * and evict another page of the instruction: it goes to the emulator, which
- * completes the instruction. Before the fix the pages evicted each other on
- * every exit, until 1,000 refills at one RIP (100,000 on a VM) stopped it.
- * The rounds run past both progress budgets (1,000 exits).
+ * and evict another page of the instruction: it maps outside the cache for
+ * the instruction, and never goes to the emulator, whose MMIO entry an
+ * event delivery or a guest page walk could not pass. Before the fix the
+ * pages evicted each other on every exit, until 1,000 refills at one RIP
+ * (100,000 on a VM) stopped it. The rounds run past both progress budgets
+ * (1,000 exits).
  */
 static void femu_cxl_pingpong(unsigned ways)
 {
@@ -21255,8 +21257,129 @@ static void femu_cxl_pingpong(unsigned ways)
     }
     g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-conflicts"), >=,
                      1100 / (ways + 1));
-    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), >=,
+                     femu_cxl_stat(qts, "der-fault-conflicts"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-emulated"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-marker-refused"), ==, 0);
     qtest_quit(qts);
+}
+
+/*
+ * The defect that ended a VM on d760: a guest page-table page and the data
+ * page that the instruction writes share a 1-way set. The walk's refault
+ * found the set held by the instruction's own page, and the conflict
+ * fallback marked the page-table page for emulation; the marker became an
+ * MMIO SPTE, and the next timer interrupt walked it: KVM refuses an EPT
+ * misconfiguration during event delivery. The walk, an event delivery, and
+ * a data access must each map outside the cache, never mark.
+ */
+static void femu_test_cxl_walk_conflict(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const char *const kinds[] = {
+        "test-fault-walk", "test-fault-delivery", "test-fault",
+    };
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(kinds); i++) {
+        QTestState *qts = femu_cxl_fault_init(1);
+
+        /* Page 2: the page table; page 0: the instruction's data page. */
+        femu_cxl_fault(qts, kinds[i], 2);
+        femu_cxl_fault(qts, "test-fault", 0);
+        femu_cxl_fault(qts, kinds[i], 2);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-conflicts"), ==, 1);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 1);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-emulated"), ==, 0);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-forced"), ==, 0);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-marker-refused"),
+                         ==, 0);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-page-walks"), ==,
+                         i == 0 ? 2 : 0);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-deliveries"), ==,
+                         i == 1 ? 2 : 0);
+        /* The data page stays resident: a hit. */
+        femu_cxl_fault(qts, "test-fault", 0);
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), ==, 1);
+        qtest_quit(qts);
+    }
+}
+
+/*
+ * An instruction at one RIP that needs more overflow pages than a vCPU
+ * keeps (64) releases its own pages in a cycle: each mapping is served,
+ * but the instruction never completes, and cylon-fault-stop (1,000 here)
+ * must stop it. A cycle that fits stays mapped on a VM; here its refaults
+ * find their pages still held and never stop.
+ */
+static void femu_test_cxl_overflow_cycle(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    static const unsigned sizes[] = { 60, 70 };
+    unsigned k;
+
+    for (k = 0; k < ARRAY_SIZE(sizes); k++) {
+        QTestState *qts = femu_cxl_fault_init(1);
+        bool stopped = false;
+        unsigned round;
+        unsigned i;
+
+        for (round = 0; round < 40 && !stopped; round++) {
+            for (i = 0; i < sizes[k] && !stopped; i++) {
+                QDict *rsp = qtest_qmp(qts,
+                    "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd',"
+                    "'property':'test-fault','value':%" PRIu64 "}}",
+                    (uint64_t)FEMU_CXL_WINDOW + 2 * i * 4096);
+
+                stopped = qdict_haskey(rsp, "error");
+                qobject_unref(rsp);
+            }
+        }
+        g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-emulated"), ==, 0);
+        if (k) {
+            g_assert_true(stopped);
+            g_assert_cmpuint(femu_cxl_stat(qts, "der-fault-overflows"), >,
+                             64);
+        } else {
+            g_assert_false(stopped);
+        }
+        qtest_quit(qts);
+    }
+}
+
+/*
+ * Version 2 marks for emulation only a data access to a page that the
+ * caching API keeps uncached. A guest page walk or an event delivery on
+ * such a page maps it outside the cache for the instruction (der-fault-
+ * forced), charged as one read; nothing else is ever marked.
+ */
+static void femu_test_cxl_uncached_walk(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    FemuCca c;
+    uint64_t reads;
+
+    femu_cca_start(&c, "-smp 2 ", "cache-pages=4,cache-ways=1,"
+                   "cache-policy=lifo,prefetch-degree=0,"
+                   "cylon-fault-stop=1000");
+    femu_cxl_set(c.qts, "test-map", true);
+    femu_cxl_set_u64(c.qts, "test-owner", 0);
+    g_assert_cmpint(femu_cca_cmd(&c, CCA_CTRL_CACHE_DISABLE, 0, 0, 3, NULL),
+                    ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cca-uncached"), ==, 3);
+    femu_cxl_fault(c.qts, "test-fault", 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-fault-emulated"), ==, 1);
+    reads = femu_cxl_stat(c.qts, "media-reads");
+    femu_cxl_fault(c.qts, "test-fault-walk", 1);
+    femu_cxl_fault(c.qts, "test-fault-delivery", 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-fault-forced"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-fault-overflows"), ==, 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "media-reads"), ==, reads + 2);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-fault-emulated"), ==, 1);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "der-fault-marker-refused"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(c.qts, "cache-entries"), ==, 0);
+    femu_cca_quit(&c);
 }
 
 /*
@@ -24479,6 +24602,12 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-pingpong-2", "femu", femu_test_cxl_pingpong_2, NULL);
     qos_add_test("cxl-pingpong-4", "femu", femu_test_cxl_pingpong_4, NULL);
     qos_add_test("cxl-overflow", "femu", femu_test_cxl_overflow, NULL);
+    qos_add_test("cxl-walk-conflict", "femu", femu_test_cxl_walk_conflict,
+                 NULL);
+    qos_add_test("cxl-uncached-walk", "femu", femu_test_cxl_uncached_walk,
+                 NULL);
+    qos_add_test("cxl-overflow-cycle", "femu", femu_test_cxl_overflow_cycle,
+                 NULL);
     qos_add_test("cxl-one-rip-loops", "femu", femu_test_cxl_one_rip_loops,
                  NULL);
     qos_add_test("cxl-prefetch-race", "femu", femu_test_cxl_prefetch_race,

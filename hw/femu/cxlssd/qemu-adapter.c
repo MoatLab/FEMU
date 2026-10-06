@@ -112,6 +112,7 @@ static bool cylon_version_fixed;
 static bool femu_cylon_map(FemuCxlDer *der, CXLFixedWindow *fw,
                            uint64_t hpa, uint64_t dpa);
 static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn);
+static void femu_cylon_unmark(FemuCxlDer *der);
 static unsigned femu_cylon_batch(FemuCxlDer *der, uint64_t lpn);
 static void femu_cylon_remove_batch(FemuCxlDer *der, uint64_t lpn,
                                     const uint64_t *ahead, unsigned n);
@@ -2024,8 +2025,8 @@ static void adapter_test_lock_mutex_set(Object *obj, bool value,
 }
 
 static bool cylon_test_fault_fill(uint64_t gpa, Error **errp);
-static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
-                             Error **errp);
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa,
+                             const char *kind, Error **errp);
 static void cylon_storm_start(FemuCxlSsd *dev, const char *spec,
                               Error **errp);
 static void cylon_storm_wait(void);
@@ -2090,9 +2091,7 @@ static void adapter_test_fault(Object *obj, Visitor *v, const char *name,
 
         dev->test_fault_repeats = 0;
         object_ref(obj);
-        while (n-- && cylon_test_fault(dev, gpa,
-                                       !strcmp(name, "test-fault-decode"),
-                                       errp)) {
+        while (n-- && cylon_test_fault(dev, gpa, name, errp)) {
             continue;
         }
         object_unref(obj);
@@ -2234,6 +2233,10 @@ static void cxl_init(Object *obj)
                             adapter_test_fault, NULL, NULL);
         object_property_add(obj, "test-fault-decode", "uint64", NULL,
                             adapter_test_fault, NULL, NULL);
+        object_property_add(obj, "test-fault-walk", "uint64", NULL,
+                            adapter_test_fault, NULL, NULL);
+        object_property_add(obj, "test-fault-delivery", "uint64", NULL,
+                            adapter_test_fault, NULL, NULL);
         object_property_add(obj, "test-fault-repeats", "uint64", NULL,
                             adapter_test_fault_repeats, NULL, NULL);
         object_property_add_bool(obj, "test-map", NULL, adapter_test_map);
@@ -2331,6 +2334,10 @@ static void cxl_init(Object *obj)
     cxl_add_counter(obj, "der-fault-unprotected", &s->direct.fault_unprotected);
     cxl_add_counter(obj, "der-fault-conflicts", &s->direct.fault_conflicts);
     cxl_add_counter(obj, "der-fault-overflows", &s->direct.fault_overflows);
+    cxl_add_counter(obj, "der-fault-forced", &s->direct.fault_forced);
+    cxl_add_counter(obj, "der-fault-deliveries", &s->direct.fault_deliveries);
+    cxl_add_counter(obj, "der-fault-marker-refused",
+                    &s->direct.fault_marker_refused);
     cxl_add_counter(obj, "der-revoke-flushes", &s->direct.revoke_flushes);
     cxl_add_counter(obj, "der-revoked-ahead", &s->direct.revoked_ahead);
     cxl_add_counter(obj, "der-ahead-remaps", &s->direct.ahead_remaps);
@@ -3118,11 +3125,25 @@ void femu_cxl_der_disable(FemuCxlDer *der)
     femu_cylon_destroy(der);
 }
 
+/*
+ * A cache enable or an unpin made pages admissible again. Give their marked
+ * leaves back the cold state, so a guest page walk or an event delivery
+ * exits to FEMU instead of meeting an MMIO SPTE. CXL lock.
+ */
+void femu_cxl_der_unmark(FemuCxlDer *der)
+{
+    assert(femu_cxl_locked());
+    if (der->marked && g_hash_table_size(der->marked)) {
+        femu_cylon_unmark(der);
+    }
+}
+
 void femu_cxl_der_destroy(FemuCxlDer *der)
 {
     femu_cxl_der_clear(der);
     femu_cylon_destroy(der);
     der->available = false;
+    g_clear_pointer(&der->marked, g_hash_table_destroy);
     g_hash_table_destroy(der->maps);
     g_ptr_array_free(der->windows, true);
 }
@@ -3472,7 +3493,16 @@ fail:
 #define CYLON_FAULT_ACCESS (1U << 2)
 #define CYLON_FAULT_READ (1U << 3)
 #define CYLON_FAULT_WRITE (1U << 4)
+#define CYLON_FAULT_FINAL (1U << 5)
 #define CYLON_FAULT_PAGE_WALK (1U << 6)
+/*
+ * Version 2, kernel candidate 3: the access was part of an event delivery
+ * (IDT, GDT, TSS, stack, or a page walk for them). KVM injects the event
+ * again; the page must be mapped, never emulated.
+ */
+#define CYLON_FAULT_DELIVERY (1U << 8)
+/* Only a mapping serves these: the emulator runs RIP's instruction. */
+#define CYLON_FAULT_MAP_ONLY (CYLON_FAULT_PAGE_WALK | CYLON_FAULT_DELIVERY)
 #define CYLON_FAULT_EXIT_ON 1
 #define CYLON_FAULT_EXIT_V2 2
 
@@ -3532,11 +3562,12 @@ QEMU_BUILD_BUG_ON(sizeof(CylonFault) > sizeof(((struct kvm_run *)0)->padding));
  */
 #define CYLON_PROTECT_PAGES 64
 /*
- * Pages mapped without a cache way for one instruction that the emulator
- * cannot run and whose pages do not fit in their set; see
- * cylon_fault_overflow().
+ * Pages mapped without a cache way for one instruction whose pages do not
+ * fit in their set; see cylon_fault_overflow(). As many as the protected
+ * pages: an event delivery adds the IDT, GDT, TSS and stack pages and their
+ * page walks to the footprint of the instruction it interrupts.
  */
-#define CYLON_OVERFLOW_PAGES 16
+#define CYLON_OVERFLOW_PAGES 64
 
 typedef struct CylonProtect {
     FemuCxlSsd *dev;
@@ -3569,6 +3600,10 @@ typedef struct CylonFaultTrack {
     /* Pages mapped outside the cache for the instruction at @rip. */
     CylonProtect overflow[CYLON_OVERFLOW_PAGES];
     unsigned noverflow;
+    /* The latest overflow mapping released an older one of @rip. */
+    bool overflow_replaced;
+    /* Overflow mappings at @rip that released an older one. */
+    uint64_t overflow_cycles;
 } CylonFaultTrack;
 
 /* Sized once for every possible vCPU, so entries never move. */
@@ -3648,6 +3683,7 @@ static void cylon_fault_track_clear(CylonFaultTrack *t)
     t->rip = 0;
     t->repeats = 0;
     t->unserved = 0;
+    t->overflow_cycles = 0;
     t->refault = false;
     t->nrecent = 0;
 }
@@ -3953,16 +3989,30 @@ static uint64_t *cylon_fault_sptep(FemuCxlSsd *dev, uint64_t gpa)
 }
 
 /*
- * Version 2: hand a page FEMU cannot map back to KVM's emulator for its next
- * accesses. Only a cold (zero) leaf changes; any other value means another
- * vCPU or a KVM update got there first, and the guest simply retries.
+ * Version 2: hand a page that the caching API keeps uncached back to KVM's
+ * emulator for its next accesses. Only a cold (zero) leaf changes; any other
+ * value means another vCPU or a KVM update got there first, and the guest
+ * simply retries.
+ *
+ * The marker becomes an MMIO SPTE, which an event delivery or a guest page
+ * walk cannot pass. So no other page ever gets it: an admissible page is
+ * mapped (outside the cache if need be), and a walk or a delivery maps even
+ * an uncached page. Refused here too, so a new caller cannot break the rule.
  */
-static bool cylon_fault_emulate(FemuCxlSsd *dev, uint64_t gpa,
+static bool cylon_fault_emulate(FemuCxlSsd *dev, const CylonFault *f,
                                 bool *installed)
 {
+    uint64_t gpa = f->gpa;
     uint64_t *sptep = cylon_fault_sptep(dev, gpa);
+    uint64_t dpa;
 
     *installed = false;
+    if ((f->flags & CYLON_FAULT_MAP_ONLY) ||
+        !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa) ||
+        femu_cxl_admissible(&dev->media, dpa / 4096)) {
+        dev->media.direct.fault_marker_refused++;
+        return false;
+    }
     if (!sptep && dev->media.test_map) {
         FemuCxlWindow *w = cylon_fault_window(gpa);
         uint64_t data;
@@ -3980,7 +4030,15 @@ static bool cylon_fault_emulate(FemuCxlSsd *dev, uint64_t gpa,
         return false;
     }
     if (cylon_spte_install(sptep, 0, CYLON_EMULATE_SPTE)) {
-        dev->media.direct.fault_emulated++;
+        FemuCxlDer *der = &dev->media.direct;
+
+        if (!der->marked) {
+            der->marked = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                                g_free, NULL);
+        }
+        g_hash_table_add(der->marked,
+                         g_memdup2(&(uint64_t){dpa / 4096}, sizeof(uint64_t)));
+        der->fault_emulated++;
         *installed = true;
     }
     return true;
@@ -4018,7 +4076,8 @@ static bool cylon_fault_fill(uint64_t gpa, unsigned flags,
         if (!w || !now || now != dev || femu_cxl_bql_needed() ||
             !adapter_translate(CXL_TYPE3(now), gpa, 1, &dpa) ||
             (i && (dpa / 4096 != lpn ||
-                   !femu_cxl_admissible(&now->media, lpn) ||
+                   (!(flags & FEMU_CXL_FILL_FORCE) &&
+                    !femu_cxl_admissible(&now->media, lpn)) ||
                    (!ready && !g_hash_table_contains(now->media.cache.entries,
                                                      &lpn))))) {
             break;
@@ -4084,33 +4143,59 @@ static void cylon_fault_conflict_dirty(CylonFaultTrack *t, FemuCxlSsd *dev)
     }
 }
 
+/* What cylon_fault_overflow() may map outside the cache. */
+typedef enum CylonOverflow {
+    /* A refault whose instruction's own pages fill the set. */
+    CYLON_OVERFLOW_CONFLICT,
+    /* Any admissible page that a fill could not keep (version 2). */
+    CYLON_OVERFLOW_ADMISSIBLE,
+    /* Also a page that the caching API keeps uncached (walk, delivery). */
+    CYLON_OVERFLOW_FORCE,
+} CylonOverflow;
+
 /*
- * The emulator cannot run an instruction (undecodable, or a code fetch)
- * whose page cannot keep a way because the instruction's own pages fill its
- * set. Map the page without a cache way for this instruction, charged as
- * one fill, until the vCPU faults at another RIP or 16 newer overflow pages
- * replace it. A model deviation, counted in der-fault-overflows: writes
- * through that mapping are not charged, and other vCPUs reach the page
- * uncounted meanwhile. The alternative, refilling into the set, evicts a
- * page the instruction needs and never ends.
+ * Map a page that cannot keep a cache way without one, for this
+ * instruction, charged as one fill, until the vCPU faults at another RIP or
+ * 64 newer overflow pages replace it; the leaf then goes back to zero. Used
+ * when the emulator cannot run the instruction (undecodable, a code fetch),
+ * and in version 2 for every page that cannot stay, because the emulation
+ * marker is an MMIO SPTE that a later event delivery or guest page walk
+ * cannot pass. A model deviation, counted in der-fault-overflows (and
+ * der-fault-forced for an uncached page): writes through that mapping are
+ * not charged, and other vCPUs reach the page uncounted meanwhile. The
+ * alternative, refilling into the set, evicts a page the instruction needs
+ * and never ends.
  */
 static bool cylon_fault_overflow(CylonFaultTrack *t, uint64_t gpa,
-                                 MemTxResult *result)
+                                 CylonOverflow mode, MemTxResult *result)
 {
     FemuCxlSsd *dev = cylon_fault_device(gpa);
+    bool admissible;
+    bool conflict;
     uint64_t dpa;
     uint64_t lpn;
     unsigned i;
 
-    if (!t->refault || !dev ||
-        !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa) ||
-        !femu_cxl_admissible(&dev->media, dpa / 4096) ||
-        !femu_cxl_fill_conflict(&dev->media, dpa / 4096)) {
+    if (!dev || !adapter_translate(CXL_TYPE3(dev), gpa, 1, &dpa)) {
         return false;
     }
-    dev->media.direct.fault_conflicts++;
+    admissible = femu_cxl_admissible(&dev->media, dpa / 4096);
+    conflict = t->refault && admissible &&
+               femu_cxl_fill_conflict(&dev->media, dpa / 4096);
+    if ((mode == CYLON_OVERFLOW_CONFLICT && !conflict) ||
+        (mode != CYLON_OVERFLOW_FORCE && !admissible)) {
+        return false;
+    }
+    dev->media.direct.fault_conflicts += conflict;
+    t->overflow_replaced = false;
+    /*
+     * FORCE follows the mode, not the check above: a cache disable or pin
+     * that the fill waits behind can still make the page inadmissible.
+     */
     if (!cylon_fault_fill(gpa, FEMU_CXL_FILL_KEEP_OWN |
-                          FEMU_CXL_FILL_OVERFLOW, result)) {
+                          FEMU_CXL_FILL_OVERFLOW |
+                          (mode == CYLON_OVERFLOW_FORCE ?
+                           FEMU_CXL_FILL_FORCE : 0), result)) {
         return false;
     }
     dev = cylon_fault_device(gpa);
@@ -4123,6 +4208,8 @@ static bool cylon_fault_overflow(CylonFaultTrack *t, uint64_t gpa,
         return true;
     }
     dev->media.direct.fault_overflows++;
+    dev->media.direct.fault_forced +=
+        !femu_cxl_admissible(&dev->media, lpn);
     for (i = 0; i < t->noverflow; i++) {
         if (t->overflow[i].dev == dev && t->overflow[i].lpn == lpn) {
             return true;
@@ -4132,6 +4219,7 @@ static bool cylon_fault_overflow(CylonFaultTrack *t, uint64_t gpa,
         cylon_overflow_release(&t->overflow[0]);
         memmove(&t->overflow[0], &t->overflow[1],
                 --t->noverflow * sizeof(t->overflow[0]));
+        t->overflow_replaced = true;
     }
     femu_cxl_overflow_add(&dev->media, lpn);
     object_ref(OBJECT(dev));
@@ -4162,7 +4250,8 @@ static bool cylon_fault_decode(CylonFaultTrack *t, const CylonFault *f,
                               t->refault ? FEMU_CXL_FILL_KEEP_OWN : 0,
                               result);
     if (!mapped && !femu_cxl_bql_needed()) {
-        mapped = cylon_fault_overflow(t, f->gpa, result);
+        mapped = cylon_fault_overflow(t, f->gpa, CYLON_OVERFLOW_CONFLICT,
+                                      result);
     }
     dev = cylon_fault_device(f->gpa);
     if (!mapped || !dev || femu_cxl_bql_needed()) {
@@ -4184,22 +4273,33 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
                                const char **why);
 
 /*
- * A fault exit of vCPU test-owner at a fixed RIP, as KVM sends it: a
- * version 2 read, or with @decode an instruction the emulator cannot decode.
+ * A fault exit of vCPU test-owner at a fixed RIP, as KVM sends it for the
+ * property @kind: test-fault a version 2 read, test-fault-walk the same by
+ * the guest page walk, test-fault-delivery a misconfiguration during event
+ * delivery (no access type), test-fault-decode an instruction the emulator
+ * cannot decode (version 1).
  */
-static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, const char *kind,
                              Error **errp)
 {
     CPUState *cpu = qemu_get_cpu(MAX(dev->media.test_owner, 0));
+    bool decode = !strcmp(kind, "test-fault-decode");
     CylonFault f = {
         .gpa = gpa,
         .rip = dev->media.test_rip,
-        .flags = decode ? 0 : CYLON_FAULT_ACCESS | CYLON_FAULT_READ,
+        .flags = decode ? 0 : CYLON_FAULT_ACCESS,
     };
     MemTxResult result;
     const char *why = NULL;
     bool ok = false;
 
+    if (!strcmp(kind, "test-fault-delivery")) {
+        f.flags |= CYLON_FAULT_DELIVERY;
+    } else if (!strcmp(kind, "test-fault-walk")) {
+        f.flags |= CYLON_FAULT_READ | CYLON_FAULT_PAGE_WALK;
+    } else if (!decode) {
+        f.flags |= CYLON_FAULT_READ | CYLON_FAULT_FINAL;
+    }
     if (!cpu) {
         error_setg(errp, "no vCPU %d", dev->media.test_owner);
         return false;
@@ -4222,11 +4322,44 @@ static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
 }
 
 /*
+ * A page mapped outside the cache for a version 2 exit: a served exit. It
+ * restarts the repeat bound only while the instruction's overflow pages fit.
+ * One that needs more than CYLON_OVERFLOW_PAGES releases its own pages in a
+ * cycle, which mapping one more page does not end, and other fills at the
+ * RIP can restart the repeat bound; so such mappings have a bound of their
+ * own, cylon-fault-stop of them at one RIP. False: stop the VM.
+ */
+static bool cylon_fault_overflowed(CylonFaultTrack *t, const CylonFault *f)
+{
+    FemuCxlSsd *dev = cylon_fault_device(f->gpa);
+    uint32_t stop = dev ? dev->media.cylon_fault_stop : CYLON_FAULT_STOP;
+
+    if (dev) {
+        dev->media.direct.emul_fills++;
+        dev->media.direct.emul_fetch_fills += !!(f->flags & CYLON_FAULT_FETCH);
+    }
+    t->unserved = 0;
+    if (!t->overflow_replaced) {
+        t->repeats = 0;
+        return true;
+    }
+    return !stop || ++t->overflow_cycles < stop;
+}
+
+#define CYLON_OVERFLOW_CYCLE "retry budget exhausted: the instruction at " \
+    "this RIP needs more pages outside the cache than FEMU keeps, and they " \
+    "replace each other (cylon-fault-stop)"
+
+
+/*
  * Version 2 exit: the type is exact and nothing was emulated. Map an
  * admissible page (fill as a read miss; a store through the mapping sets the
- * EPT dirty bit) and protect it for this instruction. A page that cannot be
- * mapped goes back to KVM's emulator (version 1 path). Returns false to stop
- * the VM, with @why set.
+ * EPT dirty bit) and protect it for this instruction. A page that cannot
+ * keep a cache way maps outside the cache. Only a data access to a page
+ * that the caching API keeps uncached goes back to KVM's emulator (version 1
+ * path); a guest page walk or an event delivery maps even that page. So a
+ * leaf of a page that may hold a guest page table, IDT, GDT, TSS or stack is
+ * never an MMIO SPTE. Returns false to stop the VM, with @why set.
  */
 static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
                                const char **why)
@@ -4251,10 +4384,24 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
         dev->media.direct.fault_writes += !!(f->flags & CYLON_FAULT_WRITE);
         dev->media.direct.fault_fetches += !!(f->flags & CYLON_FAULT_FETCH);
         dev->media.direct.fault_walks += !!(f->flags & CYLON_FAULT_PAGE_WALK);
+        dev->media.direct.fault_deliveries +=
+            !!(f->flags & CYLON_FAULT_DELIVERY);
     }
     /* Decide before charging media time: emulation charges each access. */
     if (!femu_cxl_admissible(&dev->media, dpa / 4096)) {
-        if (cylon_fault_emulate(dev, f->gpa, &installed)) {
+        if (f->flags & CYLON_FAULT_MAP_ONLY) {
+            if (cylon_fault_overflow(t, f->gpa, CYLON_OVERFLOW_FORCE,
+                                     &result)) {
+                if (!cylon_fault_overflowed(t, f)) {
+                    *why = CYLON_OVERFLOW_CYCLE;
+                    return false;
+                }
+                return true;
+            }
+            *why = cylon_fault_reason(f->gpa, result);
+            return false;
+        }
+        if (cylon_fault_emulate(dev, f, &installed)) {
             return true;
         }
         *why = cylon_fault_reason(f->gpa, MEMTX_ERROR);
@@ -4292,22 +4439,42 @@ static bool cylon_fault_access(CylonFaultTrack *t, const CylonFault *f,
         }
         return true;
     }
-    /*
-     * The instruction's own pages fill the set (more pages of one set than
-     * ways): the emulator completes it, one charged access at a time, as a
-     * device that serves each access does. Refilling here would evict a page
-     * the instruction still needs, for ever.
-     */
-    if (t->refault && femu_cxl_fill_conflict(&dev->media, dpa / 4096)) {
-        dev->media.direct.fault_conflicts++;
-        cylon_fault_conflict_dirty(t, dev);
-    }
     /* A frozen or newly present leaf: KVM or another vCPU acted; retry. */
     sptep = cylon_fault_sptep(dev, f->gpa);
     old = sptep ? qatomic_read(sptep) : 0;
     if (old != CYLON_REMOVED_SPTE && !(old & CYLON_MMU_PRESENT)) {
-        /* Also a held victim that showed in the fill, or a failed read. */
-        if (!cylon_fault_emulate(dev, f->gpa, &installed)) {
+        /*
+         * The fill kept nothing: the instruction's own pages fill the set
+         * (more pages of one set than ways; der-fault-conflicts), or a held
+         * victim outlasted the waits. Map the page outside the cache for
+         * the instruction. Refilling here would evict a page the
+         * instruction still needs, for ever.
+         */
+        if (cylon_fault_overflow(t, f->gpa,
+                                 f->flags & CYLON_FAULT_MAP_ONLY ?
+                                 CYLON_OVERFLOW_FORCE :
+                                 CYLON_OVERFLOW_ADMISSIBLE, &result)) {
+            if (!cylon_fault_overflowed(t, f)) {
+                *why = CYLON_OVERFLOW_CYCLE;
+                return false;
+            }
+            return true;
+        }
+        if (femu_cxl_bql_needed()) {
+            return false;
+        }
+        dev = cylon_fault_device(f->gpa);
+        /*
+         * Only a cache disable or pin during the fill makes a data access
+         * end on the emulator; cylon_fault_emulate() refuses the rest, and
+         * a failed media read stops the VM.
+         */
+        if (!dev) {
+            *why = cylon_fault_reason(f->gpa, result);
+            return false;
+        }
+        cylon_fault_conflict_dirty(t, dev);
+        if (!cylon_fault_emulate(dev, f, &installed)) {
             *why = cylon_fault_reason(f->gpa, result);
             return false;
         }
@@ -4715,6 +4882,26 @@ static const char *cylon_storm_check(FemuCxlSsd *dev)
  * also fixes the version, even with exits off (cylon_fault_version()); a
  * later device cannot change it.
  */
+/*
+ * Without version 2 every cold page is an MMIO SPTE. KVM ends the VM when an
+ * event delivery meets one, so a guest page table, kernel stack or
+ * descriptor table on a cold page is fatal. A guest kernel puts them there
+ * when it onlines the CXL memory in a normal zone, which memory auto-online
+ * does by default.
+ */
+static void cylon_warn_v1(void)
+{
+    if (!cylon_v2) {
+        warn_report_once("femu-cxl-ssd: der=cylon runs without version 2 of "
+                         "the fault exit: cold pages are MMIO entries, and "
+                         "the VM stops with a KVM internal error when the "
+                         "CPU delivers an interrupt through a guest page "
+                         "table, stack or descriptor table on one. Online "
+                         "the CXL memory as movable in the guest (no "
+                         "auto-online; daxctl online-memory --movable)");
+    }
+}
+
 static void cylon_fault_exit_enable(FemuCxlDer *der)
 {
     static bool enabled;
@@ -4722,6 +4909,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
     bool want_v2 = cylon_fault_version(&der->dev->media, version);
 
     if (!der->dev->media.cylon_emul_exit) {
+        cylon_warn_v1();
         return;
     }
     if (!enabled) {
@@ -4741,6 +4929,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
                              "KVM_CAP_CYLON_FAULT_EXIT; an instruction KVM "
                              "cannot decode on an unmapped Cylon page fails "
                              "in the guest");
+            cylon_warn_v1();
             return;
         }
         cylon_fault_tracks_init();
@@ -4749,6 +4938,7 @@ static void cylon_fault_exit_enable(FemuCxlDer *der)
         cylon_v2 = want_v2;
         enabled = true;
     }
+    cylon_warn_v1();
     der->emul_exit = true;
 }
 
@@ -5314,6 +5504,43 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
     }
 }
 
+static void femu_cylon_unmark(FemuCxlDer *der)
+{
+    FemuCylon *c = der->fast;
+    GHashTableIter it;
+    gpointer key;
+
+    g_hash_table_iter_init(&it, der->marked);
+    while (g_hash_table_iter_next(&it, &key, NULL)) {
+        uint64_t lpn = *(uint64_t *)key;
+        uint64_t *sptep = c ? cylon_sptep(c, lpn) : NULL;
+        uint64_t old;
+
+        if (sptep && !femu_cxl_admissible(&der->dev->media, lpn)) {
+            continue;
+        }
+        old = sptep ? qatomic_read(sptep) : 0;
+        /*
+         * The marker, or the MMIO SPTE KVM made of it, to zero: both are
+         * not present, so no TLB holds the page and no flush is needed.
+         * KVM can turn the marker into its MMIO SPTE meanwhile: read again
+         * until the exchange lands or the value is no longer the marker's.
+         * A vCPU's software MMIO cache may still name the page; it only
+         * sends an emulated access through FEMU's MMIO path, which serves
+         * it.
+         */
+        while (old == CYLON_EMULATE_SPTE ||
+               ((old & 7) == CYLON_MMIO_VALUE &&
+                !(old & CYLON_MMU_PRESENT))) {
+            if (cylon_spte_install(sptep, old, 0)) {
+                break;
+            }
+            old = qatomic_read(sptep);
+        }
+        g_hash_table_iter_remove(&it);
+    }
+}
+
 /*
  * Version 2 maps every filled page and the guest then uses it, so A is set
  * at nearly every eviction and each revocation flushes the VM twice. Those
@@ -5490,6 +5717,10 @@ static void femu_cylon_remove(FemuCxlDer *der, uint64_t lpn)
 {
 }
 
+static void femu_cylon_unmark(FemuCxlDer *der)
+{
+}
+
 static unsigned femu_cylon_batch(FemuCxlDer *der, uint64_t lpn)
 {
     return 0;
@@ -5534,8 +5765,8 @@ static bool cylon_test_fault_fill(uint64_t gpa, Error **errp)
     return false;
 }
 
-static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa, bool decode,
-                             Error **errp)
+static bool cylon_test_fault(FemuCxlSsd *dev, uint64_t gpa,
+                             const char *kind, Error **errp)
 {
     error_setg(errp, "fault exits need KVM support");
     return false;
