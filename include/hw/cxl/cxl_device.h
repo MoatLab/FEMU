@@ -420,14 +420,18 @@ REG64(CXL_MEM_DEV_STS, 0)
     FIELD(CXL_MEM_DEV_STS, MBOX_READY, 4, 1)
     FIELD(CXL_MEM_DEV_STS, RESET_NEEDED, 5, 3)
 
+/*
+ * Writers of memdev_status hold the BQL. Readers may not (a femu-cxl-ssd
+ * fault exit), so writes and such reads are atomic.
+ */
 static inline void __toggle_media(CXLDeviceState *cxl_dstate, int val)
 {
     uint64_t dev_status_reg;
 
-    dev_status_reg = cxl_dstate->memdev_status;
+    dev_status_reg = qatomic_read(&cxl_dstate->memdev_status);
     dev_status_reg = FIELD_DP64(dev_status_reg, CXL_MEM_DEV_STS, MEDIA_STATUS,
                                 val);
-    cxl_dstate->memdev_status = dev_status_reg;
+    qatomic_set(&cxl_dstate->memdev_status, dev_status_reg);
 }
 #define cxl_dev_disable_media(cxlds)                    \
         do { __toggle_media((cxlds), 0x3); } while (0)
@@ -436,7 +440,8 @@ static inline void __toggle_media(CXLDeviceState *cxl_dstate, int val)
 
 static inline bool cxl_dev_media_disabled(CXLDeviceState *cxl_dstate)
 {
-    uint64_t dev_status_reg = cxl_dstate->mbox_reg_state64[R_CXL_MEM_DEV_STS];
+    uint64_t dev_status_reg = qatomic_read(&cxl_dstate->memdev_status);
+
     return FIELD_EX64(dev_status_reg, CXL_MEM_DEV_STS, MEDIA_STATUS) == 0x3;
 }
 static inline bool scan_media_running(CXLCCI *cci)

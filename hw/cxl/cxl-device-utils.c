@@ -235,7 +235,7 @@ static uint64_t mdev_reg_read(void *opaque, hwaddr offset, unsigned size)
 {
     CXLDeviceState *cxl_dstate = opaque;
 
-    return cxl_dstate->memdev_status;
+    return qatomic_read(&cxl_dstate->memdev_status);
 }
 
 static void ro_reg_write(void *opaque, hwaddr offset, uint64_t value,
@@ -381,7 +381,7 @@ static void memdev_reg_init_common(CXLDeviceState *cxl_dstate)
     memdev_status_reg = FIELD_DP64(0, CXL_MEM_DEV_STS, MEDIA_STATUS, 1);
     memdev_status_reg = FIELD_DP64(memdev_status_reg, CXL_MEM_DEV_STS,
                                    MBOX_READY, 1);
-    cxl_dstate->memdev_status = memdev_status_reg;
+    qatomic_set(&cxl_dstate->memdev_status, memdev_status_reg);
 }
 
 void cxl_device_register_init_t3(CXLType3Dev *ct3d, int msi_n)
