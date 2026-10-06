@@ -380,7 +380,6 @@ static bool adapter_translate(CXLType3Dev *dev, uint64_t hpa,
     return false;
 }
 
-#ifdef CONFIG_KVM
 static bool adapter_linear(CXLType3Dev *dev, uint64_t base, uint64_t size)
 {
     uint32_t *regs = dev->cxl_cstate.crb.cache_mem_registers;
@@ -415,8 +414,6 @@ static bool adapter_linear(CXLType3Dev *dev, uint64_t base, uint64_t size)
     }
     return cursor == base + size;
 }
-
-#endif
 
 typedef struct FemuCxlWindow {
     struct rcu_head rcu;

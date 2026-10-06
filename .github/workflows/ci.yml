@@ -303,6 +303,33 @@ jobs:
         chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh
         ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-debug/qemu-system-x86_64"
 
+  # The other builds all have KVM, so code that only compiles with KVM goes
+  # unseen there. This compiles the FEMU objects alone, without KVM.
+  no-kvm-build:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential pkg-config libglib2.0-dev \
+          libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev ninja-build \
+          python3-pip libslirp-dev flex bison
+
+    - name: Compile FEMU without KVM
+      run: |
+        mkdir build-nokvm
+        cd build-nokvm
+        ../configure --disable-kvm --target-list=x86_64-softmmu \
+          --enable-slirp --disable-docs --enable-werror
+        ninja $(ninja -t targets all |
+                sed -n 's/^\([^:]*hw_femu_[^:]*\.c\.o\):.*/\1/p')
+
   compatibility-test:
     # The binary comes from the build on the same release: libaio, for one,
     # has a different soname on 24.04.
