@@ -347,7 +347,7 @@ MMIO while its guard is engaged. Such an access:
 Nobody waits for a queued operation, but its time occupies the NAND
 timelines, so later accesses meet it as contention. The worker runs a queued
 operation when no waited request is queued (see "Waits for garbage
-collection") and adds its time to `dma-media-time-ns`. After each one it publishes the FTL program and
+collection"), or first if it was queued before `fast-load` last went off and adds its time to `dma-media-time-ns`. After each one it publishes the FTL program and
 collection counts. A main-loop bottom half then takes the CXL lock, raises
 `media-writes`, `gc-stalls` and `gc-stall-ns` to them, and counts a program
 that NAND refused in `media-full`. It reads what the worker published and
@@ -357,10 +357,15 @@ the CXL lock.
 Device DMA has no latency of its own in the model, as it has none for guest
 RAM, and its time is not in `media-time-ns`. A medium that served such an
 access is treated as written when a linked NVMe controller attaches, as for
-any earlier CXL access. Switching `fast-load` off waits at most 100 ms for
-the worker to run the queued operations; that wait releases both locks.
-`nand-idle-ns` stays above 0 while operations are queued, so it covers the
-rest.
+any earlier CXL access. Switching `fast-load` off moves a barrier to the
+operations queued so far. The worker runs those before any waited request,
+so no access admitted after the switch books its NAND time ahead of them.
+Once they are booked, the worker sets `fast-load-drain-ns` to the NAND
+backlog from the switch. The switch waits at most 100 ms for that, with
+both locks released. If the time runs out, it reports the booked backlog,
+at least 1, and the worker updates it later. `nand-idle-ns` stays above 0
+while operations are queued. The regression test `cxl-fast-load-posted`
+checks the order and the late report.
 The worker runs any queued operation before it stops, and a teardown
 inside a device's re-entrancy guard leaves that wait to a bottom half.
 Debug builds (`FEMU_FTL_ASSERT`) also abort when teardown stops the worker
@@ -435,11 +440,14 @@ The qtest hooks `test-ftl-hold` and `test-ftl-delay` sleep in real time
 under the FTL mutex; only tests set them. The warning for a long stall
 (see "Full NAND") is reported from the main loop, not under the FTL mutex.
 
-The `fast-load` switch-off releases both locks before it takes the FTL
-mutex to read the NAND horizon. It never sleeps until that horizon: it runs
-on the main loop. `nand-idle-ns` only tries the FTL mutex, under the CXL
-lock and the BQL. While another thread holds the mutex it reports the last
-horizon it read, and at least 1.
+The `fast-load` switch-off releases both locks and then only tries the FTL
+mutex to read the NAND horizon. It never waits for that mutex, which the
+worker can hold for a whole forced collection, and never sleeps until that
+horizon: it runs on the main loop. `nand-idle-ns` also only tries the FTL
+mutex, under the CXL lock and the BQL. While another thread holds the mutex
+both report the last horizon read, and at least 1. The regression test
+`cxl-fast-load-held` switches fast load off while `test-ftl-hold` keeps
+the worker in a request.
 
 The worker holds the FTL mutex while it has work. Waited requests need the
 mutex to be queued, so they cannot keep the worker busy, but device DMA

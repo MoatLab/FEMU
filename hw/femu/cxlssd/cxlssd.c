@@ -573,10 +573,41 @@ static void cxl_worker_yield(FemuCxlMedia *s)
     qemu_mutex_lock(&s->lock);
 }
 
+static uint64_t cxl_timing_horizon(struct ssd *ssd);
+
+/*
+ * Once the device DMA operations queued before fast load went off are
+ * booked, the NAND horizon includes them: report the backlog from the
+ * switch in fast-load-drain-ns. Under @lock.
+ */
+static void cxl_drain_settle(FemuCxlMedia *s)
+{
+    uint64_t end;
+
+    if (!qatomic_read(&s->drain_from) ||
+        s->posted_taken < qatomic_read(&s->post_barrier)) {
+        return;
+    }
+    end = cxl_timing_horizon(s->ns.ssd);
+    qatomic_set(&s->nand_horizon, end);
+    qemu_mutex_lock(&s->post_lock);
+    /* A later switch may have moved the barrier meanwhile. */
+    if (s->drain_from && s->posted_taken >= s->post_barrier) {
+        qatomic_set(&s->fast_load_drain_ns,
+                    end > s->drain_from ? end - s->drain_from : 0);
+        qatomic_set(&s->drain_from, 0);
+        qemu_cond_broadcast(&s->posted_cond);
+    }
+    qemu_mutex_unlock(&s->post_lock);
+}
+
 /*
  * Only metadata reaches the worker; the vCPU owns all payload access.
- * Waited requests run first, in arrival order; device DMA operations run
- * when none is queued.
+ * Device DMA operations queued before fast load last went off run first,
+ * so no later access books its NAND time ahead of them; a linked NVMe
+ * request waits for them (cxl_ftl_lock_after_barrier()). Then waited
+ * requests run, in arrival order; other device DMA operations run when
+ * none is queued.
  */
 static void *cxl_worker(void *opaque)
 {
@@ -585,11 +616,17 @@ static void *cxl_worker(void *opaque)
 
     qemu_mutex_lock(&s->lock);
     for (;;) {
-        FemuCxlWork *work = QSIMPLEQ_FIRST(&s->work);
+        FemuCxlWork *work = NULL;
 
-        if (work) {
+        cxl_drain_settle(s);
+        if (s->posted_taken < qatomic_read(&s->post_barrier)) {
+            cxl_worker_yield(s);
+            work = cxl_take_posted(s);
+        }
+        if (!work && !QSIMPLEQ_EMPTY(&s->work)) {
+            work = QSIMPLEQ_FIRST(&s->work);
             QSIMPLEQ_REMOVE_HEAD(&s->work, next);
-        } else if (cxl_posted_pending(s)) {
+        } else if (!work && cxl_posted_pending(s)) {
             cxl_worker_yield(s);
             /* A thread let in may have queued a waited request. */
             if (!QSIMPLEQ_EMPTY(&s->work)) {
@@ -1719,48 +1756,61 @@ uint64_t femu_cxl_nand_idle(FemuCxlMedia *s)
 #define FEMU_CXL_BACKLOG_WAIT_MS 100
 
 /*
- * The NAND work that accesses left queued while they skipped their
- * completion wait, in ns from now. It stays on the NAND timelines, so later
- * accesses queue behind it in their own threads; the caller, often the main
- * loop, must not sleep it out. Device DMA operations book their NAND time
- * only once the worker runs them, so wait for those queued now, but only
- * for a bounded time. Device DMA queues them with the BQL and the CXL lock
- * held, so let go of both.
+ * Report in fast-load-drain-ns the NAND work that accesses left queued
+ * while they skipped their completion wait, in ns from the switch. It stays
+ * on the NAND timelines, so later accesses queue behind it in their own
+ * threads; the caller, often the main loop, must not sleep it out. Device
+ * DMA operations book their NAND time only once the worker runs them. The
+ * worker runs those queued now before any later access and then settles
+ * the report (cxl_drain_settle()). Wait for that, but only for a bounded
+ * time; if it has not happened, report what is booked, and at least 1, and
+ * the worker settles the report later. Device DMA queues them with the BQL
+ * and the CXL lock held, so let go of both. Never waits for @lock.
  */
-uint64_t femu_cxl_backlog(FemuCxlMedia *s)
+void femu_cxl_backlog(FemuCxlMedia *s)
 {
-    int64_t deadline;
+    int64_t start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t deadline = start + FEMU_CXL_BACKLOG_WAIT_MS * SCALE_MS;
     int64_t now;
-    uint64_t target;
     uint64_t end;
     FemuCxlHeld held;
-    bool queued;
 
     if (!s->ftl) {
-        return 0;
+        qatomic_set(&s->fast_load_drain_ns, 0);
+        return;
     }
     femu_cxl_drop(&held);
-    deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
-               FEMU_CXL_BACKLOG_WAIT_MS * SCALE_MS;
     qemu_mutex_lock(&s->post_lock);
-    target = s->posted;
-    while (s->posted_done < target &&
+    qatomic_set(&s->post_barrier, s->posted);
+    qatomic_set(&s->drain_from, start);
+    qemu_mutex_unlock(&s->post_lock);
+    qemu_event_set(&s->worker_event);
+    qemu_mutex_lock(&s->post_lock);
+    while (s->drain_from == start &&
            (now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) < deadline) {
         qemu_cond_timedwait(&s->posted_cond, &s->post_lock,
                             DIV_ROUND_UP(deadline - now, SCALE_MS));
     }
-    queued = s->posted_done < target;
     qemu_mutex_unlock(&s->post_lock);
-    cxl_ftl_lock(s);
-    end = cxl_timing_horizon(s->ns.ssd);
-    qatomic_set(&s->nand_horizon, end);
-    qemu_mutex_unlock(&s->lock);
-    femu_cxl_retake(&held);
-    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    if (end > now) {
-        return end - now;
+    /*
+     * The worker holds @lock for a whole request, a forced collection
+     * included, so never wait for it: report the last horizon seen.
+     */
+    if (qemu_mutex_trylock(&s->lock)) {
+        end = qatomic_read(&s->nand_horizon);
+    } else {
+        cxl_drain_settle(s);
+        end = cxl_timing_horizon(s->ns.ssd);
+        qatomic_set(&s->nand_horizon, end);
+        qemu_mutex_unlock(&s->lock);
     }
-    return queued;
+    qemu_mutex_lock(&s->post_lock);
+    if (s->drain_from == start) {
+        qatomic_set(&s->fast_load_drain_ns,
+                    MAX(end > start ? end - start : 0, 1));
+    }
+    qemu_mutex_unlock(&s->post_lock);
+    femu_cxl_retake(&held);
 }
 
 /*
@@ -1849,6 +1899,29 @@ static bool cxl_nvme_record(FemuCxlMedia *s, NvmeNamespace *ns, uint64_t slba,
 }
 
 /*
+ * Take @lock once the device DMA operations queued before fast load last
+ * went off are booked, so this request books its NAND time after them, as
+ * a later CXL access does. The worker books them without waiting for
+ * anything, so the wait is bounded; a later switch can only move the
+ * barrier over operations already queued.
+ */
+static void cxl_ftl_lock_after_barrier(FemuCxlMedia *s)
+{
+    uint64_t barrier;
+
+    cxl_ftl_lock(s);
+    while (s->posted_taken < (barrier = qatomic_read(&s->post_barrier))) {
+        qemu_mutex_unlock(&s->lock);
+        qemu_mutex_lock(&s->post_lock);
+        while (s->posted_done < barrier) {
+            qemu_cond_wait(&s->posted_cond, &s->post_lock);
+        }
+        qemu_mutex_unlock(&s->post_lock);
+        cxl_ftl_lock(s);
+    }
+}
+
+/*
  * Run a linked NVMe request on the medium's FTL. The medium's worker holds
  * @lock for each of its requests, so the two never interleave. The pollers'
  * pause waits for this thread, so it must never need the BQL; the cache is
@@ -1863,7 +1936,7 @@ uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     int i;
 
     assert(!bql_locked());
-    cxl_ftl_lock(s);
+    cxl_ftl_lock_after_barrier(s);
     /*
      * The poller already changed the payload, whatever the FTL decides.
      * Record from the command: the FTL frees DSM ranges as it trims.
@@ -1893,6 +1966,7 @@ uint64_t femu_cxl_nvme_ftl(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     if (recorded) {
         req->cxl_seq = s->nvme_taken + 1;
     }
+    qatomic_set(&s->nvme_after_posted, s->posted_taken);
     lat = cxl_ftl_request(s, n, ns, req);
     qemu_mutex_unlock(&s->lock);
     if (req->cxl_seq) {

@@ -22367,6 +22367,74 @@ static void femu_test_cxl_dma_fair(void *obj, void *data,
 }
 
 /*
+ * The worker can hold the FTL mutex for a whole request, a forced
+ * collection included. Switching fast load off runs on the main loop, so
+ * it must not wait for that mutex: it returns while the worker still holds
+ * it, and reports work as queued.
+ */
+static void femu_test_cxl_fast_load_held(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0");
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "fast-load", true);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 20000);
+    femu_cxl_set_u64(qts, "test-guarded-write", FEMU_CXL_WINDOW + 4096);
+    femu_cxl_wait_flag(qts, "test-ftl-holding", true);
+    femu_cxl_set(qts, "fast-load", false);
+    g_assert_true(femu_cxl_flag(qts, "test-ftl-holding"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), >, 0);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 0);
+    femu_cxl_wait_flag(qts, "test-ftl-holding", false);
+    qtest_quit(qts);
+}
+
+/*
+ * Device DMA work queued before fast load goes off, and still queued when
+ * the switch returns, books its NAND time before any later access, and the
+ * reported backlog includes it. Two 1 s programs on one LUN are queued
+ * while the worker holds the first for 1 s, and each takes 1 s more. A
+ * read miss after the switch must find both run, and fast-load-drain-ns
+ * must end up past the first program.
+ */
+static void femu_test_cxl_fast_load_posted(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0,"
+        "channels=1,luns-per-channel=1,program-ns=1000000000");
+    int64_t deadline;
+    uint64_t done;
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "fast-load", true);
+    femu_cxl_set_u64(qts, "test-ftl-delay", 1000);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 1000);
+    femu_cxl_set_u64(qts, "test-guarded-write", FEMU_CXL_WINDOW + 4096);
+    femu_cxl_set_u64(qts, "test-guarded-write", FEMU_CXL_WINDOW + 2 * 4096);
+    femu_cxl_wait_flag(qts, "test-ftl-holding", true);
+    femu_cxl_set(qts, "fast-load", false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "test-posted-done"), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 0);
+    done = femu_cxl_stat(qts, "test-posted-done");
+    g_test_message("device DMA operations run before the later miss: %"
+                   PRIu64, done);
+    g_assert_cmpuint(done, ==, 2);
+    deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+    while (femu_cxl_stat(qts, "fast-load-drain-ns") < NANOSECONDS_PER_SECOND) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(10 * 1000);
+    }
+    femu_cxl_set_u64(qts, "test-ftl-delay", 0);
+    qtest_quit(qts);
+}
+
+/*
  * A fill waits out its media time inside its media read, without the locks.
  * It must take the whole read once: a 50 ms NAND read of a programmed page
  * keeps the fault exit at least 50 ms, and well under two reads.
@@ -23300,6 +23368,56 @@ static void femu_test_cxl_nvme_gate(void *obj, void *data,
     femu_cca_poll_stat(l.qts, "nvme-drops", 1);
     g_assert_cmpuint(femu_cxl_stat(l.qts, "cache-entries"), ==, 0);
     g_assert_cmphex(qtest_readb(l.qts, femu_cca_page(100)), ==, 0x42);
+    femu_link_quit(&l);
+}
+
+/*
+ * A linked NVMe write that arrives after fast load went off must not book
+ * its NAND time ahead of the device DMA operations queued before the
+ * switch. Two operations are queued while the worker holds the first, and
+ * each takes 1 s more; the NVMe write then waits for the FTL mutex, which
+ * the worker offered it between the two. It must book after both. A test
+ * that the host deschedules lets the worker take the second first, so it
+ * can only pass.
+ */
+static void femu_test_cxl_nvme_barrier(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    uint8_t pattern[FEMU_DATA_SIZE];
+    NvmeRwCmd rw = { 0 };
+    FemuLink l;
+    int64_t deadline;
+
+    femu_link_start(&l, "", ",cache-pages=16,cache-ways=16,"
+                    "prefetch-degree=0", "");
+    femu_cxl_set(l.qts, "fast-load", true);
+    femu_cxl_set_u64(l.qts, "test-ftl-delay", 1000);
+    femu_cxl_set_u64(l.qts, "test-ftl-hold", 60000);
+    femu_cxl_set_u64(l.qts, "test-guarded-write", FEMU_CXL_WINDOW + 4096);
+    femu_cxl_set_u64(l.qts, "test-guarded-write",
+                     FEMU_CXL_WINDOW + 2 * 4096);
+    femu_cxl_wait_flag(l.qts, "test-ftl-holding", true);
+    femu_cxl_set(l.qts, "fast-load", false);
+
+    memset(pattern, 0x42, sizeof(pattern));
+    qtest_memwrite(l.qts, l.buf, pattern, sizeof(pattern));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(l.buf);
+    rw.slba = cpu_to_le64(femu_link_lba(&l, 100));
+    rw.nlb = cpu_to_le16(4096 / l.c.lba_size - 1);
+    femu_submit(&l.c, &l.c.io, (NvmeCmd *)&rw);
+    femu_cxl_wait_flag(l.qts, "test-lock-wanted", true);
+    femu_cxl_set_u64(l.qts, "test-ftl-hold", 0);
+    deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
+    while (!femu_cq_ready(&l.c, &l.c.io)) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmpint(FEMU_SC(femu_complete(&l.c, &l.c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_cxl_stat(l.qts, "test-nvme-after-posted"), ==, 2);
+    femu_cxl_set_u64(l.qts, "test-ftl-delay", 0);
     femu_link_quit(&l);
 }
 
@@ -25194,6 +25312,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-dma-main-loop", "femu", femu_test_cxl_dma_main_loop,
                  NULL);
     qos_add_test("cxl-dma-fair", "femu", femu_test_cxl_dma_fair, NULL);
+    qos_add_test("cxl-fast-load-held", "femu", femu_test_cxl_fast_load_held,
+                 NULL);
+    qos_add_test("cxl-fast-load-posted", "femu",
+                 femu_test_cxl_fast_load_posted, NULL);
     qos_add_test("cxl-storm-change", "femu", femu_test_cxl_storm_change,
                  NULL);
     qos_add_test("cxl-storm-unplug", "femu", femu_test_cxl_storm_unplug,
@@ -25236,6 +25358,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-nvme-slot-off", "femu", femu_test_cxl_nvme_unplug,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     qos_add_test("cxl-nvme-gate", "femu", femu_test_cxl_nvme_gate, NULL);
+    qos_add_test("cxl-nvme-barrier", "femu", femu_test_cxl_nvme_barrier,
+                 NULL);
     qos_add_test("cxl-nvme-gate-unplug", "femu", femu_test_cxl_nvme_gate,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     {

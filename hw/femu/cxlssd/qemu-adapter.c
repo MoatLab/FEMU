@@ -1039,8 +1039,11 @@ static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
         goto out;
     }
     if (!value) {
-        s->fast_load_drain_ns = s->started && !s->closing ?
-                                femu_cxl_backlog(s) : 0;
+        if (s->started && !s->closing) {
+            femu_cxl_backlog(s);
+        } else {
+            qatomic_set(&s->fast_load_drain_ns, 0);
+        }
     }
     s->fast_load = value;
 out:
@@ -1056,6 +1059,15 @@ static void cxl_nand_idle_get(Object *obj, Visitor *v, const char *name,
     WITH_FEMU_CXL_LOCK() {
         value = femu_cxl_nand_idle(&FEMU_CXL_SSD(obj)->media);
     }
+    visit_type_uint64(v, name, &value, errp);
+}
+
+/* The worker settles it without the CXL lock (femu_cxl_backlog()). */
+static void cxl_drain_get(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    uint64_t value = qatomic_read(&FEMU_CXL_SSD(obj)->media.fast_load_drain_ns);
+
     visit_type_uint64(v, name, &value, errp);
 }
 
@@ -1949,9 +1961,11 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
  * worker hold the FTL mutex in its next request until it is set to 0 (or
  * for at most that many ms), and test-ftl-holding reports whether it
  * holds. test-ftl-delay makes each device DMA operation take that many ms
- * more under the FTL mutex. test-posted-done counts device DMA operations
- * run. test-lock-mutex reports whether the CXL lock is a mutex, and
- * setting it makes it one, as version 2 does.
+ * more under the FTL mutex. test-lock-wanted reports whether another
+ * thread waits for the FTL mutex. test-posted-done counts device DMA
+ * operations run, and test-nvme-after-posted those booked before the last
+ * linked NVMe request. test-lock-mutex reports whether the CXL lock is a
+ * mutex, and setting it makes it one, as version 2 does.
  */
 static void adapter_test_guarded_write(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
@@ -1993,6 +2007,20 @@ static void adapter_test_ftl_hold(Object *obj, Visitor *v, const char *name,
 static bool adapter_test_ftl_holding(Object *obj, Error **errp)
 {
     return qatomic_read(&FEMU_CXL_SSD(obj)->media.test_ftl_holding);
+}
+
+static void adapter_test_nvme_after_posted(Object *obj, Visitor *v,
+                                           const char *name, void *opaque,
+                                           Error **errp)
+{
+    uint64_t value = qatomic_read(&FEMU_CXL_SSD(obj)->media.nvme_after_posted);
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static bool adapter_test_lock_wanted(Object *obj, Error **errp)
+{
+    return qatomic_read(&FEMU_CXL_SSD(obj)->media.lock_wanted);
 }
 
 static void adapter_test_posted_done(Object *obj, Visitor *v,
@@ -2288,8 +2316,12 @@ static void cxl_init(Object *obj)
                             adapter_test_ftl_hold, NULL, NULL);
         object_property_add_bool(obj, "test-ftl-holding",
                                  adapter_test_ftl_holding, NULL);
+        object_property_add_bool(obj, "test-lock-wanted",
+                                 adapter_test_lock_wanted, NULL);
         object_property_add(obj, "test-posted-done", "uint64",
                             adapter_test_posted_done, NULL, NULL, NULL);
+        object_property_add(obj, "test-nvme-after-posted", "uint64",
+                            adapter_test_nvme_after_posted, NULL, NULL, NULL);
         object_property_add(obj, "test-fault-version", "int64", NULL,
                             adapter_test_fault_version, NULL, NULL);
         object_property_add_bool(obj, "test-lock-mutex",
@@ -2332,7 +2364,8 @@ static void cxl_init(Object *obj)
     object_property_add_bool(obj, "stats-reset", NULL, cxl_stats_reset);
     object_property_add_bool(obj, "fast-load", cxl_fast_load_get,
                              cxl_fast_load_set);
-    cxl_add_counter(obj, "fast-load-drain-ns", &s->fast_load_drain_ns);
+    object_property_add(obj, "fast-load-drain-ns", "uint64", cxl_drain_get,
+                        NULL, NULL, NULL);
     object_property_add(obj, "nand-idle-ns", "uint64", cxl_nand_idle_get,
                         NULL, NULL, NULL);
     cxl_add_counter(obj, "prefetch-inserts", &s->prefetch_inserts);

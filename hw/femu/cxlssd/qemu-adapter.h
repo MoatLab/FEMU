@@ -175,10 +175,11 @@ struct FemuCxlMedia {
     uint64_t dma_run_posted;
     /*
      * Such operations wait in @post until the worker takes them, after the
-     * waited requests in @work. @post_lock is held only to add or take one
-     * and to count, so a guarded access never waits for @lock, which the
-     * FTL holds for a whole request, garbage collection included. Order:
-     * @lock, then @post_lock. @posted counts them, written under @post_lock
+     * waited requests in @work, except those before @post_barrier.
+     * @post_lock is held only to add or take one and to count, so a
+     * guarded access never waits for @lock, which the FTL holds for a
+     * whole request, garbage collection included. Order: @lock, then
+     * @post_lock. @posted counts them, written under @post_lock
      * and read atomically; @posted_taken counts those taken, under both;
      * @posted_done counts those run, under @post_lock, which the worker
      * wakes @posted_cond for.
@@ -189,6 +190,19 @@ struct FemuCxlMedia {
     uint64_t posted_taken;
     uint64_t posted_done;
     QemuCond posted_cond;
+    /*
+     * @posted when fast load last went off: the worker runs the operations
+     * queued before it ahead of waited requests, so their NAND time is
+     * booked before that of any later access. Written under @post_lock,
+     * read atomically.
+     */
+    uint64_t post_barrier;
+    /*
+     * When fast load last went off, while fast_load_drain_ns still waits
+     * for the operations before @post_barrier to be booked; 0 otherwise.
+     * Under @post_lock, also read atomically by the worker.
+     */
+    int64_t drain_from;
     /*
      * After each one the worker publishes the FTL program and collection
      * counts and the programs NAND refused, atomically, for @posted_bh,
@@ -209,7 +223,9 @@ struct FemuCxlMedia {
     bool fast_load;
     /*
      * The NAND backlog, in ns, when fast load last went off; the switch
-     * does not wait for it (femu_cxl_backlog()).
+     * does not wait for it (femu_cxl_backlog()). Settled under @post_lock
+     * by the switch or, once it has booked the device DMA work queued
+     * before the switch, by the worker; read atomically.
      */
     uint64_t fast_load_drain_ns;
     /*
@@ -301,6 +317,8 @@ struct FemuCxlMedia {
     uint64_t test_ftl_hold_ms;
     bool test_ftl_holding;
     uint64_t test_ftl_delay_ms;
+    /* Device DMA operations booked before the last linked NVMe request. */
+    uint64_t nvme_after_posted;
 };
 
 /*
@@ -417,7 +435,7 @@ bool femu_cxl_revoke_ahead_ok(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn,
 void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn);
 void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn);
 bool femu_cxl_protected_by(FemuCxlMedia *s, int owner, uint64_t lpn);
-uint64_t femu_cxl_backlog(FemuCxlMedia *s);
+void femu_cxl_backlog(FemuCxlMedia *s);
 uint64_t femu_cxl_nand_idle(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,

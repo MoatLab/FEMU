@@ -285,10 +285,14 @@ still advance, so the skipped time builds up as a backlog on the LUNs.
 
 `fast-load=false` waits only for the accesses in progress, and at most
 100 ms for queued device DMA work. It does not wait for the NAND backlog.
+Device DMA work queued before the switch still books its NAND time before
+any later access.
 That wait would stop the QEMU main loop for as long, and a guest disk that
 the main loop serves would time out. The backlog stays on the LUNs, so the
 next accesses wait behind it in their own threads. It does not flush the
-cache. `fast-load-drain-ns` gives the backlog in ns when the switch ran.
+cache. `fast-load-drain-ns` gives the backlog in ns from the switch. If
+queued device DMA work was not booked within the 100 ms, it reads at least
+1 at first, and the device updates it once that work is booked.
 After it returns, accesses pay the full media time again.
 
 Before a measured phase, wait until the NAND is idle. Poll `nand-idle-ns`

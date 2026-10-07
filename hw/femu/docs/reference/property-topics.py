@@ -198,6 +198,7 @@ DEVICES = [
                       "test-guarded-write", "test-ftl-hold",
                       "test-ftl-delay", "test-ftl-holding",
                       "test-posted-done", "test-lock-mutex",
+                      "test-lock-wanted", "test-nvme-after-posted",
                       "test-fault-version", "test-fault-repeats"],
         "topics": [
             {

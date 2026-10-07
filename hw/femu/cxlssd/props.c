@@ -154,8 +154,9 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "measurement. Setting false does not wait for the queued NAND work "
       "(see nand-idle-ns); default off, changeable with qom-set" },
     { "fast-load-drain-ns",
-      "Read-only: the NAND backlog, in ns, when fast-load last went to "
-      "false; the switch does not wait for it" },
+      "Read-only: the NAND backlog, in ns from when fast-load last went "
+      "to false, including device DMA work queued before the switch; the "
+      "switch does not wait for it. At least 1 until that work is booked" },
     { "nand-idle-ns",
       "Read-only: ns until the NAND timelines and queued NAND work are "
       "idle, 0 when idle; poll it after fast-load=false before measuring. "
