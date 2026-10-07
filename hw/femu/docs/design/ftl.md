@@ -1007,7 +1007,7 @@ What the automated tests check:
 | Area | Test | Checks |
 | --- | --- | --- |
 | BAST merges | unit test `test-femu-hybrid-oracle`; qtests `hybrid-oracle-*`, `hybrid-batch-occupancy`, `hybrid-destage-occupancy`, `hybrid-switch-trim-erase`, `hybrid-trim-occupancy` | the unit test checks the reference model; the qtests compare FEMU's switch, full merge and erase counts against it, including deallocate and the write buffer |
-| Victim queue | unit test `test-femu-pqueue` | priority queue operations, including random pop driven by the caller's number |
+| Victim queue | unit test `test-femu-pqueue` | priority queue operations, including random pop driven by the caller's number; pop, remove and random pop leave the detached element's index at 0; pop equals removing the top and random pop equals removing the drawn slot, slot for slot |
 | Reproducible GC | qtests `gc-seed-d-choice`, `gc-seed-random`, `gc-seed-fifo` | two devices with the same configuration and 2048 random page writes report the same relocation count every 32 writes and the same WAF; a third with another `gc_seed` differs (FIFO: matches) |
 | NAND timing | unit test `test-femu-nand-media` | the media layer the FTL calls |
 | C0h counters | qtest `media-counters` | host and NAND page counts and the WAF move with writes |

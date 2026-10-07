@@ -158,6 +158,11 @@ void pqueue_change_priority(pqueue_t *q, pqueue_pri_t new_pri, void *d)
     }
 }
 
+/*
+ * A detached element reads index 0, so a caller can test membership by its
+ * index. Clear it last: when the element held the last slot, the move above
+ * has just written its old index back.
+ */
 int pqueue_remove(pqueue_t *q, void *d)
 {
     size_t posn = q->getpos(d);
@@ -166,6 +171,7 @@ int pqueue_remove(pqueue_t *q, void *d)
         bubble_up(q, posn);
     else
         percolate_down(q, posn);
+    q->setpos(d, 0);
 
     return 0;
 }
@@ -180,6 +186,7 @@ void *pqueue_pop(pqueue_t *q)
     head = q->d[1];
     q->d[1] = q->d[--q->size];
     percolate_down(q, 1);
+    q->setpos(head, 0);
 
     return head;
 }
@@ -220,6 +227,7 @@ void *pqueue_randpop(pqueue_t *q, uint64_t r)
         bubble_up(q, ra);
     else
         percolate_down(q, ra);
+    q->setpos(head, 0);
 
     return head;
 }

@@ -114,14 +114,14 @@ void
 pqueue_change_priority(pqueue_t *q, pqueue_pri_t new_pri, void *d);
 
 /**
- * pop the highest-ranking item from the queue.
+ * pop the highest-ranking item from the queue; its position becomes 0.
  * @param q the queue
  * @return NULL on error, otherwise the entry
  */
 void *pqueue_pop(pqueue_t *q);
 
 /**
- * remove an item from the queue.
+ * remove an item from the queue; its position becomes 0.
  * @param q the queue
  * @param d the entry
  * @return 0 on success
@@ -136,7 +136,8 @@ int pqueue_remove(pqueue_t *q, void *d);
 void *pqueue_peek(pqueue_t *q);
 
 /**
- * pop an item chosen by a random number from the queue.
+ * pop an item chosen by a random number from the queue; its position
+ * becomes 0.
  * @param q the queue
  * @param r a random number from the caller's generator, so that a seeded
  *          caller sees the same picks on every run
