@@ -440,8 +440,11 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
 
     /* update RU vpc and victim queue priority based on GC strategy */
     ru->vpc--;
-    ru->utilization = (ru->vpc + ru->ipc > 0) ?
-        (float)ru->vpc / (ru->vpc + ru->ipc) : 0.0f;
+    /*
+     * The share of the unit a collection copies, as at retirement: pages
+     * never written are freed by the erase too, so they count as reclaimable.
+     */
+    ru->utilization = (float)ru->vpc / ru->npages;
     ru->last_invalidated_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     if (rm->mgmt_type == GC_GLOBAL_CB && ru->utilization < 1.0f &&

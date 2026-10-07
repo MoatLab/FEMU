@@ -4390,6 +4390,54 @@ static void femu_test_fdp_cb_unwritten_age(void *obj, void *data,
 }
 
 /*
+ * A unit left with 4 of its 16 pages written, then one of them overwritten,
+ * gives back 13 pages for 3 copies. The overwrite used to measure its
+ * utilization against the 4 written pages only, as 3 / 4, so a full unit
+ * with half its pages valid outscored it. Utilization is now the share of
+ * all 16 pages, as at retirement, and the part-written unit goes first.
+ */
+static void femu_test_fdp_cb_utilization(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t pid0 = cpu_to_le16(0);
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    qtest_memwrite(qts, pids, &pid0, sizeof(pid0));
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 4, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    /* half of the full unit, then one page of the part-written one */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 8, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    /* equal ages, so utilization alone decides */
+    g_usleep(20 * 1000);
+
+    femu_fdp_cb_fill(&c, qts, buf, list, true);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 3);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * A Zone Append reads the zone's write pointer to decide where it lands and
  * then moves it. On queues that different pollers serve, two of them read the
  * same pointer unless the zone state is held still, and the controller reports
@@ -23087,6 +23135,13 @@ static void femu_register_nodes(void)
     });
     qos_add_test("fdp-cb-unwritten-age", "femu",
                  femu_test_fdp_cb_unwritten_age, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-cb-utilization", "femu", femu_test_fdp_cb_utilization,
+                 &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
