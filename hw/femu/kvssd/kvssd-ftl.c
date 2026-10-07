@@ -176,7 +176,6 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
             break;
         }
         line = pqueue_pop(lm->victim_line_pq);
-        line->pos = 0;
         lm->victim_line_cnt--;
         ppa.g.blk = line->id;
 

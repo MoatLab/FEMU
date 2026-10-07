@@ -657,7 +657,6 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
     }
 
     pqueue_pop(lm->victim_line_pq);
-    victim_line->pos = 0;
     lm->victim_line_cnt--;
 
     /* victim_line is a danggling node now */
@@ -679,7 +678,6 @@ static struct line *select_victim_line_random(struct ssd *ssd, bool force)
         pqueue_insert(lm->victim_line_pq, victim_line);
         return NULL;
     }
-    victim_line->pos = 0;
     lm->victim_line_cnt--;
     return victim_line;
 }
@@ -733,7 +731,6 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_remove(pq, best);
-    best->pos = 0;
     lm->victim_line_cnt--;
     return best;
 }
@@ -756,7 +753,6 @@ static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_pop(lm->victim_line_pq);
-    best->pos = 0;
     lm->victim_line_cnt--;
     return best;
 }
@@ -793,7 +789,6 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_remove(pq, best);
-    best->pos = 0;
     lm->victim_line_cnt--;
     return best;
 }
@@ -1046,7 +1041,6 @@ int do_read_reclaim(struct ssd *ssd)
         ssd->lm.full_line_cnt--;
     } else if (line->pos) {
         pqueue_remove(ssd->lm.victim_line_pq, line);
-        line->pos = 0;
         ssd->lm.victim_line_cnt--;
     } else {
         /* being written to right now: leave it alone */

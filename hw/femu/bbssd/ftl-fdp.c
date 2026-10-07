@@ -507,15 +507,6 @@ static FemuReclaimUnit *select_victim_ru_from_ruh(struct ssd *ssd,
 
     victim_ru = pqueue_pop(ru_mgmt->victim_ru_pq);
     if (victim_ru) {
-        /*
-         * pqueue_pop does not clear the popped element's stored index, so reset
-         * ruh_pos to keep it a truthful "not in per-RUH queue" marker (same
-         * discipline as the NOISY path). Without this, a later change_priority
-         * or insert could act on a stale per-RUH index -- the issue #189 bug
-         * class. Dormant today (no strategy fills the per-RUH queue on this
-         * path) but hardened for when one does.
-         */
-        victim_ru->ruh_pos = 0;
         ru_mgmt->victim_ru_cnt--;
     }
     return victim_ru;
@@ -602,17 +593,11 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
             victim_ru = pqueue_pop(
                 ssd->ruhs[best_ruh].ru_mgmt->victim_ru_pq);
             if (victim_ru) {
-                /*
-                 * pqueue_pop does NOT clear the element's stored index, so reset
-                 * ruh_pos explicitly to keep it a truthful "in per-RUH queue"
-                 * marker (the change_priority guard relies on it).
-                 */
-                victim_ru->ruh_pos = 0;
                 ssd->ruhs[best_ruh].ru_mgmt->victim_ru_cnt--;
                 /*
                  * Also remove from the global queue (uses the still-valid pos);
-                 * the global victim_ru_cnt-- and pos=0 happen at the shared
-                 * cleanup below, so do not touch them here. With nrg>1 the
+                 * the global victim_ru_cnt-- happens at the shared cleanup
+                 * below, so do not touch it here. With nrg>1 the
                  * per-RUH queue can hold RUs from any RG, so the global twin
                  * lives in the victim's OWN RG queue, not the caller's rgid.
                  */
@@ -633,7 +618,6 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
             if (victim_ru && victim_ru->ruh_pos &&
                 victim_ru->ruh && victim_ru->ruh->ru_mgmt) {
                 pqueue_remove(victim_ru->ruh->ru_mgmt->victim_ru_pq, victim_ru);
-                victim_ru->ruh_pos = 0;
                 victim_ru->ruh->ru_mgmt->victim_ru_cnt--;
             }
         }
@@ -713,8 +697,6 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         }
     }
 
-    victim_ru->pos = 0;
-    victim_ru->ruh_pos = 0;
     /*
      * Decrement the count on the victim's OWN reclaim group. For every path
      * except cross-RG NOISY selection this is the caller's rgid; NOISY can pull
@@ -1882,14 +1864,9 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
          * are already freed, so just clear the heap and its counter.
          */
         if (ssd->ruhs[i].ru_mgmt && ssd->ruhs[i].ru_mgmt->victim_ru_pq) {
-            FemuReclaimUnit *pru;
-            /*
-             * pqueue_pop reassigns ruh_pos during percolate_down and never
-             * clears the popped element's own index, so zero it explicitly or
-             * a drained RU keeps a stale ruh_pos and later looks "in queue".
-             */
-            while ((pru = pqueue_pop(ssd->ruhs[i].ru_mgmt->victim_ru_pq))) {
-                pru->ruh_pos = 0;
+            /* each pop leaves the popped unit's ruh_pos at 0 */
+            while (pqueue_pop(ssd->ruhs[i].ru_mgmt->victim_ru_pq)) {
+                continue;
             }
             ssd->ruhs[i].ru_mgmt->victim_ru_cnt = 0;
         }
