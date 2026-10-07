@@ -2135,6 +2135,12 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
      */
     s->backend.femu_mode = FEMU_BBSSD_MODE;
     femu_cxl_cache_init(&s->cache, s->cache_pages, s->cache_ways, policy);
+    /*
+     * No run yet: no access ends at UINT64_MAX, so the first one, even an
+     * unguarded read at DPA 0, starts a run and charges its page.
+     */
+    s->dma_run_end = UINT64_MAX;
+    s->dma_run_posted = UINT64_MAX;
     if (!s->ftl) {
         return;
     }

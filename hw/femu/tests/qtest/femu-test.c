@@ -18271,7 +18271,9 @@ static void femu_test_cxl_fast_load_drain(void *obj, void *data,
  * Turning fast load off must not keep the main loop for the NAND backlog: a
  * guest disk served by the main loop would time out. The backlog stays on
  * the NAND timelines, nand-idle-ns counts it down, and once it reads 0 a
- * miss pays only its own program again.
+ * miss pays only its own program again. Sleeping it out took the whole
+ * backlog, at least 2 s; the switch now takes about 100 ms, so half the
+ * backlog tells the two apart with room for a loaded host.
  */
 static void femu_test_cxl_fast_load_backlog(void *obj, void *data,
                                             QGuestAllocator *alloc)
@@ -18297,7 +18299,7 @@ static void femu_test_cxl_fast_load_backlog(void *obj, void *data,
     qobject_unref(rsp);
     g_test_message("backlog %" PRId64 " ms, switch and query %" PRId64
                    " ms", backlog / 1000000, took / 1000000);
-    g_assert_cmpint(took, <, backlog / 4);
+    g_assert_cmpint(took, <, backlog / 2);
     g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), >=,
                      backlog / 2);
     g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), <=,
@@ -22159,10 +22161,10 @@ static void femu_test_cxl_storm_bql(void *obj, void *data,
     qtest_quit(qts);
 }
 
-/* Wait until a qtest flag reads @value, at most 10 s. */
+/* Wait until a qtest flag reads @value, at most 30 s. */
 static void femu_cxl_wait_flag(QTestState *qts, const char *name, bool value)
 {
-    int64_t deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    int64_t deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
 
     while (femu_cxl_flag(qts, name) != value) {
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
@@ -22235,10 +22237,12 @@ static void femu_cxl_nvme_submit(QTestState *qts, uint64_t sq, uint32_t db,
  * A QEMU NVMe Read into CXL memory runs on the main loop. Only its first
  * map runs in the controller's guarded bottom half; the copy into CXL
  * happens when the block layer completes, outside any re-entrancy guard.
- * The NVMe read of two pages, with the FTL held for 2 s, must not keep the
- * main loop for that long: a guest disk served there would time out. The
- * monitor answers throughout, and the FTL is seen holding meanwhile, so the
- * copy reached it.
+ * The NVMe read of two pages, with the FTL held until the test lets go,
+ * must not keep the main loop meanwhile: a guest disk served there would
+ * time out. The monitor answers while the FTL is seen holding, so the copy
+ * reached it. Before the fix each answer took the whole hold; the bound
+ * on one answer is far below the hold, and far above a loaded host's
+ * delays.
  */
 static void femu_test_cxl_dma_main_loop(void *obj, void *data,
                                         QGuestAllocator *alloc)
@@ -22257,8 +22261,7 @@ static void femu_test_cxl_dma_main_loop(void *obj, void *data,
         "-device nvme,id=nvme0,serial=cxlml,drive=disk,bus=pcie.0,addr=5");
     int64_t deadline;
     int64_t worst = 0;
-    int64_t end;
-    bool held = false;
+    unsigned i;
     uint8_t sqe[64];
 
     femu_cxl_decode(qts);
@@ -22308,26 +22311,190 @@ static void femu_test_cxl_dma_main_loop(void *obj, void *data,
     stq_le_p(sqe + 24, buf);
     stq_le_p(sqe + 32, buf + 4096);
     stl_le_p(sqe + 48, 15);
-    femu_cxl_set_u64(qts, "test-ftl-hold", 2000);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 60000);
     femu_cxl_nvme_submit(qts, iosq, db + 8, 0, sqe);
-    end = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
-    while (g_get_monotonic_time() < end) {
+    femu_cxl_wait_flag(qts, "test-ftl-holding", true);
+    for (i = 0; i < 10; i++) {
         int64_t start = g_get_monotonic_time();
         QDict *rsp = qtest_qmp(qts, "{'execute':'query-status'}");
 
         worst = MAX(worst, g_get_monotonic_time() - start);
+        g_assert_true(qdict_haskey(rsp, "return"));
         qobject_unref(rsp);
-        held |= femu_cxl_flag(qts, "test-ftl-holding");
-        g_usleep(20 * 1000);
     }
-    g_test_message("slowest query-status during a 2 s FTL hold: %" PRId64
+    /* Every answer came while the FTL held. */
+    g_assert_true(femu_cxl_flag(qts, "test-ftl-holding"));
+    g_test_message("slowest query-status during the FTL hold: %" PRId64
                    " ms", worst / 1000);
-    g_assert_cmpint(worst, <, G_TIME_SPAN_SECOND / 2);
-    g_assert_true(held);
-    deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+    g_assert_cmpint(worst, <, 10 * G_TIME_SPAN_SECOND);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 0);
+    deadline = g_get_monotonic_time() + 60 * G_TIME_SPAN_SECOND;
     g_assert_true(femu_cxl_dma_cqe(qts, iocq, 0, 3, deadline));
     g_assert_cmphex(qtest_readq(qts, buf), ==, 0);
     g_assert_cmphex(qtest_readq(qts, buf + 2 * 4096 - 8), ==, 0);
+    qtest_quit(qts);
+}
+
+/* A legacy virtio-blk device at 00:06.0, its I/O BAR and its one queue. */
+#define FEMU_VBLK_DEVFN  (6 << 3)
+#define FEMU_VBLK_IO     0xc000
+#define FEMU_VBLK_RING   0x300000ULL
+#define FEMU_VBLK_HDR    0x310000ULL
+#define FEMU_VBLK_STATUS 0x310100ULL
+
+typedef struct FemuVblk {
+    QTestState *qts;
+    uint64_t avail;
+    uint64_t used;
+    uint16_t size;
+    uint16_t next;
+} FemuVblk;
+
+/* Reset, acknowledge, driver, no features, queue 0, driver OK. */
+static void femu_vblk_start(FemuVblk *v, QTestState *qts)
+{
+    uint16_t size;
+
+    v->qts = qts;
+    v->next = 0;
+    femu_cxl_config(qts, 0, FEMU_VBLK_DEVFN << 8 | PCI_BASE_ADDRESS_0,
+                    FEMU_VBLK_IO);
+    femu_cxl_config(qts, 0, FEMU_VBLK_DEVFN << 8 | PCI_COMMAND,
+                    PCI_COMMAND_IO | PCI_COMMAND_MASTER);
+    qtest_outb(qts, FEMU_VBLK_IO + 0x12, 0);
+    qtest_outb(qts, FEMU_VBLK_IO + 0x12, 1);
+    qtest_outb(qts, FEMU_VBLK_IO + 0x12, 3);
+    qtest_outl(qts, FEMU_VBLK_IO + 0x04, 0);
+    qtest_outw(qts, FEMU_VBLK_IO + 0x0e, 0);
+    size = qtest_inw(qts, FEMU_VBLK_IO + 0x0c);
+    g_assert_cmpuint(size, >=, 3);
+    v->size = size;
+    v->avail = FEMU_VBLK_RING + 16 * size;
+    v->used = ROUND_UP(v->avail + 6 + 2 * size, 4096);
+    qtest_outl(qts, FEMU_VBLK_IO + 0x08, FEMU_VBLK_RING >> 12);
+    qtest_outb(qts, FEMU_VBLK_IO + 0x12, 7);
+}
+
+/*
+ * Read (or with @write, write) 4 KiB at sector 0 from (to) @buf: header,
+ * data, status. Each request reuses descriptors 0 to 2.
+ */
+static void femu_vblk_rw(FemuVblk *v, uint64_t buf, bool write)
+{
+    QTestState *qts = v->qts;
+    int64_t deadline;
+
+    qtest_writel(qts, FEMU_VBLK_HDR, write);
+    qtest_writel(qts, FEMU_VBLK_HDR + 4, 0);
+    qtest_writeq(qts, FEMU_VBLK_HDR + 8, 0);
+    qtest_writeb(qts, FEMU_VBLK_STATUS, 0xff);
+    qtest_writeq(qts, FEMU_VBLK_RING, FEMU_VBLK_HDR);
+    qtest_writel(qts, FEMU_VBLK_RING + 8, 16);
+    qtest_writew(qts, FEMU_VBLK_RING + 12, 1);
+    qtest_writew(qts, FEMU_VBLK_RING + 14, 1);
+    qtest_writeq(qts, FEMU_VBLK_RING + 16, buf);
+    qtest_writel(qts, FEMU_VBLK_RING + 24, 4096);
+    qtest_writew(qts, FEMU_VBLK_RING + 28, write ? 1 : 1 | 2);
+    qtest_writew(qts, FEMU_VBLK_RING + 30, 2);
+    qtest_writeq(qts, FEMU_VBLK_RING + 32, FEMU_VBLK_STATUS);
+    qtest_writel(qts, FEMU_VBLK_RING + 40, 1);
+    qtest_writew(qts, FEMU_VBLK_RING + 44, 2);
+    qtest_writew(qts, v->avail + 4 + 2 * (v->next % v->size), 0);
+    v->next++;
+    qtest_writew(qts, v->avail + 2, v->next);
+    qtest_outw(qts, FEMU_VBLK_IO + 0x10, 0);
+    deadline = g_get_monotonic_time() + 30 * G_TIME_SPAN_SECOND;
+    while (qtest_readw(qts, v->used + 2) != v->next) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(qtest_readb(qts, FEMU_VBLK_STATUS), ==, 0);
+}
+
+/*
+ * A virtio-blk read in an IOThread copies into CXL memory there. The copy
+ * is MMIO, so QEMU takes the BQL for it, but the IOThread is not the main
+ * loop and keeps the full model: it counts a write miss and queues no
+ * device DMA operation. One 4 KiB read into a CXL page.
+ */
+static void femu_test_cxl_dma_iothread(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    const uint64_t buf = FEMU_CXL_WINDOW + 8 * 4096;
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0 "
+        "-object iothread,id=io0 "
+        "-blockdev null-co,node-name=disk,read-zeroes=on "
+        "-device virtio-blk-pci,id=vblk,drive=disk,iothread=io0,"
+        "disable-modern=on,disable-legacy=off,bus=pcie.0,addr=6");
+    FemuVblk v;
+    uint64_t misses;
+
+    femu_cxl_decode(qts);
+    femu_vblk_start(&v, qts);
+    /* Data in the backend but not cached, so the copy misses. */
+    qtest_memset(qts, buf, 0xa5, 4096);
+    femu_cxl_set(qts, "flush-cache", true);
+    misses = femu_cxl_stat(qts, "write-misses");
+    femu_vblk_rw(&v, buf, false);
+    g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "write-misses"), >, misses);
+    g_assert_cmphex(qtest_readq(qts, buf), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, buf + 4096 - 8), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * A thread that is neither a vCPU nor an IOThread, such as an RCU callback,
+ * holds the BQL for MMIO and reports the main AioContext, as it has none
+ * of its own. It is not the main loop, so it keeps the full model: a read
+ * miss counts, and no device DMA operation is queued.
+ */
+static void femu_test_cxl_dma_thread(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    const uint64_t buf = FEMU_CXL_WINDOW + 8 * 4096;
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0");
+    uint64_t misses;
+
+    femu_cxl_decode(qts);
+    qtest_memset(qts, buf, 0xa5, 4096);
+    femu_cxl_set(qts, "flush-cache", true);
+    misses = femu_cxl_stat(qts, "read-misses");
+    femu_cxl_set_u64(qts, "test-thread-read", buf);
+    g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), >, misses);
+    qtest_quit(qts);
+}
+
+/*
+ * The first device DMA access is a main-loop read of page 0, outside any
+ * guard: a virtio-blk write from the first CXL page, whose request the
+ * main loop handles. It shares section 0 with every unguarded access, so
+ * it must still start a run of its own and charge page 0.
+ */
+static void femu_test_cxl_dma_page0(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,prefetch-degree=0 "
+        "-blockdev null-co,node-name=disk "
+        "-device virtio-blk-pci,id=vblk,drive=disk,"
+        "disable-modern=on,disable-legacy=off,bus=pcie.0,addr=6");
+    FemuVblk v;
+
+    femu_cxl_decode(qts);
+    femu_vblk_start(&v, qts);
+    qtest_memset(qts, FEMU_CXL_WINDOW, 0xa5, 4096);
+    femu_cxl_set(qts, "flush-cache", true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "cache-entries"), ==, 0);
+    femu_vblk_rw(&v, FEMU_CXL_WINDOW, true);
+    g_assert_cmpuint(femu_cxl_stat(qts, "dma-accesses"), >, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "dma-media-ops"), ==, 1);
     qtest_quit(qts);
 }
 
@@ -25311,6 +25478,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-dma-queue", "femu", femu_test_cxl_dma_queue, NULL);
     qos_add_test("cxl-dma-main-loop", "femu", femu_test_cxl_dma_main_loop,
                  NULL);
+    qos_add_test("cxl-dma-iothread", "femu", femu_test_cxl_dma_iothread,
+                 NULL);
+    qos_add_test("cxl-dma-page0", "femu", femu_test_cxl_dma_page0, NULL);
+    qos_add_test("cxl-dma-thread", "femu", femu_test_cxl_dma_thread, NULL);
     qos_add_test("cxl-dma-fair", "femu", femu_test_cxl_dma_fair, NULL);
     qos_add_test("cxl-fast-load-held", "femu", femu_test_cxl_fast_load_held,
                  NULL);

@@ -45,6 +45,8 @@ struct FemuCxlSsd {
     MemoryRegion component_overlay;
     /* The bridge above the device, set while it is in adapter_live. */
     PCIDevice *port;
+    /* The thread that realized the device: the main loop's. */
+    QemuThread main_loop;
     Notifier machine_done;
     bool attached;
     bool test_change_dpa;
@@ -697,12 +699,15 @@ static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
      * Outside a guard, the main loop must not wait either: a block layer
      * completion copies into CXL there, and a media wait, which can be
      * a whole NAND backlog, would stop every device the main loop serves.
-     * So a thread that is not a vCPU and holds the BQL does not wait,
-     * unless it runs a qtest command, which tests the full model. An
-     * IOThread holds no BQL and keeps the full model.
+     * So the main-loop thread does not wait, unless it runs a qtest
+     * command, which tests the full model. Every other thread keeps the
+     * full model: vCPUs, IOThreads and threads such as RCU's. Each holds
+     * the BQL here, which QEMU takes for MMIO (prepare_mmio_access()), and
+     * those without an AioContext of their own report the main one, so
+     * only the thread itself tells the main loop apart.
      */
     if (qemu_in_guarded_io() ||
-        (!mapped && !current_cpu && bql_locked() &&
+        (!mapped && qemu_thread_is_self(&cxl->main_loop) &&
          !qtest_command_running())) {
         if (mapped || !s->started || s->closing) {
             return MEMTX_ERROR;
@@ -1703,6 +1708,12 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     if (s->cca_enabled && !femu_cxl_cca_alloc(s, OBJECT(dev), errp)) {
         return;
     }
+    /*
+     * Realize runs in the main-loop thread, at startup or for device_add.
+     * Where the main loop moves to a thread of its own after startup
+     * (qemu_main), its accesses keep the full model instead.
+     */
+    qemu_thread_get_self(&FEMU_CXL_SSD(dev)->main_loop);
     parent_realize(dev, &local_err);
     if (local_err) {
         if (s->cca_enabled) {
@@ -1964,8 +1975,10 @@ static void adapter_test_protect_window(Object *obj, Visitor *v,
  * more under the FTL mutex. test-lock-wanted reports whether another
  * thread waits for the FTL mutex. test-posted-done counts device DMA
  * operations run, and test-nvme-after-posted those booked before the last
- * linked NVMe request. test-lock-mutex reports whether the CXL lock is a
- * mutex, and setting it makes it one, as version 2 does.
+ * linked NVMe request. test-thread-read reads 8 bytes at the GPA from a
+ * thread that is neither a vCPU nor an IOThread, as an RCU callback might.
+ * test-lock-mutex reports whether the CXL lock is a mutex, and setting it
+ * makes it one, as version 2 does.
  */
 static void adapter_test_guarded_write(Object *obj, Visitor *v,
                                        const char *name, void *opaque,
@@ -2007,6 +2020,41 @@ static void adapter_test_ftl_hold(Object *obj, Visitor *v, const char *name,
 static bool adapter_test_ftl_holding(Object *obj, Error **errp)
 {
     return qatomic_read(&FEMU_CXL_SSD(obj)->media.test_ftl_holding);
+}
+
+static void *adapter_test_thread_read_run(void *opaque)
+{
+    uint64_t *gpa = opaque;
+    uint64_t value;
+    MemTxResult result;
+
+    rcu_register_thread();
+    result = address_space_read(&address_space_memory, *gpa,
+                                MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
+    rcu_unregister_thread();
+    return GINT_TO_POINTER(result == MEMTX_OK);
+}
+
+static void adapter_test_thread_read(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    QemuThread thread;
+    uint64_t gpa;
+    void *ok;
+
+    if (!visit_type_uint64(v, name, &gpa, errp)) {
+        return;
+    }
+    qemu_thread_create(&thread, "femu-cxl-test", adapter_test_thread_read_run,
+                       &gpa, QEMU_THREAD_JOINABLE);
+    /* The thread takes the BQL for the MMIO dispatch. */
+    bql_unlock();
+    ok = qemu_thread_join(&thread);
+    bql_lock();
+    if (!ok) {
+        error_setg(errp, "the thread read failed");
+    }
 }
 
 static void adapter_test_nvme_after_posted(Object *obj, Visitor *v,
@@ -2318,6 +2366,8 @@ static void cxl_init(Object *obj)
                                  adapter_test_ftl_holding, NULL);
         object_property_add_bool(obj, "test-lock-wanted",
                                  adapter_test_lock_wanted, NULL);
+        object_property_add(obj, "test-thread-read", "uint64", NULL,
+                            adapter_test_thread_read, NULL, NULL);
         object_property_add(obj, "test-posted-done", "uint64",
                             adapter_test_posted_done, NULL, NULL, NULL);
         object_property_add(obj, "test-nvme-after-posted", "uint64",

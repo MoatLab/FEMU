@@ -377,14 +377,28 @@ half. The block layer completion (`dma_blk_cb()`) copies the rest through a
 4 KiB bounce buffer, on the main loop, with no guard engaged. A media wait
 there would stop the main loop for the whole NAND backlog, and with it
 every device the main loop serves, so the guest's boot disk would time out.
-So an access from a thread that is not a vCPU and holds the BQL takes the
-same path as a guarded one. Outside a guard all such accesses share one
-section, so a run is consecutive accesses in one direction. The regression
-test `cxl-dma-main-loop` holds the FTL for 2 s during an NVMe read into CXL
-memory and checks that the monitor answers meanwhile.
+So an access from the main-loop thread takes the same path as a guarded
+one. FEMU records that thread when it realizes the device, and tells it
+apart by identity alone. Every other thread holds the BQL for such a copy
+too, which QEMU takes for MMIO (`prepare_mmio_access()`), and a thread
+without an AioContext of its own, such as the RCU thread, reports the main
+one, so neither the BQL nor the AioContext identifies the main loop.
+vCPUs, IOThreads and such threads keep the full model. The regression
+test `cxl-dma-iothread` reads through a virtio-blk device in an IOThread
+into CXL memory and checks that the copy counts a write miss and no
+`dma-accesses`; `cxl-dma-thread` reads from a plain QEMU thread and checks
+for a read miss and no `dma-accesses`. Where the main loop runs in a
+thread other than the one that started QEMU (`qemu_main`, used on macOS
+for some displays), main-loop copies keep the full model and wait. Outside a guard all such accesses share one
+section, so a run is consecutive accesses in one direction. The first
+access after start begins a run, so it charges its page even at DPA 0
+(regression test `cxl-dma-page0`). The regression
+test `cxl-dma-main-loop` holds the FTL during an NVMe read into CXL memory
+until the monitor has answered ten times, and checks that the FTL still
+held after them.
 
-A vCPU access, a fault exit, a qtest command and an IOThread access keep the
-full model. A qtest command marks itself (`qtest_command_running()`), so a
+A vCPU access, a fault exit, a qtest command, an IOThread access and an
+access from any other thread but the main loop keep the full model. A qtest command marks itself (`qtest_command_running()`), so a
 test that times an access still sees its media wait. Inline mailbox commands and the
 invalidations of configuration and component writes run inside this
 device's own guard and never wait. Debug builds (`FEMU_FTL_ASSERT`) abort

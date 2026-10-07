@@ -167,7 +167,8 @@ struct FemuCxlMedia {
     uint64_t dma_media_ns;
     /*
      * The last run of such accesses: its guarded section, direction, end,
-     * and the page it last queued an operation for. CXL lock.
+     * and the page it last queued an operation for; an end of UINT64_MAX
+     * before the first. CXL lock.
      */
     uint64_t dma_run_section;
     bool dma_run_write;
