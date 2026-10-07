@@ -272,6 +272,14 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
     }
 
     ru->utilization = (float)ru->vpc / ru->npages;
+    /*
+     * Cost-benefit ages a unit from its last invalidation. A unit retired
+     * with none, which a handle update can leave part written, would count
+     * from time zero and outscore every other unit; age it from now.
+     */
+    if (ru->last_invalidated_time == 0) {
+        ru->last_invalidated_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
     if (rm->mgmt_type == GC_GLOBAL_CB) {
         if (ru->utilization < 1.0f && ru->last_invalidated_time > 0) {
             ru->my_cb = (uint64_t)(100000.0f * ru->utilization /

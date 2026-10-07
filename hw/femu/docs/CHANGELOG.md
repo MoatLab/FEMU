@@ -259,6 +259,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - An FDP handle whose last unit filled with nothing free reports no room in RUH Status. It used to report the room of its retired unit, which GC could free and give to another handle (4e7a06666).
 - The `random` and `d-choice` GC policies and FDP's random reclaim strategy draw victims from a generator seeded by the new `gc_seed` property instead of the wall clock and `rand()`, so the same configuration and workload give the same victims and WAF on every run. `fifo` finds its victim at the top of a queue ordered by close order instead of scanning every line, with the same victims as before (04ba1c0aa).
 - FDP background GC counts the pages a unit never wrote as reclaimable. A unit that RUH Update retired holding a few valid pages had none invalid, so each background pass took it from the top of the victim queue, refused it and stopped; units behind it were collected only under the foreground watermark (beb9878ac).
+- FDP cost-benefit GC ages a unit retired with no page invalidated from its retirement. It used to count from time zero, so a part-written unit left by RUH Update outscored every other victim; with few pages to free, background GC refused it on every pass and collected nothing.
 
 #### Spec conformance and host compatibility
 

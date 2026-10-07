@@ -246,7 +246,7 @@ not apply under FDP and only `greedy` is accepted with it.
 | `gc_strategy` | Policy |
 | --- | --- |
 | 0 (default) | greedy: the unit with the fewest valid pages |
-| 1 | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid pages over the pages written (over the unit's pages until a page is invalidated) and `age` the time since a page in the unit was last invalidated, computed at selection time; a unit never invalidated counts as maximally old |
+| 1 | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid pages over the pages written (over the unit's pages until a page is invalidated) and `age` the time since a page in the unit was last invalidated, computed at selection time; a unit retired with no page invalidated is aged from its retirement |
 | 2 | random among the victims |
 | 4 | per handle: the unit with the fewest valid pages among the per-handle queues of Persistently Isolated handles, falling back to greedy |
 
@@ -424,7 +424,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-csd-runs`, `fdp-gc-strategy-refused` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-csd-runs`, `fdp-gc-strategy-refused` |
 | Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |

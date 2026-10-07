@@ -4312,6 +4312,84 @@ static void femu_test_fdp_background_gc(void *obj, void *data,
 }
 
 /*
+ * Cost-benefit collection scores a unit by (1 - u) * age / u, with u the
+ * share of the unit a collection copies and age the time since its last
+ * invalidation. The tests below write a unit through placement 0, leave it
+ * part written with a handle update, set up a competitor through placement
+ * 1, and then fill the device through placement 3 until background
+ * collection starts. A unit is four blocks of four pages; the competitor and
+ * the part-written unit are the only victims.
+ */
+static void femu_fdp_cb_fill(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint64_t list, bool stop_at_erase)
+{
+    uint64_t page;
+
+    for (page = 32; page < 256; page += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(c, page, 16, buf, list,
+                                                        3)), ==, NVME_SUCCESS);
+        if (stop_at_erase && femu_ftl_trace_field(qts, 5)) {
+            return;
+        }
+    }
+}
+
+/*
+ * A unit that was never invalidated has no last invalidation time. It used
+ * to count as invalidated at time zero, so its age was the whole host clock
+ * and it outscored every unit with an invalidation. Here it holds 15 valid
+ * pages of 16, which background collection refuses as too little to gain, so
+ * collection stopped at it on every pass, and a unit with 14 invalid pages
+ * behind it was never taken.
+ */
+static void femu_test_fdp_cb_unwritten_age(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t pid0 = cpu_to_le16(0);
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    qtest_memwrite(qts, pids, &pid0, sizeof(pid0));
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 15, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    for (i = 16; i < 30; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 1, buf, list,
+                                                        2)), ==, NVME_SUCCESS);
+    }
+    /* the score of each unit grows with its age; give both units one */
+    g_usleep(20 * 1000);
+
+    femu_fdp_cb_fill(&c, qts, buf, list, false);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(femu_read_pages(&c, i, 1, buf, list), ==,
+                        NVME_SUCCESS);
+    }
+    /* the unit with 14 invalid pages: its 2 valid pages and 4 blocks */
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 2);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    /* the next test counts from a device that has collected nothing */
+    qos_invalidate_command_line();
+}
+
+/*
  * A Zone Append reads the zone's write pointer to decide where it lands and
  * then moves it. On queues that different pollers serve, two of them read the
  * same pointer unless the zone state is held still, and the controller reports
@@ -23006,6 +23084,13 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub",
+    });
+    qos_add_test("fdp-cb-unwritten-age", "femu",
+                 femu_test_fdp_cb_unwritten_age, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_strategy=1,subsys=fdpsub",
     });
     qos_add_test("fdp-background-gc", "femu", femu_test_fdp_background_gc,
                  &(QOSGraphTestOptions) {
