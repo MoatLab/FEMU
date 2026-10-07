@@ -4335,6 +4335,18 @@ static void femu_fdp_cb_fill(FemuCtrlState *c, QTestState *qts, uint64_t buf,
 }
 
 /*
+ * Cost-benefit multiplies each unit's score by its age, and the setup above
+ * gives the units their ages a few writes apart. Wait ten times that gap, so
+ * the ages are close to equal however slowly the host ran the setup.
+ */
+static void femu_fdp_cb_age(int64_t setup_start_us)
+{
+    int64_t gap = g_get_monotonic_time() - setup_start_us;
+
+    g_usleep(MAX(20 * 1000, 10 * gap));
+}
+
+/*
  * A unit that was never invalidated has no last invalidation time. It used
  * to count as invalidated at time zero, so its age was the whole host clock
  * and it outscored every unit with an invalidation. Here it holds 15 valid
@@ -4352,6 +4364,7 @@ static void femu_test_fdp_cb_unwritten_age(void *obj, void *data,
     uint64_t buf = guest_alloc(alloc, 16 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t pids = guest_alloc(alloc, 4096);
+    int64_t setup_start;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
@@ -4361,6 +4374,7 @@ static void femu_test_fdp_cb_unwritten_age(void *obj, void *data,
 
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 15, buf, list, 0)),
                     ==, NVME_SUCCESS);
+    setup_start = g_get_monotonic_time();
     g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
                                                     1)), ==, NVME_SUCCESS);
@@ -4368,8 +4382,7 @@ static void femu_test_fdp_cb_unwritten_age(void *obj, void *data,
         g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 1, buf, list,
                                                         2)), ==, NVME_SUCCESS);
     }
-    /* the score of each unit grows with its age; give both units one */
-    g_usleep(20 * 1000);
+    femu_fdp_cb_age(setup_start);
 
     femu_fdp_cb_fill(&c, qts, buf, list, false);
     for (i = 0; i < 4; i++) {
@@ -4406,6 +4419,7 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
     uint64_t buf = guest_alloc(alloc, 16 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t pids = guest_alloc(alloc, 4096);
+    int64_t setup_start;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -4418,12 +4432,13 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
                                                     1)), ==, NVME_SUCCESS);
     /* half of the full unit, then one page of the part-written one */
+    setup_start = g_get_monotonic_time();
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 8, buf, list, 2)),
                     ==, NVME_SUCCESS);
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 2)),
                     ==, NVME_SUCCESS);
-    /* equal ages, so utilization alone decides */
-    g_usleep(20 * 1000);
+    /* near-equal ages, so utilization decides */
+    femu_fdp_cb_age(setup_start);
 
     femu_fdp_cb_fill(&c, qts, buf, list, true);
     g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
