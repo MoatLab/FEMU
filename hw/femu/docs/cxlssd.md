@@ -366,8 +366,21 @@ inside a device's re-entrancy guard leaves that wait to a bottom half.
 Debug builds (`FEMU_FTL_ASSERT`) also abort when teardown stops the worker
 inside a guard.
 
-A vCPU access, a fault exit, a qtest access and a QOM command run outside
-any guard and keep the full model. Inline mailbox commands and the
+The main loop also copies into the window outside any guard. QEMU's NVMe
+controller maps only the first chunk of a transfer in its guarded bottom
+half. The block layer completion (`dma_blk_cb()`) copies the rest through a
+4 KiB bounce buffer, on the main loop, with no guard engaged. A media wait
+there would stop the main loop for the whole NAND backlog, and with it
+every device the main loop serves, so the guest's boot disk would time out.
+So an access from a thread that is not a vCPU and holds the BQL takes the
+same path as a guarded one. Outside a guard all such accesses share one
+section, so a run is consecutive accesses in one direction. The regression
+test `cxl-dma-main-loop` holds the FTL for 2 s during an NVMe read into CXL
+memory and checks that the monitor answers meanwhile.
+
+A vCPU access, a fault exit, a qtest command and an IOThread access keep the
+full model. A qtest command marks itself (`qtest_command_running()`), so a
+test that times an access still sees its media wait. Inline mailbox commands and the
 invalidations of configuration and component writes run inside this
 device's own guard and never wait. Debug builds (`FEMU_FTL_ASSERT`) abort
 when a wait starts inside a guard, so the qtests check every path they

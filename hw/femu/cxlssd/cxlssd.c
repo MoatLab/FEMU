@@ -1310,13 +1310,16 @@ static void cxl_media_post(FemuCxlMedia *s, uint64_t lpn, bool write)
  * the device, and its MMIO needs the BQL. A wait for the gate, a held page
  * or the media releases the BQL, and while it is released the device
  * refuses every other access as re-entrant: a vCPU's doorbell write would be
- * dropped. So nothing here waits or releases a lock; the caller holds the
+ * dropped. The main loop's other accesses, such as a block layer
+ * completion's copy, come here too, so that no media wait stops the main
+ * loop. So nothing here waits or releases a lock; the caller holds the
  * BQL and the CXL lock throughout. The payload moves at once. A cached page
  * is a hit, and a write marks it dirty. Any other page queues one media
  * operation, which nobody waits for, for each run of consecutive accesses
  * to it within one guarded section: a DMA transfer arrives as one access
- * per 8 bytes. The cache, direct mappings and the I/O log are left as they
- * are.
+ * per 8 bytes. Accesses outside a guard all share section 0, so for them a
+ * run is only consecutive accesses in one direction. The cache, direct
+ * mappings and the I/O log are left as they are.
  */
 MemTxResult femu_cxl_access_nowait(FemuCxlMedia *s, uint64_t dpa,
                                    uint64_t *data, unsigned size, bool write)

@@ -694,8 +694,16 @@ static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
      * Inside a device's re-entrancy guard, typically another device's DMA,
      * waiting would release the BQL, and that device would then refuse
      * other threads' accesses as re-entrant. See femu_cxl_access_nowait().
+     * Outside a guard, the main loop must not wait either: a block layer
+     * completion copies into CXL there, and a media wait, which can be
+     * a whole NAND backlog, would stop every device the main loop serves.
+     * So a thread that is not a vCPU and holds the BQL does not wait,
+     * unless it runs a qtest command, which tests the full model. An
+     * IOThread holds no BQL and keeps the full model.
      */
-    if (qemu_in_guarded_io()) {
+    if (qemu_in_guarded_io() ||
+        (!mapped && !current_cpu && bql_locked() &&
+         !qtest_command_running())) {
         if (mapped || !s->started || s->closing) {
             return MEMTX_ERROR;
         }

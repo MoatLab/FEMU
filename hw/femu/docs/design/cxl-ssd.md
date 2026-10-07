@@ -802,6 +802,7 @@ case and the realize messages.
 | `femu-cxl-ftl` | `cxl_worker()`: every FTL request of the medium | `s->lock` only; never the BQL or the CXL lock, never guest memory |
 | `femu-cxl-cca` | Caching API commands | BQL, CXL lock, gate per chunk, `cca->lock` for the doorbell flag |
 | QEMU main loop | QMP `qom-set` (flush, way change, control commands), queued LSA commands, NVMe drop BH, Cylon install BH, teardown and reference BHs left by fault exits | BQL, CXL lock; the gate, except the Cylon install BH, which pauses all vCPUs before it takes the CXL lock |
+| QEMU main loop, device DMA | Copies of other devices into the window, guarded or not (block layer completions), except qtest commands | BQL, CXL lock, `post_lock`; never the gate or `s->lock`, never waits (`femu_cxl_access_nowait()`) |
 | NVMe FTL thread (linked controller) | NVMe I/O on the shared FTL (`femu_cxl_nvme_ftl()`) | `s->lock`; never the BQL or the CXL lock |
 | NVMe pollers (linked controller) | Hold a completion until its cache drop is published | Read `nvme_done` only |
 
