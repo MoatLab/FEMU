@@ -2897,6 +2897,25 @@ typedef struct FtlTraceMp {
     uint64_t base_seq_ns;
 } FtlTraceMp;
 
+/*
+ * A variant of the workload for the victim policies the plain trace does not
+ * reach. The writes take the placement identifiers in @pids in turn, so more
+ * than one handle holds victims. With @reread, a read of a random page
+ * follows each overwrite. Each read adds a background collection pass and
+ * read stress; @read_reclaims is the exact count log page C0h must report.
+ * With @trim, the overwrites run twice with one deallocate between them,
+ * which resets the whole device, and the mapping must hold exactly the pages
+ * written after it.
+ */
+typedef struct FtlTraceVar {
+    const char *want;
+    int pids[2];
+    int npids;
+    bool reread;
+    uint64_t read_reclaims;
+    bool trim;
+} FtlTraceVar;
+
 /* field @i of x-ftl-trace on the device with id "trace" */
 static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
 {
@@ -2914,8 +2933,12 @@ static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
     return ns;
 }
 
+static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
+                                   uint32_t npages, uint64_t buf);
+
 static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
-                               const char *want, const FtlTraceMp *mp)
+                               const char *want, const FtlTraceMp *mp,
+                               const FtlTraceVar *var)
 {
     const char *base = mp ? mp->base : NULL;
     QFemu *femu = obj;
@@ -2925,7 +2948,12 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint32_t seed = 1;
+    uint32_t read_seed = 3;
+    bool written[256] = { false };
+    int rounds = var && var->trim ? 2 : 1;
+    int nw = 0;
     QDict *rsp;
+    int round;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
@@ -2933,7 +2961,10 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
     qtest_memset(qts, buf, 0x3c, 64 * 4096);
 
     for (i = 0; i < pages; i += 64) {
-        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+        int pid = var && var->npids ? var->pids[nw++ % var->npids] : -1;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        pid)), ==,
                         NVME_SUCCESS);
     }
     /*
@@ -2957,14 +2988,33 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
             g_assert_cmpuint(seq_ns, <, mp->base_seq_ns);
         }
     }
-    for (i = 0; i < 600; i++) {
-        uint32_t npages = i % 4 == 3 ? 64 : 1;
-        uint64_t page;
+    for (round = 0; round < rounds; round++) {
+        if (round) {
+            g_assert_cmphex(femu_dealloc_pages(&c, 0, 1, list), ==,
+                            NVME_SUCCESS);
+            memset(written, 0, sizeof(written));
+        }
+        for (i = 0; i < 600; i++) {
+            uint32_t npages = i % 4 == 3 ? 64 : 1;
+            int pid = var && var->npids ? var->pids[nw++ % var->npids] : -1;
+            uint64_t page;
+            uint32_t j;
 
-        seed = seed * 1103515245 + 12345;
-        page = (seed >> 8) % (pages - npages + 1);
-        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
-                        ==, NVME_SUCCESS);
+            seed = seed * 1103515245 + 12345;
+            page = (seed >> 8) % (pages - npages + 1);
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, page, npages,
+                                                            buf, list, pid)),
+                            ==, NVME_SUCCESS);
+            for (j = 0; j < npages; j++) {
+                written[page + j] = true;
+            }
+            if (var && var->reread) {
+                read_seed = read_seed * 1103515245 + 12345;
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                        ((read_seed >> 8) % pages) * 8, buf),
+                                ==, NVME_SUCCESS);
+            }
+        }
     }
     for (i = 0; i < 128; i++) {
         seed = seed * 1103515245 + 12345;
@@ -3022,6 +3072,33 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
     }
     qobject_unref(rsp);
 
+    if (var && var->reread) {
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list,
+                                             512, 0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, list + 40), ==, var->read_reclaims);
+    }
+    if (var && var->trim) {
+        uint64_t mapped;
+        uint64_t lost;
+        uint64_t orphans;
+        uint64_t want_mapped = 0;
+
+        for (i = 0; i < pages; i++) {
+            want_mapped += written[i];
+        }
+        rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/trace',"
+                        "'property':'x-ftl-check'}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                               "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                               &mapped, &lost, &orphans), ==, 3);
+        qobject_unref(rsp);
+        g_assert_cmpuint(mapped, ==, want_mapped);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -3029,7 +3106,16 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
 
 static void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
 {
-    femu_ftl_trace_run(obj, alloc, data, NULL);
+    femu_ftl_trace_run(obj, alloc, data, NULL, NULL);
+}
+
+/* the trace under one of the variants above; data is an FtlTraceVar */
+static void femu_test_ftl_trace_var(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    const FtlTraceVar *var = data;
+
+    femu_ftl_trace_run(obj, alloc, var->want, NULL, var);
 }
 
 /* two planes per LUN, with reads of several pages; data is an FtlTraceMp */
@@ -3038,7 +3124,7 @@ static void femu_test_ftl_trace_mp(void *obj, void *data,
 {
     const FtlTraceMp *mp = data;
 
-    femu_ftl_trace_run(obj, alloc, mp->want, mp);
+    femu_ftl_trace_run(obj, alloc, mp->want, mp, NULL);
 }
 
 #define FTL_TRACE_MP_OFF \
@@ -3057,6 +3143,41 @@ static const FtlTraceMp ftl_trace_mp_on = {
     .base = FTL_TRACE_MP_OFF,
     .seq_ns = 10040000,
     .base_seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
+};
+
+/* two handles, so the per-handle heaps compare their tops */
+static const FtlTraceVar ftl_trace_fdp_noisy = {
+    .want = "732 2054843255 10306 10306 4892 3732 5020 15198 3732",
+    .pids = { 0, 1 },
+    .npids = 2,
+};
+/* handle 3 is initially isolated and has no heap of its own */
+static const FtlTraceVar ftl_trace_fdp_noisy_ii = {
+    .want = "732 1954207306 10306 10306 4077 3528 4205 14383 3528",
+    .pids = { 0, 3 },
+    .npids = 2,
+};
+/* a whole-device reset while both kinds of heap hold victims */
+static const FtlTraceVar ftl_trace_fdp_trim = {
+    .want = "1333 4066723313 20356 20356 9148 7332 9276 29504 7332",
+    .pids = { 0, 1 },
+    .npids = 2,
+    .trim = true,
+};
+/*
+ * Each command runs one background collection pass, and a greedy placement
+ * pass that refuses its victim pops it and inserts it back, which moves the
+ * order of units with equal valid counts. The reads add enough refusals for
+ * that order to change what later collections relocate.
+ */
+static const FtlTraceVar ftl_trace_fdp_reread = {
+    .want = "1332 2670000000 10306 10306 9360 4852 10088 19666 4852",
+    .reread = true,
+};
+static const FtlTraceVar ftl_trace_read_reclaim = {
+    .want = "1332 1609160254 10306 10306 1399 2836 2127 11705 2836",
+    .reread = true,
+    .read_reclaims = 83,
 };
 
 /*
@@ -3643,6 +3764,35 @@ static void femu_test_fdp_capacity_refused(void *obj, void *data,
         g_assert_true(qdict_haskey(rsp, "error"));
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
                                              "desc"), "fdp.nruh"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * Only greedy, cost-benefit, random and per-handle collection (0, 1, 2 and 4)
+ * are implemented for placement. The other numbers once fell back to greedy
+ * or never collected, so realize refuses them rather than run something else.
+ */
+static void femu_test_fdp_gc_strategy_refused(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const int refused[] = { -1, 3, 5, 10, 11, 12, 13, 14, 15 };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(refused); i++) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'fdp-gcs','addr':'5',"
+                        "'devsz_mb':1,'femu_mode':1,'secsz':512,"
+                        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+                        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,"
+                        "'gc_strategy':%d,'subsys':'fdpsub'}}", refused[i]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), "gc_strategy"));
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
@@ -22543,6 +22693,91 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
     });
+    /*
+     * The victim order of each collection policy, on the workload above.
+     * Cost-benefit has no pin: it ages victims by the host's real-time clock.
+     * The counts see a victim only through how many collections run, so a
+     * seed can hide a changed draw; with gc_seed=7, FDP random relocates the
+     * same pages when each draw is one higher, so it uses gc_seed=1.
+     */
+    qos_add_test("ftl-trace-random", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 6331851448 10306 10306 26577 9156 26705 36883 9156",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=random,gc_seed=7",
+    });
+    qos_add_test("ftl-trace-d-choice", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 4152925024 10306 10306 15855 6476 15983 26161 6476",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=d-choice,gc_seed=7",
+    });
+    qos_add_test("ftl-trace-fifo", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 6408371473 10306 10306 26366 9104 26494 36672 9104",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=fifo",
+    });
+    qos_add_test("ftl-trace-fdp-random", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_strategy=2,gc_seed=1",
+    });
+    qos_add_test("ftl-trace-fdp-noisy", "femu", femu_test_ftl_trace_var,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_fdp_noisy,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_strategy=4",
+    });
+    qos_add_test("ftl-trace-fdp-noisy-ii", "femu", femu_test_ftl_trace_var,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_fdp_noisy_ii,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub-ii,gc_strategy=4",
+    });
+    qos_add_test("ftl-trace-fdp-trim-erase-all", "femu",
+                 femu_test_ftl_trace_var, &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_fdp_trim,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_strategy=4,fdp_trim_erase_all=1",
+    });
+    qos_add_test("ftl-trace-fdp-reread", "femu", femu_test_ftl_trace_var,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_fdp_reread,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    /*
+     * Read reclaim runs only with two lines free, so this device has more
+     * lines than the others. The reads reach lines in the victim heap.
+     */
+    qos_add_test("ftl-trace-read-reclaim", "femu", femu_test_ftl_trace_var,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&ftl_trace_read_reclaim,
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "read_reclaim_limit=2",
+    });
+    qos_add_test("fdp-gc-strategy-refused", "femu",
+                 femu_test_fdp_gc_strategy_refused, NULL);
     qos_add_test("query-bbssd", "femu", femu_test_query,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
