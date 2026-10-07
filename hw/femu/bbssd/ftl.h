@@ -283,14 +283,7 @@ enum {
     GC_GLOBAL_GREEDY              = 0,
     GC_GLOBAL_CB                  = 1,
     GC_GLOBAL_RAND                = 2,
-    GC_GLOBAL_WARM                = 3,
     GC_NOISY_RUH_CUSTOM           = 4,
-    GC_SELECTIVE_RUH              = 10,
-    GC_SELECTIVE_RUH_ADV          = 11,
-    GC_SELECTIVE_MIDAS_OP         = 12,
-    GC_SELECTIVE_RUH_SOCIAL_WELFARE = 13,
-    GC_EXPLOIT_SEQUENTIAL         = 14,
-    GC_BIT_POPULATION             = 15,
 };
 
 typedef struct ru_mgmt {
@@ -303,20 +296,12 @@ typedef struct ru_mgmt {
     uint64_t tt_rus;
     uint64_t free_ru_cnt;
     int victim_ru_cnt;
-    int full_ru_cnt;
     int custom_gc_threshold;
 
     uint64_t gc_thres_rus;
     uint64_t gc_thres_rus_high;
     double gc_thres_pcent;
     double gc_thres_pcent_high;
-
-    /* runtime WAF tracking */
-    bool is_gc_triggered;
-    bool is_force_gc_triggered;
-    float waf_score_global;
-    float waf_score_transitory;
-    float utilization_overall;
 } ru_mgmt;
 
 struct FemuReclaimUnit {
@@ -332,15 +317,11 @@ struct FemuReclaimUnit {
     int pos;       /* heap index in the per-RG (global) victim pqueue */
     int ruh_pos;   /* heap index in the per-RUH victim pqueue (PI RUHs) */
     int n_lines;
-    int next_line_index;
     int npages;
-    int chance_token;
     float utilization;
 
     /* cost-benefit GC attributes */
-    uint64_t last_init_time;
     uint64_t last_invalidated_time;
-    int erase_cnt;
     float my_cb;
 };
 
@@ -349,7 +330,6 @@ struct FemuRuHandle {
     uint16_t ruhid;
     int ru_in_use_cnt;
     int ruh_live_pages_cnt;
-    uint16_t curr_rg;
     NvmeRuHandle *ruh;
     FemuReclaimUnit **rus;
     FemuReclaimUnit *curr_ru;

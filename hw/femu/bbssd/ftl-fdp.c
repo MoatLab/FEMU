@@ -126,11 +126,8 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
     }
     new_ru->rgidx = rgidx;
     new_ru->ruh = eruh;
-    new_ru->last_init_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     new_ru->last_invalidated_time = 0;
-    new_ru->erase_cnt = 0;
     new_ru->my_cb = 0.0f;
-    new_ru->chance_token = 0;
 
     fdp_set_ru_write_pointer(ssd, new_ru);
     eruh->ru_in_use_cnt++;
@@ -198,7 +195,6 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
 
     if (is_full) {
         QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
-        rm->full_ru_cnt++;
         return true;
     }
 
@@ -403,7 +399,6 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
         }
         if (was_full_ru) {
             QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
-            rm->full_ru_cnt--;
             pqueue_insert(rm->victim_ru_pq, ru);
             rm->victim_ru_cnt++;
             /*
@@ -432,23 +427,7 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
         }
         if (was_full_ru) {
             QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
-            rm->full_ru_cnt--;
             pqueue_insert(rm->victim_ru_cb, ru);
-            rm->victim_ru_cnt++;
-        }
-        break;
-
-    default:
-        //Greedy
-        ftl_err( "Undefined rg mgmt type (rm->mgmt_type %d). Fallback to Greedy.\n",
-              rm->mgmt_type);
-        if (ru->pos) {
-            pqueue_change_priority(rm->victim_ru_pq, ru->vpc, ru);
-        }
-        if (was_full_ru) {
-            QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
-            rm->full_ru_cnt--;
-            pqueue_insert(rm->victim_ru_pq, ru);
             rm->victim_ru_cnt++;
         }
         break;
@@ -492,31 +471,10 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
 }
 
 /*
- * select_victim_ru_from_ruh - pick victim from a specific RUH's queue
- */
-static FemuReclaimUnit *select_victim_ru_from_ruh(struct ssd *ssd,
-                                                   uint16_t rgid,
-                                                   uint16_t ruhid)
-{
-    FemuReclaimUnit *victim_ru = NULL;
-    struct ru_mgmt *ru_mgmt = ssd->ruhs[ruhid].ru_mgmt;
-
-    if (!ru_mgmt) {
-        return NULL;
-    }
-
-    victim_ru = pqueue_pop(ru_mgmt->victim_ru_pq);
-    if (victim_ru) {
-        ru_mgmt->victim_ru_cnt--;
-    }
-    return victim_ru;
-}
-
-/*
  * select_victim_ru - pick best victim RU based on configured GC strategy
  */
 static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
-                                         uint16_t ruhid, bool force)
+                                         bool force)
 {
     struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
     FemuReclaimUnit *victim_ru = NULL;
@@ -624,23 +582,9 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         break;
     }
 
-    case GC_SELECTIVE_RUH:
-    case GC_EXPLOIT_SEQUENTIAL:
-        victim_ru = pqueue_pop(rm->victim_ru_pq);
-        break;
-
-    case GC_SELECTIVE_RUH_SOCIAL_WELFARE:
-        victim_ru = select_victim_ru_from_ruh(ssd, rgid, ruhid);
-        break;
-
-    case GC_BIT_POPULATION:
-    case GC_GLOBAL_WARM:
-    case GC_SELECTIVE_RUH_ADV:
-    case GC_SELECTIVE_MIDAS_OP:
     default:
-        /* fallback to greedy */
-        victim_ru = pqueue_pop(rm->victim_ru_pq);
-        break;
+        /* realize refuses every other gc_strategy */
+        g_assert_not_reached();
     }
 
     if (!victim_ru) {
@@ -877,18 +821,14 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     for (int i = 0; i < ru->n_lines; i++) {
         ru->lines[i]->ipc = 0;
         ru->lines[i]->vpc = 0;
-        ru->lines[i]->pos = 0;
     }
 
     ru->vpc = 0;
     ru->ipc = 0;
     ru->pos = 0;
     ru->ruh_pos = 0;
-    ru->next_line_index = 1;
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
-    ru->erase_cnt++;
-    ru->chance_token = 0;
 
     fdp_set_ru_write_pointer(ssd, ru);
 
@@ -940,7 +880,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     struct ppa ppa;
     int vpc_cnt = 0;
     int blk_cnt = 0;
-    victim_ru = select_victim_ru(ssd, rgid, ruhid, force);
+    victim_ru = select_victim_ru(ssd, rgid, force);
     if (!victim_ru) {
         //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
         return -1;
@@ -1424,17 +1364,10 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
     rm->tt_rus = rg->tt_nru;
     rm->free_ru_cnt = rg->tt_nru;
     rm->victim_ru_cnt = 0;
-    rm->full_ru_cnt = 0;
     rm->custom_gc_threshold = 0;
 
     /* default GC strategy */
     rm->mgmt_type = GC_GLOBAL_GREEDY;
-
-    rm->is_gc_triggered = false;
-    rm->is_force_gc_triggered = false;
-    rm->waf_score_global = 0.0f;
-    rm->waf_score_transitory = 0.0f;
-    rm->utilization_overall = 0.0f;
 
     QTAILQ_INIT(&rm->free_ru_list);
     QTAILQ_INIT(&rm->full_ru_list);
@@ -1460,7 +1393,6 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     struct write_pointer *wpp;
 
     femu_ru->n_lines = spp->lines_per_ru;
-    femu_ru->next_line_index = 1;
     femu_ru->vpc = 0;
     femu_ru->ipc = 0;
     femu_ru->pos = 0;
@@ -1577,7 +1509,6 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         ssd->ruhs[i].ruhid = i;
         ssd->ruhs[i].ruh_live_pages_cnt = 0;
         ssd->ruhs[i].ru_in_use_cnt = 0;
-        ssd->ruhs[i].curr_rg = 0;
         ssd->ruhs[i].hbmw = 0;
         ssd->ruhs[i].mbmw = 0;
         ssd->ruhs[i].mbe = 0;
@@ -1591,8 +1522,8 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
             ssd->ruhs[i].ruh->rus[j] = ssd->ruhs[i].rus[j]->nvme_ru;
         }
         /*
-         * The active RU must match the default reclaim group (rgid 0, curr_rg
-         * 0), not the last one allocated by the loop above. A non-placement
+         * The active RU must match the default reclaim group (rgid 0), not
+         * the last one allocated by the loop above. A non-placement
          * write uses rgid 0, and the write path advances ruh->curr_ru through
          * ssd->rg[rgid]'s management object. Leaving curr_ru in the last group
          * (nrg-1) made a default write advance an rg[nrg-1] RU through rg[0]'s
@@ -1608,7 +1539,6 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
             ssd->ruhs[i].ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
             ssd->ruhs[i].ru_mgmt->mgmt_type = n->bb_params.gc_strategy;
             ssd->ruhs[i].ru_mgmt->victim_ru_cnt = 0;
-            ssd->ruhs[i].ru_mgmt->full_ru_cnt = 0;
             ssd->ruhs[i].ru_mgmt->custom_gc_threshold = 0;
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->free_ru_list);
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->full_ru_list);
@@ -1619,11 +1549,6 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
             ssd->ruhs[i].ru_mgmt->victim_ru_pq =
                 pqueue_init(ssd->rg[0].tt_nru, victim_ru_cmp_pri,
                             victim_ru_get_pri, victim_ru_set_pri,
-                            victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
-            ssd->ruhs[i].ru_mgmt->victim_ru_cb =
-                pqueue_init(ssd->rg[0].tt_nru, victim_ru_cmp_pri_by_cb,
-                            victim_ru_get_pri_by_cb,
-                            victim_ru_set_pri_by_cb,
                             victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
         }
 
@@ -1848,7 +1773,6 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         }
         while ((v_ru = QTAILQ_FIRST(&rm->full_ru_list)) != NULL) {
             QTAILQ_REMOVE(&rm->full_ru_list, v_ru, entry);
-            rm->full_ru_cnt--;
             mark_ru_free(ssd, v_ru->rgidx, v_ru);
         }
     }
@@ -1951,7 +1875,6 @@ void femu_fdp_ssd_free(struct ssd *ssd)
 
             if (rm) {
                 pqueue_free(rm->victim_ru_pq);
-                pqueue_free(rm->victim_ru_cb);
                 g_free(rm);
             }
             g_free(ssd->ruhs[i].rus);
