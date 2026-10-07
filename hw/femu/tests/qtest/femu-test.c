@@ -4454,11 +4454,14 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
 
 /*
  * Cost-benefit can rank a unit that background collection refuses above
- * one it would take. Here a unit with 15 valid pages of 16 and an old
- * invalidation outscores one with 8 invalid pages invalidated just now.
- * The background pass used to refuse the first and return nothing, so the
- * second waited until its age caught up or the foreground watermark.
+ * one it would take. Here a unit with 15 valid pages of 16 outscores one
+ * with 14 valid pages while the second's age is under 7 / 15 of the
+ * first's. The background pass used to refuse the first and return
+ * nothing, so the second waited until its age caught up or the foreground
+ * watermark.
  */
+#define FDP_CB_BG_WAIT_US   (300 * 1000)
+
 static void femu_test_fdp_cb_background(void *obj, void *data,
                                         QGuestAllocator *alloc)
 {
@@ -4467,8 +4470,9 @@ static void femu_test_fdp_cb_background(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 16 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
-    int64_t start;
-    int64_t gap;
+    int64_t old_done;
+    int64_t submit;
+    int64_t done;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -4482,21 +4486,37 @@ static void femu_test_fdp_cb_background(void *obj, void *data,
     femu_fdp_cb_fill(&c, qts, buf, list, false);
     g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
 
-    start = g_get_monotonic_time();
+    /* one invalid page: every background pass refuses this unit */
     g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 2)),
                     ==, NVME_SUCCESS);
-    gap = g_get_monotonic_time() - start;
+    old_done = g_get_monotonic_time();
+    g_usleep(FDP_CB_BG_WAIT_US);
+
     /*
-     * The first unit outscores the second while the second's age is under
-     * 1 / 14 of its own. The pass that decides runs in the same command as
-     * the invalidations, so a wait of a hundred commands leaves a margin.
+     * The pass that decides runs in this command, after both invalidations.
+     * At that moment the first unit's age is at least submit - old_done and
+     * the second's at most done - submit.
      */
-    g_usleep(MAX(100 * 1000, 100 * gap));
-    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 8, buf, list, 2)),
+    submit = g_get_monotonic_time();
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 2, buf, list, 2)),
                     ==, NVME_SUCCESS);
-    /* the unit with 8 invalid pages: its 8 valid pages and 4 blocks */
+    done = g_get_monotonic_time();
+
+    /*
+     * Two invalid pages are the fewest a background pass takes, so the
+     * refused unit leads by the widest margin. Collected: 14 pages, 4 blocks.
+     */
     g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
-    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 8);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 14);
+
+    /*
+     * The old selector takes the second unit too once it outscores the
+     * first, so the result only shows the fix if the first still led.
+     */
+    if (15 * (done - submit) >= 7 * (submit - old_done)) {
+        g_test_skip("host too slow: the refused unit may not have led "
+                    "the cost-benefit ranking");
+    }
 
     guest_free(alloc, list);
     guest_free(alloc, buf);
