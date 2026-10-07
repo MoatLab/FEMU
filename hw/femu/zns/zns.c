@@ -212,6 +212,8 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     /* per-zone placement progress; zones fill independently of one another */
     g_free(ns->zns->zone_wp_slot);
     ns->zns->zone_wp_slot = g_new0(uint64_t, ns->num_zones);
+    g_free(ns->zns->zone_wp_plane);
+    ns->zns->zone_wp_plane = g_new0(uint8_t, ns->num_zones);
     if (ns->zd_extension_size) {
         ns->zd_extensions = g_malloc0(ns->zd_extension_size * ns->num_zones);
     }
@@ -397,6 +399,7 @@ static void zns_free_params(NvmeNamespace *ns)
     nand_media_destroy(&zns->media);
     g_free(zns->maptbl);
     g_free(zns->zone_wp_slot);
+    g_free(zns->zone_wp_plane);
     g_free(zns);
     ns->zns = NULL;
 }

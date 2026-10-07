@@ -201,6 +201,12 @@ struct zns_ssd {
      */
     uint64_t chnls_per_zone;
     uint64_t *zone_wp_slot;
+    /*
+     * First plane of the zone's current die slot that holds no data yet. A
+     * flush of a partial cache (an eviction) stops mid-die; the zone's next
+     * flush continues there instead of starting over at plane 0.
+     */
+    uint8_t *zone_wp_plane;
 };
 
 enum NvmeZoneAttr {
