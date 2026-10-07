@@ -230,6 +230,12 @@ struct FemuCxlMedia {
      */
     uint64_t fast_load_drain_ns;
     /*
+     * How long, in ns, the last qom-set of fast-load to false took inside
+     * the device, so a test can tell that it did not sleep out the backlog
+     * whatever the host does to the test. Under the BQL, read atomically.
+     */
+    uint64_t fast_load_switch_ns;
+    /*
      * The last NAND horizon (cxl_timing_horizon()) read under @lock, for
      * readers that will not wait for @lock. Read and written atomically.
      */

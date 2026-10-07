@@ -47,6 +47,7 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `stats-reset` | `bool` | Write-only: true copies the counters to the last-* properties, then clears the event counters |
 | `fast-load` | `bool` | Accesses skip only their wait for the modelled media time; the FTL, cache and counters still run. For warmup and loading, not for measurement. Setting false does not wait for the queued NAND work (see nand-idle-ns); default off, changeable with qom-set |
 | `fast-load-drain-ns` | `uint64` | Read-only: the NAND backlog, in ns from when fast-load last went to false, including device DMA work queued before the switch; the switch does not wait for it. At least 1 until that work is booked |
+| `fast-load-switch-ns` | `uint64` | Read-only: ns the last setting of fast-load to false took inside the device, for checking that the switch does not wait for the backlog; 0 before the first |
 | `nand-idle-ns` | `uint64` | Read-only: ns until the NAND timelines and queued NAND work are idle, 0 when idle; poll it after fast-load=false before measuring. Never blocks |
 
 ### Cache counters

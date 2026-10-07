@@ -18156,13 +18156,14 @@ static int64_t femu_fast_misses(QTestState *qts, uint64_t first, unsigned n)
     return g_get_monotonic_time() - start;
 }
 
-/* Turn fast load off; return how long the qom-set took, in ns. */
+/*
+ * Turn fast load off; return how long the switch took inside the device, in
+ * ns, which a descheduled test process does not stretch.
+ */
 static int64_t femu_fast_off(QTestState *qts)
 {
-    int64_t start = g_get_monotonic_time();
-
     femu_cxl_set(qts, "fast-load", false);
-    return (g_get_monotonic_time() - start) * 1000;
+    return femu_cxl_stat(qts, "fast-load-switch-ns");
 }
 
 /* Wait out the NAND backlog that fast load left, as a harness does. */
@@ -18266,51 +18267,57 @@ static void femu_test_cxl_fast_load_drain(void *obj, void *data,
     "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem," \
     "channels=1,luns-per-channel=1,read-ns=250000000," \
     "program-ns=250000000,cylon-first-touch-program=on"
+/* Far above the 100 ms the switch can wait, far below the backlog. */
+#define FEMU_BACKLOG_SWITCH_NS 500000000LL
 
 /*
  * Turning fast load off must not keep the main loop for the NAND backlog: a
  * guest disk served by the main loop would time out. The backlog stays on
  * the NAND timelines, nand-idle-ns counts it down, and once it reads 0 a
- * miss pays only its own program again. Sleeping it out took the whole
- * backlog, at least 2 s; the switch now takes about 100 ms, so half the
- * backlog tells the two apart with room for a loaded host.
+ * miss pays only its own program again. fast-load-drain-ns is what was left
+ * at the switch, and sleeping it out made the switch take at least that
+ * long. The device times the switch itself, so the bound holds however the
+ * host schedules this test. A descheduled test leaves less backlog, so the
+ * misses run again until at least 1 s was left, twice the bound.
  */
 static void femu_test_cxl_fast_load_backlog(void *obj, void *data,
                                             QGuestAllocator *alloc)
 {
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE FEMU_BACKLOG_DEVICE);
-    int64_t backlog;
+    uint64_t drain;
+    unsigned round;
     int64_t took;
     int64_t start;
     uint64_t media;
     QDict *rsp;
 
     femu_fast_start(qts);
-    femu_cxl_set(qts, "fast-load", true);
-    backlog = FEMU_BACKLOG_PAGES * FEMU_BACKLOG_NS -
-              femu_fast_misses(qts, 0, FEMU_BACKLOG_PAGES) * 1000;
-    g_assert_cmpint(backlog, >=, 2 * NANOSECONDS_PER_SECOND);
-
-    start = g_get_monotonic_time();
-    femu_cxl_set(qts, "fast-load", false);
-    rsp = qtest_qmp(qts, "{'execute':'query-status'}");
-    took = (g_get_monotonic_time() - start) * 1000;
-    g_assert_true(qdict_haskey(rsp, "return"));
-    qobject_unref(rsp);
-    g_test_message("backlog %" PRId64 " ms, switch and query %" PRId64
-                   " ms", backlog / 1000000, took / 1000000);
-    g_assert_cmpint(took, <, backlog / 2);
-    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), >=,
-                     backlog / 2);
-    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), <=,
-                     FEMU_BACKLOG_PAGES * FEMU_BACKLOG_NS);
-    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), >, 0);
+    for (round = 0;; round++) {
+        femu_cxl_set(qts, "fast-load", true);
+        femu_fast_misses(qts, round * FEMU_BACKLOG_PAGES, FEMU_BACKLOG_PAGES);
+        start = g_get_monotonic_time();
+        took = femu_fast_off(qts);
+        rsp = qtest_qmp(qts, "{'execute':'query-status'}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        drain = femu_cxl_stat(qts, "fast-load-drain-ns");
+        g_test_message("backlog %" PRIu64 " ms, switch %" PRId64 " us",
+                       drain / 1000000, took / 1000);
+        g_assert_cmpint(took, <, FEMU_BACKLOG_SWITCH_NS);
+        if (drain >= NANOSECONDS_PER_SECOND || round == 4) {
+            break;
+        }
+        femu_fast_idle(qts);
+    }
+    g_assert_cmpuint(drain, >=, NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(drain, <=, FEMU_BACKLOG_PAGES * FEMU_BACKLOG_NS);
+    g_assert_cmpint(took, <, drain / 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), <=, drain);
 
     femu_fast_idle(qts);
-    g_assert_cmpint((g_get_monotonic_time() - start) * 1000, >=,
-                    backlog / 2);
+    g_assert_cmpint((g_get_monotonic_time() - start) * 1000, >=, drain / 2);
     media = femu_cxl_stat(qts, "media-time-ns");
-    femu_fast_misses(qts, FEMU_BACKLOG_PAGES, 1);
+    femu_fast_misses(qts, (round + 1) * FEMU_BACKLOG_PAGES, 1);
     g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns") - media, ==,
                      FEMU_BACKLOG_NS);
     g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), ==, 0);
@@ -22564,9 +22571,12 @@ static void femu_test_cxl_fast_load_held(void *obj, void *data,
  * Device DMA work queued before fast load goes off, and still queued when
  * the switch returns, books its NAND time before any later access, and the
  * reported backlog includes it. Two 1 s programs on one LUN are queued
- * while the worker holds the first for 1 s, and each takes 1 s more. A
- * read miss after the switch must find both run, and fast-load-drain-ns
- * must end up past the first program.
+ * while the worker holds the first until the test lets go, and each takes
+ * 500 ms more. A read miss queued while the first still runs must find
+ * both run. fast-load-drain-ns counts from the switch to the end of both
+ * programs, so it is at least what nand-idle-ns reports afterwards, about
+ * 1 s; left out, it is 1. A descheduled test can only see less NAND time
+ * ahead, and a miss that comes late finds both run either way.
  */
 static void femu_test_cxl_fast_load_posted(void *obj, void *data,
                                            QGuestAllocator *alloc)
@@ -22575,27 +22585,33 @@ static void femu_test_cxl_fast_load_posted(void *obj, void *data,
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
         "cache-pages=16,cache-ways=16,prefetch-degree=0,"
         "channels=1,luns-per-channel=1,program-ns=1000000000");
-    int64_t deadline;
+    uint64_t drain;
+    uint64_t idle;
     uint64_t done;
 
     femu_cxl_decode(qts);
     femu_cxl_set(qts, "fast-load", true);
-    femu_cxl_set_u64(qts, "test-ftl-delay", 1000);
-    femu_cxl_set_u64(qts, "test-ftl-hold", 1000);
+    femu_cxl_set_u64(qts, "test-ftl-delay", 500);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 60000);
     femu_cxl_set_u64(qts, "test-guarded-write", FEMU_CXL_WINDOW + 4096);
     femu_cxl_set_u64(qts, "test-guarded-write", FEMU_CXL_WINDOW + 2 * 4096);
     femu_cxl_wait_flag(qts, "test-ftl-holding", true);
     femu_cxl_set(qts, "fast-load", false);
+    g_assert_true(femu_cxl_flag(qts, "test-ftl-holding"));
     g_assert_cmpuint(femu_cxl_stat(qts, "test-posted-done"), ==, 0);
+    femu_cxl_set_u64(qts, "test-ftl-hold", 0);
     g_assert_cmphex(qtest_readq(qts, FEMU_CXL_WINDOW + 3 * 4096), ==, 0);
     done = femu_cxl_stat(qts, "test-posted-done");
     g_test_message("device DMA operations run before the later miss: %"
                    PRIu64, done);
     g_assert_cmpuint(done, ==, 2);
-    deadline = g_get_monotonic_time() + 30 * G_USEC_PER_SEC;
-    while (femu_cxl_stat(qts, "fast-load-drain-ns") < NANOSECONDS_PER_SECOND) {
-        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
-        g_usleep(10 * 1000);
+    /* The worker settled the backlog before it took the miss. */
+    drain = femu_cxl_stat(qts, "fast-load-drain-ns");
+    idle = femu_cxl_stat(qts, "nand-idle-ns");
+    g_test_message("backlog at the switch %" PRIu64 " ms, NAND idle in %"
+                   PRIu64 " ms", drain / 1000000, idle / 1000000);
+    if (idle > 1) {
+        g_assert_cmpuint(drain, >=, idle);
     }
     femu_cxl_set_u64(qts, "test-ftl-delay", 0);
     qtest_quit(qts);

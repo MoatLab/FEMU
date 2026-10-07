@@ -1036,6 +1036,7 @@ static bool cxl_fast_load_get(Object *obj, Error **errp)
 static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
 {
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
+    int64_t start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     FEMU_CXL_LOCK_GUARD();
 
     object_ref(obj);
@@ -1053,6 +1054,10 @@ static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
     s->fast_load = value;
 out:
     femu_cxl_leave(s);
+    if (!value) {
+        qatomic_set(&s->fast_load_switch_ns,
+                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start);
+    }
     object_unref(obj);
 }
 
@@ -1072,6 +1077,15 @@ static void cxl_drain_get(Object *obj, Visitor *v, const char *name,
                           void *opaque, Error **errp)
 {
     uint64_t value = qatomic_read(&FEMU_CXL_SSD(obj)->media.fast_load_drain_ns);
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void cxl_switch_get(Object *obj, Visitor *v, const char *name,
+                           void *opaque, Error **errp)
+{
+    uint64_t value =
+        qatomic_read(&FEMU_CXL_SSD(obj)->media.fast_load_switch_ns);
 
     visit_type_uint64(v, name, &value, errp);
 }
@@ -2415,6 +2429,8 @@ static void cxl_init(Object *obj)
     object_property_add_bool(obj, "fast-load", cxl_fast_load_get,
                              cxl_fast_load_set);
     object_property_add(obj, "fast-load-drain-ns", "uint64", cxl_drain_get,
+                        NULL, NULL, NULL);
+    object_property_add(obj, "fast-load-switch-ns", "uint64", cxl_switch_get,
                         NULL, NULL, NULL);
     object_property_add(obj, "nand-idle-ns", "uint64", cxl_nand_idle_get,
                         NULL, NULL, NULL);

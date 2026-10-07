@@ -360,6 +360,11 @@ access is treated as written when a linked NVMe controller attaches, as for
 any earlier CXL access. Switching `fast-load` off moves a barrier to the
 operations queued so far. The worker runs those before any waited request,
 so no access admitted after the switch books its NAND time ahead of them.
+A linked NVMe request takes the FTL mutex without the worker queue, so it
+waits until they are booked; the worker books them without waiting for
+anything, so that wait is bounded. The regression test `cxl-nvme-barrier`
+offers the mutex to an NVMe write between two such operations and checks
+that it books after both.
 Once they are booked, the worker sets `fast-load-drain-ns` to the NAND
 backlog from the switch. The switch waits at most 100 ms for that, with
 both locks released. If the time runs out, it reports the booked backlog,
@@ -466,11 +471,15 @@ the worker in a request.
 The worker holds the FTL mutex while it has work. Waited requests need the
 mutex to be queued, so they cannot keep the worker busy, but device DMA
 queues without it. So the worker runs waited requests before device DMA
-operations, and before each device DMA operation it offers the mutex to
-the threads that wait for it: a caller whose request is done and must take
-the mutex back, and a thread that wants to queue or run a request. It
-releases the mutex and spins at most 1 ms while such a thread is left, so a
-thread that the host does not run cannot stop the worker. This is a
+operations, except those queued before `fast-load` last went off, which it
+runs first (see "Device DMA into the window"). Before each device DMA
+operation it offers the mutex to the threads that wait for it: a caller
+whose request is done and must take the mutex back, and a thread that
+wants to queue or run a request. While operations before the barrier are
+left, a waited request queued then still runs after them, and a linked
+NVMe request lets go of the mutex again until they are booked. The worker
+releases the mutex and spins at most 1 ms while such a thread is left, so
+a thread that the host does not run cannot stop the worker. This is a
 bounded chance to get in, not a strict turn: a thread that the host does
 not run in that window waits for the next device DMA operation or for the
 worker to go idle.

@@ -293,6 +293,7 @@ next accesses wait behind it in their own threads. It does not flush the
 cache. `fast-load-drain-ns` gives the backlog in ns from the switch. If
 queued device DMA work was not booked within the 100 ms, it reads at least
 1 at first, and the device updates it once that work is booked.
+`fast-load-switch-ns` gives how long the last switch took in the device.
 After it returns, accesses pay the full media time again.
 
 Before a measured phase, wait until the NAND is idle. Poll `nand-idle-ns`
