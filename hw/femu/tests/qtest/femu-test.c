@@ -4453,6 +4453,59 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
 }
 
 /*
+ * Cost-benefit can rank a unit that background collection refuses above
+ * one it would take. Here a unit with 15 valid pages of 16 and an old
+ * invalidation outscores one with 8 invalid pages invalidated just now.
+ * The background pass used to refuse the first and return nothing, so the
+ * second waited until its age caught up or the foreground watermark.
+ */
+static void femu_test_fdp_cb_background(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t start;
+    int64_t gap;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    /* past the background watermark, with no victim yet */
+    femu_fdp_cb_fill(&c, qts, buf, list, false);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
+
+    start = g_get_monotonic_time();
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    gap = g_get_monotonic_time() - start;
+    /*
+     * The first unit outscores the second while the second's age is under
+     * 1 / 14 of its own. The pass that decides runs in the same command as
+     * the invalidations, so a wait of a hundred commands leaves a margin.
+     */
+    g_usleep(MAX(100 * 1000, 100 * gap));
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 8, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    /* the unit with 8 invalid pages: its 8 valid pages and 4 blocks */
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 8);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * A Zone Append reads the zone's write pointer to decide where it lands and
  * then moves it. On queues that different pollers serve, two of them read the
  * same pointer unless the zone state is held still, and the controller reports
@@ -23156,6 +23209,13 @@ static void femu_register_nodes(void)
             "gc_strategy=1,subsys=fdpsub",
     });
     qos_add_test("fdp-cb-utilization", "femu", femu_test_fdp_cb_utilization,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-cb-background", "femu", femu_test_fdp_cb_background,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"

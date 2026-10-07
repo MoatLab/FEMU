@@ -497,6 +497,18 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
 }
 
 /*
+ * Whether a background pass may take @ru: its erase must give back at least
+ * an eighth of the unit. Count every page the erase gives back. A unit that a
+ * handle update retired part written also frees the pages it never wrote;
+ * judged by ipc alone it is refused on every pass, while its low vpc keeps
+ * it at the heap top.
+ */
+static bool fdp_bg_worth_collecting(FemuReclaimUnit *ru)
+{
+    return ru->vpc == 0 || ru->npages - ru->vpc >= ru->npages / 8;
+}
+
+/*
  * select_victim_ru - pick best victim RU based on configured GC strategy
  */
 static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
@@ -520,7 +532,9 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         pqueue_t *pq = rm->victim_ru_cb;
         uint64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         double best = -1.0;
+        double best_bg = -1.0;
         bool best_free = false;
+        FemuReclaimUnit *bg_ru = NULL;
 
         for (size_t i = 1; i < pq->size; i++) {
             FemuReclaimUnit *ru = pq->d[i];
@@ -533,10 +547,25 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
                     best_free = true;
                     victim_ru = ru;
                 }
-            } else if (!best_free && score > best) {
-                best = score;
-                victim_ru = ru;
+            } else if (!best_free) {
+                if (score > best) {
+                    best = score;
+                    victim_ru = ru;
+                }
+                if (score > best_bg && fdp_bg_worth_collecting(ru)) {
+                    best_bg = score;
+                    bg_ru = ru;
+                }
             }
+        }
+        /*
+         * An old unit with little to free can outscore every unit a
+         * background pass would take. Refusing it then stalls background
+         * collection until the others age past it, so take the best unit
+         * the pass accepts. With none, the refusal below still runs.
+         */
+        if (!force && !best_free && bg_ru) {
+            victim_ru = bg_ru;
         }
         break;
     }
@@ -602,25 +631,13 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
      */
     fdp_victim_dequeue(ssd, victim_ru);
 
-    if (!force && victim_ru->vpc > 0) {
-        int threshold = victim_ru->npages / 8;
-        /*
-         * Count every page an erase gives back. A unit that a handle update
-         * retired part written also gives back the pages it never wrote, which
-         * are neither valid nor invalid. Judged by ipc alone it is refused on
-         * every pass, and its low vpc keeps it at the heap top, so background
-         * collection never reaches the units behind it.
-         */
-        int reclaimable = victim_ru->npages - victim_ru->vpc;
-
-        if (reclaimable < threshold) {
-            FDP_TRACE(ssd, "GC_BACK_RESERT triggered but delay GC "
-                      "(ru %d ipc %d threshold %d full %d)\n",
-                      victim_ru->ruidx, victim_ru->ipc, threshold,
-                      victim_ru->npages);
-            fdp_victim_enqueue(ssd, victim_ru);
-            return NULL;
-        }
+    if (!force && !fdp_bg_worth_collecting(victim_ru)) {
+        FDP_TRACE(ssd, "GC_BACK_RESERT triggered but delay GC "
+                  "(ru %d ipc %d threshold %d full %d)\n",
+                  victim_ru->ruidx, victim_ru->ipc, victim_ru->npages / 8,
+                  victim_ru->npages);
+        fdp_victim_enqueue(ssd, victim_ru);
+        return NULL;
     }
 
     return victim_ru;
