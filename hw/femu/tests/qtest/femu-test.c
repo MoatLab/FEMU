@@ -18165,9 +18165,20 @@ static int64_t femu_fast_off(QTestState *qts)
     return (g_get_monotonic_time() - start) * 1000;
 }
 
+/* Wait out the NAND backlog that fast load left, as a harness does. */
+static void femu_fast_idle(QTestState *qts)
+{
+    int64_t deadline = g_get_monotonic_time() + 60 * G_USEC_PER_SEC;
+
+    while (femu_cxl_stat(qts, "nand-idle-ns")) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(10 * 1000);
+    }
+}
+
 /*
- * A miss to a new page right after the switch pays exactly one program: the
- * barrier left no backlog on the LUN to queue behind.
+ * A miss to a new page once the NAND is idle pays exactly one program: no
+ * backlog is left on the LUN to queue behind.
  */
 static void femu_fast_restored(QTestState *qts, uint64_t page)
 {
@@ -18200,6 +18211,7 @@ static void femu_test_cxl_fast_load(void *obj, void *data,
     g_assert_cmpuint(femu_cxl_stat(qts, "read-misses"), ==,
                      FEMU_FAST_PAGES + 1);
     femu_fast_off(qts);
+    femu_fast_idle(qts);
     femu_fast_restored(qts, FEMU_FAST_PAGES);
     /* Control: the same misses with it off pay each program in turn. */
     took = femu_fast_misses(qts, FEMU_FAST_PAGES + 1, FEMU_FAST_PAGES);
@@ -18207,7 +18219,10 @@ static void femu_test_cxl_fast_load(void *obj, void *data,
     qtest_quit(qts);
 }
 
-/* Switching off waits for the NAND work the skipped waits left queued. */
+/*
+ * Switching off reports the NAND work the skipped waits left queued, without
+ * waiting for it.
+ */
 static void femu_test_cxl_fast_load_drain(void *obj, void *data,
                                           QGuestAllocator *alloc)
 {
@@ -18228,14 +18243,75 @@ static void femu_test_cxl_fast_load_drain(void *obj, void *data,
     took = femu_fast_off(qts);
     drain = femu_cxl_stat(qts, "fast-load-drain-ns");
     g_assert_cmpuint(drain, >, 0);
-    g_assert_cmpint(took, >=, drain);
+    g_assert_cmpint(took, <, drain / 2);
     /* Most of the queued programs were still ahead when the misses ended. */
     g_assert_cmpuint(drain, >=, FEMU_FAST_PAGES * FEMU_FAST_NS / 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), >, 0);
+    femu_fast_idle(qts);
     femu_fast_restored(qts, FEMU_FAST_PAGES);
     /* Already off: no second wait, and the last one is still reported. */
     took = femu_fast_off(qts);
     g_assert_cmpint(took, <, FEMU_FAST_NS);
     g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), ==, drain);
+    qtest_quit(qts);
+}
+
+/*
+ * A backlog of several seconds: each first touch programs a page on the one
+ * LUN, and fast load lets the fill run far ahead of the NAND.
+ */
+#define FEMU_BACKLOG_NS    250000000ULL
+#define FEMU_BACKLOG_PAGES 16
+#define FEMU_BACKLOG_DEVICE \
+    "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem," \
+    "channels=1,luns-per-channel=1,read-ns=250000000," \
+    "program-ns=250000000,cylon-first-touch-program=on"
+
+/*
+ * Turning fast load off must not keep the main loop for the NAND backlog: a
+ * guest disk served by the main loop would time out. The backlog stays on
+ * the NAND timelines, nand-idle-ns counts it down, and once it reads 0 a
+ * miss pays only its own program again.
+ */
+static void femu_test_cxl_fast_load_backlog(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE FEMU_BACKLOG_DEVICE);
+    int64_t backlog;
+    int64_t took;
+    int64_t start;
+    uint64_t media;
+    QDict *rsp;
+
+    femu_fast_start(qts);
+    femu_cxl_set(qts, "fast-load", true);
+    backlog = FEMU_BACKLOG_PAGES * FEMU_BACKLOG_NS -
+              femu_fast_misses(qts, 0, FEMU_BACKLOG_PAGES) * 1000;
+    g_assert_cmpint(backlog, >=, 2 * NANOSECONDS_PER_SECOND);
+
+    start = g_get_monotonic_time();
+    femu_cxl_set(qts, "fast-load", false);
+    rsp = qtest_qmp(qts, "{'execute':'query-status'}");
+    took = (g_get_monotonic_time() - start) * 1000;
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    g_test_message("backlog %" PRId64 " ms, switch and query %" PRId64
+                   " ms", backlog / 1000000, took / 1000000);
+    g_assert_cmpint(took, <, backlog / 4);
+    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), >=,
+                     backlog / 2);
+    g_assert_cmpuint(femu_cxl_stat(qts, "fast-load-drain-ns"), <=,
+                     FEMU_BACKLOG_PAGES * FEMU_BACKLOG_NS);
+    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), >, 0);
+
+    femu_fast_idle(qts);
+    g_assert_cmpint((g_get_monotonic_time() - start) * 1000, >=,
+                    backlog / 2);
+    media = femu_cxl_stat(qts, "media-time-ns");
+    femu_fast_misses(qts, FEMU_BACKLOG_PAGES, 1);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-time-ns") - media, ==,
+                     FEMU_BACKLOG_NS);
+    g_assert_cmpuint(femu_cxl_stat(qts, "nand-idle-ns"), ==, 0);
     qtest_quit(qts);
 }
 
@@ -18292,6 +18368,7 @@ static void femu_fast_trace(FemuFastDigest *d, uint32_t seed, bool fast)
         }
     }
     femu_cxl_set(qts, "fast-load", false);
+    femu_fast_idle(qts);
     for (i = 0; i < FEMU_FAST_COUNTERS; i++) {
         d->counter[i] = femu_cxl_stat(qts, femu_fast_counters[i]);
     }
@@ -22257,6 +22334,7 @@ static void femu_test_cxl_storm_bench(void *obj, void *data,
             }
             femu_cxl_set(qts, "flush-cache", true);
             femu_cxl_set(qts, "fast-load", false);
+            femu_fast_idle(qts);
             if (mode && g_getenv("FEMU_STORM_LIVE")) {
                 femu_cxl_set(qts, "test-lock-mutex", true);
             }
@@ -24879,6 +24957,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-fast-load", "femu", femu_test_cxl_fast_load, NULL);
     qos_add_test("cxl-fast-load-drain", "femu", femu_test_cxl_fast_load_drain,
                  NULL);
+    qos_add_test("cxl-fast-load-backlog", "femu",
+                 femu_test_cxl_fast_load_backlog, NULL);
     qos_add_test("cxl-fast-load-state", "femu", femu_test_cxl_fast_load_state,
                  NULL);
     qos_add_test("cxl-der-default", "femu", femu_test_cxl_der_modes,

@@ -151,11 +151,15 @@ static const FemuPropDesc cxl_runtime_descs[] = {
     { "fast-load",
       "Accesses skip only their wait for the modelled media time; the FTL, "
       "cache and counters still run. For warmup and loading, not for "
-      "measurement. Setting false waits for the queued NAND work first; "
-      "default off, changeable with qom-set" },
+      "measurement. Setting false does not wait for the queued NAND work "
+      "(see nand-idle-ns); default off, changeable with qom-set" },
     { "fast-load-drain-ns",
-      "Read-only: ns the last fast-load switch to false waited for queued "
-      "NAND work" },
+      "Read-only: the NAND backlog, in ns, when fast-load last went to "
+      "false; the switch does not wait for it" },
+    { "nand-idle-ns",
+      "Read-only: ns until the NAND timelines and queued NAND work are "
+      "idle, 0 when idle; poll it after fast-load=false before measuring. "
+      "Never blocks" },
 
     /* cache counters */
     { "cache-entries",

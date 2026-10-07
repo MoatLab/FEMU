@@ -257,9 +257,10 @@ the deadline and spins for the rest. Other properties:
 media time of the write-backs they cause, on the thread that runs them.
 
 `fast-load=true` removes only the wait at the end of an access; the FTL and
-the NAND timelines still advance. Setting it back to false waits until the
-latest LUN and channel busy-until time has passed, so the next access sees
-an idle model. See [Fast load](../modes/cxl-ssd.md#fast-load).
+the NAND timelines still advance. Setting it back to false does not wait
+for that backlog: the next accesses wait behind it. `nand-idle-ns` reads 0
+once the latest LUN and channel busy-until time has passed, so a harness
+polls it before it measures. See [Fast load](../modes/cxl-ssd.md#fast-load).
 
 Properties: [femu-cxl-ssd
 cache](../reference/properties.md#cache), [NAND geometry and

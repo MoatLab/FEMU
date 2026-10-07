@@ -283,15 +283,25 @@ time. Everything else still runs: the FTL request, cache inserts and
 evictions, prefetch, direct mapping and every counter. The NAND timelines
 still advance, so the skipped time builds up as a backlog on the LUNs.
 
-`fast-load=false` is a barrier. It waits for the accesses in progress, then
-waits until the modelled NAND is idle, and only then returns. It does not
-flush the cache. `fast-load-drain-ns` gives the time that this wait took.
+`fast-load=false` waits only for the accesses in progress, and at most
+100 ms for queued device DMA work. It does not wait for the NAND backlog.
+That wait would stop the QEMU main loop for as long, and a guest disk that
+the main loop serves would time out. The backlog stays on the LUNs, so the
+next accesses wait behind it in their own threads. It does not flush the
+cache. `fast-load-drain-ns` gives the backlog in ns when the switch ran.
 After it returns, accesses pay the full media time again.
+
+Before a measured phase, wait until the NAND is idle. Poll `nand-idle-ns`
+until it reads 0. It gives the ns until the NAND timelines and the queued
+work are idle, and it never blocks. A harness that cannot poll can sleep
+`fast-load-drain-ns` instead, but device DMA that arrives meanwhile can add
+work after it.
 
 ```text
 {"execute": "qom-set", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load", "value": true}}
 {"execute": "qom-set", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load", "value": false}}
 {"execute": "qom-get", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "fast-load-drain-ns"}}
+{"execute": "qom-get", "arguments": {"path": "/machine/peripheral/cxlssd", "property": "nand-idle-ns"}}
 ```
 
 The contract is narrow:

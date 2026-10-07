@@ -357,9 +357,10 @@ the CXL lock.
 Device DMA has no latency of its own in the model, as it has none for guest
 RAM, and its time is not in `media-time-ns`. A medium that served such an
 access is treated as written when a linked NVMe controller attaches, as for
-any earlier CXL access. Switching `fast-load` off first waits until the
-worker has run every queued operation; that wait releases both locks.
-Device DMA that arrives during the wait can still add NAND work after it.
+any earlier CXL access. Switching `fast-load` off waits at most 100 ms for
+the worker to run the queued operations; that wait releases both locks.
+`nand-idle-ns` stays above 0 while operations are queued, so it covers the
+rest.
 The worker runs any queued operation before it stops, and a teardown
 inside a device's re-entrancy guard leaves that wait to a bottom half.
 Debug builds (`FEMU_FTL_ASSERT`) also abort when teardown stops the worker
@@ -422,7 +423,10 @@ under the FTL mutex; only tests set them. The warning for a long stall
 (see "Full NAND") is reported from the main loop, not under the FTL mutex.
 
 The `fast-load` switch-off releases both locks before it takes the FTL
-mutex to read the NAND horizon.
+mutex to read the NAND horizon. It never sleeps until that horizon: it runs
+on the main loop. `nand-idle-ns` only tries the FTL mutex, under the CXL
+lock and the BQL. While another thread holds the mutex it reports the last
+horizon it read, and at least 1.
 
 The worker holds the FTL mutex while it has work. Waited requests need the
 mutex to be queued, so they cannot keep the worker busy, but device DMA

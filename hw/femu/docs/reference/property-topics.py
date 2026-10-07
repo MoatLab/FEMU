@@ -248,7 +248,7 @@ DEVICES = [
                 "props": [
                     "der-ratio", "control-command", "control-argument",
                     "control-status", "flush-cache", "stats-reset",
-                    "fast-load", "fast-load-drain-ns",
+                    "fast-load", "fast-load-drain-ns", "nand-idle-ns",
                 ],
             },
             {

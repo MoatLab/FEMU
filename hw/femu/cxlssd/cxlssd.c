@@ -1683,47 +1683,81 @@ static uint64_t cxl_timing_horizon(struct ssd *ssd)
 }
 
 /*
- * Wait out the NAND work that accesses left queued while they skipped their
- * completion wait, and return how long that took. The caller holds the gate
- * alone, so no access adds to it; a linked controller still can, and so can
- * device DMA (femu_cxl_access_nowait()), which never takes the gate.
+ * Nanoseconds from now until the NAND timelines go idle, 0 once they are.
+ * Never waits for @lock: while another thread holds it, or device DMA
+ * operations are queued, report the last horizon seen, and at least 1.
+ * Under the CXL lock.
  */
-uint64_t femu_cxl_drain(FemuCxlMedia *s)
+uint64_t femu_cxl_nand_idle(FemuCxlMedia *s)
 {
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     uint64_t end;
+    bool busy;
+
+    if (!s->ftl || !s->started) {
+        return 0;
+    }
+    if (qemu_mutex_trylock(&s->lock)) {
+        end = qatomic_read(&s->nand_horizon);
+        busy = true;
+    } else {
+        end = cxl_timing_horizon(s->ns.ssd);
+        busy = !QSIMPLEQ_EMPTY(&s->work) || cxl_posted_pending(s);
+        qatomic_set(&s->nand_horizon, end);
+        qemu_mutex_unlock(&s->lock);
+    }
+    if (end > now) {
+        return end - now;
+    }
+    return busy;
+}
+
+/* How long the switch off fast load waits for queued device DMA work. */
+#define FEMU_CXL_BACKLOG_WAIT_MS 100
+
+/*
+ * The NAND work that accesses left queued while they skipped their
+ * completion wait, in ns from now. It stays on the NAND timelines, so later
+ * accesses queue behind it in their own threads; the caller, often the main
+ * loop, must not sleep it out. Device DMA operations book their NAND time
+ * only once the worker runs them, so wait for those queued now, but only
+ * for a bounded time. Device DMA queues them with the BQL and the CXL lock
+ * held, so let go of both.
+ */
+uint64_t femu_cxl_backlog(FemuCxlMedia *s)
+{
+    int64_t deadline;
     int64_t now;
     uint64_t target;
+    uint64_t end;
     FemuCxlHeld held;
-    bool waited;
+    bool queued;
 
     if (!s->ftl) {
         return 0;
     }
-    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    /*
-     * Queued operations book their NAND time only once the worker runs them.
-     * Device DMA queues them with the BQL and the CXL lock held, so let go
-     * of both.
-     */
     femu_cxl_drop(&held);
-    /* Only what is queued now: device DMA keeps queueing meanwhile. */
+    deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
+               FEMU_CXL_BACKLOG_WAIT_MS * SCALE_MS;
     qemu_mutex_lock(&s->post_lock);
     target = s->posted;
-    waited = s->posted_done < target;
-    while (s->posted_done < target) {
-        qemu_cond_wait(&s->posted_cond, &s->post_lock);
+    while (s->posted_done < target &&
+           (now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) < deadline) {
+        qemu_cond_timedwait(&s->posted_cond, &s->post_lock,
+                            DIV_ROUND_UP(deadline - now, SCALE_MS));
     }
+    queued = s->posted_done < target;
     qemu_mutex_unlock(&s->post_lock);
     cxl_ftl_lock(s);
     end = cxl_timing_horizon(s->ns.ssd);
+    qatomic_set(&s->nand_horizon, end);
     qemu_mutex_unlock(&s->lock);
     femu_cxl_retake(&held);
-    if (end > qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) {
-        femu_cxl_delay(end - qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
-    } else if (!waited) {
-        return 0;
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (end > now) {
+        return end - now;
     }
-    return qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - now;
+    return queued;
 }
 
 /*

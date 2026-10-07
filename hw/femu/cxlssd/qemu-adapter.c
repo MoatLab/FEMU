@@ -1012,9 +1012,13 @@ static bool cxl_fast_load_get(Object *obj, Error **errp)
 }
 
 /*
- * Turning fast load off is a barrier: the gate waits for admitted accesses,
- * then the NAND work they queued drains, so measurement starts on an idle
- * model. The cache stays as loaded.
+ * Turning fast load off is a short barrier: the gate waits for admitted
+ * accesses, which skip their media wait, so none still sleeps as a fast
+ * one. The NAND work they queued stays on the timelines; later accesses
+ * wait behind it in their own threads. Sleeping it out here would stop the
+ * main loop for as long, and with it every device the main loop serves.
+ * nand-idle-ns tells a harness when the model is idle. The cache stays as
+ * loaded.
  */
 static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
 {
@@ -1028,12 +1032,23 @@ static void cxl_fast_load_set(Object *obj, bool value, Error **errp)
     }
     if (!value) {
         s->fast_load_drain_ns = s->started && !s->closing ?
-                                femu_cxl_drain(s) : 0;
+                                femu_cxl_backlog(s) : 0;
     }
     s->fast_load = value;
 out:
     femu_cxl_leave(s);
     object_unref(obj);
+}
+
+static void cxl_nand_idle_get(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    uint64_t value;
+
+    WITH_FEMU_CXL_LOCK() {
+        value = femu_cxl_nand_idle(&FEMU_CXL_SSD(obj)->media);
+    }
+    visit_type_uint64(v, name, &value, errp);
 }
 
 static void cxl_stats_reset(Object *obj, bool value, Error **errp)
@@ -2310,6 +2325,8 @@ static void cxl_init(Object *obj)
     object_property_add_bool(obj, "fast-load", cxl_fast_load_get,
                              cxl_fast_load_set);
     cxl_add_counter(obj, "fast-load-drain-ns", &s->fast_load_drain_ns);
+    object_property_add(obj, "nand-idle-ns", "uint64", cxl_nand_idle_get,
+                        NULL, NULL, NULL);
     cxl_add_counter(obj, "prefetch-inserts", &s->prefetch_inserts);
     cxl_add_counter(obj, "cache-entries", &s->cache_entries);
     cxl_add_counter(obj, "write-misses", &s->write_misses);

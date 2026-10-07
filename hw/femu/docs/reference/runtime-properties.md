@@ -45,8 +45,9 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | `control-status` | `uint64` | Read-only result of the last control command: 0 success, 1 error, 2 a Get LSA command still queued |
 | `flush-cache` | `bool` | Write-only: true revokes direct mappings, writes dirty pages back, drops unpinned pages and waits for the modelled media time |
 | `stats-reset` | `bool` | Write-only: true copies the counters to the last-* properties, then clears the event counters |
-| `fast-load` | `bool` | Accesses skip only their wait for the modelled media time; the FTL, cache and counters still run. For warmup and loading, not for measurement. Setting false waits for the queued NAND work first; default off, changeable with qom-set |
-| `fast-load-drain-ns` | `uint64` | Read-only: ns the last fast-load switch to false waited for queued NAND work |
+| `fast-load` | `bool` | Accesses skip only their wait for the modelled media time; the FTL, cache and counters still run. For warmup and loading, not for measurement. Setting false does not wait for the queued NAND work (see nand-idle-ns); default off, changeable with qom-set |
+| `fast-load-drain-ns` | `uint64` | Read-only: the NAND backlog, in ns, when fast-load last went to false; the switch does not wait for it |
+| `nand-idle-ns` | `uint64` | Read-only: ns until the NAND timelines and queued NAND work are idle, 0 when idle; poll it after fast-load=false before measuring. Never blocks |
 
 ### Cache counters
 

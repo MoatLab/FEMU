@@ -207,8 +207,16 @@ struct FemuCxlMedia {
      * Changed only under the gate held alone. BQL and CXL lock.
      */
     bool fast_load;
-    /* How long the last switch back to the full model waited for NAND. */
+    /*
+     * The NAND backlog, in ns, when fast load last went off; the switch
+     * does not wait for it (femu_cxl_backlog()).
+     */
     uint64_t fast_load_drain_ns;
+    /*
+     * The last NAND horizon (cxl_timing_horizon()) read under @lock, for
+     * readers that will not wait for @lock. Read and written atomically.
+     */
+    uint64_t nand_horizon;
     QemuMutex lock;
     /*
      * Threads that found @lock taken, and waited requests that are done but
@@ -409,7 +417,8 @@ bool femu_cxl_revoke_ahead_ok(FemuCxlMedia *s, FemuCxlOp *op, uint64_t lpn,
 void femu_cxl_protect_renew(FemuCxlMedia *s, int owner, uint64_t lpn);
 void femu_cxl_unprotect(FemuCxlMedia *s, int owner, uint64_t lpn);
 bool femu_cxl_protected_by(FemuCxlMedia *s, int owner, uint64_t lpn);
-uint64_t femu_cxl_drain(FemuCxlMedia *s);
+uint64_t femu_cxl_backlog(FemuCxlMedia *s);
+uint64_t femu_cxl_nand_idle(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);
