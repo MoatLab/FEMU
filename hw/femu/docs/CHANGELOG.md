@@ -261,7 +261,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - FDP background GC counts the pages a unit never wrote as reclaimable. A unit that RUH Update retired holding a few valid pages had none invalid, so each background pass took it from the top of the victim queue, refused it and stopped; units behind it were collected only under the foreground watermark (beb9878ac).
 - FDP cost-benefit GC ages a unit retired with no page invalidated from its retirement. It used to count from time zero, so a part-written unit left by RUH Update outscored every other victim; with few pages to free, background GC refused it on every pass and collected nothing. (a9e0e1af6)
 - FDP cost-benefit GC measures a unit's utilization against all its pages at every invalidation, as it already did at retirement. The first overwrite in a part-written unit used to measure it against the pages written only, so a unit holding 3 valid pages of 16 scored as 3 of 4 full and lost to units that cost more to collect. (529d70960)
-- FDP background cost-benefit GC takes the best-scoring unit with enough to free. A unit with one invalid page and an old invalidation could outscore every other victim; the pass refused it and collected nothing until the others aged past it or the foreground watermark was reached.
+- FDP background cost-benefit GC takes the best-scoring unit with enough to free. A unit with one invalid page and an old invalidation could outscore every other victim; the pass refused it and collected nothing until the others aged past it or the foreground watermark was reached (fe29da90b).
 
 #### Spec conformance and host compatibility
 
