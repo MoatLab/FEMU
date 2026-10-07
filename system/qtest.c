@@ -57,6 +57,8 @@ static GString *inbuf;
 static int irq_levels[MAX_IRQ];
 static GTimer *timer;
 static bool qtest_opened;
+/* Nesting of qtest commands on the main thread, under the BQL. */
+static unsigned qtest_command_depth;
 static void (*qtest_server_send)(void*, const char*);
 static void *qtest_server_send_opaque;
 
@@ -767,8 +769,19 @@ static void qtest_process_inbuf(CharBackend *chr, GString *inbuf)
         g_auto(GStrv) words = g_strsplit(cmd, " ", 0);
 
         g_string_erase(inbuf, 0, len + 1);
+        qtest_command_depth++;
         qtest_process_command(chr, words);
+        qtest_command_depth--;
     }
+}
+
+/*
+ * Whether this thread runs a qtest command, such as a memory access, as
+ * opposed to work that a command only started, such as a device's DMA.
+ */
+bool qtest_command_running(void)
+{
+    return qtest_command_depth && bql_locked();
 }
 
 static void qtest_read(void *opaque, const uint8_t *buf, int size)
