@@ -1014,10 +1014,22 @@ static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
 
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
-    FemuKvssdState *s = g_try_new0(FemuKvssdState, 1);
+    FemuKvssdState *s;
     uint64_t cap;
     uint32_t slots;
 
+    /*
+     * KV reclaims by taking the emptiest line off the shared victim queue.
+     * Another policy reorders that queue (fifo by close order, which KV never
+     * records), so the line it takes is no longer the emptiest.
+     */
+    if (n->bb_params.gc_policy && strcmp(n->bb_params.gc_policy, "greedy")) {
+        error_setg(errp, "FEMU kvssd: gc_policy=%s is not supported; KV mode "
+                   "always reclaims the emptiest line", n->bb_params.gc_policy);
+        return NULL;
+    }
+
+    s = g_try_new0(FemuKvssdState, 1);
     if (!s) {
         error_setg(errp, "KVSSD state allocation failed");
         return NULL;

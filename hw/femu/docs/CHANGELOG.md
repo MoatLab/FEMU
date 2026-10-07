@@ -143,6 +143,7 @@ was not doing anything.
 | `cell_pages` above 5 | Indexed past the page-type multiplier table. | d589ce2b8 |
 | `nand_cell_type` with `pgs_per_blk` above 512 | Read past the page-type latency tables. | d589ce2b8 |
 | `gc_strategy` outside {0,1,2,4} | Other values silently fell back to greedy or never collected at all. | d589ce2b8 |
+| `gc_policy` other than greedy with `femu_mode=5` | KV reclaims by taking the emptiest line off the shared victim queue; another policy reorders that queue (fifo by a close order KV never records), so KV took a line that was not the emptiest. | |
 | `zns_flash_type` 0, 6 or above, or MLC/PLC without explicit latencies | 0 gives a zero-length write cache and an endless flush loop; 6+ indexes past the timing tables; MLC and PLC have no built-in figures, so every NAND operation cost nothing. | b234d27c8 |
 | `femu_mode` above 5 | No mode registers command handlers for it (6 was a SmartSSD placeholder), so the controller came up with none. | c3b8e88ef |
 | `multipoller_enabled` other than 0 or 1 | Values above 1 started several pollers that each swept every queue, so two pollers could run and complete the same command. | de5fcd972 |

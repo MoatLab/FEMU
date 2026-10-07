@@ -4912,6 +4912,8 @@ static const struct {
     { "'femu_mode':0,'lver':2,'flash_type':255", "flash_type" },
     { "'tplpbsy':-1", "tplpbsy" },
     { "'tplrbsy':-1", "tplrbsy" },
+    { "'femu_mode':5,'gc_policy':'fifo'", "gc_policy" },
+    { "'femu_mode':5,'gc_policy':'random'", "gc_policy" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,
