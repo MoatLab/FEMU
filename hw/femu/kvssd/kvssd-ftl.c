@@ -176,7 +176,6 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
             break;
         }
         line = pqueue_pop(lm->victim_line_pq);
-        lm->victim_line_cnt--;
         ppa.g.blk = line->id;
 
         for (int ch = 0; ch < spp->nchs; ch++) {
@@ -272,7 +271,6 @@ static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
     } else {
         ftl_assert(wpp->curline->ipc > 0);
         pqueue_insert(lm->victim_line_pq, wpp->curline);
-        lm->victim_line_cnt++;
     }
 
     wpp->curline = NULL;

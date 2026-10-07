@@ -1060,8 +1060,9 @@ calibrated against a specific commercial drive.
    `pgs_per_line / 8` invalid pages, return NULL and leave the queue as it
    was.
 3. Remove the chosen line with `pqueue_remove()` (or `pqueue_pop()` for the
-   top), which sets `line->pos` to 0, and decrement `lm->victim_line_cnt`.
-   `reclaim_line()` expects a line that is in no list.
+   top), which sets `line->pos` to 0. The victim count is the queue size,
+   so there is no counter to keep. `reclaim_line()` expects a line that is
+   in no list.
 4. Add `{ .name = "<name>", .select_victim_line = ... }` to
    `femu_ftl_policies[]`. `femu_ftl_policy_known()` then accepts the name.
 5. Describe it in the `gc_policy` description in `hw/femu/femu-props.c`,

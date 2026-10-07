@@ -258,7 +258,6 @@ struct line_mgmt {
     QTAILQ_HEAD(full_line_list, line) full_line_list;
     int tt_lines;
     int free_line_cnt;
-    int victim_line_cnt;
     int full_line_cnt;
     uint64_t next_close_seq;
 };
@@ -295,7 +294,6 @@ typedef struct ru_mgmt {
     QTAILQ_HEAD(full_ru_list, FemuReclaimUnit) full_ru_list;
     uint64_t tt_rus;
     uint64_t free_ru_cnt;
-    int victim_ru_cnt;
     int custom_gc_threshold;
 
     uint64_t gc_thres_rus;

@@ -92,7 +92,7 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->erases = ssd->total_erases;
 
     q->free_lines = lm->free_line_cnt;
-    q->victim_lines = lm->victim_line_cnt;
+    q->victim_lines = pqueue_size(lm->victim_line_pq);
     q->full_lines = lm->full_line_cnt;
 
     q->nr_lines = 0;

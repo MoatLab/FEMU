@@ -84,7 +84,6 @@ void ssd_init_lines(struct ssd *ssd)
     }
 
     ftl_assert(lm->free_line_cnt == lm->tt_lines);
-    lm->victim_line_cnt = 0;
     lm->full_line_cnt = 0;
 }
 
@@ -148,7 +147,6 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
         /* there must be some invalid pages in this line */
         ftl_assert(wpp->curline->ipc > 0);
         pqueue_insert(lm->victim_line_pq, wpp->curline);
-        lm->victim_line_cnt++;
     }
     /* current line is used up, pick another empty line */
     check_addr(wpp->blk, spp->blks_per_pl);
@@ -241,7 +239,6 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
         line->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         line->close_seq = ssd->lm.next_close_seq++;
         pqueue_insert(ssd->lm.victim_line_pq, line);
-        ssd->lm.victim_line_cnt++;
     }
     memset(wp, 0, sizeof(*wp));
 }
@@ -433,7 +430,6 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
         QTAILQ_REMOVE(&lm->full_line_list, line, entry);
         lm->full_line_cnt--;
         pqueue_insert(lm->victim_line_pq, line);
-        lm->victim_line_cnt++;
     }
 }
 
@@ -657,7 +653,6 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
     }
 
     pqueue_pop(lm->victim_line_pq);
-    lm->victim_line_cnt--;
 
     /* victim_line is a danggling node now */
     return victim_line;
@@ -678,7 +673,6 @@ static struct line *select_victim_line_random(struct ssd *ssd, bool force)
         pqueue_insert(lm->victim_line_pq, victim_line);
         return NULL;
     }
-    lm->victim_line_cnt--;
     return victim_line;
 }
 
@@ -731,7 +725,6 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_remove(pq, best);
-    lm->victim_line_cnt--;
     return best;
 }
 
@@ -753,7 +746,6 @@ static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_pop(lm->victim_line_pq);
-    lm->victim_line_cnt--;
     return best;
 }
 
@@ -789,7 +781,6 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
         return NULL;
     }
     pqueue_remove(pq, best);
-    lm->victim_line_cnt--;
     return best;
 }
 
@@ -899,7 +890,6 @@ static void requeue_line(struct ssd *ssd, struct line *line)
         lm->full_line_cnt++;
     } else {
         pqueue_insert(lm->victim_line_pq, line);
-        lm->victim_line_cnt++;
     }
 }
 
@@ -964,12 +954,12 @@ int do_gc(struct ssd *ssd, bool force)
 
     if (ssd->n->streams && victim_line->vpc && !ssd->lm.free_line_cnt) {
         pqueue_insert(ssd->lm.victim_line_pq, victim_line);
-        ssd->lm.victim_line_cnt++;
         return -1;
     }
 
-    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
-              victim_line->id, victim_line->ipc, ssd->lm.victim_line_cnt,
+    ftl_debug("GC-ing line:%d,ipc=%d,victim=%zu,full=%d,free=%d\n",
+              victim_line->id, victim_line->ipc,
+              pqueue_size(ssd->lm.victim_line_pq),
               ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
 
     if (!reclaim_line(ssd, victim_line)) {
@@ -1041,7 +1031,6 @@ int do_read_reclaim(struct ssd *ssd)
         ssd->lm.full_line_cnt--;
     } else if (line->pos) {
         pqueue_remove(ssd->lm.victim_line_pq, line);
-        ssd->lm.victim_line_cnt--;
     } else {
         /* being written to right now: leave it alone */
         return -1;
@@ -1073,6 +1062,5 @@ void ssd_free_lines(struct ssd *ssd)
     lm->lines = NULL;
     lm->tt_lines = 0;
     lm->free_line_cnt = 0;
-    lm->victim_line_cnt = 0;
     lm->full_line_cnt = 0;
 }

@@ -205,10 +205,8 @@ static void fdp_victim_enqueue(struct ssd *ssd, FemuReclaimUnit *ru)
     struct ru_mgmt *hm = fdp_victim_ruh_mgmt(ssd, ru);
 
     pqueue_insert(fdp_victim_heap(rm), ru);
-    rm->victim_ru_cnt++;
     if (hm) {
         pqueue_insert(hm->victim_ru_pq, ru);
-        hm->victim_ru_cnt++;
     }
 }
 
@@ -223,10 +221,8 @@ static void fdp_victim_dequeue(struct ssd *ssd, FemuReclaimUnit *ru)
     if (ru->pos) {
         pqueue_remove(fdp_victim_heap(rm), ru);
     }
-    rm->victim_ru_cnt--;
     if (ru->ruh_pos && ru->ruh && ru->ruh->ru_mgmt) {
         pqueue_remove(ru->ruh->ru_mgmt->victim_ru_pq, ru);
-        ru->ruh->ru_mgmt->victim_ru_cnt--;
     }
 }
 
@@ -328,10 +324,10 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
             return NULL;
         }
         FDP_TRACE(ssd, "RU_ROTATE ruhid=%u old_ru=%u "
-                  "new_ru=%u reason=%s victim_ru_cnt %d\n",
+                  "new_ru=%u reason=%s victims %zu\n",
                   ruh->ruhid, ru->ruidx, new_ru->ruidx,
                   is_full ? "full_valid" : "full_victim",
-                  rm->victim_ru_cnt);
+                  pqueue_size(fdp_victim_heap(rm)));
         wpp = new_ru->ssd_wptr;
         wpp->blk = wpp->curline->id;
         check_addr(wpp->blk, spp->blks_per_pl);
@@ -1307,7 +1303,6 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
 
     rm->tt_rus = rg->tt_nru;
     rm->free_ru_cnt = rg->tt_nru;
-    rm->victim_ru_cnt = 0;
     rm->custom_gc_threshold = 0;
 
     /* default GC strategy */
@@ -1482,7 +1477,6 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
             ssd->ruhs[i].ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
             ssd->ruhs[i].ru_mgmt->mgmt_type = n->bb_params.gc_strategy;
-            ssd->ruhs[i].ru_mgmt->victim_ru_cnt = 0;
             ssd->ruhs[i].ru_mgmt->custom_gc_threshold = 0;
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->free_ru_list);
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->full_ru_list);
