@@ -1,8 +1,8 @@
 /*
  * Uniform NAND media-layer timing implementation. The op math here reproduces the
  * bbssd staged model (the richest superset): channel-bus phases + LUN/plane array
- * gating + page-type program latency + ECC-wear-on-read + cache-read pipeline +
- * multi-plane + copyback. ZNS and OCSSD use strict config subsets of the
+ * gating + page-type program latency + ECC-wear-on-read + multi-plane +
+ * copyback. ZNS and OCSSD use strict config subsets of the
  * same code.
  *
  * Bit-identical contract for the channel-off modes: the max() ordering and the
@@ -486,15 +486,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 uint64_t done = rs + alat;
 
                 array_suspend_extend(m, loc, t, shift);
-                if (m->cfg.policy.cache_read && m->cfg.timeline->page_reg_ready) {
-                    uint64_t *prr =
-                        m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
-                    uint64_t dout = mx(*prr, done);
-                    t = bus_later(m, loc->ch, stime, dout, bus_xfer_ns(m, loc));
-                    *prr = t;
-                } else {
-                    t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
-                }
+                t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
                 t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
                 c.done_ns = t;
                 c.latency_ns = c.done_ns - stime;
@@ -508,16 +500,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
-        if (m->cfg.policy.cache_read && m->cfg.timeline->page_reg_ready) {
-            uint64_t rcbsy = m->cfg.timing.trcbsy_ns ? m->cfg.timing.trcbsy_ns : alat;
-            *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = s + rcbsy;
-            uint64_t *prr = m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
-            uint64_t dout = mx(*prr, done);
-            t = bus_later(m, loc->ch, stime, dout, bus_xfer_ns(m, loc));
-            *prr = t;
-        } else {
-            t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
-        }
+        t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
         t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
         c.done_ns = t;
     } else if (op == NAND_MEDIA_PROGRAM) {

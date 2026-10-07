@@ -153,9 +153,9 @@ The media layer's types are in `hw/femu/nand/nand-media.h`.
 | Type | Fields that matter | Role |
 | --- | --- | --- |
 | `NandLoc` | `ch`, `lun`, `pl`, `blk`, `pg`, `flash_type`, `page_type`, `pe_cycles`, `age_sec`, `xfer_secs` | One operation's position and the facts timing depends on. Filled by the mode's decoder (`bb_decode_loc()`, `zns_advance_status()`, `oc12_media_op()`). |
-| `NandMediaTiming` | `rd_ns`, `wr_ns`, `er_ns` (flat); `rd_table_ns`, `wr_table_ns`, `er_table_ns` (by cell and page type); `pgtype_mult`; `cmd_addr_ns`, `page_xfer_ns`, `status_ns`; `tplebsy_ns` and three unused multi-plane and cache-read times; `ecc_*`; `tsusp_ns` | Every duration. |
-| `NandMediaPolicy` | `array_gate`, `channel_mode`, `pe_suspend`, `ecc_on_read`, `use_flat_timing`, `cache_read` | Which mechanisms are on. |
-| `NandTimelineOps` | `ch_avail`, `lun_avail`, `plane_avail`, `page_reg_ready`, `lock_lun`, `unlock_lun` | Accessors that return pointers into the mode's own busy-until fields. |
+| `NandMediaTiming` | `rd_ns`, `wr_ns`, `er_ns` (flat); `rd_table_ns`, `wr_table_ns`, `er_table_ns` (by cell and page type); `pgtype_mult`; `cmd_addr_ns`, `page_xfer_ns`, `status_ns`; `tplpbsy_ns`, `tplrbsy_ns`, `tplebsy_ns`; `ecc_*`; `tsusp_ns` | Every duration. |
+| `NandMediaPolicy` | `array_gate`, `channel_mode`, `pe_suspend`, `ecc_on_read`, `use_flat_timing` | Which mechanisms are on. |
+| `NandTimelineOps` | `ch_avail`, `lun_avail`, `plane_avail`, `lock_lun`, `unlock_lun` | Accessors that return pointers into the mode's own busy-until fields. |
 | `NandMedia` | `cfg`, `bus_res` (per-channel booked windows), `susp` (per-position suspend state) | One instance per namespace FTL. |
 | `NandOpCompletion` | `done_ns`, `latency_ns` | Absolute end time, and `done_ns - stime`. |
 
@@ -177,7 +177,6 @@ Each mode configures the layer differently:
 | `use_flat_timing` | true when `nand_cell_type=0`, false with a cell type | false (per-type table, page type always 0) |
 | `pe_suspend` | `pe_suspend` property | `zns_pe_suspend` property |
 | `ecc_on_read` | true; the adder is still 0 unless `ecc_step_ns` is set | false |
-| `cache_read` | false | false |
 
 The enum also has `NAND_CH_NOOP` and `NAND_GATE_LUN_AND_PLANE`. No mode
 selects either today.

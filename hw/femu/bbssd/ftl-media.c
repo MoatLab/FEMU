@@ -65,9 +65,9 @@ static uint64_t *bb_lun_avail(void *opaque, const NandLoc *loc)
 }
 
 /*
- * plane_avail / page_reg_ready / lock_lun / unlock_lun are left unset: bbssd runs
- * the flat per-LUN gate under a single FTL thread, so the media never reaches for
- * plane-level state, a page register, or a lock.
+ * plane_avail / lock_lun / unlock_lun are left unset: bbssd runs the flat
+ * per-LUN gate under a single FTL thread, so the media never reaches for
+ * plane-level state or a lock.
  */
 static const NandTimelineOps bb_timeline_ops = {
     .ch_avail = bb_ch_avail,
@@ -101,7 +101,6 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.tplpbsy_ns = spp->tplpbsy;
     cfg.timing.tplrbsy_ns = spp->tplrbsy;
     cfg.timing.tplebsy_ns = spp->tplebsy;
-    cfg.timing.trcbsy_ns = spp->trcbsy;
     cfg.policy.pe_suspend = (spp->pe_suspend != 0);
     cfg.timing.tsusp_ns = spp->tsusp_ns;
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;

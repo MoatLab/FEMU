@@ -94,8 +94,6 @@ typedef struct NandMediaTiming {
     int64_t tplpbsy_ns;
     int64_t tplrbsy_ns;
     int64_t tplebsy_ns;
-    /* cache read busy */
-    int64_t trcbsy_ns;
     /* ECC wear-on-read */
     int64_t ecc_step_ns;
     int32_t ecc_pe_per_tier;
@@ -109,7 +107,6 @@ typedef struct NandMediaTiming {
 typedef struct NandMediaPolicy {
     NandArrayGate   array_gate;
     NandChannelMode channel_mode;
-    bool            cache_read;
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the
                                    * LUN/plane (all gates, staged or plain channel) */
     bool            ecc_on_read;
@@ -123,13 +120,12 @@ typedef struct NandMediaPolicy {
 
 /*
  * Busy-timeline accessors. Each controller returns pointers into its own per-(ch,lun,
- * plane) device-state. page_reg_ready may be NULL when cache_read is off.
+ * plane) device-state.
  */
 typedef struct NandTimelineOps {
     uint64_t *(*ch_avail)(void *opaque, uint32_t ch);
     uint64_t *(*lun_avail)(void *opaque, const NandLoc *loc);
     uint64_t *(*plane_avail)(void *opaque, const NandLoc *loc);
-    uint64_t *(*page_reg_ready)(void *opaque, const NandLoc *loc);
     /*
      * Optional per-LUN lock around the array reservation; both NULL = no
      * locking. Only OCSSD 1.2 sets them, to its channel lock, since several
