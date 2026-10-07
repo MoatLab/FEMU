@@ -670,7 +670,16 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 
     if (!force && victim_ru->vpc > 0) {
         int threshold = victim_ru->npages / 8;
-        if (victim_ru->ipc < threshold) {
+        /*
+         * Count every page an erase gives back. A unit that a handle update
+         * retired part written also gives back the pages it never wrote, which
+         * are neither valid nor invalid. Judged by ipc alone it is refused on
+         * every pass, and its low vpc keeps it at the heap top, so background
+         * collection never reaches the units behind it.
+         */
+        int reclaimable = victim_ru->npages - victim_ru->vpc;
+
+        if (reclaimable < threshold) {
             /*
              * Delay GC and put the victim back. Cross-RG NOISY selection can
              * return an RU that belongs to a different reclaim group than the

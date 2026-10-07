@@ -4093,6 +4093,63 @@ static void femu_test_fdp_ruh_update_full(void *obj, void *data,
 }
 
 /*
+ * A handle update can leave a unit holding a single valid page: the rest of it
+ * was never written, so it counts neither valid nor invalid. It then has the
+ * fewest valid pages of any victim and sits at the top of the heap. Background
+ * collection must not refuse it for having few invalid pages: it would stop
+ * there on every pass, and a unit behind it with almost nothing valid would
+ * wait for the forced watermark.
+ *
+ * Background collection runs on every command here (gc_thres_pcent=1) and
+ * forced collection only with no unit free, which this workload never reaches.
+ * A unit is four blocks of four pages.
+ */
+static void femu_test_fdp_background_gc(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t pid0 = cpu_to_le16(0);
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    qtest_memwrite(qts, pids, &pid0, sizeof(pid0));
+
+    /* one page, then leave the unit: it retires holding 1 valid of 16 */
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+
+    /* fill the next unit, then overwrite all but two of its pages */
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 16, buf, list)), ==,
+                    NVME_SUCCESS);
+    for (i = 0; i < 14; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+
+    /*
+     * Both units were collected: eight blocks erased, and the one page of the
+     * first plus the two of the second that were still valid when it was
+     * taken, which was as soon as it had two invalid pages.
+     */
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 8);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 15);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * A Zone Append reads the zone's write pointer to decide where it lands and
  * then moves it. On queues that different pollers serve, two of them read the
  * same pointer unless the zone state is held still, and the controller reports
@@ -22691,6 +22748,13 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub",
+    });
+    qos_add_test("fdp-background-gc", "femu", femu_test_fdp_background_gc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=1,gc_thres_pcent_high=100,subsys=fdpsub",
     });
     qos_add_test("sgl", "femu", femu_test_sgl, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "sgl=on"

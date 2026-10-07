@@ -228,7 +228,9 @@ because its last unit filled with no free unit to follow it.
   group's free units are at or below
   `(1 - gc_thres_pcent / 100) * units`, it runs one pass. A background pass
   puts its victim back, whatever the policy, unless the victim is empty or
-  at least 1/8 of its pages are invalid.
+  an erase would give back at least 1/8 of its pages. Those pages are the
+  invalid ones plus, for a unit that RUH Update retired part written, the
+  ones it never wrote.
 - Foreground: before a placed write and before each of its pages, while
   free units are at or below `(1 - gc_thres_pcent_high / 100) * units` (at
   least one unless `gc_thres_pcent_high` is 100), it
@@ -422,7 +424,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-csd-runs` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-csd-runs` |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
