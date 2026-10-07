@@ -716,6 +716,16 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
     return victim_ru;
 }
 
+static void fdp_gc_mark_valid(struct ssd *ssd, struct ppa *ppa, void *dest)
+{
+    mark_page_valid_fdp(ssd, ppa, dest);
+}
+
+static const struct ssd_gc_move_ops fdp_gc_move_ops = {
+    .mark_valid   = fdp_gc_mark_valid,
+    .mark_invalid = mark_page_invalid_fdp,
+};
+
 /*
  * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
  * Returns false when there is nowhere to put it, which leaves the page where it
@@ -725,7 +735,6 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
                                     FemuRuHandle *dest_ruh, uint16_t rgidx)
 {
     struct ppa new_ppa;
-    struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
     FemuReclaimUnit *dest_ru=NULL;
     FemuReclaimUnit *ret_ru=NULL;
@@ -739,16 +748,7 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     }
 
     new_ppa = fdp_get_new_page(ssd, dest_ru);
-    set_maptbl_ent(ssd, lpn, &new_ppa);
-    set_rmap_ent(ssd, lpn, &new_ppa);
-    mark_page_valid_fdp(ssd, &new_ppa, dest_ru);
-    /*
-     * Retire the old copy now: a victim that cannot be emptied is requeued,
-     * and a copy still marked valid would be moved again over newer data.
-     */
-    mark_page_invalid_fdp(ssd, old_ppa);
-    set_rmap_ent(ssd, INVALID_LPN, old_ppa);
-    ssd->gc_write_pages++; /* a page the device relocated itself */
+    ssd_gc_move_page(ssd, lpn, old_ppa, &new_ppa, &fdp_gc_move_ops, dest_ru);
 
     // FDP_TRACE(ssd, "GC_MIGRATE lpn=%lu src(ch=%u/lun=%u/blk=%u/pg=%u) "
     //           "dst(ch=%u/lun=%u/blk=%u/pg=%u) dest_ruhid=%u\n",
@@ -811,16 +811,7 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
         ftl_err("FDP: no free reclaim unit while relocating; device is full\n");
     }
 
-    if (ssd->sp.enable_gc_delay) {
-        struct nand_cmd gcw;
-        gcw.type = GC_IO;
-        gcw.cmd = NAND_WRITE;
-        gcw.stime = 0;
-        ssd_advance_status(ssd, &new_ppa, &gcw);
-    }
-
-    new_lun = get_lun(ssd, &new_ppa);
-    new_lun->gc_endtime = new_lun->next_lun_avail_time;
+    ssd_gc_charge_move(ssd, &new_ppa);
 
     /* this page is relocated; whether the next one can be is the next call */
     return true;

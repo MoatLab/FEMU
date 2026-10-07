@@ -536,12 +536,69 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa)
     }
 }
 
+/**
+ * ssd_gc_move_page - record that collection copied one valid page
+ * @ssd: the device
+ * @lpn: the logical page the copy holds
+ * @old_ppa: the copy being collected
+ * @new_ppa: the destination, already chosen by the caller
+ * @ops: how this mode marks a page valid or invalid
+ * @dest: handed to @ops->mark_valid
+ *
+ * Call before advancing the write frontier, which reads the destination's
+ * valid count to decide whether it is full. The old copy is retired now, not
+ * at the erase: a victim that cannot be emptied goes back to the queue, and a
+ * copy still counted valid would be moved again over newer data.
+ */
+void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
+                      struct ppa *new_ppa, const struct ssd_gc_move_ops *ops,
+                      void *dest)
+{
+    ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, new_ppa);
+    ops->mark_invalid(ssd, old_ppa);
+    set_rmap_ent(ssd, INVALID_LPN, old_ppa);
+    ops->mark_valid(ssd, new_ppa, dest);
+    ssd->gc_write_pages++; /* write amplification */
+}
+
+/**
+ * ssd_gc_charge_move - time the program of a relocated page
+ * @ssd: the device
+ * @new_ppa: the page collection wrote
+ *
+ * Charges the program when collection is timed and moves the LUN's collection
+ * end to its busy-until time.
+ */
+void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa)
+{
+    struct nand_lun *lun = get_lun(ssd, new_ppa);
+
+    if (ssd->sp.enable_gc_delay) {
+        struct nand_cmd gcw;
+        gcw.type = GC_IO;
+        gcw.cmd = NAND_WRITE;
+        gcw.stime = 0;
+        ssd_advance_status(ssd, new_ppa, &gcw);
+    }
+    lun->gc_endtime = lun->next_lun_avail_time;
+}
+
+static void gc_mark_valid(struct ssd *ssd, struct ppa *ppa, void *dest)
+{
+    (void)dest;
+    mark_page_valid(ssd, ppa);
+}
+
+static const struct ssd_gc_move_ops gc_line_move_ops = {
+    .mark_valid   = gc_mark_valid,
+    .mark_invalid = mark_page_invalid,
+};
+
 /* move valid page data (already in DRAM) from victim line to a new page */
 /* true when the page was relocated; false when there is nowhere to put it */
 static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
     struct ppa new_ppa;
-    struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
     uint64_t tag = get_line(ssd, old_ppa)->stream_tag;
     struct write_pointer *stream_wp = NULL;
@@ -564,23 +621,12 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
          */
         return false;
     }
-    /* commit the relocated mapping through the active scheme (maptbl + rmap) */
-    ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, &new_ppa);
-    /*
-     * Retire the old copy now rather than at the erase: if the line cannot be
-     * emptied it goes back to the victim queue, and its counts must then say
-     * what it still holds.
-     */
-    mark_page_invalid(ssd, old_ppa);
-    set_rmap_ent(ssd, INVALID_LPN, old_ppa);
+    ssd_gc_move_page(ssd, lpn, old_ppa, &new_ppa, &gc_line_move_ops, NULL);
     if (exp_lpn_watched(lpn)) {
         exp_watch_blk[new_ppa.g.blk] = 1; /* track the new block too */
         EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
                 lpn, PPA_ARG(old_ppa), PPA_ARG(&new_ppa));
     }
-
-    mark_page_valid(ssd, &new_ppa);
-    ssd->gc_write_pages++; /* write amplification: a page the device relocated */
 
     /* need to advance the write pointer here */
     if (stream_wp) {
@@ -592,23 +638,7 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
         ssd_advance_write_pointer(ssd);
     }
 
-    if (ssd->sp.enable_gc_delay) {
-        struct nand_cmd gcw;
-        gcw.type = GC_IO;
-        gcw.cmd = NAND_WRITE;
-        gcw.stime = 0;
-        ssd_advance_status(ssd, &new_ppa, &gcw);
-    }
-
-    /* advance per-ch gc_endtime as well */
-#if 0
-    new_ch = get_ch(ssd, &new_ppa);
-    new_ch->gc_endtime = new_ch->next_ch_avail_time;
-#endif
-
-    new_lun = get_lun(ssd, &new_ppa);
-    new_lun->gc_endtime = new_lun->next_lun_avail_time;
-
+    ssd_gc_charge_move(ssd, &new_ppa);
     return true;
 }
 

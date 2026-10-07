@@ -245,6 +245,16 @@ uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
                              bool charge, int64_t stime);
 void mark_line_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
+
+/* how a mode marks pages when collection moves one (ssd_gc_move_page) */
+struct ssd_gc_move_ops {
+    void (*mark_valid)(struct ssd *ssd, struct ppa *ppa, void *dest);
+    void (*mark_invalid)(struct ssd *ssd, struct ppa *ppa);
+};
+void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
+                      struct ppa *new_ppa, const struct ssd_gc_move_ops *ops,
+                      void *dest);
+void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa);
 int do_gc(struct ssd *ssd, bool force);
 int do_read_reclaim(struct ssd *ssd);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);

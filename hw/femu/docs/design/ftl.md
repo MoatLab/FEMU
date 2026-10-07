@@ -575,6 +575,11 @@ picks that victim policy; `gc_policy` and the other FTL knobs listed under
 and the [FDP guide](../features/fdp.md) describe
 it.
 
+Both collectors record a page move through one helper, `ssd_gc_move_page()`,
+and time it through `ssd_gc_charge_move()`. Each keeps its own destination
+and write frontier: line GC writes to the data or stream pointer, FDP to the
+handle's collection reclaim unit.
+
 ## Write buffer
 
 The write buffer models DRAM in front of the NAND. It holds logical page
