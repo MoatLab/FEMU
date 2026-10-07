@@ -2879,11 +2879,13 @@ static void femu_ftl_check(QTestState *qts, uint64_t *mapped, uint64_t *lost,
 /*
  * A fixed, queue-depth-one workload with collection, and what the FTL charged
  * for it: commands, their summed modelled latency, host, NAND and relocated
- * pages, erases, and the read, program and erase commands charged to the
- * media layer (x-ftl-trace). Refactoring the FTL must not move these. Every
- * count is exact. The latency sum is only held to 25%: collection starts at
- * the host time of the request that triggered it, so how soon the next request
- * arrives, which depends on how loaded the host is, changes how long it waits.
+ * pages, erases, the read, program and erase commands charged to the
+ * media layer, and a digest of the order of the collected victims
+ * (x-ftl-trace). Refactoring the FTL must not move these. Every count is
+ * exact, and the digest tells apart two victim orders with equal counts.
+ * The latency sum is only held to 25%: collection starts at the host time of
+ * the request that triggered it, so how soon the next request arrives, which
+ * depends on how loaded the host is, changes how long it waits.
  */
 /*
  * A multi-plane variant of the trace below. want and base are the traces of
@@ -2916,6 +2918,8 @@ typedef struct FtlTraceVar {
     bool trim;
 } FtlTraceVar;
 
+#define FTL_TRACE_FIELDS 10
+
 /* field @i of x-ftl-trace on the device with id "trace" */
 static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
 {
@@ -2927,7 +2931,7 @@ static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
 
     g_assert_true(qdict_haskey(rsp, "return"));
     v = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
-    g_assert_cmpuint(g_strv_length(v), ==, 9);
+    g_assert_cmpuint(g_strv_length(v), ==, FTL_TRACE_FIELDS);
     ns = g_ascii_strtoull(v[i], NULL, 10);
     qobject_unref(rsp);
     return ns;
@@ -3030,16 +3034,16 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
     {
         g_auto(GStrv) gotv = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
         g_auto(GStrv) expv = g_strsplit(want, " ", 0);
-        uint64_t got[9];
-        uint64_t exp[9];
+        uint64_t got[FTL_TRACE_FIELDS];
+        uint64_t exp[FTL_TRACE_FIELDS];
 
-        g_assert_cmpuint(g_strv_length(gotv), ==, 9);
-        g_assert_cmpuint(g_strv_length(expv), ==, 9);
-        for (i = 0; i < 9; i++) {
+        g_assert_cmpuint(g_strv_length(gotv), ==, FTL_TRACE_FIELDS);
+        g_assert_cmpuint(g_strv_length(expv), ==, FTL_TRACE_FIELDS);
+        for (i = 0; i < FTL_TRACE_FIELDS; i++) {
             got[i] = g_ascii_strtoull(gotv[i], NULL, 10);
             exp[i] = g_ascii_strtoull(expv[i], NULL, 10);
         }
-        for (i = 0; i < 9; i++) {
+        for (i = 0; i < FTL_TRACE_FIELDS; i++) {
             if (i == 1) {
                 g_assert_cmpuint(got[1], >=, exp[1] - exp[1] / 4);
                 g_assert_cmpuint(got[1], <=, exp[1] + exp[1] / 4);
@@ -3054,13 +3058,13 @@ static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
          */
         if (base) {
             g_auto(GStrv) basev = g_strsplit(base, " ", 0);
-            uint64_t b[9];
+            uint64_t b[FTL_TRACE_FIELDS];
 
-            g_assert_cmpuint(g_strv_length(basev), ==, 9);
-            for (i = 0; i < 9; i++) {
+            g_assert_cmpuint(g_strv_length(basev), ==, FTL_TRACE_FIELDS);
+            for (i = 0; i < FTL_TRACE_FIELDS; i++) {
                 b[i] = g_ascii_strtoull(basev[i], NULL, 10);
             }
-            for (i = 0; i < 9; i++) {
+            for (i = 0; i < FTL_TRACE_FIELDS; i++) {
                 if (i == 1 || i == 6 || i == 7) {
                     continue;
                 }
@@ -3128,18 +3132,21 @@ static void femu_test_ftl_trace_mp(void *obj, void *data,
 }
 
 #define FTL_TRACE_MP_OFF \
-    "764 3450000000 10306 10306 12181 11112 12821 22487 5556"
+    "764 3450000000 10306 10306 12181 11112 12821 22487 5556 " \
+    "15238286681531891579"
 #define FTL_TRACE_MP_OFF_SEQ_NS 17920000
 static const FtlTraceMp ftl_trace_mp_off = {
     .want = FTL_TRACE_MP_OFF,
     .seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
 };
 static const FtlTraceMp ftl_trace_mp_fdp = {
-    .want = "764 2020000000 10306 10306 4593 7320 5233 14899 3660",
+    .want = "764 2020000000 10306 10306 4593 7320 5233 14899 3660 "
+            "683895796762672279",
     .seq_ns = 17920000,
 };
 static const FtlTraceMp ftl_trace_mp_on = {
-    .want = "764 3240000000 10306 10306 12181 11112 12619 18495 5556",
+    .want = "764 3240000000 10306 10306 12181 11112 12619 18495 5556 "
+            "15238286681531891579",
     .base = FTL_TRACE_MP_OFF,
     .seq_ns = 10040000,
     .base_seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
@@ -3147,19 +3154,22 @@ static const FtlTraceMp ftl_trace_mp_on = {
 
 /* two handles, so the per-handle heaps compare their tops */
 static const FtlTraceVar ftl_trace_fdp_noisy = {
-    .want = "732 2054843255 10306 10306 4892 3732 5020 15198 3732",
+    .want = "732 2054843255 10306 10306 4892 3732 5020 15198 3732 "
+            "18370040710023928802",
     .pids = { 0, 1 },
     .npids = 2,
 };
 /* handle 3 is initially isolated and has no heap of its own */
 static const FtlTraceVar ftl_trace_fdp_noisy_ii = {
-    .want = "732 1954207306 10306 10306 4077 3528 4205 14383 3528",
+    .want = "732 1954207306 10306 10306 4077 3528 4205 14383 3528 "
+            "4801098223349791737",
     .pids = { 0, 3 },
     .npids = 2,
 };
 /* a whole-device reset while both kinds of heap hold victims */
 static const FtlTraceVar ftl_trace_fdp_trim = {
-    .want = "1333 4066723313 20356 20356 9148 7332 9276 29504 7332",
+    .want = "1333 4066723313 20356 20356 9148 7332 9276 29504 7332 "
+            "6162714646788561405",
     .pids = { 0, 1 },
     .npids = 2,
     .trim = true,
@@ -3171,11 +3181,13 @@ static const FtlTraceVar ftl_trace_fdp_trim = {
  * that order to change what later collections relocate.
  */
 static const FtlTraceVar ftl_trace_fdp_reread = {
-    .want = "1332 2670000000 10306 10306 9360 4852 10088 19666 4852",
+    .want = "1332 2670000000 10306 10306 9360 4852 10088 19666 4852 "
+            "6214949802370350338",
     .reread = true,
 };
 static const FtlTraceVar ftl_trace_read_reclaim = {
-    .want = "1332 1609160254 10306 10306 1399 2836 2127 11705 2836",
+    .want = "1332 1609160254 10306 10306 1399 2836 2127 11705 2836 "
+            "9709285251358799837",
     .reread = true,
     .read_reclaims = 83,
 };
@@ -22672,14 +22684,17 @@ static void femu_register_nodes(void)
     /* 19 lines of 16 pages: the forced watermark is zero free lines */
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364",
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2",
     });
     qos_add_test("ftl-trace-hot-cold", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 9800000000 10306 10306 44095 13536 44223 54401 13536",
+        .arg = (void *)
+            "732 9800000000 10306 10306 44095 13536 44223 54401 13536 "
+            "15350679178168073678",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22687,7 +22702,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616",
+        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616 "
+                       "5667387085002007720",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22696,13 +22712,14 @@ static void femu_register_nodes(void)
     /*
      * The victim order of each collection policy, on the workload above.
      * Cost-benefit has no pin: it ages victims by the host's real-time clock.
-     * The counts see a victim only through how many collections run, so a
-     * seed can hide a changed draw; with gc_seed=7, FDP random relocates the
-     * same pages when each draw is one higher, so it uses gc_seed=1.
+     * The counts alone can hide a changed draw: with gc_seed=7, FDP random
+     * relocates the same pages when each draw is one higher. The victim
+     * digest, the last field, still tells the two orders apart.
      */
     qos_add_test("ftl-trace-random", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 6331851448 10306 10306 26577 9156 26705 36883 9156",
+        .arg = (void *)"732 6331851448 10306 10306 26577 9156 26705 36883 9156 "
+                       "2001030099875195277",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22710,7 +22727,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-d-choice", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 4152925024 10306 10306 15855 6476 15983 26161 6476",
+        .arg = (void *)"732 4152925024 10306 10306 15855 6476 15983 26161 6476 "
+                       "15202952108705383366",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22718,7 +22736,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fifo", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 6408371473 10306 10306 26366 9104 26494 36672 9104",
+        .arg = (void *)"732 6408371473 10306 10306 26366 9104 26494 36672 9104 "
+                       "15363890515473485230",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22726,7 +22745,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp-random", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740",
+        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740 "
+                       "9224531952056629341",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -22820,7 +22840,8 @@ static void femu_register_nodes(void)
     /* one plane: multi-plane commands have nothing to combine */
     qos_add_test("ftl-trace-mp-one-plane", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364",
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"

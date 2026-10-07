@@ -930,6 +930,7 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
      */
     ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
+    ftl_note_victim(ssd, victim_line->id);
 
     for (ch = 0; ch < spp->nchs && victim_line->vpc; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {

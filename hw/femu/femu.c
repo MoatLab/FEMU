@@ -3184,9 +3184,10 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
 
 /*
  * Completed commands, their summed modelled latency, namespace 1's host,
- * NAND and relocated pages and erases, and the read, program and erase
- * commands it charged to the media layer: a trace that pins what the FTL
- * charged for a fixed workload.
+ * NAND and relocated pages and erases, the read, program and erase
+ * commands it charged to the media layer, and a digest of the order in
+ * which it collected lines or reclaim units: a trace that pins what the
+ * FTL charged for a fixed workload.
  */
 static char *femu_test_ftl_trace(Object *obj, Error **errp)
 {
@@ -3209,11 +3210,13 @@ static char *femu_test_ftl_trace(Object *obj, Error **errp)
     }
     out = g_strdup_printf("%" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64
                           " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                          " %" PRIu64, ios, model_ns, ssd->host_write_pages,
-                          ssd->nand_write_pages, ssd->gc_write_pages,
-                          ssd->total_erases, ssd->media_ops[NAND_MEDIA_READ],
+                          " %" PRIu64 " %" PRIu64, ios, model_ns,
+                          ssd->host_write_pages, ssd->nand_write_pages,
+                          ssd->gc_write_pages, ssd->total_erases,
+                          ssd->media_ops[NAND_MEDIA_READ],
                           ssd->media_ops[NAND_MEDIA_PROGRAM],
-                          ssd->media_ops[NAND_MEDIA_ERASE]);
+                          ssd->media_ops[NAND_MEDIA_ERASE],
+                          ssd->victim_digest);
     nvme_resume_pollers(n, resume);
     return out;
 }

@@ -50,6 +50,13 @@ static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
     return true;
 }
 
+/* fold the id of a collected line or reclaim unit into the victim digest */
+static inline void ftl_note_victim(struct ssd *ssd, uint64_t id)
+{
+    ssd->victim_digest = (ssd->victim_digest ^ (id + 1)) *
+                         0x100000001b3ULL;
+}
+
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;

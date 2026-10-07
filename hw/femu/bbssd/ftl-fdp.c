@@ -1001,6 +1001,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         return -1;
     }
 
+    ftl_note_victim(ssd, (uint64_t)victim_ru->rgidx << 16 | victim_ru->ruidx);
     FDP_TRACE(ssd, "GC_START rgid=%u ruhid=%u victim_ru=%u "
               "victim_vpc=%d isolation=%s gc_type=%s\n",
               rgid, ruhid, victim_ru->ruidx, victim_ru->vpc,

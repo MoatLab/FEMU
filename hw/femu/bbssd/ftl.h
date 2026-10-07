@@ -561,6 +561,11 @@ struct ssd {
     uint64_t total_erases;
     /* NAND commands charged to the media layer, by NandMediaOp */
     uint64_t media_ops[3];
+    /*
+     * A running hash of the id of each line or reclaim unit collected, in
+     * order, so a test can tell two victim orders with the same counts apart.
+     */
+    uint64_t victim_digest;
     uint32_t rated_pe_cycles;
 
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */

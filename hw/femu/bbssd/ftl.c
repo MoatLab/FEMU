@@ -77,6 +77,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
+    ssd->victim_digest = 0;
 
     ssd->bad_blocks = n->nand_bad_blocks;
     if (spp->tt_blks > 0 && ssd->bad_blocks > (uint32_t)spp->tt_blks) {
