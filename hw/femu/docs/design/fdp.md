@@ -457,9 +457,12 @@ last:
   hook, but `fdp_advance_ru_pointer()` retires a unit after its first line;
   it must walk `ru->lines[]` first.
 - A new victim policy: add a value to the GC strategy enum in
-  `bbssd/ftl.h`, a case in `select_victim_ru()`, and accept it in the
-  geometry checks of `bbssd/ftl-geom.c`. Keep the two heap positions
-  (`pos` for the group queue, `ruh_pos` for a handle queue) separate.
+  `bbssd/ftl.h`, a case in `select_victim_ru()` that chooses a unit without
+  removing it, and accept the value in the geometry checks of
+  `bbssd/ftl-geom.c`. Queue, remove and reorder victims only through
+  `fdp_victim_enqueue()`, `fdp_victim_dequeue()` and
+  `fdp_victim_reprioritize()`, which keep the group heap (`pos`) and the
+  handle heap (`ruh_pos`) in step.
 - A new event: generate it with `nvme_fdp_record_event()` after checking the
   handle's filter, and add the type to `nvme_fdp_events_supported[]` and
   `nvme_fdp_evf_shifts[]` in `nvme.h`.
