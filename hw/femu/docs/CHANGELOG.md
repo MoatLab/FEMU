@@ -302,6 +302,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - The controller reports NVMe 2.1 instead of 1.4, with what that requires: CAP.CRMS and the CRTO register, BPCAP 01b, Identify CNS 1Fh, CNS 00h refused for a Key Value namespace (Invalid I/O Command Set), CSI-specific log pages refused for an unknown command set, and CNS 07h refused for a set CC.CSS does not enable. Open-Channel stays at 1.4 (409db7bb3).
 - CAP.AMS no longer claims weighted round robin, which nothing arbitrated by, and enabling with another CC.AMS fails (409db7bb3).
 - A controller in a subsystem reports its endurance group (CTRATT bit 4, ENDGIDMAX, each namespace's ENDGID, the Key Value Identify structure included) whether or not FDP is on, as log 09h already did (409db7bb3).
+- The spare critical warning in the SMART and Endurance Group logs is set when the available spare falls below the threshold, not when it equals it (4faaff90a).
 
 ### Documentation and tooling
 
