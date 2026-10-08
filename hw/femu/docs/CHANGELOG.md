@@ -107,6 +107,7 @@ listed one by one.
 - Optional modelled TRIM time (`trim_lat_ns`) and explicit over-provisioning (`op_pcent`) (1027eb240, 6a4559ee4).
 - DRAM write buffer (`buffer_size`, `buffer_thres_pcent`) with Flush, FUA and volatile write cache support (6a8daec7a, d4d03f127, 0ee6d211b).
 - Hot/cold separation of overwritten pages (`hot_cold_sep`) (4ded2e928).
+- Log page C0h counts NAND pages that host writes cover only in part, whose read-modify-write the model does not charge (c80a23e88).
 - Opt-in static wear levelling (`wl_spread`): the least worn full line moves into the most worn free line, without a write pointer of its own (2e1ef35ba).
 - Read reclaim (`read_reclaim_limit`) and retention refresh (`retention_limit_sec`) (7f9b4f6af, 4e09c4797, e7f182b87).
 - Data age feeds the ECC read model (`ecc_retention_sec`) (f9433e9ab, 13f2b85de).
