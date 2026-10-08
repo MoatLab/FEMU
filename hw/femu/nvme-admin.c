@@ -2006,6 +2006,8 @@ typedef struct FemuMediaStats {
     uint64_t overworn_blocks;
     uint64_t grown_bad_blocks;
     uint64_t retired_lines;
+    uint64_t wl_relocations;
+    uint64_t wl_pages;
     uint64_t media_errors;      /* summed over every namespace */
     uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
@@ -2073,6 +2075,8 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->overworn_blocks += ssd_overworn_blocks(ns->ssd);
         st->grown_bad_blocks += ssd_grown_bad_blocks(ns->ssd);
         st->retired_lines += ssd_retired_lines(ns->ssd);
+        st->wl_relocations += ssd_wl_relocations(ns->ssd);
+        st->wl_pages += ssd_wl_pages(ns->ssd);
         st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
         st->buf_reads += ssd_buffer_reads(ns->ssd);
         st->buf_read_hits += ssd_buffer_read_hits(ns->ssd);
@@ -2123,6 +2127,8 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.overworn_blocks = cpu_to_le64(st.overworn_blocks);
     stats.grown_bad_blocks = cpu_to_le64(st.grown_bad_blocks);
     stats.retired_lines = cpu_to_le64(st.retired_lines);
+    stats.wl_relocations = cpu_to_le64(st.wl_relocations);
+    stats.wl_pages = cpu_to_le64(st.wl_pages);
     *log = stats;
 }
 

@@ -403,6 +403,7 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | `err_write_fail_ppm` | per million | 0 disables; bbssd, CSD and ZNS | writes that fail; a ZNS zone then becomes read only |
 | `read_reclaim_limit` | reads | 0 disables; bbssd and CSD; refused with FDP | a block read this often since its erase gets its line rewritten on a following write |
 | `retention_limit_sec` | seconds | 0 disables; bbssd and CSD; refused with FDP | a read that hits a line filled at least this long ago queues the line, which is rewritten on a following write |
+| `wl_spread` | erases | 0 disables; the settings `blk_pe_limit` refuses are refused too | static wear levelling: when the erases of lines in service differ by more than this, the least worn full line moves into the most worn free line, at most a quarter of the host pages; it stops at half the gap |
 | `age_scale` | factor | 1 (default) or more | data ages this many times faster than wall time for `retention_limit_sec` and `ecc_retention_sec`; I/O timing and collection order do not change |
 
 Interactions: faults come at a fixed period, so a run repeats exactly.

@@ -283,6 +283,7 @@ void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
 void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa);
 int do_gc(struct ssd *ssd, bool force);
 int do_read_reclaim(struct ssd *ssd);
+int do_wear_level(struct ssd *ssd);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
 uint64_t ftl_gc_rand(struct ssd *ssd);
 

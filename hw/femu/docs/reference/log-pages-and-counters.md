@@ -29,8 +29,10 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 112 | 8 | Blocks in service past their erase limit (`blk_pe_limit`) |
 | 120 | 8 | Worn-out blocks taken out of service |
 | 128 | 8 | Lines taken out of service |
+| 136 | 8 | Lines moved by static wear levelling (`wl_spread`) |
+| 144 | 8 | Pages those moves copied (also counted at offset 16) |
 
-Bytes 4-7 and 136-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 152-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

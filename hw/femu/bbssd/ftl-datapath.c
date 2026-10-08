@@ -729,6 +729,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int stream = ssd->n->streams && req->cmd.opcode == NVME_CMD_WRITE ?
                  nvme_streams_open(req->ns, &req->cmd) : -1;
     int r;
+    bool wl_done;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -748,6 +749,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     /* refresh at most one read-stressed line per write */
     do_read_reclaim(ssd);
+    wl_done = do_wear_level(ssd) == 0;
 
     /* pages the host wrote, whether or not the buffer absorbs them */
     ssd->host_write_pages += end_lpn - start_lpn + 1;
@@ -866,6 +868,19 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         buffer_write_data(ssd, req, lpn, false);
         curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+
+        /*
+         * Wear levelling needs the data pointer on a fresh line, and a long
+         * write can cross that point at the same offset every time, so look
+         * again here, once per command.
+         */
+        if (spp->wl_spread) {
+            ssd->wl_credit = MIN(ssd->wl_credit + 1,
+                                 4ull * spp->pgs_per_line);
+            if (!wl_done) {
+                wl_done = do_wear_level(ssd) == 0;
+            }
+        }
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;

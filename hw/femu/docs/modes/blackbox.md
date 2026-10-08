@@ -174,6 +174,12 @@ All of these are off by default.
   slower.
 - `pe_cycles_rated` and `nand_bad_blocks` feed SMART Percentage Used and
   Available Spare.
+- `wl_spread` turns on static wear levelling. When the lines in service
+  differ by more than that many erases, the least worn full line moves into
+  the most worn free line, so cold data rests on worn blocks and young blocks
+  rejoin the rotation. It runs only when the data write pointer has just
+  taken an empty line, which it exchanges for the worn one, so it adds no
+  write pointer, and it copies at most a quarter of what the host writes.
 - `age_scale` makes data age faster than wall time for `retention_limit_sec`
   and `ecc_retention_sec`, so a study of months of retention runs in
   minutes. I/O timing and collection order stay as they are.

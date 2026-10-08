@@ -1197,7 +1197,9 @@ typedef struct FemuStatsLog {
     uint64_t    overworn_blocks;  /* in service past their erase limit */
     uint64_t    grown_bad_blocks; /* worn-out blocks taken out of service */
     uint64_t    retired_lines;    /* lines taken out of service */
-    uint8_t     rsvd136[376];
+    uint64_t    wl_relocations;   /* lines moved by wear levelling */
+    uint64_t    wl_pages;         /* pages they copied, also at offset 16 */
+    uint8_t     rsvd152[360];
 } FemuStatsLog;
 
 /*
@@ -1985,6 +1987,7 @@ typedef struct BbCtrlParams {
     int read_reclaim_limit;   /* reads before a line is rewritten; 0 = never */
     int retention_limit_sec;  /* age before programmed data is refreshed; 0 = never */
     int age_scale;            /* data age per wall-time unit; 1 = real time */
+    int wl_spread;            /* wear gap that starts wear levelling; 0 = off */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -2815,6 +2818,8 @@ uint64_t ssd_read_reclaims(struct ssd *ssd);
 uint64_t ssd_overworn_blocks(struct ssd *ssd);
 uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
+uint64_t ssd_wl_relocations(struct ssd *ssd);
+uint64_t ssd_wl_pages(struct ssd *ssd);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
 
 /* write buffer: host pages seen and the pages it answered without the media */

@@ -212,6 +212,7 @@ struct ssdparams {
     /* seconds a line may hold data before it is rewritten; 0 = never */
     int retention_limit_sec;
     int age_scale;
+    int wl_spread;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -538,6 +539,10 @@ struct ssd {
     bool reclaim_by_age;            /* that line was queued by age, not reads */
     uint64_t read_reclaims;         /* lines rewritten for read stress */
     uint64_t overworn_blocks;       /* in service past their erase limit */
+    uint64_t wl_credit;             /* host pages wear levelling may spend */
+    uint64_t wl_relocations;        /* lines moved by wear levelling */
+    uint64_t wl_pages;              /* pages they copied, also in gc pages */
+    bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
     int wear_floor_lines;           /* usable lines retirement keeps */

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 153 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 154 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -165,6 +165,7 @@ Devices:
 | `gc_policy` | `str` | unset | bbssd, CSD without FDP: line victim policy, one of greedy, random, cost-benefit, fifo or d-choice; unset is greedy |
 | `gc_seed` | `uint64` | `0` | bbssd, CSD: seed for the victims the random and d-choice gc_policy and the FDP random gc_strategy pick; the same seed and workload pick the same victims, so vary it to vary runs |
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle |
+| `wl_spread` | `int32` | `0` | bbssd, CSD: static wear levelling starts when the erases of lines in service differ by more than this and stops at half of it; it moves the least worn full line into the most worn free line and copies at most a quarter of the host pages; 0 (default) turns it off |
 | `mapping` | `str` | unset | bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, hybrid or fast; unset is page, and FDP supports only page |
 | `mapping_cache_mb` | `uint32` | `0` | bbssd, CSD with mapping=dftl: size of the cached mapping table in MiB; 0 means 4 |
 | `read_cache_mb` | `uint32` | `0` | bbssd, CSD: size of the DRAM read cache in MiB; 0 disables it |

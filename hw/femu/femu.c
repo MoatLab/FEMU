@@ -2399,9 +2399,9 @@ static bool femu_check_multiplane_props(FemuCtrl *n, Error **errp)
 }
 
 /*
- * Block wear-out runs only in the plain line FTL of one bbssd or CSD
- * namespace. Each refused setting has its own write path or allocator that
- * the wear model does not cover yet.
+ * Block wear-out and wear levelling run only in the plain line FTL of one
+ * bbssd or CSD namespace. Each refused setting has its own write path or
+ * allocator that the wear model does not cover yet.
  */
 static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
 {
@@ -2418,9 +2418,10 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
             warn_report("femu: blk_pe_spread and blk_pe_seed have no effect "
                         "unless blk_pe_limit is set");
         }
-        return true;
-    }
-    if (n->spare_lines >= (uint32_t)MAX(bp->blks_per_pl, 0)) {
+        if (!bp->wl_spread) {
+            return true;
+        }
+    } else if (n->spare_lines >= (uint32_t)MAX(bp->blks_per_pl, 0)) {
         error_setg(errp, "femu: spare_lines (%u) must be below blks_per_pl "
                    "(%d)", n->spare_lines, bp->blks_per_pl);
         return false;
@@ -2455,7 +2456,8 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
         why = "nand_bad_blocks";
     }
     if (why) {
-        error_setg(errp, "femu: blk_pe_limit is not supported with %s", why);
+        error_setg(errp, "femu: %s is not supported with %s",
+                   n->blk_pe_limit ? "blk_pe_limit" : "wl_spread", why);
         return false;
     }
     return true;
@@ -3133,6 +3135,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("retention_limit_sec", FemuCtrl,
                       bb_params.retention_limit_sec, 0),
     DEFINE_PROP_INT32("age_scale", FemuCtrl, bb_params.age_scale, 1),
+    DEFINE_PROP_INT32("wl_spread", FemuCtrl, bb_params.wl_spread, 0),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

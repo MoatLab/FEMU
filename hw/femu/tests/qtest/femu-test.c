@@ -4013,6 +4013,79 @@ static void femu_test_wear_query(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+/*
+ * Static wear levelling. 16 lines of cold data are written once, then one
+ * hot logical line is rewritten 400 times. Without levelling, the lines the
+ * hot data cycles through take every erase and the cold lines none. With it,
+ * cold lines move into worn free lines and the young ones rejoin the
+ * rotation. @data pins the erase spread over lines in service at the end
+ * (most erases of any block, less fewest) and the number of moves. Every move
+ * copies one full line, levelling copies at most a quarter of the host pages,
+ * and the mapping stays exact.
+ */
+static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t want_spread, want_moves, moves, pages, host;
+    g_autofree char *args = g_strdup(
+        "'path':'/machine/peripheral/gc-test','kind':'lines','limit':4096");
+    uint8_t page[512];
+    uint64_t lo = UINT64_MAX, hi = 0;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *ns;
+    int i;
+
+    g_assert_cmpint(sscanf(data, "%" SCNu64 " %" SCNu64, &want_spread,
+                           &want_moves), ==, 2);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (i = 0; i < 256; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 240, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    host = ldq_le_p(page + 8);
+    moves = ldq_le_p(page + 136);
+    pages = ldq_le_p(page + 144);
+
+    ns = femu_query_ns(qts, args, &rsp);
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "lines"), e) {
+        QDict *l = qobject_to(QDict, qlist_entry_obj(e));
+
+        lo = MIN(lo, (uint64_t)qdict_get_int(l, "erase-max"));
+        hi = MAX(hi, (uint64_t)qdict_get_int(l, "erase-max"));
+    }
+    qobject_unref(rsp);
+    g_test_message("spread %" PRIu64 ", %" PRIu64 " moves, %" PRIu64
+                   " pages, %" PRIu64 " host pages", hi - lo, moves, pages,
+                   host);
+    g_assert_cmpuint(pages, ==, moves * 16);
+    g_assert_cmpuint(pages * 4, <=, host);
+    g_assert_cmpuint(hi - lo, ==, want_spread);
+    g_assert_cmpuint(moves, ==, want_moves);
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", 256);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* A setting the wear model does not cover refuses blk_pe_limit at realize */
 static void femu_test_wear_refused(void *obj, void *data,
                                    QGuestAllocator *alloc)
@@ -24317,6 +24390,22 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "ecc_step_ns=1000000,ecc_retention_sec=100,"
             "retention_limit_sec=100,age_scale=1"
+    });
+    qos_add_test("wear-level-off", "femu", femu_test_wear_level,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"33 0",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
+            ""
+    });
+    qos_add_test("wear-level-on", "femu", femu_test_wear_level,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"19 61",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
+            ",wl_spread=4"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

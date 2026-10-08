@@ -1227,6 +1227,126 @@ int do_read_reclaim(struct ssd *ssd)
     return 0;
 }
 
+/* the most erases of a block now in @line: what the line will take next */
+static uint32_t line_wear(struct ssd *ssd, struct line *line)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint32_t most = 0;
+
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                most = MAX(most,
+                           ssd->ch[ch].lun[lun].pl[pl].blk[line->id].erase_cnt);
+            }
+        }
+    }
+    return most;
+}
+
+/* the data write pointer sits on a line nothing has been written to yet */
+static bool ssd_frontier_fresh(struct ssd *ssd)
+{
+    struct write_pointer *wp = &ssd->wp;
+
+    return wp->curline && !wp->curline->vpc && !wp->curline->ipc &&
+           !wp->ch && !wp->lun && !wp->pl && !wp->pg;
+}
+
+/*
+ * Static wear levelling: move the coldest full line into the most worn free
+ * line, so the worn line holds data that stays put and the young one goes
+ * back to the rotation. Two earlier attempts failed. Relocating through the
+ * data pointer as it stood put cold data in a young line, because the pointer
+ * fills its current line before it takes another; a pointer of its own pinned
+ * a line and drove collection into a spiral. So this runs only when the data
+ * pointer has just taken a fresh line, and swaps that line for the worn one
+ * before the first copy: the full source fills the worn line exactly, and the
+ * rollover after its last page takes the young line back from the head of
+ * the free list. No pointer is added.
+ *
+ * It spends host pages: one credit per page the host programs, capped at four
+ * lines, and a move costs four lines of credit, so it copies at most a
+ * quarter of what the host writes. It starts when the wear gap between lines
+ * in service exceeds wl_spread and stops once it is down to half of that.
+ * Returns 0 when a line moved.
+ */
+int do_wear_level(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+    uint64_t cost = 4ull * spp->pgs_per_line;
+    struct line *src = NULL, *worn = NULL, *young, *line;
+    uint32_t lo = UINT32_MAX, hi = 0, src_wear = 0, worn_wear = 0;
+    uint64_t copied;
+
+    if (!spp->wl_spread || ssd->wl_credit < cost || !ssd_frontier_fresh(ssd) ||
+        should_gc_high(ssd) || lm->free_line_cnt < 2) {
+        return -1;
+    }
+
+    for (int i = 0; i < lm->tt_lines; i++) {
+        uint32_t w;
+
+        line = &lm->lines[i];
+        if (line->retired || line->spare) {
+            continue;
+        }
+        w = line_wear(ssd, line);
+        lo = MIN(lo, w);
+        hi = MAX(hi, w);
+    }
+    if (hi - lo > (uint32_t)spp->wl_spread) {
+        ssd->wl_on = true;
+    } else if (hi - lo <= (uint32_t)spp->wl_spread / 2) {
+        ssd->wl_on = false;
+    }
+    if (!ssd->wl_on) {
+        return -1;
+    }
+
+    QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
+        uint32_t w = line_wear(ssd, line);
+
+        if (!src || w < src_wear ||
+            (w == src_wear && line->close_seq < src->close_seq)) {
+            src = line;
+            src_wear = w;
+        }
+    }
+    QTAILQ_FOREACH(line, &lm->free_line_list, entry) {
+        uint32_t w = line_wear(ssd, line);
+
+        if (!worn || w > worn_wear) {
+            worn = line;
+            worn_wear = w;
+        }
+    }
+    if (!src || !worn || src->vpc != spp->pgs_per_line || src->ipc ||
+        src->reclaiming || worn_wear < src_wear + (uint32_t)spp->wl_spread) {
+        return -1;
+    }
+
+    ssd->wl_credit -= cost;
+    young = ssd->wp.curline;
+    QTAILQ_REMOVE(&lm->free_line_list, worn, entry);
+    QTAILQ_INSERT_HEAD(&lm->free_line_list, young, entry);
+    ssd_wp_reset(&ssd->wp, worn);
+
+    QTAILQ_REMOVE(&lm->full_line_list, src, entry);
+    lm->full_line_cnt--;
+    copied = ssd->gc_write_pages;
+    src->reclaiming = true;
+    if (!reclaim_line(ssd, src)) {
+        src->reclaiming = false;
+        return -1;
+    }
+    src->reclaiming = false;
+    ssd->wl_pages += ssd->gc_write_pages - copied;
+    ssd->wl_relocations++;
+    return 0;
+}
+
 /* release what ssd_init_lines() took */
 void ssd_free_lines(struct ssd *ssd)
 {
