@@ -835,10 +835,10 @@ Give each poller and the FTL thread its own host core while measuring;
   `oc12-trace-off`), the warning for the timing properties that have no
   effect (`ignored-props`), the 0xEF flips on a linked `femu-cxl-ssd`
   (`cxl-nvme-flip`), the two example configurations on this page
-  (`doc-examples`), and program/erase suspend on a BBSSD and a ZNS device
-  (`pe-suspend-bbssd-on`, `pe-suspend-bbssd-off`, `pe-suspend-zns-on`,
-  `pe-suspend-zns-off`): a read that arrives during a program completes
-  before the program only when suspend is on.
+  (`doc-examples`), and program/erase suspend on a BBSSD, CSD, KV and ZNS
+  device (`pe-suspend-<mode>-on` and `pe-suspend-<mode>-off`): a read that
+  arrives during a program completes before the program only when suspend
+  is on.
 - **Not covered by automated tests**: other BBSSD and ZNS timing inside QEMU, the
   host link, `fw_cpu_ns`, the 0xEF flips on a plain BBSSD controller, and
   end-to-end guest latency against a reference device. The built-in MLC table is a profile of real
