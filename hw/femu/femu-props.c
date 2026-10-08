@@ -357,6 +357,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "blk_pe_seed",
       "bbssd, CSD: seed of the per-block erase limits; one seed gives the "
       "same limits on every run" },
+    { "energy_read_nj",
+      "bbssd, CSD, KV: energy of one plane read in nJ, for the energy total "
+      "in log page C0h; 0 (default) gives no figure" },
+    { "energy_prog_nj",
+      "bbssd, CSD, KV: energy of one plane program in nJ, for the energy "
+      "total in log page C0h; 0 (default) gives no figure" },
+    { "energy_erase_nj",
+      "bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total "
+      "in log page C0h; 0 (default) gives no figure" },
     { "spare_lines",
       "bbssd, CSD: lines held back, needs blk_pe_limit; their blocks "
       "replace worn-out blocks of the same plane, and SMART Available Spare "

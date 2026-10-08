@@ -32,8 +32,12 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 136 | 8 | Lines moved by static wear levelling (`wl_spread`) |
 | 144 | 8 | Pages those moves copied (also counted at offset 16) |
 | 152 | 8 | NAND pages host writes covered only in part (a device reads such a page to program it again; FEMU does not charge that read) |
+| 160 | 8 | Plane reads charged to NAND (a multi-plane command counts each plane) |
+| 168 | 8 | Plane programs |
+| 176 | 8 | Plane erases |
+| 184 | 8 | Energy in uJ: the three counts above times `energy_read_nj`, `energy_prog_nj` and `energy_erase_nj` |
 
-Bytes 4-7 and 160-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 192-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

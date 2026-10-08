@@ -426,6 +426,12 @@ uint64_t ssd_partial_page_writes(struct ssd *ssd)
     return ssd->partial_page_writes;
 }
 
+/* @op is a NandMediaOp: read, program or erase */
+uint64_t ssd_plane_ops(struct ssd *ssd, int op)
+{
+    return ssd->media_plane_ops[op];
+}
+
 uint64_t ssd_retired_lines(struct ssd *ssd)
 {
     uint64_t v;

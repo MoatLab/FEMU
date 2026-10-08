@@ -174,6 +174,9 @@ All of these are off by default.
   slower.
 - `pe_cycles_rated` and `nand_bad_blocks` feed SMART Percentage Used and
   Available Spare.
+- Log page C0h counts plane reads, programs and erases. With
+  `energy_read_nj`, `energy_prog_nj` and `energy_erase_nj` set from a part's
+  datasheet, it also reports their energy in uJ.
 - `wl_spread` turns on static wear levelling. When the lines in service
   differ by more than that many erases, the least worn full line moves into
   the most worn free line, so cold data rests on worn blocks and young blocks

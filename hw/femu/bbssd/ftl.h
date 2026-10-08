@@ -577,6 +577,8 @@ struct ssd {
     uint64_t total_erases;
     /* NAND commands charged to the media layer, by NandMediaOp */
     uint64_t media_ops[3];
+    /* the planes those commands used: what energy is spent per */
+    uint64_t media_plane_ops[3];
     /*
      * A running hash of the id of each line or reclaim unit collected, in
      * order, so a test can tell two victim orders with the same counts apart.

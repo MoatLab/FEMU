@@ -1200,7 +1200,11 @@ typedef struct FemuStatsLog {
     uint64_t    wl_relocations;   /* lines moved by wear levelling */
     uint64_t    wl_pages;         /* pages they copied, also at offset 16 */
     uint64_t    partial_page_writes; /* pages written only in part */
-    uint8_t     rsvd160[352];
+    uint64_t    plane_reads;      /* plane operations charged to NAND */
+    uint64_t    plane_programs;
+    uint64_t    plane_erases;
+    uint64_t    energy_uj;        /* those times energy_*_nj, in uJ */
+    uint8_t     rsvd192[320];
 } FemuStatsLog;
 
 /*
@@ -2291,6 +2295,10 @@ typedef struct FemuCtrl {
     uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */
     uint64_t        blk_pe_seed;    /* seed of the per-block limits */
+    /* energy of one plane read, program and erase, nJ; 0 = no figure */
+    uint32_t        energy_read_nj;
+    uint32_t        energy_prog_nj;
+    uint32_t        energy_erase_nj;
     uint32_t        spare_lines;    /* lines held back as spare blocks */
     /*
      * SMART critical warning bits whose condition the FTL thread saw begin
@@ -2822,6 +2830,7 @@ uint64_t ssd_retired_lines(struct ssd *ssd);
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);
+uint64_t ssd_plane_ops(struct ssd *ssd, int op);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
 
 /* write buffer: host pages seen and the pages it answered without the media */

@@ -4145,6 +4145,65 @@ static void femu_test_partial_writes(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Log page C0h counts the planes each NAND operation used and prices them
+ * with energy_read_nj, energy_prog_nj and energy_erase_nj. On a workload with
+ * collection the counts must match the FTL's own: one program per page
+ * written or relocated, one erase per block erased. With multi-plane
+ * commands on (@data "mp") one command covers several planes, so there are
+ * fewer commands than plane programs.
+ */
+static void femu_test_plane_energy(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool mp = g_str_equal(data, "mp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t rd, prog, er, uj;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload(&c, buf, list);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_read_pages(&c, i * 16, 16, buf, list), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    rd = ldq_le_p(page + 160);
+    prog = ldq_le_p(page + 168);
+    er = ldq_le_p(page + 176);
+    uj = ldq_le_p(page + 184);
+    g_test_message("plane reads %" PRIu64 " programs %" PRIu64 " erases %"
+                   PRIu64 ", %" PRIu64 " uJ", rd, prog, er, uj);
+
+    g_assert_cmpuint(prog, ==, femu_ftl_trace_field(qts, 3) +
+                               femu_ftl_trace_field(qts, 4));
+    g_assert_cmpuint(er, ==, femu_ftl_trace_field(qts, 5));
+    g_assert_cmpuint(rd, >=, 256);
+    g_assert_cmpuint(uj, ==, (rd * 100 + prog * 1000 + er * 10000) / 1000);
+    if (mp) {
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7), <, prog);
+    } else {
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7), ==, prog);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* A setting the wear model does not cover refuses blk_pe_limit at realize */
 static void femu_test_wear_refused(void *obj, void *data,
                                    QGuestAllocator *alloc)
@@ -24473,6 +24532,23 @@ static void femu_register_nodes(void)
     qos_add_test("partial-writes-fdp", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,subsys=fdpsub"
+    });
+    qos_add_test("plane-energy", "femu", femu_test_plane_energy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"one",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "energy_read_nj=100,energy_prog_nj=1000,energy_erase_nj=10000"
+    });
+    qos_add_test("plane-energy-mp", "femu", femu_test_plane_energy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"mp",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "mp_program=1,mp_read=1,"
+            "energy_read_nj=100,energy_prog_nj=1000,energy_erase_nj=10000"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

@@ -213,6 +213,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     }
 
     ssd->media_ops[op]++;
+    ssd->media_plane_ops[op]++;
     loc = bb_decode_loc(ssd, ppa, stime);
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
@@ -260,5 +261,6 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
     }
 
     ssd->media_ops[op]++;
+    ssd->media_plane_ops[op] += nppas;
     return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;
 }

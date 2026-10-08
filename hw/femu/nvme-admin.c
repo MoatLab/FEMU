@@ -2009,6 +2009,7 @@ typedef struct FemuMediaStats {
     uint64_t wl_relocations;
     uint64_t wl_pages;
     uint64_t partial_page_writes;
+    uint64_t plane_ops[3];      /* read, program, erase */
     uint64_t media_errors;      /* summed over every namespace */
     uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
@@ -2079,6 +2080,9 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->wl_relocations += ssd_wl_relocations(ns->ssd);
         st->wl_pages += ssd_wl_pages(ns->ssd);
         st->partial_page_writes += ssd_partial_page_writes(ns->ssd);
+        for (int op = 0; op < 3; op++) {
+            st->plane_ops[op] += ssd_plane_ops(ns->ssd, op);
+        }
         st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
         st->buf_reads += ssd_buffer_reads(ns->ssd);
         st->buf_read_hits += ssd_buffer_read_hits(ns->ssd);
@@ -2132,6 +2136,13 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.wl_relocations = cpu_to_le64(st.wl_relocations);
     stats.wl_pages = cpu_to_le64(st.wl_pages);
     stats.partial_page_writes = cpu_to_le64(st.partial_page_writes);
+    stats.plane_reads = cpu_to_le64(st.plane_ops[NAND_MEDIA_READ]);
+    stats.plane_programs = cpu_to_le64(st.plane_ops[NAND_MEDIA_PROGRAM]);
+    stats.plane_erases = cpu_to_le64(st.plane_ops[NAND_MEDIA_ERASE]);
+    stats.energy_uj = cpu_to_le64(
+        (st.plane_ops[NAND_MEDIA_READ] * n->energy_read_nj +
+         st.plane_ops[NAND_MEDIA_PROGRAM] * n->energy_prog_nj +
+         st.plane_ops[NAND_MEDIA_ERASE] * n->energy_erase_nj) / 1000);
     *log = stats;
 }
 
