@@ -949,6 +949,7 @@ does inside the FTL and what it interacts with.
 | `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | `ecc_retention_sec` refused with FDP |
 | `err_read_unc_ppm`, `err_write_fail_ppm` | fixed-period command failures | counted in SMART media errors |
 | `read_reclaim_limit` | read count that queues a line for rewrite | needs host writes to act; refused with FDP |
+| `age_scale` | multiplies data age (`ssd_data_age_ns()`) for retention refresh and the ECC age tier | not for cost-benefit collection, whose order one factor on every age does not change |
 | `retention_limit_sec` | line age that queues a line for rewrite | same |
 
 ### NAND timing the FTL charges

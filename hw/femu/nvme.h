@@ -1984,6 +1984,7 @@ typedef struct BbCtrlParams {
     bool hot_cold_sep;        /* separate overwrites from write-once pages */
     int read_reclaim_limit;   /* reads before a line is rewritten; 0 = never */
     int retention_limit_sec;  /* age before programmed data is refreshed; 0 = never */
+    int age_scale;            /* data age per wall-time unit; 1 = real time */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */

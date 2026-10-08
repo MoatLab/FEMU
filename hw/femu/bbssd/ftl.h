@@ -211,6 +211,7 @@ struct ssdparams {
     int read_reclaim_limit;
     /* seconds a line may hold data before it is rewritten; 0 = never */
     int retention_limit_sec;
+    int age_scale;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;

@@ -3132,6 +3132,7 @@ static const Property femu_props[] = {
                       bb_params.read_reclaim_limit, 0),
     DEFINE_PROP_INT32("retention_limit_sec", FemuCtrl,
                       bb_params.retention_limit_sec, 0),
+    DEFINE_PROP_INT32("age_scale", FemuCtrl, bb_params.age_scale, 1),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

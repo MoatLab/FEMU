@@ -43,11 +43,10 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
      * filled; a line still being written has none yet.
      */
     if (ssd->sp.ecc_step_ns && ssd->sp.ecc_retention_sec) {
-        uint64_t closed = get_line(ssd, ppa)->close_time;
+        uint64_t age = ssd_data_age_ns(ssd, get_line(ssd, ppa)->close_time,
+                                       stime) / NANOSECONDS_PER_SECOND;
 
-        if (closed && stime > closed) {
-            loc.age_sec = (uint32_t)((stime - closed) / NANOSECONDS_PER_SECOND);
-        }
+        loc.age_sec = (uint32_t)MIN(age, UINT32_MAX);
     }
     return loc;
 }

@@ -360,8 +360,7 @@ static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
         uint64_t limit = (uint64_t)spp->retention_limit_sec *
                          NANOSECONDS_PER_SECOND;
 
-        if (aged->close_time && stime > aged->close_time &&
-            stime - aged->close_time >= limit) {
+        if (ssd_data_age_ns(ssd, aged->close_time, stime) >= limit) {
             ssd->read_reclaim_line = aged;
             ssd->reclaim_by_age = true;
         }

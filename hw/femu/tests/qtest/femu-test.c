@@ -4036,6 +4036,7 @@ static void femu_test_wear_refused(void *obj, void *data,
         { "'femu_mode':1,'nand_bad_blocks':1", "nand_bad_blocks" },
         { "'femu_mode':1,'blk_pe_spread':91", "blk_pe_spread must be 0 to 90" },
         { "'femu_mode':1,'spare_lines':40", "must be below blks_per_pl" },
+        { "'femu_mode':1,'age_scale':0", "age_scale must be 1 or more" },
     };
     QDict *rsp;
     int i;
@@ -4055,6 +4056,66 @@ static void femu_test_wear_refused(void *obj, void *data,
                                              "desc"), cases[i].msg));
         qobject_unref(rsp);
     }
+    qos_invalidate_command_line();
+}
+
+/*
+ * age_scale ages data faster than wall time, for the two models of charge
+ * leaking out over time and for nothing else. Lines filled and then left
+ * 50 ms: with @data "warp" (age_scale 10^6) that is 50000 s of age, so a read
+ * pays the four ECC tiers age can add (1 ms each here) and the read queues a
+ * retention refresh, which the next write performs. Without it the same reads
+ * pay no age tier and nothing is refreshed.
+ */
+static void femu_test_age_scale(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool warp = g_str_equal(data, "warp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+    uint64_t before, spent, refreshes;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (i = 0; i < 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(50 * 1000);
+
+    before = femu_ftl_trace_field(qts, 1);
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+    }
+    spent = femu_ftl_trace_field(qts, 1) - before;
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    refreshes = ldq_le_p(page + 48);
+    g_test_message("10 reads took %" PRIu64 " ns, %" PRIu64 " refreshes",
+                   spent, refreshes);
+    if (warp) {
+        g_assert_cmpuint(spent, >=, 10 * 4 * 1000000ULL);
+        g_assert_cmpuint(refreshes, >=, 1);
+    } else {
+        g_assert_cmpuint(spent, <, 10 * 1000000ULL);
+        g_assert_cmpuint(refreshes, ==, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
     qos_invalidate_command_line();
 }
 
@@ -24238,6 +24299,24 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
+    });
+    qos_add_test("age-scale-warp", "femu", femu_test_age_scale,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"warp",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=1000000,ecc_retention_sec=100,"
+            "retention_limit_sec=100,age_scale=1000000"
+    });
+    qos_add_test("age-scale-off", "femu", femu_test_age_scale,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=1000000,ecc_retention_sec=100,"
+            "retention_limit_sec=100,age_scale=1"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

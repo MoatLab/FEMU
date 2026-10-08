@@ -174,6 +174,9 @@ All of these are off by default.
   slower.
 - `pe_cycles_rated` and `nand_bad_blocks` feed SMART Percentage Used and
   Available Spare.
+- `age_scale` makes data age faster than wall time for `retention_limit_sec`
+  and `ecc_retention_sec`, so a study of months of retention runs in
+  minutes. I/O timing and collection order stay as they are.
 - `blk_pe_limit` gives each block an erase limit (`blk_pe_spread` varies it
   per block, from `blk_pe_seed`). When a line's erase takes a block to its
   limit, the line leaves service if enough lines remain: the namespace's

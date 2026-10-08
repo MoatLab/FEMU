@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 152 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 153 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -154,6 +154,7 @@ Devices:
 | `err_write_fail_ppm` | `uint32` | `0` | bbssd, CSD and ZNS: writes per million that fail, injected at a fixed period (a ZNS zone then goes read-only); 0 disables |
 | `read_reclaim_limit` | `int32` | `0` | bbssd, CSD: when a host read finds its block has taken this many reads since its erase, that line is queued and rewritten on a following write, one line at a time; 0 disables, refused with FDP |
 | `retention_limit_sec` | `int32` | `0` | bbssd, CSD: when a host read hits a line filled at least this many seconds earlier, the line is queued and rewritten on a following write; 0 disables, refused with FDP |
+| `age_scale` | `int32` | `1` | bbssd, CSD: data ages this many times faster than wall time, for retention_limit_sec and ecc_retention_sec only; 1 (default) or more. I/O timing and garbage collection order do not change |
 
 ### Garbage collection, mapping and caches
 

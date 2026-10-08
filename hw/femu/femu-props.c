@@ -375,6 +375,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: when a host read hits a line filled at least this many "
       "seconds earlier, the line is queued and rewritten on a following "
       "write; 0 disables, refused with FDP" },
+    { "age_scale",
+      "bbssd, CSD: data ages this many times faster than wall time, for "
+      "retention_limit_sec and ecc_retention_sec only; 1 (default) or more. "
+      "I/O timing and garbage collection order do not change" },
 
     /* garbage collection, mapping and caches */
     { "gc_thres_pcent",

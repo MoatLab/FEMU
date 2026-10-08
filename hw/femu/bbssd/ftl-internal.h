@@ -108,6 +108,25 @@ static inline struct nand_block *get_blk(struct ssd *ssd, struct ppa *ppa)
     return &(pl->blk[ppa->g.blk]);
 }
 
+/*
+ * How long a line's data has sat programmed at @now, in ns, aged age_scale
+ * times faster than wall time so a lifetime study runs in hours. Only the
+ * physics of data age reads this: I/O timing and collection order do not.
+ * A line still being written has no age yet.
+ */
+static inline uint64_t ssd_data_age_ns(struct ssd *ssd, uint64_t close_time,
+                                       uint64_t now)
+{
+    uint64_t age;
+    uint64_t scale = ssd->sp.age_scale > 1 ? ssd->sp.age_scale : 1;
+
+    if (!close_time || now <= close_time) {
+        return 0;
+    }
+    age = now - close_time;
+    return age > UINT64_MAX / scale ? UINT64_MAX : age * scale;
+}
+
 static inline struct line *get_line(struct ssd *ssd, struct ppa *ppa)
 {
     return &(ssd->lm.lines[ppa->g.blk]);

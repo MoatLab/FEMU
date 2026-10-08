@@ -155,6 +155,11 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    if (p->age_scale < 1) {
+        error_setg(errp, "FEMU bbssd: age_scale must be 1 or more");
+        return -1;
+    }
+
     if (p->retention_limit_sec < 0) {
         error_setg(errp, "FEMU bbssd: retention_limit_sec must not be negative");
         return -1;
@@ -261,6 +266,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;
     spp->retention_limit_sec = n->bb_params.retention_limit_sec;
+    spp->age_scale = n->bb_params.age_scale;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;
