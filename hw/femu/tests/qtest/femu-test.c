@@ -3912,6 +3912,8 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
 }
 
 /*
@@ -3965,6 +3967,8 @@ static void femu_test_wear_aer(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+    /* each warning is raised once: the next test needs a new device */
+    qos_invalidate_command_line();
 }
 
 /* A setting the wear model does not cover refuses blk_pe_limit at realize */
