@@ -4690,6 +4690,100 @@ static void femu_test_zone_append_parallel(void *obj, void *data,
 }
 
 /*
+ * Program/erase suspend, end to end. On one LUN, a write that programs NAND
+ * and a read of a page written before go in one doorbell ring, so the read
+ * reaches the media while the program is in flight. Off, the read waits out
+ * the program and completes second; on, it preempts the program and
+ * completes first. The program is 5000 times longer than the read, so how
+ * loaded the host is cannot swap them. @data is "on" when the device has
+ * suspend turned on.
+ *
+ * bbssd programs on every write. ZNS fills a write cache and programs it when
+ * the next write finds it full, so the test first finds which write programs:
+ * the first one that takes the program time.
+ */
+#define PE_SUSPEND_SLOW_US  100000
+
+static void femu_pe_suspend_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
+                               uint8_t opcode, uint64_t page)
+{
+    rw->opcode = opcode;
+    rw->slba = cpu_to_le64(page * (FEMU_DATA_SIZE / c->lba_size));
+    femu_zap_queue(c, q, (NvmeCmd *)rw);
+}
+
+static void femu_test_pe_suspend(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint64_t page = 0;
+    uint64_t fill;
+    uint16_t cid[2];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+
+    for (;;) {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmpuint(page, <, 1024);
+        femu_pe_suspend_rw(&c, &q, &rw, NVME_CMD_WRITE, page++);
+        femu_zap_ring(&c, &q);
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        if (g_get_monotonic_time() - t0 >= PE_SUSPEND_SLOW_US) {
+            break;
+        }
+    }
+    /*
+     * The write that programmed is in the next cache now: fill it up to the
+     * write that will program it.
+     */
+    fill = page >= 2 ? page - 2 : 0;
+    g_test_message("write %" PRIu64 " programs; %" PRIu64 " more fill the "
+                   "cache", page, fill);
+    while (fill--) {
+        femu_pe_suspend_rw(&c, &q, &rw, NVME_CMD_WRITE, page++);
+        femu_zap_ring(&c, &q);
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    }
+
+    femu_pe_suspend_rw(&c, &q, &rw, NVME_CMD_WRITE, page++);
+    femu_pe_suspend_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+    femu_zap_ring(&c, &q);
+    for (i = 0; i < 2; i++) {
+        uint64_t slot = q.cq_addr + q.cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+    }
+    g_test_message("suspend %s: cid %u completed before cid %u",
+                   on ? "on" : "off", cid[0], cid[1]);
+    /* the write took cid c.cid - 2 and the read c.cid - 1 */
+    g_assert_cmpuint(cid[0], ==, on ? c.cid - 1 : c.cid - 2);
+    g_assert_cmpuint(cid[1], ==, on ? c.cid - 2 : c.cid - 1);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/*
  * A host finds the Key Value command set by asking which sets the controller
  * has, then what the commands of that set do. Neither answered: the set was
  * missing from the list, and its effects log came back with no command
@@ -23467,6 +23561,39 @@ static void femu_register_nodes(void)
                  femu_test_zone_append_parallel, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,multipoller_enabled=1,poller_ratio=1"
+    });
+    /* one LUN and plane; a 200 ms program against a 40 us read */
+    qos_add_test("pe-suspend-bbssd-off", "femu", femu_test_pe_suspend,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000"
+    });
+    qos_add_test("pe-suspend-bbssd-on", "femu", femu_test_pe_suspend,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
+    });
+    qos_add_test("pe-suspend-zns-off", "femu", femu_test_pe_suspend,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=1,zns_flash_type=1,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=40000,zns_tsusp_ns=10000"
+    });
+    qos_add_test("pe-suspend-zns-on", "femu", femu_test_pe_suspend,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=1,zns_flash_type=1,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=40000,zns_tsusp_ns=10000,zns_pe_suspend=1"
     });
     qos_add_test("zone-bad-dptr", "femu", femu_test_zone_bad_dptr,
                  &(QOSGraphTestOptions) {
