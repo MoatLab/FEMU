@@ -36,8 +36,12 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 168 | 8 | Plane programs |
 | 176 | 8 | Plane erases |
 | 184 | 8 | Energy in uJ: the three counts above times `energy_read_nj`, `energy_prog_nj` and `energy_erase_nj` |
+| 192 | 8 | Host writes that waited for forced garbage collection to make room |
+| 200 | 8 | Forced collection passes run inside those writes |
+| 208 | 8 | Host writes that emptied a full write buffer to make room |
+| 216 | 8 | Completions held because the host's completion queue was full (summed over pollers) |
 
-Bytes 4-7 and 192-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 224-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

@@ -5406,6 +5406,122 @@ static void femu_test_fw_cost(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * Log page C0h counts the three ways a host write waits for room. @data names
+ * the case. "gc": the FTL trace workload, whose writes collect first; every
+ * stalled write ran at least one pass, and no more writes stall than were
+ * sent. "buffer": 32 writes of 4 pages into a 16-page write buffer empty it
+ * to make room. "cq": six reads into a completion queue of two entries, one
+ * of which must stay empty, so completions wait for the host to reap. That
+ * needs a mode whose completions come back from the FTL: NoSSD completes in
+ * the submission sweep and stops fetching instead.
+ */
+static uint64_t femu_c0h_field(FemuCtrlState *c, uint64_t log, int off)
+{
+    uint8_t page[512];
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, page, sizeof(page));
+    return ldq_le_p(page + off);
+}
+
+static void femu_test_stalls(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+
+    if (g_str_equal(mode, "gc")) {
+        uint64_t writes, passes;
+
+        femu_create_io_queues(&c);
+        femu_wear_workload(&c, buf, list);
+        writes = femu_c0h_field(&c, log, 192);
+        passes = femu_c0h_field(&c, log, 200);
+        g_test_message("%" PRIu64 " stalled writes, %" PRIu64 " passes",
+                       writes, passes);
+        g_assert_cmpuint(writes, >, 0);
+        g_assert_cmpuint(passes, >=, writes);
+        g_assert_cmpuint(writes, <=, 604);
+    } else if (g_str_equal(mode, "buffer")) {
+        femu_create_io_queues(&c);
+        for (i = 0; i < 32; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i * 4, 4, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        g_assert_cmpuint(femu_c0h_field(&c, log, 208), >, 0);
+    } else {
+        FemuQueue q = { .qid = 1, .phase = 1 };
+        NvmeCmd cmd;
+        int head = 0;
+
+        q.sq_addr = guest_alloc(alloc, 16 * sizeof(NvmeCmd));
+        q.cq_addr = guest_alloc(alloc, 2 * sizeof(NvmeCqe));
+        qtest_memset(qts, q.cq_addr, 0, 2 * sizeof(NvmeCqe));
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+        cmd.dptr.prp1 = cpu_to_le64(q.cq_addr);
+        cmd.cdw10 = cpu_to_le32((1 << 16) | 1);
+        cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+        cmd.dptr.prp1 = cpu_to_le64(q.sq_addr);
+        cmd.cdw10 = cpu_to_le32((15 << 16) | 1);
+        cmd.cdw11 = cpu_to_le32((1 << 16) | NVME_SQ_PC);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+        for (i = 0; i < 6; i++) {
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.opcode = NVME_CMD_READ;
+            cmd.cid = cpu_to_le16(c.cid++);
+            cmd.nsid = cpu_to_le32(1);
+            cmd.dptr.prp1 = cpu_to_le64(buf);
+            cmd.cdw12 = cpu_to_le32(7);
+            qtest_memwrite(qts, q.sq_addr + i * sizeof(NvmeCmd), &cmd,
+                           sizeof(cmd));
+        }
+        qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), 6);
+        /* let the device fill the queue before reaping anything */
+        g_usleep(200 * 1000);
+        for (i = 0; i < 6; i++) {
+            uint64_t slot = q.cq_addr + head * sizeof(NvmeCqe);
+            NvmeCqe cqe;
+            int waited = 0;
+
+            for (;;) {
+                qtest_memread(qts, slot, &cqe, sizeof(cqe));
+                if ((le16_to_cpu(cqe.status) & 1) == q.phase) {
+                    break;
+                }
+                g_assert_cmpint(waited++, <, FEMU_POLL_LIMIT_MS);
+                g_usleep(1000);
+            }
+            head = (head + 1) % 2;
+            if (!head) {
+                q.phase ^= 1;
+            }
+            qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, 1), head);
+        }
+        g_assert_cmpuint(femu_c0h_field(&c, log, 216), >, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * A host finds the Key Value command set by asking which sets the controller
  * has, then what the commands of that set do. Neither answered: the set was
  * missing from the list, and its effects log came back with no command
@@ -25454,6 +25570,26 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)"cores2",
         .edge.extra_device_opts = "femu_mode=2,fw_read_ns=200000000,fw_cores=2"
+    });
+    qos_add_test("stall-gc", "femu", femu_test_stalls,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gc",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("stall-buffer", "femu", femu_test_stalls,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer",
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,buffer_size=16"
+    });
+    qos_add_test("stall-cq", "femu", femu_test_stalls,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cq",
+        .edge.extra_device_opts =
+            "femu_mode=1"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

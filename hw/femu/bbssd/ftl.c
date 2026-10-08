@@ -426,6 +426,15 @@ uint64_t ssd_partial_page_writes(struct ssd *ssd)
     return ssd->partial_page_writes;
 }
 
+/* the three ways a host write waits for the device to make room */
+void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,
+                     uint64_t *destages)
+{
+    *writes = ssd->gc_stalled_writes;
+    *passes = ssd->gc_stall_passes;
+    *destages = ssd->buffer_full_destages;
+}
+
 /* @op is a NandMediaOp: read, program or erase */
 uint64_t ssd_plane_ops(struct ssd *ssd, int op)
 {

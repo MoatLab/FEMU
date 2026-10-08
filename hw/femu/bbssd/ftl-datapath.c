@@ -556,6 +556,7 @@ static uint64_t ssd_gc_until_clear(struct ssd *ssd)
         if (do_gc(ssd, true) == -1) {
             break;
         }
+        ssd->gc_stall_passes++;
     }
     return lat;
 }
@@ -730,6 +731,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                  nvme_streams_open(req->ns, &req->cmd) : -1;
     int r;
     bool wl_done;
+    uint64_t passes = ssd->gc_stall_passes;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -745,6 +747,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         r = do_gc(ssd, true);
         if (r == -1)
             break;
+        ssd->gc_stall_passes++;
     }
 
     /* refresh at most one read-stressed line per write */
@@ -781,6 +784,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
              * also bounds the latency a single command can absorb.
              */
             if (!buffer_hit(ssd, lpn) && buffer_at_watermark(ssd)) {
+                ssd->buffer_full_destages++;
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
                 /*
@@ -882,6 +886,10 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 wl_done = do_wear_level(ssd) == 0;
             }
         }
+    }
+    /* the write waited for collection to make room */
+    if (ssd->gc_stall_passes != passes) {
+        ssd->gc_stalled_writes++;
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;

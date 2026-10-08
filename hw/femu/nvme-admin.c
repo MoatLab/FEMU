@@ -2010,6 +2010,7 @@ typedef struct FemuMediaStats {
     uint64_t wl_pages;
     uint64_t partial_page_writes;
     uint64_t plane_ops[3];      /* read, program, erase */
+    uint64_t stall_writes, stall_passes, stall_destages, cq_full;
     uint64_t media_errors;      /* summed over every namespace */
     uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
@@ -2029,6 +2030,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->wr_cmds  += n->poller_ctr[p].nr_host_wr_cmds;
         st->rd_bytes += n->poller_ctr[p].nr_host_rd_bytes;
         st->wr_bytes += n->poller_ctr[p].nr_host_wr_bytes;
+        st->cq_full += n->poller_ctr[p].nr_cq_full;
     }
 
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
@@ -2082,6 +2084,14 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->partial_page_writes += ssd_partial_page_writes(ns->ssd);
         for (int op = 0; op < 3; op++) {
             st->plane_ops[op] += ssd_plane_ops(ns->ssd, op);
+        }
+        {
+            uint64_t w, ps, dg;
+
+            ssd_stall_stats(ns->ssd, &w, &ps, &dg);
+            st->stall_writes += w;
+            st->stall_passes += ps;
+            st->stall_destages += dg;
         }
         st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
         st->buf_reads += ssd_buffer_reads(ns->ssd);
@@ -2143,6 +2153,10 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
         (st.plane_ops[NAND_MEDIA_READ] * n->energy_read_nj +
          st.plane_ops[NAND_MEDIA_PROGRAM] * n->energy_prog_nj +
          st.plane_ops[NAND_MEDIA_ERASE] * n->energy_erase_nj) / 1000);
+    stats.gc_stalled_writes = cpu_to_le64(st.stall_writes);
+    stats.gc_stall_passes = cpu_to_le64(st.stall_passes);
+    stats.buffer_full_destages = cpu_to_le64(st.stall_destages);
+    stats.cq_full_completions = cpu_to_le64(st.cq_full);
     *log = stats;
 }
 

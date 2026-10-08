@@ -1204,7 +1204,11 @@ typedef struct FemuStatsLog {
     uint64_t    plane_programs;
     uint64_t    plane_erases;
     uint64_t    energy_uj;        /* those times energy_*_nj, in uJ */
-    uint8_t     rsvd192[320];
+    uint64_t    gc_stalled_writes; /* host writes that collected first */
+    uint64_t    gc_stall_passes;  /* collection passes they ran */
+    uint64_t    buffer_full_destages; /* writes that emptied a full buffer */
+    uint64_t    cq_full_completions; /* completions held for a full CQ */
+    uint8_t     rsvd224[288];
 } FemuStatsLog;
 
 /*
@@ -2103,7 +2107,8 @@ typedef struct FemuPollerCtr {
     int64_t nr_host_wr_bytes;
     /* modelled latency of the completed commands, for the qtest trace */
     int64_t nr_model_ns;
-    char    pad[64 - 7 * sizeof(int64_t)];
+    /* completions held back because the host's completion queue was full */
+    int64_t nr_cq_full;
 } QEMU_ALIGNED(64) FemuPollerCtr;
 
 typedef struct FemuCtrl {
@@ -2838,6 +2843,8 @@ uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);
 uint64_t ssd_plane_ops(struct ssd *ssd, int op);
+void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,
+                     uint64_t *destages);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
 
 /* write buffer: host pages seen and the pages it answered without the media */

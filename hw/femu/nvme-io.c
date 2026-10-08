@@ -346,6 +346,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
              * since: hold the completion for the next sweep then.
              */
             if (cq && cq->is_active && !nvme_try_post_cqe(n, cq, req)) {
+                n->poller_ctr[index_poller].nr_cq_full++;
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
             } else {
                 if (cq && cq->is_active) {
@@ -557,6 +558,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             continue;
         }
         if (!nvme_try_post_cqe(n, cq, req)) {
+            n->poller_ctr[index_poller].nr_cq_full++;
             QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
             continue;
         }
