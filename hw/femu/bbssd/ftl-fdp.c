@@ -1264,6 +1264,7 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     uint64_t start_lpn, end_lpn;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
+    ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
 
     return ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
 }

@@ -4086,6 +4086,65 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+/*
+ * Log page C0h counts the NAND pages a host write covers only in part. With
+ * 512-byte blocks and 4 KiB pages: one block inside a page is one; a whole
+ * page is none; 16 blocks from the middle of one page end in the middle of
+ * the third, two; 4 blocks from the start of a page end inside it, one.
+ */
+static void femu_test_partial_writes(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        uint64_t slba;
+        uint16_t nlb;
+        uint64_t partial;
+    } cases[] = {
+        { 1, 1, 1 }, { 0, 8, 0 }, { 4, 16, 2 }, { 8, 4, 1 },
+    };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 512);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t page[512];
+    uint64_t before = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5c, 16 * 512);
+    qtest_writeq(qts, list, buf + 4096);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        NvmeRwCmd rw;
+        uint16_t got;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+        rw.slba = cpu_to_le64(cases[i].slba);
+        rw.nlb = cpu_to_le16(cases[i].nlb - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                             sizeof(page), 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, log, page, sizeof(page));
+        g_assert_cmpuint(ldq_le_p(page + 152) - before, ==, cases[i].partial);
+        before = ldq_le_p(page + 152);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 /* A setting the wear model does not cover refuses blk_pe_limit at realize */
 static void femu_test_wear_refused(void *obj, void *data,
                                    QGuestAllocator *alloc)
@@ -24406,6 +24465,14 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
             ",wl_spread=4"
+    });
+    qos_add_test("partial-writes-bbssd", "femu", femu_test_partial_writes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1"
+    });
+    qos_add_test("partial-writes-fdp", "femu", femu_test_partial_writes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=fdpsub"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

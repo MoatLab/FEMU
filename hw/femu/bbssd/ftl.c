@@ -25,6 +25,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->wl_relocations = 0;
     ssd->wl_pages = 0;
     ssd->wl_on = false;
+    ssd->partial_page_writes = 0;
     ssd->grown_bad_blocks = 0;
     ssd->sacrificed_blocks = 0;
     ssd->spare_lines = limit ? n->spare_lines : 0;
@@ -418,6 +419,11 @@ uint64_t ssd_wl_relocations(struct ssd *ssd)
 uint64_t ssd_wl_pages(struct ssd *ssd)
 {
     return ssd->wl_pages;
+}
+
+uint64_t ssd_partial_page_writes(struct ssd *ssd)
+{
+    return ssd->partial_page_writes;
 }
 
 uint64_t ssd_retired_lines(struct ssd *ssd)

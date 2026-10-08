@@ -1199,7 +1199,8 @@ typedef struct FemuStatsLog {
     uint64_t    retired_lines;    /* lines taken out of service */
     uint64_t    wl_relocations;   /* lines moved by wear levelling */
     uint64_t    wl_pages;         /* pages they copied, also at offset 16 */
-    uint8_t     rsvd152[360];
+    uint64_t    partial_page_writes; /* pages written only in part */
+    uint8_t     rsvd160[352];
 } FemuStatsLog;
 
 /*
@@ -2820,6 +2821,7 @@ uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
+uint64_t ssd_partial_page_writes(struct ssd *ssd);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
 
 /* write buffer: host pages seen and the pages it answered without the media */

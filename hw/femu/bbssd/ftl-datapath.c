@@ -753,6 +753,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     /* pages the host wrote, whether or not the buffer absorbs them */
     ssd->host_write_pages += end_lpn - start_lpn + 1;
+    ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
     ssd->sp.write_cnt += end_lpn - start_lpn + 1;
 
     /*

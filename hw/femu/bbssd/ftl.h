@@ -542,6 +542,7 @@ struct ssd {
     uint64_t wl_credit;             /* host pages wear levelling may spend */
     uint64_t wl_relocations;        /* lines moved by wear levelling */
     uint64_t wl_pages;              /* pages they copied, also in gc pages */
+    uint64_t partial_page_writes;   /* NAND pages host writes covered in part */
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
