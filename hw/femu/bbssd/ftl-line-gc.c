@@ -959,6 +959,29 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
     return true;
 }
 
+/*
+ * Tell the main loop when wear has just crossed into a SMART warning: the
+ * spare below its threshold, or the first block kept in service past its
+ * limit. Both only get worse, so each is raised once. The FTL thread may not
+ * post a completion itself; the controller's event bottom half does.
+ */
+static void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
+{
+    uint32_t bits = 0;
+
+    if (spare >= NVME_SPARE_THRESHOLD &&
+        ssd_available_spare(ssd) < NVME_SPARE_THRESHOLD) {
+        bits |= NVME_SMART_SPARE;
+    }
+    if (!overworn && ssd->overworn_blocks) {
+        bits |= NVME_SMART_RELIABILITY;
+    }
+    if (bits) {
+        qatomic_or(&ssd->n->health_pending, bits);
+        qemu_bh_schedule(ssd->n->aer_bh);
+    }
+}
+
 static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1061,8 +1084,15 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
                                 0);
         }
     }
-    if (ssd_wear_out_line(ssd, victim_line)) {
-        return true;
+    if (ssd->wear_on) {
+        uint8_t spare = ssd_available_spare(ssd);
+        uint64_t overworn = ssd->overworn_blocks;
+        bool retired = ssd_wear_out_line(ssd, victim_line);
+
+        ssd_wear_events(ssd, spare, overworn);
+        if (retired) {
+            return true;
+        }
     }
 
     /* update line status */

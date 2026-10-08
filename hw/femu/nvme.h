@@ -2287,6 +2287,11 @@ typedef struct FemuCtrl {
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */
     uint64_t        blk_pe_seed;    /* seed of the per-block limits */
     uint32_t        spare_lines;    /* lines held back as spare blocks */
+    /*
+     * SMART critical warning bits whose condition the FTL thread saw begin
+     * and the main loop has not yet raised as an event; set atomically.
+     */
+    uint32_t        health_pending;
     uint64_t        gc_seed; /* seed for the GC policies that sample victims */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */

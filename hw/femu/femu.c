@@ -503,6 +503,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->ns_notice_masked = false;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
+    qatomic_set(&n->health_pending, 0);
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
@@ -2814,10 +2815,28 @@ static void femu_free_namespace_bitmaps(FemuCtrl *n)
  * controller's, and every mode's exit walks the namespaces itself, so dispatch
  * over the distinct handlers rather than once per namespace.
  */
-/* Post whatever events are queued, from the main loop rather than a poller. */
+/*
+ * Post whatever events are queued, from the main loop rather than a poller.
+ * Health warnings the FTL thread saw begin are raised here first, for the
+ * kinds the host enabled in Asynchronous Event Configuration.
+ */
 static void femu_aer_bh(void *opaque)
 {
-    nvme_process_aers(opaque);
+    FemuCtrl *n = opaque;
+    uint32_t bits = qatomic_xchg(&n->health_pending, 0);
+    uint32_t aec = NVME_AEC_SMART(n->features.async_config);
+
+    if (bits & aec & NVME_SMART_SPARE) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
+                           NVME_AER_INFO_SMART_SPARE_THRESH,
+                           NVME_LOG_SMART_INFO);
+    }
+    if (bits & aec & NVME_SMART_RELIABILITY) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
+                           NVME_AER_INFO_SMART_RELIABILITY,
+                           NVME_LOG_SMART_INFO);
+    }
+    nvme_process_aers(n);
 }
 
 static void femu_exit_extensions(FemuCtrl *n)

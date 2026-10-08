@@ -3838,6 +3838,27 @@ static void femu_test_fdp_capacity_refused(void *obj, void *data,
  * trace. SMART reports the reliability warning exactly
  * when a block is overworn, and no mapped page may be left in a retired line.
  */
+/* the FTL trace's fill and 600 overwrites, every write required to succeed */
+static void femu_wear_workload(FemuCtrlState *c, uint64_t buf, uint64_t list)
+{
+    uint32_t seed = 1;
+    int i;
+
+    for (i = 0; i < 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, (seed >> 8) %
+                                                 (256 - npages + 1), npages,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+}
+
 static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -3849,7 +3870,6 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 512);
     uint8_t page[512];
-    uint32_t seed = 1;
     uint64_t got[3];
     int i;
 
@@ -3859,20 +3879,7 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x3c, 64 * 4096);
-
-    for (i = 0; i < 256; i += 64) {
-        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
-                        NVME_SUCCESS);
-    }
-    for (i = 0; i < 600; i++) {
-        uint32_t npages = i % 4 == 3 ? 64 : 1;
-
-        seed = seed * 1103515245 + 12345;
-        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) %
-                                                 (256 - npages + 1), npages,
-                                                 buf, list)), ==,
-                        NVME_SUCCESS);
-    }
+    femu_wear_workload(&c, buf, list);
 
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
                                          sizeof(page), 0)), ==, NVME_SUCCESS);
@@ -3902,6 +3909,59 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(orphans, ==, 0);
 
     guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A worn-out block raises a SMART event when the host enabled its kind in
+ * Asynchronous Event Configuration (@data): bit 0, the spare falling below
+ * its threshold, reports information 02h; bit 2, reliability, reports 00h.
+ * With neither enabled the request stays outstanding. This device crosses
+ * both: a line retires, using up the spare, and blocks stay overworn.
+ */
+static void femu_test_wear_aer(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint32_t aec = g_ascii_strtoull(data, NULL, 0);
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    NvmeCqe cqe;
+    NvmeCmd cmd;
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    g_assert_cmpint(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, false,
+                                     0, aec, NULL), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    femu_submit(&c, &c.admin, &cmd);
+
+    femu_wear_workload(&c, buf, list);
+
+    if (!aec) {
+        /* the event bottom half has had the whole workload to run */
+        qtest_memread(qts, c.admin.cq_addr +
+                      c.admin.cq_head * sizeof(NvmeCqe), &cqe, sizeof(cqe));
+        g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c.admin.phase);
+    } else {
+        g_assert_cmpint(femu_complete(&c, &c.admin, NULL, &result), ==,
+                        NVME_SUCCESS);
+        g_test_message("AER result 0x%x", result);
+        g_assert_cmphex(result & 0x7, ==, NVME_AER_TYPE_SMART);
+        g_assert_cmphex((result >> 8) & 0xff, ==,
+                        aec & NVME_SMART_SPARE ?
+                        NVME_AER_INFO_SMART_SPARE_THRESH :
+                        NVME_AER_INFO_SMART_RELIABILITY);
+        g_assert_cmphex((result >> 16) & 0xff, ==, NVME_LOG_SMART_INFO);
+    }
+
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -24092,6 +24152,30 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
+    });
+    qos_add_test("wear-aer-spare", "femu", femu_test_wear_aer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0x1",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=75"
+    });
+    qos_add_test("wear-aer-reliability", "femu", femu_test_wear_aer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0x4",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=75"
+    });
+    qos_add_test("wear-aer-off", "femu", femu_test_wear_aer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0x0",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=75"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

@@ -186,6 +186,10 @@ All of these are off by default.
   the line has one. SMART Available Spare is then the spare blocks the
   emptiest plane has left; without spare lines, it is the lines retirement can
   still take.
+- When the spare falls below its threshold, or the first block stays in
+  service past its limit, the controller raises a SMART asynchronous event
+  (information 02h or 00h) if the host enabled bit 0 or bit 2 of
+  Asynchronous Event Configuration. Each is raised once.
 - `err_read_unc_ppm` and `err_write_fail_ppm` fail a fixed share of reads or
   writes. The failures come at a fixed period, so a run repeats exactly.
 - `read_reclaim_limit` and `retention_limit_sec` rewrite lines that were read
