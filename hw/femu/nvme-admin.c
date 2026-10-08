@@ -2227,7 +2227,8 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     smart.unsafe_shutdowns[1] = cpu_to_le64(n->unsafe_shutdowns[1]);
 
     smart.available_spare_threshold = NVME_SPARE_THRESHOLD;
-    if (smart.available_spare <= NVME_SPARE_THRESHOLD) {
+    /* the warning is for a spare below the threshold, not one at it */
+    if (smart.available_spare < NVME_SPARE_THRESHOLD) {
         smart.critical_warning |= NVME_SMART_SPARE;
     }
     if (n->features.temp_thresh <= n->temperature) {
@@ -2320,7 +2321,7 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     info.avail_spare = st.available_spare;
     info.avail_spare_thres = NVME_SPARE_THRESHOLD;
     info.percet_used = st.percentage_used;
-    if (st.available_spare <= NVME_SPARE_THRESHOLD) {
+    if (st.available_spare < NVME_SPARE_THRESHOLD) {
         info.critical_warning |= NVME_SMART_SPARE;
     }
     /*

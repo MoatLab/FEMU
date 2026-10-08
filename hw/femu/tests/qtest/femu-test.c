@@ -39,6 +39,7 @@
 #define FEMU_CSI_KV         0x01    /* key-value command set */
 #define FEMU_ZONE_ACTION_RESET  0x04
 #define FEMU_DSM_AD             0x04    /* Dataset Management: deallocate */
+#define FEMU_SPARE_THRESHOLD    20      /* Available Spare Threshold reported */
 #define FEMU_OC20_IDENTIFY      0xe2    /* Open-Channel 2.0 geometry */
 #define FEMU_OC20_VECT_WRITE    0x91
 #define FEMU_OC20_VECT_READ     0x92
@@ -2251,6 +2252,53 @@ static void femu_test_log_pages(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /* Large dword counts must not wrap to a small, successful transfer. */
+/*
+ * The spare warning is for a spare that has fallen below the threshold, in
+ * the SMART log and the Endurance Group log alike. On 100 blocks, @data bad
+ * ones leave 100 - @data percent: 80 leaves the threshold itself, which is
+ * not below it, and 81 leaves one less.
+ */
+static void femu_test_spare_threshold(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint8_t spare = 100 - atoi(data);
+    bool below = spare < FEMU_SPARE_THRESHOLD;
+    FemuCtrlState c = { 0 };
+    uint8_t page[512];
+    uint64_t buf;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, sizeof(page));
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, spare);
+    g_assert_cmpuint(page[4], ==, FEMU_SPARE_THRESHOLD);
+    g_assert_cmpuint(page[0] & NVME_SMART_SPARE, ==,
+                     below ? NVME_SMART_SPARE : 0);
+
+    /* Endurance Group 1: critical warning at 0, spare at 3, threshold at 4 */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_LOG_ENDGRP | ((sizeof(page) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, spare);
+    g_assert_cmpuint(page[4], ==, FEMU_SPARE_THRESHOLD);
+    g_assert_cmpuint(page[0] & NVME_SMART_SPARE, ==,
+                     below ? NVME_SMART_SPARE : 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_log_length(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -23707,6 +23755,22 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lba_index=3"
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
+    qos_add_test("spare-at-threshold", "femu", femu_test_spare_threshold,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"80",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=100,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "nand_bad_blocks=80,subsys=fdpsub"
+    });
+    qos_add_test("spare-below-threshold", "femu", femu_test_spare_threshold,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"81",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=100,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "nand_bad_blocks=81,subsys=fdpsub"
+    });
     qos_add_test("get-lba-status", "femu", femu_test_get_lba_status,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f"
