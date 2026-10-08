@@ -190,6 +190,9 @@ All of these are off by default.
   service past its limit, the controller raises a SMART asynchronous event
   (information 02h or 00h) if the host enabled bit 0 or bit 2 of
   Asynchronous Event Configuration. Each is raised once.
+- With `blk_pe_limit`, SMART Percentage Used counts erases against the sum
+  of the blocks' limits. `query-femu` shows retired and spare lines with
+  their own states.
 - `err_read_unc_ppm` and `err_write_fail_ppm` fail a fixed share of reads or
   writes. The failures come at a fixed period, so a run repeats exactly.
 - `read_reclaim_limit` and `retention_limit_sec` rewrite lines that were read

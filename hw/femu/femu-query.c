@@ -229,6 +229,8 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, FemuMode mode,
     cnt->free = q->free_lines;
     cnt->victim = q->victim_lines;
     cnt->full = q->full_lines;
+    cnt->retired = q->retired_lines;
+    cnt->spare = q->spare_lines;
     cnt->total = q->tt_lines;
     info->line_counts = cnt;
 

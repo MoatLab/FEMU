@@ -27,6 +27,13 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
     size_t i;
 
     memset(state, FEMU_LINE_STATE_UNLISTED, lm->tt_lines);
+    for (i = 0; i < (size_t)lm->tt_lines; i++) {
+        if (lm->lines[i].retired) {
+            state[i] = FEMU_LINE_STATE_RETIRED;
+        } else if (lm->lines[i].spare) {
+            state[i] = FEMU_LINE_STATE_SPARE;
+        }
+    }
     QTAILQ_FOREACH(line, &lm->free_line_list, entry) {
         state[line->id] = FEMU_LINE_STATE_FREE;
     }
@@ -94,6 +101,8 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->free_lines = lm->free_line_cnt;
     q->victim_lines = pqueue_size(lm->victim_line_pq);
     q->full_lines = lm->full_line_cnt;
+    q->retired_lines = lm->retired_line_cnt;
+    q->spare_lines = ssd->spare_lines;
 
     q->nr_lines = 0;
     if (!q->lines || q->offset >= q->tt_lines) {

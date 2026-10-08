@@ -43,7 +43,7 @@ The reply has the device `path`, the controller `mode` and one entry in
 | `nsid`, `mode` | the namespace and its mode: `ocssd`, `bbssd`, `nossd`, `znssd`, `csd` or `kvssd` |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
 | `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, and `waf` |
-| `line-counts` | lines that are `free`, `victim` and `full`, and the `total` |
+| `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total` |
 | `lines` | with `kind` `lines`: `id`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each line |
 | `offset`, `next-offset` | with `kind` `lines`: the first line in `lines`, and the offset of the next call; `next-offset` is absent after the last line |
 
@@ -68,6 +68,8 @@ The `state` of a line is one of these values:
 | `victim` | closed with invalid pages, a garbage collection candidate |
 | `reclaiming` | garbage collection moves its valid pages |
 | `unlisted` | on no list; a correct FTL does not report this state |
+| `retired` | out of service: a block in it wore out (`blk_pe_limit`) |
+| `spare` | held back so its blocks can replace worn-out ones (`spare_lines`) |
 
 ## Example
 
@@ -83,7 +85,8 @@ The `state` of a line is one of these values:
                "page-size": 4096, "pages-per-line": 16384},
   "counters": {"host-write-pages": 20480, "nand-write-pages": 20480,
                "gc-write-pages": 0, "block-erases": 0, "waf": 1.0},
-  "line-counts": {"free": 254, "victim": 0, "full": 1, "total": 256},
+  "line-counts": {"free": 254, "victim": 0, "full": 1, "retired": 0, "spare": 0,
+                  "total": 256},
   "lines": [{"id": 0, "state": "full", "vpc": 16384, "ipc": 0, "erase-min": 0, "erase-max": 0},
             {"id": 1, "state": "open", "vpc": 4096, "ipc": 0, "erase-min": 0, "erase-max": 0}],
   "offset": 0, "next-offset": 2}]}}

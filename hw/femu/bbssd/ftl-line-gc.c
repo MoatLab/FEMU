@@ -1087,7 +1087,11 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
     if (ssd->wear_on) {
         uint8_t spare = ssd_available_spare(ssd);
         uint64_t overworn = ssd->overworn_blocks;
-        bool retired = ssd_wear_out_line(ssd, victim_line);
+        bool retired;
+
+        qemu_mutex_lock(&ssd->wear_lock);
+        retired = ssd_wear_out_line(ssd, victim_line);
+        qemu_mutex_unlock(&ssd->wear_lock);
 
         ssd_wear_events(ssd, spare, overworn);
         if (retired) {

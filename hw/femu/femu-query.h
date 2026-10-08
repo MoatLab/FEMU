@@ -49,6 +49,8 @@ typedef struct FemuQueryNs {
     uint32_t free_lines;
     uint32_t victim_lines;
     uint32_t full_lines;
+    uint32_t retired_lines;
+    uint32_t spare_lines;
 
     uint32_t offset;
     uint32_t max_lines;

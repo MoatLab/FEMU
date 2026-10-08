@@ -714,7 +714,9 @@ Every erase increments the block's `erase_cnt` and the FTL-wide
 
 where `rated_pe_cycles` is `pe_cycles_rated`, or the rating of
 `nand_cell_type` (SLC 100000, MLC 3000, TLC 1000, QLC 300), or 0, in which
-case the field reads 0. `nand_bad_blocks` marks a number of blocks as
+case the field reads 0. With `blk_pe_limit`, the denominator is the sum of
+every block's own erase limit at start, spare lines included, so the figure
+only grows. `nand_bad_blocks` marks a number of blocks as
 factory bad for SMART Available Spare only: `100 - bad * 100 / tt_blks`.
 Placement ignores them. With several namespaces the controller reports the
 most worn namespace and the lowest spare.

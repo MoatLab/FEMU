@@ -63,10 +63,15 @@
 #
 # @unlisted: on no list the FTL keeps
 #
+# @retired: taken out of service after a block in it wore out
+#
+# @spare: held back so its blocks can replace worn-out ones
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuLineState',
-  'data': [ 'free', 'open', 'full', 'victim', 'reclaiming', 'unlisted' ] }
+  'data': [ 'free', 'open', 'full', 'victim', 'reclaiming', 'unlisted',
+            'retired', 'spare' ] }
 
 ##
 # @FemuGeometry:
@@ -134,13 +139,17 @@
 #
 # @full: closed lines with every page valid
 #
+# @retired: lines taken out of service after a block wore out
+#
+# @spare: lines held back as replacement blocks
+#
 # @total: every line of the namespace
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuLineCounts',
   'data': { 'free': 'uint32', 'victim': 'uint32', 'full': 'uint32',
-            'total': 'uint32' } }
+            'retired': 'uint32', 'spare': 'uint32', 'total': 'uint32' } }
 
 ##
 # @FemuLineInfo:

@@ -3260,8 +3260,8 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
     uint64_t orphans;
     bool resume;
 
-    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
-        error_setg(errp, "FTL check requires a bbssd namespace 1");
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+        error_setg(errp, "FTL check requires a bbssd or CSD namespace 1");
         return NULL;
     }
     resume = nvme_pause_pollers(n);

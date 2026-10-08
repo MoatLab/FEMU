@@ -542,6 +542,13 @@ struct ssd {
     int wear_floor_lines;           /* usable lines retirement keeps */
     int spare_lines;                /* lines held back as spare blocks */
     bool wear_on;                   /* blk_pe_limit set */
+    /*
+     * Held by the FTL thread while wear changes blocks, lines and the
+     * counts above, and by SMART readers, so a reader never sees a block
+     * half swapped. Only exists with wear_on.
+     */
+    QemuMutex wear_lock;
+    uint64_t wear_pe_total;         /* sum of every block's erase limit */
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

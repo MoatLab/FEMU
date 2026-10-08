@@ -25,6 +25,10 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->sacrificed_blocks = 0;
     ssd->spare_lines = limit ? n->spare_lines : 0;
     ssd->wear_on = limit != 0;
+    ssd->wear_pe_total = 0;
+    if (ssd->wear_on) {
+        qemu_mutex_init(&ssd->wear_lock);
+    }
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
@@ -44,6 +48,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
                     v = limit - off + x % (2 * off + 1);
                     blk->pe_limit = limit ? MAX(MIN(v, UINT32_MAX), 1) : 0;
                     blk->overworn = false;
+                    ssd->wear_pe_total += blk->pe_limit;
                 }
             }
         }
@@ -367,19 +372,48 @@ uint64_t ssd_read_reclaims(struct ssd *ssd)
     return ssd->read_reclaims;
 }
 
+static void ssd_wear_lock(struct ssd *ssd)
+{
+    if (ssd->wear_on) {
+        qemu_mutex_lock(&ssd->wear_lock);
+    }
+}
+
+static void ssd_wear_unlock(struct ssd *ssd)
+{
+    if (ssd->wear_on) {
+        qemu_mutex_unlock(&ssd->wear_lock);
+    }
+}
+
 uint64_t ssd_overworn_blocks(struct ssd *ssd)
 {
-    return ssd->overworn_blocks;
+    uint64_t v;
+
+    ssd_wear_lock(ssd);
+    v = ssd->overworn_blocks;
+    ssd_wear_unlock(ssd);
+    return v;
 }
 
 uint64_t ssd_grown_bad_blocks(struct ssd *ssd)
 {
-    return ssd->grown_bad_blocks;
+    uint64_t v;
+
+    ssd_wear_lock(ssd);
+    v = ssd->grown_bad_blocks;
+    ssd_wear_unlock(ssd);
+    return v;
 }
 
 uint64_t ssd_retired_lines(struct ssd *ssd)
 {
-    return ssd->lm.retired_line_cnt;
+    uint64_t v;
+
+    ssd_wear_lock(ssd);
+    v = ssd->lm.retired_line_cnt;
+    ssd_wear_unlock(ssd);
+    return v;
 }
 
 /* Bytes in one NAND page, for counters the host wants in bytes. */
@@ -442,6 +476,7 @@ uint64_t ssd_max_block_reads(struct ssd *ssd)
     uint64_t most = 0;
     int ch, lun, pl, blk;
 
+    ssd_wear_lock(ssd);
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
             for (pl = 0; pl < spp->pls_per_lun; pl++) {
@@ -455,6 +490,7 @@ uint64_t ssd_max_block_reads(struct ssd *ssd)
             }
         }
     }
+    ssd_wear_unlock(ssd);
 
     return most;
 }
@@ -477,6 +513,15 @@ uint8_t ssd_percentage_used(struct ssd *ssd)
     struct ssdparams *spp = &ssd->sp;
     uint64_t denom, pct;
 
+    /*
+     * With per-block limits, measure against what every block, spares
+     * included, was given at start. The denominator never shrinks, so
+     * the figure only grows.
+     */
+    if (ssd->wear_on) {
+        pct = ssd->total_erases * 100ull / ssd->wear_pe_total;
+        return pct > 255 ? 255 : (uint8_t)pct;
+    }
     if (!ssd->rated_pe_cycles || spp->tt_blks <= 0) {
         return 0;
     }
@@ -525,7 +570,12 @@ uint8_t ssd_available_spare(struct ssd *ssd)
     uint64_t bad_pct;
 
     if (ssd->wear_on) {
-        return ssd_wear_spare(ssd);
+        uint8_t spare;
+
+        qemu_mutex_lock(&ssd->wear_lock);
+        spare = ssd_wear_spare(ssd);
+        qemu_mutex_unlock(&ssd->wear_lock);
+        return spare;
     }
     if (ssd->bad_blocks == 0 || spp->tt_blks <= 0) {
         return 100;
@@ -722,6 +772,10 @@ void ssd_free(struct ssd *ssd)
     ssd->maptbl = NULL;
 
     nand_media_destroy(&ssd->media);
+    if (ssd->wear_on) {
+        qemu_mutex_destroy(&ssd->wear_lock);
+        ssd->wear_on = false;
+    }
 
     if (ssd->ch) {
         for (i = 0; i < spp->nchs; i++) {

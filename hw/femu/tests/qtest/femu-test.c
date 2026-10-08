@@ -3327,6 +3327,8 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     uint32_t free_lines = 0;
     uint32_t victim = 0;
     uint32_t full = 0;
+    uint32_t retired = 0;
+    uint32_t spare = 0;
     uint64_t vpc = 0;
     uint64_t erase_lo = 0;
     uint64_t erase_hi = 0;
@@ -3361,14 +3363,19 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
         free_lines += !strcmp(st, "free");
         victim += !strcmp(st, "victim");
         full += !strcmp(st, "full");
+        retired += !strcmp(st, "retired");
+        spare += !strcmp(st, "spare");
         g_assert_cmpstr(st, !=, "unlisted");
-        if (!strcmp(st, "free")) {
+        if (!strcmp(st, "free") || !strcmp(st, "retired") ||
+            !strcmp(st, "spare")) {
             g_assert_cmpuint(qdict_get_int(l, "vpc"), ==, 0);
         }
     }
     g_assert_cmpuint(free_lines, ==, qdict_get_int(cnt, "free"));
     g_assert_cmpuint(victim, ==, qdict_get_int(cnt, "victim"));
     g_assert_cmpuint(full, ==, qdict_get_int(cnt, "full"));
+    g_assert_cmpuint(retired, ==, qdict_get_int(cnt, "retired"));
+    g_assert_cmpuint(spare, ==, qdict_get_int(cnt, "spare"));
     erases = qdict_get_int(qdict_get_qdict(ns, "counters"), "block-erases");
     g_assert_cmpuint(erase_lo, <=, erases);
     g_assert_cmpuint(erases, <=, erase_hi);
@@ -3833,7 +3840,8 @@ static void femu_test_fdp_capacity_refused(void *obj, void *data,
  * Block wear-out. The workload of the FTL trace collects enough to erase every
  * line many times. @data pins three exact counts from log page C0h: blocks in
  * service past their erase limit, worn-out blocks taken out of service, and
- * retired lines; and SMART Available Spare, with its warning below 20. A seed
+ * retired lines; and SMART Available Spare, with its warning below 20, and
+ * Percentage Used. A seed
  * gives each block the same limit on every run, so the counts repeat like the
  * trace. SMART reports the reliability warning exactly
  * when a block is overworn, and no mapped page may be left in a retired line.
@@ -3863,7 +3871,7 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    uint64_t want[4];
+    uint64_t want[5];
     uint64_t mapped, lost, orphans;
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
@@ -3874,8 +3882,8 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     int i;
 
     g_assert_cmpint(sscanf(data, "%" SCNu64 " %" SCNu64 " %" SCNu64
-                           " %" SCNu64, &want[0], &want[1], &want[2],
-                           &want[3]), ==, 4);
+                           " %" SCNu64 " %" SCNu64, &want[0], &want[1],
+                           &want[2], &want[3], &want[4]), ==, 5);
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x3c, 64 * 4096);
@@ -3896,10 +3904,11 @@ static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
                                          sizeof(page), 0)), ==, NVME_SUCCESS);
     qtest_memread(qts, log, page, sizeof(page));
-    g_test_message("available spare %u", page[3]);
+    g_test_message("available spare %u percentage used %u", page[3], page[5]);
     g_assert_cmpuint(page[0] & NVME_SMART_RELIABILITY, ==,
                      want[0] ? NVME_SMART_RELIABILITY : 0);
     g_assert_cmpuint(page[3], ==, want[3]);
+    g_assert_cmpuint(page[5], ==, want[4]);
     g_assert_cmpuint(page[0] & NVME_SMART_SPARE, ==,
                      want[3] < FEMU_SPARE_THRESHOLD ? NVME_SMART_SPARE : 0);
 
@@ -3968,6 +3977,39 @@ static void femu_test_wear_aer(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
     femu_disable(&c);
     /* each warning is raised once: the next test needs a new device */
+    qos_invalidate_command_line();
+}
+
+/*
+ * query-femu names retired and spare lines, counts them, and finds no valid
+ * page in them, while every mapped page stays where the map says. This
+ * device retires 5 lines and keeps 8 spare lines.
+ */
+static void femu_test_wear_query(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *cnt;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload(&c, buf, list);
+
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", 256);
+    cnt = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "line-counts");
+    g_assert_cmpuint(qdict_get_int(cnt, "retired"), ==, 5);
+    g_assert_cmpuint(qdict_get_int(cnt, "spare"), ==, 8);
+    qobject_unref(rsp);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
     qos_invalidate_command_line();
 }
 
@@ -24100,14 +24142,14 @@ static void femu_register_nodes(void)
     /* 19 lines of 16 pages: the forced watermark is zero free lines */
     qos_add_test("wear-off", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"0 0 0 100",
+        .arg = (void *)"0 0 0 100 0",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
     qos_add_test("wear-limit", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"52 4 1 0",
+        .arg = (void *)"52 4 1 0 103",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24115,7 +24157,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("wear-spread", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"72 1 1 0",
+        .arg = (void *)"72 1 1 0 186",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24124,7 +24166,7 @@ static void femu_register_nodes(void)
     /* 40 lines, a floor of 18: lines retire in a row until the guard holds */
     qos_add_test("wear-retire", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"80 80 20 0",
+        .arg = (void *)"80 80 20 0 255",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24133,7 +24175,7 @@ static void femu_register_nodes(void)
     /* 8 spare lines replace worn-out blocks before any line retires */
     qos_add_test("wear-spare", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"80 80 12 0",
+        .arg = (void *)"80 80 12 0 255",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24142,7 +24184,7 @@ static void femu_register_nodes(void)
     /* spread limits: planes run out of spares at different times */
     qos_add_test("wear-spare-spread", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"0 13 0 37",
+        .arg = (void *)"0 13 0 37 37",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24151,7 +24193,7 @@ static void femu_register_nodes(void)
     /* some planes run out of spares while others have them left */
     qos_add_test("wear-spare-uneven", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"0 31 5 0",
+        .arg = (void *)"0 31 5 0 52",
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
@@ -24180,6 +24222,22 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "blk_pe_limit=75"
+    });
+    /* CSD runs its NVM commands through the same line FTL */
+    qos_add_test("wear-csd", "femu", femu_test_wear,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"52 4 1 0 103",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,"
+            "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,"
+            "luns_per_ch=2,nchs=2,blk_pe_limit=75"
+    });
+    qos_add_test("wear-query", "femu", femu_test_wear_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,
