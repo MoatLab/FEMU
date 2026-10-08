@@ -109,6 +109,7 @@ listed one by one.
 - Hot/cold separation of overwritten pages (`hot_cold_sep`) (4ded2e928).
 - Read reclaim (`read_reclaim_limit`) and retention refresh (`retention_limit_sec`) (7f9b4f6af, 4e09c4797, e7f182b87).
 - Data age feeds the ECC read model (`ecc_retention_sec`) (f9433e9ab, 13f2b85de).
+- `age_scale` ages data faster than wall time for retention refresh and the ECC retention tier, so a retention study runs in minutes (9988153d3).
 - More than one plane per LUN (`pls_per_lun`) in bbssd, FDP and KV, with a line's planes erased in one operation (0f554fb7d, 3699e980d, 9c8228d28, 7276af2d8).
 - Channel bus phases (`cmd_addr_lat`, `pg_xfer_lat`, `status_lat`, `ch_xfer_lat`) are added to the timing when set (c274ba7d9).
 - A read can suspend an in-flight program or erase (`pe_suspend`, `tsusp_ns`) (9ec423985, 6a5c498a8).
