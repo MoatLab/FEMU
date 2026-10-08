@@ -2409,11 +2409,20 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     const char *why = NULL;
 
     if (!n->blk_pe_limit) {
+        if (n->spare_lines) {
+            error_setg(errp, "femu: spare_lines needs blk_pe_limit");
+            return false;
+        }
         if (n->blk_pe_spread || n->blk_pe_seed) {
             warn_report("femu: blk_pe_spread and blk_pe_seed have no effect "
                         "unless blk_pe_limit is set");
         }
         return true;
+    }
+    if (n->spare_lines >= (uint32_t)MAX(bp->blks_per_pl, 0)) {
+        error_setg(errp, "femu: spare_lines (%u) must be below blks_per_pl "
+                   "(%d)", n->spare_lines, bp->blks_per_pl);
+        return false;
     }
     if (n->blk_pe_spread > 90) {
         error_setg(errp, "femu: blk_pe_spread must be 0 to 90, got %u",
@@ -3082,6 +3091,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("blk_pe_limit", FemuCtrl, blk_pe_limit, 0),
     DEFINE_PROP_UINT32("blk_pe_spread", FemuCtrl, blk_pe_spread, 0),
     DEFINE_PROP_UINT64("blk_pe_seed", FemuCtrl, blk_pe_seed, 0),
+    DEFINE_PROP_UINT32("spare_lines", FemuCtrl, spare_lines, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
     DEFINE_PROP_UINT32("err_read_unc_ppm", FemuCtrl, err_read_unc_ppm, 0),

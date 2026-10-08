@@ -398,6 +398,7 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | `blk_pe_limit` | P/E cycles | 0 disables; bbssd and CSD, one namespace, page or dftl mapping, one plane per LUN, no buffer, Streams, hot/cold separation, FDP or `nand_bad_blocks` | erases a block survives; its line then retires while enough lines remain, else the block stays in service and sets SMART critical warning bit 2 |
 | `blk_pe_spread` | percent | 0 to 90 | each block's limit varies by up to this much from `blk_pe_limit` |
 | `blk_pe_seed` | | any | seed of the per-block limits; one seed gives the same limits on every run |
+| `spare_lines` | lines | below `blks_per_pl`; needs `blk_pe_limit` | lines held back; their blocks replace worn-out blocks of the same plane; they hold no data, so the namespace must fit without them |
 | `err_read_unc_ppm` | per million | 0 disables; bbssd and CSD | reads that fail as Unrecovered Read Error, at a fixed period |
 | `err_write_fail_ppm` | per million | 0 disables; bbssd, CSD and ZNS | writes that fail; a ZNS zone then becomes read only |
 | `read_reclaim_limit` | reads | 0 disables; bbssd and CSD; refused with FDP | a block read this often since its erase gets its line rewritten on a following write |

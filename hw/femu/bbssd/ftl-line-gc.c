@@ -75,6 +75,10 @@ void ssd_init_lines(struct ssd *ssd)
         line = &lm->lines[i];
         line->id = i;
         line->retired = false;
+        line->spare = i >= lm->tt_lines - ssd->spare_lines;
+        if (line->spare) {
+            continue;
+        }
         line->ipc = 0;
         line->vpc = 0;
         line->pos = 0;
@@ -85,7 +89,7 @@ void ssd_init_lines(struct ssd *ssd)
         lm->free_line_cnt++;
     }
 
-    ftl_assert(lm->free_line_cnt == lm->tt_lines);
+    ftl_assert(lm->free_line_cnt == lm->tt_lines - ssd->spare_lines);
     lm->full_line_cnt = 0;
 }
 
@@ -848,27 +852,64 @@ bool femu_ftl_policy_known(const char *name)
  * lines alone is not enough, since collection relocates into the open line
  * before it frees anything, and retiring victim after victim would use it up.
  * Otherwise the worn-out blocks stay in service, overworn, each counted once.
+ *
+ * Before any of that, a worn-out block is replaced by a spare block of its
+ * plane when every plane with one has a spare left. The swap moves the whole
+ * block, pages and counts, so addresses do not change: the line keeps its id
+ * and the worn-out block sits in the spare line, which never holds data. When
+ * one plane has no spare left, no spare is spent on the others.
  * Returns true when the line was retired.
  */
 static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
-    int usable = lm->tt_lines - lm->retired_line_cnt;
+    int usable = lm->tt_lines - ssd->spare_lines - lm->retired_line_cnt;
+    bool spares = ssd->spare_lines > 0;
     bool retire;
     int dead = 0;
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                struct nand_block *blk =
-                    &ssd->ch[ch].lun[lun].pl[pl].blk[line->id];
+                struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
+                struct nand_block *blk = &plane->blk[line->id];
 
-                dead += blk->pe_limit && blk->erase_cnt >= blk->pe_limit;
+                if (blk->pe_limit && blk->erase_cnt >= blk->pe_limit) {
+                    dead++;
+                    spares &= plane->spares_used < ssd->spare_lines;
+                }
             }
         }
     }
     if (!dead) {
+        return false;
+    }
+    if (spares) {
+        for (int ch = 0; ch < spp->nchs; ch++) {
+            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
+                    struct nand_block *blk = &plane->blk[line->id];
+                    int slot;
+                    struct nand_block worn;
+
+                    if (!blk->pe_limit || blk->erase_cnt < blk->pe_limit) {
+                        continue;
+                    }
+                    slot = lm->tt_lines - ssd->spare_lines +
+                           plane->spares_used++;
+                    worn = *blk;
+                    *blk = plane->blk[slot];
+                    if (worn.overworn) {
+                        worn.overworn = false;
+                        ssd->overworn_blocks--;
+                    }
+                    plane->blk[slot] = worn;
+                    ssd->grown_bad_blocks++;
+                }
+            }
+        }
         return false;
     }
     retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&

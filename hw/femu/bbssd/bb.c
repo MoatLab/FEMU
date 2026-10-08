@@ -24,7 +24,9 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* a line is one block on every plane of every LUN, as the FTL builds it */
     uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch *
                             p->pls_per_lun * p->pgs_per_blk;
-    uint64_t tt_lines = (uint64_t)p->blks_per_pl;
+    /* spare lines only replace worn-out blocks; they hold no data */
+    uint64_t tt_lines = (uint64_t)p->blks_per_pl -
+                        (n->blk_pe_limit ? n->spare_lines : 0);
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
 
     /*

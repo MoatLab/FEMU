@@ -110,6 +110,7 @@ struct nand_block {
 struct nand_plane {
     struct nand_block *blk;
     int nblks;
+    int spares_used;    /* blocks taken from this plane's spare lines */
 };
 
 /*
@@ -244,6 +245,8 @@ typedef struct line {
     bool reclaiming;
     /* taken out of service for good: worn-out blocks and no room to spare */
     bool retired;
+    /* one of the spare_lines: its blocks replace worn-out ones */
+    bool spare;
 } line;
 
 /* wp: record next write addr */
@@ -537,6 +540,8 @@ struct ssd {
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
     int wear_floor_lines;           /* usable lines retirement keeps */
+    int spare_lines;                /* lines held back as spare blocks */
+    bool wear_on;                   /* blk_pe_limit set */
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

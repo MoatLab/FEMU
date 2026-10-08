@@ -2286,6 +2286,7 @@ typedef struct FemuCtrl {
     uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */
     uint64_t        blk_pe_seed;    /* seed of the per-block limits */
+    uint32_t        spare_lines;    /* lines held back as spare blocks */
     uint64_t        gc_seed; /* seed for the GC policies that sample victims */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */

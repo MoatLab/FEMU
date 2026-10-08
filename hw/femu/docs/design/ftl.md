@@ -941,6 +941,7 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `pe_cycles_rated` | Percentage Used denominator | overrides the `nand_cell_type` rating |
 | `nand_bad_blocks` | Available Spare | placement ignores it |
+| `spare_lines` | per-plane pool of replacement blocks: a worn-out block swaps its whole state with a spare block of its plane, so addresses do not change; Available Spare follows the emptiest plane | needs `blk_pe_limit`; the namespace must fit without the spare lines |
 | `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2 and an open line and a free line remain; otherwise the block stays in service (overworn) and sets SMART critical warning bit 2 | refused with the settings the parameter manual lists |
 | `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | `ecc_retention_sec` refused with FDP |
 | `err_read_unc_ppm`, `err_write_fail_ppm` | fixed-period command failures | counted in SMART media errors |

@@ -23,11 +23,14 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->overworn_blocks = 0;
     ssd->grown_bad_blocks = 0;
     ssd->sacrificed_blocks = 0;
+    ssd->spare_lines = limit ? n->spare_lines : 0;
+    ssd->wear_on = limit != 0;
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
 
+                plane->spares_used = 0;
                 for (int b = 0; b < spp->blks_per_pl; b++, idx++) {
                     struct nand_block *blk = &plane->blk[b];
                     uint64_t x = n->blk_pe_seed +
@@ -488,11 +491,42 @@ uint8_t ssd_percentage_used(struct ssd *ssd)
     return pct > 255 ? 255 : (uint8_t)pct;
 }
 
+/*
+ * With blk_pe_limit, the spare is what is left to replace worn-out blocks:
+ * the fewest spare blocks any plane has left, against spare_lines; without
+ * spare lines, the lines retirement may still take, against those it could
+ * take at start. No room to retire at start means nothing is used up.
+ */
+static uint8_t ssd_wear_spare(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+    int start = lm->tt_lines - ssd->spare_lines - ssd->wear_floor_lines;
+    int left = start - lm->retired_line_cnt;
+    int fewest = ssd->spare_lines;
+
+    if (ssd->spare_lines) {
+        for (int ch = 0; ch < spp->nchs; ch++) {
+            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    fewest = MIN(fewest, ssd->spare_lines -
+                                 ssd->ch[ch].lun[lun].pl[pl].spares_used);
+                }
+            }
+        }
+        return fewest * 100 / ssd->spare_lines;
+    }
+    return start > 0 ? MAX(left, 0) * 100 / start : 100;
+}
+
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t bad_pct;
 
+    if (ssd->wear_on) {
+        return ssd_wear_spare(ssd);
+    }
     if (ssd->bad_blocks == 0 || spp->tt_blks <= 0) {
         return 100;
     }
