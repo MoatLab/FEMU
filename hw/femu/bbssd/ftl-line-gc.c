@@ -70,9 +70,11 @@ void ssd_init_lines(struct ssd *ssd)
     QTAILQ_INIT(&lm->full_line_list);
 
     lm->free_line_cnt = 0;
+    lm->retired_line_cnt = 0;
     for (int i = 0; i < lm->tt_lines; i++) {
         line = &lm->lines[i];
         line->id = i;
+        line->retired = false;
         line->ipc = 0;
         line->vpc = 0;
         line->pos = 0;
@@ -838,27 +840,82 @@ bool femu_ftl_policy_known(const char *name)
 
 /* move a block's valid pages out; false when one had nowhere to go */
 /*
- * After a line's erase, count each block of it that has now reached its erase
- * limit. The erase that reaches the limit succeeds and the block holds no
- * data, so it stays in service, overworn, and is counted once.
+ * After a line's erase, deal with each block of it that has reached its erase
+ * limit. The erase that reaches the limit succeeds and the line holds no data
+ * now, so taking it out of service loses nothing. Retire the line only while
+ * that leaves the namespace its lines, collection its reserve, and space to
+ * write into right now: an open data line and one free line. Counting usable
+ * lines alone is not enough, since collection relocates into the open line
+ * before it frees anything, and retiring victim after victim would use it up.
+ * Otherwise the worn-out blocks stay in service, overworn, each counted once.
+ * Returns true when the line was retired.
  */
-static void ssd_note_wear(struct ssd *ssd, int line)
+static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
 {
     struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+    int usable = lm->tt_lines - lm->retired_line_cnt;
+    bool retire;
+    int dead = 0;
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                struct nand_block *blk = &ssd->ch[ch].lun[lun].pl[pl].blk[line];
+                struct nand_block *blk =
+                    &ssd->ch[ch].lun[lun].pl[pl].blk[line->id];
 
-                if (blk->pe_limit && !blk->overworn &&
-                    blk->erase_cnt >= blk->pe_limit) {
-                    blk->overworn = true;
-                    ssd->overworn_blocks++;
+                dead += blk->pe_limit && blk->erase_cnt >= blk->pe_limit;
+            }
+        }
+    }
+    if (!dead) {
+        return false;
+    }
+    retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&
+             lm->free_line_cnt >= 1;
+
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_block *blk =
+                    &ssd->ch[ch].lun[lun].pl[pl].blk[line->id];
+                bool worn = blk->pe_limit && blk->erase_cnt >= blk->pe_limit;
+
+                if (!retire) {
+                    if (worn && !blk->overworn) {
+                        blk->overworn = true;
+                        ssd->overworn_blocks++;
+                    }
+                    continue;
+                }
+                if (blk->overworn) {
+                    blk->overworn = false;
+                    ssd->overworn_blocks--;
+                }
+                if (worn) {
+                    ssd->grown_bad_blocks++;
+                } else {
+                    ssd->sacrificed_blocks++;
                 }
             }
         }
     }
+    if (!retire) {
+        return false;
+    }
+
+    /* what mark_line_free() resets, without putting the line back */
+    if (ssd->read_reclaim_line == line) {
+        ssd->read_reclaim_line = NULL;
+        ssd->reclaim_by_age = false;
+    }
+    line->ipc = 0;
+    line->vpc = 0;
+    line->close_time = 0;
+    line->stream_tag = 0;
+    line->retired = true;
+    lm->retired_line_cnt++;
+    return true;
 }
 
 static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
@@ -963,7 +1020,9 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
                                 0);
         }
     }
-    ssd_note_wear(ssd, ppa.g.blk);
+    if (ssd_wear_out_line(ssd, victim_line)) {
+        return true;
+    }
 
     /* update line status */
     mark_line_free(ssd, &ppa);

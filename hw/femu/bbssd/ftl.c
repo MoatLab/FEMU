@@ -13,7 +13,7 @@
  * percent either way. Each limit is a function of the seed and the block's
  * position alone, so a seed gives the same limits whatever runs first.
  */
-static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n)
+static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t limit = n->blk_pe_limit;
@@ -21,6 +21,8 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n)
     uint64_t idx = 0;
 
     ssd->overworn_blocks = 0;
+    ssd->grown_bad_blocks = 0;
+    ssd->sacrificed_blocks = 0;
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
@@ -43,6 +45,15 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n)
             }
         }
     }
+
+    /*
+     * Retirement keeps the lines the namespace needs, the free lines forced
+     * collection keeps, the data write pointer's line and one more.
+     */
+    ssd->wear_floor_lines =
+        DIV_ROUND_UP(DIV_ROUND_UP(ns->size, (uint64_t)spp->secsz *
+                                            spp->secs_per_pg),
+                     spp->pgs_per_line) + bb_gc_forced_lines(n) + 2;
 }
 
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
@@ -130,7 +141,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->total_erases = 0;
     ssd->rated_pe_cycles = n->pe_cycles_rated ? n->pe_cycles_rated :
                            get_rated_pe_cycles(n->nand_cell_type);
-    ssd_init_wear(ssd, n);
+    ssd_init_wear(ssd, n, ns);
 
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
@@ -356,6 +367,16 @@ uint64_t ssd_read_reclaims(struct ssd *ssd)
 uint64_t ssd_overworn_blocks(struct ssd *ssd)
 {
     return ssd->overworn_blocks;
+}
+
+uint64_t ssd_grown_bad_blocks(struct ssd *ssd)
+{
+    return ssd->grown_bad_blocks;
+}
+
+uint64_t ssd_retired_lines(struct ssd *ssd)
+{
+    return ssd->lm.retired_line_cnt;
 }
 
 /* Bytes in one NAND page, for counters the host wants in bytes. */

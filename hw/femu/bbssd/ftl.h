@@ -242,6 +242,8 @@ typedef struct line {
     uint64_t stream_tag;
     /* set while the line is being rewritten, so it stays out of the lists */
     bool reclaiming;
+    /* taken out of service for good: worn-out blocks and no room to spare */
+    bool retired;
 } line;
 
 /* wp: record next write addr */
@@ -264,6 +266,7 @@ struct line_mgmt {
     int tt_lines;
     int free_line_cnt;
     int full_line_cnt;
+    int retired_line_cnt;
     uint64_t next_close_seq;
 };
 
@@ -530,7 +533,10 @@ struct ssd {
     struct line *read_reclaim_line; /* line the read path asked to rewrite */
     bool reclaim_by_age;            /* that line was queued by age, not reads */
     uint64_t read_reclaims;         /* lines rewritten for read stress */
-    uint64_t overworn_blocks;       /* blocks past their erase limit */
+    uint64_t overworn_blocks;       /* in service past their erase limit */
+    uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
+    uint64_t sacrificed_blocks;     /* good blocks retired with their line */
+    int wear_floor_lines;           /* usable lines retirement keeps */
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

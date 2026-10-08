@@ -26,9 +26,11 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 88 | 8 | Log-block switch merges (`mapping=hybrid` only) |
 | 96 | 8 | Log-block full merges |
 | 104 | 8 | Erases charged to log-block merges |
-| 112 | 8 | Blocks past their erase limit (`blk_pe_limit`) |
+| 112 | 8 | Blocks in service past their erase limit (`blk_pe_limit`) |
+| 120 | 8 | Worn-out blocks taken out of service |
+| 128 | 8 | Lines taken out of service |
 
-Bytes 4-7 and 120-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 136-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.
