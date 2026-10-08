@@ -408,7 +408,8 @@ headers for specific attribution details.
 
 FEMU development is supported by the U.S. National Science Foundation
 ([NSF POSE award #2550145](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2550145)),
-Virginia Tech (primary development and maintenance), research collaborators
+the University of Chicago (2018-2020), Carnegie Mellon University (2020-2022) and
+Virginia Tech (2022-present) for development and maintenance, research collaborators
 (algorithm contributions and validation) and the systems community (feedback,
 bug reports and improvements).
 
