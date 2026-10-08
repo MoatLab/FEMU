@@ -377,7 +377,7 @@ have one; consider contributing it.
 FEMU is released under the **GNU General Public License v2.0 or later**.
 
 ```
-Copyright (C) 2018-2024 Virginia Tech and Contributors
+Copyright (C) 2018-2026 Virginia Tech and Contributors
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
