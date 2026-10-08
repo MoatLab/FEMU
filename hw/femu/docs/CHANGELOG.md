@@ -114,7 +114,7 @@ listed one by one.
 - A read can suspend an in-flight program or erase (`pe_suspend`, `tsusp_ns`) (9ec423985, 6a5c498a8).
 - Opt-in multi-plane program and read (`mp_program`, `mp_read`, with `pls_per_lun > 1`): host programs or reads of the same page on several planes of a LUN take one array time, plus `tplpbsy` or `tplrbsy` between planes. Placement and page counts do not change. The defaults leave the timing unchanged, FDP is not affected, and a negative busy time is refused.
 - Optional debug logging to study whether deleted data remains on the device (18ba6557c, 45e61ae41).
-- Opt-in block erase limits (`blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed`): a block past its limit stays in service, is counted in log page C0h and sets SMART critical warning bit 2 (12f1c582c). The block's line leaves service while enough lines remain (af99ecb21).
+- Opt-in block erase limits (`blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed`): a block past its limit stays in service, is counted in log page C0h and sets SMART critical warning bit 2 (12f1c582c). The block's line leaves service while enough lines remain (af99ecb21). `spare_lines` holds lines back whose blocks replace worn-out ones, and SMART Available Spare follows what is left (ee6afccd4).
 
 #### Timing and fault models
 
