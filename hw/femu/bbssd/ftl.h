@@ -91,7 +91,13 @@ struct nand_block {
     int npgs;
     int ipc; /* invalid page count */
     int vpc; /* valid page count */
-    int erase_cnt;
+    uint32_t erase_cnt;
+    /*
+     * Erases this block survives (blk_pe_limit, spread per block); 0 when
+     * blocks do not wear out. A block past it is overworn: still in service.
+     */
+    uint32_t pe_limit;
+    bool overworn;
     /*
      * Reads of this block since it was last erased. Reading a page stresses the
      * others in the block, so read reclaim rewrites the line once this reaches
@@ -524,6 +530,7 @@ struct ssd {
     struct line *read_reclaim_line; /* line the read path asked to rewrite */
     bool reclaim_by_age;            /* that line was queued by age, not reads */
     uint64_t read_reclaims;         /* lines rewritten for read stress */
+    uint64_t overworn_blocks;       /* blocks past their erase limit */
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

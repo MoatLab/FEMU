@@ -512,11 +512,13 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     ftl_assert(blk->npgs == spp->pgs_per_blk);
     blk->ipc = 0;
     blk->vpc = 0;
-    blk->erase_cnt++;
+    if (blk->erase_cnt < UINT32_MAX) {
+        blk->erase_cnt++;
+    }
     ssd->total_erases++;
     blk->read_cnt = 0; /* the stress an erase clears */
     if (exp_watch_blk[ppa->g.blk])
-        EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%d (vpc/ipc reset)\n",
+        EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%u (vpc/ipc reset)\n",
                 PPA_ARG(ppa), blk->erase_cnt);
 }
 
@@ -835,6 +837,30 @@ bool femu_ftl_policy_known(const char *name)
 }
 
 /* move a block's valid pages out; false when one had nowhere to go */
+/*
+ * After a line's erase, count each block of it that has now reached its erase
+ * limit. The erase that reaches the limit succeeds and the block holds no
+ * data, so it stays in service, overworn, and is counted once.
+ */
+static void ssd_note_wear(struct ssd *ssd, int line)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_block *blk = &ssd->ch[ch].lun[lun].pl[pl].blk[line];
+
+                if (blk->pe_limit && !blk->overworn &&
+                    blk->erase_cnt >= blk->pe_limit) {
+                    blk->overworn = true;
+                    ssd->overworn_blocks++;
+                }
+            }
+        }
+    }
+}
+
 static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -937,6 +963,7 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
                                 0);
         }
     }
+    ssd_note_wear(ssd, ppa.g.blk);
 
     /* update line status */
     mark_line_free(ssd, &ppa);

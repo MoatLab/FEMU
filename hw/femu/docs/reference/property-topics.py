@@ -85,7 +85,8 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "ecc_step_ns", "ecc_retention_sec", "pe_cycles_rated",
-                    "nand_bad_blocks", "err_read_unc_ppm",
+                    "nand_bad_blocks", "blk_pe_limit", "blk_pe_spread",
+                    "blk_pe_seed", "err_read_unc_ppm",
                     "err_write_fail_ppm", "read_reclaim_limit",
                     "retention_limit_sec",
                 ],

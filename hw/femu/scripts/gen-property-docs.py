@@ -49,7 +49,8 @@ UNIT_NAME = re.compile(r"(_lat|_ns|-ns|_mb|_mbps|_sec$|_size|_pcent|_ppm|"
                        r"^devsz|threshold|limit|stride$|-pages$)")
 UNIT_WORD = re.compile(r"\b(ns|MiB|KiB|bytes?|seconds?|percent|pages?|"
                        r"logical blocks|MB/s|per million|reads|sectors?|"
-                       r"namespaces|zones|entries|kelvin)\b|%", re.IGNORECASE)
+                       r"namespaces|zones|entries|kelvin|cycles|erases)\b|%",
+                       re.IGNORECASE)
 
 GENERATED_NOTE = (
     "<!--\n"

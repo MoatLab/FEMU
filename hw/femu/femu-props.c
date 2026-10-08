@@ -347,6 +347,16 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "nand_bad_blocks",
       "bbssd, CSD, KV: blocks marked bad at start, capped at the block "
       "count, which lowers SMART Available Spare" },
+    { "blk_pe_limit",
+      "bbssd, CSD: mean program/erase cycles a block survives before it "
+      "wears out; 0 (default) turns wear-out off. A worn-out block stays in "
+      "service and sets the SMART reliability warning" },
+    { "blk_pe_spread",
+      "bbssd, CSD: how far each block's limit varies from blk_pe_limit, in "
+      "percent, 0 to 90" },
+    { "blk_pe_seed",
+      "bbssd, CSD: seed of the per-block erase limits; one seed gives the "
+      "same limits on every run" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },

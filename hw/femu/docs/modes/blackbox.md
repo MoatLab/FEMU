@@ -174,6 +174,9 @@ All of these are off by default.
   slower.
 - `pe_cycles_rated` and `nand_bad_blocks` feed SMART Percentage Used and
   Available Spare.
+- `blk_pe_limit` gives each block an erase limit (`blk_pe_spread` varies it
+  per block, from `blk_pe_seed`). A block past its limit stays in service and
+  sets the SMART reliability warning (critical warning bit 2).
 - `err_read_unc_ppm` and `err_write_fail_ppm` fail a fixed share of reads or
   writes. The failures come at a fixed period, so a run repeats exactly.
 - `read_reclaim_limit` and `retention_limit_sec` rewrite lines that were read

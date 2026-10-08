@@ -1194,7 +1194,8 @@ typedef struct FemuStatsLog {
     uint64_t    hybrid_switch_merges;
     uint64_t    hybrid_full_merges;
     uint64_t    hybrid_merge_erases;
-    uint8_t     rsvd112[400];
+    uint64_t    overworn_blocks;  /* blocks past their erase limit */
+    uint8_t     rsvd120[392];
 } FemuStatsLog;
 
 /*
@@ -2280,6 +2281,9 @@ typedef struct FemuCtrl {
     /* program/erase cycles the media is rated for; 0 takes the cell type's */
     uint32_t        pe_cycles_rated;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
+    uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
+    uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */
+    uint64_t        blk_pe_seed;    /* seed of the per-block limits */
     uint64_t        gc_seed; /* seed for the GC policies that sample victims */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
@@ -2799,6 +2803,7 @@ void ssd_hybrid_stats(struct ssd *ssd, uint64_t *switches,
                       uint64_t *full, uint64_t *erases);
 uint64_t ssd_max_block_reads(struct ssd *ssd);
 uint64_t ssd_read_reclaims(struct ssd *ssd);
+uint64_t ssd_overworn_blocks(struct ssd *ssd);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
 
 /* write buffer: host pages seen and the pages it answered without the media */

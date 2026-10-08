@@ -8,6 +8,43 @@
 
 
 
+/*
+ * Give every block its erase limit: blk_pe_limit, moved by up to blk_pe_spread
+ * percent either way. Each limit is a function of the seed and the block's
+ * position alone, so a seed gives the same limits whatever runs first.
+ */
+static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t limit = n->blk_pe_limit;
+    uint64_t off = limit * n->blk_pe_spread / 100;
+    uint64_t idx = 0;
+
+    ssd->overworn_blocks = 0;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
+
+                for (int b = 0; b < spp->blks_per_pl; b++, idx++) {
+                    struct nand_block *blk = &plane->blk[b];
+                    uint64_t x = n->blk_pe_seed +
+                                 (idx + 1) * 0x9e3779b97f4a7c15ULL;
+                    uint64_t v;
+
+                    /* splitmix64 */
+                    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+                    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+                    x ^= x >> 31;
+                    v = limit - off + x % (2 * off + 1);
+                    blk->pe_limit = limit ? MAX(MIN(v, UINT32_MAX), 1) : 0;
+                    blk->overworn = false;
+                }
+            }
+        }
+    }
+}
+
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 {
     struct ssd *ssd = ns->ssd;
@@ -93,6 +130,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->total_erases = 0;
     ssd->rated_pe_cycles = n->pe_cycles_rated ? n->pe_cycles_rated :
                            get_rated_pe_cycles(n->nand_cell_type);
+    ssd_init_wear(ssd, n);
 
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
@@ -313,6 +351,11 @@ static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
 uint64_t ssd_read_reclaims(struct ssd *ssd)
 {
     return ssd->read_reclaims;
+}
+
+uint64_t ssd_overworn_blocks(struct ssd *ssd)
+{
+    return ssd->overworn_blocks;
 }
 
 /* Bytes in one NAND page, for counters the host wants in bytes. */

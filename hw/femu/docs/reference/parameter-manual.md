@@ -395,6 +395,9 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | `ecc_retention_sec` | seconds | 0 counts wear only; refused with FDP | data age that adds one tier |
 | `pe_cycles_rated` | P/E cycles | 0 takes the rating of `nand_cell_type` | denominator of SMART Percentage Used |
 | `nand_bad_blocks` | blocks | capped at the block count | blocks bad from the start; lowers SMART Available Spare |
+| `blk_pe_limit` | P/E cycles | 0 disables; bbssd and CSD, one namespace, page or dftl mapping, one plane per LUN, no buffer, Streams, hot/cold separation, FDP or `nand_bad_blocks` | erases a block survives; a block past it stays in service and sets SMART critical warning bit 2 |
+| `blk_pe_spread` | percent | 0 to 90 | each block's limit varies by up to this much from `blk_pe_limit` |
+| `blk_pe_seed` | | any | seed of the per-block limits; one seed gives the same limits on every run |
 | `err_read_unc_ppm` | per million | 0 disables; bbssd and CSD | reads that fail as Unrecovered Read Error, at a fixed period |
 | `err_write_fail_ppm` | per million | 0 disables; bbssd, CSD and ZNS | writes that fail; a ZNS zone then becomes read only |
 | `read_reclaim_limit` | reads | 0 disables; bbssd and CSD; refused with FDP | a block read this often since its erase gets its line rewritten on a following write |

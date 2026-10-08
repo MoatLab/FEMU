@@ -2397,6 +2397,60 @@ static bool femu_check_multiplane_props(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * Block wear-out runs only in the plain line FTL of one bbssd or CSD
+ * namespace. Each refused setting has its own write path or allocator that
+ * the wear model does not cover yet.
+ */
+static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *map = bp->mapping_scheme;
+    const char *why = NULL;
+
+    if (!n->blk_pe_limit) {
+        if (n->blk_pe_spread || n->blk_pe_seed) {
+            warn_report("femu: blk_pe_spread and blk_pe_seed have no effect "
+                        "unless blk_pe_limit is set");
+        }
+        return true;
+    }
+    if (n->blk_pe_spread > 90) {
+        error_setg(errp, "femu: blk_pe_spread must be 0 to 90, got %u",
+                   n->blk_pe_spread);
+        return false;
+    }
+    if (!BBSSD(n) && !CSD(n)) {
+        why = "a mode other than bbssd or CSD";
+    } else if (n->subsys && n->subsys->params.fdp.enabled) {
+        why = "FDP";
+    } else if (n->cxl_dev) {
+        why = "cxl_ssd";
+    } else if (bp->buffer_size > 0) {
+        /* power_loss needs a buffer, so this refuses it too */
+        why = "buffer_size";
+    } else if (n->streams) {
+        why = "Streams";
+    } else if (bp->hot_cold_sep) {
+        why = "hot_cold_sep";
+    } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
+        why = "a mapping other than page or dftl";
+    } else if (bp->pls_per_lun > 1) {
+        why = "pls_per_lun > 1";
+    } else if (n->num_namespaces > 1 || n->namespace_modes) {
+        why = "more than one namespace";
+    } else if (nvme_ns_shared(n) || n->ns_mgmt) {
+        why = "namespace management or shared namespaces";
+    } else if (n->nand_bad_blocks) {
+        why = "nand_bad_blocks";
+    }
+    if (why) {
+        error_setg(errp, "femu: blk_pe_limit is not supported with %s", why);
+        return false;
+    }
+    return true;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -2440,6 +2494,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
     femu_warn_ignored_props(n);
     if (!femu_check_multiplane_props(n, errp)) {
+        return;
+    }
+    if (!femu_check_wear_props(n, errp)) {
         return;
     }
 
@@ -3022,6 +3079,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("pe_suspend", FemuCtrl, bb_params.pe_suspend, 0),
     DEFINE_PROP_INT32("tsusp_ns", FemuCtrl, bb_params.tsusp_ns, 0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
+    DEFINE_PROP_UINT32("blk_pe_limit", FemuCtrl, blk_pe_limit, 0),
+    DEFINE_PROP_UINT32("blk_pe_spread", FemuCtrl, blk_pe_spread, 0),
+    DEFINE_PROP_UINT64("blk_pe_seed", FemuCtrl, blk_pe_seed, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
     DEFINE_PROP_UINT32("err_read_unc_ppm", FemuCtrl, err_read_unc_ppm, 0),
