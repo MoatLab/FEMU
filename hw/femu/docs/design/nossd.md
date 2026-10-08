@@ -129,7 +129,8 @@ group apply to NoSSD as to every mode:
   direction;
 - `pcie_prop_delay_ns`: a fixed delay after each transfer;
 - `fw_cpu_ns`: a fixed time per Read, Write and Zone Append on one
-  modelled controller core.
+  modelled controller core; `fw_read_ns`, `fw_write_ns` and `fw_other_ns`
+  set the time per opcode, and `fw_cores` sets the number of cores.
 
 
 ## Parameters

@@ -109,6 +109,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "pcie_bandwidth_mbps", "pcie_prop_delay_ns", "fw_cpu_ns",
+                    "fw_read_ns", "fw_write_ns", "fw_other_ns", "fw_cores",
                 ],
             },
             {

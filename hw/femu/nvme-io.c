@@ -326,7 +326,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * The host-link and controller-CPU models are applied on the ring
          * path, so a request that should pay them cannot complete inline.
          */
-        if (inline_mode && !n->pcie_enabled && !n->fw_cpu_ns &&
+        if (inline_mode && !n->pcie_enabled && !n->fw_enabled &&
             req->ns && NS_NOSSD(req->ns)) {
             /*
              * Inline completion: NoSSD has zero latency, so the request is
@@ -411,6 +411,25 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     nvme_inc_cq_tail(cq);
 }
 
+
+/*
+ * Firmware time for one I/O command: the per-opcode figure when it is set,
+ * otherwise fw_cpu_ns. fw_cpu_ns alone covers Read, Write and Zone Append, as
+ * it always has; other commands pay only fw_other_ns.
+ */
+static uint64_t nvme_fw_cost(FemuCtrl *n, uint8_t opcode)
+{
+    switch (opcode) {
+    case NVME_CMD_READ:
+        return n->fw_read_ns ? n->fw_read_ns : n->fw_cpu_ns;
+    case NVME_CMD_WRITE:
+    case NVME_CMD_ZONE_APPEND:
+        return n->fw_write_ns ? n->fw_write_ns : n->fw_cpu_ns;
+    default:
+        return n->fw_other_ns;
+    }
+}
+
 static void nvme_process_cq_cpl(void *arg, int index_poller)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -471,23 +490,31 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
 
         /*
-         * Optional controller-CPU model: charge a fixed cost per command on a
-         * single firmware core. At high rates this caps throughput at roughly
-         * one command per fw_cpu_ns, the way a real controller's CPU does. It
-         * is a separate resource from the link, so it takes its own lock.
+         * Optional controller-CPU model: charge each command its firmware
+         * time on the core that is free soonest. At high rates this caps
+         * throughput at about fw_cores commands per firmware time, the way a
+         * real controller's CPUs do. It is a separate resource from the
+         * link, so it takes its own lock.
          */
-        if (unlikely(n->fw_cpu_ns) &&
-            (req->cmd_opcode == NVME_CMD_READ ||
-             req->cmd_opcode == NVME_CMD_WRITE ||
-             req->cmd_opcode == NVME_CMD_ZONE_APPEND)) {
-            uint64_t start;
+        if (unlikely(n->fw_enabled)) {
+            uint64_t cost = nvme_fw_cost(n, req->cmd_opcode);
 
-            pthread_spin_lock(&n->fw_cpu_lock);
-            start = (n->fw_cpu_next_avail_time > (uint64_t)req->expire_time) ?
-                    n->fw_cpu_next_avail_time : (uint64_t)req->expire_time;
-            n->fw_cpu_next_avail_time = start + n->fw_cpu_ns;
-            req->expire_time = (int64_t)n->fw_cpu_next_avail_time;
-            pthread_spin_unlock(&n->fw_cpu_lock);
+            if (cost) {
+                uint64_t *core = &n->fw_core_avail[0];
+                uint64_t start;
+
+                pthread_spin_lock(&n->fw_cpu_lock);
+                for (uint32_t c = 1; c < n->fw_cores; c++) {
+                    if (n->fw_core_avail[c] < *core) {
+                        core = &n->fw_core_avail[c];
+                    }
+                }
+                start = MAX(*core, (uint64_t)req->expire_time);
+                *core = start + cost;
+                n->fw_cpu_next_avail_time = *core;
+                req->expire_time = (int64_t)*core;
+                pthread_spin_unlock(&n->fw_cpu_lock);
+            }
         }
 
         pqueue_insert(pq, req);

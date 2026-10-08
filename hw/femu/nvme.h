@@ -2324,7 +2324,14 @@ typedef struct FemuCtrl {
     uint64_t        pcie_rx_next_avail_time;
     pthread_spinlock_t pcie_lock;
     uint64_t        fw_cpu_ns;
+    /* per-opcode firmware time; 0 takes fw_cpu_ns */
+    uint64_t        fw_read_ns;
+    uint64_t        fw_write_ns;
+    uint64_t        fw_other_ns;
+    uint32_t        fw_cores;       /* firmware cores, each serial */
+    bool            fw_enabled;     /* any firmware time is charged */
     uint64_t        fw_cpu_next_avail_time;
+    uint64_t        *fw_core_avail; /* fw_cores entries */
     pthread_spinlock_t fw_cpu_lock;
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */

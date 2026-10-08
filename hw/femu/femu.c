@@ -1010,6 +1010,11 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "5 (key-value)");
         return false;
     }
+    /* each core keeps its own busy-until time */
+    if (n->fw_cores < 1 || n->fw_cores > 64) {
+        error_setg(errp, "fw_cores must be 1 to 64, got %u", n->fw_cores);
+        return false;
+    }
     /* any other version registered no Open-Channel handlers */
     if (n->femu_mode == FEMU_OCSSD_MODE && n->lver != OCSSD12 &&
         n->lver != OCSSD20) {
@@ -2552,6 +2557,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->pcie_tx_next_avail_time = 0;
     n->pcie_rx_next_avail_time = 0;
     n->fw_cpu_next_avail_time = 0;
+    n->fw_enabled = n->fw_cpu_ns || n->fw_read_ns || n->fw_write_ns ||
+                    n->fw_other_ns;
+    n->fw_core_avail = g_new0(uint64_t, n->fw_cores);
     pthread_spin_init(&n->pcie_lock, PTHREAD_PROCESS_PRIVATE);
     pthread_spin_init(&n->fw_cpu_lock, PTHREAD_PROCESS_PRIVATE);
 
@@ -2912,6 +2920,8 @@ static void femu_exit(PCIDevice *pci_dev)
     }
     pthread_spin_destroy(&n->pcie_lock);
     pthread_spin_destroy(&n->fw_cpu_lock);
+    g_free(n->fw_core_avail);
+    n->fw_core_avail = NULL;
 
     /* FDP: unregister controller from subsystem */
     if (n->subsys) {
@@ -3123,6 +3133,10 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("pcie_bandwidth_mbps", FemuCtrl, pcie_bandwidth_mbps, 0),
     DEFINE_PROP_UINT32("pcie_prop_delay_ns", FemuCtrl, pcie_prop_delay_ns, 0),
     DEFINE_PROP_UINT64("fw_cpu_ns", FemuCtrl, fw_cpu_ns, 0),
+    DEFINE_PROP_UINT64("fw_read_ns", FemuCtrl, fw_read_ns, 0),
+    DEFINE_PROP_UINT64("fw_write_ns", FemuCtrl, fw_write_ns, 0),
+    DEFINE_PROP_UINT64("fw_other_ns", FemuCtrl, fw_other_ns, 0),
+    DEFINE_PROP_UINT32("fw_cores", FemuCtrl, fw_cores, 1),
     DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
     DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,

@@ -5329,6 +5329,83 @@ static void femu_test_pe_suspend(void *obj, void *data,
 }
 
 /*
+ * Firmware time per opcode and per core, on NoSSD so nothing else adds time.
+ * @data names the case: "read" charges reads only, "other" charges commands
+ * other than reads and writes (a Flush here), "cores1" and "cores2" send two
+ * reads at once to one and to two firmware cores. Each figure is 200 ms, so
+ * the bounds below hold however loaded the host is, except the two-core one,
+ * which leaves 150 ms of slack.
+ */
+#define FW_COST_MS 200
+
+static int64_t femu_fw_elapsed_ms(FemuCtrlState *c, FemuQueue *q,
+                                  NvmeCmd *cmds, int n)
+{
+    int64_t t0 = g_get_monotonic_time();
+    int i;
+
+    for (i = 0; i < n; i++) {
+        femu_zap_queue(c, q, &cmds[i]);
+    }
+    femu_zap_ring(c, q);
+    for (i = 0; i < n; i++) {
+        g_assert_cmpint(femu_zap_complete(c, q, NULL), ==, NVME_SUCCESS);
+    }
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+static void femu_test_fw_cost(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeCmd cmd[2];
+    uint64_t buf;
+    int64_t ms;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, 4096);
+    memset(cmd, 0, sizeof(cmd));
+    for (int i = 0; i < 2; i++) {
+        cmd[i].opcode = NVME_CMD_READ;
+        cmd[i].nsid = cpu_to_le32(1);
+        cmd[i].dptr.prp1 = cpu_to_le64(buf);
+        cmd[i].cdw12 = cpu_to_le32(7);
+    }
+
+    if (g_str_equal(mode, "read")) {
+        ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
+        g_assert_cmpint(ms, >=, FW_COST_MS);
+        cmd[0].opcode = NVME_CMD_WRITE;
+        ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
+        g_assert_cmpint(ms, <, FW_COST_MS / 2);
+    } else if (g_str_equal(mode, "other")) {
+        ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
+        g_assert_cmpint(ms, <, FW_COST_MS / 2);
+        memset(&cmd[0], 0, sizeof(cmd[0]));
+        cmd[0].opcode = NVME_CMD_FLUSH;
+        cmd[0].nsid = cpu_to_le32(1);
+        ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
+        g_assert_cmpint(ms, >=, FW_COST_MS);
+    } else {
+        ms = femu_fw_elapsed_ms(&c, &q, cmd, 2);
+        g_test_message("two reads took %" PRId64 " ms", ms);
+        if (g_str_equal(mode, "cores1")) {
+            g_assert_cmpint(ms, >=, 2 * FW_COST_MS);
+        } else {
+            g_assert_cmpint(ms, >=, FW_COST_MS);
+            g_assert_cmpint(ms, <, FW_COST_MS + 150);
+        }
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/*
  * A host finds the Key Value command set by asking which sets the controller
  * has, then what the commands of that set do. Neither answered: the set was
  * missing from the list, and its effects log came back with no command
@@ -25357,6 +25434,26 @@ static void femu_register_nodes(void)
             "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
             "mp_program=1,mp_read=1,"
             "energy_read_nj=100,energy_prog_nj=1000,energy_erase_nj=10000"
+    });
+    qos_add_test("fw-cost-read", "femu", femu_test_fw_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"read",
+        .edge.extra_device_opts = "femu_mode=2,fw_read_ns=200000000"
+    });
+    qos_add_test("fw-cost-other", "femu", femu_test_fw_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"other",
+        .edge.extra_device_opts = "femu_mode=2,vwc=1,fw_other_ns=200000000"
+    });
+    qos_add_test("fw-cost-cores1", "femu", femu_test_fw_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cores1",
+        .edge.extra_device_opts = "femu_mode=2,fw_read_ns=200000000,fw_cores=1"
+    });
+    qos_add_test("fw-cost-cores2", "femu", femu_test_fw_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cores2",
+        .edge.extra_device_opts = "femu_mode=2,fw_read_ns=200000000,fw_cores=2"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

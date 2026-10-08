@@ -452,6 +452,18 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "fw_cpu_ns",
       "Controller firmware time in ns charged to each Read, Write and "
       "Zone Append, serialized on one modelled core; 0 disables it" },
+    { "fw_read_ns",
+      "Controller firmware time in ns for each Read; 0 (default) takes "
+      "fw_cpu_ns" },
+    { "fw_write_ns",
+      "Controller firmware time in ns for each Write and Zone Append; 0 "
+      "(default) takes fw_cpu_ns" },
+    { "fw_other_ns",
+      "Controller firmware time in ns for each I/O command other than Read, "
+      "Write and Zone Append; 0 (default) charges none" },
+    { "fw_cores",
+      "Controller firmware cores, 1 (default) to 64; each command takes the "
+      "core that is free soonest" },
 
     /* ZNS */
     { "zns_num_ch",

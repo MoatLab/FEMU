@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 157 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 161 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -186,6 +186,10 @@ Devices:
 | `pcie_bandwidth_mbps` | `uint32` | `0` | Host link bandwidth in MB/s (10^6 bytes); each Read or Write is charged its transfer time on a per-direction link queue; 0 disables the bandwidth charge |
 | `pcie_prop_delay_ns` | `uint32` | `0` | Host link propagation delay in ns added to each Read or Write after its link transfer; 0 disables it |
 | `fw_cpu_ns` | `uint64` | `0` | Controller firmware time in ns charged to each Read, Write and Zone Append, serialized on one modelled core; 0 disables it |
+| `fw_read_ns` | `uint64` | `0` | Controller firmware time in ns for each Read; 0 (default) takes fw_cpu_ns |
+| `fw_write_ns` | `uint64` | `0` | Controller firmware time in ns for each Write and Zone Append; 0 (default) takes fw_cpu_ns |
+| `fw_other_ns` | `uint64` | `0` | Controller firmware time in ns for each I/O command other than Read, Write and Zone Append; 0 (default) charges none |
+| `fw_cores` | `uint32` | `1` | Controller firmware cores, 1 (default) to 64; each command takes the core that is free soonest |
 
 ### ZNS
 

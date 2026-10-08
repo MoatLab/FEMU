@@ -663,7 +663,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
                 if (req->ns == ns) {
                     bool completed = req->status != NVME_SUCCESS ||
                         ((!n->use_ftl_thread || r == 1) &&
-                         !n->pcie_enabled && !n->fw_cpu_ns &&
+                         !n->pcie_enabled && !n->fw_enabled &&
                          req->expire_time <=
                          qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
 

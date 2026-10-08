@@ -645,12 +645,12 @@ queue. Both are off by default.
 | --- | --- | --- |
 | Link transfer (`pcie_bandwidth_mbps`) | NVMe Read and Write (opcodes 01h and 02h) in BBSSD, CSD, KV, ZNS and NoSSD; KV store and retrieve share those opcodes and use the bytes moved. Not Zone Append, and not the Open-Channel vector commands, so OCSSD 1.2 never pays it | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. `start = max(queue, expire)`, `queue = start + trans` |
 | Propagation (`pcie_prop_delay_ns`) | same | `expire = queue + delay`; does not occupy the queue |
-| Firmware CPU (`fw_cpu_ns`) | Read, Write (01h, 02h) and Zone Append; not the Open-Channel vector commands | one modelled core: `start = max(core, expire)`, `core = start + fw_cpu_ns`, `expire = core` |
+| Firmware CPU (`fw_cpu_ns`, `fw_read_ns`, `fw_write_ns`, `fw_other_ns`, `fw_cores`) | Read (`fw_read_ns`), Write and Zone Append (`fw_write_ns`), each falling back to `fw_cpu_ns` when 0; every other I/O command pays `fw_other_ns`; not the Open-Channel vector commands | `fw_cores` modelled cores: the command takes the core free soonest, `start = max(core, expire)`, `core = start + cost`, `expire = core` |
 
 The link is modelled after the media for both directions. A read's transfer
 to the host never overlaps its NAND time, and a write's transfer from the
 host is charged after its programs, not before them. The firmware cost is charged at the end of a command,
-which caps the command rate at about one per `fw_cpu_ns` but does not delay
+which caps the command rate at about `fw_cores` per firmware time but does not delay
 the start of the media operations. The link model is enabled when either link property is non-zero
 (`pcie_enabled` in `femu.c`).
 
@@ -839,8 +839,10 @@ Give each poller and the FTL thread its own host core while measuring;
   device (`pe-suspend-<mode>-on` and `pe-suspend-<mode>-off`): a read that
   arrives during a program completes before the program only when suspend
   is on.
+- The firmware CPU model per opcode and per core (`fw-cost-read`,
+  `fw-cost-other`, `fw-cost-cores1`, `fw-cost-cores2`).
 - **Not covered by automated tests**: other BBSSD and ZNS timing inside QEMU, the
-  host link, `fw_cpu_ns`, the 0xEF flips on a plain BBSSD controller, and
+  host link, the 0xEF flips on a plain BBSSD controller, and
   end-to-end guest latency against a reference device. The built-in MLC table is a profile of real
   parts; the other tables are from published papers, as cited in the
   headers. Check numbers that matter to you with the calibration steps above.
