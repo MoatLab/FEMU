@@ -565,6 +565,42 @@ read or program on a LUN that GC is using starts when GC is done with it.
 The LUN field `gc_endtime` is updated as GC programs and erases, and the
 channel field is never written; nothing reads either.
 
+### Paced collection (`gc_pace`)
+
+A whole-line pass books every copy of the victim at one instant, so the next
+writes wait for all of them. With `gc_pace` on, collection copies the victim
+a few pages at a time instead, in step with host writes.
+
+```text
+  end of a request, free lines <= gc_thres_pcent line count, no paced line:
+    victim = policy->select_victim_line(false); mark it reclaiming
+    V0 = its valid pages; R = pages_per_line - V0 (the pages it frees)
+  each host page programmed (direct, write-back, Write Zeroes):
+    credit += V0
+    while credit >= R: copy the victim's next valid page; credit -= R
+  every step:
+    budget: pages left before free lines reach the forced threshold
+    if the copies left and the host pages they need do not fit: copy more now
+  victim has no valid page left:
+    erase it on every LUN (in parallel), then free or retire it
+  forced pass (free lines <= gc_thres_pcent_high):
+    finishes the paced victim first, then collects as before
+```
+
+The line is empty after about R host pages, which is the space it gives
+back. Each copy still enters the NAND model at "now", as other GC does, so a
+host write waits for about one copy instead of a whole line. The end of each
+request takes the place of the background pass: it chooses the victim, and it
+finishes one that deallocation or overwrites emptied. Only host programs earn
+credit. A copy that finds no room stops pacing until the next request.
+
+Pacing spreads the work; it does not bound latency. A large write does its
+share in one call, and read reclaim and wear levelling still move whole lines.
+It uses the boundary of `blk_pe_limit` (one plane per LUN, one namespace, no
+buffer, FDP, Streams, CXL, hot/cold or hybrid mapping). Log page C0h counts
+the copies at offset 224, the lines it finishes at 232, and the lines the
+forced pass or the budget had to finish at 240.
+
 ### FDP reclaim units
 
 With Flexible Data Placement the FTL places data in reclaim units, one line
@@ -926,6 +962,7 @@ does inside the FTL and what it interacts with.
 | `gc_thres_pcent_high` | forced GC watermark; sizes the reserve | lower values cost exposed capacity |
 | `gc_policy` | line victim selection | refused with FDP |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
+| `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is |
 | `gc_strategy` | reclaim unit victim selection | FDP only |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams; FDP needs `page` |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |

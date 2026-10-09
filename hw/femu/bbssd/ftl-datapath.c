@@ -537,6 +537,10 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         merge_lat = ssd->mapping->reclaim(ssd, 1);
         lat = MAX(lat, merge_lat);
     }
+    /* paced collection copies its share after the host page has its slot */
+    if (ssd->sp.gc_pace) {
+        ssd_pace_program(ssd);
+    }
     return lat;
 }
 

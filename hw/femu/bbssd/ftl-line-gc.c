@@ -1046,6 +1046,8 @@ static void requeue_line(struct ssd *ssd, struct line *line)
  * one, the line is requeued as it stands and false returned. Erasing then
  * would destroy the pages still in it while their mappings point there.
  */
+static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line);
+
 static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1078,6 +1080,23 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
         }
     }
 
+    reclaim_line_tail(ssd, victim_line);
+    return true;
+}
+
+/*
+ * Erase an emptied line on every LUN, then free it, or retire it if a block
+ * wore out. Each LUN erases its own block, so the LUNs erase in parallel.
+ */
+static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa ppa;
+    int ch, lun;
+
+    ftl_assert(victim_line->vpc == 0);
+    ppa.ppa = 0;
+    ppa.g.blk = victim_line->id;
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
             ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk, spp->enable_gc_delay,
@@ -1095,20 +1114,50 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
 
         ssd_wear_events(ssd, spare, overworn);
         if (retired) {
-            return true;
+            return;
         }
     }
 
     /* update line status */
     mark_line_free(ssd, &ppa);
-    return true;
 }
+
+/* the erase is the last command forced collection gives each LUN */
+static void note_forced_end(struct ssd *ssd)
+{
+    int ch;
+    int lun;
+
+    ssd->forced_gc_timed++;
+    for (ch = 0; ch < ssd->sp.nchs; ch++) {
+        for (lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
+            struct nand_lun *l = &ssd->ch[ch].lun[lun];
+
+            ssd->forced_gc_end = MAX(ssd->forced_gc_end,
+                                     l->next_lun_avail_time);
+        }
+    }
+}
+
+static int pace_finish(struct ssd *ssd);
 
 int do_gc(struct ssd *ssd, bool force)
 {
     int free_lines = ssd->lm.free_line_cnt;
-    struct line *victim_line = ssd->policy->select_victim_line(ssd, force);
+    struct line *victim_line;
 
+    /* a forced pass first finishes the line paced collection holds */
+    if (ssd->pace_line) {
+        if (!force || pace_finish(ssd)) {
+            return -1;
+        }
+        if (ssd->sp.enable_gc_delay) {
+            note_forced_end(ssd);
+        }
+        return 0;
+    }
+
+    victim_line = ssd->policy->select_victim_line(ssd, force);
     if (!victim_line) {
         return -1;
     }
@@ -1127,19 +1176,7 @@ int do_gc(struct ssd *ssd, bool force)
         return -1;
     }
     if (force && ssd->sp.enable_gc_delay) {
-        int ch;
-        int lun;
-
-        ssd->forced_gc_timed++;
-        /* The erase is the last command collection gives each LUN. */
-        for (ch = 0; ch < ssd->sp.nchs; ch++) {
-            for (lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
-                struct nand_lun *l = &ssd->ch[ch].lun[lun];
-
-                ssd->forced_gc_end = MAX(ssd->forced_gc_end,
-                                         l->next_lun_avail_time);
-            }
-        }
+        note_forced_end(ssd);
     }
 
     /* Distinct retired streams may occupy lines that cannot be combined. */
@@ -1348,9 +1385,233 @@ int do_wear_level(struct ssd *ssd)
 }
 
 /* release what ssd_init_lines() took */
+/*
+ * Paced collection (gc_pace): one victim at a time is copied a few pages per
+ * host page programmed, in proportion to its valid pages, so its cost spreads
+ * over many writes instead of one forced pass. With V0 valid pages when it is
+ * chosen and R = P - V0 pages it frees, each host page earns V0 credit and each
+ * copy costs R, so the line is empty after about R host pages. A budget check
+ * copies more when the free lines above the forced threshold would run out
+ * first. The forced pass stays as the last resort and finishes the victim.
+ */
+
+/* page @i of @line, in the order reclaim_line() visits them */
+static void pace_ppa(struct ssd *ssd, struct line *line, int i,
+                     struct ppa *ppa)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    ppa->ppa = 0;
+    ppa->g.blk = line->id;
+    ppa->g.pg = i % spp->pgs_per_blk;
+    i /= spp->pgs_per_blk;
+    ppa->g.pl = i % spp->pls_per_lun;
+    i /= spp->pls_per_lun;
+    ppa->g.lun = i % spp->luns_per_ch;
+    ppa->g.ch = i / spp->luns_per_ch;
+}
+
+/* copy the next valid page of the paced line; false when there is no room */
+static bool pace_copy_one(struct ssd *ssd)
+{
+    struct line *line = ssd->pace_line;
+    struct ppa ppa;
+
+    while (ssd->pace_cursor < ssd->sp.pgs_per_line) {
+        pace_ppa(ssd, line, ssd->pace_cursor, &ppa);
+        if (get_pg(ssd, &ppa)->status == PG_VALID) {
+            gc_read_page(ssd, &ppa);
+            if (!gc_write_page(ssd, &ppa)) {
+                return false;
+            }
+            ssd->pace_cursor++;
+            return true;
+        }
+        ssd->pace_cursor++;
+    }
+    return true;
+}
+
+/* give up the paced line: every pacing exit goes through here */
+static struct line *pace_release(struct ssd *ssd)
+{
+    struct line *line = ssd->pace_line;
+
+    if (line) {
+        line->reclaiming = false;
+        ssd->pace_line = NULL;
+        ssd->pace_acc = 0;
+    }
+    return line;
+}
+
+/* the paced line is empty: erase it and free or retire it */
+static void pace_done(struct ssd *ssd)
+{
+    reclaim_line_tail(ssd, pace_release(ssd));
+}
+
+/* a copy found no room: no more pacing until the next request */
+static void pace_fail(struct ssd *ssd)
+{
+    ssd->pace_fail_gen = ssd->pace_gen;
+    ssd->pace_failed = true;
+}
+
+static bool pace_blocked(struct ssd *ssd)
+{
+    return ssd->pace_failed && ssd->pace_fail_gen == ssd->pace_gen;
+}
+
+/*
+ * Copy the rest of the paced line and finish it, for the forced pass or when
+ * the budget cannot be met. On failure the line goes back to the list its
+ * counts call for, with the copies already made kept.
+ */
+static int pace_finish(struct ssd *ssd)
+{
+    while (ssd->pace_line->vpc) {
+        if (!pace_copy_one(ssd) ||
+            (ssd->pace_line->vpc && ssd->pace_cursor >= ssd->sp.pgs_per_line)) {
+            /* the tick of this request must not take the line straight back */
+            pace_fail(ssd);
+            requeue_line(ssd, pace_release(ssd));
+            return -1;
+        }
+    }
+    ssd->pace_takeovers++;
+    pace_done(ssd);
+    return 0;
+}
+
+/*
+ * Host programs the nominal rate still needs for the pages left, and the
+ * budget: allocations left before a rollover takes the free lines down to the
+ * forced threshold. Copy more now when the two do not fit.
+ */
+static void pace_budget(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct line *cur = ssd->wp.curline;
+    uint64_t P = spp->pgs_per_line;
+    uint64_t v0 = ssd->pace_v0;
+    uint64_t r = P - v0;
+    uint64_t v = ssd->pace_line->vpc;
+    uint64_t f = ssd->lm.free_line_cnt;
+    uint64_t hi = spp->gc_thres_lines_high;
+    uint64_t a, t, h, need, d, k;
+
+    /* at or below the threshold the forced pass takes over */
+    if (f <= hi) {
+        return;
+    }
+    a = cur ? P - (uint64_t)cur->vpc - (uint64_t)cur->ipc : 0;
+    t = a + (f - hi - 1) * P;
+    if (t <= v) {
+        pace_finish(ssd);
+        return;
+    }
+    need = v * r;
+    h = ssd->pace_acc >= need ? 0 :
+        (need - ssd->pace_acc + v0 - 1) / v0;
+    if (h + v <= t) {
+        return;
+    }
+    d = h + v - t;
+    k = MIN((d * v0 + r - 1) / r, v);
+    while (k-- && ssd->pace_line->vpc) {
+        if (!pace_copy_one(ssd)) {
+            pace_fail(ssd);
+            return;
+        }
+        ssd->pace_copies++;
+    }
+}
+
+/* finish the line when it is empty, otherwise check the budget */
+static void pace_settle(struct ssd *ssd)
+{
+    if (!ssd->pace_line) {
+        return;
+    }
+    if (!ssd->pace_line->vpc) {
+        ssd->pace_lines++;
+        pace_done(ssd);
+        return;
+    }
+    if (!pace_blocked(ssd)) {
+        pace_budget(ssd);
+        if (ssd->pace_line && !ssd->pace_line->vpc) {
+            ssd->pace_lines++;
+            pace_done(ssd);
+        }
+    }
+}
+
+/**
+ * ssd_pace_program - pay for one host page just programmed
+ * @ssd: the device
+ *
+ * Earns V0 credit and copies one victim page for each R of it. Only host
+ * programs call this, so collection copies never earn credit.
+ */
+void ssd_pace_program(struct ssd *ssd)
+{
+    uint64_t r;
+
+    if (!ssd->pace_line || pace_blocked(ssd)) {
+        return;
+    }
+    r = ssd->sp.pgs_per_line - ssd->pace_v0;
+    ssd->pace_acc += ssd->pace_v0;
+    while (ssd->pace_line->vpc && ssd->pace_acc >= r) {
+        if (!pace_copy_one(ssd)) {
+            pace_fail(ssd);
+            return;
+        }
+        ssd->pace_acc -= r;
+        ssd->pace_copies++;
+    }
+    pace_settle(ssd);
+}
+
+/**
+ * ssd_pace_tick - paced collection's turn at the end of a request
+ * @ssd: the device
+ *
+ * Takes the place of the background pass: chooses a victim when the free lines
+ * reach the background threshold, finishes one that has no valid pages left,
+ * and keeps to the budget. It earns no credit.
+ */
+void ssd_pace_tick(struct ssd *ssd)
+{
+    struct line *victim;
+
+    if (!ssd->pace_line && should_gc(ssd) && !pace_blocked(ssd)) {
+        victim = ssd->policy->select_victim_line(ssd, false);
+        if (!victim) {
+            return;
+        }
+        if (victim->vpc >= ssd->sp.pgs_per_line) {
+            /* a full line frees nothing; the queue does not hold one */
+            requeue_line(ssd, victim);
+            return;
+        }
+        ftl_note_victim(ssd, victim->id);
+        victim->reclaiming = true;
+        ssd->pace_line = victim;
+        ssd->pace_cursor = 0;
+        ssd->pace_v0 = victim->vpc;
+        ssd->pace_acc = 0;
+    }
+    pace_settle(ssd);
+}
+
 void ssd_free_lines(struct ssd *ssd)
 {
     struct line_mgmt *lm = &ssd->lm;
+
+    ssd->pace_line = NULL;
 
     pqueue_free(lm->victim_line_pq);
     lm->victim_line_pq = NULL;

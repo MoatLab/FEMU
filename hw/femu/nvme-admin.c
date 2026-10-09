@@ -2008,6 +2008,7 @@ typedef struct FemuMediaStats {
     uint64_t retired_lines;
     uint64_t wl_relocations;
     uint64_t wl_pages;
+    uint64_t pace[3];           /* copies, lines, takeovers */
     uint64_t partial_page_writes;
     uint64_t plane_ops[3];      /* read, program, erase */
     uint64_t stall_writes, stall_passes, stall_destages, cq_full;
@@ -2081,6 +2082,14 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->retired_lines += ssd_retired_lines(ns->ssd);
         st->wl_relocations += ssd_wl_relocations(ns->ssd);
         st->wl_pages += ssd_wl_pages(ns->ssd);
+        {
+            uint64_t c, l, t;
+
+            ssd_pace_stats(ns->ssd, &c, &l, &t);
+            st->pace[0] += c;
+            st->pace[1] += l;
+            st->pace[2] += t;
+        }
         st->partial_page_writes += ssd_partial_page_writes(ns->ssd);
         for (int op = 0; op < 3; op++) {
             st->plane_ops[op] += ssd_plane_ops(ns->ssd, op);
@@ -2157,6 +2166,9 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.gc_stall_passes = cpu_to_le64(st.stall_passes);
     stats.buffer_full_destages = cpu_to_le64(st.stall_destages);
     stats.cq_full_completions = cpu_to_le64(st.cq_full);
+    stats.pace_copies = cpu_to_le64(st.pace[0]);
+    stats.pace_lines = cpu_to_le64(st.pace[1]);
+    stats.pace_takeovers = cpu_to_le64(st.pace[2]);
     *log = stats;
 }
 

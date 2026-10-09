@@ -4195,6 +4195,312 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+static uint64_t femu_c0h_field(FemuCtrlState *c, uint64_t log, int off);
+
+/* the state and valid pages of line @id, from query-femu */
+static char *femu_line_state(QTestState *qts, const char *path, int id,
+                             uint64_t *vpc)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'path':'%s','kind':'lines','offset':%d,'limit':1", path, id);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QDict *l = qobject_to(QDict,
+                          qlist_peek(qdict_get_qlist(ns, "lines")));
+    char *st = g_strdup(qdict_get_str(l, "state"));
+
+    *vpc = qdict_get_int(l, "vpc");
+    qobject_unref(rsp);
+    return st;
+}
+
+/*
+ * Fill line 0 with 128 pages and deallocate @dealloc of them, write @skew
+ * more pages, then fill other lines until collection takes line 0. Returns
+ * the state of line 0 then; @lpn is the next unwritten page and @vpc the
+ * valid pages left in line 0.
+ */
+static char *femu_pace_setup(FemuCtrlState *c, const char *path, uint64_t buf,
+                             uint64_t list, uint32_t dealloc, uint32_t skew,
+                             uint64_t *lpn, uint64_t *vpc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    char *st = NULL;
+    int n;
+
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    for (*lpn = 0; *lpn < 128; *lpn += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_dealloc_pages(c, 0, dealloc, list), ==,
+                    NVME_SUCCESS);
+    if (skew) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, skew, buf, list)),
+                        ==, NVME_SUCCESS);
+        *lpn += skew;
+    }
+    /* at most up to the end of the 14 MiB namespace */
+    for (n = 0; n < 216; n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        *lpn += 16;
+        g_free(st);
+        st = femu_line_state(qts, path, 0, vpc);
+        if (strcmp(st, "victim")) {
+            break;
+        }
+    }
+    g_test_message("line 0 %s with %" PRIu64 " valid pages after %" PRIu64
+                   " host pages", st, *vpc, *lpn);
+    return st;
+}
+
+/*
+ * Paced collection on one LUN with 128-page lines. Line 0 is filled, then
+ * half of it is deallocated, so V0 = 64 and it frees R = 64 pages. Other
+ * lines fill until the free lines reach the background threshold and line 0
+ * is chosen. From then on each 1-page host write copies exactly one of its
+ * pages, and the 64th frees it, with no forced pass. "trim" empties the victim
+ * with a deallocation instead; "off" is the whole-line pass for contrast.
+ * "format" formats the namespace after 5 copies, so the next write finishes
+ * the empty victim; "reset" resets the controller after 5 copies, which keeps
+ * the FTL, so pacing goes on to 64.
+ */
+static void femu_test_gc_pace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn = 0;
+    uint64_t vpc = 0;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 64, 0, &lpn, &vpc);
+
+    if (!strcmp(mode, "off")) {
+        /* the background pass moves all 64 pages in one request */
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 0);
+    } else if (!strcmp(mode, "takeover")) {
+        /*
+         * Both thresholds are three lines, so the next write starts at the
+         * forced threshold: its forced pass finishes the paced line.
+         */
+        g_assert_cmpstr(st, ==, "reclaiming");
+        /* the namespace is full: overwrite a page of another line */
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1000, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 200), >=, 1);
+    } else if (!strcmp(mode, "format")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        for (n = 1; n <= 5; n++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 5);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+        /* only the page written after the format is mapped */
+        lpn = 1 + 64;
+    } else if (!strcmp(mode, "reset")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        for (n = 1; n <= 64; n++) {
+            if (n == 6) {
+                femu_disable(&c);
+                femu_enable(&c, &femu->dev, alloc);
+                femu_create_io_queues(&c);
+                g_free(st);
+                st = femu_line_state(qts, path, 0, &vpc);
+                g_assert_cmpstr(st, ==, "reclaiming");
+                g_assert_cmpuint(vpc, ==, 59);
+            }
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else if (!strcmp(mode, "trim")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        g_assert_cmpuint(vpc, ==, 64);
+        /* nothing left to copy: the end of this request frees the line */
+        g_assert_cmphex(femu_dealloc_pages(&c, 64, 64, list), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        g_assert_cmpuint(vpc, ==, 64);
+        for (n = 1; n <= 64; n++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+            g_free(st);
+            st = femu_line_state(qts, path, 0, &vpc);
+            if (n < 64) {
+                g_assert_cmpstr(st, ==, "reclaiming");
+                g_assert_cmpuint(vpc, ==, 64 - n);
+            }
+        }
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==,
+                     !strcmp(mode, "takeover"));
+    /* 64 pages were deallocated, and "trim" deallocates 64 more */
+    femu_query_check_lines(qts, path,
+                           lpn - 64 - (strcmp(mode, "trim") ? 0 : 64));
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The budget. Line 0 keeps 32 valid pages, so it frees R = 96 and the
+ * nominal rate is one copy per three host pages: 96 host pages and 32 copies,
+ * 128 allocations. The 8 skew pages leave the data line 8 pages in when the
+ * free lines reach the background threshold, which is the forced threshold
+ * plus one, so only 120 allocations remain before a forced pass. The budget
+ * check copies ceil(8 * 32 / 96) = 3 pages at once, and the line is free
+ * before the forced threshold, with no takeover.
+ */
+static void femu_test_gc_pace_budget(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 96, 8, &lpn, &vpc);
+    g_assert_cmpstr(st, ==, "reclaiming");
+    g_assert_cmpuint(vpc, ==, 29);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 3);
+
+    /* the nominal rate: one copy per three host pages */
+    for (n = 1; n <= 3; n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_free(st);
+    st = femu_line_state(qts, path, 0, &vpc);
+    g_assert_cmpuint(vpc, ==, 28);
+
+    for (n = 0; n < 200 && strcmp(st, "free"); n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+    }
+    g_test_message("line 0 %s after %d more host pages", st, n + 3);
+    g_assert_cmpstr(st, ==, "free");
+    g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 32);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 200), ==, 0);
+    femu_query_check_lines(qts, path, lpn - 96);
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The latency a whole-line pass puts on the next writes, against paced
+ * collection, on one LUN so the copies queue behind each other. With 0.2 ms
+ * reads, 4 ms programs and a 1 ms erase, one pass over 64 valid pages books
+ * about 270 ms; a paced write waits for one copy, about 4 ms, before its own
+ * 4 ms program. The off bound is half the pass, so a host delay of up to
+ * 135 ms before the first timed write still leaves it red.
+ */
+static void femu_test_gc_pace_timing(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    const char *path = "/machine/peripheral/gc-test";
+    bool on = !strcmp(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc;
+    int64_t max_ms = 0;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 64, 0, &lpn, &vpc);
+    g_assert_cmpstr(st, ==, on ? "reclaiming" : "free");
+    for (n = 0; n < 80; n++) {
+        int64_t t0 = g_get_monotonic_time();
+        int64_t ms;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - t0) / 1000;
+        max_ms = MAX(max_ms, ms);
+    }
+    g_test_message("gc_pace %s: slowest of 80 writes %" PRId64 " ms",
+                   on ? "on" : "off", max_ms);
+    if (on) {
+        /* the same work was done: every page copied, the line freed */
+        g_assert_cmpint(max_ms, <, 60);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else {
+        g_assert_cmpint(max_ms, >, 135);
+    }
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * Log page C0h counts the NAND pages a host write covers only in part. With
  * 512-byte blocks and 4 KiB pages: one block inside a page is one; a whole
@@ -4365,6 +4671,9 @@ static void femu_test_wear_refused(void *obj, void *data,
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
+    /* the wear features and paced collection share one boundary */
+    const char *feature = data ? data : "'blk_pe_limit':3";
+    const char *name = data ? "gc_pace" : "blk_pe_limit";
     const struct {
         const char *opts;
         const char *msg;
@@ -4380,6 +4689,7 @@ static void femu_test_wear_refused(void *obj, void *data,
         { "'femu_mode':1,'namespaces':2", "more than one namespace" },
         { "'femu_mode':1,'ns_mgmt':true", "namespace management" },
         { "'femu_mode':1,'nand_bad_blocks':1", "nand_bad_blocks" },
+        { NULL },
         { "'femu_mode':1,'blk_pe_spread':91", "blk_pe_spread must be 0 to 90" },
         { "'femu_mode':1,'spare_lines':40", "must be below blks_per_pl" },
         { "'femu_mode':1,'age_scale':0", "age_scale must be 1 or more" },
@@ -4387,17 +4697,32 @@ static void femu_test_wear_refused(void *obj, void *data,
     QDict *rsp;
     int i;
 
-    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+    for (i = 0; i < ARRAY_SIZE(cases) && cases[i].opts; i++) {
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{"
             "'driver':'femu','id':'wear','addr':'5','devsz_mb':1,"
             "'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':40,"
-            "'luns_per_ch':2,'nchs':2,'blk_pe_limit':3,%s}}", cases[i].opts);
+            "'luns_per_ch':2,'nchs':2,%s,%s}}", feature, cases[i].opts);
+        const char *desc;
 
         rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         g_assert_true(qdict_haskey(rsp, "error"));
-        g_test_message("%s: %s", cases[i].opts,
-                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_assert_nonnull(strstr(desc, name));
+        qobject_unref(rsp);
+    }
+    /* the checks after the marker need blk_pe_limit */
+    for (i++; !data && i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'wear','addr':'5','devsz_mb':1,"
+            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':40,"
+            "'luns_per_ch':2,'nchs':2,%s,%s}}", feature, cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
                                              "desc"), cases[i].msg));
         qobject_unref(rsp);
@@ -26237,6 +26562,77 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
             ",wl_spread=4,oncs=0x1c"
     });
+    qos_add_test("gc-pace-on", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=75,gc_thres_pcent_high=94,gc_pace=on"
+    });
+    qos_add_test("gc-pace-trim", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"trim",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=75,gc_thres_pcent_high=94,gc_pace=on"
+    });
+    qos_add_test("gc-pace-takeover", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"takeover",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=90,gc_pace=on"
+    });
+    qos_add_test("gc-pace-budget", "femu", femu_test_gc_pace_budget,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=87,gc_thres_pcent_high=90,gc_pace=on"
+    });
+    qos_add_test("gc-pace-format", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"format",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=75,gc_thres_pcent_high=94,gc_pace=on"
+    });
+    qos_add_test("gc-pace-reset", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"reset",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=75,gc_thres_pcent_high=94,gc_pace=on"
+    });
+    qos_add_test("gc-pace-off", "femu", femu_test_gc_pace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=32,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=75,gc_thres_pcent_high=94"
+    });
+    qos_add_test("gc-pace-timing-on", "femu", femu_test_gc_pace_timing,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=5,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=12,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_rd_lat=200000,pg_wr_lat=4000000,blk_er_lat=1000000,gc_pace=on"
+    });
+    qos_add_test("gc-pace-timing-off", "femu", femu_test_gc_pace_timing,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=5,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=128,blks_per_pl=12,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_rd_lat=200000,pg_wr_lat=4000000,blk_er_lat=1000000"
+    });
     qos_add_test("partial-writes-bbssd", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,oncs=0x1c"
@@ -26328,6 +26724,8 @@ static void femu_register_nodes(void)
             "femu_mode=1"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
+    qos_add_test("pace-refused", "femu", femu_test_wear_refused,
+                 &(QOSGraphTestOptions) { .arg = (void *)"'gc_pace':true" });
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "

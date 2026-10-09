@@ -24,6 +24,12 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->wl_credit = 0;
     ssd->wl_relocations = 0;
     ssd->wl_pages = 0;
+    ssd->pace_line = NULL;
+    ssd->pace_failed = false;
+    ssd->pace_gen = 0;
+    ssd->pace_copies = 0;
+    ssd->pace_lines = 0;
+    ssd->pace_takeovers = 0;
     ssd->wl_on = false;
     ssd->partial_page_writes = 0;
     ssd->grown_bad_blocks = 0;
@@ -421,6 +427,14 @@ uint64_t ssd_wl_pages(struct ssd *ssd)
     return ssd->wl_pages;
 }
 
+void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
+                    uint64_t *takeovers)
+{
+    *copies = ssd->pace_copies;
+    *lines = ssd->pace_lines;
+    *takeovers = ssd->pace_takeovers;
+}
+
 uint64_t ssd_partial_page_writes(struct ssd *ssd)
 {
     return ssd->partial_page_writes;
@@ -655,6 +669,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     if (req->status != NVME_SUCCESS) {
         return 0;
     }
+    ssd->pace_gen++;
 
     if (n->streams) {
         qemu_mutex_lock(&n->streams_lock);
@@ -759,6 +774,8 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
                 do_gc_fdp_style(ssd, rgidx, 0, false);
             }
         }
+    } else if (ssd->sp.gc_pace) {
+        ssd_pace_tick(ssd);
     } else if (should_gc(ssd)) {
         do_gc(ssd, false);
     }

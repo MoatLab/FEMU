@@ -2430,7 +2430,7 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
             warn_report("femu: blk_pe_spread and blk_pe_seed have no effect "
                         "unless blk_pe_limit is set");
         }
-        if (!bp->wl_spread) {
+        if (!bp->wl_spread && !bp->gc_pace) {
             return true;
         }
     } else if (n->spare_lines >= (uint32_t)MAX(bp->blks_per_pl, 0)) {
@@ -2469,7 +2469,8 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     }
     if (why) {
         error_setg(errp, "femu: %s is not supported with %s",
-                   n->blk_pe_limit ? "blk_pe_limit" : "wl_spread", why);
+                   n->blk_pe_limit ? "blk_pe_limit" :
+                   bp->wl_spread ? "wl_spread" : "gc_pace", why);
         return false;
     }
     return true;
@@ -3160,6 +3161,7 @@ static const Property femu_props[] = {
                       bb_params.retention_limit_sec, 0),
     DEFINE_PROP_INT32("age_scale", FemuCtrl, bb_params.age_scale, 1),
     DEFINE_PROP_INT32("wl_spread", FemuCtrl, bb_params.wl_spread, 0),
+    DEFINE_PROP_BOOL("gc_pace", FemuCtrl, bb_params.gc_pace, false),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

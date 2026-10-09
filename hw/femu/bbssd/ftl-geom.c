@@ -273,6 +273,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->retention_limit_sec = n->bb_params.retention_limit_sec;
     spp->age_scale = n->bb_params.age_scale;
     spp->wl_spread = n->bb_params.wl_spread;
+    spp->gc_pace = n->bb_params.gc_pace;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;

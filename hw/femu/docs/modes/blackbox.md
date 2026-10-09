@@ -183,6 +183,10 @@ All of these are off by default.
   rejoin the rotation. It runs only when the data write pointer has just
   taken an empty line, which it exchanges for the worn one, so it adds no
   write pointer, and it copies at most a quarter of what the host writes.
+- `gc_pace` collects the victim line a few pages per host page written, in
+  proportion to its valid pages, instead of in one pass. A write then waits
+  for about one copy instead of a whole line. The forced pass stays as the
+  last resort. It is refused where `blk_pe_limit` is.
 - `age_scale` makes data age faster than wall time for `retention_limit_sec`
   and `ecc_retention_sec`, so a study of months of retention runs in
   minutes. I/O timing and collection order stay as they are.

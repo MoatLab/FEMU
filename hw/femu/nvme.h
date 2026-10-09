@@ -1208,7 +1208,10 @@ typedef struct FemuStatsLog {
     uint64_t    gc_stall_passes;  /* collection passes they ran */
     uint64_t    buffer_full_destages; /* writes that emptied a full buffer */
     uint64_t    cq_full_completions; /* completions held for a full CQ */
-    uint8_t     rsvd224[288];
+    uint64_t    pace_copies;      /* pages paced steps copied, also at 16 */
+    uint64_t    pace_lines;       /* lines paced collection finished */
+    uint64_t    pace_takeovers;   /* paced lines a forced pass finished */
+    uint8_t     rsvd248[264];
 } FemuStatsLog;
 
 /*
@@ -1997,6 +2000,7 @@ typedef struct BbCtrlParams {
     int retention_limit_sec;  /* age before programmed data is refreshed; 0 = never */
     int age_scale;            /* data age per wall-time unit; 1 = real time */
     int wl_spread;            /* wear gap that starts wear levelling; 0 = off */
+    bool gc_pace;             /* collect a line a few pages per host write */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -2841,6 +2845,8 @@ uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
+void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
+                    uint64_t *takeovers);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);
 uint64_t ssd_plane_ops(struct ssd *ssd, int op);
 void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,

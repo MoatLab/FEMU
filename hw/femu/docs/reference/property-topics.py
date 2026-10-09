@@ -97,7 +97,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "gc_thres_pcent", "gc_thres_pcent_high", "gc_policy",
-                    "gc_seed", "gc_strategy", "wl_spread", "mapping",
+                    "gc_seed", "gc_strategy", "wl_spread", "gc_pace", "mapping",
                     "mapping_cache_mb",
                     "read_cache_mb", "cache_evict", "hot_cold_sep",
                     "buffer_size", "buffer_thres_pcent", "fdp_trim_erase_all",

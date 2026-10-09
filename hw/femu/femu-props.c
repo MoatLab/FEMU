@@ -389,6 +389,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "service differ by more than this and stops at half of it; it moves "
       "the least worn full line into the most worn free line and copies at "
       "most a quarter of the host pages; 0 (default) turns it off" },
+    { "gc_pace",
+      "bbssd, CSD: collect the victim line a few pages per host page "
+      "written, in proportion to its valid pages, instead of in one pass; "
+      "the forced pass stays as the last resort; off (default)" },
     { "age_scale",
       "bbssd, CSD: data ages this many times faster than wall time, for "
       "retention_limit_sec and ecc_retention_sec only; 1 (default) or more. "

@@ -405,6 +405,7 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | `retention_limit_sec` | seconds | 0 disables; bbssd and CSD; refused with FDP | a read that hits a line filled at least this long ago queues the line, which is rewritten on a following write |
 | `energy_read_nj`, `energy_prog_nj`, `energy_erase_nj` | nJ per plane operation | 0 (default) gives no figure | price the plane reads, programs and erases log page C0h counts; the total is reported in uJ at offset 184 |
 | `wl_spread` | erases | 0 disables; the settings `blk_pe_limit` refuses are refused too | static wear levelling: when the erases of lines in service differ by more than this, the least worn full line moves into the most worn free line, at most a quarter of the host pages; it stops at half the gap |
+| `gc_pace` | on/off | off (default); the settings `blk_pe_limit` refuses are refused too | paced collection: the victim is copied in step with host writes, V0 / (pages per line - V0) copies per host page, instead of in one pass; log page C0h offsets 224, 232 and 240 count it |
 | `age_scale` | factor | 1 (default) or more | data ages this many times faster than wall time for `retention_limit_sec` and `ecc_retention_sec`; I/O timing and collection order do not change |
 
 Interactions: faults come at a fixed period, so a run repeats exactly.

@@ -40,8 +40,11 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 200 | 8 | Forced collection passes run inside those writes |
 | 208 | 8 | Host writes that emptied a full write buffer to make room |
 | 216 | 8 | Completions held because the host's completion queue was full (summed over pollers) |
+| 224 | 8 | Pages paced collection copied (`gc_pace`; also counted at offset 16) |
+| 232 | 8 | Lines paced collection finished, freed or retired |
+| 240 | 8 | Paced lines the forced pass or the budget finished in one pass |
 
-Bytes 4-7 and 224-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 248-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

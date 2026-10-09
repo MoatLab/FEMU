@@ -213,6 +213,7 @@ struct ssdparams {
     int retention_limit_sec;
     int age_scale;
     int wl_spread;
+    bool gc_pace;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -542,6 +543,16 @@ struct ssd {
     uint64_t wl_credit;             /* host pages wear levelling may spend */
     uint64_t wl_relocations;        /* lines moved by wear levelling */
     uint64_t wl_pages;              /* pages they copied, also in gc pages */
+    struct line *pace_line;         /* victim paced collection is copying */
+    int pace_cursor;                /* next page of it, in reclaim order */
+    uint64_t pace_v0;               /* its valid pages when chosen */
+    uint64_t pace_acc;              /* credit: V0 per host page programmed */
+    bool pace_failed;               /* a copy found no room ... */
+    uint64_t pace_fail_gen;         /* ... in this request */
+    uint64_t pace_gen;              /* requests the FTL has started */
+    uint64_t pace_copies;           /* pages paced steps copied */
+    uint64_t pace_lines;            /* lines paced steps finished */
+    uint64_t pace_takeovers;        /* paced lines a forced pass finished */
     uint64_t partial_page_writes;   /* NAND pages host writes covered in part */
     uint64_t gc_stalled_writes;     /* host writes that collected first */
     uint64_t gc_stall_passes;       /* forced passes run inside host writes */
