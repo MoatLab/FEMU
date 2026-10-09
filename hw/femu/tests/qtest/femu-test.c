@@ -4501,6 +4501,178 @@ static void femu_test_gc_pace_timing(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static bool femu_cq_ready(FemuCtrlState *c, FemuQueue *q);
+static uint16_t femu_aer(FemuCtrlState *c);
+
+/* the composite temperature and the critical warning, from the SMART log */
+static uint16_t femu_smart_temp(FemuCtrlState *c, uint64_t log,
+                                uint8_t *warning)
+{
+    uint8_t page[512];
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, page, sizeof(page));
+    if (warning) {
+        *warning = page[0];
+    }
+    return lduw_le_p(page + 1);
+}
+
+/*
+ * The thermal model on the virtual clock, which only the test moves. With
+ * ambient 300 K, 10 K per W and a 1 s time constant:
+ *   "idle": 1 W gives T(t) = 300 + 10 (1 - e^-t), so 301 K at 0.1 s, 304 at
+ *     0.5 s, 305 at 0.6 s, 306 at 1 s and 309 at 2 s;
+ *   "pulse": 1000 plane programs of 1 mJ each are 1 J in the first 0.1 s
+ *     step, 10 W, so 300 + 100 (1 - e^-0.1) = 309.5 -> 310 K, then with no
+ *     power 300 + 9.516 e^-0.9 = 303.9 -> 304 K at 1 s;
+ *   "off": no model, so 300 K whatever the load and the clock.
+ */
+static void femu_test_thermal(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t progs;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 300);
+
+    if (!strcmp(mode, "idle")) {
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 301);
+        qtest_clock_step(qts, 400 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 304);
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 305);
+        qtest_clock_step(qts, 400 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 306);
+        qtest_clock_step(qts, 1000 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 309);
+    } else {
+        /* 1000 pages, each one plane program, with the clock stopped */
+        progs = femu_c0h_field(&c, log, 168);
+        qtest_memset(qts, buf, 0x6b, 16 * 4096);
+        for (i = 0; i < 1000; i += 8) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 8, buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmpuint(femu_c0h_field(&c, log, 168) - progs, ==, 1000);
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==,
+                         strcmp(mode, "off") ? 310 : 300);
+        qtest_clock_step(qts, 900 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==,
+                         strcmp(mode, "off") ? 304 : 300);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The temperature event. With the idle trace above and an over threshold of
+ * 305 K, the temperature reaches 305 K at the 0.6 s step: an outstanding
+ * Asynchronous Event Request completes then (SMART, temperature, log 02h:
+ * 0x00020101), not at 0.5 s, and SMART sets critical warning bit 1. After
+ * the host reads the log, a device that stays hot raises no second event.
+ */
+static void femu_test_thermal_event(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 512);
+    uint32_t result;
+    uint16_t want, got;
+    uint8_t warning;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, NVME_SMART_TEMPERATURE,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 305, NULL)), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+
+    qtest_clock_step(qts, 500 * SCALE_MS);
+    g_usleep(50 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    qtest_clock_step(qts, 100 * SCALE_MS);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmphex(result, ==, 0x00020101);
+    g_assert_cmpuint(femu_smart_temp(&c, log, &warning), ==, 305);
+    g_assert_cmphex(warning & NVME_SMART_TEMPERATURE, ==,
+                    NVME_SMART_TEMPERATURE);
+
+    /*
+     * The log was read; still hot, and the same event setting written again,
+     * so the next request stays outstanding.
+     */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, NVME_SMART_TEMPERATURE,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_aer(&c);
+    qtest_clock_step(qts, 1000 * SCALE_MS);
+    g_usleep(50 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+static void femu_test_thermal_refused(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'thermal_tau_ms':1000", "thermal_tau_ms needs thermal_r" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'thermal_step_ms':0",
+          "thermal_step_ms must be 1 to 60000" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'thermal_step_ms':60001",
+          "thermal_step_ms must be 1 to 60000" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'ns_mgmt':true",
+          "namespace management" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'thermal','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /*
  * Log page C0h counts the NAND pages a host write covers only in part. With
  * 512-byte blocks and 4 KiB pages: one block inside a page is one; a whole
@@ -26633,6 +26805,33 @@ static void femu_register_nodes(void)
             "pgs_per_blk=128,blks_per_pl=12,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_rd_lat=200000,pg_wr_lat=4000000,blk_er_lat=1000000"
     });
+    qos_add_test("thermal-idle", "femu", femu_test_thermal,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"idle",
+        .edge.extra_device_opts =
+            "femu_mode=1,temperature=300,thermal_tau_ms=1000,thermal_r=10,"
+            "idle_mw=1000"
+    });
+    qos_add_test("thermal-pulse", "femu", femu_test_thermal,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pulse",
+        .edge.extra_device_opts =
+            "femu_mode=1,temperature=300,thermal_tau_ms=1000,thermal_r=10,"
+            "energy_prog_nj=1000000"
+    });
+    qos_add_test("thermal-off", "femu", femu_test_thermal,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "femu_mode=1,temperature=300,energy_prog_nj=1000000"
+    });
+    qos_add_test("thermal-event", "femu", femu_test_thermal_event,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,temperature=300,thermal_tau_ms=1000,thermal_r=10,"
+            "idle_mw=1000"
+    });
+    qos_add_test("thermal-refused", "femu", femu_test_thermal_refused, NULL);
     qos_add_test("partial-writes-bbssd", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,oncs=0x1c"

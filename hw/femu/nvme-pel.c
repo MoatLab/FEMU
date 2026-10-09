@@ -392,6 +392,21 @@ void femu_pel_warning(FemuCtrl *n, uint8_t warning)
 }
 
 /*
+ * The temperature bit alone, from the thermal model: the other bits keep
+ * the value the event log last saw, so no SMART collection runs for it.
+ */
+void femu_pel_temp_warning(FemuCtrl *n, bool on)
+{
+    FemuPel *pel = n->pel;
+
+    if (!pel) {
+        return;
+    }
+    femu_pel_warning(n, (pel->warning & ~NVME_SMART_TEMPERATURE) |
+                        (on ? NVME_SMART_TEMPERATURE : 0));
+}
+
+/*
  * A completion with a Media and Data Integrity status other than Access
  * Denied or Deallocated or Unwritten Logical Block (code 0Ah), carrying the
  * completion entry. Called from wherever completions are written, pollers

@@ -452,7 +452,7 @@ void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,
 /* @op is a NandMediaOp: read, program or erase */
 uint64_t ssd_plane_ops(struct ssd *ssd, int op)
 {
-    return ssd->media_plane_ops[op];
+    return qatomic_read(&ssd->media_plane_ops[op]);
 }
 
 uint64_t ssd_retired_lines(struct ssd *ssd)

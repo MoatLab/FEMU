@@ -1610,9 +1610,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         if (dw11 & (1 << 20)) {
             n->features.temp_thresh_under = dw11 & 0xffff;
+            if (n->thermal_timer) {
+                femu_temp_eval(n);
+            }
             break;
         }
         n->features.temp_thresh = dw11 & 0xffff;
+        if (n->thermal_timer) {
+            femu_temp_eval(n);
+            break;
+        }
         femu_pel_warning(n, nvme_critical_warning(n));
         /*
          * Crossing the threshold raises a SMART event once, pointing the host
@@ -1692,6 +1699,10 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_ASYNCHRONOUS_EVENT_CONF:
         n->features.async_config = dw11;
+        /* enabling temperature events during an excursion reports it */
+        if (n->thermal_timer) {
+            femu_temp_eval(n);
+        }
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
@@ -2290,7 +2301,7 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     if (st.overworn_blocks) {
         smart.critical_warning |= NVME_SMART_RELIABILITY;
     }
-    if (n->features.temp_thresh <= n->temperature) {
+    if (femu_temp_condition(n)) {
         smart.critical_warning |= NVME_SMART_TEMPERATURE;
     }
 

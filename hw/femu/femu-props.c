@@ -366,6 +366,19 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "energy_erase_nj",
       "bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total "
       "in log page C0h; 0 (default) gives no figure" },
+    { "thermal_tau_ms",
+      "time constant of the package, ms: the composite temperature moves "
+      "towards temperature + power * thermal_r at this rate, where power is "
+      "idle_mw plus the energy of the NAND plane operations (energy_*_nj) per "
+      "second; 0 (default) turns the model off" },
+    { "thermal_r",
+      "thermal resistance from the package to ambient, mK per mW (K per W); "
+      "needed with thermal_tau_ms" },
+    { "idle_mw",
+      "power with no NAND operations, mW, for the thermal model" },
+    { "thermal_step_ms",
+      "how often the thermal model updates the temperature, ms, 1 to 60000; "
+      "100 (default)" },
     { "spare_lines",
       "bbssd, CSD: lines held back, needs blk_pe_limit; their blocks "
       "replace worn-out blocks of the same plane, and SMART Available Spare "

@@ -176,7 +176,10 @@ All of these are off by default.
   Available Spare.
 - Log page C0h counts plane reads, programs and erases. With
   `energy_read_nj`, `energy_prog_nj` and `energy_erase_nj` set from a part's
-  datasheet, it also reports their energy in uJ.
+  datasheet, it also reports their energy in uJ. With `thermal_tau_ms`,
+  `thermal_r` and `idle_mw` too, that energy heats a first-order thermal model,
+  and the SMART temperature follows it
+  ([thermal model](../reference/log-pages-and-counters.md#thermal-model)).
 - `wl_spread` turns on static wear levelling. When the lines in service
   differ by more than that many erases, the least worn full line moves into
   the most worn free line, so cold data rests on worn blocks and young blocks

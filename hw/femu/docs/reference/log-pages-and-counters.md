@@ -76,7 +76,7 @@ of these happens:
 
 | Event | Raised when | Log page it names |
 | --- | --- | --- |
-| SMART temperature warning | the host has enabled it with Async Event Configuration and set a temperature threshold at or below the reported value (`temperature`, in Kelvin, default 323, which is 50 C) | SMART / Health (02h) |
+| SMART temperature warning | the host has enabled it with Async Event Configuration and set a temperature threshold at or below the reported value (`temperature`, in Kelvin, default 323, which is 50 C); with the thermal model on, also when the modelled temperature reaches the over threshold or falls to the under threshold | SMART / Health (02h) |
 | Error | the host writes a doorbell that does not exist, or a value past the end of its queue | Error Information (01h) |
 | Namespace Attribute Changed | with `ns_mgmt=on`, a namespace is attached, detached, deleted or formatted, and the host enabled the notice | Changed Namespace List (04h) |
 | Zone Descriptor Changed | an injected write fault (`err_write_fail_ppm`) made a ZNS zone read only, and the host enabled Zone Descriptor Changed notices (bit 27) | Changed Zone List (BFh) |
@@ -91,6 +91,37 @@ checks the temperature path from inside the guest:
 gcc -O2 -o aer-probe femu-scripts/aer-probe.c   # inside the guest
 sudo ./aer-probe /dev/nvme0
 ```
+
+## Thermal model
+
+With `thermal_tau_ms` set, the composite temperature in the SMART log
+follows the NAND work instead of staying at `temperature`. Every constant
+comes from the user; FEMU has no built-in figures.
+
+```text
+  power (mW)  = idle_mw + NAND energy since the last step / the step
+                (plane reads, programs, erases x energy_*_nj; bbssd, CSD, KV)
+  target (K)  = temperature + power x thermal_r / 1000     (thermal_r: mK per mW)
+  every thermal_step_ms of virtual time:
+    T = target + (T - target) x exp(-step / thermal_tau_ms)
+    SMART temperature = T rounded to a Kelvin
+    T reaches the over threshold, or falls to the under threshold:
+      SMART critical warning bit 1, Persistent Event log entry,
+      and one SMART temperature event if the host enabled it
+```
+
+- The clock is QEMU's virtual clock, so a paused VM does not cool. NAND work
+  that FEMU does while the VM is paused counts in the first step after it.
+- The model does not throttle I/O, and the SMART time-over-threshold fields
+  stay 0.
+- One event is raised each time the condition starts while the host has
+  temperature events enabled, including when it enables them during an
+  excursion. A SMART read without RAE discards queued SMART events, so an
+  excursion that ends and starts again before the host reads the log is not
+  reported twice.
+- Refused with namespace management, shared namespaces, `cxl_ssd` and
+  `-icount`. `thermal_tau_ms` needs `thermal_r`; `thermal_step_ms` is 1 to
+  60000.
 
 ## Persistent Event log retention
 

@@ -2308,6 +2308,18 @@ typedef struct FemuCtrl {
     uint32_t        energy_read_nj;
     uint32_t        energy_prog_nj;
     uint32_t        energy_erase_nj;
+    /* thermal model (femu-thermal.c); off while thermal_tau_ms is 0 */
+    uint32_t        thermal_tau_ms; /* package time constant */
+    uint32_t        thermal_r;      /* mK per mW, package to ambient */
+    uint32_t        idle_mw;        /* power with no NAND operations */
+    uint32_t        thermal_step_ms; /* update period */
+    QEMUTimer       *thermal_timer;
+    double          thermal_t;      /* temperature in K, not rounded */
+    uint16_t        thermal_ambient; /* the temperature property at realize */
+    int64_t         thermal_last_ns;
+    int64_t         thermal_deadline;
+    uint64_t        *thermal_ops;   /* plane ops priced, 3 per namespace */
+    bool            temp_cond_prev; /* condition seen with events enabled */
     uint32_t        spare_lines;    /* lines held back as spare blocks */
     /*
      * SMART critical warning bits whose condition the FTL thread saw begin
@@ -2638,6 +2650,12 @@ void femu_pel_set_feature(FemuCtrl *n, const NvmeCmd *cmd,
 void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
                   uint16_t len);
 void femu_pel_warning(FemuCtrl *n, uint8_t warning);
+void femu_pel_temp_warning(FemuCtrl *n, bool on);
+bool femu_thermal_check(FemuCtrl *n, Error **errp);
+void femu_thermal_start(FemuCtrl *n);
+void femu_thermal_stop(FemuCtrl *n);
+bool femu_temp_condition(FemuCtrl *n);
+void femu_temp_eval(FemuCtrl *n);
 void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe);
 uint16_t femu_pel_get_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                           uint64_t off);

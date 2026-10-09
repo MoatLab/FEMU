@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 162 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 166 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -153,6 +153,10 @@ Devices:
 | `energy_read_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane read in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_prog_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane program in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_erase_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
+| `thermal_tau_ms` | `uint32` | `0` | time constant of the package, ms: the composite temperature moves towards temperature + power * thermal_r at this rate, where power is idle_mw plus the energy of the NAND plane operations (energy_*_nj) per second; 0 (default) turns the model off |
+| `thermal_r` | `uint32` | `0` | thermal resistance from the package to ambient, mK per mW (K per W); needed with thermal_tau_ms |
+| `idle_mw` | `uint32` | `0` | power with no NAND operations, mW, for the thermal model |
+| `thermal_step_ms` | `uint32` | `100` | how often the thermal model updates the temperature, ms, 1 to 60000; 100 (default) |
 | `err_read_unc_ppm` | `uint32` | `0` | bbssd, CSD: reads per million that fail as Unrecovered Read Error, injected at a fixed period; 0 disables |
 | `err_write_fail_ppm` | `uint32` | `0` | bbssd, CSD and ZNS: writes per million that fail, injected at a fixed period (a ZNS zone then goes read-only); 0 disables |
 | `read_reclaim_limit` | `int32` | `0` | bbssd, CSD: when a host read finds its block has taken this many reads since its erase, that line is queued and rewritten on a following write, one line at a time; 0 disables, refused with FDP |

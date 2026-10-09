@@ -503,6 +503,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->ns_notice_masked = false;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
+    n->temp_cond_prev = false;
     qatomic_set(&n->health_pending, 0);
     /* commands the reset dropped no longer hold a firmware core */
     if (n->fw_core_avail) {
@@ -546,6 +547,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->bar.cc = 0;
     nvme_reset_features(n);
     n->temp_warn_issued = 0;
+    n->temp_cond_prev = false;
     /*
      * Release the doorbell buffers as well as forgetting them: each enable and
      * configure took a mapping reference that only the device going away gave
@@ -2521,6 +2523,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_check_multiplane_props(n, errp)) {
         return;
     }
+    if (!femu_thermal_check(n, errp)) {
+        return;
+    }
     if (!femu_check_wear_props(n, errp)) {
         return;
     }
@@ -2739,6 +2744,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
     }
+    femu_thermal_start(n);
 }
 
 /*
@@ -2892,6 +2898,7 @@ static void femu_exit(PCIDevice *pci_dev)
     FemuCtrl *n = FEMU(pci_dev);
 
     femu_debug("femu_exit starting!\n");
+    femu_thermal_stop(n);
 
     /*
      * Stop every thread first. femu_exit_extensions() releases each mode's FTL
@@ -3134,6 +3141,10 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("energy_read_nj", FemuCtrl, energy_read_nj, 0),
     DEFINE_PROP_UINT32("energy_prog_nj", FemuCtrl, energy_prog_nj, 0),
     DEFINE_PROP_UINT32("energy_erase_nj", FemuCtrl, energy_erase_nj, 0),
+    DEFINE_PROP_UINT32("thermal_tau_ms", FemuCtrl, thermal_tau_ms, 0),
+    DEFINE_PROP_UINT32("thermal_r", FemuCtrl, thermal_r, 0),
+    DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
+    DEFINE_PROP_UINT32("thermal_step_ms", FemuCtrl, thermal_step_ms, 100),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
     DEFINE_PROP_UINT32("err_read_unc_ppm", FemuCtrl, err_read_unc_ppm, 0),
