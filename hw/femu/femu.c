@@ -504,6 +504,13 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
     qatomic_set(&n->health_pending, 0);
+    /* commands the reset dropped no longer hold a firmware core */
+    if (n->fw_core_avail) {
+        pthread_spin_lock(&n->fw_cpu_lock);
+        memset(n->fw_core_avail, 0, n->fw_cores * sizeof(*n->fw_core_avail));
+        n->fw_cpu_next_avail_time = 0;
+        pthread_spin_unlock(&n->fw_cpu_lock);
+    }
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");

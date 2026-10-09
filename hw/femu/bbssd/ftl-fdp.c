@@ -992,6 +992,7 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
             break;
         }
         fg_gc_iters++;
+        ssd->gc_stall_passes++;
     }
 }
 
@@ -1007,6 +1008,7 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
                                       NvmeRequest *req, uint64_t start_lpn,
                                       uint64_t end_lpn)
 {
+    uint64_t passes;
     NvmeNamespace *ns = req->ns;
     struct ssdparams *spp = &ssd->sp;
     FemuReclaimGroup *rg;
@@ -1121,6 +1123,7 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
      * only a guard against an unexpected non-terminating condition, bounded by
      * the total reclaim-unit population so it never trips during real progress.
      */
+    passes = ssd->gc_stall_passes;
     fdp_gc_until_clear(ssd, rgid, ruhid);
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -1202,6 +1205,7 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     /* what the caller charges its byte counters with */
     req->xfer_bytes = written * (uint64_t)spp->secs_per_pg * spp->secsz;
 
+    ssd_note_gc_stall(ssd, passes);
     return maxlat;
 }
 
@@ -1676,7 +1680,11 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
      * charged the media nor counted the pages.
      */
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
-        uint64_t lat = ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
+        uint64_t lat;
+
+        ssd_count_partial_pages(ssd, req, le64_to_cpu(rw->slba),
+                                le16_to_cpu(rw->nlb) + 1);
+        lat = ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
 
         fdp_count_write(req->ns, ssd, req);
         return lat;

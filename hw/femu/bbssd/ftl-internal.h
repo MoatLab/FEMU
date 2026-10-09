@@ -296,11 +296,10 @@ extern const struct femu_mapping_ops femu_mapping_fast_ops;
  * Fixed namespaces retain device-relative numbering; managed namespaces use
  * their private FTL address spaces.
  */
-static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
-                                 uint64_t slba, uint64_t nlb,
-                                 uint64_t *start_lpn, uint64_t *end_lpn)
+/* byte offset of block @slba of the request's namespace in the FTL */
+static inline uint64_t ssd_lba_byte_offset(struct ssd *ssd, NvmeRequest *req,
+                                           uint64_t slba)
 {
-    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
     uint64_t off = req->ns ? req->ns->backend_offset : 0;
 
@@ -309,7 +308,17 @@ static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
         (le16_to_cpu(ssd->n->id_ctrl.oacs) & NVME_OACS_NS_MGMT)) {
         off = 0;
     }
-    off += slba << lbads;
+    return off + (slba << lbads);
+}
+
+static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
+                                 uint64_t slba, uint64_t nlb,
+                                 uint64_t *start_lpn, uint64_t *end_lpn)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t off = ssd_lba_byte_offset(ssd, req, slba);
+
     *start_lpn = off / pg;
     *end_lpn = (off + (nlb << lbads) - 1) / pg;
 }
@@ -325,7 +334,7 @@ static inline void ssd_count_partial_pages(struct ssd *ssd, NvmeRequest *req,
 {
     uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
-    uint64_t start = slba << lbads;
+    uint64_t start = ssd_lba_byte_offset(ssd, req, slba);
     uint64_t end = start + (nlb << lbads);
 
     if (!nlb) {
@@ -336,6 +345,14 @@ static inline void ssd_count_partial_pages(struct ssd *ssd, NvmeRequest *req,
         return;
     }
     ssd->partial_page_writes += (start % pg != 0) + (end % pg != 0);
+}
+
+/* a host write that ran forced collection before it got room counts once */
+static inline void ssd_note_gc_stall(struct ssd *ssd, uint64_t passes_before)
+{
+    if (ssd->gc_stall_passes != passes_before) {
+        ssd->gc_stalled_writes++;
+    }
 }
 
 /* DRAM write buffer ordering (hw/femu/bbssd/ftl-datapath.c) */

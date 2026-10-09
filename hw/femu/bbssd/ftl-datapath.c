@@ -732,6 +732,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int r;
     bool wl_done;
     uint64_t passes = ssd->gc_stall_passes;
+    bool buffer_full = false;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -784,7 +785,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
              * also bounds the latency a single command can absorb.
              */
             if (!buffer_hit(ssd, lpn) && buffer_at_watermark(ssd)) {
-                ssd->buffer_full_destages++;
+                buffer_full = true;
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
                 /*
@@ -810,6 +811,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         curlat = buffer_hit_lat(ssd);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
 
+        ssd->buffer_full_destages += buffer_full;
+        ssd_note_gc_stall(ssd, passes);
         return maxlat;
     }
 
@@ -888,9 +891,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
     }
     /* the write waited for collection to make room */
-    if (ssd->gc_stall_passes != passes) {
-        ssd->gc_stalled_writes++;
-    }
+    ssd_note_gc_stall(ssd, passes);
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;
 
@@ -989,6 +990,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
 
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
         uint64_t lpn, curlat, maxlat = 0;
+        uint64_t passes = ssd->gc_stall_passes;
+        bool wl_done;
 
         /*
          * Without the bit the blocks hold written zeros rather than becoming
@@ -1008,11 +1011,15 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             if (do_gc(ssd, true) == -1) {
                 break;
             }
+            ssd->gc_stall_passes++;
         }
+        wl_done = do_wear_level(ssd) == 0;
 
         ssd->host_write_pages += end_lpn - start_lpn + 1;
         /* the pair an ordinary write bumps; these pages are programmed too */
         ssd->sp.write_cnt += end_lpn - start_lpn + 1;
+        ssd_count_partial_pages(ssd, req, le64_to_cpu(rw->slba),
+                                le16_to_cpu(rw->nlb) + 1);
 
         /*
          * This goes straight to the media, so anything the buffer is holding
@@ -1037,9 +1044,18 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             }
             curlat = ssd_program_lpn(ssd, lpn, req->stime, -1);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
+            /* the pages are programmed, so wear levelling sees them too */
+            if (spp->wl_spread) {
+                ssd->wl_credit = MIN(ssd->wl_credit + 1,
+                                     4ull * spp->pgs_per_line);
+                if (!wl_done) {
+                    wl_done = do_wear_level(ssd) == 0;
+                }
+            }
         }
         curlat = ssd_mp_flush(ssd, NAND_WRITE);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+        ssd_note_gc_stall(ssd, passes);
 
         return maxlat;
     }

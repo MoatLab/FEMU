@@ -3846,6 +3846,26 @@ static void femu_test_fdp_capacity_refused(void *obj, void *data,
  * trace. SMART reports the reliability warning exactly
  * when a block is overworn, and no mapped page may be left in a retired line.
  */
+/* Write Zeroes of @nlb blocks from @slba on namespace 1, without deallocate */
+static uint16_t femu_write_zeroes(FemuCtrlState *c, uint64_t slba, uint32_t nlb)
+{
+    NvmeCmd cmd;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(nlb - 1);
+    femu_submit(c, &c->io, &cmd);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
 /* the FTL trace's fill and 600 overwrites, every write required to succeed */
 static void femu_wear_workload(FemuCtrlState *c, uint64_t buf, uint64_t list)
 {
@@ -4041,8 +4061,10 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
     QDict *ns;
     int i;
 
-    g_assert_cmpint(sscanf(data, "%" SCNu64 " %" SCNu64, &want_spread,
-                           &want_moves), ==, 2);
+    bool wz = g_str_has_prefix(data, "wz ");
+
+    g_assert_cmpint(sscanf(wz ? data + 3 : data, "%" SCNu64 " %" SCNu64,
+                           &want_spread, &want_moves), ==, 2);
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x3c, 64 * 4096);
@@ -4051,7 +4073,9 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
                         NVME_SUCCESS);
     }
     for (i = 0; i < 400; i++) {
-        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 240, 16, buf, list)), ==,
+        /* Write Zeroes programs the pages too, so it must level the same */
+        g_assert_cmphex(wz ? femu_write_zeroes(&c, 240 * 8, 128) :
+                        FEMU_SC(femu_write_pages(&c, 240, 16, buf, list)), ==,
                         NVME_SUCCESS);
     }
 
@@ -4139,7 +4163,53 @@ static void femu_test_partial_writes(void *obj, void *data,
         before = ldq_le_p(page + 152);
     }
 
+    /* Write Zeroes programs its pages, so a partial one counts the same */
+    g_assert_cmpint(femu_write_zeroes(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_write_zeroes(&c, 4, 16), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 152) - before, ==, 3);
+
     guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Namespaces after the first start wherever the one before ended, which
+ * need not be on a NAND page. On a 1 MiB device split in three with 512-byte
+ * blocks, namespace 2 starts 1 KiB into a page, so 4 KiB from its block 0
+ * covers two pages in part.
+ */
+static void femu_test_partial_writes_ns2(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+    NvmeRwCmd rw;
+    uint16_t got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(2);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 152), ==, 2);
+
     guest_free(alloc, log);
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -5381,6 +5451,26 @@ static void femu_test_fw_cost(void *obj, void *data, QGuestAllocator *alloc)
         cmd[0].opcode = NVME_CMD_WRITE;
         ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
         g_assert_cmpint(ms, <, FW_COST_MS / 2);
+    } else if (g_str_equal(mode, "reset")) {
+        FemuCtrlState c2 = { 0 };
+        FemuQueue q2;
+
+        /* eight reads hold the firmware core for 1.6 s; reset after 50 ms */
+        for (int i = 0; i < 8; i++) {
+            femu_zap_queue(&c, &q, &cmd[0]);
+        }
+        femu_zap_ring(&c, &q);
+        g_usleep(50 * 1000);
+        femu_disable(&c);
+        femu_enable(&c2, &femu->dev, alloc);
+        femu_zap_create_queue(&c2, &q2, 1);
+        ms = femu_fw_elapsed_ms(&c2, &q2, cmd, 1);
+        g_test_message("first read after reset took %" PRId64 " ms", ms);
+        g_assert_cmpint(ms, <, 2 * FW_COST_MS);
+        guest_free(alloc, buf);
+        femu_queue_free(&c2, &q2);
+        femu_disable(&c2);
+        return;
     } else if (g_str_equal(mode, "other")) {
         ms = femu_fw_elapsed_ms(&c, &q, cmd, 1);
         g_assert_cmpint(ms, <, FW_COST_MS / 2);
@@ -5457,7 +5547,26 @@ static void femu_test_stalls(void *obj, void *data, QGuestAllocator *alloc)
             g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i * 4, 4, buf, list)),
                             ==, NVME_SUCCESS);
         }
+        /* writes, not the batches they destaged */
         g_assert_cmpuint(femu_c0h_field(&c, log, 208), >, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 208), <=, 32);
+    } else if (g_str_equal(mode, "buffer-gc") || g_str_equal(mode, "fdp")) {
+        uint64_t writes, passes;
+
+        /* buffered or placed writes that collect count like direct ones */
+        femu_create_io_queues(&c);
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (i * 64) % 192, 64,
+                                                     buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+        writes = femu_c0h_field(&c, log, 192);
+        passes = femu_c0h_field(&c, log, 200);
+        g_test_message("%s: %" PRIu64 " stalled writes, %" PRIu64 " passes",
+                       mode, writes, passes);
+        g_assert_cmpuint(writes, >, 0);
+        g_assert_cmpuint(passes, >=, writes);
+        g_assert_cmpuint(writes, <=, 40);
     } else {
         FemuQueue q = { .qid = 1, .phase = 1 };
         NvmeCmd cmd;
@@ -25526,13 +25635,26 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
             ",wl_spread=4"
     });
+
+    qos_add_test("wear-level-wz", "femu", femu_test_wear_level,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"wz 19 61",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
+            ",wl_spread=4,oncs=0x1c"
+    });
     qos_add_test("partial-writes-bbssd", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "femu_mode=1"
+        .edge.extra_device_opts = "femu_mode=1,oncs=0x1c"
+    });
+    qos_add_test("partial-writes-ns2", "femu", femu_test_partial_writes_ns2,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=1,namespaces=3"
     });
     qos_add_test("partial-writes-fdp", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "femu_mode=1,subsys=fdpsub"
+        .edge.extra_device_opts = "femu_mode=1,subsys=fdpsub,oncs=0x1c"
     });
     qos_add_test("plane-energy", "femu", femu_test_plane_energy,
                  &(QOSGraphTestOptions) {
@@ -25561,6 +25683,11 @@ static void femu_register_nodes(void)
         .arg = (void *)"other",
         .edge.extra_device_opts = "femu_mode=2,vwc=1,fw_other_ns=200000000"
     });
+    qos_add_test("fw-cost-reset", "femu", femu_test_fw_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"reset",
+        .edge.extra_device_opts = "femu_mode=2,fw_read_ns=200000000"
+    });
     qos_add_test("fw-cost-cores1", "femu", femu_test_fw_cost,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"cores1",
@@ -25584,6 +25711,22 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,buffer_size=16"
+    });
+    qos_add_test("stall-buffer-gc", "femu", femu_test_stalls,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer-gc",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "buffer_size=16"
+    });
+    qos_add_test("stall-fdp", "femu", femu_test_stalls,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_thres_pcent=100,gc_thres_pcent_high=100"
     });
     qos_add_test("stall-cq", "femu", femu_test_stalls,
                  &(QOSGraphTestOptions) {

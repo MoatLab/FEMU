@@ -645,7 +645,7 @@ queue. Both are off by default.
 | --- | --- | --- |
 | Link transfer (`pcie_bandwidth_mbps`) | NVMe Read and Write (opcodes 01h and 02h) in BBSSD, CSD, KV, ZNS and NoSSD; KV store and retrieve share those opcodes and use the bytes moved. Not Zone Append, and not the Open-Channel vector commands, so OCSSD 1.2 never pays it | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. `start = max(queue, expire)`, `queue = start + trans` |
 | Propagation (`pcie_prop_delay_ns`) | same | `expire = queue + delay`; does not occupy the queue |
-| Firmware CPU (`fw_cpu_ns`, `fw_read_ns`, `fw_write_ns`, `fw_other_ns`, `fw_cores`) | Read (`fw_read_ns`), Write and Zone Append (`fw_write_ns`), each falling back to `fw_cpu_ns` when 0; every other I/O command pays `fw_other_ns`; not the Open-Channel vector commands | `fw_cores` modelled cores: the command takes the core free soonest, `start = max(core, expire)`, `core = start + cost`, `expire = core` |
+| Firmware CPU (`fw_cpu_ns`, `fw_read_ns`, `fw_write_ns`, `fw_other_ns`, `fw_cores`) | Read (`fw_read_ns`), Write and Zone Append (`fw_write_ns`), each falling back to `fw_cpu_ns` when 0; every other I/O command, the Open-Channel vector commands included, pays `fw_other_ns` | `fw_cores` modelled cores: the command takes the core free soonest, `start = max(core, expire)`, `core = start + cost`, `expire = core` |
 
 The link is modelled after the media for both directions. A read's transfer
 to the host never overlaps its NAND time, and a write's transfer from the
