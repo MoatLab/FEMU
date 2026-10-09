@@ -332,6 +332,9 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
     if (zns->zone_wp_slot) {
         zns->zone_wp_slot[zone_idx] = 0;
     }
+    if (zns->zone_wp_plane) {
+        zns->zone_wp_plane[zone_idx] = 0;
+    }
 
     ftl_debug("Reset block state for zone %u (all page_wp = 0)\n", zone_idx);
 }
@@ -439,10 +442,19 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     int flash_type = zns->flash_type;
     uint64_t sublat = 0, maxlat = 0;
 
+    /*
+     * Resume at the plane where this zone's previous flush stopped: a
+     * partial flush (eviction) fills only the first plane(s) of a die, and
+     * restarting every flush at plane 0 piles the zone's pages onto its
+     * plane-0 blocks, which then overrun num_page while the other planes'
+     * blocks stay empty.
+     */
+    int start_pl = zns->zone_wp_plane ? zns->zone_wp_plane[zone_idx] : 0;
+
     i = 0;
     while(i < zns->cache.write_cache[wcidx].used)
     {
-        for(p = 0;p<zns->num_plane;p++){
+        for(p = start_pl;p<zns->num_plane;p++){
             /*
              * A partial cache (evicted before its stripe filled) programs
              * only the pages that hold data; the untouched planes and
@@ -492,8 +504,16 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
             }
         }
-        /* need to advance the write pointer here */
-        zns_advance_write_pointer(zns, zone_idx);
+        /* move to the next die only once every plane of this one is used */
+        if (p == zns->num_plane) {
+            zns_advance_write_pointer(zns, zone_idx);
+            start_pl = 0;
+        } else {
+            start_pl = p;
+        }
+    }
+    if (zns->zone_wp_plane) {
+        zns->zone_wp_plane[zone_idx] = start_pl;
     }
     zns->cache.write_cache[wcidx].used = 0;
     return maxlat;
