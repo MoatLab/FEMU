@@ -66,6 +66,7 @@ check-docs:
 	python3 ../scripts/gen-property-docs.py --check --qemu $(QEMU)
 	python3 ../scripts/gen-mode-table.py --check
 	python3 ../scripts/check-doc-links.py
+	python3 ../scripts/check-changelog-hashes.py ../docs/CHANGELOG.md
 	python3 ../scripts/check-doc-examples.py --self-test --qemu $(QEMU) \
 	    --qos-test $(QOS_TEST)
 	python3 ../scripts/check-doc-examples.py --qemu $(QEMU) \

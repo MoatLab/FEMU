@@ -13,6 +13,7 @@ make -C hw/femu/tests check-docs QEMU=$PWD/build/qemu-system-x86_64 \
 | Property reference | `hw/femu/scripts/gen-property-docs.py --check` | a property has no description, or `reference/properties.md` or `reference/runtime-properties.md` differs from the binary |
 | Mode table | `hw/femu/scripts/gen-mode-table.py --check` | a mode table differs from `modes.py`, or `modes.py` disagrees with the tree |
 | Links | `hw/femu/scripts/check-doc-links.py` | a relative link or heading anchor does not exist |
+| CHANGELOG commits | `hw/femu/scripts/check-changelog-hashes.py` | a commit that the CHANGELOG names is not in the history of HEAD, for example a hash from before a rebase |
 | Examples | `hw/femu/scripts/check-doc-examples.py` | a code block is not tagged, or a tagged example does not work |
 
 Only two reference pages are generated: `reference/properties.md` and

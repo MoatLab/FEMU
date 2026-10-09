@@ -412,6 +412,10 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        # The CHANGELOG check needs every commit; file contents are not needed.
+        fetch-depth: 0
+        filter: blob:none
 
     - name: Check code style
       run: |
@@ -437,6 +441,12 @@ jobs:
         # command block must carry a femu-example or femu-untested tag.
         python3 hw/femu/scripts/gen-mode-table.py --check
         python3 hw/femu/scripts/check-doc-examples.py --lint
+
+    - name: Check the commits the CHANGELOG names
+      run: |
+        # A hash from before a rebase or a squash names a commit that is not
+        # in the public history.
+        python3 hw/femu/scripts/check-changelog-hashes.py
 
     - name: Validate documentation
       run: |
