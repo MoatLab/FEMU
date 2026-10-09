@@ -112,6 +112,8 @@ listed one by one.
 - Log page C0h counts plane reads, programs and erases and, with `energy_read_nj`, `energy_prog_nj` and `energy_erase_nj`, their energy (1f5620a1e).
 - Firmware time per opcode (`fw_read_ns`, `fw_write_ns`, `fw_other_ns`) and on several firmware cores (`fw_cores`) (8370f6f59).
 - Log page C0h counts host writes that waited for forced collection or a full write buffer, and completions held for a full completion queue (5631b3c07).
+- Opt-in paced collection (`gc_pace`): the victim line is copied a few pages per host page written instead of in one pass, so a write waits for about one copy instead of a whole line (ff5e4b5ce).
+- Opt-in thermal model (`thermal_tau_ms`, `thermal_r`, `idle_mw`, `thermal_step_ms`): the SMART composite temperature follows the NAND energy and idle power through a first-order model, and crossing a threshold raises the SMART temperature warning and event (eda6b6ffe).
 - Opt-in static wear levelling (`wl_spread`): the least worn full line moves into the most worn free line, without a write pointer of its own (2e1ef35ba).
 - Read reclaim (`read_reclaim_limit`) and retention refresh (`retention_limit_sec`) (7f9b4f6af, 4e09c4797, e7f182b87).
 - Data age feeds the ECC read model (`ecc_retention_sec`) (f9433e9ab, 13f2b85de).
@@ -289,6 +291,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Fixed controller configuration and admin queue registers, feature reset on controller reset, and the fatal status cleared on disable (330ed2aab, f2ea41361, ab63717c5).
 - Get Log Page reads its identifier and offset correctly and serves every log from the requested offset (a6b0d5897, ef8b755ee, 23fc538ea).
 - Feature identifier, selector and save bit are decoded, and namespace-scoped features take a namespace (2380e4ecc, 1729244c2).
+- Temperature Threshold: Get Features refuses the reserved THSEL values and "all sensors", Set Features refuses the reserved THSEL values, the over threshold starts at the warning temperature (343 K) as Identify reports, and the under threshold sets SMART critical warning bit 1 and raises the temperature event (7ff2172cc).
 - Identify reports total NVM capacity and the fields a host relies on (907ad6ff1, 8530bc287).
 - Fixed the error and SMART logs, the log directories, Format secure erase decoding, data pointer and transfer size statuses, and bad doorbell reporting (325e02cfd, c52d9ff9c, adfc12e93, bdb6f6b59, 225c6bdee).
 - Fixed the AER count, Zone Append limit, KV MDTS and vector masking (7b5dbbc77).
