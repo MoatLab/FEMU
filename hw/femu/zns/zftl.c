@@ -454,7 +454,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     i = 0;
     while(i < zns->cache.write_cache[wcidx].used)
     {
-        for(p = start_pl;p<zns->num_plane;p++){
+        for (p = start_pl; p < zns->num_plane; p++) {
             /*
              * A partial cache (evicted before its stripe filled) programs
              * only the pages that hold data; the untouched planes and

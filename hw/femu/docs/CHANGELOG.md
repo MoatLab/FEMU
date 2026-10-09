@@ -256,6 +256,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Fixed FDP victim accounting, foreground GC under write pressure, the initial reclaim unit, and the FDP Events log offset (cee9670a5, 247151a16, f9fc94d4f, 438e485a1).
 - bbssd maps blocks by their real size, so 4 KiB formats no longer share logical pages (bb63df5a3).
 - Fixed ZNS zone append, Zone Append bounds, zone open on write, zone resource counts, multi-zone reset, and zone write caches keyed by zone (07acf491a, 27949b51f, 3fd4f34e6, 8129cfd16, 340522142, 99ce4fb2b, 9a3449362, 347a8a691).
+- A ZNS zone whose write cache is evicted before it fills now continues its next flush on the first free plane, not on plane 0. With more zones written at once than write caches, plane 0's block ran past its last page and reads of those blocks finished faster than tR (8bcaa0623).
 - A ZNS write refused for its data pointer no longer moves the write pointer (6343c4d22).
 - FDP Write Zeroes is placed by its own directive fields and counted in HBMW and MBMW, instead of reusing the placement of an earlier command (834abe2cb).
 - Write Zeroes and deallocate address the backend per namespace, program the media where required, and drop buffered copies (f44ce6499, 9005cf952, 373de039b, 783131b7d, 22988e07b).

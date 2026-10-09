@@ -1469,6 +1469,91 @@ static void femu_test_zone_reset(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * More zones written at once than there are write caches: every 16 KiB a
+ * zone writes evicts another zone's cache, and that flush fills only part
+ * of a die. The next flush has to continue at the first free plane. If it
+ * starts at plane 0 again, plane 0's block runs past its last page, and
+ * reads of the blocks mapped there skip the NAND model and finish under tR.
+ */
+#define ZNS_PLANE_WRITERS   5
+#define ZNS_PLANE_TR_NS     2000000
+
+static void femu_test_zns_flush_plane(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint8_t report[192];
+    uint64_t zsze;
+    uint64_t lpns;
+    uint64_t lba4k;
+    uint64_t lpn;
+    unsigned fast_head = 0;
+    unsigned fast_tail = 0;
+    int z;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+
+    femu_zone_report(&c, buf, report);
+    zsze = ldq_le_p(report + 64 + 64 + 16);
+    lba4k = FEMU_DATA_SIZE / c.lba_size;
+    lpns = zsze / lba4k;
+    g_assert_cmpuint(lpns, ==, 512);
+
+    for (lpn = 0; lpn < lpns; lpn += 4) {
+        for (z = 0; z < ZNS_PLANE_WRITERS; z++) {
+            for (k = 0; k < 4; k++) {
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                                z * zsze +
+                                                (lpn + k) * lba4k, buf)),
+                                ==, NVME_SUCCESS);
+            }
+        }
+    }
+    /* one write to each of three more zones flushes all three caches */
+    for (z = ZNS_PLANE_WRITERS; z < ZNS_PLANE_WRITERS + 3; z++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, z * zsze, buf)),
+                        ==, NVME_SUCCESS);
+    }
+
+    /*
+     * The head of zone 0 is the control: those reads must take tR. The
+     * tail is where plane 0's block overflows.
+     */
+    for (lpn = 0; lpn < lpns; lpn++) {
+        int64_t t0;
+
+        if (lpn == 80) {
+            lpn = lpns - 80;
+        }
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, lpn * lba4k,
+                                        buf)), ==, NVME_SUCCESS);
+        if ((g_get_monotonic_time() - t0) * 1000 < ZNS_PLANE_TR_NS / 2) {
+            if (lpn < 80) {
+                fast_head++;
+            } else {
+                fast_tail++;
+            }
+        }
+    }
+    g_test_message("reads under tR/2: head %u, tail %u", fast_head,
+                   fast_tail);
+    g_assert_cmpuint(fast_head, ==, 0);
+    g_assert_cmpuint(fast_tail, ==, 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static uint16_t femu_get_feature(FemuCtrlState *c, uint8_t fid, uint8_t sel,
                                  uint32_t nsid, uint32_t dw11,
                                  uint32_t *result)
@@ -25315,6 +25400,13 @@ static void femu_register_nodes(void)
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
+    qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_pg_rd_lat=2000000"
     });
     qos_add_test("identify-other-csi", "femu", femu_test_identify_other_csi,
                  &(QOSGraphTestOptions) {

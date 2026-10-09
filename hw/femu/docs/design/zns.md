@@ -60,7 +60,7 @@ how long each operation takes. The general request path is described in
 | --- | --- | --- |
 | `NvmeZone` | `zns/zns.h` | `d` (the zone descriptor the host reads: type `zt`, state `zs`, attributes `za`, `zcap`, `zslba`, `wp`), `w_ptr` (the write pointer used to place writes), list `entry` |
 | `NvmeNamespace` (zoned part) | `nvme.h` | `zone_array`, `num_zones`, `zone_size` and `zone_capacity` in logical blocks, `zone_size_log2`, the lists `exp_open_zones`, `imp_open_zones`, `closed_zones`, `full_zones`, the counters `nr_open_zones` and `nr_active_zones` with their limits, the ZRWA fields `zrwa_size`, `zrwafg_size`, `zrwa_num`, `zrwa_avail`, `zd_extensions`, `id_ns_zoned` |
-| `struct zns_ssd` | `zns/zns.h` | NAND geometry (`num_ch`, `num_lun`, `num_plane`, `num_blk`, `num_page`), the `ch -> fc -> plane -> blk` tree with per-block `page_wp`, `maptbl` (L2P per 4 KiB page), `cache` (write caches), `program_unit`, `stripe_unit`, `chnls_per_zone`, `zone_wp_slot[]`, `media`, `zone_lock`, the changed zone list |
+| `struct zns_ssd` | `zns/zns.h` | NAND geometry (`num_ch`, `num_lun`, `num_plane`, `num_blk`, `num_page`), the `ch -> fc -> plane -> blk` tree with per-block `page_wp`, `maptbl` (L2P per 4 KiB page), `cache` (write caches), `program_unit`, `stripe_unit`, `chnls_per_zone`, `zone_wp_slot[]`, `zone_wp_plane[]`, `media`, `zone_lock`, the changed zone list |
 | `struct zns_write_cache` | `zns/zns.h` | `sblk` (the zone it serves), `used`, `cap`, `lpns[]` |
 
 There are two write pointers per zone. `w_ptr` moves when a write is
@@ -150,8 +150,28 @@ channel first, then LUN:
 
 With `run-zns.sh` (8 channels, 4 LUNs, 2 planes, QLC) the program unit is
 128 KiB and the stripe unit 4 MiB. Each block keeps its own page write
-pointer `page_wp`; a zone reset sets it, and the zone's slot counter, back to
-zero.
+pointer `page_wp`; a zone reset sets it, the zone's slot counter and the
+zone's plane cursor back to zero.
+
+A flush of a full write cache uses every plane of each slot. A flush of a
+partial cache (an eviction) can stop after the first planes of a slot. The
+zone then keeps that position in `zone_wp_plane[zone]`, and its next flush
+continues on the first free plane of the same slot. The slot counter moves
+only after all planes of the slot are used:
+
+```text
+ eviction 1:  slot 0  [pl 0: data] [pl 1: free ]   zone_wp_plane = 1
+ eviction 2:  slot 0  [pl 0: data] [pl 1: data ]   slot -> 1, zone_wp_plane = 0
+```
+
+Without the cursor, every flush started at plane 0, so plane 0's block ran
+past its last page while the other planes stayed empty.
+
+A partial flush still programs a whole 16 KiB page for each group of up to
+4 logical pages it holds. A workload that evicts caches with fewer than 4
+logical pages, or a `zns_flash_type` that does not divide the pages of a
+block, can still use more pages than a block has. FEMU does not refuse or
+redirect those writes.
 
 ## Zone state machine
 
