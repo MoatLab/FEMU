@@ -69,15 +69,11 @@ bool femu_thermal_check(FemuCtrl *n, Error **errp)
     return true;
 }
 
-/* over the threshold, or (model on) at or under the under threshold */
+/* at or over the over threshold, or at or under the under threshold */
 bool femu_temp_condition(FemuCtrl *n)
 {
-    bool cond = n->features.temp_thresh <= n->temperature;
-
-    if (n->thermal_timer) {
-        cond |= n->temperature <= n->features.temp_thresh_under;
-    }
-    return cond;
+    return n->features.temp_thresh <= n->temperature ||
+           n->temperature <= n->features.temp_thresh_under;
 }
 
 /**

@@ -445,7 +445,7 @@ static void nvme_reset_features(FemuCtrl *n)
 
     n->features.arbitration     = 0x1f0f0706;
     n->features.power_mgmt      = 0;
-    n->features.temp_thresh     = 0x14d;
+    n->features.temp_thresh     = NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues    = (n->nr_io_queues - 1) |

@@ -76,7 +76,7 @@ of these happens:
 
 | Event | Raised when | Log page it names |
 | --- | --- | --- |
-| SMART temperature warning | the host has enabled it with Async Event Configuration and set a temperature threshold at or below the reported value (`temperature`, in Kelvin, default 323, which is 50 C); with the thermal model on, also when the modelled temperature reaches the over threshold or falls to the under threshold | SMART / Health (02h) |
+| SMART temperature warning | the host has enabled it with Async Event Configuration and the reported temperature (`temperature`, in Kelvin, default 323, which is 50 C) is at or above the over threshold (default 343 K, the warning temperature WCTEMP) or at or below the under threshold (default 0); with the thermal model on, also when the modelled temperature crosses one | SMART / Health (02h) |
 | Error | the host writes a doorbell that does not exist, or a value past the end of its queue | Error Information (01h) |
 | Namespace Attribute Changed | with `ns_mgmt=on`, a namespace is attached, detached, deleted or formatted, and the host enabled the notice | Changed Namespace List (04h) |
 | Zone Descriptor Changed | an injected write fault (`err_write_fail_ppm`) made a ZNS zone read only, and the host enabled Zone Descriptor Changed notices (bit 27) | Changed Zone List (BFh) |

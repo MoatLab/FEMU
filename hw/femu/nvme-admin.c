@@ -1291,13 +1291,18 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
     case NVME_TEMPERATURE_THRESHOLD:
         /*
          * Only the composite sensor is implemented, so every other one reads
-         * zero, and the under-temperature threshold starts there too.
+         * zero, and the under-temperature threshold starts there too. The
+         * over threshold starts at the warning temperature Identify reports.
+         * THSEL 2 and 3 are reserved, and "all sensors" is for Set only.
          */
-        if (((dw11 >> 16) & 0xf) != 0 || (dw11 & (1 << 20))) {
+        if (NVME_TEMP_THSEL(dw11) > 1 || NVME_TEMP_TMPSEL(dw11) == 0xf) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (NVME_TEMP_TMPSEL(dw11) != 0 || NVME_TEMP_THSEL(dw11)) {
             result = 0;
             break;
         }
-        result = 0x14d;
+        result = NVME_TEMPERATURE_WARNING;
         break;
     case NVME_VOLATILE_WRITE_CACHE:
         /* only a controller that reports a write cache has the feature */
@@ -1423,10 +1428,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         /* one composite sensor; THSEL picks the over or under threshold */
-        if (((dw11 >> 16) & 0xf) != 0 && ((dw11 >> 16) & 0xf) != 0xf) {
+        if (NVME_TEMP_TMPSEL(dw11) != 0 || NVME_TEMP_THSEL(dw11) > 1) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        cqe->n.result = cpu_to_le32((dw11 & (1 << 20)) ?
+        cqe->n.result = cpu_to_le32(NVME_TEMP_THSEL(dw11) ?
                                     n->features.temp_thresh_under :
                                     n->features.temp_thresh);
         break;
@@ -1602,39 +1607,38 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_TEMPERATURE_THRESHOLD:
         /*
          * dw11 carries the threshold in its low half and, above it, which
-         * sensor (TMPSEL) and which side (THSEL) it applies to. There is one
-         * composite sensor, and only its over threshold feeds the warning.
+         * sensor (TMPSEL) and which side (THSEL, 2 and 3 reserved) it applies
+         * to. There is one composite sensor; "all sensors" sets it too.
          */
-        if (((dw11 >> 16) & 0xf) != 0 && ((dw11 >> 16) & 0xf) != 0xf) {
+        if ((NVME_TEMP_TMPSEL(dw11) != 0 && NVME_TEMP_TMPSEL(dw11) != 0xf) ||
+            NVME_TEMP_THSEL(dw11) > 1) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        if (dw11 & (1 << 20)) {
+        if (NVME_TEMP_THSEL(dw11)) {
             n->features.temp_thresh_under = dw11 & 0xffff;
-            if (n->thermal_timer) {
-                femu_temp_eval(n);
-            }
-            break;
+        } else {
+            n->features.temp_thresh = dw11 & 0xffff;
         }
-        n->features.temp_thresh = dw11 & 0xffff;
         if (n->thermal_timer) {
             femu_temp_eval(n);
             break;
         }
         femu_pel_warning(n, nvme_critical_warning(n));
         /*
-         * Crossing the threshold raises a SMART event once, pointing the host
-         * at the health log. It is armed again when the threshold moves back
-         * above the temperature and the previous event has been read.
+         * Crossing a threshold raises a SMART event once, pointing the host
+         * at the health log, if the host enabled it. It is armed again when
+         * the thresholds move back past the temperature and the previous
+         * event has been read.
          */
-        if (n->features.temp_thresh <= n->temperature && !n->temp_warn_issued) {
-            n->temp_warn_issued = 1;
+        if (femu_temp_condition(n) && !n->temp_warn_issued) {
             if (NVME_AEC_SMART(n->features.async_config) &
                 NVME_SMART_TEMPERATURE) {
+                n->temp_warn_issued = 1;
                 nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
                                    NVME_AER_INFO_SMART_TEMP_THRESH,
                                    NVME_LOG_SMART_INFO);
             }
-        } else if (n->features.temp_thresh > n->temperature &&
+        } else if (!femu_temp_condition(n) &&
                 !(n->aer_mask & 1 << NVME_AER_TYPE_SMART)) {
             n->temp_warn_issued = 0;
         }

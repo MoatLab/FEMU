@@ -459,6 +459,9 @@ enum NvmeCapMask {
 #define NVME_TEMPERATURE        0x143
 #define NVME_TEMPERATURE_WARNING  0x157     /* 70 C */
 #define NVME_TEMPERATURE_CRITICAL 0x175     /* 100 C */
+/* Temperature Threshold feature, CDW11: sensor and over (0) or under (1) */
+#define NVME_TEMP_TMPSEL(dw11)  (((dw11) >> 16) & 0xf)
+#define NVME_TEMP_THSEL(dw11)   (((dw11) >> 20) & 0x3)
 #define NVME_ABORT_MARKED       (1u << 16)
 
 #define NVME_CAP_MQES(cap)  (((cap) >> CAP_MQES_SHIFT)   & CAP_MQES_MASK)

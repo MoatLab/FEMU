@@ -1589,6 +1589,12 @@ static uint16_t femu_set_feature(FemuCtrlState *c, uint8_t fid, bool save,
  * than obeyed, and an identifier the controller does not implement is an
  * invalid field.
  */
+static uint16_t femu_smart_temp(FemuCtrlState *c, uint64_t log,
+                                uint8_t *warning);
+
+/* the over threshold starts at WCTEMP, 343 K */
+#define FEMU_WCTEMP 0x157
+
 static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -1600,7 +1606,7 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
                             NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
                     ==, NVME_SUCCESS);
-    g_assert_cmpint(result, ==, 0x14d);
+    g_assert_cmpint(result, ==, FEMU_WCTEMP);
 
     /* the one command set combination there is may be selected, no other */
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
@@ -1628,11 +1634,11 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
                             NVME_GETFEAT_SELECT_DEFAULT, 0, 0, &result)),
                     ==, NVME_SUCCESS);
-    g_assert_cmpint(result, ==, 0x14d);
+    g_assert_cmpint(result, ==, FEMU_WCTEMP);
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
                             NVME_GETFEAT_SELECT_SAVED, 0, 0, &result)),
                     ==, NVME_SUCCESS);
-    g_assert_cmpint(result, ==, 0x14d);
+    g_assert_cmpint(result, ==, FEMU_WCTEMP);
 
     /* nothing is saveable */
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
@@ -1642,6 +1648,45 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
     /* a selector the specification does not define */
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
                             4, 0, 0, &result)), ==, NVME_INVALID_FIELD);
+
+    /* THSEL 2 and 3 are reserved; "all sensors" is for Set only */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 2 << 20, &result)),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_DEFAULT, 0, 3 << 20, &result)),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0xf << 16,
+                            &result)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            false, 0, (2 << 20) | 0x150, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            false, 0, (0xf << 16) | 0x150, NULL)), ==,
+                    NVME_SUCCESS);
+
+    /*
+     * At 323 K, an under threshold of 336 K is met, so SMART critical warning
+     * bit 1 is set; an under threshold of 0 clears it again.
+     */
+    {
+        uint64_t log = guest_alloc(alloc, 512);
+        uint8_t warning;
+
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                NVME_TEMPERATURE_THRESHOLD, false, 0,
+                                (1 << 20) | 0x150, NULL)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, &warning), ==, 323);
+        g_assert_cmphex(warning & NVME_SMART_TEMPERATURE, ==,
+                        NVME_SMART_TEMPERATURE);
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                NVME_TEMPERATURE_THRESHOLD, false, 0,
+                                1 << 20, NULL)), ==, NVME_SUCCESS);
+        femu_smart_temp(&c, log, &warning);
+        g_assert_cmphex(warning & NVME_SMART_TEMPERATURE, ==, 0);
+        guest_free(alloc, log);
+    }
 
     /* autonomous power state transitions are not implemented */
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, 0x0c,
