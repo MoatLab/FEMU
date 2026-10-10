@@ -117,12 +117,15 @@ Two things follow from this picture.
 | Write Zeroes | `ssd_write_zeroes()` | with the Deallocate bit: unmap; without it: program the range |
 | Dataset Management | `ssd_trim()` | deallocate each range |
 | Copy | `ssd_copy()` | read every source range, then write the destination |
+| Compare, Verify | `ssd_read()` | read the range as a Read does, without the injected read faults; also after a miscompare, or a protection error of a Verify |
 | Flush | `ssd_buffer_destage(ssd, 0, ...)` | program everything the write buffer holds |
 | I/O Management Send | `ssd_fdp_update_ruhs()` | FDP only: update reclaim unit handles |
 
 Read and Write latency is the largest per-page latency of the request: pages
 on different LUNs proceed in parallel, and pages on one LUN queue on its
-timeline. Copy costs the slowest source read plus the destination write.
+timeline. Copy issues the destination write when the slowest source read
+ends, so it costs that read plus the write. A source in a NoSSD namespace
+costs nothing, and a Copy into a NoSSD namespace charges no source read.
 After the opcode handler, the thread runs one background GC step if the
 device is past the background watermark ([Triggers](#triggers-and-watermarks)).
 

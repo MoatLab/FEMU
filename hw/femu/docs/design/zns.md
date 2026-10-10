@@ -255,7 +255,8 @@ the closed zones would not fit under the open limit.
 Zone Management Receive. Other I/O opcodes go through the common path in
 `nvme-io.c`, with these zoned rules:
 
-- Compare is checked like a Read (`zns_check_compare()`).
+- Compare is checked like a Read (`zns_check_compare()`). Compare and
+  Verify take the NAND read time of a Read, also after a miscompare.
 - Dataset Management, Write Zeroes, Copy and Write Uncorrectable fail with
   Invalid Opcode on a zoned namespace: they would change blocks without
   going through the state machine. The command effects log for CSI 2 leaves
@@ -528,7 +529,7 @@ A device with 64 MiB zones of half width on an 8-channel geometry:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `zone-reset`, `zone-open-limits`, `zone-active-limit`, `zone-append-parallel`, `zoned-append-limit`, `zoned-append-mdts0`, `zone-bad-dptr`, `zone-report-length`, `mdts0-zone-report`, `zoned-format-index`, `zoned-compare`, `zone-change-notice`, `log-contents-zoned`, `sgl-zoned`, `dma-error-zoned`, `ns-mgmt-unavailable-zoned`, `zrwa-reopen`, `zrwa-write-bounds`, `zrwa-odd-granule`, `zrwa-zd-ext`, `io-fuzz-zoned` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `zone-reset`, `zone-open-limits`, `zone-active-limit`, `zone-append-parallel`, `zoned-append-limit`, `zoned-append-mdts0`, `zone-bad-dptr`, `zone-report-length`, `mdts0-zone-report`, `zoned-format-index`, `zoned-compare`, `compare-verify-media-zns`, `zone-change-notice`, `log-contents-zoned`, `sgl-zoned`, `dma-error-zoned`, `ns-mgmt-unavailable-zoned`, `zrwa-reopen`, `zrwa-write-bounds`, `zrwa-odd-granule`, `zrwa-zd-ext`, `io-fuzz-zoned` |
 | Documentation examples | each tagged ZNS example starts under qtest, identifies the controller and writes and reads one block |
 | `hw/femu/scripts/zone-aen-probe.c` | in-guest, manual: Zone Descriptor Changed notice end to end with `err_write_fail_ppm` |
 | Guest tools | `blkzone`, `nvme zns`, fio `--zonemode=zbd` on a Linux guest, as in the [mode guide](../modes/zns.md#verify) |

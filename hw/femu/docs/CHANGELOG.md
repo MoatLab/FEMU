@@ -190,6 +190,8 @@ was not doing anything.
 #### Behaviour changes (still boots, numbers move)
 
 - Compare, Write Zeroes, Verify and Copy are on by default: the `oncs` default is now 0x19d instead of 0x14. A guest that sees Write Zeroes in ONCS can send it, and on bbssd the FTL programs the range unless Deallocate is set. `oncs=0x14` gives the old set. Write Uncorrectable still needs bit 0x2.
+- Compare and Verify take the NAND read time of a Read on bbssd, CSD and ZNS namespaces, also after a miscompare. Before, both completed with no media read.
+- A Copy on bbssd issues its destination write when its source reads end. On one LUN, a one-page Copy took the read time twice: 600 ms instead of 500 ms with a 100 ms read and a 400 ms program.
 - A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
@@ -289,6 +291,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Spec conformance and host compatibility
 
+- A Copy descriptor format 2 range that names the command's own namespace is accepted in every mode that accepts Copy. A CSD namespace refused it with Invalid Namespace, although the controller advertised format 2.
 - Identify CNS 19h (Endurance Group List) lists endurance group 1 on a controller in a subsystem, from a starting identifier of 0 or 1, as `nvme list-endgrp` asks. Without a subsystem it is refused.
 - Commands complete on the completion queue they were bound to, and submission queues that share a completion queue are served (7a3f1d9fa, dc4289f91).
 - Completions are not posted into a full queue and the phase tag is written last (6f998742f, 04ce8b1a7).

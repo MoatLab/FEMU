@@ -1707,6 +1707,28 @@ typedef struct NvmeRequest {
     void            (*defer)(FemuCtrl *n, struct NvmeRequest *req, int poller);
 } NvmeRequest;
 
+/*
+ * A check that failed only after it read the stored data still read the
+ * media, so the FTL charges that read: a miscompare, or a protection error
+ * of a Verify, which checks stored data only. A Compare checks the host
+ * buffer's protection first, so its protection errors may not have read
+ * anything. The I/O layer sets req->slba and req->nlb before either check.
+ */
+static inline bool nvme_req_media_checked(const NvmeRequest *req)
+{
+    uint16_t sc = req->status & 0x7ff;
+
+    switch (req->cmd.opcode) {
+    case NVME_CMD_COMPARE:
+        return sc == NVME_CMP_FAILURE;
+    case NVME_CMD_VERIFY:
+        return sc == NVME_E2E_GUARD_ERROR || sc == NVME_E2E_APP_ERROR ||
+               sc == NVME_E2E_REF_ERROR;
+    default:
+        return false;
+    }
+}
+
 typedef struct DMAOff {
     QEMUSGList *qsg;
     int ndx;

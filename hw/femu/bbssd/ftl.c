@@ -329,13 +329,14 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
 /* Lines rewritten because a block of theirs passed the read stress limit. */
 /*
  * Copy: read every source range, then program the destination as one write.
- * The write cannot start before its data has been read, so the latency is the
- * slowest read plus the write.
+ * The write cannot start before its data has been read, so it is issued when
+ * the slowest read ends, and the latency is that read plus the write.
  */
 static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
 {
     uint64_t dslba = req->slba;
     uint32_t dnlb = req->nlb;
+    uint64_t stime = req->stime;
     uint64_t rlat = 0;
     uint64_t wlat;
 
@@ -369,11 +370,13 @@ static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
     }
     req->slba = dslba;
     req->nlb = dnlb;
+    req->stime = stime + rlat;
     if (ssd->fdp_enabled) {
         wlat = nvme_do_write_fdp(n, req, dslba, dnlb);
     } else {
         wlat = ssd_write(ssd, req);
     }
+    req->stime = stime;
 
     return rlat + wlat;
 }
@@ -666,7 +669,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
      * would then touch unrelated mapping state and overwrite the error. Leave
      * latency at zero and let the poller post the carried status.
      */
-    if (req->status != NVME_SUCCESS) {
+    if (req->status != NVME_SUCCESS && !nvme_req_media_checked(req)) {
         return 0;
     }
     ssd->pace_gen++;
@@ -731,6 +734,20 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     case NVME_CMD_COPY:
         lat = ssd_copy(n, ssd, req);
         break;
+    case NVME_CMD_COMPARE:
+    case NVME_CMD_VERIFY: {
+        /*
+         * Both read the media; neither takes a read fault of its own. A
+         * failed check keeps its status, whatever the read reports.
+         */
+        uint16_t status = req->status;
+
+        lat = ssd_read(ssd, req);
+        if (status != NVME_SUCCESS) {
+            req->status = status;
+        }
+        break;
+    }
     case NVME_CMD_READ:
         lat = ssd_read(ssd, req);
         /*

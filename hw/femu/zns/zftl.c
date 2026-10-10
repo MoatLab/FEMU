@@ -679,7 +679,7 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
         return zns_zone_reset_deferred(ns, zns, req);
     }
 
-    if (req->status != NVME_SUCCESS) {
+    if (req->status != NVME_SUCCESS && !nvme_req_media_checked(req)) {
         return 0;
     }
 
@@ -690,6 +690,8 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
         lat = zns_write(zns, req);
         break;
     case NVME_CMD_READ:
+    case NVME_CMD_COMPARE:
+    case NVME_CMD_VERIFY:
         lat = zns_read(zns, req);
         break;
     case NVME_CMD_DSM:

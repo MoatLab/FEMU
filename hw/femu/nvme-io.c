@@ -1027,7 +1027,8 @@ mapped:
  * reports the blocks a Read would fail on, uncorrectable ones and, with DULBE
  * set, unwritten ones. A zoned namespace applies its read rules first.
  */
-static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                            NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -1039,6 +1040,9 @@ static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     if (slba > nsze || nlb > nsze - slba) {
         return NVME_LBA_RANGE | NVME_DNR;
     }
+    /* the FTL charges the media read, as for a Read */
+    req->slba = slba;
+    req->nlb = nlb;
     if (NS_ZNSSD(ns)) {
         status = zns_check_compare(ns, cmd);
         if (status) {
@@ -1198,7 +1202,9 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
  * The namespace a Copy range reads from: the command's own for descriptor
  * format 0, or the one the SNSID of a format 2 range names. Format 2 reads
  * logical blocks, so both ends have to be block namespaces; and they have to
- * have matching or corresponding PI formats (NVM 1.2, 3.3.2).
+ * have matching or corresponding PI formats (NVM 1.2, 3.3.2). A range in the
+ * command's own namespace is a format 0 range, so it is allowed in every mode
+ * that accepts Copy.
  */
 static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
                                  const NvmeCopyRange *r, NvmeNamespace **out)
@@ -1214,7 +1220,8 @@ static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
     if (!s) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
-    if (!(NS_BBSSD(s) || NS_NOSSD(s)) || !(NS_BBSSD(ns) || NS_NOSSD(ns))) {
+    if (s != ns && (!(NS_BBSSD(s) || NS_NOSSD(s)) ||
+                    !(NS_BBSSD(ns) || NS_NOSSD(ns)))) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
     *out = s;
@@ -1466,6 +1473,9 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
     }
+    /* the FTL charges the media read, as for a Read */
+    req->slba = slba;
+    req->nlb = nlb;
     uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);
     if (dulbe) {
         return dulbe;
@@ -2002,7 +2012,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_VERIFY:
         if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
-            return nvme_verify(n, ns, cmd);
+            return nvme_verify(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:

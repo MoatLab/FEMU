@@ -26109,6 +26109,178 @@ static void femu_test_oncs_default(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_STATS_PLANE_READS  160     /* C0h: plane operations that read */
+
+static uint64_t femu_plane_reads(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, 512, 0)),
+                    ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, buf + FEMU_STATS_PLANE_READS);
+}
+
+/*
+ * Compare and Verify read the media, so the FTL charges each a NAND read, as
+ * it does a Read, and a miscompare as well. Before, none of them read the
+ * media.
+ */
+static void femu_test_compare_verify_media(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, log, before;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    log = guest_alloc(alloc, 512);
+
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, 0, buf), ==,
+                    NVME_SUCCESS);
+    /* a Read moves the counter, so the counter can show a media read */
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_VERIFY, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    /* a miscompare read the media too */
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, FEMU_DATA_SIZE);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_CMP_FAILURE);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    femu_disable(&c);
+}
+
+/*
+ * One LUN, a 100 ms read and a 400 ms program: a one-page Copy reads the
+ * source and then programs the destination on the same LUN, which takes
+ * 500 ms. The program used to be issued at the start of the Copy, so it also
+ * waited for the read and the Copy took 600 ms.
+ */
+static void femu_test_copy_timing(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list, src = 0;
+    uint16_t nlb;
+    gint64 start, ms;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+    nlb = FEMU_DATA_SIZE / c.lba_size;
+
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, src, buf), ==,
+                    NVME_SUCCESS);
+    start = g_get_monotonic_time();
+    g_assert_cmphex(femu_copy(&c, list, 2 * nlb, &src, &nlb, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - start) / 1000;
+    g_test_message("one-page Copy took %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 480);
+    g_assert_cmpint(ms, <, 560);
+    femu_disable(&c);
+}
+
+/*
+ * A format 2 range that names the command's own namespace is a format 0
+ * range. The controller advertises format 2 wherever it accepts Copy, so a
+ * CSD namespace has to take it too.
+ */
+static void femu_test_copy_fmt2_own(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list;
+    uint8_t r[FEMU_DATA_SIZE];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writew(qts, buf + 4, 0x4);              /* enable format 2 */
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, 16, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_copy_fmt2(&c, list, 64, 1, 16, 8), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, 64, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, r, sizeof(r));
+    for (i = 0; i < sizeof(r); i++) {
+        g_assert_cmphex(r[i], ==, 0x3c);
+    }
+    /* another namespace is still refused: there is none here */
+    g_assert_cmphex(femu_copy_fmt2(&c, list, 64, 2, 16, 8), ==,
+                    NVME_INVALID_NSID);
+    femu_disable(&c);
+}
+
+/*
+ * The ZNS form: a 300 ms page read. Eight more writes push the first page out
+ * of the write cache, so a Read of it takes the read time, and Compare and
+ * Verify must take it as well, also when the Compare fails. Before, both
+ * completed at once.
+ */
+static void femu_test_compare_verify_zns(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    static const uint8_t opcodes[] = {
+        NVME_CMD_READ, NVME_CMD_COMPARE, NVME_CMD_VERIFY,
+    };
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    gint64 start, ms;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(c.pdev->bus->qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (i = 0; i <= ZNS_LUN_FILL; i++) {
+        g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE,
+                                      i * (FEMU_DATA_SIZE / c.lba_size), buf),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < ARRAY_SIZE(opcodes); i++) {
+        start = g_get_monotonic_time();
+        g_assert_cmphex(femu_oncs_cmd(&c, opcodes[i], 0, buf), ==,
+                        NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - start) / 1000;
+        g_test_message("opcode 0x%x took %" PRId64 " ms", opcodes[i], ms);
+        g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+    }
+    /* a miscompare read the media too */
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, FEMU_DATA_SIZE);
+    start = g_get_monotonic_time();
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_CMP_FAILURE);
+    ms = (g_get_monotonic_time() - start) / 1000;
+    g_test_message("miscompare took %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -26621,6 +26793,30 @@ static void femu_register_nodes(void)
                  femu_test_kv_namespaces_are_separate,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,namespaces=2"
+    });
+    qos_add_test("compare-verify-media-bbssd", "femu",
+                 femu_test_compare_verify_media, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1," FEMU_CAPS_GEO
+    });
+    qos_add_test("compare-verify-media-zns", "femu",
+                 femu_test_compare_verify_zns, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_pg_rd_lat=300000000"
+    });
+    qos_add_test("copy-timing-bbssd", "femu", femu_test_copy_timing,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=100000000,pg_wr_lat=400000000"
+    });
+    qos_add_test("copy-fmt2-own-csd", "femu", femu_test_copy_fmt2_own,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1"
     });
     qos_add_test("oncs-default-bbssd", "femu", femu_test_oncs_default,
                  &(QOSGraphTestOptions) {
