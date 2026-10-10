@@ -9,7 +9,7 @@ CI; the last runs inside a booted guest.
 | Device tests (qtest) | `hw/femu/tests/qtest/femu-test.c` | about 400 cases that drive the controller through its registers with no guest: every mode, admin and I/O commands, error paths, fuzzers, the CXL SSD | `qos-test` |
 | Documentation checks | `hw/femu/scripts/` | the property reference, mode tables, links and every example in the docs | `make -C hw/femu/tests check-docs` |
 | Configuration files | `hw/femu/scripts/ssd-config-test.sh` | every file in `scripts/configs/` starts QEMU | `ssd-config-test.sh BINARY` |
-| Guest-side tests | `hw/femu/scripts/`, `hw/femu/tests/csd/`, `hw/femu/tools/cca/` | the device as Linux sees it | inside the guest |
+| Guest-side tests | `hw/femu/scripts/`, `hw/femu/tests/csd/`, `hw/femu/tools/cca/` | the device as Linux sees it, with blktests and the nvme-cli suite among them | inside the guest, or `guest-conformance.sh` from the host |
 
 CONTRIBUTING.md asks for a test that fails without your change and passes
 with it.
@@ -173,6 +173,75 @@ Mode-specific suites:
   ([CCA guide](../features/cxl-cca.md#guest-tests)).
 
 All of them are listed in the [scripts reference](../reference/scripts.md#guest-side-test-tools).
+
+### Conformance suites
+
+Two external suites check FEMU as Linux sees it:
+[blktests](https://github.com/linux-blktests/blktests) and the
+end-to-end tests of [nvme-cli](https://github.com/linux-nvme/nvme-cli).
+`guest-conformance.sh` runs them on the host. For each suite it boots a
+fresh guest with one FEMU device, runs the suite inside, and stops the
+guest:
+
+```text
+ host: guest-conformance.sh SUITE...
+   for each suite:
+     qemu-img overlay of the guest image (the image does not change)
+       |
+       v
+     QEMU + KVM + FEMU (suite device options) --ssh--> guest
+                                                        |
+                                    blktests-guest.sh or nvme-cli-e2e-guest.sh
+                                    (apt-get, git clone, build, run)
+       |
+       v
+     OUTDIR/SUITE.log, SUITE.qemu.log, SUITE.serial.log --> RESULT SUITE PASS|FAIL
+```
+
+| Suite | Device | Runs |
+| --- | --- | --- |
+| `blktests-block` | BlackBox SSD, 768 MiB | blktests `block` group with `TEST_DEVS=(/dev/nvme0n1)` |
+| `blktests-zbd` | ZNS SSD, 1 GiB | blktests `zbd` group |
+| `nvme-cli` | BlackBox SSD with `oncs=415,vwc=1` (Compare, Write Uncorrectable, Dataset Management, Write Zeroes, Verify, Copy and Flush) | nvme-cli `tests/nvme-cli-e2e`, tag `v3.1` by default |
+
+The guest is the image that `make-guest-image.sh` builds. The suites fetch
+packages and sources, so the guest needs network access; QEMU's user
+networking gives it. Run from `build-femu/`; a suite takes 10 to 40
+minutes:
+
+<!-- femu-untested: needs a guest image, KVM and network access -->
+```bash
+../femu-scripts/guest-conformance.sh all
+../femu-scripts/guest-conformance.sh --outdir /tmp/conf nvme-cli
+```
+
+`--help` lists the options: the QEMU binary, the image, the SSH key and
+port, the result directory and the time limits. `BLKTESTS_REF` and
+`NVMECLI_REF` select a blktests commit and an nvme-cli tag. The script
+prints `RESULT SUITE PASS`, `FAIL` or `SETUP-ERROR` for each suite. The
+exit status is 0 when every suite passed and 1 when a suite failed. It is
+2 when a suite could not run and no suite failed.
+
+A blktests suite fails when a test that ran on the FEMU namespace failed.
+It also fails when the run stopped before every test reported a status. Some tests use `null_blk`, `scsi_debug` or device-mapper instead of
+the namespace. Their failures count in `FAILED` but stay out of the
+`DEVICE_FAILED` count. A test that needs a feature FEMU or the guest kernel
+lacks shows as `not run`, and the suite log gives the reason.
+
+The nvme-cli suite fails when a test fails, with one exception. In nvme-cli
+v3.1, `test_get_lba_status` passes the namespace device path as the
+namespace ID. When that test fails, the script runs the same command with
+the numeric namespace ID. If the command passes, the log shows the test as
+`KNOWN_DEFECT` and the suite still passes. If it fails, FEMU fails the test.
+
+The two guest scripts also run on their own in any guest:
+
+```sh
+sudo bash blktests-guest.sh block /dev/nvme0n1
+sudo bash nvme-cli-e2e-guest.sh /dev/nvme0 /dev/nvme0n1
+```
+
+Both write to the namespace, and the nvme-cli suite can format it.
 
 ## Adding a test
 

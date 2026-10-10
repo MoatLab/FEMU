@@ -340,6 +340,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Added CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CITATION.cff and ROADMAP files (599a36676, da692f5d9).
 - `ssd-config.sh` expands an INI-style config file into the device arguments, checking keys against the binary (7f605016e).
 - `femu-test.sh` checks a device from inside the guest for block, zoned, KV and CSD namespaces (9fee8190c, 2244a1b9c, c17a31ea9).
+- `guest-conformance.sh` boots a guest for each conformance suite and runs blktests (the `block` and `zbd` groups) or the nvme-cli end-to-end suite against FEMU. The guest scripts `blktests-guest.sh` and `nvme-cli-e2e-guest.sh` also run on their own inside a guest. CI does not run them.
 - `make-guest-image.sh` builds an Ubuntu 24.04 guest image, and the run scripts accept `IMGDIR`, `OSIMGF` and another SSH port (e877f2dc0, e74535012, 66bb3068e).
 - The build script fails on a compile error, and the config self-test fails when FEMU does not survive (a1bf37caf, da7c1fcfe).
 - The config self-test requires each device to come up, not only its property names to be accepted. That caught `zns.conf`, which asked for more active zones than it has and was refused at every size (b509a23a5).
