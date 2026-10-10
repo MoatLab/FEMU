@@ -508,6 +508,8 @@ enum NvmeCsi {
     NVME_CSI_NVM                = 0x00,
     NVME_CSI_KV                 = 0x01,
     NVME_CSI_ZONED              = 0x02,
+    /* not a CSI: CC.CSS enables no I/O command set (nvme_log_csi()) */
+    NVME_CSI_NONE               = 0xff,
 };
 
 enum NvmeCapCss {
@@ -2492,7 +2494,7 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc);
 uint32_t nvme_io_effects(FemuCtrl *n, uint8_t csi, uint8_t opc);
 uint32_t nvme_ns_io_effects(FemuCtrl *n, NvmeNamespace *ns, uint8_t opc);
 uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid);
-bool nvme_log_answered(FemuCtrl *n, uint8_t lid);
+uint8_t nvme_log_csi(FemuCtrl *n, uint8_t csi);
 void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id);
 void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id);
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns);

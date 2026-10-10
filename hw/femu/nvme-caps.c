@@ -344,21 +344,21 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
 }
 
 /*
- * Whether Get Log Page answers @lid at all: a page any command set lists is
- * answered whichever set the command names.
+ * The command set whose log pages, commands and features a Get Log Page
+ * reads: @csi from CDW14 when CC.CSS is 110b, else the set CC.CSS selects
+ * (Base 2.3, Figure 205 and 5.2.12.1.1). With admin commands only there is
+ * no I/O command set, and NVME_CSI_NONE says so.
  */
-bool nvme_log_answered(FemuCtrl *n, uint8_t lid)
+uint8_t nvme_log_csi(FemuCtrl *n, uint8_t csi)
 {
-    static const uint8_t csis[] = {
-        NVME_CSI_NVM, NVME_CSI_KV, NVME_CSI_ZONED,
-    };
-
-    for (int i = 0; i < ARRAY_SIZE(csis); i++) {
-        if (nvme_log_support(n, csis[i], lid)) {
-            return true;
-        }
+    switch (NVME_CC_CSS(n->bar.cc)) {
+    case NVME_CC_CSS_NVM:
+        return NVME_CSI_NVM;
+    case NVME_CC_CSS_CSI:
+        return csi;
+    default:
+        return NVME_CSI_NONE;
     }
-    return false;
 }
 
 /*

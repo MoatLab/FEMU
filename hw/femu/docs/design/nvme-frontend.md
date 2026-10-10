@@ -527,13 +527,9 @@ The `caps-*` qtests check the registry against dispatch. Vendor command 0xEE
 answers Invalid Command Opcode outside Open-Channel, as any unlisted admin
 opcode does. I/O Management Send and Receive answer Invalid Command
 Opcode where log 05h does not list them: without FDP, and on namespaces of
-other command sets. One difference is known and left for a decision, and
-the test holds it to its current answer: the Changed Zone List (BFh) and
-Chunk Information (CAh) pages answer when the command names another command
-set. Outside the test's reach, log 00h takes its command
-set from CDW14 even when CC.CSS selects NVM only, Get Features serves the
-Select field while ONCS bit 4 is clear, and CNS 1Ch always lists the NVM,
-zoned and key value sets.
+other command sets. Two differences are outside the test's reach. Get
+Features serves the Select field while ONCS bit 4 is clear. CNS 1Ch always
+lists the NVM, zoned and key value sets.
 
 ### Namespace routing
 
@@ -577,11 +573,15 @@ Namespace Management.
 | Chunk Information | CAh | Open-Channel 2.0, from the mode |
 | FEMU media counters | C0h | WAF and FTL counters |
 
-Get Log Page refuses an id that log 00h lists for no command set with
-Invalid Log Page (`nvme_log_answered()`). Logs 00h, 05h and 12h refuse a
-CSI other than NVM, KV and zoned with I/O Command Set Not Supported when
-CC.CSS selects by CSI. With FDP off there is no FDP capability, so the FDP
-pages are neither listed nor answered.
+`nvme_log_csi()` gives the command set of a Get Log Page. It is CDW14.CSI
+when CC.CSS is 110b, and NVM when CC.CSS is 000b (Base 2.3, Figure 205).
+Get Log Page refuses an id that log 00h does not list for that command
+set with Invalid Log Page. So the Changed Zone List (BFh) answers only for
+the zoned set, and the Open-Channel 2.0 Chunk Information (CAh) only for
+NVM. When CC.CSS selects by CSI, logs 00h, 05h, 12h and BFh refuse an
+unknown CSI with I/O Command Set Not Supported.
+With FDP off there is no FDP capability, so the FDP pages are neither
+listed nor answered.
 
 Get and Set Features answer Arbitration (01h), Power Management (02h, one
 power state), LBA Range Type (03h), Temperature Threshold (04h), Error
@@ -757,7 +757,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | --- | --- |
 | `hw/femu/femu.c` | `nvme_init_pci()`, `nvme_init_cmb()`, `nvme_init_ctrl()` (Identify Controller, CAP), `nvme_check_constraints()`, `nvme_mmio_write()`, `nvme_write_bar()`, `nvme_process_db_admin()`, `nvme_process_db_io()`, `nvme_start_ctrl()`, `nvme_clear_ctrl()`, `nvme_reset_features()`, `femu_ftl_thread()`, `femu_ftl_process_req()`, `femu_needs_ftl_thread()`, `nvme_register_extensions()`, `nvme_register_extensions_ns()`, `femu_realize()`, `femu_exit()` |
 | `hw/femu/nvme-admin.c` | `nvme_create_sq()`, `nvme_create_cq()`, `nvme_del_sq()`, `nvme_del_cq()`, `nvme_init_poller()`, `nvme_start_dataplane()`, `nvme_set_db_memory()`, `nvme_identify()`, `nvme_get_feature()`, `nvme_set_feature()`, `nvme_get_log()`, `nvme_abort_req()`, `nvme_admin_cmd()`, `nvme_process_aers()`, `nvme_process_sq_admin()` |
-| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_ns_io_effects()`, `nvme_log_support()`, `nvme_log_answered()`, `nvme_caps_id_ctrl()` |
+| `hw/femu/nvme-caps.c` | `nvme_admin_effects()`, `nvme_io_effects()`, `nvme_ns_io_effects()`, `nvme_log_support()`, `nvme_log_csi()`, `nvme_caps_id_ctrl()` |
 | `hw/femu/nvme-io.c` | `nvme_poller()`, `nvme_process_sq_io()`, `nvme_update_sq_eventidx()`, `nvme_process_cq_cpl()`, `nvme_post_cqe()`, `nvme_rw()`, `nvme_io_cmd()` |
 | `hw/femu/nvme-util.c` | `nvme_pause_pollers()`, `nvme_resume_pollers()`, `nvme_update_sq_tail()`, `nvme_update_cq_head()`, `nvme_update_cq_eventidx()`, `nvme_init_sq()`, `nvme_init_cq()` |
 | `hw/femu/intr.c` | `nvme_isr_notify_io()`, `nvme_isr_notify_admin()`, `nvme_irq_update()`, `nvme_irq_mask_changed()`, `nvme_setup_virq()`, vector notifiers |

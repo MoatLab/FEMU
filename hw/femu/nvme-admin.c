@@ -2014,7 +2014,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t lids[256] = {};
     uint32_t trans_len;
-    uint8_t csi = le32_to_cpu(cmd->cdw14) >> 24;
+    uint8_t csi = nvme_log_csi(n, le32_to_cpu(cmd->cdw14) >> 24);
     int i;
 
     QEMU_BUILD_BUG_ON(sizeof(lids) != 1024);
@@ -2682,7 +2682,6 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeEffectsLog log = {};
-    bool iocs = true;
     uint32_t trans_len;
     int i;
 
@@ -2690,23 +2689,9 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    /* the command set comes from CDW14 only when CC.CSS selects by CSI */
-    switch (NVME_CC_CSS(n->bar.cc)) {
-    case NVME_CC_CSS_NVM:
-        csi = NVME_CSI_NVM;
-        break;
-    case NVME_CC_CSS_CSI:
-        break;
-    default:
-        iocs = false;
-        break;
-    }
-
     for (i = 0; i < 256; i++) {
         log.acs[i] = cpu_to_le32(nvme_admin_effects(n, i));
-        if (iocs) {
-            log.iocs[i] = cpu_to_le32(nvme_io_effects(n, csi, i));
-        }
+        log.iocs[i] = cpu_to_le32(nvme_io_effects(n, csi, i));
     }
 
     trans_len = MIN(sizeof(log) - off, buf_len);
@@ -3079,17 +3064,20 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return status;
     }
 
-    /* a page log 00h lists for no command set is not answered */
-    if (!nvme_log_answered(n, lid)) {
-        return NVME_INVALID_LOG_ID | NVME_DNR;
-    }
-
-    /* the pages that depend on CSI name a set this controller knows (Fig 268) */
+    /*
+     * The pages that use CSI name a set this controller knows (Fig 268).
+     * The Changed Zone List is one of them (ZNS 1.4, Figure 46).
+     */
     if ((lid == NVME_LOG_SUPPORTED || lid == NVME_LOG_CMD_EFFECTS ||
-         lid == NVME_LOG_FID_EFFECTS) &&
+         lid == NVME_LOG_FID_EFFECTS || lid == NVME_LOG_CHANGED_ZONE_LIST) &&
         NVME_CC_CSS(n->bar.cc) == NVME_CC_CSS_CSI &&
         csi != NVME_CSI_NVM && csi != NVME_CSI_KV && csi != NVME_CSI_ZONED) {
         return NVME_IOCS_NOT_SUPPORTED | NVME_DNR;
+    }
+
+    /* a page log 00h does not list for the command set is not answered */
+    if (!nvme_log_support(n, nvme_log_csi(n, csi), lid)) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
     }
 
     switch (lid) {
@@ -3106,7 +3094,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_changed_ns_log(n, cmd, len, off, rae);
     case NVME_LOG_CMD_EFFECTS:
-        return nvme_cmd_effects(n, cmd, csi, len, off);
+        return nvme_cmd_effects(n, cmd, nvme_log_csi(n, csi), len, off);
     case NVME_LOG_DEV_SELF_TEST:
         return nvme_dst_log(n, cmd, len, off);
     case NVME_LOG_TELEMETRY_HOST:

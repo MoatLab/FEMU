@@ -8099,13 +8099,14 @@ static void femu_test_zoned_compare(void *obj, void *data,
  * the host enabled Zone Descriptor Changed Notices, which Identify has to
  * offer (ZNS 1.4, Figures 44-45). The notice names the namespace in dword 1.
  * Reporting zones by attribute (Zone Receive Action Specific 9h) is valid.
+ * The list is a zoned page, so the host selects command sets by CSI.
  */
 static void femu_test_zone_change_notice(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    FemuCtrlState c = { 0 };
+    FemuCtrlState c = { .pdev = &femu->dev, .alloc = alloc };
     uint64_t buf;
     uint64_t zsze;
     uint32_t result;
@@ -8114,7 +8115,9 @@ static void femu_test_zone_change_notice(void *obj, void *data,
     uint8_t zs[4];
     NvmeCmd cmd;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, &femu->dev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
     femu_create_io_queues(&c);
     buf = guest_alloc(alloc, 4096);
     femu_zone_states(&c, buf, zs, &zsze);
@@ -8131,7 +8134,8 @@ static void femu_test_zone_change_notice(void *obj, void *data,
     femu_submit(&c, &c.admin, &cmd);
     g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), !=, NVME_SUCCESS);
     g_usleep(100 * 1000);
-    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES, 0, buf, 4096),
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, buf, 4096),
                     ==, NVME_SUCCESS);
     g_assert_cmpint(qtest_readw(qts, buf), ==, 1);
     g_assert_cmpint(qtest_readq(qts, buf + 8), ==, 0);
@@ -8157,7 +8161,8 @@ static void femu_test_zone_change_notice(void *obj, void *data,
                     ((c.admin.cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
                     sizeof(NvmeCqe) + 4), ==, 1);
 
-    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES, 0, buf, 4096),
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, buf, 4096),
                     ==, NVME_SUCCESS);
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
@@ -8515,16 +8520,21 @@ static void femu_test_fdp_write_zeroes_placed(void *obj, void *data,
     femu_disable(&c);
 }
 
-/* the Changed Zone List belongs to the zoned command set's list of pages */
+/*
+ * The Changed Zone List belongs to the zoned command set's list of pages,
+ * which CDW14.CSI selects while CC.CSS selects by CSI.
+ */
 static void femu_test_log_contents_zoned(void *obj, void *data,
                                          QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    FemuCtrlState c = { 0 };
+    FemuCtrlState c = { .pdev = &femu->dev, .alloc = alloc };
     uint64_t buf;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, &femu->dev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
     buf = guest_alloc(alloc, 4096);
     g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SUPPORTED, 0, buf, 1024),
                     ==, NVME_SUCCESS);
@@ -25402,8 +25412,7 @@ static void femu_caps_io(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
  * Every log identifier for each command set, addressed to a namespace of
  * that set when there is one, since a namespace's own pages need it. A page
  * listed for a command set answers for it, and a page that answers is listed
- * for it, except that a mode's own page (BFh, CAh) still answers when the
- * command names another set; that is left for a decision.
+ * for it.
  */
 static void femu_caps_logs(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
 {
@@ -25420,17 +25429,8 @@ static void femu_caps_logs(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
             uint16_t sc = femu_log_cmd(c, nsid, lid,
                                        (uint32_t)femu_caps_csi[x] << 24, buf,
                                        512);
-            bool listed = false;
 
-            for (int y = 0; y < FEMU_CAPS_NCSI; y++) {
-                listed |= femu_caps_on(k->lids[y], lid);
-            }
-            /* only a mode's own page may answer for another set */
-            if (lid != 0xbf && lid != 0xca) {
-                listed = false;
-            }
-            if (adv ? sc == NVME_INVALID_LOG_ID :
-                      sc != NVME_INVALID_LOG_ID && !listed) {
+            if (adv != (sc != NVME_INVALID_LOG_ID)) {
                 femu_caps_bad(k, "log 0x%02x for CSI %u answers 0x%x, log 00h "
                               "%s it", lid, femu_caps_csi[x], sc,
                               adv ? "lists" : "does not list");
@@ -25621,7 +25621,9 @@ static void femu_caps_version(FemuCtrlState *c, FemuCaps *k, bool ocssd)
  * offer, Identify CNS 00h for a Key Value namespace (Invalid I/O Command Set,
  * 5.2.13.2.1), a CSI-specific log page for a set the controller does not
  * have (I/O Command Set Not Supported, Figure 321), and the CSI-specific
- * namespace list for a set CC.CSS does not enable (5.2.13.2.7).
+ * namespace list for a set CC.CSS does not enable (5.2.13.2.7). A log page
+ * of one command set answers only for that set, and with CC.CSS 000b the
+ * logs ignore CDW14.CSI and serve NVM (Figure 205, 5.2.12.1.1).
  */
 static void femu_test_v2_refusals(void *obj, void *data,
                                   QGuestAllocator *alloc)
@@ -25678,6 +25680,16 @@ static void femu_test_v2_refusals(void *obj, void *data,
     g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
                                   (uint32_t)FEMU_CSI_KV << 24, buf), ==,
                     NVME_SUCCESS);
+    /* the Changed Zone List is a zoned page; namespace 2 is zoned */
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_ZONED << 24,
+                                 buf, 512), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_NVM << 24,
+                                 buf, 512), ==, NVME_INVALID_LOG_ID);
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, 0x3 << 24, buf, 512), ==,
+                    NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, NVME_CSI_ZONED,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0xbf) & 1, ==, 1);
     femu_disable(&c);
 
     /* with CC.CSS 000b only the NVM Command Set is enabled */
@@ -25692,6 +25704,13 @@ static void femu_test_v2_refusals(void *obj, void *data,
     /* the allocated list (1Ah) asks only that the set be supported */
     g_assert_cmphex(femu_identify(&c, 0, 0x1a, (uint32_t)FEMU_CSI_KV << 24,
                                   buf), ==, NVME_SUCCESS);
+    /* the logs read NVM whatever CDW14.CSI names */
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_ZONED << 24,
+                                 buf, 512), ==, NVME_INVALID_LOG_ID);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, NVME_CSI_ZONED,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0xbf), ==, 0);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0x02) & 1, ==, 1);
 
     /* CNS 1Fh: CNS 08h for an allocated NSID, never the broadcast one */
     qtest_memset(c.pdev->bus->qts, buf, 0, 4096);
