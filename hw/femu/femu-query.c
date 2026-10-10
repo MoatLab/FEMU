@@ -2,11 +2,15 @@
 /*
  * query-femu: report a controller's FTL state over QMP.
  *
- * The FTL thread owns the FTL state and holds no lock over it, so the
+ * The FTL thread owns the bbssd state and holds no lock over it, so the
  * command does not read it from the main thread. It posts a request to the
  * controller, and the FTL thread copies the state into buffers the command
  * sized beforehand, between two requests. The command waits in a coroutine,
  * so the main loop keeps running, and builds the reply from the copy.
+ *
+ * Zone state belongs to no single thread: the pollers change it under the
+ * namespace's zone lock. The command copies it on the main loop under that
+ * lock instead.
  */
 #include "qemu/osdep.h"
 #include "qemu/atomic.h"
@@ -43,10 +47,17 @@ static FemuMode femu_query_mode(uint8_t mode)
     }
 }
 
+/* A namespace the FTL thread copies. */
 static bool femu_query_supported(NvmeNamespace *ns)
 {
     return NS_BBSSD(ns) && ns->ssd && !ns->ssd->fdp_enabled &&
            !ns->ssd_borrowed;
+}
+
+/* A namespace the main loop copies under its zone lock. */
+static bool femu_query_zoned(NvmeNamespace *ns)
+{
+    return NS_ZNSSD(ns) && ns->zns && ns->zone_array;
 }
 
 void femu_query_service(FemuCtrl *n, FemuQueryReq *req)
@@ -110,13 +121,49 @@ static FemuCtrl *femu_query_find(const char *path, Error **errp)
     return FEMU(obj);
 }
 
-/* Check one namespace and size its buffers. */
-static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns, bool lines,
+/* One selected namespace: which copy holds it, and its mode. */
+typedef struct FemuQuerySel {
+    FemuMode mode;
+    bool zoned;
+    uint32_t idx;               /* into req->ns, or into the zoned copies */
+} FemuQuerySel;
+
+/* Check one namespace and size the buffers of its copy. */
+static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
                                uint32_t offset, uint32_t limit,
-                               FemuQueryNs *q, Error **errp)
+                               FemuQueryReq *req, FemuQueryZoned *zoned,
+                               uint32_t *nr_zoned, FemuQuerySel *sel,
+                               Error **errp)
 {
+    sel->mode = femu_query_mode(ns->femu_mode);
+
+    if (femu_query_zoned(ns)) {
+        FemuQueryZoned *q = &zoned[*nr_zoned];
+
+        if (kind == FEMU_QUERY_KIND_LINES) {
+            error_setg(errp, "namespace %u: kind 'lines' applies only to "
+                       "bbssd namespaces", ns->id);
+            return false;
+        }
+        q->nsid = ns->id;
+        q->generation = ns->creation_generation;
+        if (kind == FEMU_QUERY_KIND_ZONES) {
+            if (offset >= ns->num_zones) {
+                error_setg(errp, "namespace %u: offset %u is past its last "
+                           "zone (%u zones)", ns->id, offset, ns->num_zones);
+                return false;
+            }
+            q->offset = offset;
+            q->max_zones = limit;
+            q->zones = g_new0(FemuQueryZone, limit);
+        }
+        sel->zoned = true;
+        sel->idx = (*nr_zoned)++;
+        return true;
+    }
+
     if (!femu_query_supported(ns)) {
-        const char *what = FemuMode_str(femu_query_mode(ns->femu_mode));
+        const char *what = FemuMode_str(sel->mode);
 
         if (NS_BBSSD(ns) && ns->ssd && ns->ssd->fdp_enabled) {
             what = "flexible data placement";
@@ -127,23 +174,33 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns, bool lines,
                    "namespaces yet", ns->id, what);
         return false;
     }
-
-    q->nsid = ns->id;
-    q->generation = ns->creation_generation;
-    if (!lines) {
-        return true;
-    }
-    if (offset >= (uint32_t)ns->ssd->lm.tt_lines) {
-        error_setg(errp, "namespace %u: offset %u is past its last line (%d "
-                   "lines)", ns->id, offset, ns->ssd->lm.tt_lines);
+    if (kind == FEMU_QUERY_KIND_ZONES) {
+        error_setg(errp, "namespace %u: kind 'zones' applies only to "
+                   "znssd namespaces", ns->id);
         return false;
     }
-    q->offset = offset;
-    q->max_lines = limit;
-    q->lines = g_new0(FemuQueryLine, limit);
-    q->state_cap = ns->ssd->lm.tt_lines;
-    q->state = g_malloc0(q->state_cap);
 
+    {
+        FemuQueryNs *q = &req->ns[req->nr_ns];
+
+        q->nsid = ns->id;
+        q->generation = ns->creation_generation;
+        if (kind == FEMU_QUERY_KIND_LINES) {
+            if (offset >= (uint32_t)ns->ssd->lm.tt_lines) {
+                error_setg(errp, "namespace %u: offset %u is past its last "
+                           "line (%d lines)", ns->id, offset,
+                           ns->ssd->lm.tt_lines);
+                return false;
+            }
+            q->offset = offset;
+            q->max_lines = limit;
+            q->lines = g_new0(FemuQueryLine, limit);
+            q->state_cap = ns->ssd->lm.tt_lines;
+            q->state = g_malloc0(q->state_cap);
+        }
+    }
+    sel->zoned = false;
+    sel->idx = req->nr_ns++;
     return true;
 }
 
@@ -155,6 +212,14 @@ static void femu_query_free(FemuQueryReq *req)
     }
     g_free(req->ns);
     g_free(req);
+}
+
+static void femu_query_zoned_free(FemuQueryZoned *zoned, uint32_t cap)
+{
+    for (uint32_t i = 0; i < cap; i++) {
+        g_free(zoned[i].zones);
+    }
+    g_free(zoned);
 }
 
 /*
@@ -195,16 +260,64 @@ static void coroutine_fn femu_query_run(FemuCtrl *n, FemuQueryReq *req,
     }
 }
 
-static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, FemuMode mode,
-                                             bool lines)
+/*
+ * Copy each zoned namespace under its zone lock. A poller can hold the lock
+ * for a whole Report Zones transfer, so the main loop only tries it, and
+ * sleeps between tries. The device or a namespace may go away during a
+ * sleep; look both up again after each one.
+ */
+static void coroutine_fn femu_query_zoned_run(FemuCtrl *n,
+                                              FemuQueryZoned *zoned,
+                                              uint32_t nr_zoned, Error **errp)
 {
-    FemuNamespaceInfo *info = g_new0(FemuNamespaceInfo, 1);
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
+                       FEMU_QUERY_TIMEOUT_NS;
+
+    for (uint32_t i = 0; i < nr_zoned; i++) {
+        FemuQueryZoned *q = &zoned[i];
+        int64_t pause_ns = 20 * SCALE_US;
+        bool slept = false;
+
+        for (;;) {
+            NvmeNamespace *ns;
+
+            if (slept && qemu_clock_get_ns(QEMU_CLOCK_REALTIME) > deadline) {
+                error_setg(errp, "namespace %u: the zone lock stayed busy",
+                           q->nsid);
+                return;
+            }
+            if (!DEVICE(n)->realized) {
+                error_setg(errp, "the femu device was removed during the "
+                           "query");
+                return;
+            }
+            ns = nvme_ns(n, q->nsid);
+            if (!ns || ns->creation_generation != q->generation ||
+                !femu_query_zoned(ns)) {
+                error_setg(errp, "namespace %u changed during the query",
+                           q->nsid);
+                return;
+            }
+            if (zns_query_collect(ns, q)) {
+                break;
+            }
+            qemu_co_sleep_ns(QEMU_CLOCK_REALTIME, pause_ns);
+            pause_ns = MIN(pause_ns * 2, SCALE_MS);
+            slept = true;
+        }
+    }
+}
+
+static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
+{
+    FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
+    FemuBbssdInfo *info = &ns_info->u.bbssd;
     FemuGeometry *geo = g_new0(FemuGeometry, 1);
     FemuWriteCounters *ctr = g_new0(FemuWriteCounters, 1);
     FemuLineCounts *cnt = g_new0(FemuLineCounts, 1);
 
-    info->nsid = q->nsid;
-    info->mode = mode;
+    ns_info->nsid = q->nsid;
+    ns_info->mode = FEMU_MODE_BBSSD;
 
     geo->channels = q->nchs;
     geo->luns_per_channel = q->luns_per_ch;
@@ -257,7 +370,59 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, FemuMode mode,
         }
     }
 
-    return info;
+    return ns_info;
+}
+
+static FemuNamespaceInfo *femu_query_zoned_info(FemuQueryZoned *q)
+{
+    FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
+    FemuZonedInfo *info = &ns_info->u.znssd;
+    FemuZoneCounts *cnt = g_new0(FemuZoneCounts, 1);
+
+    ns_info->nsid = q->nsid;
+    ns_info->mode = FEMU_MODE_ZNSSD;
+    info->lba_size = q->lba_size;
+    info->zone_size = q->zone_size;
+    info->zone_capacity = q->zone_cap;
+    info->max_open = q->max_open;
+    info->max_active = q->max_active;
+
+    cnt->empty = q->counts[FEMU_ZONE_STATE_EMPTY];
+    cnt->implicitly_open = q->counts[FEMU_ZONE_STATE_IMPLICITLY_OPEN];
+    cnt->explicitly_open = q->counts[FEMU_ZONE_STATE_EXPLICITLY_OPEN];
+    cnt->closed = q->counts[FEMU_ZONE_STATE_CLOSED];
+    cnt->read_only = q->counts[FEMU_ZONE_STATE_READ_ONLY];
+    cnt->full = q->counts[FEMU_ZONE_STATE_FULL];
+    cnt->offline = q->counts[FEMU_ZONE_STATE_OFFLINE];
+    cnt->total = q->num_zones;
+    info->zone_counts = cnt;
+
+    if (q->zones) {
+        FemuZoneInfoList **tail = &info->zones;
+
+        info->has_zones = true;
+        for (uint32_t i = 0; i < q->nr_zones; i++) {
+            FemuZoneInfo *zi = g_new0(FemuZoneInfo, 1);
+
+            zi->index = q->zones[i].index;
+            zi->type = q->zones[i].type;
+            zi->state = q->zones[i].state;
+            zi->start_lba = q->zones[i].slba;
+            zi->capacity = q->zones[i].cap;
+            zi->has_write_pointer = q->zones[i].wp_valid;
+            zi->write_pointer = q->zones[i].wp;
+            zi->zrwa = q->zones[i].zrwa;
+            QAPI_LIST_APPEND(tail, zi);
+        }
+        info->has_offset = true;
+        info->offset = q->offset;
+        if (q->offset + q->nr_zones < q->num_zones) {
+            info->has_next_offset = true;
+            info->next_offset = q->offset + q->nr_zones;
+        }
+    }
+
+    return ns_info;
 }
 
 FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
@@ -266,13 +431,17 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
                                       uint32_t offset, bool has_limit,
                                       uint32_t limit, Error **errp)
 {
-    bool lines = has_kind && kind == FEMU_QUERY_KIND_LINES;
+    bool window;
     FemuQueryReq *req = NULL;
+    FemuQueryZoned *zoned = NULL;
+    FemuQuerySel *sel = NULL;
     FemuInfo *info = NULL;
-    FemuMode *modes = NULL;
     FemuMode ctrl_mode;
     Error *local_err = NULL;
     g_autofree char *qom_path = NULL;
+    uint32_t nr_sel = 0;
+    uint32_t nr_zoned = 0;
+    uint32_t cap;
     FemuCtrl *n;
     uint32_t i;
 
@@ -280,8 +449,13 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
     if (!n) {
         return NULL;
     }
-    if (!lines && (has_offset || has_limit)) {
-        error_setg(errp, "offset and limit apply only to kind 'lines'");
+    if (!has_kind) {
+        kind = FEMU_QUERY_KIND_SUMMARY;
+    }
+    window = kind != FEMU_QUERY_KIND_SUMMARY;
+    if (!window && (has_offset || has_limit)) {
+        error_setg(errp, "offset and limit apply only to kind 'lines' or "
+                   "'zones'");
         return NULL;
     }
     if (!has_limit) {
@@ -299,9 +473,11 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
      * Namespace support is checked first: a controller in a mode with no
      * FTL thread is never "enabled" in the sense below.
      */
+    cap = n->namespace_limit;
     req = g_new0(FemuQueryReq, 1);
-    req->ns = g_new0(FemuQueryNs, n->namespace_limit);
-    modes = g_new0(FemuMode, n->namespace_limit);
+    req->ns = g_new0(FemuQueryNs, cap);
+    zoned = g_new0(FemuQueryZoned, cap);
+    sel = g_new0(FemuQuerySel, cap);
     if (has_nsid) {
         NvmeNamespace *ns = nvme_ns(n, nsid);
 
@@ -309,12 +485,11 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
             error_setg(errp, "namespace %u is not attached", nsid);
             goto out;
         }
-        if (!femu_query_prepare(n, ns, lines, offset, limit, &req->ns[0],
-                                errp)) {
+        if (!femu_query_prepare(ns, kind, offset, limit, req, zoned,
+                                &nr_zoned, &sel[0], errp)) {
             goto out;
         }
-        modes[0] = femu_query_mode(ns->femu_mode);
-        req->nr_ns = 1;
+        nr_sel = 1;
     } else {
         for (i = 1; i <= n->namespace_limit; i++) {
             NvmeNamespace *ns = nvme_ns(n, i);
@@ -322,36 +497,45 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
             if (!ns) {
                 continue;
             }
-            if (lines && req->nr_ns) {
-                error_setg(errp, "kind 'lines' needs an nsid when the "
-                           "controller has more than one namespace");
+            if (window && nr_sel) {
+                error_setg(errp, "kind '%s' needs an nsid when the "
+                           "controller has more than one namespace",
+                           FemuQueryKind_str(kind));
                 goto out;
             }
-            if (!femu_query_prepare(n, ns, lines, offset, limit,
-                                    &req->ns[req->nr_ns], errp)) {
+            if (!femu_query_prepare(ns, kind, offset, limit, req, zoned,
+                                    &nr_zoned, &sel[nr_sel], errp)) {
                 goto out;
             }
-            modes[req->nr_ns++] = femu_query_mode(ns->femu_mode);
+            nr_sel++;
         }
-        if (!req->nr_ns) {
+        if (!nr_sel) {
             error_setg(errp, "the controller has no attached namespace");
             goto out;
         }
     }
 
-    if (!n->ftl_thread_running || !n->dataplane_started) {
+    /* only the FTL thread's copy needs the controller enabled */
+    if (req->nr_ns && (!n->ftl_thread_running || !n->dataplane_started)) {
         error_setg(errp, "the femu controller is not enabled");
         goto out;
     }
 
     /*
-     * The device may be unplugged during the wait. Take what the reply needs
-     * from it now, and hold a reference until the wait is over.
+     * The device may be unplugged during the waits. Take what the reply
+     * needs from it now, and hold a reference until the waits are over.
      */
     qom_path = object_get_canonical_path(OBJECT(n));
     ctrl_mode = femu_query_mode(n->femu_mode);
     object_ref(OBJECT(n));
-    femu_query_run(n, req, &local_err);
+    femu_query_zoned_run(n, zoned, nr_zoned, &local_err);
+    if (!local_err && req->nr_ns) {
+        femu_query_run(n, req, &local_err);
+    } else if (!local_err && n->test_query_delay_ms) {
+        /* qtest: widen the window between the copy and the reply */
+        qemu_co_sleep_ns(QEMU_CLOCK_REALTIME,
+                         n->test_query_delay_ms * SCALE_MS);
+    }
     object_unref(OBJECT(n));
     n = NULL;   /* may be freed now */
     if (local_err) {
@@ -359,29 +543,32 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
         goto out;
     }
 
-    info = g_new0(FemuInfo, 1);
-    info->path = g_steal_pointer(&qom_path);
-    info->mode = ctrl_mode;
     for (i = 0; i < req->nr_ns; i++) {
         if (req->ns[i].status) {
             error_setg(errp, "namespace %u changed during the query",
                        req->ns[i].nsid);
-            qapi_free_FemuInfo(info);
-            info = NULL;
             goto out;
         }
     }
+    info = g_new0(FemuInfo, 1);
+    info->path = g_steal_pointer(&qom_path);
+    info->mode = ctrl_mode;
     {
         FemuNamespaceInfoList **tail = &info->namespaces;
 
-        for (i = 0; i < req->nr_ns; i++) {
-            QAPI_LIST_APPEND(tail, femu_query_ns_info(&req->ns[i], modes[i],
-                                                      lines));
+        for (i = 0; i < nr_sel; i++) {
+            FemuNamespaceInfo *ns_info = sel[i].zoned ?
+                femu_query_zoned_info(&zoned[sel[i].idx]) :
+                femu_query_ns_info(&req->ns[sel[i].idx],
+                                   kind == FEMU_QUERY_KIND_LINES);
+
+            QAPI_LIST_APPEND(tail, ns_info);
         }
     }
 
 out:
-    g_free(modes);
+    g_free(sel);
+    femu_query_zoned_free(zoned, cap);
     femu_query_free(req);
     return info;
 }

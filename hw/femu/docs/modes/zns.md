@@ -311,6 +311,9 @@ without going through the zone state machine. Reset the zone instead.
    formula above.
 3. `sudo nvme zns report-zones /dev/nvme0n1 -d 1` shows zone 0 empty; after
    the fio run the first zones are full and their write pointers moved.
+4. From the host, the QMP command
+   [`query-femu`](../reference/query-femu.md) with `kind` `zones` shows the
+   same zone states and write pointers. It needs no guest tools.
 
 ## Troubleshooting
 
@@ -344,3 +347,5 @@ Related issues: #57, #76, #112, #115, #126, #144, #161, #177, #182, #193.
 - [Multiple namespaces](../features/multi-namespace.md), to mix zoned and
   conventional namespaces
 - [Device property reference: ZNS](../reference/properties.md#zns)
+- [QMP query-femu](../reference/query-femu.md), to read the zones from the
+  host

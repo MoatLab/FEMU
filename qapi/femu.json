@@ -37,14 +37,20 @@
 #
 # What @query-femu reports for each namespace.
 #
-# @summary: identity, geometry, write counters and line counts
+# @summary: identity, and the members of the namespace mode: for a
+#     blackbox namespace the geometry, write counters and line counts,
+#     for a zoned namespace the zone geometry, limits and zone counts
 #
-# @lines: the summary and one record per line, for a window of lines
+# @lines: the summary and one record per line, for a window of lines.
+#     Blackbox namespaces only.
+#
+# @zones: the summary and one record per zone, for a window of zones.
+#     Zoned namespaces only.
 #
 # Since: 10.1
 ##
 { 'enum': 'FemuQueryKind',
-  'data': [ 'summary', 'lines' ] }
+  'data': [ 'summary', 'lines', 'zones' ] }
 
 ##
 # @FemuLineState:
@@ -175,14 +181,108 @@
             'ipc': 'uint32', 'erase-min': 'uint32', 'erase-max': 'uint32' } }
 
 ##
-# @FemuNamespaceInfo:
+# @FemuZoneState:
 #
-# State of one namespace, copied by the FTL between two requests, so
-# the fields of one namespace agree with each other.
+# State of a zone, as Report Zones gives it.
 #
-# @nsid: namespace identifier
+# @empty: no data written since the last reset
 #
-# @mode: namespace mode
+# @implicitly-open: opened by a write
+#
+# @explicitly-open: opened by an Open Zone command
+#
+# @closed: holds data, not open
+#
+# @read-only: can be read, not written
+#
+# @full: written to its capacity, or finished
+#
+# @offline: can be neither read nor written
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuZoneState',
+  'data': [ 'empty', 'implicitly-open', 'explicitly-open', 'closed',
+            'read-only', 'full', 'offline' ] }
+
+##
+# @FemuZoneType:
+#
+# Write rule of a zone.
+#
+# @sequential: writes must start at the write pointer
+#
+# @conventional: writes may go to any block of the zone
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuZoneType',
+  'data': [ 'sequential', 'conventional' ] }
+
+##
+# @FemuZoneCounts:
+#
+# How many zones are in each state.
+#
+# @empty: empty zones
+#
+# @implicitly-open: zones opened by a write
+#
+# @explicitly-open: zones opened by an Open Zone command
+#
+# @closed: closed zones
+#
+# @read-only: read-only zones
+#
+# @full: full zones
+#
+# @offline: offline zones
+#
+# @total: every zone of the namespace
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuZoneCounts',
+  'data': { 'empty': 'uint32', 'implicitly-open': 'uint32',
+            'explicitly-open': 'uint32', 'closed': 'uint32',
+            'read-only': 'uint32', 'full': 'uint32', 'offline': 'uint32',
+            'total': 'uint32' } }
+
+##
+# @FemuZoneInfo:
+#
+# One zone of a namespace.  Addresses and sizes are in logical blocks.
+#
+# @index: zone index, from 0
+#
+# @type: write rule of the zone
+#
+# @state: zone state
+#
+# @start-lba: first logical block of the zone
+#
+# @capacity: writable logical blocks of the zone
+#
+# @write-pointer: the next logical block a write must use, as Report
+#     Zones gives it.  Absent when Report Zones has no valid write
+#     pointer: a conventional zone, or a full, read-only or offline
+#     zone.
+#
+# @zrwa: the zone holds a zone random write area
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuZoneInfo',
+  'data': { 'index': 'uint32', 'type': 'FemuZoneType',
+            'state': 'FemuZoneState', 'start-lba': 'uint64',
+            'capacity': 'uint64', '*write-pointer': 'uint64',
+            'zrwa': 'bool' } }
+
+##
+# @FemuBbssdInfo:
+#
+# State of a blackbox namespace, copied by the FTL thread between two
+# requests, so its fields agree with each other.
 #
 # @geometry: NAND geometry
 #
@@ -200,13 +300,66 @@
 #
 # Since: 10.1
 ##
-{ 'struct': 'FemuNamespaceInfo',
-  'data': { 'nsid': 'uint32', 'mode': 'FemuMode',
-            'geometry': 'FemuGeometry',
+{ 'struct': 'FemuBbssdInfo',
+  'data': { 'geometry': 'FemuGeometry',
             'counters': 'FemuWriteCounters',
             'line-counts': 'FemuLineCounts',
             '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
+
+##
+# @FemuZonedInfo:
+#
+# State of a zoned namespace, copied under its zone lock, so its
+# fields agree with each other.  Addresses and sizes are in logical
+# blocks.
+#
+# @lba-size: bytes per logical block
+#
+# @zone-size: logical blocks per zone
+#
+# @zone-capacity: writable logical blocks per zone
+#
+# @max-open: the most zones that may be open at once, or 0 for no
+#     limit
+#
+# @max-active: the most zones that may be open or closed at once, or
+#     0 for no limit
+#
+# @zone-counts: zones in each state
+#
+# @zones: with kind @zones, the zones from @offset, at most limit of
+#     them
+#
+# @offset: with kind @zones, the index of the first zone in @zones
+#
+# @next-offset: with kind @zones, the offset that continues the
+#     listing.  Absent after the last zone.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuZonedInfo',
+  'data': { 'lba-size': 'uint32', 'zone-size': 'uint64',
+            'zone-capacity': 'uint64', 'max-open': 'uint32',
+            'max-active': 'uint32', 'zone-counts': 'FemuZoneCounts',
+            '*zones': [ 'FemuZoneInfo' ], '*offset': 'uint32',
+            '*next-offset': 'uint32' } }
+
+##
+# @FemuNamespaceInfo:
+#
+# State of one namespace.  @mode selects the other members.
+#
+# @nsid: namespace identifier
+#
+# @mode: namespace mode
+#
+# Since: 10.1
+##
+{ 'union': 'FemuNamespaceInfo',
+  'base': { 'nsid': 'uint32', 'mode': 'FemuMode' },
+  'discriminator': 'mode',
+  'data': { 'bbssd': 'FemuBbssdInfo', 'znssd': 'FemuZonedInfo' } }
 
 ##
 # @FemuInfo:
@@ -229,26 +382,29 @@
 # @query-femu:
 #
 # Report the flash translation layer state of a FEMU NVMe controller.
-# Only blackbox (bbssd) namespaces are supported.  A selected
-# namespace in another mode, with flexible data placement, or backed
-# by a CXL SSD medium makes the command fail.  The controller must be
-# enabled.  Two calls are two separate copies, so the lines of one
-# call and the next may not agree.
+# Blackbox (bbssd) and zoned (znssd) namespaces are supported.  A
+# selected namespace in another mode, with flexible data placement,
+# or backed by a CXL SSD medium makes the command fail.  The
+# controller must be enabled when a blackbox namespace is selected.
+# Each namespace is one copy, but two namespaces, and two calls, can
+# show different points in time.
 #
 # @path: QOM path of the femu device.  Optional when exactly one
 #     exists.
 #
 # @nsid: namespace to report.  Default every attached namespace.
-#     With kind lines, required when the controller has more than one
-#     attached namespace.
+#     With kind lines or zones, required when the controller has more
+#     than one attached namespace.
 #
-# @kind: what to report (default summary)
+# @kind: what to report (default summary).  Kind lines needs a
+#     blackbox namespace, and kind zones a zoned namespace.
 #
-# @offset: the first line to report (default 0).  Only with kind
-#     lines; an error with kind summary.
+# @offset: the first line or zone to report (default 0).  Only with
+#     kind lines or zones; an error with kind summary.
 #
-# @limit: the most lines to report, 1 to 4096 (default 256).  Only
-#     with kind lines; an error with kind summary.
+# @limit: the most lines or zones to report, 1 to 4096 (default
+#     256).  Only with kind lines or zones; an error with kind
+#     summary.
 #
 # Returns: the state of the controller and its selected namespaces
 #
@@ -272,7 +428,31 @@
 #                            "gc-write-pages": 0, "block-erases": 0,
 #                            "waf": 1.0 },
 #              "line-counts": { "free": 255, "victim": 0, "full": 0,
+#                               "retired": 0, "spare": 0,
 #                               "total": 256 } } ] } }
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu",
+#          "arguments": { "kind": "zones", "limit": 2 } }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "mode": "znssd",
+#            "namespaces": [ {
+#              "nsid": 1, "mode": "znssd", "lba-size": 512,
+#              "zone-size": 131072, "zone-capacity": 131072,
+#              "max-open": 0, "max-active": 0,
+#              "zone-counts": { "empty": 14, "implicitly-open": 1,
+#                               "explicitly-open": 0, "closed": 0,
+#                               "read-only": 0, "full": 1,
+#                               "offline": 0, "total": 16 },
+#              "zones": [ { "index": 0, "type": "sequential",
+#                           "state": "full", "start-lba": 0,
+#                           "capacity": 131072, "zrwa": false },
+#                         { "index": 1, "type": "sequential",
+#                           "state": "implicitly-open",
+#                           "start-lba": 131072, "capacity": 131072,
+#                           "write-pointer": 131080, "zrwa": false } ],
+#              "offset": 0, "next-offset": 2 } ] } }
 ##
 { 'command': 'query-femu',
   'data': { '*path': 'str', '*nsid': 'uint32', '*kind': 'FemuQueryKind',

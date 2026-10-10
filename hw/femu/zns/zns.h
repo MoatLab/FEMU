@@ -173,6 +173,12 @@ struct zns_ssd {
      */
     QemuMutex zone_lock;
 
+    /*
+     * Zones in each state, indexed by the state code. Kept with every state
+     * change, under the zone lock, so query-femu need not walk the zones.
+     */
+    uint32_t zone_states[16];
+
     uint64_t changed_zones[511];
     uint32_t nr_changed_zones;
     bool     changed_zone_overflow;
@@ -391,9 +397,17 @@ static inline NvmeZoneState zns_get_zone_state(NvmeZone *zone)
     return zone->d.zs >> 4;
 }
 
-static inline void zns_set_zone_state(NvmeZone *zone, NvmeZoneState state)
+static inline void zns_set_zone_state(NvmeNamespace *ns, NvmeZone *zone,
+                                      NvmeZoneState state)
 {
+    uint32_t *count = ns->zns->zone_states;
+
+    /* a zone not yet set up has state 0 and is in no count */
+    if (zns_get_zone_state(zone)) {
+        count[zns_get_zone_state(zone)]--;
+    }
     zone->d.zs = state << 4;
+    count[state]++;
 }
 
 static inline uint64_t zns_zone_rd_boundary(NvmeNamespace *ns, NvmeZone *zone)

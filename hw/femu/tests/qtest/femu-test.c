@@ -3826,7 +3826,7 @@ static void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
     /* selectors */
     femu_query_fails(qts, "'nsid':2", "not attached");
     femu_query_fails(qts, "'nsid':0", "not attached");
-    femu_query_fails(qts, "'kind':'zones'", "zones");
+    femu_query_fails(qts, "'kind':'zones'", "only to znssd");
     femu_query_fails(qts, "'path':'/machine'", "not a femu device");
     femu_query_fails(qts, "'path':'/machine/peripheral/none'",
                      "not a femu device");
@@ -3877,10 +3877,12 @@ static void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
- * The device is unplugged after the FTL thread has made the copy and before
- * the command replies (x-query-delay-ms holds it there). The reply must
- * still come from the copy, and the command must not touch the device once
- * it has dropped its reference; a sanitizer build reports that access.
+ * The device is unplugged after the copy is made and before the command
+ * replies (x-query-delay-ms holds it there). The reply must still come from
+ * the copy, and the command must not touch the device once it has dropped
+ * its reference; a sanitizer build reports that access. @data names the
+ * namespace mode: the FTL thread copies a bbssd namespace, and the main
+ * loop a znssd one.
  */
 static void femu_test_query_unplug(void *obj, void *data,
                                    QGuestAllocator *alloc)
@@ -3905,7 +3907,7 @@ static void femu_test_query_unplug(void *obj, void *data,
     g_assert_nonnull(ret);
     g_assert_cmpstr(qdict_get_str(ret, "path"), ==,
                     "/machine/peripheral/qu");
-    g_assert_cmpstr(qdict_get_str(ret, "mode"), ==, "bbssd");
+    g_assert_cmpstr(qdict_get_str(ret, "mode"), ==, data ? data : "bbssd");
     qobject_unref(rsp);
     qtest_qmp_eventwait(qts, "DEVICE_DELETED");
     femu_query_fails(qts, "", "no femu device");
@@ -8147,6 +8149,390 @@ static void femu_test_zone_open_limits(void *obj, void *data,
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
+}
+
+#define FEMU_ZONE_ACTION_FINISH 0x02
+#define FEMU_ZQ_MAX_ZONES       63      /* descriptors in a 4 KiB report */
+
+typedef struct FemuZoneDesc {
+    uint8_t zt;
+    uint8_t zs;
+    uint8_t za;
+    uint64_t zcap;
+    uint64_t zslba;
+    uint64_t wp;
+} FemuZoneDesc;
+
+/* Report Zones over every zone into @zd; returns the zone count. */
+static uint32_t femu_zone_report_all(FemuCtrlState *c, uint64_t buf,
+                                     FemuZoneDesc *zd)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+    uint64_t nr;
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    nr = qtest_readq(qts, buf);
+    g_assert_cmpuint(nr, <=, FEMU_ZQ_MAX_ZONES);
+    for (uint32_t i = 0; i < nr; i++) {
+        uint64_t d = buf + 64 + i * 64;
+
+        zd[i].zt = qtest_readb(qts, d);
+        zd[i].zs = qtest_readb(qts, d + 1) >> 4;
+        zd[i].za = qtest_readb(qts, d + 2);
+        zd[i].zcap = qtest_readq(qts, d + 8);
+        zd[i].zslba = qtest_readq(qts, d + 16);
+        zd[i].wp = qtest_readq(qts, d + 24);
+    }
+    return nr;
+}
+
+static uint8_t femu_zone_state_code(const char *state)
+{
+    static const char *const names[16] = {
+        [0x1] = "empty", [0x2] = "implicitly-open",
+        [0x3] = "explicitly-open", [0x4] = "closed",
+        [0xd] = "read-only", [0xe] = "full", [0xf] = "offline",
+    };
+
+    for (int i = 0; i < 16; i++) {
+        if (names[i] && !strcmp(names[i], state)) {
+            return i;
+        }
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * Every zone through query-femu in windows of @limit: each zone comes once,
+ * in order, and agrees with Report Zones; the state counts add up. The zone
+ * counts of the last window are returned in @counts, indexed by state code.
+ */
+static void femu_query_zns_check(FemuCtrlState *c, uint64_t buf,
+                                 uint32_t limit, uint32_t *counts)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    FemuZoneDesc zd[FEMU_ZQ_MAX_ZONES];
+    uint32_t nr = femu_zone_report_all(c, buf, zd);
+    uint32_t seen[16] = { 0 };
+    uint32_t next = 0;
+    uint32_t got = 0;
+
+    do {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'zones','offset':%u,'limit':%u", next, limit);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QDict *cnt = qdict_get_qdict(ns, "zone-counts");
+        QListEntry *e;
+
+        g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "znssd");
+        g_assert_cmpuint(qdict_get_int(cnt, "total"), ==, nr);
+        g_assert_cmpuint(qdict_get_int(ns, "offset"), ==, next);
+        counts[0x1] = qdict_get_int(cnt, "empty");
+        counts[0x2] = qdict_get_int(cnt, "implicitly-open");
+        counts[0x3] = qdict_get_int(cnt, "explicitly-open");
+        counts[0x4] = qdict_get_int(cnt, "closed");
+        counts[0xd] = qdict_get_int(cnt, "read-only");
+        counts[0xe] = qdict_get_int(cnt, "full");
+        counts[0xf] = qdict_get_int(cnt, "offline");
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "zones"), e) {
+            QDict *z = qobject_to(QDict, qlist_entry_obj(e));
+            uint32_t idx = qdict_get_int(z, "index");
+            uint8_t zs = femu_zone_state_code(qdict_get_str(z, "state"));
+
+            g_assert_cmpuint(idx, ==, got);
+            g_assert_cmpuint(zs, ==, zd[idx].zs);
+            g_assert_cmpuint(qdict_get_int(z, "start-lba"), ==,
+                             zd[idx].zslba);
+            g_assert_cmpuint(qdict_get_int(z, "capacity"), ==, zd[idx].zcap);
+            g_assert_cmpstr(qdict_get_str(z, "type"), ==,
+                            zd[idx].zt == 1 ? "conventional" : "sequential");
+            g_assert_cmpint(qdict_get_bool(z, "zrwa"), ==,
+                            !!(zd[idx].za & 0x8));
+            if (qdict_haskey(z, "write-pointer")) {
+                g_assert_cmphex(qdict_get_int(z, "write-pointer"), ==,
+                                zd[idx].wp);
+            } else {
+                g_assert_cmphex(zd[idx].wp, ==, UINT64_MAX);
+            }
+            seen[zs]++;
+            got++;
+        }
+        if (qdict_haskey(ns, "next-offset")) {
+            next = qdict_get_int(ns, "next-offset");
+            g_assert_cmpuint(next, ==, got);
+            g_assert_cmpuint(next, <, nr);
+        } else {
+            next = 0;
+        }
+        qobject_unref(rsp);
+    } while (next);
+    g_assert_cmpuint(got, ==, nr);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpuint(seen[i], ==, counts[i]);
+    }
+}
+
+/*
+ * query-femu on a zoned namespace with one conventional zone: its zones and
+ * counts agree with Report Zones before and after writes, an open, a
+ * finish, a close and a reset; windows and errors are checked, and queries
+ * made while appends are in flight all return.
+ */
+static void femu_test_query_zns(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t rpt = guest_alloc(alloc, 4096);
+    FemuZoneDesc zd[FEMU_ZQ_MAX_ZONES];
+    uint32_t counts[16] = { 0 };
+    uint64_t zsze;
+    uint32_t nr;
+    uint32_t appends;
+    int64_t slowest = 0;
+    QDict *rsp;
+    QDict *ns;
+    int i;
+
+    /* the zone state exists before the guest enables the controller */
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "znssd");
+    g_assert_cmpuint(qdict_get_int(ns, "lba-size"), ==, 512);
+    g_assert_cmpuint(qdict_get_int(ns, "max-open"), ==, 3);
+    g_assert_cmpuint(qdict_get_int(ns, "max-active"), ==, 4);
+    g_assert_false(qdict_haskey(ns, "zones"));
+    g_assert_false(qdict_haskey(ns, "geometry"));
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "zone-counts"),
+                                   "empty"), ==,
+                     qdict_get_int(qdict_get_qdict(ns, "zone-counts"),
+                                   "total"));
+    qobject_unref(rsp);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    nr = femu_zone_report_all(&c, rpt, zd);
+    g_assert_cmpuint(nr, >=, 6);
+    zsze = zd[1].zslba - zd[0].zslba;
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpuint(qdict_get_int(ns, "zone-size"), ==, zsze);
+    g_assert_cmpuint(qdict_get_int(ns, "zone-capacity"), ==, zd[1].zcap);
+    qobject_unref(rsp);
+    femu_query_zns_check(&c, rpt, 3, counts);
+    femu_query_zns_check(&c, rpt, 4096, counts);
+    g_assert_cmpuint(counts[0x1], ==, nr);
+
+    /* zone 0 is conventional: a write moves no write pointer */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    /* 1 implicitly open, 2 explicitly open, 3 full, 4 closed */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, zsze, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 2 * zsze, FEMU_ZONE_ACTION_OPEN), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 3 * zsze, FEMU_ZONE_ACTION_FINISH),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 4 * zsze, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 4 * zsze, FEMU_ZONE_ACTION_CLOSE), ==,
+                    NVME_SUCCESS);
+    femu_query_zns_check(&c, rpt, 2, counts);
+    g_assert_cmpuint(counts[0x2], ==, 1);
+    g_assert_cmpuint(counts[0x3], ==, 1);
+    g_assert_cmpuint(counts[0x4], ==, 1);
+    g_assert_cmpuint(counts[0xe], ==, 1);
+    g_assert_cmpuint(counts[0x1], ==, nr - 4);
+
+    ns = femu_query_ns(qts, "'kind':'zones','offset':1,'limit':1", &rsp);
+    {
+        QDict *z = qobject_to(QDict, qlist_peek(qdict_get_qlist(ns, "zones")));
+
+        g_assert_cmpstr(qdict_get_str(z, "state"), ==, "implicitly-open");
+        g_assert_cmpuint(qdict_get_int(z, "write-pointer"), ==,
+                         zsze + FEMU_DATA_SIZE / c.lba_size);
+        g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, 2);
+    }
+    qobject_unref(rsp);
+    ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+    {
+        QDict *z = qobject_to(QDict, qlist_peek(qdict_get_qlist(ns, "zones")));
+
+        g_assert_cmpstr(qdict_get_str(z, "type"), ==, "conventional");
+        g_assert_false(qdict_haskey(z, "write-pointer"));
+    }
+    qobject_unref(rsp);
+    {
+        g_autofree char *last = g_strdup_printf(
+            "'kind':'zones','offset':%u", nr - 1);
+
+        ns = femu_query_ns(qts, last, &rsp);
+        g_assert_cmpuint(qlist_size(qdict_get_qlist(ns, "zones")), ==, 1);
+        g_assert_false(qdict_haskey(ns, "next-offset"));
+        qobject_unref(rsp);
+    }
+
+    /* errors */
+    {
+        g_autofree char *past = g_strdup_printf(
+            "'kind':'zones','offset':%u", nr);
+
+        femu_query_fails(qts, past, "past its last zone");
+    }
+    femu_query_fails(qts, "'kind':'lines'", "only to bbssd");
+    femu_query_fails(qts, "'kind':'zones','limit':0", "limit must be");
+    femu_query_fails(qts, "'kind':'zones','limit':4097", "limit must be");
+    femu_query_fails(qts, "'offset':1", "only to kind");
+    femu_query_fails(qts, "'nsid':2", "not attached");
+
+    /*
+     * Queries while appends to zone 1 are in flight: every query must
+     * return within a second, and every append must then complete.
+     */
+    appends = MIN(FEMU_QSIZE - 1,
+                  (zd[1].zcap - FEMU_DATA_SIZE / c.lba_size) /
+                  (FEMU_DATA_SIZE / c.lba_size));
+    for (i = 0; i < appends; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_ZONE_APPEND;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(zsze);
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    for (i = 0; i < 8; i++) {
+        int64_t start = g_get_monotonic_time();
+
+        ns = femu_query_ns(qts, i % 2 ? "'kind':'zones'" : "", &rsp);
+        qobject_unref(rsp);
+        slowest = MAX(slowest, g_get_monotonic_time() - start);
+        g_assert_cmpint(slowest, <, G_USEC_PER_SEC);
+    }
+    for (i = 0; i < appends; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    g_test_message("%u appends; slowest query with appends in flight: %"
+                   PRId64 " us", appends, slowest);
+    femu_query_zns_check(&c, rpt, 4096, counts);
+
+    /* reset every zone */
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET |
+                                     FEMU_ZONE_SELECT_ALL), ==, NVME_SUCCESS);
+    femu_query_zns_check(&c, rpt, 5, counts);
+    g_assert_cmpuint(counts[0x1], ==, nr);
+
+    guest_free(alloc, rpt);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* Submit a Report Zones of every zone and do not wait for it. */
+static void femu_zone_report_send(FemuCtrlState *c, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    femu_submit(c, &c->io, &cmd);
+}
+
+static void femu_zone_lock_hold(QTestState *qts, uint32_t ms)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/qz',"
+                             "'property':'x-zone-lock-hold-ms','value':%u}}",
+                             ms);
+}
+
+/*
+ * A poller holds the zone lock (a Report Zones held there by
+ * x-zone-lock-hold-ms). The query must wait for the lock, not read without
+ * it, and must not block the main loop meanwhile: a qtest read, served by
+ * the main loop, has to come back at once.
+ */
+static void femu_test_query_zns_busy(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t rpt = guest_alloc(alloc, 4096);
+    int64_t start, main_us, query_us;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zone_lock_hold(qts, 400);
+    femu_zone_report_send(&c, rpt);
+    g_usleep(100 * 1000);
+
+    start = g_get_monotonic_time();
+    qtest_qmp_send(qts, "{'execute':'query-femu'}");
+    g_usleep(20 * 1000);
+    main_us = g_get_monotonic_time();
+    qtest_readb(qts, rpt);
+    main_us = g_get_monotonic_time() - main_us;
+    rsp = qtest_qmp_receive(qts);
+    query_us = g_get_monotonic_time() - start;
+    g_test_message("main loop answered in %" PRId64 " us; query took %"
+                   PRId64 " us", main_us, query_us);
+    g_assert_nonnull(qdict_get_qdict(rsp, "return"));
+    qobject_unref(rsp);
+    g_assert_cmpint(main_us, <, 100 * 1000);
+    g_assert_cmpint(query_us, >=, 200 * 1000);
+
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_zone_lock_hold(qts, 0);
+    guest_free(alloc, rpt);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * The device is unplugged while the query sleeps between two tries of a
+ * busy zone lock. When it wakes, it must see the device gone and fail,
+ * without touching the namespaces; a sanitizer build reports that access.
+ */
+static void femu_test_query_zns_busy_unplug(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t rpt = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *err;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zone_lock_hold(qts, 600);
+    femu_zone_report_send(&c, rpt);
+    g_usleep(100 * 1000);
+    qtest_qmp_device_del_send(qts, "qz");
+    qtest_qmp_send(qts, "{'execute':'query-femu'}");
+    g_usleep(100 * 1000);
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    rsp = qtest_qmp_receive(qts);
+    err = qdict_get_qdict(rsp, "error");
+    g_assert_nonnull(err);
+    g_test_message("query-femu: %s", qdict_get_str(err, "desc"));
+    g_assert_nonnull(strstr(qdict_get_str(err, "desc"), "removed"));
+    qobject_unref(rsp);
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+    qos_invalidate_command_line();
 }
 
 #define FEMU_ZONE_BOUNDARY_ERROR    0x1b8   /* command specific */
@@ -27745,10 +28131,12 @@ static void femu_register_nodes(void)
             "id=qf,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
-    qos_add_test("query-unsupported-zns", "femu", femu_test_query_unsupported,
+    qos_add_test("query-zns", "femu", femu_test_query_zns,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"does not support znssd namespaces",
-        .edge.extra_device_opts = "femu_mode=3,secsz=512"
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_num_conv_zones=1,"
+            "zns_max_open=3,zns_max_active=4"
     });
     qos_add_test("query-unsupported-nossd", "femu",
                  femu_test_query_unsupported, &(QOSGraphTestOptions) {
@@ -27769,6 +28157,25 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=qu,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
+    });
+    qos_add_test("query-zns-busy", "femu", femu_test_query_zns_busy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
+    });
+    qos_add_test("query-zns-busy-unplug", "femu",
+                 femu_test_query_zns_busy_unplug, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
+    });
+    qos_add_test("query-zns-unplug", "femu", femu_test_query_unplug,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"znssd",
+        .edge.extra_device_opts =
+            "id=qu,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
     });
     qos_add_test("query-unsupported-fdp", "femu", femu_test_query_unsupported,
                  &(QOSGraphTestOptions) {

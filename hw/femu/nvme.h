@@ -2451,6 +2451,8 @@ typedef struct FemuCtrl {
     struct FemuQueryReq *query_req;
     /* qtest only: ms query-femu waits after the copy before it replies */
     uint32_t        test_query_delay_ms;
+    /* qtest only: ms Report Zones holds the zone lock before it reports */
+    uint32_t        test_zone_lock_hold_ms;
     /*
      * Asks the poller threads to leave their loop. They run until the device
      * goes away, so without this the join in teardown never returns.

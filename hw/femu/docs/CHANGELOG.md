@@ -82,6 +82,7 @@ listed one by one.
 - The Endurance Group log is filled in (074b63f4f).
 - Media counters (write amplification, host and relocated pages, write buffer hits, read reclaims, retention refreshes) are reported in vendor log page C0h (e57448e41, 4cb1f9ba7, e9746f6bf, e7f182b87).
 - A QMP command, `query-femu`, reports the geometry, write counters, line counts and per-line state of bbssd namespaces to the host. The FTL thread copies the state between two requests ([reference](reference/query-femu.md)).
+- `query-femu` also reports zoned namespaces: the zone geometry, the zone counts per state and, with kind `zones`, the state, write pointer and capacity of each zone. The main loop copies them under the zone lock, so a zoned namespace needs no enabled controller. Each namespace entry now carries only the members of its mode.
 - Opt-in power loss model (`power_loss`) that drops data still held in the volatile write buffer and records the event in SMART and the event log (46602b0e7, 303c77aef, 7679c443d).
 
 #### ZNS

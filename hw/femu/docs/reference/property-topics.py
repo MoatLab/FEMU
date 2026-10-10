@@ -16,7 +16,8 @@ DEVICES = [
         "title": "NVMe controller",
         "parent": "pci-device",
         "test_only": ["x-ftl-check", "x-ftl-trace", "x-ns-test", "x-oc12-clock",
-                      "x-oc12-trace", "x-query-delay-ms", "x-stream-test"],
+                      "x-oc12-trace", "x-query-delay-ms", "x-stream-test",
+                      "x-zone-lock-hold-ms"],
         "topics": [
             {
                 "title": "Mode, capacity and namespaces",

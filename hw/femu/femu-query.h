@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * query-femu: the request the QMP command hands to a controller's FTL
- * thread, and the copy of namespace state the thread fills in.
+ * thread, the copy of namespace state the thread fills in, and the copy of
+ * a zoned namespace that the main loop takes under the zone lock.
  */
 #ifndef HW_FEMU_FEMU_QUERY_H
 #define HW_FEMU_FEMU_QUERY_H
 
 #include "qapi/qapi-types-femu.h"
 
-/* The most line records one call reports per namespace. */
+/* The most line or zone records one call reports per namespace. */
 #define FEMU_QUERY_MAX_LINES        4096
 #define FEMU_QUERY_DEFAULT_LINES    256
 
@@ -67,8 +68,42 @@ typedef struct FemuQueryReq {
     bool done;                  /* set last, with release order */
 } FemuQueryReq;
 
+typedef struct FemuQueryZone {
+    uint64_t slba;
+    uint64_t cap;
+    uint64_t wp;
+    uint32_t index;
+    FemuZoneState state;
+    FemuZoneType type;
+    bool wp_valid;
+    bool zrwa;
+} FemuQueryZone;
+
+/*
+ * One zoned namespace. The caller fills nsid, generation, offset, max_zones
+ * and the buffer; zns_query_collect() fills the rest.
+ */
+typedef struct FemuQueryZoned {
+    uint32_t nsid;
+    uint64_t generation;
+
+    uint32_t lba_size;
+    uint64_t zone_size;
+    uint64_t zone_cap;
+    uint32_t max_open;
+    uint32_t max_active;
+    uint32_t num_zones;
+    uint32_t counts[FEMU_ZONE_STATE__MAX];
+
+    uint32_t offset;
+    uint32_t max_zones;
+    uint32_t nr_zones;
+    FemuQueryZone *zones;       /* max_zones entries, or NULL for a summary */
+} FemuQueryZoned;
+
 struct FemuCtrl;
 struct ssd;
+struct NvmeNamespace;
 
 /* Run on the FTL thread between two requests. */
 void femu_query_service(struct FemuCtrl *n, FemuQueryReq *req);
@@ -76,5 +111,10 @@ void femu_query_service(struct FemuCtrl *n, FemuQueryReq *req);
 void femu_query_cancel(FemuQueryReq *req);
 /* Copy one bbssd namespace into @q. FTL thread only. */
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q);
+/*
+ * Copy one zoned namespace into @q under its zone lock. Main loop only.
+ * Returns false, with @q unchanged, when a poller holds the lock.
+ */
+bool zns_query_collect(struct NvmeNamespace *ns, FemuQueryZoned *q);
 
 #endif

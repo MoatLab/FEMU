@@ -3446,6 +3446,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-zone-lock-hold-ms",
+                                       &FEMU(obj)->test_zone_lock_hold_ms,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
     }

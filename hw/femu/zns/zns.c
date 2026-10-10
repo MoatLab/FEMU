@@ -209,6 +209,7 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     }
 
     ns->zone_array = g_new0(NvmeZone, ns->num_zones);
+    memset(ns->zns->zone_states, 0, sizeof(ns->zns->zone_states));
     /* per-zone placement progress; zones fill independently of one another */
     g_free(ns->zns->zone_wp_slot);
     ns->zns->zone_wp_slot = g_new0(uint64_t, ns->num_zones);
@@ -231,7 +232,7 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
         /* the leading num_conv_zones are conventional (random-write) */
         zone->d.zt = (i < ns->num_conv_zones) ? NVME_ZONE_TYPE_CONVENTIONAL :
                                                 NVME_ZONE_TYPE_SEQ_WRITE;
-        zns_set_zone_state(zone, NVME_ZONE_STATE_EMPTY);
+        zns_set_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
         zone->d.za = 0;
         zone->d.zcap = ns->zone_capacity;
         zone->d.zslba = start;
@@ -306,12 +307,12 @@ static void zns_clear_zone(NvmeNamespace *ns, NvmeZone *zone)
     state = zns_get_zone_state(zone);
     if (zone->d.wp != zone->d.zslba || (zone->d.za & NVME_ZA_ZD_EXT_VALID)) {
         if (state != NVME_ZONE_STATE_CLOSED) {
-            zns_set_zone_state(zone, NVME_ZONE_STATE_CLOSED);
+            zns_set_zone_state(ns, zone, NVME_ZONE_STATE_CLOSED);
         }
         zns_aor_inc_active(ns);
         QTAILQ_INSERT_HEAD(&ns->closed_zones, zone, entry);
     } else {
-        zns_set_zone_state(zone, NVME_ZONE_STATE_EMPTY);
+        zns_set_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
     }
 }
 
@@ -512,7 +513,7 @@ static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneSta
         }
     }
 
-    zns_set_zone_state(zone, state);
+    zns_set_zone_state(ns, zone, state);
 
     switch (state) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
@@ -1758,6 +1759,10 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
 
     /* the report is a snapshot, so no write may land in the middle of it */
     QEMU_LOCK_GUARD(&ns->zns->zone_lock);
+    /* qtest: keep the lock busy, as a long report transfer does */
+    if (unlikely(qatomic_read(&n->test_zone_lock_hold_ms))) {
+        g_usleep(qatomic_read(&n->test_zone_lock_hold_ms) * 1000);
+    }
 
     status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
     if (status) {

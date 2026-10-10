@@ -4,11 +4,26 @@
 controller to the host. It needs no guest tools. The schema is in
 `qapi/femu.json`, and `query-qmp-schema` also returns it.
 
-This release supports only BlackBox (`bbssd`) namespaces. A selected
-namespace in another mode, with flexible data placement, or backed by a
-`femu-cxl-ssd` medium returns an error that names the mode. A controller
-in an unsupported mode returns that error even when the guest has not
-enabled it.
+This release supports BlackBox (`bbssd`) and zoned (`znssd`) namespaces.
+A selected namespace in another mode, with flexible data placement, or
+backed by a `femu-cxl-ssd` medium returns an error that names the mode.
+A controller in an unsupported mode returns that error even when the
+guest has not enabled it.
+
+```
+ QMP client                main loop                    device threads
+ ----------                ---------                    --------------
+ query-femu --------> check args, size buffers
+                           |
+                           |-- znssd: try the zone lock ----- pollers hold it
+                           |   busy? sleep, try again         for zone changes
+                           |   copy zones, unlock
+                           |
+                           |-- bbssd: post request ---------> FTL thread copies
+                           |   sleep until done <------------ between 2 requests
+                           |
+ reply  <------------ build one entry per namespace
+```
 
 ## Start a device with a QMP socket
 
@@ -17,8 +32,9 @@ enabled it.
 -device femu,id=femu0,devsz_mb=1024,femu_mode=1 -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off
 ```
 
-The guest must enable the controller before a query works. The NVMe driver
-does this when it binds to the device.
+For a `bbssd` namespace, the guest must enable the controller before a
+query works. The NVMe driver does this when it binds to the device. A
+`znssd` namespace needs no enabled controller.
 
 ## Arguments
 
@@ -26,21 +42,28 @@ does this when it binds to the device.
 | --- | --- | --- | --- |
 | `path` | string | the only `femu` device | QOM path of the device, for example `/machine/peripheral/femu0` |
 | `nsid` | integer | every attached namespace | the namespace to report |
-| `kind` | `summary` or `lines` | `summary` | `lines` adds one record per line |
-| `offset` | integer | 0 | with `lines`, the first line to report |
-| `limit` | integer | 256 | with `lines`, the most lines to report, 1 to 4096 |
+| `kind` | `summary`, `lines` or `zones` | `summary` | `lines` adds one record per line of a `bbssd` namespace; `zones` adds one record per zone of a `znssd` namespace |
+| `offset` | integer | 0 | with `lines` or `zones`, the first line or zone to report |
+| `limit` | integer | 256 | with `lines` or `zones`, the most records to report, 1 to 4096 |
 
 `offset` and `limit` with `kind` `summary` are an error. With `kind`
-`lines`, give `nsid` if the controller has more than one namespace.
+`lines` or `zones`, give `nsid` if the controller has more than one
+namespace. `lines` on a `znssd` namespace, and `zones` on a `bbssd`
+namespace, are an error.
 
 ## Reply
 
 The reply has the device `path`, the controller `mode` and one entry in
-`namespaces` for each selected namespace. Each entry has these members:
+`namespaces` for each selected namespace. Each entry has `nsid` and
+`mode` (`ocssd`, `bbssd`, `nossd`, `znssd`, `csd` or `kvssd`). The `mode`
+selects the other members of the entry.
+
+### BlackBox namespaces
+
+A `bbssd` entry has these members:
 
 | Member | Content |
 | --- | --- |
-| `nsid`, `mode` | the namespace and its mode: `ocssd`, `bbssd`, `nossd`, `znssd`, `csd` or `kvssd` |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
 | `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, and `waf` |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total` |
@@ -71,6 +94,26 @@ The `state` of a line is one of these values:
 | `retired` | out of service: a block in it wore out (`blk_pe_limit`) |
 | `spare` | held back so its blocks can replace worn-out ones (`spare_lines`) |
 
+### Zoned namespaces
+
+A `znssd` entry has these members. Addresses and sizes are in logical
+blocks.
+
+| Member | Content |
+| --- | --- |
+| `lba-size` | bytes per logical block |
+| `zone-size`, `zone-capacity` | logical blocks per zone, and the writable part of a zone |
+| `max-open`, `max-active` | the zone resource limits; 0 means no limit |
+| `zone-counts` | zones that are `empty`, `implicitly-open`, `explicitly-open`, `closed`, `read-only`, `full` and `offline`, and the `total` |
+| `zones` | with `kind` `zones`: `index`, `type`, `state`, `start-lba`, `capacity`, `write-pointer` and `zrwa` of each zone |
+| `offset`, `next-offset` | with `kind` `zones`: the first zone in `zones`, and the offset of the next call; `next-offset` is absent after the last zone |
+
+The `state` and `write-pointer` of a zone are the values Report Zones
+gives. `write-pointer` is absent where Report Zones has no valid write
+pointer: in a `conventional` zone, and in a `full`, `read-only` or
+`offline` zone. `type` is `sequential` or `conventional`. `zrwa` is true
+when the zone holds a zone random write area.
+
 ## Example
 
 ```json
@@ -95,22 +138,50 @@ The `state` of a line is one of these values:
 To read all lines, call again with `offset` set to `next-offset` until the
 reply has no `next-offset`.
 
+A zoned namespace with one zone written and one zone finished:
+
+```json
+{"execute": "query-femu", "arguments": {"kind": "zones", "limit": 2}}
+```
+
+```json
+{"return": {"path": "/machine/peripheral/femu0", "mode": "znssd", "namespaces": [{
+  "nsid": 1, "mode": "znssd", "lba-size": 512,
+  "zone-size": 131072, "zone-capacity": 131072, "max-open": 0, "max-active": 0,
+  "zone-counts": {"empty": 14, "implicitly-open": 1, "explicitly-open": 0,
+                  "closed": 0, "read-only": 0, "full": 1, "offline": 0,
+                  "total": 16},
+  "zones": [{"index": 0, "type": "sequential", "state": "full",
+             "start-lba": 0, "capacity": 131072, "zrwa": false},
+            {"index": 1, "type": "sequential", "state": "implicitly-open",
+             "start-lba": 131072, "capacity": 131072,
+             "write-pointer": 131080, "zrwa": false}],
+  "offset": 0, "next-offset": 2}]}}
+```
+
 ## Consistency and cost
 
-The FTL thread of the controller copies the state of a namespace between
-two I/O requests. Thus the counters, line counts and lines of one namespace
-in one reply agree with each other. Different namespaces, and different
-calls, show different points in time. A listing in pages is not one
-snapshot.
+The FTL thread of the controller copies the state of a `bbssd` namespace
+between two I/O requests. Thus the counters, line counts and lines of one
+namespace in one reply agree with each other. The main loop copies a
+`znssd` namespace while it holds the zone lock, so its zone counts and
+zones also agree. Different namespaces, and different calls, show
+different points in time. A listing in pages is not one snapshot.
+
+The pollers hold the zone lock while they change a zone, and for a whole
+Report Zones command. The main loop does not wait on the lock: when a
+poller holds it, the command sleeps and tries again. The zone counts are
+kept with each state change, so the copy reads only the zones it lists.
 
 The copy occupies the FTL thread for a short time. It does not stop the
 pollers, and the main loop continues while the command waits. With
 `kind` `lines`, the FTL thread walks the free, full and victim lists of the
 namespace once per call. The command fails with an error in these cases:
 
-- The controller is not enabled.
+- A `bbssd` namespace is selected and the controller is not enabled.
 - The FTL thread does not take the query in 5 seconds, for example because
   an admin command pauses the controller.
+- The zone lock of a `znssd` namespace stays busy for 5 seconds.
 - The device is removed during the query.
 - A namespace changes during the query.
 
