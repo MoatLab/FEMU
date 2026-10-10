@@ -262,7 +262,8 @@ Zone Management Receive. Other I/O opcodes go through the common path in
   them out, and Identify Namespace reports no Copy limits (MSSRL, MCL and
   MSRC are zero) even when `oncs` turns Copy on.
 - Verify runs the common path without zone state or boundary checks.
-- Flush and the I/O Management commands behave as on any namespace.
+- Flush behaves as on any namespace. I/O Management Send and Receive fail
+  with Invalid Command Opcode, since log 05h lists them for NVM only.
 
 ### Read and Write
 

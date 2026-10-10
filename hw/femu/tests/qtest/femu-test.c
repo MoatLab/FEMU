@@ -25176,6 +25176,7 @@ typedef struct FemuCapsCfg {
     const char *opts;
     uint16_t oncs;          /* the optional NVM commands it turns on */
     bool format;            /* whether Format NVM is offered */
+    void *(*before)(GString *cmd_line, void *arg);
 } FemuCapsCfg;
 
 typedef struct FemuCaps {
@@ -25355,9 +25356,7 @@ static void femu_caps_admin(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
 /*
  * Every I/O opcode on every namespace. A namespace may handle only what its
  * command set lists, and each listed command must be handled by a namespace
- * of that set. I/O Management Send and Receive are listed only for NVM with
- * FDP on, but every namespace takes their no-operation; that stays as it is
- * until it is decided which side should change.
+ * of that set.
  */
 static void femu_caps_io(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
 {
@@ -25378,16 +25377,6 @@ static void femu_caps_io(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
             cmd.dptr.prp1 = cpu_to_le64(buf);
             qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
             sc = femu_io(c, &cmd);
-            if ((opc == FEMU_CMD_IO_MGMT_RECV ||
-                 opc == FEMU_CMD_IO_MGMT_SEND) &&
-                !femu_caps_on(k->iocs[x], opc)) {
-                if (sc != NVME_SUCCESS) {
-                    femu_caps_bad(k, "namespace %u: unlisted I/O 0x%02x "
-                                  "answers 0x%x, not its no-operation",
-                                  k->nsid[i], opc, sc);
-                }
-                continue;
-            }
             if (sc == NVME_INVALID_OPCODE) {
                 continue;
             }
@@ -25721,6 +25710,9 @@ static void femu_test_v2_refusals(void *obj, void *data,
  * A subsystem has one endurance group, which log 09h reports whether or not
  * FDP is on: Identify Controller and every namespace have to say so as well,
  * a Key Value namespace in its own Identify structure too (KV 1.3, Figure 41).
+ * FDP is fixed at realize, so with it off the controller has no FDP
+ * capability: CTRATT.FDPS is clear, and the placement pages, features and
+ * I/O Management are neither listed nor answered.
  */
 static void femu_test_endgrp_reported(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -25731,6 +25723,8 @@ static void femu_test_endgrp_reported(void *obj, void *data,
     uint64_t buf;
     NvmeIdCtrl id;
     NvmeIdNs ns;
+    NvmeCmd iom;
+    uint32_t result;
     uint8_t indep[4096];
 
     femu_enable(&c, &femu->dev, alloc);
@@ -25771,7 +25765,29 @@ static void femu_test_endgrp_reported(void *obj, void *data,
                     ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
 
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_SUPPORTED, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (uint32_t lid = 0x20; lid <= 0x23; lid++) {
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, 0);
+        g_assert_cmphex(femu_endgrp_log(&c, lid, 0, buf, 64), ==,
+                        NVME_INVALID_LOG_ID);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, NVME_FDP_MODE,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 1, &result)),
+                    ==, NVME_INVALID_FIELD);
+    femu_create_io_queues(&c);
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        memset(&iom, 0, sizeof(iom));
+        iom.opcode = FEMU_CMD_IO_MGMT_RECV;
+        iom.nsid = cpu_to_le32(nsid);
+        iom.dptr.prp1 = cpu_to_le64(buf);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &iom)), ==, NVME_INVALID_OPCODE);
+        iom.opcode = FEMU_CMD_IO_MGMT_SEND;
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &iom)), ==, NVME_INVALID_OPCODE);
+    }
+
     guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -25914,6 +25930,12 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
       FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
     { "caps-bbssd-fdp", "femu_mode=1,subsys=fdpsub," FEMU_CAPS_GEO,
       FEMU_ONCS_DEFAULT, true },
+    /* an endurance group with FDP off */
+    { "caps-bbssd-endgrp", "femu_mode=1,subsys=nssub," FEMU_CAPS_GEO,
+      FEMU_ONCS_DEFAULT, true, femu_ns_subsys_before },
+    { "caps-mixed-endgrp", "femu_mode=1,namespaces=3,subsys=nssub,"
+      "namespace_modes=bbssd,,znssd,,kvssd," FEMU_CAPS_GEO,
+      FEMU_ONCS_DEFAULT, true, femu_ns_subsys_before },
     { "caps-zns", "femu_mode=3,secsz=512", FEMU_ONCS_DEFAULT, true },
     { "caps-zns-all", "femu_mode=3,secsz=512,oncs=0x19f,vwc=1,sgl=on", 0x19f,
       true },
@@ -28495,6 +28517,7 @@ static void femu_register_nodes(void)
         qos_add_test(femu_caps_cfgs[i].name, "femu", femu_test_caps,
                      &(QOSGraphTestOptions) {
             .edge.extra_device_opts = femu_caps_cfgs[i].opts,
+            .before = femu_caps_cfgs[i].before,
             .arg = (void *)&femu_caps_cfgs[i],
         });
     }

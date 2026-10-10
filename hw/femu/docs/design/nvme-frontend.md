@@ -525,13 +525,12 @@ namespace's command set. Features follow the same rule through
 
 The `caps-*` qtests check the registry against dispatch. Vendor command 0xEE
 answers Invalid Command Opcode outside Open-Channel, as any unlisted admin
-opcode does. Three differences are
-known and left for a decision, and the test holds each to its current
-answer: I/O Management Send and Receive take their no-operation on every
-namespace though log 05h lists them only for NVM with FDP on; the Changed Zone List (BFh) and Chunk
-Information (CAh) pages answer when the command names another command set;
-and with a subsystem whose FDP is off the FDP pages answer FDP Disabled
-without being listed. Outside the test's reach, log 00h takes its command
+opcode does. I/O Management Send and Receive answer Invalid Command
+Opcode where log 05h does not list them: without FDP, and on namespaces of
+other command sets. One difference is known and left for a decision, and
+the test holds it to its current answer: the Changed Zone List (BFh) and
+Chunk Information (CAh) pages answer when the command names another command
+set. Outside the test's reach, log 00h takes its command
 set from CDW14 even when CC.CSS selects NVM only, Get Features serves the
 Select field while ONCS bit 4 is clear, and CNS 1Ch always lists the NVM,
 zoned and key value sets.
@@ -581,9 +580,8 @@ Namespace Management.
 Get Log Page refuses an id that log 00h lists for no command set with
 Invalid Log Page (`nvme_log_answered()`). Logs 00h, 05h and 12h refuse a
 CSI other than NVM, KV and zoned with I/O Command Set Not Supported when
-CC.CSS selects by CSI. The one exception is the FDP pages
-on a controller with a subsystem: while FDP is off they are not listed but
-still answer, with FDP Disabled.
+CC.CSS selects by CSI. With FDP off there is no FDP capability, so the FDP
+pages are neither listed nor answered.
 
 Get and Set Features answer Arbitration (01h), Power Management (02h, one
 power state), LBA Range Type (03h), Temperature Threshold (04h), Error
@@ -591,7 +589,7 @@ Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
 Timestamp (0Eh), Host Behavior Support (16h), Command Set Profile (19h), FDP
-(1Dh, 1Eh, only with `femu-subsys`), Key Value Configuration (20h, only with
+(1Dh, 1Eh, only with FDP on), Key Value Configuration (20h, only with
 a KV namespace) and Software Progress Marker (80h). Any other identifier, or
 one of these without what it needs, fails with Invalid Field in Command, and
 log 12h lists exactly the identifiers that answer.
@@ -695,7 +693,7 @@ registers with no guest. Cases that target this chapter include:
 | `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for; VS, CAP.CRMS, CRTO and BPCAP match the reported version (2.1, or 1.4 for Open-Channel), CAP.AMS is 0, and LPA bit 5 and every command scope are clear |
 | `ns-mgmt-before-identify` | a managed bbssd namespace is addressed correctly before the host reads Identify Controller |
 | `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
-| `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh |
+| `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh; the FDP pages, FDP Mode and I/O Management are refused |
 | `endgrp-list-absent` | without a subsystem, CNS 19h fails with Invalid Field |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |

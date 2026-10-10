@@ -325,7 +325,11 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
     case NVME_LOG_FDP_RUH_USAGE:
     case NVME_LOG_FDP_STATS:
     case NVME_LOG_FDP_EVENTS:
-        /* the placement pages answer only while placement is on */
+        /*
+         * FDP is fixed at realize: with it off there is no FDP capability
+         * (CTRATT.FDPS clear), so the placement pages are neither listed
+         * nor answered.
+         */
         return n->subsys && n->subsys->endgrp.fdp.enabled ?
                NVME_LIDS_LSUPP : 0;
     case NVME_LOG_CHANGED_ZONE_LIST:
@@ -341,9 +345,7 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
 
 /*
  * Whether Get Log Page answers @lid at all: a page any command set lists is
- * answered whichever set the command names. The placement pages also answer
- * while placement is off, with FDP Disabled, as long as there is an
- * endurance group.
+ * answered whichever set the command names.
  */
 bool nvme_log_answered(FemuCtrl *n, uint8_t lid)
 {
@@ -356,16 +358,7 @@ bool nvme_log_answered(FemuCtrl *n, uint8_t lid)
             return true;
         }
     }
-
-    switch (lid) {
-    case NVME_LOG_FDP_CONFS:
-    case NVME_LOG_FDP_RUH_USAGE:
-    case NVME_LOG_FDP_STATS:
-    case NVME_LOG_FDP_EVENTS:
-        return n->subsys;
-    default:
-        return false;
-    }
+    return false;
 }
 
 /*

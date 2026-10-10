@@ -2011,9 +2011,15 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_IO_MGMT_RECV:
-        return nvme_io_mgmt_recv(n, req);
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
+            return nvme_io_mgmt_recv(n, req);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_IO_MGMT_SEND:
-        return nvme_io_mgmt_send(n, req);
+        if (nvme_ns_io_effects(n, ns, cmd->opcode)) {
+            return nvme_io_mgmt_send(n, req);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     default:
         /* dispatch on the namespace's mode, not the controller's */
         if (ns->ext_ops.io_cmd) {

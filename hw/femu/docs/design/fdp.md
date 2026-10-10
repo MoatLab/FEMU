@@ -69,11 +69,13 @@ with a single FDP configuration when the subsystem is realized:
 | MAXPIDS | 128 (reported zero-based as 127) | fixed |
 | Event filter | every supported event type enabled on every handle | Set Features 1Eh |
 
-When a controller joins, `nvme_ns_init_fdp()` gives namespace 1 every
-handle in order: placement handle `i` is RUH `i`, the namespace's ENDGID is
-1, and each handle's RUAMW starts at a full unit. The controller then sets
-CTRATT bit 19 (FDP), and the effects log lists I/O Management Send and
-Receive. CTRATT bit 4 (Endurance Groups), ENDGIDMAX = 1 and each
+With FDP on, a controller that joins runs `nvme_ns_init_fdp()`, which gives
+namespace 1 every handle in order: placement handle `i` is RUH `i`, the
+namespace's ENDGID is 1, and each handle's RUAMW starts at a full unit. The
+controller then sets CTRATT bit 19 (FDP), and the effects log lists I/O
+Management Send and Receive for NVM namespaces. Without FDP, and on
+namespaces of other command sets, the two commands fail with Invalid Command
+Opcode. CTRATT bit 4 (Endurance Groups), ENDGIDMAX = 1 and each
 namespace's ENDGID = 1 come with any subsystem, FDP or not, since its one
 endurance group is what log 09h reports.
 The Endurance Group List (Identify CNS 19h) lists group 1 when CDW11 asks
@@ -302,9 +304,10 @@ only its range.
 ## Log pages and features
 
 All four FDP log pages take endurance group 1 in the Log Specific
-Identifier, and need a subsystem (without one they fail with Invalid Log
-Page); 21h, 22h and 23h fail with FDP Disabled when FDP is off. The supported log pages list (00h) shows them only while
-FDP is on.
+Identifier, and need a subsystem with FDP on. FEMU fixes FDP at realize.
+So with FDP off, the controller has no FDP capability (CTRATT bit 19 is
+clear). The pages then fail with Invalid Log Page, and log 00h does not
+list them.
 
 | Log | Content | Code |
 | --- | --- | --- |
@@ -361,8 +364,9 @@ Each event carries the Timestamp feature's current value.
 Get and Set Features 1Eh (FDP Events) read and change the enabled event
 types of one placement handle, named in CDW11; an unsupported type in a Set
 fails with Invalid Field. Get Features 1Dh (FDP Mode) for endurance group 1
-reports whether FDP is on. Set Features 1Dh fails with Invalid Field for an
-endurance group other than 1 or without a subsystem, and otherwise with
+reports that FDP is on. Both features exist only with FDP on; otherwise they
+fail with Invalid Field, and log 12h does not list them. Set Features 1Dh
+fails with Invalid Field for an endurance group other than 1, and otherwise with
 Command Sequence Error, since the mode may only change while the endurance group has
 no namespaces and FEMU builds the namespace at realize.
 

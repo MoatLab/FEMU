@@ -72,8 +72,11 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->vwc;
     case NVME_FDP_MODE:
     case NVME_FDP_EVENTS:
-        /* both name the endurance group, which comes with a subsystem */
-        return n->subsys;
+        /*
+         * FDP is fixed at realize, so a subsystem with FDP off has no FDP
+         * capability (CTRATT.FDPS clear) and no FDP features.
+         */
+        return n->subsys && n->subsys->endgrp.fdp.enabled;
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
             if (n->namespaces[i].allocated && NS_KVSSD(&n->namespaces[i])) {
