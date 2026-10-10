@@ -141,6 +141,14 @@ CACHE_DISABLE (`disable`)
   read is a NAND read and every write a NAND program. A failed command
   clears the mark from the pages it could not drop, so an uncached page is
   never resident.
+  A lock-prefixed read-modify-write on an uncached page depends on the mode:
+  - With `der=off`, or with `der=cylon` while no slot is installed, it
+    reaches the device as a read and a separate write. So it is not atomic
+    between vCPUs (see [thread ownership](../cxlssd.md#thread-ownership)).
+    A slot is never installed when every page is uncached from the start.
+  - With an installed `der=cylon` slot, a Cylon kernel with commit 768e5d4d0
+    or later does the write as an atomic exchange on the payload. FEMU then
+    charges the read, but no program for the write.
 
 CACHE_ENABLE (`enable`)
 : Ends the uncached marking; the next access caches the page again.
