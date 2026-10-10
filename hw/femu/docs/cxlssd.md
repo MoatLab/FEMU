@@ -594,16 +594,20 @@ pending installation and RCU readers finish. Slot deletion precedes SPT unmap,
 backing unlock and reservation release. Failed deletion terminates QEMU rather
 than releasing an ID or payload that the kernel might still use.
 
-GET receives one untouched `MAP_SHARED | MAP_ANONYMOUS` VMA per used chunk,
-sized exactly to `min(remaining SPT bytes, 4 MiB)`. This matches the published
-x86 Cylon kernel and prototype (`MAX_ORDER=10`, 4 KiB pages); a differently
-configured ABI is unsupported and must be reviewed before acknowledging it.
+GET receives one untouched `MAP_SHARED | MAP_ANONYMOUS` VMA per used chunk.
+Each VMA is sized exactly to `min(remaining SPT bytes, 4 MiB)`. This matches
+the published x86 Cylon kernel and prototype (`MAX_ORDER=10`, 4 KiB pages).
+A differently configured ABI is unsupported; review it before you acknowledge it.
 A 256 MiB window needs 512 KiB of SPT; a 64 GiB window needs 32 chunks.
-Installation explicitly checks the sixty-entry ioctl limit before slot creation.
-Returned count, pointers, offsets and lengths must describe a contiguous,
-nonoverlapping SPT covering exactly the slot. `/proc/self/smaps` must report
-`pf` for each exact VMA; there is no sentinel write or pre-ioctl page fault.
-This detects absent remaps. SPT areas are unmapped after successful slot deletion.
+Installation checks the sixty-entry ioctl limit before slot creation.
+
+The returned count, pointers, offsets and lengths must describe a contiguous,
+nonoverlapping SPT that covers exactly the slot. For each exact VMA,
+`/proc/self/smaps` must report `pf` or `mm`. Older Cylon kernels map raw
+PFNs (`pf`); newer ones map refcounted pages (`mm`), which outlive the slot
+while FEMU maps them. There is no sentinel write or pre-ioctl page fault, so
+this check detects absent remaps. SPT areas are unmapped after successful slot
+deletion.
 
 #### Host kernel
 

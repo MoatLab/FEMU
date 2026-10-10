@@ -30,6 +30,10 @@ static inline void *cylon_spt_area(uint64_t size)
                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 }
 
+/*
+ * Whether the kernel mapped its tables over @area: older Cylon kernels map
+ * them as raw PFNs ("pf"), newer ones as refcounted pages ("mm").
+ */
 static inline bool cylon_spt_mapped(void *area, uint64_t size)
 {
     FILE *file = fopen("/proc/self/smaps", "r");
@@ -46,7 +50,7 @@ static inline bool cylon_spt_mapped(void *area, uint64_t size)
         if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
             match = start == (uintptr_t)area && end - start == size;
         } else if (match && !strncmp(line, "VmFlags:", 8)) {
-            mapped = strstr(line, " pf ") != NULL;
+            mapped = strstr(line, " pf ") || strstr(line, " mm ");
             break;
         }
     }
