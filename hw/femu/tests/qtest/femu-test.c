@@ -25925,6 +25925,7 @@ static void femu_test_ns_mgmt_before_identify(void *obj, void *data,
     "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
     "luns_per_ch=4,nchs=4"
 #define FEMU_ONCS_DEFAULT   0x14    /* the oncs property's default */
+#define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
 /*
  * Every mode, and the properties that change what is advertised. The
@@ -25962,8 +25963,8 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
     { "caps-kv-all", "devsz_mb=512,femu_mode=5,oncs=0x19f,vwc=1,sgl=on",
       0x19f, true },
     { "caps-csd", "femu_mode=4,fdm_size=16", FEMU_ONCS_DEFAULT, true },
-    { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_DEFAULT, true },
-    { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_DEFAULT, true },
+    { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_OCSSD, true },
+    { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_OCSSD, true },
     { "caps-mixed", "femu_mode=1,namespaces=3,"
       "namespace_modes=bbssd,,znssd,,kvssd," FEMU_CAPS_GEO,
       FEMU_ONCS_DEFAULT, true },
@@ -25972,6 +25973,62 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
     { "caps-mixed-csd", "namespaces=2,namespace_modes=nossd,,csd,"
       "fdm_size=16," FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
 };
+
+/*
+ * An Open-Channel address is sparse, and the common handlers of the optional
+ * commands index the backing store with a flat LBA. With every ONCS bit set,
+ * the controller must neither list nor run them. The last address of the
+ * namespace lies far past the backed media, so a command that still ran would
+ * zero or read memory outside the store.
+ */
+static void femu_test_oc_generic_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    static const uint8_t opcodes[] = {
+        NVME_CMD_DSM, NVME_CMD_WRITE_ZEROES, NVME_CMD_COMPARE,
+        NVME_CMD_VERIFY, FEMU_CMD_COPY, NVME_CMD_WRITE_UNCOR,
+    };
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    NvmeIdCtrl id;
+    uint64_t nsze, buf, last;
+    uint32_t lbasz;
+    uint8_t range[16] = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(c.pdev->bus->qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le16_to_cpu(id.oncs) & 0x18f, ==, 0);
+
+    femu_identify_ns(&c, &nsze, &lbasz);
+    last = nsze - 1;
+    stl_le_p(range + 4, 1);
+    stq_le_p(range + 8, last);
+    qtest_memwrite(c.pdev->bus->qts, buf, range, sizeof(range));
+    for (i = 0; i < ARRAY_SIZE(opcodes); i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = opcodes[i];
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        if (opcodes[i] == NVME_CMD_DSM) {
+            cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        } else {
+            cmd.cdw10 = cpu_to_le32((uint32_t)last);
+            cmd.cdw11 = cpu_to_le32((uint32_t)(last >> 32));
+        }
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_INVALID_OPCODE);
+    }
+    femu_disable(&c);
+}
 
 static void femu_register_nodes(void)
 {
@@ -26485,6 +26542,16 @@ static void femu_register_nodes(void)
                  femu_test_kv_namespaces_are_separate,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,namespaces=2"
+    });
+    qos_add_test("oc20-generic-refused", "femu", femu_test_oc_generic_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256,oncs=0x19f"
+    });
+    qos_add_test("oc12-generic-refused", "femu", femu_test_oc_generic_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=1,oncs=0x19f"
     });
     qos_add_test("oc20-vector-io", "femu", femu_test_oc20_vector_io,
                  &(QOSGraphTestOptions) {

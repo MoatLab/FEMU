@@ -220,8 +220,12 @@ static uint32_t nvme_mode_io_effects(FemuCtrl *n, uint8_t csi, uint8_t mode,
     bool optional;
     uint32_t eff = nvme_optional_effects(n, csi, opc, &optional);
 
+    /*
+     * An Open-Channel address is a sparse vector address. The common handlers
+     * index the backing store with a flat LBA, so they are refused there.
+     */
     if (optional) {
-        return eff;
+        return mode == FEMU_OCSSD_MODE ? 0 : eff;
     }
 
     switch (opc) {

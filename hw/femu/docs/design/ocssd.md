@@ -186,10 +186,13 @@ bit of the per-address status in completion dwords 0 and 1 is set. Reads
 are not checked. Clearing an entry with 0xF1 makes the block usable again.
 The table starts empty; `nand_bad_blocks` does not seed it.
 
-In both versions the generic NVM commands (Flush, Dataset Management,
-Compare, Write Zeroes, Copy, Verify, Write Uncorrectable) are handled by
-`nvme_io_cmd()` on raw LBAs before the Open-Channel handler is consulted,
-when `oncs` turns them on. They do not follow the Open-Channel rules.
+In both versions, Flush is handled by `nvme_io_cmd()` before the
+Open-Channel handler. The optional NVM commands (Dataset Management, Compare,
+Write Zeroes, Copy, Verify, Write Uncorrectable) fail with Invalid Opcode, and
+ONCS and the command effects log leave them out, whatever `oncs` sets. Their
+common handlers address the backing store with a flat LBA. An Open-Channel
+address is sparse, so these handlers would touch the wrong media or memory
+past the store.
 
 ### What 1.2 does not enforce
 
