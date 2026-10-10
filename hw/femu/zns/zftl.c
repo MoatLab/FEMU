@@ -169,15 +169,26 @@ static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
 }
 
 /*
- * Erase block blk_idx on every plane of one LUN as one multi-plane operation
- * and count the wear on each block. Returns the latency from stime.
+ * With zns_reset_by_fill, a reset skips a block that holds no programmed page:
+ * it is still in the erased state, so a real device has nothing to erase.
+ */
+static bool zns_reset_skips(struct zns_ssd *zns, struct ppa *ppa)
+{
+    return zns->timing.reset_by_fill && get_blk(zns, ppa)->page_wp == 0;
+}
+
+/*
+ * Erase block blk_idx on the planes of one LUN as one multi-plane operation
+ * and count the wear on each block. Returns the latency from stime and adds
+ * the number of erased blocks to *erased.
  */
 static uint64_t zns_erase_lun(struct zns_ssd *zns, int ch, int lun,
-                              uint32_t blk_idx, uint64_t stime)
+                              uint32_t blk_idx, uint64_t stime,
+                              uint64_t *erased)
 {
     NandLoc locs[1 << PL_BITS];
     struct ppa ppa;
-    int pl;
+    int pl, n = 0;
 
     if (stime == 0) {
         stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -188,7 +199,10 @@ static uint64_t zns_erase_lun(struct zns_ssd *zns, int ch, int lun,
         ppa.g.fc = lun;
         ppa.g.pl = pl;
         ppa.g.blk = blk_idx;
-        locs[pl] = (NandLoc) {
+        if (zns_reset_skips(zns, &ppa)) {
+            continue;
+        }
+        locs[n++] = (NandLoc) {
             .ch = ch,
             .lun = lun,
             .pl = pl,
@@ -199,7 +213,11 @@ static uint64_t zns_erase_lun(struct zns_ssd *zns, int ch, int lun,
         get_blk(zns, &ppa)->erase_cnt++;
     }
 
-    return nand_media_multiplane(&zns->media, locs, zns->num_plane,
+    *erased += n;
+    if (n == 0) {
+        return 0;
+    }
+    return nand_media_multiplane(&zns->media, locs, n,
                                  NAND_MEDIA_ERASE, stime).latency_ns;
 }
 
@@ -406,10 +424,11 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     /* Step 2: Invalidate L2P mappings (instant) */
     zns_invalidate_zone_mappings(zns, zone_idx, zone_size_lbas, lbasz);
 
-    /* Step 3: Reset block state (instant) */
-    zns_reset_block_state(zns, zone_idx);
-
-    /* Step 4: Simulate physical erase across all channels/LUNs/planes (parallel) */
+    /*
+     * Step 3: Simulate physical erase across all channels/LUNs/planes
+     * (parallel). It runs before the block state is cleared, because
+     * zns_reset_by_fill reads each block's page_wp to find what to erase.
+     */
     erase_cmd.type = USER_IO;
     erase_cmd.cmd = NAND_ERASE;
     erase_cmd.stime = stime;
@@ -421,9 +440,9 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                  * The die is held for the whole erase, so erase every plane
                  * in one multi-plane operation instead of num_plane in turn.
                  */
-                sublat = zns_erase_lun(zns, ch, lun, blk_idx, stime);
+                sublat = zns_erase_lun(zns, ch, lun, blk_idx, stime,
+                                       &total_blocks_erased);
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
-                total_blocks_erased += zns->num_plane;
                 continue;
             }
             for (pl = 0; pl < zns->num_plane; pl++) {
@@ -435,6 +454,9 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                 ppa.g.pg = 0;
                 ppa.g.spg = 0;
 
+                if (zns_reset_skips(zns, &ppa)) {
+                    continue;
+                }
                 sublat = zns_advance_status(zns, &ppa, &erase_cmd);
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
                 get_blk(zns, &ppa)->erase_cnt++;
@@ -444,6 +466,9 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     }
 
     qatomic_add(&zns->total_erases, total_blocks_erased);
+
+    /* Step 4: Reset block state (instant) */
+    zns_reset_block_state(zns, zone_idx);
 
     ftl_debug("Zone %u reset complete: erased %lu blocks across %d ch * %d lun * %d planes\n",
              zone_idx, total_blocks_erased, (int)zns->num_ch, (int)zns->num_lun, (int)zns->num_plane);

@@ -130,6 +130,8 @@ typedef struct SSDNandFlashTiming {
     uint64_t tsusp_ns;
     /* one array op at a time per LUN, as on a real die (false = per plane) */
     bool     lun_contention;
+    /* a zone reset erases only the blocks that hold programmed pages */
+    bool     reset_by_fill;
 } SSDNandFlashTiming;
 
 struct zns_write_cache{

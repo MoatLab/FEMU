@@ -519,6 +519,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "ZNS: non-zero makes the planes of one LUN share the die, so their "
       "operations run one at a time; a zone reset erases each LUN's planes "
       "in one multi-plane operation" },
+    { "zns_reset_by_fill",
+      "ZNS: non-zero makes a zone reset erase only the blocks that hold "
+      "programmed pages, so its time and wear follow the zone's fill" },
     { "zns_tsusp_ns",
       "ZNS: overhead in ns added to a read that suspends a program or "
       "erase, 0 or more" },

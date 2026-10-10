@@ -1930,6 +1930,97 @@ static void femu_test_zns_lun(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * Zone reset by fill. One channel has two LUNs of two planes, so zone 0 owns
+ * four blocks, and an erase takes ZNS_LUN_OP_MS. One write stays in the write
+ * cache. ZNS_LUN_FILL writes fill half the stripe, and a write to zone 1
+ * evicts the only cache, which programs both planes of LUN 0 only. Without
+ * zns_reset_by_fill a reset erases all four blocks. With it, a reset erases
+ * only programmed blocks: none after one write, two after the eviction.
+ * SMART Percentage Used (rating 1, 128 blocks) shows the erase count. A
+ * reset with no erase must finish under half an erase time, which leaves
+ * room for host jitter. @data is "off", "on", or "lun" (on, plus
+ * zns_lun_contention).
+ */
+static void femu_test_zns_reset_fill(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = !g_str_equal(data, "off");
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf;
+    uint64_t log;
+    uint64_t zsze;
+    int64_t t0;
+    int64_t ms;
+    uint64_t lba = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    log = guest_alloc(alloc, 512);
+    femu_zone_report(&c, buf, report);
+    zsze = ldq_le_p(report + 64 + 64 + 16);
+    /* the first I/O command pays a one-time start cost; keep it out */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    /* an empty zone has no media work in either mode */
+    t0 = g_get_monotonic_time();
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("reset by fill %s: empty reset %" PRId64 " ms",
+                   (char *)data, ms);
+    g_assert_cmpint(ms, <, ZNS_LUN_OP_MS / 2);
+
+    /* one write, still in the write cache: no block holds a programmed page */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    t0 = g_get_monotonic_time();
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("reset by fill %s: cached reset %" PRId64 " ms",
+                   (char *)data, ms);
+    if (on) {
+        g_assert_cmpint(ms, <, ZNS_LUN_OP_MS / 2);
+    } else {
+        g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+    }
+
+    /* program both planes of LUN 0; LUN 1 stays erased */
+    for (i = 0; i < ZNS_LUN_FILL; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba, buf)), ==,
+                        NVME_SUCCESS);
+        lba += FEMU_DATA_SIZE / c.lba_size;
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, zsze, buf)), ==,
+                    NVME_SUCCESS);
+    t0 = g_get_monotonic_time();
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("reset by fill %s: written reset %" PRId64 " ms",
+                   (char *)data, ms);
+    g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+    g_assert_cmpint(ms, <, 2 * ZNS_LUN_OP_MS - ZNS_LUN_OP_MS / 3);
+
+    /* erases: off 4 + 4 = 8 (6%), on 0 + 2 = 2 (1%) */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 5), ==, (on ? 2 : 8) * 100 / 128);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * C0h LE64 counters: copies at 16, user programs at 24, hybrid switches at
  * 88, full merges at 96 and charged merge erases at 104. The merge counters
  * exclude physical line GC, which these short traces never require.
@@ -26978,6 +27069,33 @@ static void femu_register_nodes(void)
             "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
             "zns_pg_wr_lat=300000000,zns_blk_er_lat=300000000,"
             "zns_lun_contention=1"
+    });
+    qos_add_test("zns-reset-fill-off", "femu", femu_test_zns_reset_fill,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=2,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "pe_cycles_rated=1,zns_pg_wr_lat=1000000,zns_blk_er_lat=300000000,"
+            "zns_num_wc=1"
+    });
+    qos_add_test("zns-reset-fill-on", "femu", femu_test_zns_reset_fill,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=2,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "pe_cycles_rated=1,zns_pg_wr_lat=1000000,zns_blk_er_lat=300000000,"
+            "zns_reset_by_fill=1,zns_num_wc=1"
+    });
+    qos_add_test("zns-reset-fill-lun", "femu", femu_test_zns_reset_fill,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lun",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=2,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "pe_cycles_rated=1,zns_pg_wr_lat=1000000,zns_blk_er_lat=300000000,"
+            "zns_reset_by_fill=1,zns_num_wc=1,zns_lun_contention=1"
     });
     qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
                  &(QOSGraphTestOptions) {

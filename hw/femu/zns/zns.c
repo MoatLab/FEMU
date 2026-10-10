@@ -2074,6 +2074,8 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.tsusp_ns = n->zns_params.zns_tsusp_ns;
     /* LUN contention: default off, so the plane-only timing stays as before */
     id_zns->timing.lun_contention = (n->zns_params.zns_lun_contention != 0);
+    /* reset by fill: default off, so a reset erases every block as before */
+    id_zns->timing.reset_by_fill = (n->zns_params.zns_reset_by_fill != 0);
 
     /*
      * Optional write-fault injection. One write in N fails and takes its zone

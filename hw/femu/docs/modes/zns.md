@@ -136,7 +136,10 @@ other types. `zns_cmd_addr_lat`, `zns_pg_xfer_lat` and `zns_status_lat` add a
 shared channel bus, and `zns_pe_suspend` with `zns_tsusp_ns` lets reads
 suspend a program or erase. By default each plane runs on its own.
 `zns_lun_contention=1` makes the planes of one LUN take turns, as on one die.
-A zone reset then erases the planes of a LUN in one multi-plane operation. See the [timing model](../concepts/timing-model.md#zns-write-cache).
+A zone reset then erases the planes of a LUN in one multi-plane operation.
+By default a reset of a non-empty zone erases every block of the zone.
+`zns_reset_by_fill=1` erases only the blocks that hold programmed pages, so
+the reset time and the wear follow the zone's fill. See the [timing model](../concepts/timing-model.md#zns-write-cache).
 
 ### Optional zone features
 

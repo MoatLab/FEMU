@@ -2079,6 +2079,8 @@ typedef struct ZNSCtrlParams {
     int64_t zns_tsusp_ns;
     /* planes of one LUN share the die: serialize them (0 = off) */
     int32_t zns_lun_contention;
+    /* zone reset erases only programmed blocks (0 = off: every block) */
+    int32_t zns_reset_by_fill;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_num_wc;      /* write caches (0 = zns_max_open, or 3 when unlimited) */
