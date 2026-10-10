@@ -1096,6 +1096,29 @@ static uint16_t nvme_identify_ctrl_list(FemuCtrl *n, NvmeCmd *cmd,
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
+/*
+ * Endurance Group List (CNS 19h): the groups this controller can reach whose
+ * identifier is at least the one in CDW11 bits 15:0. A controller in a
+ * subsystem has one group, 1; one without a subsystem reports no groups in
+ * CTRATT, so it does not take this CNS.
+ */
+static uint16_t nvme_identify_endgrp_list(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint16_t list[2048] = { 0 };
+    uint16_t min = le32_to_cpu(cmd->cdw11) & 0xffff;
+
+    if (!n->subsys) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (min <= 1) {
+        list[0] = cpu_to_le16(1);
+        list[1] = cpu_to_le16(1);
+    }
+    return dma_read_prp(n, (uint8_t *)list, sizeof(list),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -1170,6 +1193,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_identify_ns_descr_list(n, cmd);
     case NVME_ID_CNS_IO_COMMAND_SET:
         return nvme_identify_cmd_set(n, cmd);
+    case NVME_ID_CNS_ENDGRP_LIST:
+        return nvme_identify_endgrp_list(n, cmd);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }

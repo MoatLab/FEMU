@@ -76,6 +76,8 @@ CTRATT bit 19 (FDP), and the effects log lists I/O Management Send and
 Receive. CTRATT bit 4 (Endurance Groups), ENDGIDMAX = 1 and each
 namespace's ENDGID = 1 come with any subsystem, FDP or not, since its one
 endurance group is what log 09h reports.
+The Endurance Group List (Identify CNS 19h) lists group 1 when CDW11 asks
+for identifiers from 0 or 1; without a subsystem, CNS 19h is refused.
 
 The BlackBox side (`bb.c`, `ftl-fdp.c`) adds the following, for a CSD
 namespace as for a bbssd one, since CSD runs the same FTL

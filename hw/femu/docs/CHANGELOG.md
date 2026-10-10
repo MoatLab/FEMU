@@ -284,6 +284,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Spec conformance and host compatibility
 
+- Identify CNS 19h (Endurance Group List) lists endurance group 1 on a controller in a subsystem, from a starting identifier of 0 or 1, as `nvme list-endgrp` asks. Without a subsystem it is refused.
 - Commands complete on the completion queue they were bound to, and submission queues that share a completion queue are served (7a3f1d9fa, dc4289f91).
 - Completions are not posted into a full queue and the phase tag is written last (6f998742f, 04ce8b1a7).
 - I/O interrupts are delivered without a KVM route, and pin interrupts work with shadow doorbells (8ebffbaa4, 34621540e, 4ca1be945).

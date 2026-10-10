@@ -7806,6 +7806,7 @@ static void femu_test_error_log(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 #define FEMU_CNS_NS_CS_INDEP    0x08
+#define FEMU_CNS_ENDGRP_LIST    0x19
 
 static uint16_t femu_identify(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
                               uint32_t dw11, uint64_t buf)
@@ -25667,6 +25668,36 @@ static void femu_test_endgrp_reported(void *obj, void *data,
                     NVME_SUCCESS);
     g_assert_cmpuint(qtest_readw(qts, buf + 46), ==, 1);
 
+    /* Endurance Group List: identifiers at least CDW11 bits 15:0 */
+    for (uint32_t min = 0; min <= 2; min++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, min, buf),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readw(qts, buf), ==, min <= 1 ? 1 : 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, min <= 1 ? 1 : 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 4), ==, 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 4094), ==, 0);
+    }
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, 0xffff, buf),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* Without a subsystem there is no endurance group, so CNS 19h is refused. */
+static void femu_test_endgrp_list_absent(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, 0, buf)),
+                    ==, NVME_INVALID_FIELD);
     guest_free(alloc, buf);
     femu_disable(&c);
 }
@@ -28343,6 +28374,10 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "femu_mode=1,subsys=nssub,namespaces=2,"
             "namespace_modes=bbssd,,kvssd," FEMU_CAPS_GEO,
         .before = femu_ns_subsys_before,
+    });
+    qos_add_test("endgrp-list-absent", "femu", femu_test_endgrp_list_absent,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1," FEMU_CAPS_GEO,
     });
     for (int i = 0; i < ARRAY_SIZE(femu_caps_cfgs); i++) {
         qos_add_test(femu_caps_cfgs[i].name, "femu", femu_test_caps,
