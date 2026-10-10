@@ -71,7 +71,7 @@ Devices:
 | `mpsmin` | `uint8` | `0` | CAP.MPSMIN: smallest host memory page size as 2^(12 + mpsmin) bytes; must not exceed mpsmax |
 | `mpsmax` | `uint8` | `0` | CAP.MPSMAX: largest host memory page size as 2^(12 + mpsmax) bytes, from mpsmin to 15 |
 | `oacs` | `uint16` | `2` | Optional Admin Command Support; only bit 1 (Format NVM, 0x2) may be set, and clearing it refuses Format NVM |
-| `oncs` | `uint16` | `20` | Optional NVM Command Support bit mask: 0x1 Compare, 0x2 Write Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 Save/Select, 0x80 Verify, 0x100 Copy; Timestamp is always added |
+| `oncs` | `uint16` | `413` | Optional NVM Command Support bit mask: 0x1 Compare, 0x2 Write Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 Save/Select, 0x80 Verify, 0x100 Copy; the default 0x19d sets all but Write Uncorrectable; Timestamp is always added |
 | `sgl` | `bool` | `off` | Advertise and accept address scatter gather lists for data transfer; OCSSD ignores it |
 | `cmbsz` | `uint32` | `0` | Controller Memory Buffer size register; 0 means no buffer, otherwise the size field times the unit must be a non-zero power of two |
 | `cmbloc` | `uint32` | `0` | Controller Memory Buffer location register; its BAR field must be 2 when cmbsz is set |

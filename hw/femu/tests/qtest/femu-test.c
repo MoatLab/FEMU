@@ -25924,7 +25924,7 @@ static void femu_test_ns_mgmt_before_identify(void *obj, void *data,
 #define FEMU_CAPS_GEO \
     "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
     "luns_per_ch=4,nchs=4"
-#define FEMU_ONCS_DEFAULT   0x14    /* the oncs property's default */
+#define FEMU_ONCS_DEFAULT   0x19d   /* the oncs property's default */
 #define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
 /*
@@ -26026,6 +26026,85 @@ static void femu_test_oc_generic_refused(void *obj, void *data,
             cmd.cdw11 = cpu_to_le32((uint32_t)(last >> 32));
         }
         g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_INVALID_OPCODE);
+    }
+    femu_disable(&c);
+}
+
+static uint16_t femu_oncs_cmd(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                              uint64_t data)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c->lba_size - 1);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/*
+ * Compare, Write Zeroes, Verify and Copy are on by default. Each is listed in
+ * ONCS and does its work; with oncs=0 each is left out and refused.
+ */
+static void femu_test_oncs_default(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QTestState *qts;
+    bool on = data != NULL;
+    uint16_t want = on ? NVME_SUCCESS : NVME_INVALID_OPCODE;
+    uint64_t buf, list, src = 0, zero, dst;
+    uint16_t nlb;
+    uint8_t got[FEMU_DATA_SIZE];
+    NvmeIdCtrl id;
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qts = c.pdev->bus->qts;
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+    nlb = FEMU_DATA_SIZE / c.lba_size;
+    zero = nlb;
+    dst = 2 * nlb;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le16_to_cpu(id.oncs) & 0x189, ==, on ? 0x189 : 0);
+
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, src, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, zero, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, src, buf), ==, want);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_VERIFY, src, 0), ==, want);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE_ZEROES, zero, 0), ==,
+                    want);
+    g_assert_cmphex(femu_copy(&c, list, dst, &src, &nlb, 1, 1, 0), ==, want);
+    if (!on) {
+        femu_disable(&c);
+        return;
+    }
+
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, zero, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    for (i = 0; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0);
+    }
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, dst, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    for (i = 0; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0x5a);
     }
     femu_disable(&c);
 }
@@ -26542,6 +26621,15 @@ static void femu_register_nodes(void)
                  femu_test_kv_namespaces_are_separate,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,namespaces=2"
+    });
+    qos_add_test("oncs-default-bbssd", "femu", femu_test_oncs_default,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1," FEMU_CAPS_GEO,
+        .arg = (void *)1,
+    });
+    qos_add_test("oncs-zero-bbssd", "femu", femu_test_oncs_default,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,oncs=0," FEMU_CAPS_GEO
     });
     qos_add_test("oc20-generic-refused", "femu", femu_test_oc_generic_refused,
                  &(QOSGraphTestOptions) {

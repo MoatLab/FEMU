@@ -183,7 +183,7 @@ Reference: [controller identity and capabilities](properties.md#controller-ident
 | `cqr` | 0 or 1 | 0, 1 | 1 requires physically contiguous queues |
 | `vwc` | 0 or 1 | 0, 1 | advertise a volatile write cache and make feature 06h usable; Flush drains the write buffer either way |
 | `oacs` | bit mask | only bit 1 (0x2) | Format NVM support; clearing it refuses Format NVM |
-| `oncs` | bit mask | 0x1 Compare, 0x2 Write Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 Save/Select, 0x80 Verify, 0x100 Copy | optional NVM commands; Timestamp is always added |
+| `oncs` | bit mask | 0x1 Compare, 0x2 Write Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 Save/Select, 0x80 Verify, 0x100 Copy | optional NVM commands; the default 0x19d sets all but Write Uncorrectable; Timestamp is always added |
 | `sgl` | bool | `on`, `off` | accept scatter gather lists; OCSSD ignores it |
 | `cmbsz`, `cmbloc` | registers | `cmbsz` size x unit a power of two; `cmbloc` BAR field 2 | Controller Memory Buffer; 0 means none |
 | `temperature` | kelvin | 16-bit | composite temperature in the SMART log, compared with the threshold feature |
@@ -191,9 +191,10 @@ Reference: [controller identity and capabilities](properties.md#controller-ident
 
 Interactions:
 
-- Write Zeroes, Compare, Copy and Verify are unreachable until you set
-  their `oncs` bit. A test of those commands on a default controller tests
-  nothing. Flush is always accepted and drains the bbssd write buffer even
+- Write Zeroes, Compare, Copy and Verify are on by default; `oncs=0x14`
+  gives the old default, with Dataset Management and Save/Select only. Write
+  Uncorrectable needs bit 0x2. Open-Channel SSD refuses all the optional
+  commands. Flush is always accepted and drains the bbssd write buffer even
   with `vwc=0`, though Linux sends no Flush to a controller that advertises
   no cache.
 - With ZNS, `mdts` also caps Zone Append when `zns_zasl_bs=0`.
@@ -615,12 +616,11 @@ that suspend a program or erase for 15 us of overhead:
 
 A DFTL table with 8 MiB cached, a 64 MiB read cache with LRU eviction, and
 a write buffer of 4096 NAND pages that the guest sees as a volatile
-write cache. `oncs=0x1c` enables Write Zeroes (0x8) together with Dataset
-Management (0x4) and Save/Select (0x10):
+write cache:
 
 <!-- femu-example: pm-dftl-caches -->
 ```
--device femu,femu_mode=1,devsz_mb=2048,mapping=dftl,mapping_cache_mb=8,read_cache_mb=64,cache_evict=lru,buffer_size=4096,buffer_thres_pcent=75,vwc=1,oncs=0x1c
+-device femu,femu_mode=1,devsz_mb=2048,mapping=dftl,mapping_cache_mb=8,read_cache_mb=64,cache_evict=lru,buffer_size=4096,buffer_thres_pcent=75,vwc=1
 ```
 
 ### A GC study drive

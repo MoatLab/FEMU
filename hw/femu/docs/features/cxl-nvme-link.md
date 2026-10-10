@@ -74,10 +74,9 @@ geometry and timing properties are ignored.
 
 ## What the controller offers
 
-- Read, Write, Flush, Dataset Management (Deallocate), and the optional
-  commands you enable with `oncs` (for example `oncs=0x10c` adds Write
-  Zeroes and Copy). Write Zeroes is off by default, as on any FEMU
-  controller.
+- Read, Write, Flush, and the optional commands that `oncs` sets. The
+  default sets Dataset Management (Deallocate), Write Zeroes, Copy, Compare
+  and Verify.
 - Format NVM is not advertised and Sanitize is refused. Both would rewrite
   the whole medium behind the CXL cache.
 - SMART, vendor log page C0h and the write amplification factor report the

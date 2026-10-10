@@ -177,7 +177,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "oncs",
       "Optional NVM Command Support bit mask: 0x1 Compare, 0x2 Write "
       "Uncorrectable, 0x4 Dataset Management, 0x8 Write Zeroes, 0x10 "
-      "Save/Select, 0x80 Verify, 0x100 Copy; Timestamp is always added" },
+      "Save/Select, 0x80 Verify, 0x100 Copy; the default 0x19d sets all but "
+      "Write Uncorrectable; Timestamp is always added" },
     { "sgl",
       "Advertise and accept address scatter gather lists for data transfer; "
       "OCSSD ignores it" },

@@ -3027,11 +3027,14 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
     /*
      * Save/Select Feature Support is how a host learns it may use the Select
-     * field and the Save bit of Get/Set Features, which the controller serves,
-     * so it is on by default; the rest stay opt-in.
+     * field and the Save bit of Get/Set Features, which the controller serves.
+     * Compare, Dataset Management, Write Zeroes, Verify and Copy are on as on
+     * a real drive. Write Uncorrectable stays opt-in: it makes reads fail.
      */
     DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs,
-                       NVME_ONCS_DSM | NVME_ONCS_FEATURES),
+                       NVME_ONCS_COMPARE | NVME_ONCS_DSM |
+                       NVME_ONCS_WRITE_ZEROS | NVME_ONCS_FEATURES |
+                       NVME_ONCS_VERIFY | NVME_ONCS_COPY),
     DEFINE_PROP_BOOL("sgl", FemuCtrl, sgl, false),
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),

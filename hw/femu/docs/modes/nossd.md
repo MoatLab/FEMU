@@ -102,9 +102,9 @@ sees FEMU's own per-command time on top.
 Properties: [controller identity and capabilities](../reference/properties.md#controller-identity-and-capabilities),
 [LBA formats, metadata and protection](../reference/properties.md#lba-formats-metadata-and-protection).
 
-- `oncs` turns on optional NVM commands. The default (0x14) offers Dataset
-  Management and Save/Select. Add 0x8 for Write Zeroes, 0x1 for Compare,
-  0x100 for Copy.
+- `oncs` turns on optional NVM commands. The default (0x19d) offers Compare,
+  Dataset Management, Write Zeroes, Save/Select, Verify and Copy. Add 0x2 for
+  Write Uncorrectable.
 - NoSSD supports [namespace management, metadata and protection information](../features/ns-management-and-pi.md)
   and Streams (`streams=on`, which tracks streams but places nothing).
 

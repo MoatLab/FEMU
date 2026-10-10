@@ -189,6 +189,7 @@ was not doing anything.
 
 #### Behaviour changes (still boots, numbers move)
 
+- Compare, Write Zeroes, Verify and Copy are on by default: the `oncs` default is now 0x19d instead of 0x14. A guest that sees Write Zeroes in ONCS can send it, and on bbssd the FTL programs the range unless Deallocate is set. `oncs=0x14` gives the old set. Write Uncorrectable still needs bit 0x2.
 - A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on

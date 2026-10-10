@@ -735,7 +735,7 @@ neighbours in that page become durable with it.
 - **Format** and **Sanitize** call `bbssd_deallocate_all()` on BlackBox
   namespaces (not CSD), which unmaps every LPN of the namespace's FTL. The lines keep their wear.
 
-ONCS bit 0x8 (Write Zeroes) and 0x100 (Copy) are off unless `oncs` sets them.
+ONCS bit 0x8 (Write Zeroes) and 0x100 (Copy) are on by default; `oncs` can clear them.
 
 ## Wear, read reclaim and retention refresh
 
@@ -1004,7 +1004,7 @@ layer.
 | Property | Where documented | Effect in the FTL |
 | --- | --- | --- |
 | `vwc` | [controller identity](../reference/properties.md#controller-identity-and-capabilities) | lets the host turn the write buffer off |
-| `oncs` | same | Write Zeroes and Copy reach the FTL only when enabled |
+| `oncs` | same | Write Zeroes and Copy reach the FTL only when enabled (the default) |
 | `power_loss` | [power loss](../reference/properties.md#namespace-management-streams-and-power-loss) | undo records and `simulate-power-loss` |
 | `streams`, `streams.max` | same | per-stream write pointers; reserve `streams.max + 1` lines |
 
