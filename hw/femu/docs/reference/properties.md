@@ -144,7 +144,7 @@ Devices:
 | --- | --- | --- | --- |
 | `ecc_step_ns` | `int32` | `0` | bbssd, CSD, KV: extra read time in ns per ECC tier, one tier per 750 erases of the block plus one per ecc_retention_sec of data age, at most 4 tiers; 0 turns the model off |
 | `ecc_retention_sec` | `int32` | `0` | bbssd, CSD, KV: data age in seconds that adds one ECC tier, with ecc_step_ns; 0 counts wear only; refused with FDP |
-| `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type, or reports none |
+| `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type (ZNS: zns_flash_type), or reports none |
 | `nand_bad_blocks` | `uint32` | `0` | bbssd, CSD, KV: blocks marked bad at start, capped at the block count, which lowers SMART Available Spare |
 | `blk_pe_limit` | `uint32` | `0` | bbssd, CSD: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. A worn-out block stays in service and sets the SMART reliability warning |
 | `blk_pe_spread` | `uint32` | `0` | bbssd, CSD: how far each block's limit varies from blk_pe_limit, in percent, 0 to 90 |

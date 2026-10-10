@@ -342,8 +342,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, KV: data age in seconds that adds one ECC tier, with "
       "ecc_step_ns; 0 counts wear only; refused with FDP" },
     { "pe_cycles_rated",
-      "bbssd, CSD, KV: rated program/erase cycles used for SMART Percentage "
-      "Used; 0 takes the rating of nand_cell_type, or reports none" },
+      "bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART "
+      "Percentage Used; 0 takes the rating of nand_cell_type (ZNS: "
+      "zns_flash_type), or reports none" },
     { "nand_bad_blocks",
       "bbssd, CSD, KV: blocks marked bad at start, capped at the block "
       "count, which lowers SMART Available Spare" },

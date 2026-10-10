@@ -157,7 +157,7 @@ static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
         .pg = ppa->g.pg,
         .flash_type = get_blk(zns, ppa)->nand_type,
         .page_type = 0,
-        .pe_cycles = 0,
+        .pe_cycles = get_blk(zns, ppa)->erase_cnt,
     };
 
     return nand_media_op(&zns->media, &loc, op, stime).latency_ns;
@@ -387,10 +387,13 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
 
                 sublat = zns_advance_status(zns, &ppa, &erase_cmd);
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
+                get_blk(zns, &ppa)->erase_cnt++;
                 total_blocks_erased++;
             }
         }
     }
+
+    qatomic_add(&zns->total_erases, total_blocks_erased);
 
     ftl_debug("Zone %u reset complete: erased %lu blocks across %d ch * %d lun * %d planes\n",
              zone_idx, total_blocks_erased, (int)zns->num_ch, (int)zns->num_lun, (int)zns->num_plane);

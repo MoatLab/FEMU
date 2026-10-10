@@ -188,6 +188,7 @@ was not doing anything.
 
 #### Behaviour changes (still boots, numbers move)
 
+- A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
   its first I/O and the kernel disabled the controller (50b65ca91).

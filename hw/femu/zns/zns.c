@@ -414,6 +414,30 @@ uint64_t zns_media_errors(NvmeNamespace *ns)
     return ns->zns->err_write_injected;
 }
 
+/*
+ * SMART Percentage Used for a zoned namespace: block erases by Zone Reset as
+ * a percentage of what all blocks are rated for, capped at 255 as the
+ * specification allows. Zero without a rating.
+ */
+uint8_t zns_percentage_used(NvmeNamespace *ns)
+{
+    struct zns_ssd *zns;
+    uint64_t denom;
+    uint64_t pct;
+
+    if (!NS_ZNSSD(ns) || !ns->zns) {
+        return 0;
+    }
+    zns = ns->zns;
+    denom = zns->num_ch * zns->num_lun * zns->num_plane * zns->num_blk *
+            (uint64_t)zns->rated_pe_cycles;
+    if (!denom) {
+        return 0;
+    }
+    pct = qatomic_read(&zns->total_erases) * 100 / denom;
+    return pct > 255 ? 255 : (uint8_t)pct;
+}
+
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
     if (!NS_ZNSSD(ns)) {
@@ -1938,6 +1962,9 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->num_page = ns->size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
     id_zns->lbasz = 1 << zns_ns_lbads(ns);
     id_zns->flash_type = n->zns_params.zns_flash_type;
+    /* as bbssd: an explicit rating wins, else the one the cell type implies */
+    id_zns->rated_pe_cycles = n->pe_cycles_rated ? n->pe_cycles_rated :
+                              get_rated_pe_cycles(id_zns->flash_type);
 
     /*
      * A zone spans chnls_per_zone channels; unset (or the full count) keeps the

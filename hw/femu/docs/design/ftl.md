@@ -920,7 +920,7 @@ ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 
 | Field | Source |
 | --- | --- |
-| Percentage Used | `ssd_percentage_used()`, most worn namespace |
+| Percentage Used | `ssd_percentage_used()`, and `zns_percentage_used()` for a zoned namespace; the most worn namespace |
 | Available Spare | `ssd_available_spare()`, lowest namespace; below 20 sets the spare critical warning |
 | Media and Data Integrity Errors | injected read and write faults (and ZNS write faults) |
 | Data units, host commands | the pollers' host I/O counters, not the FTL |

@@ -1836,6 +1836,41 @@ static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
 }
 
 /*
+ * ZNS wear: each Zone Reset of a written zone erases one block per plane
+ * (2 here), and SMART Percentage Used is the erases over the blocks (64)
+ * times the rating (1). Before, a zoned namespace always reported 0.
+ */
+static void femu_test_zns_wear(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t log;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    log = guest_alloc(alloc, 512);
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    for (int k = 1; k <= 32; k++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                        NVME_SUCCESS);
+        if (k == 1 || k == 16 || k == 32) {
+            g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                                 512, 0)), ==, NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readb(qts, log + 5), ==, 2 * k * 100 / 64);
+        }
+    }
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * C0h LE64 counters: copies at 16, user programs at 24, hybrid switches at
  * 88, full merges at 96 and charged merge erases at 104. The merge counters
  * exclude physical line GC, which these short traces never require.
@@ -26474,6 +26509,12 @@ static void femu_register_nodes(void)
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
+    qos_add_test("zns-wear", "femu", femu_test_zns_wear,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,pe_cycles_rated=1"
     });
     qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
                  &(QOSGraphTestOptions) {

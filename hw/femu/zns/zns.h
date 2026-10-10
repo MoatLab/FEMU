@@ -98,6 +98,7 @@ struct zns_blk {
     int nand_type;
     uint64_t next_blk_avail_time;
     uint64_t page_wp; //next free page
+    uint32_t erase_cnt;     /* erases by Zone Reset; FTL thread only */
 };
 
 struct zns_plane{
@@ -174,6 +175,12 @@ struct zns_ssd {
     uint32_t err_write_fail_period;   /* fail one write in N; 0 = off */
     uint64_t err_write_counter;
     uint64_t err_write_injected;
+    /*
+     * Wear: block erases by Zone Reset, summed for SMART Percentage Used.
+     * The FTL thread adds to it and the log thread reads it, so it is atomic.
+     */
+    uint64_t total_erases;
+    uint32_t rated_pe_cycles;   /* 0: no rating, no life estimate */
     int flash_type;
     uint64_t program_unit;
     uint64_t stripe_unit;

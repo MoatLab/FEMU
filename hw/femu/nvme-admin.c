@@ -2083,6 +2083,10 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             continue;
         }
         st->media_errors += zns_media_errors(ns);
+        used = zns_percentage_used(ns);
+        if (used > st->percentage_used) {
+            st->percentage_used = used;
+        }
 
         if (!ns->ssd) {
             continue;

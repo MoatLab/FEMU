@@ -514,7 +514,7 @@ A device with 64 MiB zones of half width on an 8-channel geometry:
 | --- | --- | --- |
 | Zone report (Zone Management Receive) | state, write pointer, capacity and attributes of each zone | `zns_zone_mgmt_recv()` |
 | Changed Zone List (BFh) | zones taken read only by injected write faults | `zns_changed_zone_list()` |
-| SMART / Health (02h) | host data units and commands read and written, counted on the poller for every mode; Media Errors includes the injected ZNS write faults | `nvme-io.c`, `zns_media_errors()` |
+| SMART / Health (02h) | host data units and commands read and written, counted on the poller for every mode; Media Errors includes the injected ZNS write faults; Percentage Used counts the block erases of Zone Reset against `pe_cycles_rated`, or the rating of `zns_flash_type` | `nvme-io.c`, `zns_media_errors()`, `zns_percentage_used()` |
 | Vendor log C0h | not filled for zoned namespaces: ZNS runs no garbage collection, so there is no write amplification to report | [log pages and counters](../reference/log-pages-and-counters.md#vendor-log-page-c0h) |
 | QEMU log | the ZNS geometry, program unit, stripe unit and cache count at realize (`[FEMU] Log:` lines) | `zns_init_params()` |
 
