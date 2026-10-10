@@ -128,6 +128,8 @@ typedef struct SSDNandFlashTiming {
     /* program/erase suspend: a read preempts a busy plane (0 = off) */
     bool     pe_suspend;
     uint64_t tsusp_ns;
+    /* one array op at a time per LUN, as on a real die (false = per plane) */
+    bool     lun_contention;
 } SSDNandFlashTiming;
 
 struct zns_write_cache{

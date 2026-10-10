@@ -134,7 +134,9 @@ times. MLC and PLC have none, so they need `zns_pg_rd_lat`, `zns_pg_wr_lat`
 and `zns_blk_er_lat`. Those three also override the built-in times for the
 other types. `zns_cmd_addr_lat`, `zns_pg_xfer_lat` and `zns_status_lat` add a
 shared channel bus, and `zns_pe_suspend` with `zns_tsusp_ns` lets reads
-suspend a program or erase. See the [timing model](../concepts/timing-model.md#zns-write-cache).
+suspend a program or erase. By default each plane runs on its own.
+`zns_lun_contention=1` makes the planes of one LUN take turns, as on one die.
+A zone reset then erases the planes of a LUN in one multi-plane operation. See the [timing model](../concepts/timing-model.md#zns-write-cache).
 
 ### Optional zone features
 

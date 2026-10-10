@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 166 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 167 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -212,6 +212,7 @@ Devices:
 | `zns_pg_xfer_lat` | `int64` | `0` | ZNS: page data transfer phase on the channel bus in ns, 0 or more |
 | `zns_status_lat` | `int64` | `0` | ZNS: status read phase on the channel bus in ns, 0 or more |
 | `zns_pe_suspend` | `int32` | `0` | ZNS: non-zero lets a read suspend a program or erase on its plane |
+| `zns_lun_contention` | `int32` | `0` | ZNS: non-zero makes the planes of one LUN share the die, so their operations run one at a time; a zone reset erases each LUN's planes in one multi-plane operation |
 | `zns_tsusp_ns` | `int64` | `0` | ZNS: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `zns_max_active` | `uint32` | `0` | ZNS: Maximum Active Resources (zones), at most the zone count; 0 means no limit |
 | `zns_max_open` | `uint32` | `0` | ZNS: Maximum Open Resources (zones), at most the zone count and zns_max_active; 0 means no limit |

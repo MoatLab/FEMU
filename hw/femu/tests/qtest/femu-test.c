@@ -1871,6 +1871,65 @@ static void femu_test_zns_wear(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * LUN contention on ZNS. One LUN has two planes, and a program or an erase
+ * takes ZNS_LUN_OP_MS. An SLC page is 16 KiB, so the write cache holds
+ * ZNS_LUN_FILL 4 KiB pages, and the next write programs both planes. Each plane runs on its own by default, so that write takes one
+ * program time. With zns_lun_contention the planes take turns and the write
+ * takes two. A zone reset erases both planes in one multi-plane operation,
+ * so it takes one erase time either way. @data is "on" when the device has
+ * contention on.
+ */
+#define ZNS_LUN_OP_MS 300
+#define ZNS_LUN_FILL  8
+
+static void femu_test_zns_lun(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    int64_t t0;
+    int64_t ms;
+    uint64_t lba = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+
+    for (i = 0; i <= ZNS_LUN_FILL; i++) {
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba, buf)), ==,
+                        NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - t0) / 1000;
+        lba += FEMU_DATA_SIZE / c.lba_size;
+    }
+    g_test_message("contention %s: program took %" PRId64 " ms",
+                   on ? "on" : "off", ms);
+    if (on) {
+        g_assert_cmpint(ms, >=, 2 * ZNS_LUN_OP_MS);
+    } else {
+        g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+        g_assert_cmpint(ms, <, 2 * ZNS_LUN_OP_MS - ZNS_LUN_OP_MS / 3);
+    }
+
+    t0 = g_get_monotonic_time();
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("contention %s: reset took %" PRId64 " ms",
+                   on ? "on" : "off", ms);
+    g_assert_cmpint(ms, >=, ZNS_LUN_OP_MS);
+    g_assert_cmpint(ms, <, 2 * ZNS_LUN_OP_MS - ZNS_LUN_OP_MS / 3);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * C0h LE64 counters: copies at 16, user programs at 24, hybrid switches at
  * 88, full merges at 96 and charged merge erases at 104. The merge counters
  * exclude physical line GC, which these short traces never require.
@@ -26515,6 +26574,23 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
             "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,pe_cycles_rated=1"
+    });
+    qos_add_test("zns-lun-off", "femu", femu_test_zns_lun,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_pg_wr_lat=300000000,zns_blk_er_lat=300000000"
+    });
+    qos_add_test("zns-lun-on", "femu", femu_test_zns_lun,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_pg_wr_lat=300000000,zns_blk_er_lat=300000000,"
+            "zns_lun_contention=1"
     });
     qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
                  &(QOSGraphTestOptions) {

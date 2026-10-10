@@ -3075,6 +3075,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT64("zns_pg_xfer_lat", FemuCtrl, zns_params.zns_pg_xfer_lat, 0),
     DEFINE_PROP_INT64("zns_status_lat", FemuCtrl, zns_params.zns_status_lat, 0),
     DEFINE_PROP_INT32("zns_pe_suspend", FemuCtrl, zns_params.zns_pe_suspend, 0),
+    DEFINE_PROP_INT32("zns_lun_contention", FemuCtrl, zns_params.zns_lun_contention, 0),
     DEFINE_PROP_INT64("zns_tsusp_ns", FemuCtrl, zns_params.zns_tsusp_ns, 0),
     DEFINE_PROP_UINT32("zns_max_active", FemuCtrl, zns_params.zns_max_active, 0),
     DEFINE_PROP_UINT32("zns_max_open", FemuCtrl, zns_params.zns_max_open, 0),

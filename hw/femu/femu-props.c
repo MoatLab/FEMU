@@ -514,6 +514,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "ZNS: status read phase on the channel bus in ns, 0 or more" },
     { "zns_pe_suspend",
       "ZNS: non-zero lets a read suspend a program or erase on its plane" },
+    { "zns_lun_contention",
+      "ZNS: non-zero makes the planes of one LUN share the die, so their "
+      "operations run one at a time; a zone reset erases each LUN's planes "
+      "in one multi-plane operation" },
     { "zns_tsusp_ns",
       "ZNS: overhead in ns added to a read that suspends a program or "
       "erase, 0 or more" },

@@ -165,21 +165,20 @@ structures, not in the media layer:
 | Resource | BBSSD, CSD, KV | ZNS | OCSSD |
 | --- | --- | --- | --- |
 | Channel bus | `ssd_channel.next_ch_avail_time` | `zns_ch.next_ch_avail_time` | `Oc12Ctrl.ch_avail[]` (1.2 only) |
-| LUN (die) | `nand_lun.next_lun_avail_time` | `zns_fc.next_fc_avail_time` (never consulted) | `Oc12Ctrl.lun_avail[]`, `Oc20Ctrl.lun_avail[]` |
+| LUN (die) | `nand_lun.next_lun_avail_time` | `zns_fc.next_fc_avail_time` (only with `zns_lun_contention`) | `Oc12Ctrl.lun_avail[]`, `Oc20Ctrl.lun_avail[]` |
 | Plane | not kept | `zns_plane.next_plane_avail_time` | not kept |
 
 Each mode configures the layer differently:
 
 | Setting | BBSSD, CSD, KV, CXL | ZNS |
 | --- | --- | --- |
-| `array_gate` | `NAND_GATE_LUN_ONLY` | `NAND_GATE_PLANE_ONLY` |
+| `array_gate` | `NAND_GATE_LUN_ONLY` | `NAND_GATE_PLANE_ONLY`; `NAND_GATE_LUN_AND_PLANE` with `zns_lun_contention` |
 | `channel_mode` | `NAND_CH_STAGED` when any bus phase is non-zero, else `NAND_CH_OFF` | same rule |
 | `use_flat_timing` | true when `nand_cell_type=0`, false with a cell type | false (per-type table, page type always 0) |
 | `pe_suspend` | `pe_suspend` property | `zns_pe_suspend` property |
 | `ecc_on_read` | true; the adder is still 0 unless `ecc_step_ns` is set | false |
 
-The enum also has `NAND_CH_NOOP` and `NAND_GATE_LUN_AND_PLANE`. No mode
-selects either today.
+The enum also has `NAND_CH_NOOP`. No mode selects it today.
 
 ## Operation timing
 

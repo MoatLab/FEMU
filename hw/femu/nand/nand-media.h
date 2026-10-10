@@ -38,7 +38,7 @@ typedef enum NandMediaOp {
 typedef enum NandArrayGate {
     NAND_GATE_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one gate per LUN */
     NAND_GATE_PLANE_ONLY,      /* ZNS: plane gate, no lun gate */
-    NAND_GATE_LUN_AND_PLANE,   /* no mode selects it */
+    NAND_GATE_LUN_AND_PLANE,   /* ZNS with zns_lun_contention */
 } NandArrayGate;
 
 /*

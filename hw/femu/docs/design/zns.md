@@ -472,8 +472,13 @@ puts this in context with the other modes.
   `nand/nand.h`, replaced by `zns_pg_rd_lat`, `zns_pg_wr_lat` and
   `zns_blk_er_lat` when set; MLC and PLC have no built-in row and need all
   three;
-- the array gated per plane only (`NAND_GATE_PLANE_ONLY`): operations on
-  different planes of one LUN overlap, operations on one plane queue;
+- the array held per plane only (`NAND_GATE_PLANE_ONLY`) by default:
+  operations on different planes of one LUN overlap, operations on one plane
+  queue;
+- with `zns_lun_contention` non-zero, the LUN and the plane both
+  (`NAND_GATE_LUN_AND_PLANE`): the planes of one LUN take turns, as on one
+  die, and `zns_zone_reset()` erases each LUN's planes with one
+  `nand_media_multiplane()` call instead of one erase per plane;
 - a shared channel bus only if `zns_cmd_addr_lat`, `zns_pg_xfer_lat` or
   `zns_status_lat` is non-zero;
 - program and erase suspend for reads if `zns_pe_suspend` is non-zero, with
@@ -494,7 +499,7 @@ controller uses the same `zns_` values with its own size.
 | Write cache | `zns_num_wc` | At most the zone count. |
 | ZRWA | `zns_zrwa_size`, `zns_zrwafg_size`, `zns_zrwa_num` | All three together, or none. |
 | Reads, appends | `zns_cross_zone_read`, `zns_zasl_bs` | `zns_zasl_bs` 0 follows `mdts`. |
-| Timing | `zns_flash_type`, `zns_pg_rd_lat`, `zns_pg_wr_lat`, `zns_blk_er_lat`, `zns_cmd_addr_lat`, `zns_pg_xfer_lat`, `zns_status_lat`, `zns_pe_suspend`, `zns_tsusp_ns` | Cell type also multiplies the program unit. All latencies are in ns and must not be negative. |
+| Timing | `zns_flash_type`, `zns_pg_rd_lat`, `zns_pg_wr_lat`, `zns_blk_er_lat`, `zns_cmd_addr_lat`, `zns_pg_xfer_lat`, `zns_status_lat`, `zns_pe_suspend`, `zns_tsusp_ns`, `zns_lun_contention` | Cell type also multiplies the program unit. All latencies are in ns and must not be negative. |
 | Shared with other modes | `devsz_mb`, `namespaces`, `namespace_sizes`, `namespace_modes`, `lba_index`, `nlbaf`, `mdts`, `err_write_fail_ppm` | `lba_index` must select a block of 4 KiB or less. |
 
 The BlackBox geometry and timing properties (`nchs`, `pg_rd_lat` and so on)

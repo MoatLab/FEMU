@@ -2072,6 +2072,8 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     /* P/E suspend: default off, so the plane gate is bit-identical to before */
     id_zns->timing.pe_suspend = (n->zns_params.zns_pe_suspend != 0);
     id_zns->timing.tsusp_ns = n->zns_params.zns_tsusp_ns;
+    /* LUN contention: default off, so the plane-only timing stays as before */
+    id_zns->timing.lun_contention = (n->zns_params.zns_lun_contention != 0);
 
     /*
      * Optional write-fault injection. One write in N fails and takes its zone

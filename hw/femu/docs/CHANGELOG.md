@@ -97,6 +97,7 @@ listed one by one.
 - ZNS takes NAND timing from the shared media layer, with configurable read, program and erase times and an opt-in channel bus (3d6056020, 34bbe45fa, 2a4ebc2cb).
 - Configurable write cache count (`zns_num_wc`) (66f432117).
 - Optional program/erase suspend for reads (`zns_pe_suspend`, `zns_tsusp_ns`) (9ec423985).
+- Optional LUN contention (`zns_lun_contention`): the planes of one LUN run their operations one at a time, and a zone reset erases each LUN's planes in one multi-plane operation. Off by default, so the timing does not change.
 
 #### BlackBox SSD (bbssd) and NAND media
 

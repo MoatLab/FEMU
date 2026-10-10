@@ -70,9 +70,9 @@ static uint64_t *zns_tl_plane_avail(void *opaque, const NandLoc *loc)
 }
 
 /*
- * lun_avail is required by the vtable but never reached: the gate is
- * PLANE_ONLY, which consults the plane accumulator alone. lock_lun and
- * unlock_lun stay unset because a single FTL thread drives the ZNS media.
+ * lun_avail is consulted only with zns_lun_contention, which adds the LUN to
+ * the plane accumulator. lock_lun and unlock_lun stay unset because a single
+ * FTL thread drives the ZNS media.
  */
 static uint64_t *zns_tl_lun_avail(void *opaque, const NandLoc *loc)
 {
@@ -109,7 +109,12 @@ void zns_nand_media_init(struct zns_ssd *zns)
         cfg.timing.er_table_ns[ft] = zns->timing.blk_er_lat[ft];
     }
     cfg.policy.use_flat_timing = false;
-    cfg.policy.array_gate = NAND_GATE_PLANE_ONLY;
+    /*
+     * By default each plane runs on its own, as before. zns_lun_contention
+     * also holds the LUN, so the planes of one die take turns.
+     */
+    cfg.policy.array_gate = zns->timing.lun_contention ?
+                            NAND_GATE_LUN_AND_PLANE : NAND_GATE_PLANE_ONLY;
     /*
      * The bus phases select the staged channel model the same way bbssd does:
      * any non-zero phase turns it on, all zero keeps CH_OFF and the timing
@@ -161,6 +166,41 @@ static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
     };
 
     return nand_media_op(&zns->media, &loc, op, stime).latency_ns;
+}
+
+/*
+ * Erase block blk_idx on every plane of one LUN as one multi-plane operation
+ * and count the wear on each block. Returns the latency from stime.
+ */
+static uint64_t zns_erase_lun(struct zns_ssd *zns, int ch, int lun,
+                              uint32_t blk_idx, uint64_t stime)
+{
+    NandLoc locs[1 << PL_BITS];
+    struct ppa ppa;
+    int pl;
+
+    if (stime == 0) {
+        stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    for (pl = 0; pl < zns->num_plane; pl++) {
+        ppa.ppa = 0;
+        ppa.g.ch = ch;
+        ppa.g.fc = lun;
+        ppa.g.pl = pl;
+        ppa.g.blk = blk_idx;
+        locs[pl] = (NandLoc) {
+            .ch = ch,
+            .lun = lun,
+            .pl = pl,
+            .blk = blk_idx,
+            .flash_type = get_blk(zns, &ppa)->nand_type,
+            .pe_cycles = get_blk(zns, &ppa)->erase_cnt,
+        };
+        get_blk(zns, &ppa)->erase_cnt++;
+    }
+
+    return nand_media_multiplane(&zns->media, locs, zns->num_plane,
+                                 NAND_MEDIA_ERASE, stime).latency_ns;
 }
 
 static inline bool valid_ppa(struct zns_ssd *zns, struct ppa *ppa)
@@ -376,6 +416,16 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
 
     for (ch = ch_lo; ch < ch_hi; ch++) {
         for (lun = 0; lun < zns->num_lun; lun++) {
+            if (zns->timing.lun_contention) {
+                /*
+                 * The die is held for the whole erase, so erase every plane
+                 * in one multi-plane operation instead of num_plane in turn.
+                 */
+                sublat = zns_erase_lun(zns, ch, lun, blk_idx, stime);
+                maxlat = (sublat > maxlat) ? sublat : maxlat;
+                total_blocks_erased += zns->num_plane;
+                continue;
+            }
             for (pl = 0; pl < zns->num_plane; pl++) {
                 ppa.ppa = 0;
                 ppa.g.ch = ch;
