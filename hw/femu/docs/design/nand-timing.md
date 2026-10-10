@@ -724,7 +724,7 @@ centre pages of TLC and QLC keep their table times, and SLC, with one page
 type, takes the lower page values. The times belong to that controller
 (`FemuCtrl.oc_pg_rd_lat` and the fields beside it, filled from the
 `flash_type` table by `set_latency()`), so other devices are not affected.
-Other modes refuse 0xEE with Invalid Field.
+Other modes refuse 0xEE with Invalid Command Opcode, and log 05h does not list it.
 
 ```sh
 sudo nvme admin-passthru /dev/nvme0 --opcode=0xee --cdw10=64000 --cdw11=48000 \

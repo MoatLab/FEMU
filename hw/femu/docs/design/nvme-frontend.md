@@ -523,11 +523,12 @@ Verify, Write Uncorrectable) only where `nvme_io_effects()` lists it for the
 namespace's command set. Features follow the same rule through
 `nvme_fid_supported()`, which Get Features, Set Features and log 12h share.
 
-The `caps-*` qtests check the registry against dispatch. Four differences are
+The `caps-*` qtests check the registry against dispatch. Vendor command 0xEE
+answers Invalid Command Opcode outside Open-Channel, as any unlisted admin
+opcode does. Three differences are
 known and left for a decision, and the test holds each to its current
 answer: I/O Management Send and Receive take their no-operation on every
-namespace though log 05h lists them only for NVM with FDP on; 0xEE answers
-Invalid Field outside Open-Channel; the Changed Zone List (BFh) and Chunk
+namespace though log 05h lists them only for NVM with FDP on; the Changed Zone List (BFh) and Chunk
 Information (CAh) pages answer when the command names another command set;
 and with a subsystem whose FDP is off the FDP pages answer FDP Disabled
 without being listed. Outside the test's reach, log 00h takes its command

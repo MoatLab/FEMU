@@ -15466,7 +15466,7 @@ static void femu_test_oc_set_latency(void *obj, void *data,
     cmd.cdw15 = cpu_to_le32(52433);         /* channel transfer */
     if (!data) {
         g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==,
-                        NVME_INVALID_FIELD);
+                        NVME_INVALID_OPCODE);
         femu_disable(&c);
         return;
     }
@@ -25325,9 +25325,7 @@ static void femu_caps_entries(FemuCaps *k, const char *what,
 /*
  * Every admin opcode, with a zeroed command. A handled command may refuse its
  * fields; only Invalid Command Opcode means it is not handled. An Asynchronous
- * Event Request is held, so it is checked from the log alone. The timing
- * command 0xEE answers Invalid Field outside Open-Channel, which its own test
- * holds, so there it must stay unlisted and answer exactly that.
+ * Event Request is held, so it is checked from the log alone.
  */
 static void femu_caps_admin(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
 {
@@ -25347,9 +25345,6 @@ static void femu_caps_admin(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
         cmd.dptr.prp1 = cpu_to_le64(buf);
         qtest_memset(c->pdev->bus->qts, buf, 0, 4096);
         sc = FEMU_SC(femu_admin(c, &cmd));
-        if (opc == FEMU_ADM_DEBUG && !adv && sc == NVME_INVALID_FIELD) {
-            continue;
-        }
         if ((sc != NVME_INVALID_OPCODE) != adv) {
             femu_caps_bad(k, "admin 0x%02x answers 0x%x, log 05h %s it", opc,
                           sc, adv ? "lists" : "does not list");

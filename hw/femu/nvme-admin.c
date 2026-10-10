@@ -3893,9 +3893,9 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_NS_ATTACHMENT:
         return nvme_ns_attachment(n, cmd);
     case NVME_ADM_CMD_FEMU_DEBUG:
-        /* Only the Open-Channel timing model reads these times. */
+        /* only the Open-Channel timing model has these times; log 05h agrees */
         if (!OCSSD(n)) {
-            return NVME_INVALID_FIELD | NVME_DNR;
+            return NVME_INVALID_OPCODE | NVME_DNR;
         }
         oc_set_latency(n, le32_to_cpu(cmd->cdw10), le32_to_cpu(cmd->cdw11),
                        le32_to_cpu(cmd->cdw12), le32_to_cpu(cmd->cdw13),
