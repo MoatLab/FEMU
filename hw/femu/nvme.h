@@ -1408,6 +1408,8 @@ enum NvmePelEventType {
 #define NVME_CTRL_CQES_MIN(cqes) ((cqes) & 0xf)
 #define NVME_CTRL_CQES_MAX(cqes) (((cqes) >> 4) & 0xf)
 
+typedef struct NvmeIcVector NvmeIcVector;
+
 typedef struct NvmeFeatureVal {
     uint32_t    arbitration;
     uint32_t    power_mgmt;
@@ -1417,6 +1419,7 @@ typedef struct NvmeFeatureVal {
     uint32_t    nr_io_queues;
     uint32_t    int_coalescing;
     uint32_t    *int_vector_config;
+    NvmeIcVector *ic_vec;       /* nr_io_queues + 1 vectors */
     uint32_t    write_atomicity;
     uint32_t    async_config;
     uint32_t    sw_prog_marker;
@@ -1798,6 +1801,20 @@ typedef struct NvmeCQueue {
     QemuSpin    post_lock;      /* held to post when pollers share the queue */
     bool        is_active;
 } NvmeCQueue;
+
+/*
+ * Interrupt coalescing (Feature 08h) of one interrupt vector: entries posted
+ * since its last interrupt, when the first of them was posted, whether one
+ * carries an error, and the queue to notify through. The aggregation
+ * threshold counts per vector, so queues that share a vector share this.
+ */
+struct NvmeIcVector {
+    QemuSpin    lock;
+    uint32_t    pending;
+    int64_t     first_ns;
+    bool        urgent;
+    NvmeCQueue  *cq;
+};
 
 typedef struct Oc12Bbt Oc12Bbt;
 typedef struct Oc12Ctrl Oc12Ctrl;
@@ -2431,6 +2448,7 @@ typedef struct FemuCtrl {
     bool            poller_on;
 
     FemuPollerCtr   *poller_ctr;   /* per-poller I/O accounting (1-based) */
+    bool            cq_teardown;   /* a reset frees every CQ: no interrupts */
     bool            print_log;
 
     uint8_t         multipoller_enabled;
@@ -2737,6 +2755,9 @@ static inline bool nvme_dp_dtype_invalid(NvmeNamespace *ns, uint8_t dtype)
 {
     return ns->dp_enabled && dtype && dtype != NVME_DIRECTIVE_DATA_PLACEMENT;
 }
+void nvme_cq_notify_now(FemuCtrl *n, NvmeCQueue *cq);
+void nvme_isr_notify_now(NvmeCQueue *cq);
+void nvme_ic_flush(FemuCtrl *n);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid);

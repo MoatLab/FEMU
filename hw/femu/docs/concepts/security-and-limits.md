@@ -168,11 +168,6 @@ default prints one warning at realize, for example
 | `trcbsy` | no mode enables the cache read model |
 | `nr_thread`, `time_slice`, `context_switch_time` (CSD) | accepted for CEMU configurations; CSD still refuses `nr_thread=0` |
 
-`intc`, `intc_thresh` and `intc_time` do not warn, because Get Features
-returns them: `intc_thresh` and `intc_time` in Interrupt Coalescing (feature
-08h) and `intc` (0 or 1) in Interrupt Vector Configuration (09h). Interrupts
-are still not coalesced.
-
 The [property reference](../reference/properties.md) says this in each
 description, and `-device femu,help` prints the same text.
 

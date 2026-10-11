@@ -264,7 +264,29 @@ static void nvme_isr_notify_legacy(void *opaque)
 
 void nvme_isr_notify_admin(void *opaque)
 {
-    return nvme_isr_notify_legacy(opaque);
+    NvmeCQueue *cq = opaque;
+    FemuCtrl *n = cq->ctrl;
+
+    /* I/O queues that share the vector get this interrupt too */
+    if (cq->irq_enabled && n->features.ic_vec &&
+        cq->vector <= n->nr_io_queues) {
+        NvmeIcVector *v = &n->features.ic_vec[cq->vector];
+
+        qemu_spin_lock(&v->lock);
+        v->pending = 0;
+        v->urgent = false;
+        qemu_spin_unlock(&v->lock);
+    }
+    nvme_isr_notify_legacy(opaque);
+}
+
+/*
+ * Signal @cq's vector now, on a thread that holds the BQL: no bottom half
+ * that a queue delete could cancel before it runs.
+ */
+void nvme_isr_notify_now(NvmeCQueue *cq)
+{
+    nvme_isr_notify_legacy(cq);
 }
 
 void nvme_isr_notify_io(void *opaque)

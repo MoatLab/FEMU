@@ -54,9 +54,9 @@ Devices:
 | `aerl` | `uint8` | `3` | Asynchronous Event Request Limit (Identify AERL, 0's based): the controller holds up to aerl + 1 outstanding requests |
 | `elpe` | `uint8` | `3` | Error Log Page Entries (Identify ELPE, 0's based): the Error Information log keeps the newest elpe + 1 entries |
 | `mdts` | `uint8` | `10` | Maximum Data Transfer Size as a power of two of the minimum memory page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit |
-| `intc` | `uint8` | `0` | Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector Configuration feature; the value is reported, interrupts are not coalesced |
-| `intc_thresh` | `uint8` | `0` | Initial aggregation threshold of the Interrupt Coalescing feature; the value is reported, interrupts are not coalesced |
-| `intc_time` | `uint8` | `0` | Initial aggregation time, in 100 microsecond units, of the Interrupt Coalescing feature; the value is reported, interrupts are not coalesced |
+| `intc` | `uint8` | `0` | Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector Configuration feature for every vector |
+| `intc_thresh` | `uint8` | `0` | Initial aggregation threshold (0's based entries) of the Interrupt Coalescing feature; coalescing runs when it and intc_time are non-zero |
+| `intc_time` | `uint8` | `0` | Initial aggregation time, in 100 microsecond units, of the Interrupt Coalescing feature; coalescing runs when it and intc_thresh are non-zero |
 
 ### Controller identity and capabilities
 

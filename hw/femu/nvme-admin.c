@@ -1717,15 +1717,27 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         nvme_resume_pollers(n, resume);
         break;
     }
-    case NVME_INTERRUPT_COALESCING:
+    case NVME_INTERRUPT_COALESCING: {
+        /* pollers read the setting per entry; send what the old one held */
+        bool resume = nvme_pause_pollers(n);
+
+        nvme_ic_flush(n);
         n->features.int_coalescing = dw11;
+        nvme_resume_pollers(n, resume);
         break;
-    case NVME_INTERRUPT_VECTOR_CONF:
+    }
+    case NVME_INTERRUPT_VECTOR_CONF: {
+        bool resume;
+
         if ((dw11 & 0xffff) > n->nr_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        resume = nvme_pause_pollers(n);
+        nvme_ic_flush(n);
         n->features.int_vector_config[dw11 & 0xffff] = dw11 & 0x1ffff;
+        nvme_resume_pollers(n, resume);
         break;
+    }
     case NVME_WRITE_ATOMICITY:
         n->features.write_atomicity = dw11;
         break;

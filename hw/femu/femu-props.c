@@ -135,15 +135,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit" },
     { "intc",
       "Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector "
-      "Configuration feature; the value is reported, interrupts are not "
-      "coalesced" },
+      "Configuration feature for every vector" },
     { "intc_thresh",
-      "Initial aggregation threshold of the Interrupt Coalescing feature; "
-      "the value is reported, interrupts are not coalesced" },
+      "Initial aggregation threshold (0's based entries) of the Interrupt "
+      "Coalescing feature; coalescing runs when it and intc_time are "
+      "non-zero" },
     { "intc_time",
       "Initial aggregation time, in 100 microsecond units, of the Interrupt "
-      "Coalescing feature; the value is reported, interrupts are not "
-      "coalesced" },
+      "Coalescing feature; coalescing runs when it and intc_thresh are "
+      "non-zero" },
 
     /* controller identity and capabilities */
     { "vid",

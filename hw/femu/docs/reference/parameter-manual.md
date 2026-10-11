@@ -162,7 +162,7 @@ Reference: [queues, pollers and interrupts](properties.md#queues-pollers-and-int
 | `aerl` | count, 0's based | 0 to 255 | outstanding Asynchronous Event Requests the controller holds |
 | `elpe` | count, 0's based | 0 to 255 | Error Information log entries kept |
 | `hiops_inline` | bool | `on`, `off` | NoSSD only: performance option, on by default; set off only when debugging |
-| `intc`, `intc_thresh`, `intc_time` | as named | `intc` 0 or 1 | initial values of the Interrupt Coalescing and Interrupt Vector Configuration features; reported only, interrupts are not coalesced |
+| `intc`, `intc_thresh`, `intc_time` | as named | `intc` 0 or 1 | initial values of the Interrupt Coalescing and Interrupt Vector Configuration features; coalescing runs when `intc_thresh` and `intc_time` are both non-zero |
 
 Interactions:
 

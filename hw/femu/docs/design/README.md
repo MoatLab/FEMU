@@ -61,8 +61,7 @@ models. FEMU models:
 - **Controller firmware internals.** The optional firmware-CPU model is one
   fixed cost per Read, Write and Zone Append on one modelled core.
 - **Power and heat.** The controller reports one power state, and the
-  temperature is the value of the `temperature` property. Interrupt
-  coalescing settings are reported but not applied.
+  temperature is the value of the `temperature` property.
 - **Firmware update and security commands.** Firmware Download and Commit,
   Security Send and Security Receive are refused.
 - **Exact guest-visible latency.** FEMU enforces a lower bound. A completion

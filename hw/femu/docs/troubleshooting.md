@@ -250,8 +250,7 @@ It does not model:
   happens at once, and the model only delays the completion;
 - persistence: the device lives in host memory;
 - power, heat or temperature changes (the reported temperature is the
-  `temperature` property);
-- interrupt coalescing (the features are reported but not applied).
+  `temperature` property).
 
 The latency is a lower bound. A completion is posted on the first poller
 pass after it is due, so a poller without a host core adds delay. The

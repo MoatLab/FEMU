@@ -10,6 +10,7 @@ static int64_t nvme_io_clock(FemuCtrl *n)
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
+static void nvme_cq_notify(FemuCtrl *n, NvmeCQueue *cq);
 
 /*
  * Several submission queues may report to one completion queue, and with more
@@ -386,7 +387,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         NvmeCQueue *cq = n->cq[sq->cqid];
         if (cq && cq->is_active) {
             nvme_update_cq_eventidx(cq);
-            nvme_isr_notify_io(cq);
+            nvme_cq_notify(n, cq);
         }
     }
 
@@ -410,6 +411,130 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 
     nvme_write_cqe(n, cq, cqe);
     nvme_inc_cq_tail(cq);
+
+    /*
+     * Nothing to count with coalescing off, on the admin queue, or on a
+     * queue that never interrupts.
+     */
+    if (cq->cqid && cq->irq_enabled && n->features.int_coalescing) {
+        NvmeIcVector *v = &n->features.ic_vec[cq->vector];
+
+        qemu_spin_lock(&v->lock);
+        if (!v->pending) {
+            v->first_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
+        v->pending++;
+        /* the spec recommends no coalescing for a completion with an error */
+        if (req->status) {
+            v->urgent = true;
+        }
+        v->cq = cq;
+        qemu_spin_unlock(&v->lock);
+    }
+}
+
+/*
+ * Interrupt Coalescing (Feature 08h) for @cq: the entries and the delay that
+ * may wait for one interrupt. It is off for the Admin Completion Queue, when
+ * the threshold or the time is 0h, and for a vector with Coalescing Disable
+ * set in Feature 09h.
+ */
+static bool nvme_cq_coalesces(FemuCtrl *n, NvmeCQueue *cq, uint32_t *thr,
+                              int64_t *time_ns)
+{
+    uint32_t ic = n->features.int_coalescing;
+    PCIDevice *pci = &n->parent_obj;
+
+    if (!cq->cqid || !NVME_INTC_THR(ic) || !NVME_INTC_TIME(ic)) {
+        return false;
+    }
+    /*
+     * The pin is a level the controller recomputes from the queues, so it
+     * cannot hold one; the threshold is only a recommendation.
+     */
+    if (!msix_enabled(pci) && !msi_enabled(pci)) {
+        return false;
+    }
+    if (cq->vector <= n->nr_io_queues &&
+        (n->features.int_vector_config[cq->vector] & (1 << 16))) {
+        return false;
+    }
+    *thr = NVME_INTC_THR(ic) + 1;
+    *time_ns = (int64_t)NVME_INTC_TIME(ic) * 100 * SCALE_US;
+    return true;
+}
+
+/*
+ * Interrupt the host for the entries posted to @cq, unless coalescing holds
+ * them: fewer than the threshold, none with an error, and the first posted
+ * less than the aggregation time ago. Without coalescing every call with an
+ * entry posted interrupts, as before.
+ */
+static void nvme_cq_notify(FemuCtrl *n, NvmeCQueue *cq)
+{
+    NvmeIcVector *v;
+    uint32_t thr;
+    int64_t time_ns;
+    bool fire = false;
+
+    if (!cq->cqid || !n->features.int_coalescing) {
+        nvme_isr_notify_io(cq);
+        return;
+    }
+    /* it counted nothing, and must not send what other queues hold */
+    if (!cq->irq_enabled) {
+        return;
+    }
+    v = &n->features.ic_vec[cq->vector];
+    qemu_spin_lock(&v->lock);
+    /* another queue on the vector may have sent its interrupt already */
+    if (v->pending &&
+        (!nvme_cq_coalesces(n, cq, &thr, &time_ns) || v->urgent ||
+         v->pending >= thr ||
+         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - v->first_ns >= time_ns)) {
+        v->pending = 0;
+        v->urgent = false;
+        fire = true;
+    }
+    qemu_spin_unlock(&v->lock);
+    if (fire) {
+        nvme_isr_notify_io(cq);
+    }
+}
+
+/* Interrupt for @cq now, and drop what its vector held. */
+void nvme_cq_notify_now(FemuCtrl *n, NvmeCQueue *cq)
+{
+    if (!cq->irq_enabled) {
+        return;
+    }
+    if (n->features.ic_vec && cq->vector <= n->nr_io_queues) {
+        NvmeIcVector *v = &n->features.ic_vec[cq->vector];
+
+        qemu_spin_lock(&v->lock);
+        v->pending = 0;
+        v->urgent = false;
+        qemu_spin_unlock(&v->lock);
+    }
+    nvme_isr_notify_io(cq);
+}
+
+/*
+ * Send what every vector holds: Feature 08h or 09h is changing, so the
+ * held entries no longer follow the rules they were held under. The
+ * caller holds the BQL and has paused the pollers.
+ */
+void nvme_ic_flush(FemuCtrl *n)
+{
+    for (uint32_t i = 0; n->features.ic_vec && i <= n->nr_io_queues; i++) {
+        NvmeIcVector *v = &n->features.ic_vec[i];
+
+        if (v->pending && v->cq) {
+            nvme_isr_notify_now(v->cq);
+        }
+        v->pending = 0;
+        v->urgent = false;
+    }
 }
 
 
@@ -579,6 +704,24 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         should_isr[req->sq->cqid] = true;
     }
 
+    /*
+     * Coalesced entries wait for their aggregation time. Each vector is
+     * checked by one poller: vector v by the poller with v % pollers equal
+     * to its own index % pollers.
+     */
+    if (n->features.int_coalescing) {
+        for (i = 0; i <= n->nr_io_queues; i++) {
+            NvmeIcVector *v = &n->features.ic_vec[i];
+            NvmeCQueue *vcq = qatomic_read(&v->cq);
+
+            if (i % n->nr_pollers == index_poller % n->nr_pollers &&
+                qatomic_read(&v->pending) && vcq && vcq->is_active) {
+                nvme_update_cq_eventidx(vcq);
+                nvme_cq_notify(n, vcq);
+            }
+        }
+    }
+
     if (processed == 0)
         return;
 
@@ -587,12 +730,13 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
      * eventidx published alongside so the guest can skip its CQ-head doorbell
      * (see nvme_update_cq_eventidx). The queue a completion went to is the one
      * its submission queue names, which need not be in this poller's shard.
+     * Interrupt coalescing may hold the interrupt back.
      */
     for (i = 1; i <= n->nr_io_queues; i++) {
         if (should_isr[i]) {
             /* the host reads EventIdx once interrupted, so publish it first */
             nvme_update_cq_eventidx(n->cq[i]);
-            nvme_isr_notify_io(n->cq[i]);
+            nvme_cq_notify(n, n->cq[i]);
             should_isr[i] = false;
         }
     }
@@ -2121,7 +2265,7 @@ void nvme_post_cqes_io(void *opaque)
 
     /* Only interrupt guest when we "do" complete some I/Os */
     if (processed > 0) {
-        nvme_isr_notify_io(cq);
+        nvme_cq_notify(cq->ctrl, cq);
     }
 }
 

@@ -912,6 +912,33 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
 {
     n->cq[cq->cqid] = NULL;
     /*
+     * Other queues on this vector may have entries whose interrupt is still
+     * counted, or already handed to this queue's eventfd or bottom half,
+     * which go with the queue. Signal the vector now, with the BQL held: an
+     * early interrupt is allowed, a lost one is not. A controller reset
+     * frees every queue, and the host reads none of them then.
+     */
+    if (cq->irq_enabled && n->features.ic_vec &&
+        cq->vector <= n->nr_io_queues) {
+        NvmeIcVector *v = &n->features.ic_vec[cq->vector];
+        bool shared = false;
+
+        for (uint32_t i = 1; i <= n->nr_io_queues && !shared; i++) {
+            NvmeCQueue *other = n->cq[i];
+
+            shared = other && other != cq && other->irq_enabled &&
+                     other->vector == cq->vector;
+        }
+        if ((v->pending || shared) && !n->cq_teardown) {
+            nvme_isr_notify_now(cq);
+        }
+        v->pending = 0;
+        v->urgent = false;
+        if (v->cq == cq) {
+            v->cq = NULL;
+        }
+    }
+    /*
      * The route and its notifier belong to this queue, and only the controller
      * shutdown path used to give them back: a guest that created and deleted a
      * queue in a loop leaked one interrupt id and one file descriptor each time

@@ -474,10 +474,41 @@ MSI-X mask, unmask and pending-bit polling are handled by vector notifiers
 (`nvme_vector_mask()`, `nvme_vector_unmask()`, `nvme_vector_poll()`) that move
 the irqfd routes.
 
-There is no interrupt coalescing. `intc`, `intc_thresh` and `intc_time` set
-the values the Interrupt Coalescing and Interrupt Vector Configuration
-features report, and nothing else. On the heap path a poller raises at most
-one interrupt per CQ per sweep.
+On the heap path a poller raises at most one interrupt per CQ per sweep.
+
+### Interrupt coalescing
+
+Interrupt Coalescing (Feature 08h) holds the interrupt of an I/O completion
+queue's vector until enough entries wait, or until the oldest waits too
+long. The threshold THR (0's based entries) and the time TIME (100 us steps)
+both must be non-zero, or coalescing is off. The threshold counts per
+interrupt vector, so queues that share a vector share one count. Coalescing
+Disable in Feature 09h turns it off for one vector.
+
+These are never held: the admin queue, completions with an error, and the
+pin. The pin is a level the controller recomputes from the queues, and the
+threshold is only a recommendation. `intc_thresh`, `intc_time` and `intc`
+set the reset values.
+
+```
+ entry posted:  vector pending++; first entry: first_ns = now; error: urgent
+ end of a sweep, CQs it posted to:     off, urgent, pending >= THR + 1,
+ and every sweep, vectors in its share: or now - first_ns >= TIME x 100 us
+                                          --> interrupt, pending = 0
+ Set Features 08h or 09h: pause the pollers, send what is held, apply
+```
+
+Each vector is checked for its time by one poller. A CQ head doorbell write
+that leaves entries behind still interrupts at once, which the spec allows,
+and it clears the vector's count. With Feature 08h at 0h nothing is counted.
+
+A Set Features 08h or 09h, and the delete of a queue whose vector holds
+entries or carries other queues, signal the vector at once on the thread
+that holds the BQL. They do not use the queue's bottom half or eventfd,
+which a delete would close. A controller reset sends nothing. The rule
+is that an interrupt may come early but is never lost. One extra interrupt
+can follow when an admin completion on vector 0 races a poller that has
+just posted an I/O entry; the host then finds no new entry.
 
 ## Quiescing the data plane
 
@@ -674,7 +705,7 @@ ranges are in the generated reference; follow the link of each group.
 | `hiops_inline` | NoSSD only: performance option, on by default; set off only when debugging | same |
 | `aerl`, `elpe` | held AER limit, Error log length | same |
 | `mdts` | largest data transfer per command | same |
-| `intc`, `intc_thresh`, `intc_time` | values reported by the coalescing features only | same |
+| `intc`, `intc_thresh`, `intc_time` | reset values of the coalescing features | same |
 | `vid`, `did` | PCI IDs | [controller identity and capabilities](../reference/properties.md#controller-identity-and-capabilities) |
 | `cqr` | whether queues must be physically contiguous | same |
 | `mpsmin`, `mpsmax` | memory page sizes CC.MPS may choose | same |

@@ -531,11 +531,13 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
             nvme_free_sq(n->sq[i], n);
         }
     }
+    n->cq_teardown = true;
     for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->cq[i] != NULL) {
             nvme_free_cq(n->cq[i], n);
         }
     }
+    n->cq_teardown = false;
     n->irq_status = 0;
     pci_irq_deassert(&n->parent_obj);
 
@@ -936,7 +938,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         cq->head = new_val;
 
         if (cq->tail != cq->head) {
-            nvme_isr_notify_io(cq);
+            nvme_cq_notify_now(n, cq);
         }
         nvme_irq_update(n);
     } else {
@@ -2292,6 +2294,8 @@ static void femu_realize_undo(FemuCtrl *n)
     }
     g_free(n->features.int_vector_config);
     n->features.int_vector_config = NULL;
+    g_free(n->features.ic_vec);
+    n->features.ic_vec = NULL;
     g_free(n->cmbuf);
     n->cmbuf = NULL;
     if (!n->shared_storage) {
@@ -2676,6 +2680,10 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->aer_bh = qemu_bh_new_guarded(femu_aer_bh, n,
                                     &DEVICE(n)->mem_reentrancy_guard);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
+    n->features.ic_vec = g_new0(NvmeIcVector, n->nr_io_queues + 1);
+    for (int v = 0; v <= n->nr_io_queues; v++) {
+        qemu_spin_init(&n->features.ic_vec[v].lock);
+    }
 
     nvme_init_pci(n);
 
@@ -3003,6 +3011,7 @@ static void femu_exit(PCIDevice *pci_dev)
     }
     g_free(n->cmbuf);   /* the controller memory buffer, if configured */
     g_free(n->features.int_vector_config);
+    g_free(n->features.ic_vec);
     {
         NvmeAsyncEvent *event;
 
