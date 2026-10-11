@@ -761,18 +761,22 @@ static uint16_t nvme_rw_extended(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return status;
         }
         qemu_mutex_lock(&ns->mdata_lock);
+        backend_lock_range(n->mbe, data_offset, nlb * ds);
         for (i = 0; i < nlb; i++) {
             memcpy(data + i * ds, buf + i * unit, ds);
             memcpy(ns->mdata + (slba + i) * ms, buf + i * unit + ds, ms);
         }
+        backend_unlock_range(n->mbe, data_offset, nlb * ds);
         qemu_mutex_unlock(&ns->mdata_lock);
         nvme_mark_written(ns, slba, nlb);
     } else {
         qemu_mutex_lock(&ns->mdata_lock);
+        backend_lock_range(n->mbe, data_offset, nlb * ds);
         for (i = 0; i < nlb; i++) {
             memcpy(buf + i * unit, data + i * ds, ds);
             memcpy(buf + i * unit + ds, ns->mdata + (slba + i) * ms, ms);
         }
+        backend_unlock_range(n->mbe, data_offset, nlb * ds);
         qemu_mutex_unlock(&ns->mdata_lock);
         status = dma_read_cmd(n, cmd, buf, len);
         if (status) {
@@ -849,9 +853,12 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     if (n->power_loss) {
         req->slba = slba;
         req->nlb = nlb;
-        return dma_read_cmd(n, cmd,
-                            (uint8_t *)n->mbe->logical_space + data_offset,
-                            data_size);
+        backend_lock_range(n->mbe, data_offset, data_size);
+        err = dma_read_cmd(n, cmd,
+                           (uint8_t *)n->mbe->logical_space + data_offset,
+                           data_size);
+        backend_unlock_range(n->mbe, data_offset, data_size);
+        return err;
     }
 
     if (femu_pi_type(ns)) {
@@ -890,8 +897,10 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                 return err;
             }
             qemu_mutex_lock(&ns->mdata_lock);
+            backend_lock_range(n->mbe, data_offset, data_size);
             memcpy((uint8_t *)n->mbe->logical_space + data_offset, dbuf,
                    data_size);
+            backend_unlock_range(n->mbe, data_offset, data_size);
             memcpy(ns->mdata + slba * ms, mbuf, meta_size);
             qemu_mutex_unlock(&ns->mdata_lock);
             req->slba = slba;
@@ -947,11 +956,14 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                 req->fdp_dtype = (le16_to_cpu(rw->control) >> 4) & 0xF;
             }
 
+            backend_lock_range(n->mbe, moff, data_size);
             if (femu_dma_rw(n, prp1, mb + moff, len0, !req->is_write) ||
                 (rem && femu_dma_rw(n, prp2, mb + moff + len0, rem,
                                     !req->is_write))) {
+                backend_unlock_range(n->mbe, moff, data_size);
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
+            backend_unlock_range(n->mbe, moff, data_size);
             if (req->is_write) {
                 nvme_mark_written(ns, slba, nlb);
             }
@@ -1359,7 +1371,11 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (sms) {
                 qemu_mutex_lock(&s->mdata_lock);
             }
+            backend_lock_range(n->mbe, s->backend_offset + (slba << lbads),
+                               (uint64_t)nlb << lbads);
             memcpy(dbuf, sbase + (slba << lbads), (uint64_t)nlb << lbads);
+            backend_unlock_range(n->mbe, s->backend_offset + (slba << lbads),
+                                 (uint64_t)nlb << lbads);
             if (sms) {
                 memcpy(mbuf, s->mdata + slba * ms, (size_t)nlb * ms);
                 qemu_mutex_unlock(&s->mdata_lock);
@@ -1391,7 +1407,21 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (mstage) {
         qemu_mutex_lock(&ns->mdata_lock);
     }
-    memcpy(base + (sdlba << lbads), data, total << lbads);
+    backend_lock_range(n->mbe, ns->backend_offset + (sdlba << lbads),
+                       total << lbads);
+    if (unlikely(qatomic_read(&n->test_copy_hold))) {
+        /* as for a write: a qtest stops the copy halfway */
+        uint64_t half = (total << lbads) / 2;
+
+        memcpy(base + (sdlba << lbads), data, half);
+        femu_test_copy_hold(n);
+        memcpy(base + (sdlba << lbads) + half, data + half,
+               (total << lbads) - half);
+    } else {
+        memcpy(base + (sdlba << lbads), data, total << lbads);
+    }
+    backend_unlock_range(n->mbe, ns->backend_offset + (sdlba << lbads),
+                         total << lbads);
     if (mstage) {
         memcpy(ns->mdata + sdlba * ms, mstage, total * ms);
     }
@@ -1440,12 +1470,14 @@ static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
         return status;
     }
     qemu_mutex_lock(&ns->mdata_lock);
+    backend_lock_range(n->mbe, data_offset, nlb * ds);
     for (i = 0; i < nlb && status == NVME_SUCCESS; i++) {
         if (memcmp(host + i * unit, data + i * ds, ds) ||
             memcmp(host + i * unit + ds, ns->mdata + (slba + i) * ms, ms)) {
             status = NVME_CMP_FAILURE | NVME_DNR;
         }
     }
+    backend_unlock_range(n->mbe, data_offset, nlb * ds);
     qemu_mutex_unlock(&ns->mdata_lock);
     return status;
 }
@@ -1466,6 +1498,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t data_size = (uint64_t)nlb << data_shift;
     /* address the media within this namespace's slice, as nvme_rw() does */
     uint64_t offset  = ns->backend_offset + (slba << data_shift);
+    uint64_t lock_off;
 
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
@@ -1507,8 +1540,12 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (status) {
             return status;
         }
-        return memcmp((uint8_t *)n->mbe->logical_space + offset, host,
-                      data_size) ? NVME_CMP_FAILURE | NVME_DNR : NVME_SUCCESS;
+        backend_lock_range(n->mbe, offset, data_size);
+        status = memcmp((uint8_t *)n->mbe->logical_space + offset, host,
+                        data_size) ? NVME_CMP_FAILURE | NVME_DNR :
+                                     NVME_SUCCESS;
+        backend_unlock_range(n->mbe, offset, data_size);
+        return status;
     }
     if (cmd->psdt) {
         uint16_t sc = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
@@ -1539,6 +1576,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (ns->mdata) {
         qemu_mutex_lock(&ns->mdata_lock);
     }
+    lock_off = offset;
+    backend_lock_range(n->mbe, lock_off, data_size);
     for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
         uint8_t *host = g_malloc(len);
@@ -1553,6 +1592,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (nvme_addr_read(n, req->qsg.sg[i].base, host, len)) {
             g_free(host);
             qemu_sglist_destroy(&req->qsg);
+            backend_unlock_range(n->mbe, lock_off, data_size);
             if (ns->mdata) {
                 qemu_mutex_unlock(&ns->mdata_lock);
             }
@@ -1562,6 +1602,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(host);
         if (cmp) {
             qemu_sglist_destroy(&req->qsg);
+            backend_unlock_range(n->mbe, lock_off, data_size);
             if (ns->mdata) {
                 qemu_mutex_unlock(&ns->mdata_lock);
             }
@@ -1569,6 +1610,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
         offset += len;
     }
+    backend_unlock_range(n->mbe, lock_off, data_size);
 
     qemu_sglist_destroy(&req->qsg);
 

@@ -235,6 +235,8 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     if (!req->write_data) {
         return;
     }
+    /* a read on another poller sees the page before or after, never part */
+    backend_lock_range(ssd->n->mbe, ns->backend_offset + page_start, page_size);
     if (buffered) {
         struct buffer_entry target = { .lpn = lpn };
         struct buffer_entry *entry = g_tree_lookup(ssd->wb_tree, &target);
@@ -253,6 +255,8 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     memcpy(base + first, req->write_data + first - (req->slba << shift),
            end - first);
     nvme_mark_written(ns, first >> shift, (end - first) >> shift);
+    backend_unlock_range(ssd->n->mbe, ns->backend_offset + page_start,
+                         page_size);
 }
 
 /* The caller is the FTL thread or an admin handler with processing paused. */

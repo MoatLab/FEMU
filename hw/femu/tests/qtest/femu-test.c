@@ -6261,6 +6261,266 @@ static void femu_test_zone_append_parallel(void *obj, void *data,
 }
 
 /*
+ * Write atomicity (NVM Express 2.1, AWUN): Identify reports AWUN 0, so a
+ * one-block Write must reach the media whole with respect to other commands.
+ * Two pollers run at once here: queue 1 overwrites block 0 with one of two
+ * patterns, by Write or by Copy, and queue 2 reads block 0 into a buffer of
+ * its own for each read. Every read must hold one pattern whole.
+ *
+ * @data names the case: "write" and "copy" use 64 KiB blocks, which make the
+ * copy long enough for the race to show, and an SGL; "write-4k" uses 4 KiB
+ * blocks and a PRP, the shape the NoSSD inline path takes.
+ *
+ * Nothing forces the two pollers to overlap. Reads that all run before or all
+ * after the writes of their round see one pattern, so a round whose reads see
+ * both shows an overlap. The test runs rounds until RWA_WANT such rounds have
+ * passed, and skips when a host never overlaps the pollers.
+ */
+#define RWA_MAX_BS  65536
+#define RWA_PER_Q   32
+#define RWA_ROUNDS  200
+#define RWA_WANT    8
+#define RWA_A       0xa5
+#define RWA_B       0x5a
+
+static void femu_rwa_queue_rw(FemuCtrlState *c, FemuQueue *q, uint8_t opcode,
+                              uint64_t slba, uint64_t buf, uint32_t bs)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    if (bs > 4096) {
+        rw.flags = 1 << 6;                  /* PSDT: SGL */
+        rw.dptr.sgl.addr = cpu_to_le64(buf);
+        rw.dptr.sgl.len = cpu_to_le32(bs);
+    } else {
+        rw.dptr.prp1 = cpu_to_le64(buf);
+    }
+    rw.slba = cpu_to_le64(slba);
+    femu_zap_queue(c, q, (NvmeCmd *)&rw);
+}
+
+static void femu_rwa_queue_copy(FemuCtrlState *c, FemuQueue *q, uint64_t desc)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(desc);
+    femu_zap_queue(c, q, &cmd);
+}
+
+static void femu_test_rw_atomic(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool copy = !strcmp(data, "copy");
+    uint32_t bs = strcmp(data, "write-4k") ? RWA_MAX_BS : 4096;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    uint64_t pat[2], desc[2], rd[RWA_PER_Q];
+    g_autofree uint8_t *got = g_malloc(bs);
+    uint8_t d[32];
+    int round, i, torn = 0, mixed = 0, reads = 0;
+    size_t k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+
+    for (i = 0; i < 2; i++) {
+        pat[i] = guest_alloc(alloc, bs);
+        qtest_memset(qts, pat[i], i ? RWA_B : RWA_A, bs);
+        /* blocks 1 and 2 hold the patterns for Copy to take */
+        femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 1 + i, pat[i], bs);
+        femu_zap_ring(&c, &q1);
+        g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+        desc[i] = guest_alloc(alloc, 4096);
+        memset(d, 0, sizeof(d));
+        stq_le_p(d + 8, 1 + i);             /* one block from block 1 + i */
+        qtest_memwrite(qts, desc[i], d, sizeof(d));
+    }
+    femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 0, pat[0], bs);
+    femu_zap_ring(&c, &q1);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    for (i = 0; i < RWA_PER_Q; i++) {
+        rd[i] = guest_alloc(alloc, bs);
+    }
+
+    for (round = 0; round < RWA_ROUNDS && mixed < RWA_WANT; round++) {
+        int seen_a = 0, seen_b = 0;
+
+        for (i = 0; i < RWA_PER_Q; i++) {
+            if (copy) {
+                femu_rwa_queue_copy(&c, &q1, desc[(round + i) & 1]);
+            } else {
+                femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 0,
+                                  pat[(round + i) & 1], bs);
+            }
+            femu_rwa_queue_rw(&c, &q2, NVME_CMD_READ, 0, rd[i], bs);
+        }
+        femu_zap_ring(&c, &q1);
+        femu_zap_ring(&c, &q2);
+        for (i = 0; i < RWA_PER_Q; i++) {
+            g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==,
+                            NVME_SUCCESS);
+        }
+        for (i = 0; i < RWA_PER_Q; i++) {
+            qtest_bufread(qts, rd[i], got, bs);
+            g_assert_true(got[0] == RWA_A || got[0] == RWA_B);
+            seen_a += got[0] == RWA_A;
+            seen_b += got[0] == RWA_B;
+            for (k = 1; k < bs && got[k] == got[0]; k++) {
+            }
+            if (k < bs) {
+                torn++;
+            }
+        }
+        reads += RWA_PER_Q;
+        mixed += seen_a && seen_b;
+    }
+    g_test_message("%s: %d rounds, %d reads, %d torn, %d rounds overlapped",
+                   (char *)data, round, reads, torn, mixed);
+    g_assert_cmpint(torn, ==, 0);
+    if (mixed < RWA_WANT) {
+        g_test_skip("the pollers did not overlap often enough on this host");
+    }
+
+    for (i = 0; i < RWA_PER_Q; i++) {
+        guest_free(alloc, rd[i]);
+    }
+    for (i = 0; i < 2; i++) {
+        guest_free(alloc, desc[i]);
+        guest_free(alloc, pat[i]);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
+/*
+ * The same rule, made certain. With x-copy-hold set, the device stops a
+ * write's copy (@data "write") or a Copy's destination copy (@data "copy")
+ * halfway, and x-copy-held shows that it has. Only then is a read of the
+ * block sent. The write goes on once x-range-waits shows the read waiting
+ * for its lock. A read that completes first has read past the write; either
+ * way it must return the new data whole.
+ */
+
+static void femu_rwa_hold(QTestState *qts, uint32_t on)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/rwa',"
+                             "'property':'x-copy-hold','value':%u}}", on);
+}
+
+static uint64_t femu_rwa_get(QTestState *qts, const char *prop)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/rwa',"
+                           "'property':%s}}", prop);
+    uint64_t value = qdict_get_int(rsp, "return");
+
+    qobject_unref(rsp);
+    return value;
+}
+
+static bool femu_rwa_cq_ready(FemuCtrlState *c, FemuQueue *q)
+{
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, q->cq_addr + q->cq_head * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    return (le16_to_cpu(cqe.status) & 1) == q->phase;
+}
+
+static void femu_test_rw_atomic_split(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool copy = !strcmp(data, "copy");
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    uint64_t pat[2], desc, rd;
+    g_autofree uint8_t *got = g_malloc(RWA_MAX_BS);
+    uint8_t d[32] = { 0 };
+    bool early = false;
+    uint64_t waits;
+    size_t k;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+
+    /* block 0 holds A; block 1 holds B for Copy to take */
+    for (i = 0; i < 2; i++) {
+        pat[i] = guest_alloc(alloc, RWA_MAX_BS);
+        qtest_memset(qts, pat[i], i ? RWA_B : RWA_A, RWA_MAX_BS);
+        femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, i, pat[i], RWA_MAX_BS);
+        femu_zap_ring(&c, &q1);
+        g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    }
+    desc = guest_alloc(alloc, 4096);
+    stq_le_p(d + 8, 1);
+    qtest_memwrite(qts, desc, d, sizeof(d));
+    rd = guest_alloc(alloc, RWA_MAX_BS);
+
+    femu_rwa_hold(qts, 1);
+    if (copy) {
+        femu_rwa_queue_copy(&c, &q1, desc);
+    } else {
+        femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 0, pat[1], RWA_MAX_BS);
+    }
+    femu_zap_ring(&c, &q1);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !femu_rwa_get(qts, "x-copy-held");
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+
+    waits = femu_rwa_get(qts, "x-range-waits");
+    femu_rwa_queue_rw(&c, &q2, NVME_CMD_READ, 0, rd, RWA_MAX_BS);
+    femu_zap_ring(&c, &q2);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !early &&
+         femu_rwa_get(qts, "x-range-waits") == waits; i++) {
+        g_usleep(1000);
+        early = femu_rwa_cq_ready(&c, &q2);
+    }
+    /* the read finished or blocked while the write was still stopped */
+    g_assert_true(early || femu_rwa_get(qts, "x-range-waits") != waits);
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+    femu_rwa_hold(qts, 0);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+
+    qtest_bufread(qts, rd, got, RWA_MAX_BS);
+    for (k = 0; k < RWA_MAX_BS && got[k] == RWA_B; k++) {
+    }
+    if (k < RWA_MAX_BS) {
+        g_test_message("%s: byte %zu reads 0x%02x, not the new 0x%02x",
+                       (char *)data, k, got[k], RWA_B);
+    }
+    g_assert_false(early);
+    g_assert_cmpuint(k, ==, RWA_MAX_BS);
+
+    guest_free(alloc, rd);
+    guest_free(alloc, desc);
+    for (i = 0; i < 2; i++) {
+        guest_free(alloc, pat[i]);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
+/*
  * Program/erase suspend, end to end. On one LUN, a write that programs NAND
  * and a read of a page written before go in one doorbell ring, so the read
  * reaches the media while the program is in flight. Off, the read waits out
@@ -27609,6 +27869,38 @@ static void femu_register_nodes(void)
                  femu_test_zone_append_parallel, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("rw-atomic-write", "femu", femu_test_rw_atomic,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"write",
+        .edge.extra_device_opts =
+            "sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("rw-atomic-copy", "femu", femu_test_rw_atomic,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"copy",
+        .edge.extra_device_opts =
+            "sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("rw-atomic-write-4k", "femu", femu_test_rw_atomic,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"write-4k",
+        .edge.extra_device_opts =
+            "lba_index=3,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("rw-atomic-split-write", "femu", femu_test_rw_atomic_split,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"write",
+        .edge.extra_device_opts =
+            "id=rwa,sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,"
+            "poller_ratio=1"
+    });
+    qos_add_test("rw-atomic-split-copy", "femu", femu_test_rw_atomic_split,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"copy",
+        .edge.extra_device_opts =
+            "id=rwa,sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,"
+            "poller_ratio=1"
     });
     /* one LUN and plane; a 200 ms program against a 40 us read */
     qos_add_test("pe-suspend-bbssd-off", "femu", femu_test_pe_suspend,

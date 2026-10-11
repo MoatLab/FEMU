@@ -4,6 +4,7 @@
 #include "system/qtest.h"
 #include "hw/qdev-properties.h"
 #include "qom/qom-qobject.h"
+#include "qapi/visitor.h"
 #include "qobject/qobject.h"
 #include "qobject/qstring.h"
 
@@ -2305,6 +2306,8 @@ static void femu_realize_undo(FemuCtrl *n)
     n->sq = NULL;
     if (!n->shared_storage && !n->cxl_dev) {
         free_dram_backend(n->mbe);
+    } else if (n->cxl_dev) {
+        backend_free_range_locks(n->mbe);
     }
     n->mbe = NULL;
 
@@ -2602,7 +2605,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->mbe = n->subsys->storage->mbe;
         n->shared_storage = true;
     } else if (n->cxl_dev) {
-        /* prepare() lent the medium's backend */
+        /* prepare() lent the medium's backend; the pollers bring its locks */
+        backend_init_range_locks(n->mbe);
     } else {
         init_dram_backend(&n->mbe, bs_size);
         n->mbe->femu_mode = n->femu_mode;
@@ -2971,6 +2975,8 @@ static void femu_exit(PCIDevice *pci_dev)
     qemu_mutex_destroy(&n->streams_lock);
     if (!n->shared_storage && !n->cxl_dev) {
         free_dram_backend(n->mbe);
+    } else if (n->cxl_dev) {
+        backend_free_range_locks(n->mbe);
     }
 
     if (!n->shared_storage) {
@@ -3475,6 +3481,47 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     femu_pel_power_loss(n);
 }
 
+/*
+ * qtest only. A poller reads and writes these flags without the BQL, so the
+ * accessors use atomics, not the plain loads and stores of a pointer property.
+ */
+static void femu_test_copy_hold_get(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    uint32_t value = qatomic_load_acquire(&FEMU(obj)->test_copy_hold);
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void femu_test_copy_hold_set(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    uint32_t value;
+
+    if (visit_type_uint32(v, name, &value, errp)) {
+        qatomic_store_release(&FEMU(obj)->test_copy_hold, value);
+    }
+}
+
+static void femu_test_copy_held_get(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    uint32_t value = qatomic_load_acquire(&FEMU(obj)->test_copy_held);
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+/* lock takes in the memory backend that had to wait for another access */
+static void femu_test_range_waits_get(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    SsdDramBackend *b = FEMU(obj)->mbe;
+    uint64_t value = b ? qatomic_read(&b->range_waits) : 0;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
 static void femu_instance_init(Object *obj)
 {
     object_property_add_bool(obj, "simulate-power-loss", NULL,
@@ -3493,6 +3540,13 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-zone-lock-hold-ms",
                                        &FEMU(obj)->test_zone_lock_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add(obj, "x-copy-hold", "uint32",
+                            femu_test_copy_hold_get, femu_test_copy_hold_set,
+                            NULL, NULL);
+        object_property_add(obj, "x-copy-held", "uint32",
+                            femu_test_copy_held_get, NULL, NULL, NULL);
+        object_property_add(obj, "x-range-waits", "uint64",
+                            femu_test_range_waits_get, NULL, NULL, NULL);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
     }

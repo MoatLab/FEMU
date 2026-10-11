@@ -74,7 +74,33 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
                  nbytes / MiB, strerror(errno));
     }
 
+    backend_init_range_locks(b);
+
     return 0;
+}
+
+/* A backend another device lends takes its locks from the borrower. */
+void backend_init_range_locks(SsdDramBackend *b)
+{
+    if (b->range_locks) {
+        return;
+    }
+    b->range_locks = g_new(QemuMutex, BACKEND_RANGE_LOCKS);
+    for (int i = 0; i < BACKEND_RANGE_LOCKS; i++) {
+        qemu_mutex_init(&b->range_locks[i]);
+    }
+}
+
+void backend_free_range_locks(SsdDramBackend *b)
+{
+    if (!b || !b->range_locks) {
+        return;
+    }
+    for (int i = 0; i < BACKEND_RANGE_LOCKS; i++) {
+        qemu_mutex_destroy(&b->range_locks[i]);
+    }
+    g_free(b->range_locks);
+    b->range_locks = NULL;
 }
 
 void free_dram_backend(SsdDramBackend *b)
@@ -86,7 +112,110 @@ void free_dram_backend(SsdDramBackend *b)
         munlock(b->logical_space, b->size);
         g_free(b->logical_space);
     }
+    backend_free_range_locks(b);
     g_free(b);
+}
+
+/*
+ * The locks of [off, off + len) as one or two runs of lock indexes, lowest
+ * first. Every access takes its locks in index order, so two accesses never
+ * wait on each other in a cycle.
+ */
+static int backend_range_runs(uint64_t off, uint64_t len, int run[2][2])
+{
+    uint64_t g0 = off >> BACKEND_RANGE_SHIFT;
+    uint64_t g1 = (off + len - 1) >> BACKEND_RANGE_SHIFT;
+    int s0 = g0 % BACKEND_RANGE_LOCKS;
+    int s1 = g1 % BACKEND_RANGE_LOCKS;
+
+    if (g1 - g0 >= BACKEND_RANGE_LOCKS - 1) {
+        run[0][0] = 0;
+        run[0][1] = BACKEND_RANGE_LOCKS - 1;
+        return 1;
+    }
+    if (s0 <= s1) {
+        run[0][0] = s0;
+        run[0][1] = s1;
+        return 1;
+    }
+    run[0][0] = 0;
+    run[0][1] = s1;
+    run[1][0] = s0;
+    run[1][1] = BACKEND_RANGE_LOCKS - 1;
+    return 2;
+}
+
+/*
+ * Make an access to [off, off + len) of the backing store atomic with
+ * respect to every other access that takes the locks of its range.
+ */
+void backend_lock_range(SsdDramBackend *b, uint64_t off, uint64_t len)
+{
+    int run[2][2];
+    int nr, r, i;
+
+    if (!b || !b->range_locks || !len) {
+        return;
+    }
+    nr = backend_range_runs(off, len, run);
+    for (r = 0; r < nr; r++) {
+        for (i = run[r][0]; i <= run[r][1]; i++) {
+            if (qemu_mutex_trylock(&b->range_locks[i])) {
+                qatomic_inc(&b->range_waits);
+                qemu_mutex_lock(&b->range_locks[i]);
+            }
+        }
+    }
+}
+
+void backend_unlock_range(SsdDramBackend *b, uint64_t off, uint64_t len)
+{
+    int run[2][2];
+    int nr, r, i;
+
+    if (!b || !b->range_locks || !len) {
+        return;
+    }
+    nr = backend_range_runs(off, len, run);
+    for (r = 0; r < nr; r++) {
+        for (i = run[r][0]; i <= run[r][1]; i++) {
+            qemu_mutex_unlock(&b->range_locks[i]);
+        }
+    }
+}
+
+/*
+ * qtest only: stop a write halfway through its copy while x-copy-hold is set,
+ * at most 60 s, and show the stop in x-copy-held. A read sent meanwhile meets
+ * a half-written block unless the range locks keep it out.
+ */
+void femu_test_copy_hold(FemuCtrl *n)
+{
+    int ms;
+
+    qatomic_store_release(&n->test_copy_held, 1);
+    for (ms = 0; ms < 60000 && qatomic_load_acquire(&n->test_copy_hold);
+         ms++) {
+        g_usleep(1000);
+    }
+    qatomic_store_release(&n->test_copy_held, 0);
+}
+
+/* One guest transfer; a write split in two when a qtest asks for it. */
+static MemTxResult backend_copy(FemuCtrl *n, dma_addr_t addr, void *ptr,
+                                dma_addr_t len, bool to_host)
+{
+    dma_addr_t half = len / 2;
+
+    if (likely(!qatomic_read(&n->test_copy_hold)) || to_host || !half) {
+        return femu_dma_rw(n, addr, ptr, len, to_host);
+    }
+    if (femu_dma_rw(n, addr, ptr, half, false)) {
+        return MEMTX_ERROR;
+    }
+    femu_test_copy_hold(n);
+    return femu_dma_rw(n, addr + half, (uint8_t *)ptr + half, len - half,
+                       false);
 }
 
 /*
@@ -104,11 +233,19 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     void *mb = b->logical_space;
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
+    /* OCSSD takes one offset per entry; every other mode, one range */
+    bool per_entry = b->femu_mode == FEMU_OCSSD_MODE;
+    uint64_t lock_oft = mb_oft;
+    uint64_t lock_len = qsg->size;
+    int ret = 0;
 
     if (is_write) {
         dir = DMA_DIRECTION_TO_DEVICE;
     }
 
+    if (!per_entry) {
+        backend_lock_range(b, lock_oft, lock_len);
+    }
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
@@ -122,14 +259,22 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
             femu_err("backend: %" PRIu64 "+%" PRIu64 " is outside the %" PRId64
                      " byte backing store\n", (uint64_t)mb_oft,
                      (uint64_t)cur_len, b->size);
-            qemu_sglist_destroy(qsg);
-            return -ERANGE;
+            ret = -ERANGE;
+            break;
         }
-        if (femu_dma_rw(container_of(qsg->dev, FemuCtrl, parent_obj.qdev),
-                        cur_addr, mb + mb_oft, cur_len,
-                        dir == DMA_DIRECTION_FROM_DEVICE)) {
-            qemu_sglist_destroy(qsg);
-            return -EIO;
+        if (per_entry) {
+            backend_lock_range(b, mb_oft, cur_len);
+        }
+        if (backend_copy(container_of(qsg->dev, FemuCtrl, parent_obj.qdev),
+                         cur_addr, mb + mb_oft, cur_len,
+                         dir == DMA_DIRECTION_FROM_DEVICE)) {
+            ret = -EIO;
+        }
+        if (per_entry) {
+            backend_unlock_range(b, mb_oft, cur_len);
+        }
+        if (ret) {
+            break;
         }
 
         sg_cur_byte += cur_len;
@@ -158,7 +303,10 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         }
     }
 
+    if (!per_entry) {
+        backend_unlock_range(b, lock_oft, lock_len);
+    }
     qemu_sglist_destroy(qsg);
 
-    return 0;
+    return ret;
 }

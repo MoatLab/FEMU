@@ -55,7 +55,10 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
         uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
         uint64_t off = ns->backend_offset + (slba << data_shift);
         uint64_t len = (uint64_t)nlb << data_shift;
+
+        backend_lock_range(n->mbe, off, len);
         memset((uint8_t *)n->mbe->logical_space + off, 0, len);
+        backend_unlock_range(n->mbe, off, len);
     }
     /* deallocated and zeroed blocks read back zero metadata (DLFEAT) */
     if (ns->mdata) {

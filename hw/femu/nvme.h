@@ -2456,6 +2456,12 @@ typedef struct FemuCtrl {
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /*
+     * qtest only: while test_copy_hold is set, a write stops between the two
+     * halves of its data copy, with test_copy_held set while it waits
+     */
+    uint32_t        test_copy_hold;
+    uint32_t        test_copy_held;
+    /*
      * Asks the poller threads to leave their loop. They run until the device
      * goes away, so without this the join in teardown never returns.
      */
@@ -2849,6 +2855,7 @@ void *nvme_poller(void *arg);
 
 /* NVMe I/O */
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
+void femu_test_copy_hold(FemuCtrl *n);
 
 /* FDP helpers */
 uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid);

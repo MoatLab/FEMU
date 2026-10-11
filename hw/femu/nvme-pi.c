@@ -115,7 +115,11 @@ void femu_pi_snapshot(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
     uint32_t i;
 
     qemu_mutex_lock(&ns->mdata_lock);
+    backend_lock_range(ns->ctrl->mbe, ns->backend_offset + slba * ds,
+                       (uint64_t)nlb * ds);
     memcpy(data, base + ns->backend_offset + slba * ds, (size_t)nlb * ds);
+    backend_unlock_range(ns->ctrl->mbe, ns->backend_offset + slba * ds,
+                         (uint64_t)nlb * ds);
     memcpy(meta, ns->mdata + slba * ms, (size_t)nlb * ms);
     for (i = 0; i < nlb; i++) {
         if (!test_bit(slba + i, ns->util)) {
@@ -256,8 +260,12 @@ uint16_t femu_pi_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
         }
         qemu_mutex_lock(&ns->mdata_lock);
+        backend_lock_range(n->mbe, ns->backend_offset +
+                           (slba << NVME_ID_NS_LBADS(ns)), len);
         memcpy((uint8_t *)n->mbe->logical_space + ns->backend_offset +
                (slba << NVME_ID_NS_LBADS(ns)), data, len);
+        backend_unlock_range(n->mbe, ns->backend_offset +
+                             (slba << NVME_ID_NS_LBADS(ns)), len);
         memcpy(ns->mdata + slba * ms, meta, (size_t)nlb * ms);
         nvme_mark_written(ns, slba, nlb);
         qemu_mutex_unlock(&ns->mdata_lock);
@@ -364,12 +372,16 @@ uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_SUCCESS;
     }
     qemu_mutex_lock(&ns->mdata_lock);
+    backend_lock_range(n->mbe, ns->backend_offset + slba * ds,
+                       (uint64_t)nlb * ds);
     memset(data, 0, (size_t)nlb * ds);
     memset(meta, 0, (size_t)nlb * ms);
     if (control & NVME_RW_PRINFO_PRACT) {
         femu_pi_generate(ns, data, meta, nlb, le32_to_cpu(rw->reftag),
                          le16_to_cpu(rw->apptag));
     }
+    backend_unlock_range(n->mbe, ns->backend_offset + slba * ds,
+                         (uint64_t)nlb * ds);
     nvme_mark_written(ns, slba, nlb);
     qemu_mutex_unlock(&ns->mdata_lock);
     return NVME_SUCCESS;

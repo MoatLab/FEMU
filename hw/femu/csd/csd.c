@@ -1544,8 +1544,10 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     afdm = csd_get_afdm_locked(csd, id);
     status = csd_check_afdm_range(afdm, offset, size);
     if (!status) {
+        backend_lock_range(n->mbe, nvm_offset, size);
         memcpy(afdm->data + offset,
                (uint8_t *)n->mbe->logical_space + nvm_offset, size);
+        backend_unlock_range(n->mbe, nvm_offset, size);
     }
     qemu_mutex_unlock(&csd->lock);
 

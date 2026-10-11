@@ -312,6 +312,52 @@ A poller never sleeps while the data plane runs: it spins on a host core.
 Plan one core per poller and one for the FTL thread
 ([performance tuning](../guides/performance-tuning.md#threads-and-cores)).
 
+### Data copies and write atomicity
+
+Identify reports AWUN 0, so a one-block write must reach the media whole
+with respect to every other command. With more than one poller, two commands
+on the same blocks copy at the same time. Each access to the memory backend
+therefore holds the locks of the 4 KiB granules it touches. The granules share
+1024 locks: granule `g` takes lock `g % 1024`.
+
+```text
+ poller 1: Write LBA 0 ---+                       +--> memcpy into backend
+                          |   lock granules of    |
+ poller 2: Read LBA 0  ---+-> [off, off + len)  --+--> memcpy out of backend
+                              in index order          (waits for the write)
+```
+
+- Every path that moves block data takes the locks:
+  - Read, Write and Zone Append (`backend_rw()`);
+  - the NoSSD inline path;
+  - Copy, for each source range and for the destination;
+  - Compare;
+  - Write Zeroes and deallocate;
+  - the protection information and metadata paths;
+  - the power-loss write cache;
+  - CSD memory reads.
+- Read, Write and Compare hold the locks of their whole range, so a
+  multi-block Read or Write is also atomic. OCSSD takes the locks per vector
+  entry.
+- Copy takes one source range at a time, then the destination. Its write to
+  the destination is atomic, but a Write between two of its source reads can
+  leave old data from one range and new data from the next. Deallocate and
+  Write Zeroes also take one range at a time.
+- A bbssd controller linked to a `femu-cxl-ssd` medium (`cxl_ssd=`) brings
+  the locks to the medium's backend. CXL.mem loads and stores, and pages
+  mapped straight into the guest, do not take them.
+- The data-remanence debug output (`FEMU_EXP_LOG`, `FEMU_SECRET`,
+  `FEMU_DUMP_LPN`) reads the backend without the locks.
+- The tests `rw-atomic-split-write` and `rw-atomic-split-copy` stop a write
+  halfway through its copy (`x-copy-hold`, qtest builds only) and read the
+  block meanwhile. The write goes on once `x-range-waits` shows the read
+  waiting for its lock. Without the locks the read returns half old, half
+  new data.
+- Locks are taken in index order, so two commands never wait in a cycle. A
+  namespace with metadata takes its `mdata_lock` first.
+- Two commands on different blocks wait for each other only when their
+  granules share a lock. For random 4 KiB commands that happens once in 1024.
+
 ## Command lifecycle
 
 ```text
