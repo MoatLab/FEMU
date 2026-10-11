@@ -17408,6 +17408,146 @@ static void femu_test_oc_set_latency(void *obj, void *data,
     guest_free(alloc, geo);
 }
 
+/* one Open-Channel 2.0 vector command on the single sector @lba */
+static void femu_oc20_one(FemuCtrlState *c, uint8_t opcode, uint64_t lba,
+                          uint64_t buf)
+{
+    NvmeCmd cmd;
+    uint16_t want, got;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+    want = c->cid;
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+}
+
+/* a vector read of sectors @a and @b in one command; returns its time in ms */
+static int64_t femu_oc20_read2_ms(FemuCtrlState *c, uint64_t a, uint64_t b,
+                                  uint64_t list, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd;
+    uint16_t want, got;
+    int64_t t0;
+
+    qtest_writeq(qts, list, a);
+    qtest_writeq(qts, list + 8, b);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)list);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw12 = cpu_to_le32(1);
+    want = c->cid;
+    t0 = g_get_monotonic_time();
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+static int64_t femu_oc20_read_ms(FemuCtrlState *c, uint64_t lba, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    femu_oc20_one(c, FEMU_OC20_VECT_READ, lba, buf);
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+/*
+ * oc20_page_types on MLC: 0xEE sets a 50 ms lower page read and a 200 ms
+ * upper page read. A page spans 4 sectors on each of 2 planes, so sector 0
+ * is on page 0 and sector 24 on page 3 (both lower), and sector 48 on page 6
+ * (upper); a plane factor left out would put sector 24 on an upper page. With
+ * the option each read takes its page's time, and a vector read of sectors
+ * 0 and 48 pays both pages on the one unit. Without it every read takes the
+ * lower time and the vector pays once, as before.
+ */
+static void femu_test_oc20_page_types(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool on = data != NULL;
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t list = guest_alloc(alloc, 4096);
+    NvmeCmd cmd;
+    int64_t s0, s24, s48, both;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = 0xee;
+    cmd.cdw10 = cpu_to_le32(200000000);     /* upper page read */
+    cmd.cdw11 = cpu_to_le32(50000000);      /* lower page read */
+    cmd.cdw12 = cpu_to_le32(100000);        /* upper page program */
+    cmd.cdw13 = cpu_to_le32(100000);        /* lower page program */
+    cmd.cdw14 = cpu_to_le32(100000);        /* block erase */
+    cmd.cdw15 = cpu_to_le32(0);             /* channel transfer */
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    femu_create_io_queues(&c);
+
+    /* past sector 48 by more than the cache units, so all of it is on NAND */
+    for (i = 0; i <= 96; i++) {
+        femu_oc20_one(&c, FEMU_OC20_VECT_WRITE, i, buf);
+    }
+    s0 = femu_oc20_read_ms(&c, 0, buf);
+    s24 = femu_oc20_read_ms(&c, 24, buf);
+    s48 = femu_oc20_read_ms(&c, 48, buf);
+    both = femu_oc20_read2_ms(&c, 0, 48, list, buf);
+    g_test_message("oc20 page types %s: sector 0 %" PRId64 " ms, 24 %" PRId64
+                   " ms, 48 %" PRId64 " ms, 0 and 48 %" PRId64 " ms",
+                   on ? "on" : "off", s0, s24, s48, both);
+    g_assert_cmpint(s0, >=, 50);
+    g_assert_cmpint(s0, <, 110);
+    g_assert_cmpint(s24, >=, 50);
+    g_assert_cmpint(s24, <, 110);
+    if (on) {
+        g_assert_cmpint(s48, >=, 200);
+        g_assert_cmpint(s48, <, 260);
+        g_assert_cmpint(both, >=, 250);
+        g_assert_cmpint(both, <, 320);
+    } else {
+        g_assert_cmpint(s48, >=, 50);
+        g_assert_cmpint(s48, <, 110);
+        g_assert_cmpint(both, >=, 50);
+        g_assert_cmpint(both, <, 110);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* the page type tables stop at 512 pages per block */
+static void femu_test_oc20_page_types_refused(void *obj, void *data,
+                                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QDict *rsp = qtest_qmp(femu->dev.bus->qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'oc2big',"
+        "'addr':'5','devsz_mb':1024,'femu_mode':0,'lver':2,'lnum_ch':3,"
+        "'lnum_lun':5,'lsecs_per_pg':4,'lpgs_per_blk':1024,"
+        "'oc20_page_types':true}}");
+    const char *desc;
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "oc20_page_types needs at most 512"));
+    qobject_unref(rsp);
+}
+
 static void femu_test_namespace_failed_identity(void *obj, void *data,
                                                  QGuestAllocator *alloc)
 {
@@ -30333,6 +30473,22 @@ static void femu_register_nodes(void)
     });
     qos_add_test("oc-set-latency-refused", "femu", femu_test_oc_set_latency,
                  NULL);
+    qos_add_test("oc20-page-types-off", "femu", femu_test_oc20_page_types,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1",
+    });
+    qos_add_test("oc20-page-types-refused", "femu",
+                 femu_test_oc20_page_types_refused, NULL);
+    qos_add_test("oc20-page-types-on", "femu", femu_test_oc20_page_types,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1,"
+            "oc20_page_types=on",
+        .arg = (void *)1,
+    });
     qos_add_test("namespace-sizes-rounding", "femu",
                  femu_test_namespace_sizes_rounding, NULL);
     qos_add_test("fdp-csd-knobs", "femu", femu_test_fdp_csd_knobs, NULL);

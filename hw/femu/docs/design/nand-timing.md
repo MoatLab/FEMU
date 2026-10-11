@@ -289,7 +289,8 @@ ZNS keeps one read, program and erase time per flash type. It uses page type
 0, except for reads with `zns_page_types` (see [ZNS](../modes/zns.md#nand-timing)). Each `zns_*_lat` property replaces the built-in value for the
 configured `zns_flash_type` only. OCSSD uses the `nand_cell_type` tables
 above, selected by `flash_type`; Open-Channel 1.2 looks up the page type of
-each page, Open-Channel 2.0 always uses page type 0.
+each page. Open-Channel 2.0 uses page type 0. With `oc20_page_types=on` a
+chip operation covers one NAND page and uses its page type.
 
 ## Channel bus
 
@@ -665,7 +666,8 @@ and the LUN rule (`oc12_media_init()`, `oc20_media_init()`):
 
 - Per chip (flat LUN id `ch * num_lun + lun`), an operation ends at
   `max(now, busy) + time`. Times come from the `flash_type` table: 1.2 as a
-  table by page type, 2.0 as flat lower-page times.
+  table by page type, 2.0 as flat lower-page times (by page type with
+  `oc20_page_types`).
 - Open-Channel 1.2 with channel timing uses the staged bus with no command,
   address or status phase: `bus_now()` for a program's data-in and
   `bus_later()` for a read's data-out.
@@ -676,7 +678,7 @@ and the LUN rule (`oc12_media_init()`, `oc20_media_init()`):
   `oc12_channel_timing=on`: `ch_xfer_lat` ns per page, or the table value
   for `flash_type` when it is 0, scaled by the sectors used out of
   `lsecs_per_pg`. Open-Channel 2.0 charges no channel time and uses page
-  type 0.
+  type 0 unless `oc20_page_types` is on.
 - Open-Channel 1.2 charges one chip operation per NAND page of the address
   list. Open-Channel 2.0 groups addresses that differ only in the sector
   field, which spans the whole chunk, so a run of consecutive sectors in one

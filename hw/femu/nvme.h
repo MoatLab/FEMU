@@ -2124,6 +2124,7 @@ typedef struct OcCtrlParams {
     uint8_t  num_pln;
     uint16_t sos;
     bool channel_timing;
+    bool page_types;        /* OC 2.0: reads and programs by page type */
 } OcCtrlParams;
 
 struct FemuCtrl;

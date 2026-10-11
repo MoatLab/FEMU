@@ -593,6 +593,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "flash_type",
       "OCSSD: cell type for the built-in timing tables, 1 SLC, 2 MLC, 3 "
       "TLC or 4 QLC; other values fail realize" },
+    { "oc20_page_types",
+      "OCSSD 2.0: charge each read and program the time of its page type "
+      "(lower to upper page) from the flash_type tables, as OCSSD 1.2 "
+      "does; off, every page takes the lower page time" },
     { "oc12_channel_timing",
       "OCSSD 1.2: charge channel transfer time for each page accessed, "
       "scaled by the sectors used out of lsecs_per_pg; ch_xfer_lat sets "

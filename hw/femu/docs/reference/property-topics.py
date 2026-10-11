@@ -138,7 +138,7 @@ DEVICES = [
                 "title": "OCSSD (Open-Channel)",
                 "kind": "static",
                 "props": [
-                    "lver", "flash_type", "oc12_channel_timing", "lsec_size",
+                    "lver", "flash_type", "oc12_channel_timing", "oc20_page_types", "lsec_size",
                     "lsecs_per_pg", "lpgs_per_blk", "lmax_sec_per_rq",
                     "lnum_ch", "lnum_lun", "lnum_pln", "lmetasize",
                     "learly_reset",

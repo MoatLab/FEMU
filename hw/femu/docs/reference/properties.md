@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 172 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 170 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -130,7 +130,6 @@ Devices:
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |
 | `mp_program` | `int32` | `0` | bbssd, CSD: non-zero charges programs of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `mp_read` | `int32` | `0` | bbssd, CSD: non-zero charges host reads of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
-| `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range; refused with FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
@@ -216,8 +215,6 @@ Devices:
 | `zns_pe_suspend` | `int32` | `0` | ZNS: non-zero lets a read suspend a program or erase on its plane |
 | `zns_lun_contention` | `int32` | `0` | ZNS: non-zero makes the planes of one LUN share the die, so their operations run one at a time; a zone reset erases each LUN's planes in one multi-plane operation |
 | `zns_reset_by_fill` | `int32` | `0` | ZNS: non-zero makes a zone reset erase only the blocks that hold programmed pages, so its time and wear follow the zone's fill |
-| `zns_page_types` | `int32` | `0` | ZNS: non-zero gives each read the latency of its page type (lower to upper page), spread around the read latency of the flash type; programs keep one latency per wordline |
-| `zns_ecc_step_ns` | `int64` | `0` | ZNS: ECC read time in ns added per 750 erases of the block, up to 4 steps, as bbssd ecc_step_ns; 0 or more |
 | `zns_tsusp_ns` | `int64` | `0` | ZNS: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `zns_max_active` | `uint32` | `0` | ZNS: Maximum Active Resources (zones), at most the zone count; 0 means no limit |
 | `zns_max_open` | `uint32` | `0` | ZNS: Maximum Open Resources (zones), at most the zone count and zns_max_active; 0 means no limit |
@@ -239,6 +236,7 @@ Devices:
 | `lver` | `uint8` | `2` | OCSSD: Open-Channel version, 1 for 1.2 or 2 for 2.0; other values fail realize |
 | `flash_type` | `uint8` | `2` | OCSSD: cell type for the built-in timing tables, 1 SLC, 2 MLC, 3 TLC or 4 QLC; other values fail realize |
 | `oc12_channel_timing` | `bool` | `off` | OCSSD 1.2: charge channel transfer time for each page accessed, scaled by the sectors used out of lsecs_per_pg; ch_xfer_lat sets ns per page and 0 uses the flash_type value; off, transfers take no time |
+| `oc20_page_types` | `bool` | `off` | OCSSD 2.0: charge each read and program the time of its page type (lower to upper page) from the flash_type tables, as OCSSD 1.2 does; off, every page takes the lower page time |
 | `lsec_size` | `uint16` | `4096` | OCSSD 1.2: sector size in bytes reported in the geometry, greater than 0 in both versions; data moves at the namespace block size, and OCSSD 2.0 always uses 4096 |
 | `lsecs_per_pg` | `uint8` | `4` | OCSSD: sectors per page, greater than 0 |
 | `lpgs_per_blk` | `uint16` | `512` | OCSSD: pages per block, greater than 0 and at most 512 for OCSSD 1.2 |

@@ -140,6 +140,7 @@ listed one by one.
 #### Open-Channel SSD
 
 - Opt-in OC 1.2 channel transfer timing (`oc12_channel_timing`) (d174f9551, 5cf3996c0).
+- Opt-in OC 2.0 page type timing (`oc20_page_types`): reads and programs take the time of their page type, as on OC 1.2, instead of the lower page time.
 - OC 2.0 gets media timings, chunk resets are charged as erases, an unwritten block reads as the predefined pattern, and a host can reset a chunk it has not filled (b652c3d87, 9d176f891, 00daad11c, 90ff859c1).
 
 #### NoSSD

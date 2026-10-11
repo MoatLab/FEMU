@@ -1,8 +1,9 @@
 #include "./oc20.h"
 #include "./oc-timing.h"
 
-static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
-                            int opcode);
+static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, uint8_t page_type,
+                            int64_t now, int opcode);
+static uint8_t oc20_page_type(FemuCtrl *n, int sec);
 
 static inline bool is_oc20_admin_cmd(uint8_t opcode)
 {
@@ -184,6 +185,8 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20AddrF *addrf = &lns->lbaf;
     uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;   /* 0's based, reaches 65536 */
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
+    int span = n->oc_params.secs_per_pg * n->oc_params.num_pln;
+    int cur_page, prev_page = -1;
     int secs_idx = -1;
     uint64_t lba;
     int i;
@@ -192,7 +195,10 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     for (i = 0; i < nlb; i++) {
         lba = ((uint64_t *)(req->slba))[i];
         cur_pg_addr = (lba & (~(lns->lbaf.sec_mask)));
-        if (cur_pg_addr == prev_pg_addr) {
+        /* page types time each NAND page, so a page boundary splits a run */
+        cur_page = n->oc_params.page_types && span ?
+                   OC20_LBA_GET_SECTR(addrf, lba) / span : 0;
+        if (cur_pg_addr == prev_pg_addr && cur_page == prev_page) {
             /* Accessing another secotr in the same NAND page */
             bucket[secs_idx].cnt++;
         } else {
@@ -202,12 +208,32 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bucket[secs_idx].ch = OC20_LBA_GET_GROUP(addrf, lba);
             bucket[secs_idx].lun = OC20_LBA_GET_PUNIT(addrf, lba);
             bucket[secs_idx].pg = OC20_LBA_GET_SECTR(addrf, lba);
+            bucket[secs_idx].page_type = oc20_page_type(n, bucket[secs_idx].pg);
 
             prev_pg_addr = cur_pg_addr;
+            prev_page = cur_page;
         }
     }
 
     *nr = secs_idx + 1;
+}
+
+/*
+ * The page type of the NAND page that holds sector @sec of a chunk, with
+ * oc20_page_types. A chunk fills one page of every plane, then the next
+ * page, so a page spans secs_per_pg x num_pln sectors.
+ */
+static uint8_t oc20_page_type(FemuCtrl *n, int sec)
+{
+    int span = n->oc_params.secs_per_pg * n->oc_params.num_pln;
+    int pg = span ? sec / span : 0;
+
+    if (!n->oc_params.page_types) {
+        return 0;
+    }
+    /* realize refuses blocks the tables do not cover */
+    return get_page_type(n->flash_type,
+                         MIN(pg, MAX_SUPPORTED_PAGES_PER_BLOCK - 1));
 }
 
 static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -237,7 +263,8 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         lun = addr_bucket[i].lun;
 
         /* no channel time: a program and a read are the unit's alone */
-        io_done_ts = oc20_chip_op(n, ch, lun, now, opcode);
+        io_done_ts = oc20_chip_op(n, ch, lun, addr_bucket[i].page_type, now,
+                                  opcode);
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
         cur_time_need_to_emulate = io_done_ts - now;
@@ -890,7 +917,7 @@ static void oc20_charge_reset(FemuCtrl *n, NvmeNamespace *ns,
     Oc20Namespace *lns = ns->state;
     int ch = OC20_LBA_GET_GROUP(&lns->lbaf, lba);
     int lun = OC20_LBA_GET_PUNIT(&lns->lbaf, lba);
-    int64_t ts = oc20_chip_op(n, ch, lun, req->stime, OC20_CMD_VECT_ERASE);
+    int64_t ts = oc20_chip_op(n, ch, lun, 0, req->stime, OC20_CMD_VECT_ERASE);
 
     if (ts > req->expire_time) {
         req->expire_time = ts;
@@ -1571,10 +1598,24 @@ static const NandTimelineOps oc20_timeline_ops = {
     .plane_avail = oc20_tl_plane_unused,
 };
 
+/* with oc20_page_types: this flash type's times per page type, as OC 1.2 */
+static void oc20_fill_tables(FemuCtrl *n, NandMediaTiming *t)
+{
+    int ft = n->flash_type;
+    int p;
+
+    for (p = 0; p < MAX_FLASH_TYPE; p++) {
+        t->rd_table_ns[ft][p] = n->oc_pg_rd_lat[p];
+        t->wr_table_ns[ft][p] = n->oc_pg_wr_lat[p];
+    }
+    t->er_table_ns[ft] = n->oc_blk_er_lat;
+}
+
 /*
  * Open-Channel 2.0 charges each parallel unit its flat read, program or erase
  * time after whatever it is already busy with, and moves nothing over the
- * channel: the LUN-only rule with the bus off.
+ * channel: the LUN-only rule with the bus off. oc20_page_types charges the
+ * time of each page's type instead of the lower page time.
  */
 static void oc20_media_init(FemuCtrl *n)
 {
@@ -1588,7 +1629,10 @@ static void oc20_media_init(FemuCtrl *n)
     cfg.timing.rd_ns = n->oc_pg_rd_lat[0];
     cfg.timing.wr_ns = n->oc_pg_wr_lat[0];
     cfg.timing.er_ns = n->oc_blk_er_lat;
-    cfg.policy.use_flat_timing = true;
+    cfg.policy.use_flat_timing = !n->oc_params.page_types;
+    if (n->oc_params.page_types) {
+        oc20_fill_tables(n, &cfg.timing);
+    }
     cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
     cfg.policy.channel_mode = NAND_CH_OFF;
     cfg.timeline = &oc20_timeline_ops;
@@ -1604,14 +1648,21 @@ void oc20_refresh_timing(FemuCtrl *n)
     ln->media.cfg.timing.rd_ns = n->oc_pg_rd_lat[0];
     ln->media.cfg.timing.wr_ns = n->oc_pg_wr_lat[0];
     ln->media.cfg.timing.er_ns = n->oc_blk_er_lat;
+    if (n->oc_params.page_types) {
+        oc20_fill_tables(n, &ln->media.cfg.timing);
+    }
 }
 
 /* when an op on parallel unit @ch/@lun issued at @now completes */
-static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, int64_t now,
-                            int opcode)
+static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, uint8_t page_type,
+                            int64_t now, int opcode)
 {
     Oc20Ctrl *ln = n->ext_ops.state;
-    NandLoc loc = { .ch = ch, .lun = lun };
+    NandLoc loc = {
+        .ch = ch, .lun = lun,
+        .flash_type = n->oc_params.page_types ? n->flash_type : 0,
+        .page_type = page_type,
+    };
     NandMediaOp op;
 
     switch (opcode) {
@@ -1637,6 +1688,13 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     (void)ns;
 
     if (!oc_timing_geometry_ok(n, errp)) {
+        return;
+    }
+    /* the page type tables cover MAX_SUPPORTED_PAGES_PER_BLOCK pages */
+    if (n->oc_params.page_types &&
+        n->oc_params.pgs_per_blk > MAX_SUPPORTED_PAGES_PER_BLOCK) {
+        error_setg(errp, "oc20_page_types needs at most %u pages per block",
+                   MAX_SUPPORTED_PAGES_PER_BLOCK);
         return;
     }
 
