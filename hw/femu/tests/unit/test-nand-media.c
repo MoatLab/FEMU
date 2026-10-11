@@ -1,11 +1,11 @@
 /*
  * Unit tests for the uniform NAND media timing layer.
  *
- * These cover the arithmetic only -- gating, ECC tiers and multi-plane
+ * These cover the arithmetic only -- contention rules, ECC tiers and multi-plane
  * batching -- which is the part that is otherwise measurable solely by booting
  * a guest and timing it. Two bugs in 2026 were mis-diagnosed because a slow
  * end-to-end measurement was the only evidence available: an ECC adder that
- * could never run, and a multi-plane gate that read state its caller leaves
+ * could never run, and a multi-plane rule that read state its caller leaves
  * unset. Both are asserted below.
  *
  * Output is TAP, so the same binary runs under meson (make check-unit) and
@@ -30,7 +30,7 @@ static const NandTimelineOps timeline = {
     .ch_avail = t_ch, .lun_avail = t_lun, .plane_avail = t_pl,
 };
 
-/* what bbssd actually registers: no plane_avail, because its gate is LUN-only */
+/* what bbssd actually registers: no plane_avail, because its rule is LUN-only */
 static const NandTimelineOps lun_only_timeline = {
     .ch_avail = t_ch, .lun_avail = t_lun,
 };
@@ -85,14 +85,14 @@ static void bb_config(NandMediaConfig *cfg)
     cfg->timing.ecc_max_tiers = 4;
     cfg->policy.use_flat_timing = true;
     cfg->policy.ecc_on_read = true;
-    cfg->policy.array_gate = NAND_GATE_LUN_ONLY;
+    cfg->policy.array_contend = NAND_CONTEND_LUN_ONLY;
     cfg->policy.channel_mode = NAND_CH_OFF;
     cfg->timeline = &timeline;
     cfg->timeline_opaque = NULL;
 }
 
 /*
- * Each call starts from an idle array. Without this the LUN gate carries the
+ * Each call starts from an idle array. Without this the LUN rule carries the
  * previous op's completion forward and every latency after the first is the
  * sum of those before it.
  */
@@ -205,7 +205,7 @@ static void test_staged_channel(void)
     check("the second read queues only its transfer behind the first",
           second, 300 + 10000 + (30400 - 10300) + 20000 + 100);
 
-    /* with the phases unset the plain gate is used and the bus never queues */
+    /* with the phases unset the plain rule is used and the bus never queues */
     bb_config(&cfg);
     reset_timelines();
     nand_media_destroy(&m);
@@ -228,21 +228,21 @@ static void zns_config(NandMediaConfig *cfg)
     cfg->timing.wr_table_ns[0][0] = 450000;
     cfg->timing.er_table_ns[0] = 2000000;
     cfg->policy.use_flat_timing = false;
-    cfg->policy.array_gate = NAND_GATE_PLANE_ONLY;
+    cfg->policy.array_contend = NAND_CONTEND_PLANE_ONLY;
     cfg->policy.channel_mode = NAND_CH_STAGED;
     cfg->timing.page_xfer_ns = 25000;
     cfg->timeline = &timeline;
     cfg->timeline_opaque = NULL;
 }
 
-static void test_plane_gate_with_channel(void)
+static void test_plane_contend_with_channel(void)
 {
     NandMediaConfig cfg;
     NandMedia m;
     NandLoc a, b;
     uint64_t first, second;
 
-    printf("# plane gate with the channel bus (ZNS)\n");
+    printf("# plane rule with the channel bus (ZNS)\n");
     zns_config(&cfg);
     check("read = array + transfer",
           staged_lat(&cfg, NAND_MEDIA_READ), 65000 + 25000);
@@ -304,7 +304,7 @@ static void test_plane_gate_with_channel(void)
     second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     check("another channel's read costs the same", second, first);
 
-    /* all phases zero: CH_OFF, and the plane gate alone decides */
+    /* all phases zero: CH_OFF, and the plane rule alone decides */
     zns_config(&cfg);
     cfg.timing.page_xfer_ns = 0;
     cfg.policy.channel_mode = NAND_CH_OFF;
@@ -347,7 +347,7 @@ static void test_multiplane_erase(void)
 
     /*
      * Two planes of a LUN erase as one array operation, so the batch must beat
-     * two serial erases. It must also not read plane state: the bbssd gate is
+     * two serial erases. It must also not read plane state: the bbssd rule is
      * LUN-only and leaves plane_avail unset, which used to be dereferenced.
      */
     bb_config(&cfg);
@@ -448,7 +448,7 @@ static void test_copyback(void)
     memset(&dst, 0, sizeof(dst));
     dst.lun = 1;
     c = nand_media_copyback(&m, &src, &dst, 1000000000ULL);
-    check("LUN-only gate does not touch plane state",
+    check("LUN-only rule does not touch plane state",
           c.done_ns, 1000000000ULL + 10000 + 40000);
 
     /*
@@ -484,7 +484,7 @@ static void test_copyback(void)
  * Program/erase suspend. Off (the default) a read queues behind whatever the
  * LUN or plane is doing; on, it starts after tsusp and the suspended
  * operation resumes after it, so the LUN frees that much later. The same
- * rule has to hold on the lock-free LUN gate (bbssd), the plane gate (ZNS)
+ * rule has to hold on the lock-free LUN rule (bbssd), the plane rule (ZNS)
  * and the staged channel path, which is why each is checked.
  */
 static void test_pe_suspend(void)
@@ -498,7 +498,7 @@ static void test_pe_suspend(void)
     printf("# program/erase suspend\n");
     memset(&a, 0, sizeof(a));
 
-    /* lun-only gate, suspend off: the read waits out the program */
+    /* lun-only rule, suspend off: the read waits out the program */
     bb_config(&cfg);
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
@@ -506,7 +506,7 @@ static void test_pe_suspend(void)
     check("suspend off: read queues behind the program", lat, (40000 - 1000) + 10000);
     nand_media_destroy(&m);
 
-    /* lun-only gate, suspend on: read after tsusp, program resumes after it */
+    /* lun-only rule, suspend on: read after tsusp, program resumes after it */
     bb_config(&cfg);
     cfg.policy.pe_suspend = true;
     cfg.timing.tsusp_ns = 5000;
@@ -540,7 +540,7 @@ static void test_pe_suspend(void)
     check("suspend on: a program does not preempt", lat, (2000000 - 1000) + 40000);
     nand_media_destroy(&m);
 
-    /* plane gate without a channel (ZNS default): a read preempts an erase */
+    /* plane rule without a channel (ZNS default): a read preempts an erase */
     zns_config(&cfg);
     cfg.policy.channel_mode = NAND_CH_OFF;
     cfg.policy.pe_suspend = true;
@@ -548,9 +548,9 @@ static void test_pe_suspend(void)
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
     lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
-    check("plane gate: read preempts the erase", lat, 5000 + 65000);
+    check("plane rule: read preempts the erase", lat, 5000 + 65000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
-    check("plane gate: erase resumes after the read",
+    check("plane rule: erase resumes after the read",
           lat, (2000000 + 65000 + 5000 - 1000) + 450000);
     nand_media_destroy(&m);
 
@@ -742,7 +742,7 @@ int main(void)
 
     test_ecc();
     test_staged_channel();
-    test_plane_gate_with_channel();
+    test_plane_contend_with_channel();
     test_multiplane_erase();
     test_multiplane_program_read();
     test_copyback();

@@ -65,7 +65,7 @@ static uint64_t *bb_lun_avail(void *opaque, const NandLoc *loc)
 
 /*
  * plane_avail / lock_lun / unlock_lun are left unset: bbssd runs the flat
- * per-LUN gate under a single FTL thread, so the media never reaches for
+ * per-LUN rule under a single FTL thread, so the media never reaches for
  * plane-level state or a lock.
  */
 static const NandTimelineOps bb_timeline_ops = {
@@ -75,7 +75,7 @@ static const NandTimelineOps bb_timeline_ops = {
 
 /*
  * Build the media config from bbssd ssdparams: flat per-LUN read/program/erase
- * timing gated on the LUN only, with no channel-bus accounting. This reproduces
+ * timing bound by the LUN only, with no channel-bus accounting. This reproduces
  * the historical ssd_advance_status latency exactly.
  */
 void bb_nand_media_init(struct ssd *ssd)
@@ -107,7 +107,7 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
     cfg.timing.ecc_retention_per_tier_sec = spp->ecc_retention_sec;
     /*
-     * The media layer gates the ECC read adder on this as well as on
+     * The media layer ties the ECC read adder to this as well as on
      * ecc_step_ns. Nothing ever set it, so ecc_step_ns has been inert; the
      * adder itself is still off unless ecc_step_ns is given a value.
      */
@@ -148,10 +148,10 @@ void bb_nand_media_init(struct ssd *ssd)
         cfg.timing.pgtype_lat = false; /* the table path already carries pairing */
     }
 
-    cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
+    cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
     /*
      * The channel bus phases only exist in the staged model. Select it when
-     * a phase has a duration, so the unset default keeps the plain array gate
+     * a phase has a duration, so the unset default keeps the plain array rule
      * and its exact timing.
      */
     cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||

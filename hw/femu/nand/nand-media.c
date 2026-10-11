@@ -1,7 +1,7 @@
 /*
  * Uniform NAND media-layer timing implementation. The op math here reproduces the
  * bbssd staged model (the richest superset): channel-bus phases + LUN/plane array
- * gating + page-type program latency + ECC-wear-on-read + multi-plane +
+ * contention rules + page-type program latency + ECC-wear-on-read + multi-plane +
  * copyback. ZNS and OCSSD use strict config subsets of the
  * same code.
  *
@@ -259,17 +259,17 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     return lat;
 }
 
-/* gate the array start on the configured resources (exact bbssd ordering) */
-static uint64_t array_gate_start(NandMedia *m, const NandLoc *loc, uint64_t t)
+/* bind the array start to the configured resources (exact bbssd ordering) */
+static uint64_t array_contend_start(NandMedia *m, const NandLoc *loc, uint64_t t)
 {
     uint64_t s = t;
-    if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
         s = mx(s, *lun);
     }
-    if (m->cfg.policy.array_gate == NAND_GATE_PLANE_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_PLANE_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         uint64_t *pl = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, loc);
         s = mx(s, *pl);
     }
@@ -277,22 +277,22 @@ static uint64_t array_gate_start(NandMedia *m, const NandLoc *loc, uint64_t t)
 }
 
 /*
- * A read that preempted an in-flight P/E: push back every gated timeline that
+ * A read that preempted an in-flight P/E: push back every guarded timeline that
  * was busy at t by the read's occupancy, so the suspended operation finishes
  * that much later. Timelines that were already idle at t are left alone.
  */
 static void array_suspend_extend(NandMedia *m, const NandLoc *loc, uint64_t t,
                                  uint64_t shift)
 {
-    if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
         if (*lun > t) {
             *lun += shift;
         }
     }
-    if (m->cfg.policy.array_gate == NAND_GATE_PLANE_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_PLANE_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         uint64_t *pl = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, loc);
         if (*pl > t) {
             *pl += shift;
@@ -302,19 +302,19 @@ static void array_suspend_extend(NandMedia *m, const NandLoc *loc, uint64_t t,
 
 static void array_commit(NandMedia *m, const NandLoc *loc, uint64_t done)
 {
-    if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = done;
     }
-    if (m->cfg.policy.array_gate == NAND_GATE_PLANE_ONLY ||
-        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_PLANE_ONLY ||
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, loc) = done;
     }
 }
 
 /*
- * The suspend state for an array position: the plane under a plane-only gate,
- * otherwise the LUN, since a LUN gate makes the whole LUN one position.
+ * The suspend state for an array position: the plane under a plane-only rule,
+ * otherwise the LUN, since a LUN rule makes the whole LUN one position.
  */
 static NandSuspendState *suspend_state(NandMedia *m, const NandLoc *loc)
 {
@@ -326,14 +326,14 @@ static NandSuspendState *suspend_state(NandMedia *m, const NandLoc *loc)
         return NULL;
     }
     idx = (uint64_t)loc->ch * c->luns_per_ch + loc->lun;
-    if (c->policy.array_gate == NAND_GATE_PLANE_ONLY) {
+    if (c->policy.array_contend == NAND_CONTEND_PLANE_ONLY) {
         idx = idx * c->planes_per_lun + loc->pl;
     }
 
     return &m->susp[idx];
 }
 
-/* record what an operation that went through the ordinary gate occupies */
+/* record what an operation that went through the ordinary rule occupies */
 static void suspend_note(NandMedia *m, const NandLoc *loc, NandMediaOp op,
                          uint64_t done)
 {
@@ -354,7 +354,7 @@ static void suspend_note(NandMedia *m, const NandLoc *loc, NandMediaOp op,
  * busy until. Only a program or erase is suspended: a read that finds the array
  * busy with other reads queues behind them, and one that finds a suspension
  * already open joins it behind the reads in it without paying the overhead a
- * second time. Returns false to leave the read to the ordinary gate; otherwise
+ * second time. Returns false to leave the read to the ordinary rule; otherwise
  * sets *start, and *shift, how far the suspended work slides.
  *
  * The state is read and written without a lock, so the caller must serialize
@@ -392,11 +392,11 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     if (m->cfg.policy.channel_mode != NAND_CH_STAGED) {
         /*
          * Plane-only / lun-only model (ZNS, bbssd without bus phases): array
-         * gate only; OCSSD 2.0, and 1.2 without channel timing.
+         * rule only; OCSSD 2.0, and 1.2 without channel timing.
          */
         uint64_t done;
         /*
-         * Lock-free fast path for the single-word LUN-only gate (array_gate ==
+         * Lock-free fast path for the single-word LUN-only rule (array_contend ==
          * LUN_ONLY, no plane accumulator, no busy-extend). The whole critical
          * section is one word's read-max-add-store on next_lun_avail_time. A CAS
          * loop reproduces the EXACT same value sequence a lock would: each op
@@ -410,7 +410,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * Suspend keeps state beside the timeline that one CAS cannot update
          * with it, so a device with suspend on takes the general path below.
          */
-        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY && !m->susp) {
+        if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
             for (;;) {
@@ -436,13 +436,13 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
         }
         {
-            uint64_t s = array_gate_start(m, loc, t);
+            uint64_t s = array_contend_start(m, loc, t);
             uint64_t rs, shift;
 
             if (op == NAND_MEDIA_READ &&
                 suspend_read_start(m, loc, t, s, alat, &rs, &shift)) {
                 /*
-                 * The read goes ahead of the program or erase, and every gated
+                 * The read goes ahead of the program or erase, and every guarded
                  * timeline that was busy resumes its work after it.
                  */
                 done = rs + alat;
@@ -463,7 +463,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 
     /*
      * staged channel-bus model (bbssd). This path does several channel-timeline RMWs
-     * (advance_chnl) plus the array gate, so under multiple FTL threads it must be
+     * (advance_chnl) plus the array rule, so under multiple FTL threads it must be
      * serialized per channel. lock_lun/unlock_lun (when provided) take the channel
      * lock; they are NULL for the single-FTL-thread default, leaving this lock-free.
      */
@@ -476,10 +476,10 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * Program/erase suspend: a read that finds its array mid-program or
          * mid-erase starts after a small suspend overhead instead of waiting
          * the operation out, and the suspended operation resumes after it.
-         * Default off (pe_suspend=false) => identical to the plain gate.
+         * Default off (pe_suspend=false) => identical to the plain rule.
          */
         {
-            uint64_t busy = array_gate_start(m, loc, t);
+            uint64_t busy = array_contend_start(m, loc, t);
             uint64_t rs, shift;
 
             if (suspend_read_start(m, loc, t, busy, alat, &rs, &shift)) {
@@ -496,7 +496,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 return c;
             }
         }
-        uint64_t s = array_gate_start(m, loc, t);
+        uint64_t s = array_contend_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
@@ -506,14 +506,14 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     } else if (op == NAND_MEDIA_PROGRAM) {
         t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         t = bus_now(m, loc->ch, stime, t, bus_xfer_ns(m, loc));
-        uint64_t s = array_gate_start(m, loc, t);
+        uint64_t s = array_contend_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
         c.done_ns = done;
     } else { /* erase */
         t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
-        uint64_t s = array_gate_start(m, loc, t);
+        uint64_t s = array_contend_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
@@ -550,14 +550,14 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     }
 
     /*
-     * One array op in parallel across all planes, gated on every resource the
-     * configured gate covers. Going through array_gate_start/array_commit rather
+     * One array op in parallel across all planes, bound by every resource the
+     * configured rule covers. Going through array_contend_start/array_commit rather
      * than reaching for the accumulators directly is what lets a LUN-only caller
-     * (bbssd) use this: it leaves plane_avail untouched when the gate excludes it.
+     * (bbssd) use this: it leaves plane_avail untouched when the rule excludes it.
      */
     uint64_t start = t;
     for (i = 0; i < nlocs; i++) {
-        start = mx(start, array_gate_start(m, &locs[i], start));
+        start = mx(start, array_contend_start(m, &locs[i], start));
     }
     uint64_t alat;
     if (op == NAND_MEDIA_READ) {
@@ -604,16 +604,16 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
     uint64_t s;
 
     /*
-     * On-chip read then program; no bus phases. Gated like
+     * On-chip read then program; no bus phases. Same contention rule as
      * every other op here: an operation cannot begin before it was requested,
-     * and it goes through the configured gate rather than the accumulators
+     * and it goes through the configured rule rather than the accumulators
      * directly, so a LUN-only caller's unset plane_avail is never read.
      */
-    s = array_gate_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
+    s = array_contend_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
     array_commit(m, src, s);
     /* the on-chip read is part of the program, so it is suspended with it */
     suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
-    s = array_gate_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
+    s = array_contend_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
     array_commit(m, dst, s);
     suspend_note(m, dst, NAND_MEDIA_PROGRAM, s);
 

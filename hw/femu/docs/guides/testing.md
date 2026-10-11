@@ -127,7 +127,7 @@ sudo bash femu-test.sh --yes /dev/nvme0n1
 ```
 
 It prints `PASS`, `FAIL` and `SKIP` lines and a summary, and exits non-zero
-when a check failed, so it can gate a script. A read that fails counts as a
+when a check failed, so a script can check it. A read that fails counts as a
 failure, the same as a bad checksum. It refuses a mounted device. A
 key-value namespace has no block node, so it is driven by passthrough
 through its generic node, `/dev/ngXnY`; name it as `/dev/nvmeXnY` or

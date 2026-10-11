@@ -200,7 +200,7 @@ static uint16_t kvssd_delete(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         ednek = kvssd->ednek;
         qemu_mutex_unlock(&kvssd->lock);
         /*
-         * Delete of a non-existent key: behavior is gated by the EDNEK bit of the
+         * Delete of a non-existent key: behavior is set by the EDNEK bit of the
          * Key Value Configuration feature (20h). EDNEK=1 -> abort KV Key Does Not
          * Exist; EDNEK=0 -> complete successfully as if it existed and was deleted.
          */

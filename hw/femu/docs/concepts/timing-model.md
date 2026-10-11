@@ -175,7 +175,7 @@ the program. `zns_num_wc` sets the number of caches (default:
 ## OCSSD
 
 Both Open-Channel versions keep their busy-until times in the shared media
-layer above, with the LUN gate. Open-Channel 1.2 keeps one per chip (LUN)
+layer above, with the LUN rule. Open-Channel 1.2 keeps one per chip (LUN)
 and one per channel; Open-Channel 2.0 keeps one per LUN, with the bus off. A
 write first moves its data over the channel, then programs the chip; a read
 occupies the chip, then moves its data out.

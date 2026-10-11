@@ -88,7 +88,7 @@ static const NandTimelineOps zns_timeline_ops = {
 
 /*
  * Configure the shared NAND media layer to reproduce the ZNS timing exactly:
- * the array is gated on the plane alone, which is what the enum's PLANE_ONLY
+ * the array is bound by the plane alone, which is what the enum's PLANE_ONLY
  * mode was named for, and the per-op latency comes from the same
  * per-flash-type values the device already carries. The channel bus is off
  * unless a bus phase is configured.
@@ -113,12 +113,12 @@ void zns_nand_media_init(struct zns_ssd *zns)
      * By default each plane runs on its own, as before. zns_lun_contention
      * also holds the LUN, so the planes of one die take turns.
      */
-    cfg.policy.array_gate = zns->timing.lun_contention ?
-                            NAND_GATE_LUN_AND_PLANE : NAND_GATE_PLANE_ONLY;
+    cfg.policy.array_contend = zns->timing.lun_contention ?
+                            NAND_CONTEND_LUN_AND_PLANE : NAND_CONTEND_PLANE_ONLY;
     /*
      * The bus phases select the staged channel model the same way bbssd does:
      * any non-zero phase turns it on, all zero keeps CH_OFF and the timing
-     * bit-identical to before. The plane gate is unchanged either way.
+     * bit-identical to before. The plane rule is unchanged either way.
      */
     cfg.timing.cmd_addr_ns = zns->timing.cmd_addr_lat;
     cfg.timing.page_xfer_ns = zns->timing.pg_xfer_lat;
@@ -134,7 +134,7 @@ void zns_nand_media_init(struct zns_ssd *zns)
 }
 
 /*
- * Map a ZNS read/program/erase onto the shared media layer. The gate, the
+ * Map a ZNS read/program/erase onto the shared media layer. The rule, the
  * ordering and the latency values are the same ones the open-coded version
  * used, so the timing is unchanged.
  */

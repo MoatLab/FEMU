@@ -355,7 +355,7 @@ namespace reports 16 metadata bytes per sector.
 ## Timing
 
 Both versions use the shared media layer (`nand_media_op()` in
-`hw/femu/nand/nand-media.c`), each with its own `NandMedia` and the LUN gate.
+`hw/femu/nand/nand-media.c`), each with its own `NandMedia` and the LUN rule.
 Open-Channel 2.0 charges no channel time and uses flat lower-page times,
 through `oc20_chip_op()`. Open-Channel 1.2 uses per-page-type tables, through
 `oc12_media_op()`; with `oc12_channel_timing=on` the bus is staged, otherwise

@@ -41,7 +41,7 @@ namespace with `znssd` in `namespace_modes` (see
  FTL thread     -- femu.c: femu_ftl_process_req() --> zftl.c: zns_ftl_process_req()
    |               write cache, L2P table, zone erase, NAND timing
    v
- NAND media     -- nand/: nand_media_op(), plane-gated timelines,
+ NAND media     -- nand/: nand_media_op(), plane-guarded timelines,
                    optional channel bus and program/erase suspend
    |
    | latency added to req->expire_time; to_poller ring
@@ -474,11 +474,11 @@ puts this in context with the other modes.
   `nand/nand.h`, replaced by `zns_pg_rd_lat`, `zns_pg_wr_lat` and
   `zns_blk_er_lat` when set; MLC and PLC have no built-in row and need all
   three;
-- the array held per plane only (`NAND_GATE_PLANE_ONLY`) by default:
+- the array held per plane only (`NAND_CONTEND_PLANE_ONLY`) by default:
   operations on different planes of one LUN overlap, operations on one plane
   queue;
 - with `zns_lun_contention` non-zero, the LUN and the plane both
-  (`NAND_GATE_LUN_AND_PLANE`): the planes of one LUN take turns, as on one
+  (`NAND_CONTEND_LUN_AND_PLANE`): the planes of one LUN take turns, as on one
   die, and `zns_zone_reset()` erases each LUN's planes with one
   `nand_media_multiplane()` call instead of one erase per plane;
 - with `zns_reset_by_fill` non-zero, `zns_zone_reset()` skips each block

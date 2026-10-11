@@ -158,7 +158,7 @@ whole pages; the `sec` field is unused by the mapping.
 ssd->ch[nchs]
   .next_ch_avail_time
   .lun[luns_per_ch]
-     .next_lun_avail_time          <- the timeline every NAND op is gated on
+     .next_lun_avail_time          <- the timeline every NAND op is bound by
      .pl[pls_per_lun]
         .blk[blks_per_pl]
            .vpc, .ipc              valid and invalid page counts

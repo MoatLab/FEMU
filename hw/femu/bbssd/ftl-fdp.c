@@ -1701,7 +1701,7 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
  * reclaim units, resets all RUH state, and wipes the mapping table. This was the
  * original prototype behavior for a customized non-filesystem fio+trim sweep; it
  * is NOT how DSM-deallocate behaves on a real SSD and ignores the requested LBA
- * range, so it is gated off by default.
+ * range, so it is off by default.
  */
 static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                                    uint32_t nlb)

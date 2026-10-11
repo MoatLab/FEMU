@@ -21,7 +21,7 @@ protocol-path headline.
 ## What's included
 
 These changes are upstreamed as a series of focused commits. The first three are
-mode-agnostic and benefit every device mode; the rest are gated to NoSSD and have
+mode-agnostic and benefit every device mode; the rest are limited to NoSSD and have
 no effect on bbssd/zns/ocssd/csd.
 
 | Area | Change |

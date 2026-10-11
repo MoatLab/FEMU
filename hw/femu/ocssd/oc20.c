@@ -1555,7 +1555,7 @@ static uint64_t *oc20_tl_lun_avail(void *opaque, const NandLoc *loc)
     return &ln->lun_avail[loc->ch * ln->num_lun + loc->lun];
 }
 
-/* the bus is off and the gate is the LUN, so nothing reads these */
+/* the bus is off and the rule is the LUN, so nothing reads these */
 static uint64_t *oc20_tl_unused(void *opaque, uint32_t ch)
 {
     return &((Oc20Ctrl *)opaque)->unused_avail;
@@ -1575,7 +1575,7 @@ static const NandTimelineOps oc20_timeline_ops = {
 /*
  * Open-Channel 2.0 charges each parallel unit its flat read, program or erase
  * time after whatever it is already busy with, and moves nothing over the
- * channel: the LUN-only gate with the bus off.
+ * channel: the LUN-only rule with the bus off.
  */
 static void oc20_media_init(FemuCtrl *n)
 {
@@ -1590,7 +1590,7 @@ static void oc20_media_init(FemuCtrl *n)
     cfg.timing.wr_ns = n->oc_pg_wr_lat[0];
     cfg.timing.er_ns = n->oc_blk_er_lat;
     cfg.policy.use_flat_timing = true;
-    cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
+    cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
     cfg.policy.channel_mode = NAND_CH_OFF;
     cfg.timeline = &oc20_timeline_ops;
     cfg.timeline_opaque = ln;

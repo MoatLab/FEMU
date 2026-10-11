@@ -11,7 +11,7 @@
 
 /*
  * Deleted-data-remanence experiment instrumentation (debug only; does not change
- * FTL behavior). Gated by environment variables read once at init:
+ * FTL behavior). Controlled by environment variables read once at init:
  *   FEMU_EXP_LOG   non-empty -> emit [EXP] log lines to stderr
  *   FEMU_SECRET    a marker string; only pages whose backend bytes contain it are
  *                  tracked and logged, to keep the output focused

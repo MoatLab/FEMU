@@ -67,7 +67,7 @@ check and 0xEE ([OCSSD timing model](#ocssd-timing-model)).
  +--------------------+                                          |
         | NandLoc + op + stime                                   |
         v                                                        |
- +--------------------+   array time, gates, bus phases,         |
+ +--------------------+   array time, rules, bus phases,         |
  | NAND media layer   |   suspend, ECC; returns done - stime     |
  | nand/nand-media.c  |                                          |
  +--------------------+                                          |
@@ -102,7 +102,7 @@ names of the properties and the field widths differ.
  device
  +-- channel 0 .. nchs-1             one shared bus per channel
      +-- LUN 0 .. luns_per_ch-1      a die: runs one array operation at a time
-         |                           (one per plane under the ZNS plane gate)
+         |                           (one per plane under the ZNS plane rule)
          +-- plane 0 .. pls_per_lun-1
              +-- block 0 .. blks_per_pl-1   erase unit
                  +-- page 0 .. pgs_per_blk-1  program and read unit
@@ -154,7 +154,7 @@ The media layer's types are in `hw/femu/nand/nand-media.h`.
 | --- | --- | --- |
 | `NandLoc` | `ch`, `lun`, `pl`, `blk`, `pg`, `flash_type`, `page_type`, `pe_cycles`, `age_sec`, `xfer_secs` | One operation's position and the facts timing depends on. Filled by the mode's decoder (`bb_decode_loc()`, `zns_advance_status()`, `oc12_media_op()`). |
 | `NandMediaTiming` | `rd_ns`, `wr_ns`, `er_ns` (flat); `rd_table_ns`, `wr_table_ns`, `er_table_ns` (by cell and page type); `pgtype_mult`; `cmd_addr_ns`, `page_xfer_ns`, `status_ns`; `tplpbsy_ns`, `tplrbsy_ns`, `tplebsy_ns`; `ecc_*`; `tsusp_ns` | Every duration. |
-| `NandMediaPolicy` | `array_gate`, `channel_mode`, `pe_suspend`, `ecc_on_read`, `use_flat_timing` | Which mechanisms are on. |
+| `NandMediaPolicy` | `array_contend`, `channel_mode`, `pe_suspend`, `ecc_on_read`, `use_flat_timing` | Which mechanisms are on. |
 | `NandTimelineOps` | `ch_avail`, `lun_avail`, `plane_avail`, `lock_lun`, `unlock_lun` | Accessors that return pointers into the mode's own busy-until fields. |
 | `NandMedia` | `cfg`, `bus_res` (per-channel booked windows), `susp` (per-position suspend state) | One instance per namespace FTL. |
 | `NandOpCompletion` | `done_ns`, `latency_ns` | Absolute end time, and `done_ns - stime`. |
@@ -172,7 +172,7 @@ Each mode configures the layer differently:
 
 | Setting | BBSSD, CSD, KV, CXL | ZNS |
 | --- | --- | --- |
-| `array_gate` | `NAND_GATE_LUN_ONLY` | `NAND_GATE_PLANE_ONLY`; `NAND_GATE_LUN_AND_PLANE` with `zns_lun_contention` |
+| `array_contend` | `NAND_CONTEND_LUN_ONLY` | `NAND_CONTEND_PLANE_ONLY`; `NAND_CONTEND_LUN_AND_PLANE` with `zns_lun_contention` |
 | `channel_mode` | `NAND_CH_STAGED` when any bus phase is non-zero, else `NAND_CH_OFF` | same rule |
 | `use_flat_timing` | true when `nand_cell_type=0`, false with a cell type | false (per-type table, page type always 0) |
 | `pe_suspend` | `pe_suspend` property | `zns_pe_suspend` property |
@@ -198,9 +198,9 @@ The enum also has `NAND_CH_NOOP`. No mode selects it today.
 With the channel bus off (the default), an operation is one array phase:
 
 ```text
- start = max(stime, gate busy-until)
+ start = max(stime, rule busy-until)
  done  = start + array time
- gate busy-until = done
+ rule busy-until = done
 ```
 
 With the bus on (`NAND_CH_STAGED`), each operation also has bus phases.
@@ -329,15 +329,15 @@ as OCSSD 1.2 charges a partial page.
 
 ## Plane parallelism and multi-plane operations
 
-The array gate decides which operations exclude each other:
+The array rule decides which operations exclude each other:
 
 ```text
- LUN gate (BBSSD, CSD, KV)             plane gate (ZNS)
+ LUN rule (BBSSD, CSD, KV)             plane rule (ZNS)
  LUN 0: [pl0 op][pl1 op][pl0 op]       LUN 0 pl0: [op][op]
         one at a time per LUN                pl1: [op][op]  in parallel
 ```
 
-Under the LUN gate, all planes of a LUN are busy together, so
+Under the LUN rule, all planes of a LUN are busy together, so
 `pls_per_lun > 1` adds capacity and line width but no single-operation
 parallelism, except for the batched operations below.
 
@@ -345,7 +345,7 @@ parallelism, except for the batched operations below.
 
 ```text
  per plane i:  cmd/addr on bus (+ data-in for a program); tplXbsy between planes
- array:        start = max(bus end, gate of every plane); done = start + array time
+ array:        start = max(bus end, rule of every plane); done = start + array time
  read:         status, then per plane cmd/addr + data-out (booked windows)
  program/erase: status (if set)
 ```
@@ -357,7 +357,7 @@ parallelism, except for the batched operations below.
 | Host reads | with `mp_read`: as above, one read time plus `tplrbsy` per extra plane | `ssd_read()` in `bbssd/ftl-datapath.c` |
 | FDP reads and writes, KV writes | no, one operation per page | `bbssd/ftl-fdp.c`, `kvssd/kvssd-ftl.c` |
 | GC page moves | no | `gc_read_page()`, `gc_write_page()` |
-| ZNS zone reset | no batching needed: each plane has its own gate, so per-plane erases overlap | `zns_zone_reset()` |
+| ZNS zone reset | no batching needed: each plane has its own rule, so per-plane erases overlap | `zns_zone_reset()` |
 | Copyback (`nand_media_copyback()`) | not called | none |
 
 `trcbsy` is accepted for compatibility and has no effect; setting it warns
@@ -398,14 +398,14 @@ ends) and `rd_end` (when the newest read there ends). `suspend_read_start()`
 decides:
 
 ```text
- read arrives at t, gate busy until B
- if t >= B or t >= pe_end:           ordinary gate (nothing to suspend)
+ read arrives at t, rule busy until B
+ if t >= B or t >= pe_end:           ordinary rule (nothing to suspend)
  elif rd_end > t:                    join the open suspension
      start = rd_end,      shift = tR
  else:                               open a suspension
      start = t + tsusp,   shift = tR + tsusp
  done = start + tR
- pe_end += shift; every gate busy-until > t += shift; rd_end = done
+ pe_end += shift; every rule busy-until > t += shift; rd_end = done
 ```
 
 Only programs and erases are suspended: a read that finds the die busy with
@@ -466,7 +466,7 @@ modelled; this adder stands in for it. ZNS and OCSSD have no ECC time.
 
 For every resource the operation needs, it starts no earlier than that
 resource's busy-until time, and it moves the resource's busy-until time to
-when it stops using it. With the bus off and the LUN gate this reduces to:
+when it stops using it. With the bus off and the LUN rule this reduces to:
 
 ```text
  done(op)      = max(stime, lun_avail) + array_time(op)
@@ -560,7 +560,7 @@ queues.
 - BBSSD and ZNS call the layer from the single `FEMU-FTL-Thread`, so their
   timelines need no lock. KV calls it from the poller and `femu-cxl-ssd` from
   its `femu-cxl-ftl` worker, each under its own device lock.
-- With the LUN gate, no bus and no suspend, `nand_media_op()` updates
+- With the LUN rule, no bus and no suspend, `nand_media_op()` updates
   `next_lun_avail_time` with a compare-and-swap loop that gives the same
   result as a locked read-max-add-store. Any other configuration takes the
   general path, which calls `lock_lun`/`unlock_lun` when the mode provides
@@ -656,7 +656,7 @@ the start of the media operations. The link model is enabled when either link pr
 ## OCSSD timing model
 
 Open-Channel devices run on the media layer, each with its own `NandMedia`
-and the LUN gate (`oc12_media_init()`, `oc20_media_init()`):
+and the LUN rule (`oc12_media_init()`, `oc20_media_init()`):
 
 - Per chip (flat LUN id `ch * num_lun + lun`), an operation ends at
   `max(now, busy) + time`. Times come from the `flash_type` table: 1.2 as a
@@ -739,7 +739,7 @@ properties and states how they interact.
 
 | Group | Properties | Interactions |
 | --- | --- | --- |
-| [Geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv) | `secsz`, `secs_per_pg`, `pgs_per_blk`, `blks_per_pl`, `pls_per_lun`, `luns_per_ch`, `nchs` | `nchs * luns_per_ch` is the number of independent dies. `pls_per_lun` adds no read or program parallelism under the LUN gate unless `mp_program` or `mp_read` is set. |
+| [Geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv) | `secsz`, `secs_per_pg`, `pgs_per_blk`, `blks_per_pl`, `pls_per_lun`, `luns_per_ch`, `nchs` | `nchs * luns_per_ch` is the number of independent dies. `pls_per_lun` adds no read or program parallelism under the LUN rule unless `mp_program` or `mp_read` is set. |
 | [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. `pg_rd_lat / 16` is also the cost of a write buffer hit. |
 | [Cell type](../reference/properties.md#nand-timing-bbssd-csd-kv) | `nand_cell_type`, `cell_pages`, `pgtype_lat` | `pgtype_lat` applies only with `nand_cell_type=0`. `nand_cell_type` limits `pgs_per_blk` to 512. |
 | [Bus phases](../reference/properties.md#nand-timing-bbssd-csd-kv) | `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat`, `status_lat` | Any non-zero value turns the bus on. `pg_xfer_lat` takes precedence over `ch_xfer_lat`. |
@@ -824,7 +824,7 @@ Give each poller and the FTL thread its own host core while measuring;
 
 - **Unit tests**: `hw/femu/tests/unit/test-nand-media.c` checks the media
   layer's arithmetic without QEMU: ECC tiers, the staged bus and its booked
-  windows, the plane gate with the bus, multi-plane erase against serial
+  windows, the plane rule with the bus, multi-plane erase against serial
   erases, copyback, and program/erase suspend. Run it with
   `make -C hw/femu/tests check`.
 - **qtests**: `hw/femu/tests/qtest/femu-test.c` covers the OCSSD 1.2 channel
@@ -864,7 +864,7 @@ make -C hw/femu/tests check
 - Program suspend for programs, or erase suspend by another erase. Only reads
   suspend.
 - Per-die power or thermal limits, and temperature-dependent timing.
-- Plane-level parallelism for BBSSD, CSD and KV reads and programs (the gate
+- Plane-level parallelism for BBSSD, CSD and KV reads and programs (the rule
   is per LUN), and the channel bus for OCSSD 2.0.
 - PLC outside ZNS. ZNS accepts PLC with times you supply; BBSSD resets
   `nand_cell_type=5` to 0 and OCSSD refuses `flash_type=5`.
@@ -905,7 +905,7 @@ make -C hw/femu/tests check
 | File | What it holds |
 | --- | --- |
 | [`hw/femu/nand/nand-media.h`](../../nand/nand-media.h) | Media layer types and API: `NandLoc`, `NandMediaTiming`, `NandMediaPolicy`, `NandTimelineOps`, `nand_media_op()`, `nand_media_multiplane()`, `nand_media_copyback()` |
-| [`hw/femu/nand/nand-media.c`](../../nand/nand-media.c) | Array time, gates, bus booking (`bus_now()`, `bus_later()`), suspend, ECC, multi-plane, copyback |
+| [`hw/femu/nand/nand-media.c`](../../nand/nand-media.c) | Array time, rules, bus booking (`bus_now()`, `bus_later()`), suspend, ECC, multi-plane, copyback |
 | [`hw/femu/nand/nand.h`](../../nand/nand.h), [`nand.c`](../../nand/nand.c) | Cell-type timing tables, page pairing tables, rated P/E cycles |
 | [`hw/femu/bbssd/ftl-media.c`](../../bbssd/ftl-media.c) | BBSSD adapter: `bb_decode_loc()`, `bb_nand_media_init()`, `ssd_advance_status()`, `ssd_advance_status_multiplane()`, `bb_nand_media_refresh_timing()` |
 | [`hw/femu/bbssd/ftl-geom.c`](../../bbssd/ftl-geom.c) | Geometry checks and parameter copy (`bb_check_geometry()`, `ssd_init_params()`) |

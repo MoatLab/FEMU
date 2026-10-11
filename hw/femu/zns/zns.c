@@ -2074,7 +2074,7 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.cmd_addr_lat = n->zns_params.zns_cmd_addr_lat;
     id_zns->timing.pg_xfer_lat = n->zns_params.zns_pg_xfer_lat;
     id_zns->timing.status_lat = n->zns_params.zns_status_lat;
-    /* P/E suspend: default off, so the plane gate is bit-identical to before */
+    /* P/E suspend: default off, so the plane rule is bit-identical to before */
     id_zns->timing.pe_suspend = (n->zns_params.zns_pe_suspend != 0);
     id_zns->timing.tsusp_ns = n->zns_params.zns_tsusp_ns;
     /* LUN contention: default off, so the plane-only timing stays as before */

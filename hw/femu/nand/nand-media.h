@@ -32,14 +32,14 @@ typedef enum NandMediaOp {
 } NandMediaOp;
 
 /*
- * Which array-level resource gates the op, set at init. OCSSD uses the LUN
- * gate.
+ * Which array-level resource holds the op, set at init. OCSSD uses the LUN
+ * rule.
  */
-typedef enum NandArrayGate {
-    NAND_GATE_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one gate per LUN */
-    NAND_GATE_PLANE_ONLY,      /* ZNS: plane gate, no lun gate */
-    NAND_GATE_LUN_AND_PLANE,   /* ZNS with zns_lun_contention */
-} NandArrayGate;
+typedef enum NandArrayContend {
+    NAND_CONTEND_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one rule per LUN */
+    NAND_CONTEND_PLANE_ONLY,      /* ZNS: plane rule, no lun rule */
+    NAND_CONTEND_LUN_AND_PLANE,   /* ZNS with zns_lun_contention */
+} NandArrayContend;
 
 /*
  * bbssd and ZNS both pick STAGED when any bus phase is set, else OFF; OCSSD
@@ -105,10 +105,10 @@ typedef struct NandMediaTiming {
 } NandMediaTiming;
 
 typedef struct NandMediaPolicy {
-    NandArrayGate   array_gate;
+    NandArrayContend   array_contend;
     NandChannelMode channel_mode;
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the
-                                   * LUN/plane (all gates, staged or plain channel) */
+                                   * LUN/plane (all rules, staged or plain channel) */
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
     /*
@@ -174,7 +174,7 @@ typedef struct NandBusResList {
  * What occupies an array position, which the busy-until timelines do not say:
  * when the latest program or erase there ends, and when the latest read there
  * ends. Program/erase suspend needs both to let a read preempt only a program
- * or erase. One per LUN, or per plane under a plane-only gate.
+ * or erase. One per LUN, or per plane under a plane-only rule.
  */
 typedef struct NandSuspendState {
     uint64_t pe_end;
