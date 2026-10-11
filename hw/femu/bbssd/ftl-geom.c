@@ -264,6 +264,10 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     /* with one plane there is nothing to combine, so the flag stays clear */
     spp->mp_program = n->bb_params.mp_program && spp->pls_per_lun > 1;
     spp->mp_read = n->bb_params.mp_read && spp->pls_per_lun > 1;
+    /* only where multi-plane commands exist; femu_check_multiplane_props warns */
+    spp->plane_first = n->bb_params.plane_first && spp->pls_per_lun > 1 &&
+                       (BBSSD(n) || CSD(n)) &&
+                       !(n->subsys && n->subsys->params.fdp.enabled);
 
     /* DRAM write buffer */
     spp->buffer_size = n->bb_params.buffer_size;

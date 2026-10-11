@@ -87,6 +87,13 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     exp_load_cfg();
 
     ssd_init_params(spp, n);
+    /*
+     * The controller mode allowed plane_first; a KV namespace on it keeps the
+     * default order, because KV counts the room left in a line by that order.
+     */
+    if (!NS_BBSSD(ns) && !NS_CSD(ns)) {
+        spp->plane_first = false;
+    }
 
     /* initialize ssd internal layout architecture */
     ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);

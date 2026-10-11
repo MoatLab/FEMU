@@ -307,6 +307,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: non-zero charges host reads of the same page on several "
       "planes of a LUN as one multi-plane command (one array time); needs "
       "pls_per_lun > 1 and no FDP, and warns at realize otherwise" },
+    { "plane_first",
+      "bbssd, CSD: non-zero makes write pointers fill the planes of a LUN "
+      "before the next channel, so consecutive pages form one multi-plane "
+      "program with mp_program; needs pls_per_lun > 1 and no FDP, and "
+      "warns at realize otherwise" },
     { "tplebsy",
       "bbssd, CSD, KV: busy time in ns between the planes of a "
       "multi-plane erase, which garbage collection issues when "

@@ -1556,6 +1556,11 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
 
     for (i = 0; i < n->num_namespaces; i++) {
+        if (n->bb_params.plane_first && (BBSSD(n) || CSD(n)) &&
+            ns_modes[i] != FEMU_BBSSD_MODE && ns_modes[i] != FEMU_CSD_MODE) {
+            warn_report("femu: plane_first has no effect on namespace %u; "
+                        "only bbssd and CSD namespaces use it", i + 1);
+        }
         if (n->streams && ns_modes[i] != FEMU_BBSSD_MODE &&
             ns_modes[i] != FEMU_NOSSD_MODE) {
             error_setg(errp, "streams requires NVM namespaces");
@@ -2386,6 +2391,7 @@ static bool femu_check_multiplane_props(FemuCtrl *n, Error **errp)
     } set[] = {
         { "mp_program", bp->mp_program },
         { "mp_read", bp->mp_read },
+        { "plane_first", bp->plane_first },
         { "tplpbsy", bp->tplpbsy },
         { "tplrbsy", bp->tplrbsy },
     };
@@ -3183,6 +3189,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("tplebsy", FemuCtrl, bb_params.tplebsy, 0),
     DEFINE_PROP_INT32("trcbsy", FemuCtrl, bb_params.trcbsy, 0),
     DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
+    DEFINE_PROP_INT32("plane_first", FemuCtrl, bb_params.plane_first, 0),
     DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),
     DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_INT32("pe_suspend", FemuCtrl, bb_params.pe_suspend, 0),

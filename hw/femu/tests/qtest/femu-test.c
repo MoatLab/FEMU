@@ -8143,6 +8143,76 @@ static void femu_test_mp_program_scopes(void *obj, void *data,
 }
 
 /*
+ * Two-page writes on a 2 x 2 x 2 device with mp_program. The default order
+ * puts the two pages on two channels, so each write is two programs. With
+ * plane_first they fill both planes of one LUN and form one multi-plane
+ * program. Random overwrites then run garbage collection, which steps its
+ * own pointer the same way, and the FTL must still hold every page once.
+ */
+static void femu_test_plane_first(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t want = data ? 1 : 2;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 3;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+
+    for (i = 0; i < 8; i++) {
+        uint64_t before = femu_ftl_trace_field(qts, 7);
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 2 * i, 2, buf, list)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+    }
+
+    for (i = 16; i < pages; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 16 : 1 + (i & 1);
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(
+                         femu_query_ns(qts, "", &rsp), "counters"),
+                         "gc-write-pages"), >, 0);
+    qobject_unref(rsp);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/trace',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_test_message("%" PRIu64 " mapped, %" PRIu64 " lost, %" PRIu64
+                   " orphans", mapped, lost, orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
  * SGL support is reported for the controller as a whole, so every I/O
  * command with a data buffer takes one, not only Read and Write.
  */
@@ -26196,7 +26266,8 @@ static void femu_test_ignored_props(void *obj, void *data,
  */
 #define FEMU_MP_BB ",femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
                    "blks_per_pl=19,luns_per_ch=2,nchs=2"
-#define FEMU_MP_ALL ",mp_program=1,mp_read=1,tplpbsy=100,tplrbsy=100"
+#define FEMU_MP_ALL ",mp_program=1,mp_read=1,tplpbsy=100,tplrbsy=100," \
+                    "plane_first=1"
 
 static void femu_test_multiplane_warnings(void *obj, void *data,
                                           QGuestAllocator *unused)
@@ -26212,10 +26283,15 @@ static void femu_test_multiplane_warnings(void *obj, void *data,
         FEMU_MP_ALL);
     g_autofree char *full = femu_realize_stderr(
         FEMU_MP_BB ",pgs_per_blk=2,pls_per_lun=2" FEMU_MP_ALL);
+    g_autofree char *mixed = femu_realize_stderr(
+        ",femu_mode=1,devsz_mb=2,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+        "blks_per_pl=64,pls_per_lun=2,luns_per_ch=1,nchs=2,namespaces=2,"
+        "namespace_modes=bbssd,,kvssd,plane_first=1");
     const char *prog = "femu: tplpbsy has no effect unless mp_program";
     const char *read = "femu: tplrbsy has no effect unless mp_read";
     const char *unsupported = "multi-plane program and read need bbssd";
-    const char *names[] = { "mp_program", "mp_read", "tplpbsy", "tplrbsy" };
+    const char *names[] = { "mp_program", "mp_read", "tplpbsy", "tplrbsy",
+                            "plane_first" };
     int i;
 
     g_assert_nonnull(strstr(busy, prog));
@@ -26231,6 +26307,9 @@ static void femu_test_multiplane_warnings(void *obj, void *data,
         g_assert_nonnull(strstr(fdp, needle));
     }
     g_assert_null(strstr(full, "no effect"));
+    g_assert_nonnull(strstr(mixed, "femu: plane_first has no effect on "
+                                   "namespace 2; only bbssd and CSD"));
+    g_assert_null(strstr(mixed, "namespace 1;"));
 }
 
 static void femu_test_doc_examples(void *obj, void *data,
@@ -29572,6 +29651,21 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
             "oncs=0x1f,vwc=1,buffer_size=64,mp_program=1",
+    });
+    qos_add_test("plane-first-off", "femu", femu_test_plane_first,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "mp_program=1",
+    });
+    qos_add_test("plane-first-on", "femu", femu_test_plane_first,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=2,blks_per_pl=19,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "mp_program=1,plane_first=1",
     });
     qos_add_test("gc-no-destination", "femu", femu_test_gc_no_destination,
                  &(QOSGraphTestOptions) {

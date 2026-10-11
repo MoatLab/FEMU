@@ -135,7 +135,8 @@ The timing a workload sees depends on where the FTL puts its pages, because
 the media model only charges what it is asked to.
 
 - **BBSSD, CSD, KV** allocate from a write pointer that moves channel first,
-  then LUN, then plane, then page
+  then LUN, then plane, then page (plane first with `plane_first` on bbssd
+  and CSD)
   (`ssd_advance_write_pointer_common()` in `bbssd/ftl-line-gc.c`). Consecutive
   pages of a large write therefore land on different channels, then different
   LUNs, and are programmed in parallel.
@@ -368,9 +369,12 @@ takes exactly one erase time.
 
 `mp_program` and `mp_read` are off by default. They have no effect with one
 plane per LUN, in other modes, or under FDP, whose reads and writes keep
-their single-page timing; each setting warns at realize in those cases. Placement does not change: the write pointer still walks
-channel, LUN, plane, page, so the pages of one block and page on the planes
-of a LUN arrive `nchs * luns_per_ch` pages apart. The datapath holds each
+their single-page timing; each setting warns at realize in those cases.
+By default the write pointer walks channel, LUN, plane, page, so the pages
+of one block and page on the planes of a LUN arrive `nchs * luns_per_ch`
+pages apart. With `plane_first` it walks plane, channel, LUN, page, and
+those pages arrive in a row. `plane_first` follows the same rules and
+warnings as `mp_program`. The datapath holds each
 LUN's pages in a batch and charges the batch through
 `ssd_advance_status_multiplane()` when one of these happens:
 
@@ -743,7 +747,7 @@ properties and states how they interact.
 | [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. `pg_rd_lat / 16` is also the cost of a write buffer hit. |
 | [Cell type](../reference/properties.md#nand-timing-bbssd-csd-kv) | `nand_cell_type`, `cell_pages`, `pgtype_lat` | `pgtype_lat` applies only with `nand_cell_type=0`. `nand_cell_type` limits `pgs_per_blk` to 512. |
 | [Bus phases](../reference/properties.md#nand-timing-bbssd-csd-kv) | `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat`, `status_lat` | Any non-zero value turns the bus on. `pg_xfer_lat` takes precedence over `ch_xfer_lat`. |
-| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy` (`trcbsy` has no effect) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |
+| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy`, `plane_first` (`trcbsy` has no effect) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |
 | [Suspend](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pe_suspend`, `tsusp_ns` | `tsusp_ns` matters only with `pe_suspend`. |
 | [ECC](../reference/properties.md#reliability-and-wear) | `ecc_step_ns`, `ecc_retention_sec` | `ecc_retention_sec` matters only with `ecc_step_ns`. |
 | [Other FTL costs](../reference/properties.md#nand-timing-bbssd-csd-kv) | `trim_lat_ns` | Charged per Dataset Management range by the FTL, not by the media layer. Refused with FDP. |

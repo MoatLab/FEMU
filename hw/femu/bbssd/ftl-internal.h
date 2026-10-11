@@ -22,11 +22,20 @@ static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
 
 /*
  * Move a write pointer to the next page of its line: channel first, then LUN,
- * then plane, then page. Returns true when the step wrapped past the line's
- * last page, leaving the pointer at page 0 for the caller to retire the line.
+ * then plane, then page. With plane_first the plane comes first, so pages in
+ * a row fill the planes of one LUN and form one multi-plane command. Returns
+ * true when the step wrapped past the line's last page, leaving the pointer
+ * at page 0 for the caller to retire the line.
  */
 static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
 {
+    if (spp->plane_first) {
+        check_addr(wpp->pl, spp->pls_per_lun);
+        if (++wpp->pl < spp->pls_per_lun) {
+            return false;
+        }
+        wpp->pl = 0;
+    }
     check_addr(wpp->ch, spp->nchs);
     if (++wpp->ch < spp->nchs) {
         return false;
@@ -37,11 +46,13 @@ static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
         return false;
     }
     wpp->lun = 0;
-    check_addr(wpp->pl, spp->pls_per_lun);
-    if (++wpp->pl < spp->pls_per_lun) {
-        return false;
+    if (!spp->plane_first) {
+        check_addr(wpp->pl, spp->pls_per_lun);
+        if (++wpp->pl < spp->pls_per_lun) {
+            return false;
+        }
+        wpp->pl = 0;
     }
-    wpp->pl = 0;
     check_addr(wpp->pg, spp->pgs_per_blk);
     if (++wpp->pg < spp->pgs_per_blk) {
         return false;

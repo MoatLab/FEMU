@@ -270,9 +270,11 @@ unchanged, and the CXL SSD runs a private instance of it. Its state is
   (`pgs_per_blk`) of `secs_per_pg` sectors of `secsz` bytes. With the defaults
   a page is 4 KiB. A line (superblock) is the same block index on every plane
   of every LUN, so there are `blks_per_pl` lines.
-- **Write pointer.** New pages are allocated from the current line in the
-  order channel, then LUN, then plane, then page, so consecutive pages land on
-  different channels and LUNs and can be programmed in parallel.
+- **Write pointer.** By default new pages are allocated from the current line
+  in the order channel, then LUN, then plane, then page, so consecutive pages
+  land on different channels and LUNs and can be programmed in parallel.
+  `plane_first` puts the plane first, so pages in a row share a LUN and can
+  form one multi-plane program.
 - **Mapping** (`mapping`): `page` (default, a full table in memory), `dftl`
   (a cached mapping table of `mapping_cache_mb` whose misses cost NAND reads),
   `hybrid` and `fast` (log-block schemes). Code: `hw/femu/bbssd/ftl-map*.c`.

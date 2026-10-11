@@ -342,8 +342,9 @@ Streams need `page` or `dftl`. FDP supports only `page`.
 
 A line is the block with the same index on every plane of every LUN of every
 channel. There are `blks_per_pl` lines, each `nchs * luns_per_ch *
-pls_per_lun` blocks wide. A write pointer fills a line in this order:
-channel first, then LUN, then plane, then page.
+pls_per_lun` blocks wide. By default a write pointer fills a line in this
+order: channel first, then LUN, then plane, then page. `plane_first`
+changes it for bbssd and CSD, as described below.
 
 ```text
             ch0     ch1     ch2   ...  ch7
@@ -361,6 +362,18 @@ Consecutive pages land on different channels, then different LUNs, so a
 large write or a burst of small ones spreads over the whole device. With
 several planes, the pointer sweeps every channel and LUN on plane 0, then on
 plane 1, and so on, before the page index moves on.
+
+`plane_first` (bbssd and CSD without FDP, off by default) moves the plane
+to the front: plane, then channel, then LUN, then page. Pages in a row then
+fill the planes of one LUN, so with `mp_program` two pages in a row are one
+multi-plane program. The cost is less spread for short writes.
+
+```text
+ 2 channels x 1 LUN x 2 planes, one page row
+ default:      ch0 pl0 [0]  ch1 pl0 [1]  ch0 pl1 [2]  ch1 pl1 [3]
+ plane_first:  ch0 pl0 [0]  ch0 pl1 [1]  ch1 pl0 [2]  ch1 pl1 [3]
+               \___ one multi-plane program __/
+```
 
 ### Why there are several write pointers
 
@@ -566,9 +579,10 @@ only timing. Two rules exist because a copyback skips ECC:
 - Read reclaim and retention refresh always move off-chip. They rewrite
   data so that the controller corrects it.
 
-The data pointer steps to the next die on every page (channel fastest, then
-LUN, then plane), so a victim walked in its own order meets its destination
-die only once in `nchs x luns_per_ch x pls_per_lun` moves. With `gc_copyback`
+By default the data pointer steps to the next die on every page (channel
+fastest, then LUN, then plane), so a victim walked in its own order meets its
+destination die only once in `nchs x luns_per_ch x pls_per_lun` moves. With
+`plane_first` it stays on one die for `pls_per_lun` pages. With `gc_copyback`
 on, line collection walks the victim in the order of the destination dies:
 
 ```
@@ -1021,7 +1035,7 @@ does inside the FTL and what it interacts with.
 | `secsz`, `secs_per_pg` | page size; LPN = byte offset / page size | the LBA format; DFTL entries per translation page |
 | `pgs_per_blk` | pages per block and per line column; the log-block merge unit | at most 512 with `nand_cell_type` |
 | `blks_per_pl` | the number of lines | the watermarks and the reserve are fractions of it |
-| `pls_per_lun`, `luns_per_ch`, `nchs` | line width and write striping | parallelism; `tplebsy` for multi-plane erase; `mp_program`, `mp_read` for multi-plane program and read |
+| `pls_per_lun`, `luns_per_ch`, `nchs` | line width and write striping | parallelism; `tplebsy` for multi-plane erase; `mp_program`, `mp_read` for multi-plane program and read; `plane_first` for the write order |
 | `devsz_mb`, `namespaces`, `namespace_sizes` | the exposed capacity | must fit the usable lines per namespace |
 | `op_pcent` | exposes a fixed fraction of raw NAND | overrides `devsz_mb`; refused with `cxl_ssd` |
 

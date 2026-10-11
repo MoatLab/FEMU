@@ -86,9 +86,10 @@ own:
 
 Different LUNs (or ZNS planes) never wait for each other. A command that
 covers several pages issues them all at its start time, and its latency is
-that of the slowest page. Because the BBSSD write pointer moves across
-channels first and then LUNs, consecutive pages of a large write fall on
-different LUNs and are programmed in parallel.
+that of the slowest page. By default the BBSSD write pointer moves across
+channels first and then LUNs, so consecutive pages of a large write fall on
+different LUNs and are programmed in parallel. With `plane_first`, pages in
+a row fill the planes of one LUN first.
 
 Properties: [NAND geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv).
 

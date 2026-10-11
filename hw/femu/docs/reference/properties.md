@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 169 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 170 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -130,6 +130,7 @@ Devices:
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |
 | `mp_program` | `int32` | `0` | bbssd, CSD: non-zero charges programs of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `mp_read` | `int32` | `0` | bbssd, CSD: non-zero charges host reads of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
+| `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range; refused with FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |

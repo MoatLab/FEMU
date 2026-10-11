@@ -173,6 +173,7 @@ struct ssdparams {
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
     bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
     bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */
+    bool plane_first; /* write pointers step the plane before the channel */
 
     double gc_thres_pcent;
     int gc_thres_lines;

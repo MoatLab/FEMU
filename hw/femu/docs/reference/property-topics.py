@@ -77,6 +77,7 @@ DEVICES = [
                     "pg_rd_lat", "pg_wr_lat", "blk_er_lat", "ch_xfer_lat",
                     "cmd_addr_lat", "pg_xfer_lat", "status_lat", "tplpbsy",
                     "tplrbsy", "tplebsy", "mp_program", "mp_read",
+                    "plane_first",
                     "trcbsy", "trim_lat_ns",
                     "pe_suspend", "tsusp_ns", "nand_cell_type", "cell_pages",
                     "pgtype_lat",
