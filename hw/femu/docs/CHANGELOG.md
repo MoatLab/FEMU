@@ -41,6 +41,7 @@ listed one by one.
 
 - Flexible Data Placement (FDP) on a new `femu-subsys` device, with reclaim unit handles, FDP log pages, I/O Management commands and several GC strategies (c966d341a, 6df00de01).
 - FDP placement features can be read and enabled by a Linux host, and the host sees its active reclaim unit and remaining space (8f00c7117, 9a66fe52d).
+- FDP accepts `trim_lat_ns` and `ecc_retention_sec`. A deallocate pays the same time per range as without FDP. The age of a reclaim unit counts from its retirement and starts again when collection frees it.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).

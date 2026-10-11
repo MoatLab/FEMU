@@ -1070,7 +1070,7 @@ does inside the FTL and what it interacts with.
 | wear events | the FTL thread sets a pending SMART warning bit when the spare crosses below 20 or the first block is overworn; the controller's event bottom half raises it if Asynchronous Event Configuration enables it | once each; a controller reset drops a pending bit |
 | `spare_lines` | per-plane pool of replacement blocks: a worn-out block swaps its whole state with a spare block of its plane, so addresses do not change; Available Spare follows the emptiest plane | needs `blk_pe_limit`; the namespace must fit without the spare lines |
 | `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2 and an open line and a free line remain; otherwise the block stays in service (overworn) and sets SMART critical warning bit 2 | refused with the settings the parameter manual lists |
-| `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | `ecc_retention_sec` refused with FDP |
+| `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | under FDP, a line's age counts from the retirement of its reclaim unit |
 | `err_read_unc_ppm`, `err_write_fail_ppm` | fixed-period command failures | counted in SMART media errors |
 | `read_reclaim_limit` | read count that queues a line for rewrite | needs host writes to act; refused with FDP |
 | `wl_spread` | static wear levelling (`do_wear_level()`): at a fresh data line, swap it for the most worn free line and move the least worn full line into it | no write pointer of its own; credit of one per host page programmed, four lines per move; the earlier attempts are described in the function comment |
@@ -1081,7 +1081,7 @@ does inside the FTL and what it interacts with.
 
 [NAND timing](../reference/properties.md#nand-timing-bbssd-csd-kv)
 
-The FTL charges `trim_lat_ns` per deallocate range (refused with FDP) and
+The FTL charges `trim_lat_ns` per deallocate range (also under FDP) and
 issues a multi-plane erase per LUN during GC, whose inter-plane time is
 `tplebsy`. All the other timing properties are applied by the NAND media
 layer.
@@ -1098,8 +1098,8 @@ layer.
 ### Interactions and refusals
 
 - **FDP** refuses `buffer_size`, `hot_cold_sep`, `read_reclaim_limit`,
-  `retention_limit_sec`, `ecc_retention_sec`, `trim_lat_ns`, a `mapping`
-  other than `page` and a `gc_policy` other than `greedy`, with
+  `retention_limit_sec`, a `mapping` other than `page` and a `gc_policy`
+  other than `greedy`, with
   `FEMU bbssd: <name> has no effect under FDP`.
 - **Unknown names** for `mapping`, `gc_policy` and `cache_evict` are refused
   at realize.

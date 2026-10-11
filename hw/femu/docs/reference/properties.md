@@ -133,7 +133,7 @@ Devices:
 | `mp_read` | `int32` | `0` | bbssd, CSD: non-zero charges host reads of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
-| `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range; refused with FDP |
+| `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range, with or without FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
 | `tsusp_ns` | `int32` | `0` | bbssd, CSD, KV: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `nand_cell_type` | `uint8` | `0` | bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; 1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing (other values fall back to 0) |
@@ -145,7 +145,7 @@ Devices:
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `ecc_step_ns` | `int32` | `0` | bbssd, CSD, KV: extra read time in ns per ECC tier, one tier per 750 erases of the block plus one per ecc_retention_sec of data age, at most 4 tiers; 0 turns the model off |
-| `ecc_retention_sec` | `int32` | `0` | bbssd, CSD, KV: data age in seconds that adds one ECC tier, with ecc_step_ns; 0 counts wear only; refused with FDP |
+| `ecc_retention_sec` | `int32` | `0` | bbssd, CSD, KV: data age in seconds that adds one ECC tier, with ecc_step_ns; 0 counts wear only |
 | `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type (ZNS: zns_flash_type), or reports none |
 | `nand_bad_blocks` | `uint32` | `0` | bbssd, CSD, KV: blocks marked bad at start, capped at the block count, which lowers SMART Available Spare |
 | `blk_pe_limit` | `uint32` | `0` | bbssd, CSD: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. A worn-out block stays in service and sets the SMART reliability warning |

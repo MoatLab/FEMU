@@ -58,8 +58,8 @@ controller in the subsystem, a single namespace (`namespaces=1`), `fdp.nrg=1`
 and `fdp.nruh` from 1 to `fdp.nru`. It cannot be combined with a KV namespace,
 `meta`, Streams or a subsystem with `ns_mgmt=on`. A BBSSD controller under FDP
 also refuses `buffer_size`, `hot_cold_sep`, `read_reclaim_limit`,
-`retention_limit_sec`, `ecc_retention_sec`, `trim_lat_ns`, a `mapping` other
-than `page` and a `gc_policy` other than `greedy`.
+`retention_limit_sec`, a `mapping` other than `page` and a `gc_policy` other
+than `greedy`.
 
 **Several namespaces and per-namespace modes.** `namespaces` is 1 to 256. The
 backend of `devsz_mb` MiB is split evenly, or by `namespace_sizes`.

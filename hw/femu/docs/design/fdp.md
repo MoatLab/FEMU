@@ -412,9 +412,10 @@ of the property reference; the controller-side ones are under
 | BlackBox geometry (`nchs`, `luns_per_ch`, `pls_per_lun`, `blks_per_pl`, `pgs_per_blk`, `secs_per_pg`, `secsz`) | `femu` | Sets RUNS (one superblock) and the number of lines, hence units. |
 
 Refused under FDP on a bbssd controller: `buffer_size`, `hot_cold_sep`,
-`read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec`,
-`trim_lat_ns`, a `mapping` other than `page`, and a `gc_policy` other than
-`greedy`. Refused on any controller with FDP: more than one namespace, a
+`read_reclaim_limit`, `retention_limit_sec`, a `mapping` other than `page`,
+and a `gc_policy` other than `greedy`. `trim_lat_ns` and `ecc_retention_sec`
+apply as without FDP. A unit's lines take their close time when the unit
+retires, and lose it when collection frees the unit. Refused on any controller with FDP: more than one namespace, a
 second controller in the subsystem, `meta`, `streams`, a KV namespace.
 Each message is listed in the [feature guide](../features/fdp.md#limits-and-refusals).
 

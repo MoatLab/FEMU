@@ -257,9 +257,12 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
     struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
     bool is_full = true;
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     ru->vpc = 0;
     for (int i = 0; i < ru->n_lines; i++) {
+        /* the data age of ecc_retention_sec counts from here */
+        ru->lines[i]->close_time = now;
         if (ru->lines[i]->vpc != spp->pgs_per_line) {
             is_full = false;
         }
@@ -908,6 +911,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     for (int i = 0; i < ru->n_lines; i++) {
         ru->lines[i]->ipc = 0;
         ru->lines[i]->vpc = 0;
+        ru->lines[i]->close_time = 0;
     }
 
     ru->vpc = 0;
@@ -1913,10 +1917,18 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
  * whole-device reset only when the fdp_trim_erase_all knob is set. Frees the
  * per-command DSM range list either way (nvme_dsm() allocates it per command and
  * leaves it for the FTL to release, as ssd_trim() does on the non-FDP path).
+ * Returns the trim_lat_ns cost per range, the same charge ssd_trim() makes.
  */
-void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
-                               uint32_t nlb)
+uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                            uint32_t nlb)
 {
+    uint64_t lat = 0;
+
+    if (n->ssd->sp.trim_lat_ns > 0 && req->dsm_ranges &&
+        req->dsm_nr_ranges > 0) {
+        lat = (uint64_t)n->ssd->sp.trim_lat_ns * req->dsm_nr_ranges;
+    }
+
     if (n->bb_params.fdp_trim_erase_all) {
         ssd_trim_fdp_reset_all(n, req, slba, nlb);
     } else {
@@ -1927,6 +1939,7 @@ void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     req->dsm_ranges = NULL;
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
+    return lat;
 }
 
 /*

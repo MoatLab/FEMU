@@ -396,7 +396,7 @@ void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);
 void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req);
-void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
-                        uint32_t nlb);
+uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                            uint32_t nlb);
 
 #endif /* __FEMU_BBSSD_FTL_INTERNAL_H */

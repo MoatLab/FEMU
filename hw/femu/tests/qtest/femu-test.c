@@ -5597,18 +5597,124 @@ static void femu_test_wear_refused(void *obj, void *data,
 }
 
 /*
+ * A reclaim unit that collection frees and a handle then reopens holds new
+ * data, so its age starts again. Three passes over the namespace recycle
+ * every unit; eight more pages then sit in an open unit. At age_scale 10^6
+ * a stale close time would add the four age tiers (40 ms) to each read.
+ * A read can also wait behind a collection pass that reads aged data on
+ * the same die, so the check counts the reads that pay no age.
+ */
+static void femu_test_age_fdp_reuse(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before;
+    int fresh = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < 3 * 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i % 256, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(10 * 1000);
+
+    for (i = 0; i < 8; i++) {
+        before = femu_ftl_trace_field(qts, 1);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        if (femu_ftl_trace_field(qts, 1) - before < 1000000ULL) {
+            fresh++;
+        }
+    }
+    g_test_message("%d of 8 reads of open-unit data paid no age", fresh);
+    g_assert_cmpint(fresh, >=, 6);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * trim_lat_ns charges each Deallocate range, with or without FDP. One
+ * Deallocate with three ranges of 1, 2 and 3 pages, at 1 ms a range, adds
+ * 3 ms of modelled time: a charge per command or per page gives 1 or 6 ms.
+ * @data "off" leaves the knob unset and adds none.
+ */
+static void femu_test_trim_cost(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = !g_str_equal(data, "off");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t ranges[3 * 16] = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t before, spent;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 8 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+
+    for (i = 0; i < 3; i++) {
+        /* range i: i + 1 pages from page 3 * i */
+        stl_le_p(ranges + 16 * i + 4, (i + 1) * (4096 / c.lba_size));
+        stq_le_p(ranges + 16 * i + 8, 3 * i * (4096 / c.lba_size));
+    }
+    qtest_memwrite(qts, list, ranges, sizeof(ranges));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(2);                 /* NR is 0's based */
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+
+    before = femu_ftl_trace_field(qts, 1);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    spent = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("a 3-range deallocate took %" PRIu64 " ns", spent);
+    if (on) {
+        g_assert_cmpuint(spent, >=, 3 * 1000000ULL);
+        g_assert_cmpuint(spent, <, 4 * 1000000ULL);
+    } else {
+        g_assert_cmpuint(spent, <, 1000000ULL);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * age_scale ages data faster than wall time, for the two models of charge
  * leaking out over time and for nothing else. Lines filled and then left
  * 50 ms: with @data "warp" (age_scale 10^6) that is 50000 s of age, so a read
  * pays the four ECC tiers age can add (1 ms each here) and the read queues a
  * retention refresh, which the next write performs. Without it the same reads
- * pay no age tier and nothing is refreshed.
+ * pay no age tier and nothing is refreshed. With @data "fdp" the units of a
+ * placement handle age the same way, but FDP refuses the refresh knob.
  */
 static void femu_test_age_scale(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    bool warp = g_str_equal(data, "warp");
+    bool fdp = g_str_equal(data, "fdp");
+    bool warp = fdp || g_str_equal(data, "warp");
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
@@ -5641,7 +5747,11 @@ static void femu_test_age_scale(void *obj, void *data, QGuestAllocator *alloc)
     refreshes = ldq_le_p(page + 48);
     g_test_message("10 reads took %" PRIu64 " ns, %" PRIu64 " refreshes",
                    spent, refreshes);
-    if (warp) {
+    if (fdp) {
+        /* FDP has no retention refresh, so only the read tiers show */
+        g_assert_cmpuint(spent, >=, 10 * 4 * 1000000ULL);
+        g_assert_cmpuint(refreshes, ==, 0);
+    } else if (warp) {
         g_assert_cmpuint(spent, >=, 10 * 4 * 1000000ULL);
         g_assert_cmpuint(refreshes, >=, 1);
     } else {
@@ -17634,7 +17744,7 @@ static void femu_test_fdp_csd_knobs(void *obj, void *data,
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    const char *knobs[] = { "buffer_size", "trim_lat_ns" };
+    const char *knobs[] = { "buffer_size", "read_reclaim_limit" };
     unsigned values[] = { 16, 1000 };
     int modes[] = { 1, 4 };
     QDict *rsp;
@@ -30078,6 +30188,47 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "ecc_step_ns=1000000,ecc_retention_sec=100,"
             "retention_limit_sec=100,age_scale=1000000"
+    });
+    qos_add_test("age-scale-fdp", "femu", femu_test_age_scale,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=1000000,ecc_retention_sec=100,age_scale=1000000,"
+            "subsys=fdpsub"
+    });
+    qos_add_test("age-fdp-reuse", "femu", femu_test_age_fdp_reuse,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=10000000,ecc_retention_sec=100,age_scale=1000000,"
+            "subsys=fdpsub"
+    });
+    qos_add_test("trim-cost-on", "femu", femu_test_trim_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "trim_lat_ns=1000000"
+    });
+    qos_add_test("trim-cost-fdp", "femu", femu_test_trim_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "trim_lat_ns=1000000,subsys=fdpsub"
+    });
+    qos_add_test("trim-cost-off", "femu", femu_test_trim_cost,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub"
     });
     qos_add_test("age-scale-off", "femu", femu_test_age_scale,
                  &(QOSGraphTestOptions) {

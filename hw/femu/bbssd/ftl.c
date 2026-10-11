@@ -780,8 +780,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         break;
     case NVME_CMD_DSM:
         if (ssd->fdp_enabled) {
-            ssd_trim_fdp_style(n, req, req->slba, req->nlb);
-            lat = 0;
+            lat = ssd_trim_fdp_style(n, req, req->slba, req->nlb);
         } else if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
             lat = ssd_trim(ssd, req);
         }

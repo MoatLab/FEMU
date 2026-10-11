@@ -318,7 +318,7 @@ Reference: [NAND timing](properties.md#nand-timing-bbssd-csd-kv). Design:
 | `status_lat` | ns | >= 0 | channel bus status phase |
 | `tplebsy` | ns | >= 0 | busy time between the planes of a multi-plane erase (GC with `pls_per_lun` > 1) |
 | `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0 | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns` |
-| `trim_lat_ns` | ns per range | >= 0; bbssd and CSD; refused with FDP | time charged per Dataset Management deallocate range |
+| `trim_lat_ns` | ns per range | >= 0; bbssd and CSD, also under FDP | time charged per Dataset Management deallocate range |
 
 Interactions:
 
@@ -393,7 +393,7 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | Parameter | Unit | Valid values | Meaning |
 | --- | --- | --- | --- |
 | `ecc_step_ns` | ns per tier | 0 disables | extra read time per ECC tier: one per 750 erases of the block, one per `ecc_retention_sec` of data age, at most 4 |
-| `ecc_retention_sec` | seconds | 0 counts wear only; refused with FDP | data age that adds one tier |
+| `ecc_retention_sec` | seconds | 0 counts wear only | data age that adds one tier |
 | `pe_cycles_rated` | P/E cycles | 0 takes the rating of `nand_cell_type` | denominator of SMART Percentage Used |
 | `nand_bad_blocks` | blocks | capped at the block count | blocks bad from the start; lowers SMART Available Spare |
 | `blk_pe_limit` | P/E cycles | 0 disables; bbssd and CSD, one namespace, page or dftl mapping, one plane per LUN, no buffer, Streams, hot/cold separation, FDP or `nand_bad_blocks` | erases a block survives; its line then retires while enough lines remain, else the block stays in service and sets SMART critical warning bit 2 |

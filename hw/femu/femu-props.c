@@ -325,7 +325,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "model. A value other than the default warns at realize" },
     { "trim_lat_ns",
       "bbssd, CSD: time in ns charged per Dataset Management deallocate "
-      "range; refused with FDP" },
+      "range, with or without FDP" },
     { "pe_suspend",
       "bbssd, CSD, KV: non-zero lets a read suspend a program or erase on "
       "its LUN instead of waiting for it to finish" },
@@ -350,7 +350,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "age, at most 4 tiers; 0 turns the model off" },
     { "ecc_retention_sec",
       "bbssd, CSD, KV: data age in seconds that adds one ECC tier, with "
-      "ecc_step_ns; 0 counts wear only; refused with FDP" },
+      "ecc_step_ns; 0 counts wear only" },
     { "pe_cycles_rated",
       "bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART "
       "Percentage Used; 0 takes the rating of nand_cell_type (ZNS: "

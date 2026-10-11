@@ -144,9 +144,10 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 /*
  * FDP keeps its own write and reclaim path, which none of the knobs below
- * reach; refuse them rather than accept them silently. Every mode that runs
- * this FTL under FDP needs the refusal and the reclaim unit size, not only
- * bbssd. A no-op without FDP.
+ * reach; refuse them rather than accept them silently. trim_lat_ns and
+ * ecc_retention_sec are media costs that FDP charges too, so they pass.
+ * Every mode that runs this FTL under FDP needs the refusal and the reclaim
+ * unit size, not only bbssd. A no-op without FDP.
  */
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp)
@@ -166,10 +167,6 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
         knob = "read_reclaim_limit";
     } else if (p->retention_limit_sec) {
         knob = "retention_limit_sec";
-    } else if (p->ecc_retention_sec) {
-        knob = "ecc_retention_sec";
-    } else if (p->trim_lat_ns) {
-        knob = "trim_lat_ns";
     } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
         knob = "mapping";
     } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
