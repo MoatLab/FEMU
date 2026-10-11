@@ -14728,6 +14728,145 @@ static void femu_test_kv_list_mdts0(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* One List command from @start (@start_len bytes; 0 for none) into @buf. */
+static uint32_t femu_kv_list_page(FemuCtrlState *c, uint64_t buf, uint32_t hbs,
+                                  const uint8_t *start, uint8_t start_len,
+                                  uint8_t *page)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_LIST;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(hbs);
+    cmd.cdw11 = cpu_to_le32(start_len);
+    if (start_len) {
+        cmd.res1 = cpu_to_le64(ldq_le_p(start));
+        cmd.cdw14 = cpu_to_le32(ldl_le_p(start + 8));
+        cmd.cdw15 = cpu_to_le32(ldl_le_p(start + 12));
+    }
+    qtest_memset(c->pdev->bus->qts, buf, 0xee, hbs);
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, page, hbs);
+
+    return ldl_le_p(page);
+}
+
+/*
+ * Return entry @i of a List page: each entry is a 2-byte length and the key,
+ * padded to end on a 4-byte boundary (KV 1.3, Figure 16).
+ */
+static const uint8_t *femu_kv_list_entry(const uint8_t *page, uint32_t i)
+{
+    uint32_t pos = 4;
+
+    while (i--) {
+        pos = (pos + 2 + lduw_le_p(page + pos) + 3) & ~3u;
+    }
+    g_assert_cmpuint(lduw_le_p(page + pos), ==, 16);
+    return page + pos + 2;
+}
+
+/*
+ * The Key Value command set has no iterator and no group delete. A host walks
+ * a namespace with List (KV 1.3, 2.1.6.2): the order stays the same while
+ * nothing is stored or deleted, and a start key that exists comes back first.
+ * Use the last key of each page as the next start, drop the repeated first
+ * entry, and stop when the first key of the walk comes back. Every stored key
+ * must come back exactly once.
+ */
+static void femu_test_kv_list_walk(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const int keys = 200;
+    const uint32_t hbs = 4 + 8 * 20;    /* eight 16-byte keys per page */
+    uint8_t page[4 + 8 * 20], first[16], start[16], absent[16];
+    int seen[200] = { 0 };
+    uint64_t mem, buf;
+    NvmeCmd cmd;
+    uint32_t nrk, i;
+    int k, pages, total = 0;
+    bool done = false;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    for (k = 0; k < keys; k++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_STORE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(64);
+        femu_kv_fuzz_key(&cmd, k, 16);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    /* key k holds k in bytes 0..1 and k * 0x01010101 in bytes 8..11 */
+#define FEMU_KV_WALK_MARK(key) do {                                       \
+        int id_ = (key)[0] | ((key)[1] << 8);                            \
+        g_assert_cmpint(id_, <, keys);                                   \
+        g_assert_cmphex((uint32_t)ldl_le_p((key) + 8), ==,               \
+                        id_ * 0x01010101U);                              \
+        g_assert_cmpint(seen[id_], ==, 0);                               \
+        seen[id_] = 1;                                                   \
+        total++;                                                         \
+    } while (0)
+
+    nrk = femu_kv_list_page(&c, buf, hbs, NULL, 0, page);
+    g_assert_cmpuint(nrk, ==, 8);
+    memcpy(first, femu_kv_list_entry(page, 0), 16);
+    for (i = 0; i < nrk; i++) {
+        FEMU_KV_WALK_MARK(femu_kv_list_entry(page, i));
+    }
+    memcpy(start, femu_kv_list_entry(page, nrk - 1), 16);
+
+    for (pages = 1; !done; pages++) {
+        g_assert_cmpint(pages, <=, keys);
+        nrk = femu_kv_list_page(&c, buf, hbs, start, 16, page);
+        g_assert_cmpuint(nrk, >, 1);
+        /* a start key that exists is returned first */
+        g_assert_cmpmem(femu_kv_list_entry(page, 0), 16, start, 16);
+        for (i = 1; i < nrk; i++) {
+            const uint8_t *key = femu_kv_list_entry(page, i);
+
+            if (!memcmp(key, first, 16)) {
+                done = true;
+                break;
+            }
+            FEMU_KV_WALK_MARK(key);
+        }
+        memcpy(start, femu_kv_list_entry(page, nrk - 1), 16);
+    }
+#undef FEMU_KV_WALK_MARK
+
+    g_assert_cmpint(total, ==, keys);
+    for (k = 0; k < keys; k++) {
+        g_assert_cmpint(seen[k], ==, 1);
+    }
+    g_assert_cmpint(pages, >, keys / 8);
+
+    /*
+     * A start key that is not stored gives a vendor-specific first key that
+     * must not change while nothing is stored or deleted. This device then
+     * starts where a List without a key starts.
+     */
+    memset(absent, 0x5a, sizeof(absent));
+    nrk = femu_kv_list_page(&c, buf, hbs, absent, 16, page);
+    g_assert_cmpuint(nrk, ==, 8);
+    g_assert_cmpmem(femu_kv_list_entry(page, 0), 16, first, 16);
+    nrk = femu_kv_list_page(&c, buf, hbs, absent, 16, page);
+    g_assert_cmpmem(femu_kv_list_entry(page, 0), 16, first, 16);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * Timestamp (Base 2.3, 5.2.26.1.7): advertised in ONCS; after a Set the
  * controller counts on from the host's value and reports origin 001b; a
@@ -27789,6 +27928,10 @@ static void femu_register_nodes(void)
     qos_add_test("kv-list-mdts0", "femu", femu_test_kv_list_mdts0,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,mdts=0"
+    });
+    qos_add_test("kv-list-walk", "femu", femu_test_kv_list_walk,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
     });
     qos_add_test("kv-fuzz", "femu", femu_test_kv_fuzz,
                  &(QOSGraphTestOptions) {

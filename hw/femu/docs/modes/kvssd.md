@@ -158,6 +158,27 @@ sudo nvme io-passthru /dev/nvme0 -O 0x06 -n 1 --cdw10=4096 --cdw11=0 \
 The returned buffer starts with a 4-byte key count, followed by one entry
 per key: a 2-byte key length and the key, each entry padded to 4 bytes.
 
+### Walk all keys
+
+The Key Value command set (revision 1.3) has no iterator and no command
+that deletes a group of keys. A host walks the key space with List. The
+order of the keys stays the same while no Store, Delete, Format or Sanitize
+runs. A start key that exists comes back as the first entry.
+
+```
+ List(no key)        --> page 1: k1 k2 ... k8
+ List(start = k8)    --> page 2: k8 k9 ... k15   (drop k8, it repeats)
+ List(start = k15)   --> page 3: k15 k16 ...     (drop k15)
+ ...                 --> stop when k1 comes back
+```
+
+FEMU returns the keys in the order of its index slots, from the slot of the
+start key. After the last slot the walk continues from slot 0, so a walk
+stops when its first key comes back. A start key that is not stored gives
+the same first key as a List without a key. To delete all keys, walk them
+and send one Delete for each key. The qtest `kv-list-walk` checks that a
+walk returns each stored key once.
+
 ### With kv-probe
 
 `hw/femu/scripts/kv-probe.c` runs the whole lifecycle: store, exist,
