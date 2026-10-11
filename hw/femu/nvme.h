@@ -1634,6 +1634,35 @@ typedef struct NvmeAsyncEvent {
     uint32_t nsid;      /* completion dword 1, for an event about a namespace */
 } NvmeAsyncEvent;
 
+/*
+ * io_stages: one histogram per stage of an I/O command, in log2 buckets of
+ * nanoseconds; bucket i holds [2^i, 2^(i+1)) ns and bucket 0 also holds 0.
+ */
+#define FEMU_STAGE_BUCKETS 40
+
+enum {
+    FEMU_STAGE_SUBMIT,          /* fetch to handoff to the FTL ring */
+    FEMU_STAGE_FTL,             /* handoff to return from the FTL */
+    FEMU_STAGE_HOLD,            /* return to ready: the later of due and return */
+    FEMU_STAGE_POST_DELAY,      /* ready to the posted entry */
+    FEMU_STAGE_TOTAL,           /* fetch to the posted entry */
+    FEMU_STAGE_PAST_DUE,        /* due time to the posted entry; not in total */
+    FEMU_STAGE_NR,
+};
+
+typedef struct FemuStageHist {
+    uint64_t count;
+    uint64_t sum_ns;
+    uint64_t max_ns;
+    uint64_t buckets[FEMU_STAGE_BUCKETS];
+} FemuStageHist;
+
+/* one per poller, written only by that poller */
+typedef struct FemuStageSet {
+    FemuStageHist st[FEMU_STAGE_NR];
+    uint64_t returned_after_due;    /* back from the FTL after its due time */
+} FemuStageSet;
+
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeCQueue       *cq;
@@ -1661,6 +1690,9 @@ typedef struct NvmeRequest {
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
     int64_t                 stime;
+    /* io_stages: when the poller handed it to the FTL ring, and got it back */
+    int64_t                 t_handoff;
+    int64_t                 t_return;
     int64_t                 reqlat;
     int64_t                 gcrt;
     int64_t                 expire_time;
@@ -2449,6 +2481,8 @@ typedef struct FemuCtrl {
 
     FemuPollerCtr   *poller_ctr;   /* per-poller I/O accounting (1-based) */
     bool            cq_teardown;   /* a reset frees every CQ: no interrupts */
+    bool            io_stages;     /* time each I/O command by stage */
+    FemuStageSet    *stage_sets;   /* per-poller stage times (1-based) */
     bool            print_log;
 
     uint8_t         multipoller_enabled;

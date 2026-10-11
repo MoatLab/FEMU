@@ -12,6 +12,55 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 static void nvme_cq_notify(FemuCtrl *n, NvmeCQueue *cq);
 
+/* one writer per set; atomic stores so a QMP read sees each word whole */
+static void nvme_stage_add(FemuStageHist *h, int64_t ns)
+{
+    uint64_t v = ns > 0 ? ns : 0;
+    int b = v ? MIN(63 - clz64(v), FEMU_STAGE_BUCKETS - 1) : 0;
+
+    qatomic_set(&h->count, h->count + 1);
+    qatomic_set(&h->sum_ns, h->sum_ns + v);
+    if (v > h->max_ns) {
+        qatomic_set(&h->max_ns, v);
+    }
+    qatomic_set(&h->buckets[b], h->buckets[b] + 1);
+}
+
+/*
+ * io_stages: add one posted command to this poller's histograms. The stages
+ * meet at "ready", the later of the due time and the return from the FTL,
+ * so submit, ftl, hold and post-delay add up to total. past-due, from the
+ * due time to the post, is the completion-time metric and is not in the
+ * sum. A command with no handoff or return stamp (it did not go through the
+ * FTL ring) counts only in post-delay, past-due and total. A command that a
+ * namespace retired has no due time, and is not counted.
+ */
+static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
+                             int64_t post)
+{
+    FemuStageSet *set = &n->stage_sets[index_poller];
+    int64_t ready = req->expire_time;
+
+    if (req->expire_time < req->stime) {
+        return;
+    }
+    if (req->t_handoff && req->t_return) {
+        ready = MAX(req->expire_time, req->t_return);
+        nvme_stage_add(&set->st[FEMU_STAGE_SUBMIT],
+                       req->t_handoff - req->stime);
+        nvme_stage_add(&set->st[FEMU_STAGE_FTL],
+                       req->t_return - req->t_handoff);
+        nvme_stage_add(&set->st[FEMU_STAGE_HOLD], ready - req->t_return);
+        if (req->t_return > req->expire_time) {
+            qatomic_set(&set->returned_after_due,
+                        set->returned_after_due + 1);
+        }
+    }
+    nvme_stage_add(&set->st[FEMU_STAGE_POST_DELAY], post - ready);
+    nvme_stage_add(&set->st[FEMU_STAGE_PAST_DUE], post - req->expire_time);
+    nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->stime);
+}
+
 /*
  * Several submission queues may report to one completion queue, and with more
  * than one poller two of them can be posting to it at the same time.
@@ -68,6 +117,9 @@ static int nvme_post_backlog(FemuCtrl *n, int index_poller, bool *should_isr)
             continue;
         }
         QTAILQ_REMOVE(backlog, req, entry);
+        if (n->stage_sets) {
+            nvme_stages_note(n, index_poller, req, nvme_io_clock(n));
+        }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         should_isr[cq->cqid] = true;
         posted++;
@@ -240,6 +292,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->defer = NULL;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
+        req->t_handoff = 0;
+        req->t_return = 0;
         req->cqe.cid = cmd.cid;
         req->cmd_opcode = cmd.opcode;
         memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
@@ -354,6 +408,10 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                     did_isr = true;
                     n->poller_ctr[index_poller].nr_tt_ios++;
                     n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
+                    if (n->stage_sets) {
+                        nvme_stages_note(n, index_poller, req,
+                                         nvme_io_clock(n));
+                    }
                 }
                 QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
             }
@@ -368,7 +426,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
              * completed back to the guest, eventually causing the NVMe
              * driver to timeout and crash.
              */
-            int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
+            int rc;
+
+            if (n->stage_sets) {
+                req->t_handoff = nvme_io_clock(n);
+            }
+            rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("enqueue failed, ret=%d\n", rc);
             }
@@ -580,6 +643,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             femu_err("dequeue from to_poller request failed\n");
         }
         assert(req);
+        if (n->stage_sets) {
+            req->t_return = nvme_io_clock(n);
+        }
 
         /*
          * Optional host-link model: charge the transfer over a link of the
@@ -686,6 +752,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             n->poller_ctr[index_poller].nr_cq_full++;
             QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
             continue;
+        }
+        if (n->stage_sets) {
+            /* after the entry is written, as the host sees it */
+            nvme_stages_note(n, index_poller, req, nvme_io_clock(n));
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;

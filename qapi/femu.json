@@ -647,3 +647,109 @@
             '*offset': 'uint32', '*limit': 'uint32' },
   'returns': 'FemuInfo',
   'coroutine': true }
+
+##
+# @FemuIoStage:
+#
+# A stage of an I/O command, as the pollers time it with io_stages.
+#
+# @submit: from the fetch of the command to its handoff to the FTL
+#
+# @ftl: from the handoff to the return from the FTL, in host time
+#
+# @hold: from the return to ready, the later of the return and the
+#     time the model completes the command
+#
+# @post-delay: from ready to the posted completion entry
+#
+# @total: from the fetch of the command to the posted completion entry.
+#     For a command that goes through the FTL ring, submit, ftl, hold
+#     and post-delay add up to total.
+#
+# @past-due: from the time the model completes the command to the
+#     posted completion entry.  It shows how far the real completion
+#     lands after the modelled one.  It is not part of total.
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuIoStage',
+  'data': [ 'submit', 'ftl', 'hold', 'post-delay', 'total', 'past-due' ] }
+
+##
+# @FemuIoStageInfo:
+#
+# Times of one stage over the commands counted.
+#
+# @stage: the stage
+#
+# @count: commands counted
+#
+# @sum-ns: sum of their times, in nanoseconds
+#
+# @max-ns: the longest time, in nanoseconds
+#
+# @buckets: commands per time bucket, 40 of them.  Bucket i holds
+#     times of 2^i to 2^(i+1) - 1 ns.  Bucket 0 also holds 0 ns, and
+#     bucket 39 also holds every longer time.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoStageInfo',
+  'data': { 'stage': 'FemuIoStage', 'count': 'uint64', 'sum-ns': 'uint64',
+            'max-ns': 'uint64', 'buckets': [ 'uint64' ] } }
+
+##
+# @FemuIoStages:
+#
+# Stage times of the I/O commands a FEMU controller completed.
+#
+# @path: canonical QOM path of the device
+#
+# @stages: one entry per stage
+#
+# @returned-after-due: commands that came back from the FTL after the
+#     time the model completes them
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoStages',
+  'data': { 'path': 'str', 'stages': [ 'FemuIoStageInfo' ],
+            'returned-after-due': 'uint64' } }
+
+##
+# @query-femu-stages:
+#
+# Report how long the I/O commands of a FEMU controller spent in each
+# stage, from the fetch of a command to its posted completion entry.
+# The device needs the property io_stages=on.  Commands that complete
+# without the FTL ring count only in post-delay, past-due and total.
+# Commands a namespace retired are not counted.  Without reset the sums
+# are taken while I/O may run, so they can differ by commands in
+# flight; with reset the pollers stop while the counts are read and
+# cleared.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# @reset: clear the counts after they are read (default false)
+#
+# Returns: the stage times of the controller
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu-stages" }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0",
+#            "stages": [ { "stage": "hold", "count": 2,
+#                          "sum-ns": 3999000, "max-ns": 2000000,
+#                          "buckets": [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+#                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+#                                       2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+#                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ] } ],
+#            "returned-after-due": 0 } }
+##
+{ 'command': 'query-femu-stages',
+  'data': { '*path': 'str', '*reset': 'bool' },
+  'returns': 'FemuIoStages' }

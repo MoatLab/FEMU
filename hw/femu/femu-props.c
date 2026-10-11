@@ -133,6 +133,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "mdts",
       "Maximum Data Transfer Size as a power of two of the minimum memory "
       "page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit" },
+    { "io_stages",
+      "Time each I/O command in five stages (submit, ftl, hold, "
+      "post-delay, total) for the QMP command query-femu-stages; off by "
+      "default" },
     { "intc",
       "Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector "
       "Configuration feature for every vector" },

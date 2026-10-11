@@ -2879,6 +2879,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
     n->poller_in_sweep = NULL;
     qemu_vfree(n->poller_ctr);   /* allocated with qemu_memalign */
     n->poller_ctr = NULL;
+    g_free(n->stage_sets);
+    n->stage_sets = NULL;
 }
 
 /*
@@ -3047,6 +3049,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("multipoller_enabled", FemuCtrl, multipoller_enabled, 0),
     DEFINE_PROP_UINT32("poller_ratio", FemuCtrl, poller_ratio, 1),
     DEFINE_PROP_BOOL("hiops_inline", FemuCtrl, hiops_inline, true),
+    DEFINE_PROP_BOOL("io_stages", FemuCtrl, io_stages, false),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),
     DEFINE_PROP_UINT8("max_sqes", FemuCtrl, max_sqes, 0x6),
     DEFINE_PROP_UINT8("stride", FemuCtrl, db_stride, 0),

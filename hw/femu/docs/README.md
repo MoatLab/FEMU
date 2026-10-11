@@ -63,7 +63,8 @@ The guest kernel each mode needs is in
 - [QMP query-femu](reference/query-femu.md): the FTL state of a
   namespace, read from the host with no guest tools. It gives the lines
   of a bbssd namespace, the reclaim units of an FDP namespace, or the
-  zones of a znssd namespace.
+  zones of a znssd namespace. `query-femu-stages` gives the time of
+  each stage of an I/O command, with `io_stages=on`.
 - [Changelog](CHANGELOG.md): what changed since femu-v9.0.1, including
   properties that are now refused and settings whose effect changed.
 - [Scripts and tools](reference/scripts.md): every shipped script and tool,

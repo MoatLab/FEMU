@@ -15,6 +15,7 @@
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
+#include "qobject/qnum.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "libqos/libqos-pc.h"
@@ -8223,6 +8224,167 @@ static void femu_test_intc_shared(void *obj, void *data,
     femu_queue_free(&c, &q2);
     qpci_msix_disable(dev);
     guest_free(alloc, buf);
+}
+
+/* one stage of a query-femu-stages reply */
+static QDict *femu_stage(QDict *ret, const char *name)
+{
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "stages"), e) {
+        QDict *st = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(st, "stage"), name)) {
+            return st;
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* the count in bucket @b of a stage */
+static uint64_t femu_stage_bucket(QDict *st, int b)
+{
+    QList *l = qdict_get_qlist(st, "buckets");
+    QListEntry *e;
+    int i = 0;
+
+    g_assert_cmpuint(qlist_size(l), ==, 40);
+    QLIST_FOREACH_ENTRY(l, e) {
+        if (i++ == b) {
+            return qnum_get_uint(qobject_to(QNum, qlist_entry_obj(e)));
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* the highest non-empty bucket of a stage must hold its longest time */
+static void femu_stage_check_buckets(QDict *st)
+{
+    uint64_t max = qdict_get_int(st, "max-ns");
+    int top = max ? MIN(63 - clz64(max), 39) : 0;
+    int b;
+
+    if (!qdict_get_int(st, "count")) {
+        return;
+    }
+    g_assert_cmpuint(femu_stage_bucket(st, top), >, 0);
+    for (b = top + 1; b < 40; b++) {
+        g_assert_cmpuint(femu_stage_bucket(st, b), ==, 0);
+    }
+}
+
+/* submit + ftl + hold + post-delay must equal total, and past-due is not in it */
+static void femu_stages_check_sum(QDict *ret)
+{
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "submit"), "sum-ns") +
+                     qdict_get_int(femu_stage(ret, "ftl"), "sum-ns") +
+                     qdict_get_int(femu_stage(ret, "hold"), "sum-ns") +
+                     qdict_get_int(femu_stage(ret, "post-delay"), "sum-ns"),
+                     ==, qdict_get_int(femu_stage(ret, "total"), "sum-ns"));
+}
+
+/*
+ * io_stages on a bbssd device. @data "3ms": eight single-page reads with a
+ * 3 ms page read. The model gives each read exactly 3 ms from fetch to due,
+ * so submit + ftl + hold is exactly 8 x 3 ms when no read comes back after
+ * its due time, and total is at least that, whatever the host scheduler
+ * does. @data "zero": with no read time every read comes back after its due
+ * time, and the stages must still add up to total. Every stage keeps its
+ * longest time in its highest non-empty bucket. reset=true clears the
+ * counts. @data NULL: io_stages is off, and the command must say so.
+ */
+static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const char *names[] = { "submit", "ftl", "hold", "post-delay", "total",
+                            "past-due" };
+    bool zero = data && g_str_equal(data, "zero");
+    QDict *rsp, *ret, *st;
+    int i;
+
+    if (!data) {
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), "set io_stages=on"));
+        qobject_unref(rsp);
+        guest_free(alloc, list);
+        guest_free(alloc, buf);
+        return;
+    }
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    ret = qdict_get_qdict(rsp, "return");
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "count"), ==, 1);
+    qobject_unref(rsp);
+
+    for (i = 0; i < 8; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    ret = qdict_get_qdict(rsp, "return");
+    for (i = 0; i < ARRAY_SIZE(names); i++) {
+        st = femu_stage(ret, names[i]);
+        g_test_message("%-10s count %" PRId64 " sum %" PRId64 " ns max %"
+                       PRId64 " ns", names[i], qdict_get_int(st, "count"),
+                       qdict_get_int(st, "sum-ns"),
+                       qdict_get_int(st, "max-ns"));
+        g_assert_cmpuint(qdict_get_int(st, "count"), ==, 8);
+        femu_stage_check_buckets(st);
+    }
+    femu_stages_check_sum(ret);
+    if (zero) {
+        g_test_message("returned after due: %" PRId64,
+                       qdict_get_int(ret, "returned-after-due"));
+        g_assert_cmpuint(qdict_get_int(femu_stage(ret, "hold"), "sum-ns"), ==,
+                         0);
+    } else {
+        uint64_t to_ready =
+            qdict_get_int(femu_stage(ret, "submit"), "sum-ns") +
+            qdict_get_int(femu_stage(ret, "ftl"), "sum-ns") +
+            qdict_get_int(femu_stage(ret, "hold"), "sum-ns");
+
+        g_test_message("fetch to ready: %" PRIu64 " ns, returned after due: %"
+                       PRId64, to_ready,
+                       qdict_get_int(ret, "returned-after-due"));
+        if (!qdict_get_int(ret, "returned-after-due")) {
+            g_assert_cmpuint(to_ready, ==, 8 * 3000000ULL);
+        } else {
+            g_assert_cmpuint(to_ready, >=, 8 * 3000000ULL);
+        }
+        g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "sum-ns"),
+                         >=, 8 * 3000000ULL);
+    }
+    qobject_unref(rsp);
+
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    ret = qdict_get_qdict(rsp, "return");
+    for (i = 0; i < ARRAY_SIZE(names); i++) {
+        st = femu_stage(ret, names[i]);
+        g_assert_cmpuint(qdict_get_int(st, "count"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(st, "sum-ns"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(st, "max-ns"), ==, 0);
+    }
+    g_assert_cmpuint(qdict_get_int(ret, "returned-after-due"), ==, 0);
+    qobject_unref(rsp);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
 }
 
 /* guest-physical memory nothing answers at */
@@ -30911,6 +31073,19 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=64"
     });
+    qos_add_test("io-stages", "femu", femu_test_io_stages,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=64,pg_rd_lat=3000000,io_stages=on",
+        .arg = (void *)"3ms",
+    });
+    qos_add_test("io-stages-zero", "femu", femu_test_io_stages,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=64,pg_rd_lat=0,io_stages=on",
+        .arg = (void *)"zero",
+    });
+    qos_add_test("io-stages-off", "femu", femu_test_io_stages, NULL);
     qos_add_test("intx-shadow-doorbell", "femu",
                  femu_test_intx_shadow_doorbell, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);

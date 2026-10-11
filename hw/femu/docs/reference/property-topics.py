@@ -34,7 +34,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "queues", "entries", "max_sqes", "max_cqes", "stride",
-                    "multipoller_enabled", "poller_ratio", "hiops_inline",
+                    "multipoller_enabled", "poller_ratio", "hiops_inline", "io_stages",
                     "aerl", "elpe", "mdts", "intc", "intc_thresh", "intc_time",
                 ],
             },

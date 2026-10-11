@@ -367,6 +367,9 @@ static void nvme_init_poller(FemuCtrl *n)
         n->poller_ctr = qemu_memalign(64, ctr_sz);
         memset(n->poller_ctr, 0, ctr_sz);
     }
+    if (n->io_stages && !n->stage_sets) {
+        n->stage_sets = g_new0(FemuStageSet, n->nr_pollers + 1);
+    }
 
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));

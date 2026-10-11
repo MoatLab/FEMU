@@ -673,3 +673,62 @@ out:
     femu_query_free(req);
     return info;
 }
+
+FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
+                                    bool reset, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+    FemuIoStages *info;
+    FemuIoStageInfoList **tail;
+    bool clear = has_reset && reset && n && n->stage_sets;
+    bool resume = false;
+
+    if (!n) {
+        return NULL;
+    }
+    if (!n->io_stages) {
+        error_setg(errp, "the femu device does not time I/O stages; set "
+                   "io_stages=on");
+        return NULL;
+    }
+
+    /* a reset reads and clears with the pollers stopped, so it loses none */
+    if (clear) {
+        resume = nvme_pause_pollers(n);
+    }
+    info = g_new0(FemuIoStages, 1);
+    info->path = object_get_canonical_path(OBJECT(n));
+    tail = &info->stages;
+    for (int st = 0; st < FEMU_STAGE_NR; st++) {
+        FemuIoStageInfo *si = g_new0(FemuIoStageInfo, 1);
+        uint64List **btail = &si->buckets;
+        uint64_t buckets[FEMU_STAGE_BUCKETS] = { 0 };
+
+        si->stage = st;
+        /* the pollers write their own sets; each word reads whole */
+        for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
+            const FemuStageHist *h = &n->stage_sets[p].st[st];
+
+            si->count += qatomic_read(&h->count);
+            si->sum_ns += qatomic_read(&h->sum_ns);
+            si->max_ns = MAX(si->max_ns, qatomic_read(&h->max_ns));
+            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+                buckets[b] += qatomic_read(&h->buckets[b]);
+            }
+        }
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            QAPI_LIST_APPEND(btail, buckets[b]);
+        }
+        QAPI_LIST_APPEND(tail, si);
+    }
+    for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
+        info->returned_after_due +=
+            qatomic_read(&n->stage_sets[p].returned_after_due);
+    }
+
+    if (clear) {
+        memset(n->stage_sets, 0, sizeof(FemuStageSet) * (n->nr_pollers + 1));
+        nvme_resume_pollers(n, resume);
+    }
+    return info;
+}

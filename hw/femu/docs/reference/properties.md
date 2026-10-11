@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 170 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 174 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -51,6 +51,7 @@ Devices:
 | `multipoller_enabled` | `uint8` | `0` | 0 runs one poller thread for all I/O queues; 1 runs ceil(queues / poller_ratio) pollers, each owning a round-robin share of the queues; other values fail realize |
 | `poller_ratio` | `uint32` | `1` | I/O queues per poller thread when multipoller_enabled=1; 0 is treated as 1, one poller per queue |
 | `hiops_inline` | `bool` | `on` | NoSSD only: performance option, on by default; set off only when debugging |
+| `io_stages` | `bool` | `off` | Time each I/O command in five stages (submit, ftl, hold, post-delay, total) for the QMP command query-femu-stages; off by default |
 | `aerl` | `uint8` | `3` | Asynchronous Event Request Limit (Identify AERL, 0's based): the controller holds up to aerl + 1 outstanding requests |
 | `elpe` | `uint8` | `3` | Error Log Page Entries (Identify ELPE, 0's based): the Error Information log keeps the newest elpe + 1 entries |
 | `mdts` | `uint8` | `10` | Maximum Data Transfer Size as a power of two of the minimum memory page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit |
@@ -130,6 +131,7 @@ Devices:
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |
 | `mp_program` | `int32` | `0` | bbssd, CSD: non-zero charges programs of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `mp_read` | `int32` | `0` | bbssd, CSD: non-zero charges host reads of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
+| `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range; refused with FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
@@ -215,6 +217,8 @@ Devices:
 | `zns_pe_suspend` | `int32` | `0` | ZNS: non-zero lets a read suspend a program or erase on its plane |
 | `zns_lun_contention` | `int32` | `0` | ZNS: non-zero makes the planes of one LUN share the die, so their operations run one at a time; a zone reset erases each LUN's planes in one multi-plane operation |
 | `zns_reset_by_fill` | `int32` | `0` | ZNS: non-zero makes a zone reset erase only the blocks that hold programmed pages, so its time and wear follow the zone's fill |
+| `zns_page_types` | `int32` | `0` | ZNS: non-zero gives each read the latency of its page type (lower to upper page), spread around the read latency of the flash type; programs keep one latency per wordline |
+| `zns_ecc_step_ns` | `int64` | `0` | ZNS: ECC read time in ns added per 750 erases of the block, up to 4 steps, as bbssd ecc_step_ns; 0 or more |
 | `zns_tsusp_ns` | `int64` | `0` | ZNS: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `zns_max_active` | `uint32` | `0` | ZNS: Maximum Active Resources (zones), at most the zone count; 0 means no limit |
 | `zns_max_open` | `uint32` | `0` | ZNS: Maximum Open Resources (zones), at most the zone count and zns_max_active; 0 means no limit |

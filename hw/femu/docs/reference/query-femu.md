@@ -265,3 +265,48 @@ group once per call, also for a summary. The command fails with an error in thes
 - A namespace changes during the query.
 
 Only one query at a time can wait on a device.
+
+## I/O stage times: query-femu-stages
+
+With `io_stages=on`, the pollers time each I/O command in stages, and the
+QMP command `query-femu-stages` returns one histogram per stage. It shows
+where the time of a command goes, and how far the real completion lands
+after the time the model gives it.
+
+```
+ fetch --> handoff to FTL --> back from FTL --> ready --> CQE posted
+   | submit |      ftl       |     hold      | post-delay |
+   |<-------------------------- total ------------------------->|
+ ready = the later of the model's due time and the return from the FTL
+ past-due = due time --> CQE posted   (the completion-time metric; not in total)
+```
+
+| Stage | From, to |
+| --- | --- |
+| `submit` | the fetch of the command, to its handoff to the FTL ring |
+| `ftl` | the handoff, to its return from the FTL, in host time |
+| `hold` | the return, to ready |
+| `post-delay` | ready, to the posted entry |
+| `total` | the fetch, to the posted entry |
+| `past-due` | the model's due time, to the posted entry |
+
+For a command that goes through the FTL ring, the first four stages add up
+to the total time. A large `past-due` means that completions land later than the
+model says. `returned-after-due` counts the commands that came back from
+the FTL after their due time; for those, `hold` is 0.
+
+Each stage has `count`, `sum-ns`, `max-ns` and 40 `buckets`. Bucket i holds
+the commands that took 2^i to 2^(i+1) - 1 ns. Bucket 0 also holds 0 ns,
+and bucket 39 also holds every longer time.
+
+```json
+{"execute": "query-femu-stages", "arguments": {"reset": true}}
+```
+
+`reset` stops the pollers, reads and clears the counts, and starts them
+again, so no command is lost between two replies. Commands that complete
+without the FTL ring (NoSSD with `hiops_inline` on, CSD programs) count in
+`post-delay`, `past-due` and `total` only. Commands that a namespace delete
+retired are not counted, and admin commands are not timed. Without `reset`,
+a reply taken during I/O can differ by the commands in flight. Without
+`io_stages=on` the command fails.

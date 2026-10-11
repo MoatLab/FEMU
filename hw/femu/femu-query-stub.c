@@ -13,3 +13,10 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
     error_setg(errp, "this QEMU is built without the femu device");
     return NULL;
 }
+
+FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
+                                    bool reset, Error **errp)
+{
+    error_setg(errp, "this QEMU is built without the femu device");
+    return NULL;
+}
