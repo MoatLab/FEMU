@@ -277,6 +277,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A ZNS zone whose write cache is evicted before it fills now continues its next flush on the first free plane, not on plane 0. With more zones written at once than write caches, plane 0's block ran past its last page and reads of those blocks finished faster than tR (8bcaa0623).
 - A ZNS write refused for its data pointer no longer moves the write pointer (6343c4d22).
 - FDP Write Zeroes is placed by its own directive fields and counted in HBMW and MBMW, instead of reusing the placement of an earlier command (834abe2cb).
+- Under FDP, the Directive commands report the Data Placement Directive, and the host can enable it per namespace. The enabled state survives a controller reset.
 - Write Zeroes and deallocate address the backend per namespace, program the media where required, and drop buffered copies (f44ce6499, 9005cf952, 373de039b, 783131b7d, 22988e07b).
 - The write buffer no longer resurrects deallocated pages and is bounded (d4d03f127, 0ee6d211b).
 - A Format rebuilds per-block state (a79474e73, 7e7e36161).

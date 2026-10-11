@@ -249,6 +249,10 @@ static uint16_t nvme_directive_locked(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (nsid != NVME_NSID_BROADCAST && !ns) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* Data Placement has no directive operations of its own */
+    if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT || (dtype == 1 && !n->streams)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (dtype == 1) {
         bool enabled = ns && ns->streams_enabled;
 
@@ -286,13 +290,27 @@ static uint16_t nvme_directive_locked(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (receive) {
-        params[0] = 3;
-        params[32] = ns->streams_enabled ? 3 : 1;
+        /* supported, enabled, and kept across a reset; bit 0 is Identify */
+        params[0] = 1 | (n->streams ? 2 : 0) |
+                    (nvme_fdp_directive(n) ? 4 : 0);
+        params[32] = 1 | (ns->streams_enabled ? 2 : 0) |
+                     (ns->dp_enabled ? 4 : 0);
+        params[64] = nvme_fdp_directive(n) ? 4 : 0;
         return dma_read_prp(n, params, MIN(len, sizeof(params)),
                             le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
-    if (((dw12 >> 8) & 0xff) != 1) {
+    if (((dw12 >> 8) & 0xff) == NVME_DIRECTIVE_DATA_PLACEMENT) {
+        if (!ns) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if (!ns->endgrp || !ns->endgrp->fdp.enabled) {
+            return NVME_FDP_DISABLED | NVME_DNR;
+        }
+        ns->dp_enabled = dw12 & 1;
+        return NVME_SUCCESS;
+    }
+    if (((dw12 >> 8) & 0xff) != 1 || !n->streams) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     for (i = 0; i < n->namespace_limit; i++) {

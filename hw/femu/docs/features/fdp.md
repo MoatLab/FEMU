@@ -147,6 +147,31 @@ sudo nvme write /dev/nvme0n1 -s 0 -c 7 -z 4096 -d data.bin -T 2 -S 1
 A write with no directive, or with an identifier the namespace does not
 have, goes to handle 0. An invalid identifier also logs a host event.
 
+### Enable the Data Placement Directive
+
+The spec asks the host to enable the Data Placement Directive per namespace
+before it writes with directive type 2. FEMU reports the directive in the
+Identify directive and accepts the enable. It also places writes with
+directive type 2 when the host did not enable the directive, because the
+Linux driver does not enable it.
+
+```sh
+# enable (Directive Send, Identify directive, Enable Directive, type 2)
+sudo nvme dir-send /dev/nvme0n1 -n 1 -D 0 -O 1 -T 2 -e 1
+# check: Data Placement is supported, enabled and kept across a reset
+sudo nvme dir-receive /dev/nvme0n1 -n 1 -D 0 -O 1 -H
+```
+
+```
+ Directive Receive, Identify (bytes 0, 32, 64; bit 2 = Data Placement)
+   supported  01h | 04h        enabled  01h, or 05h after the enable
+   kept across a controller reset: 04h
+ Directive Send, enable type 2:  nsid FFFFFFFFh -> Invalid Namespace or Format
+                                 no FDP          -> FDP Disabled
+ any command with directive type 2 -> Invalid Field (it has no operations)
+ enabled: Write, Write Zeroes or Copy naming a type other than 0 or 2 -> Invalid Field
+```
+
 fio places data from its `io_uring_cmd` engine. It reads the placement
 identifier list from the device and cycles through the entries whose
 indexes are listed in `fdp_pli`:

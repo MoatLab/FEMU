@@ -19174,6 +19174,126 @@ static uint16_t femu_directive(FemuCtrlState *c, bool receive,
     return FEMU_SC(femu_admin_result(c, &cmd, result));
 }
 
+/*
+ * The Data Placement Directive under FDP: Identify reports it supported and
+ * kept across a reset, the host enables and disables it per namespace, and
+ * a command that names it directly fails, since it has no operations. With
+ * no FDP (@data set: streams only) an enable fails with FDP Disabled.
+ */
+/* one 4 KiB Write at LBA 0 naming directive type @dtype, placement 0 */
+static uint16_t femu_dp_write(FemuCtrlState *c, int dtype, uint64_t buf)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c->lba_size - 1);
+    rw.control = cpu_to_le16(dtype << 4);
+    return FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+}
+
+/* the same as a Write Zeroes */
+static uint16_t femu_dp_zeroes(FemuCtrlState *c, int dtype)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.nlb = cpu_to_le16(4096 / c->lba_size - 1);
+    rw.control = cpu_to_le16(dtype << 4);
+    return FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+}
+
+static void femu_test_fdp_directive(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const uint64_t src = 0;
+    const uint16_t nlb = 8;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & 0x20, ==, 0x20);
+    if (data) {
+        g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x201, 0, 0, NULL),
+                        ==, NVME_FDP_DISABLED);
+        g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 3);
+        g_assert_cmphex(qtest_readb(qts, buf + 64), ==, 0);
+        guest_free(alloc, list);
+        guest_free(alloc, buf);
+        femu_disable(&c);
+        return;
+    }
+
+    g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 5);         /* Identify, DP */
+    g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 1);    /* DP not enabled */
+    g_assert_cmphex(qtest_readb(qts, buf + 64), ==, 4);    /* DP kept */
+    for (i = 96; i < 4096; i += 4) {
+        g_assert_cmphex(qtest_readl(qts, buf + i), ==, 0);
+    }
+
+    /* without the enable, any directive type passes, as before */
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_dp_write(&c, 3, buf), ==, NVME_SUCCESS);
+
+    /* enable, check, disable, check */
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x201, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 5);
+    for (i = 0; i < 4; i++) {
+        uint16_t want = i == 1 || i == 3 ? NVME_INVALID_FIELD : NVME_SUCCESS;
+
+        g_assert_cmphex(femu_dp_write(&c, i, buf), ==, want);
+        g_assert_cmphex(femu_dp_zeroes(&c, i), ==, want);
+        g_assert_cmphex(femu_copy(&c, list, 64, &src, &nlb, 1, 1,
+                                  (uint32_t)i << 20), ==, want);
+    }
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x200, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 1);
+
+    /* refusals */
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x201, 0, 0,
+                                   NULL), ==, NVME_INVALID_NSID);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x201, 0, buf, 4096, NULL),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x201, 0, 0, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL), ==,
+                    NVME_INVALID_FIELD);                    /* no streams */
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 4096, NULL),
+                    ==, NVME_INVALID_FIELD);
+
+    /* the enabled state survives a controller reset */
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x201, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, true, 1, 1, 0, buf, 4096, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 32), ==, 5);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_streams_identify(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -28512,6 +28632,18 @@ static void femu_register_nodes(void)
     });
     qos_add_test("streams-off", "femu", femu_test_streams_identify, NULL);
     qos_add_test("streams-identify", "femu", femu_test_streams_identify,
+                 &(QOSGraphTestOptions) {
+        .arg = GINT_TO_POINTER(1),
+        .edge.extra_device_opts = "streams=on"
+    });
+    qos_add_test("fdp-directive", "femu", femu_test_fdp_directive,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("fdp-directive-no-fdp", "femu", femu_test_fdp_directive,
                  &(QOSGraphTestOptions) {
         .arg = GINT_TO_POINTER(1),
         .edge.extra_device_opts = "streams=on"

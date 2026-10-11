@@ -3878,7 +3878,7 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DIRECTIVE_SEND:
     case NVME_ADM_CMD_DIRECTIVE_RECV:
-        if (n->streams) {
+        if (n->streams || nvme_fdp_directive(n)) {
             return nvme_directive(n, cmd, cqe);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;

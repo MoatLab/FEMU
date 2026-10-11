@@ -1877,6 +1877,8 @@ typedef struct NvmeNamespace {
 
     bool streams_enabled;
     uint16_t streams_allocated;
+    /* Data Placement Directive enabled; it persists across a reset */
+    bool dp_enabled;
 
     void *state;
 
@@ -2715,6 +2717,21 @@ int nvme_streams_open(NvmeNamespace *ns, NvmeCmd *cmd);
 char *nvme_streams_test(Object *obj, Error **errp);
 void nvme_streams_release(NvmeNamespace *ns, bool resources);
 uint16_t nvme_directive(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+
+/* FDP on: the controller supports the Data Placement Directive */
+static inline bool nvme_fdp_directive(FemuCtrl *n)
+{
+    return n->subsys && n->subsys->endgrp.fdp.enabled;
+}
+
+/*
+ * With Data Placement enabled, an I/O command may name no directive or Data
+ * Placement; any other type is unsupported or disabled (Base 2.3 8.1.9.1).
+ */
+static inline bool nvme_dp_dtype_invalid(NvmeNamespace *ns, uint8_t dtype)
+{
+    return ns->dp_enabled && dtype && dtype != NVME_DIRECTIVE_DATA_PLACEMENT;
+}
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid);

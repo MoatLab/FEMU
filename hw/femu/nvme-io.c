@@ -826,6 +826,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         ((ctrl >> 4) & 15) > 1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    if (req->is_write && nvme_dp_dtype_invalid(ns, (ctrl >> 4) & 15)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     if (femu_pi_type(ns) && ms == 8 && (ctrl & NVME_RW_PRINFO_PRACT)) {
         extended = false;
@@ -1268,6 +1271,9 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t status;
     uint32_t i;
 
+    if (nvme_dp_dtype_invalid(ns, (dw12 >> 20) & 0xf)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     /* format 2 works only once the host has enabled it (Figure 426) */
     if ((fmt != 0 && fmt != 2) ||
         (fmt == 2 && !(n->features.host_behavior[4] & (1 << 2)))) {
@@ -1649,6 +1655,10 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t status;
 
     nvme_note_user_write(n);
+
+    if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0xf)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     /* Non-wrapping bound test: nvme_deallocate_range zeroes the backing store,
      * so slba + nlb must not overflow past the namespace and drive an

@@ -157,7 +157,7 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
                NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_NIC : 0;
     case NVME_ADM_CMD_DIRECTIVE_SEND:
     case NVME_ADM_CMD_DIRECTIVE_RECV:
-        return n->streams ? NVME_CMD_EFF_CSUPP : 0;
+        return n->streams || nvme_fdp_directive(n) ? NVME_CMD_EFF_CSUPP : 0;
     default:
         return nvme_cse_acs[opc] | nvme_mode_admin_effects(n, opc);
     }
