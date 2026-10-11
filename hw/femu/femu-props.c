@@ -672,6 +672,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "CSD: host directory that shared-object and uBPF programs are "
       "loaded from, named by a file name with no slash that must resolve "
       "inside it; unset allows only the built-in phantom program type" },
+    { "kv_timing",
+      "KV: media (default) times every command on the NAND model; model "
+      "times Store and Retrieve from the workload mix of the last 16 of "
+      "them, with the Samsung KVSSD emulator fit" },
+    { "kv_model_coeffs",
+      "KV with kv_timing=model: 36 comma-separated numbers, the intercept "
+      "then the 35 polynomial coefficients; unset uses the Samsung fit" },
     { NULL, NULL }
 };
 

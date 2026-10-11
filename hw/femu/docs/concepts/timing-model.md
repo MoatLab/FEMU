@@ -197,6 +197,10 @@ triggers them, and every command pays one page read for the index lookup,
 on a LUN chosen by the key's hash. A command completes when its last NAND
 operation does.
 
+With `kv_timing=model`, Store and Retrieve take their time from a fitted
+workload-mix model instead
+([KV mode](../modes/kvssd.md#workload-mix-timing-kv_timingmodel)).
+
 CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time
 multiplied by the program's own scale, or by `csf_runtime_scale` when it

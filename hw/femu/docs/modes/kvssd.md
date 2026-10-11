@@ -82,6 +82,66 @@ command pays one page read for the index lookup, overlapped with the NAND
 reads or programs of its value; reclaiming space charges erases to the command that
 triggers it ([timing model](../concepts/timing-model.md#kv-and-csd)).
 
+### Workload-mix timing (kv_timing=model)
+
+With `kv_timing=model`, Store and Retrieve take their time from a fitted
+model, not from the NAND model. The fit and its coefficients come from the
+Samsung KVSSD PDK emulator (BSD-3). Delete, Exist, List and a Retrieve of
+a missing key keep the NAND model time, as in the PDK.
+
+```
+ Store / Retrieve hit
+        |
+        v
+ window of the last 16 timed commands  (per namespace)
+   insert share, read share, update share, mean value size
+        |
+        v
+ kIOPS = cubic polynomial (35 terms + intercept)
+        |
+        v
+ latency = 1e6 / kIOPS ns   (x size / 16 KiB when the mean is above 16 KiB)
+```
+
+- An insert is a Store of a new key. An update is a Store over an existing
+  key. A read is a Retrieve that finds the key, with the bytes it returns.
+- Each command gets its own latency. Commands do not queue behind each
+  other, so throughput grows with queue depth, as in the PDK.
+- The NAND model still runs, so wear, space and the counters move as in
+  media mode. Only the time of the command changes.
+- The fit is not used above a mean value size of 16 KiB, where it grows
+  without bound. The time then scales with the size.
+- A result below 0.01 kIOPS, or one that is not finite, becomes 0.01 kIOPS.
+  QEMU then warns once for each namespace.
+- The PDK computes the size terms x0^2 and x0^3 in 32-bit integers.
+  x0^3 wraps above 1625 bytes, and x0^2 above 65535 bytes. FEMU computes
+  every term in double. At 4 KiB FEMU gives 0.24 kIOPS more than the PDK.
+
+`kv_model_coeffs` replaces the fit: 36 comma-separated numbers, the
+intercept first. On a `-device` line, write each comma twice. The 35
+coefficients follow the PDK term order:
+
+```
+ x0 = mean value size, x1 = insert share, x2 = read share, x3 = update share
+ 1, x0, x1, x2, x3,
+ x0^2, x0 x1, x0 x2, x0 x3, x1^2, x1 x2, x1 x3, x2^2, x2 x3, x3^2,
+ x0^3, x0^2 x1, ... (every product of three, in the same order), x3^3
+```
+
+What the fit does not tell:
+
+- the device and the firmware that produced it;
+- the queue depth and the key size at training time;
+- the training data, so the fit cannot be checked or trained again here.
+
+Use it to compare workload mixes against one fixed device curve, not as a
+calibrated device.
+
+<!-- femu-example: kvssd-model -->
+```
+-device femu,femu_mode=5,devsz_mb=4096,kv_timing=model
+```
+
 Limits built into the mode:
 
 - Keys are 1 to 16 bytes.
@@ -229,6 +289,10 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 | `the key-value command set and FDP cannot share a controller: placement owns every reclaim unit and the key-value store is left with no write pointer` | A KV namespace on a controller in an FDP subsystem. |
 | `FEMU bbssd: nchs must be greater than 0, got 0` | KV checks the BlackBox geometry properties with the same messages, but not the GC capacity rule. |
 | `meta: namespace 1 runs a mode without metadata support (block or no-SSD only)` | `meta` with a KV namespace. |
+| `FEMU kvssd: kv_timing=X is not media or model` | Use `media` or `model`. |
+| `FEMU kvssd: kv_model_coeffs: ...; give the intercept and 35 coefficients` | Give 36 finite numbers, separated by commas. |
+| `kv_timing=model and kv_model_coeffs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)` | The device has no KV namespace, so the knobs would do nothing. |
+| `kv_timing=model and kv_model_coeffs need a key-value namespace; shared namespaces are NoSSD or bbssd` | A controller on shared namespaces (`ns_mgmt=on` subsystem) has no KV namespace. |
 
 ## Verify
 

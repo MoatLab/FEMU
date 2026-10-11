@@ -47,6 +47,7 @@ listed one by one.
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).
 - Key-value SSD mode (`femu_mode=5`) with store, retrieve, list, delete and exist commands (e72465909).
 - Every KV namespace has its own command set and key space, the KV command set is advertised to the host, and the KV Configuration feature is served (39664d242, e62db84f2, e4949509c).
+- Opt-in KV workload-mix timing (`kv_timing=model`): Store and Retrieve take their time from the Samsung KVSSD emulator fit over the last 16 of them, or from coefficients in `kv_model_coeffs`. A device with no KV namespace refuses both.
 
 #### Namespaces
 

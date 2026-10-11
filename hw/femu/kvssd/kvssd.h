@@ -2,6 +2,7 @@
 #define FEMU_KVSSD_H
 
 #include "qemu/thread.h"
+#include "kv-model.h"
 
 typedef struct FemuCtrl FemuCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -77,6 +78,15 @@ typedef struct FemuKvssdState {
     struct ssd *ssd;
     NvmeNamespace *ns;      /* the namespace this state serves */
     int pgsz;                          /* value page size in bytes */
+
+    /*
+     * kv_timing=model: Store and Retrieve take their time from the model of
+     * the last KV_MODEL_WINDOW of them, not from the NAND model.
+     */
+    bool timing_model;
+    FemuKvModel model;
+    FemuKvWindow window;
+    uint64_t model_floored;            /* commands raised to the kIOPS floor */
 
     /* stats */
     uint64_t nand_rd_pages;

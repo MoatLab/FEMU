@@ -2453,6 +2453,8 @@ typedef struct FemuCtrl {
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
+    char            *kv_timing;       /* KV: "media" (NULL) or "model" */
+    char            *kv_model_coeffs; /* KV: model coefficients; NULL = default */
 
     Oc12Ctrl  *oc12_ctrl;
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];

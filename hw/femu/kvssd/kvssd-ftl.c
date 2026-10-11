@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 
 #include "kvssd.h"
 #include "../nvme.h"
@@ -475,6 +476,30 @@ static uint64_t kv_charge_stages(FemuKvssdState *s, NvmeRequest *req,
     return MAX(base, index);
 }
 
+/*
+ * kv_timing=model: add the command to the window and return the model time
+ * in place of @lat, the NAND model time. The NAND model still ran, so wear,
+ * space and the media timelines stay as in media mode. Called under s->lock.
+ */
+static uint64_t kv_model_lat(FemuKvssdState *s, FemuKvOp op, uint64_t vlen,
+                             uint64_t lat)
+{
+    bool floored;
+
+    if (!s->timing_model) {
+        return lat;
+    }
+    kv_window_add(&s->window, op, (uint32_t)vlen);
+    lat = kv_model_latency_ns(&s->model, &s->window, &floored);
+    /* once per namespace: s->lock covers the count, a shared flag it would not */
+    if (floored && !s->model_floored++) {
+        warn_report("FEMU kvssd: the KV timing model gave less than %g kIOPS "
+                    "or no finite value; check kv_model_coeffs",
+                    KV_MODEL_MIN_KIOPS);
+    }
+    return lat;
+}
+
 static void kv_apply_lat(NvmeRequest *req, uint64_t lat)
 {
     req->reqlat += lat;
@@ -731,6 +756,8 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
     /* command/index base cost + value-page program timing through the NAND model */
     lat = MAX(lat, kv_charge_stages(s, req, key, kl));
+    lat = kv_model_lat(s, existing >= 0 ? KV_OP_UPDATE : KV_OP_INSERT, vsize,
+                       lat);
 
     qemu_mutex_unlock(&s->lock);
     kv_apply_lat(req, lat);
@@ -782,6 +809,8 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
             return status;
         }
     }
+
+    lat = kv_model_lat(s, KV_OP_READ, xfer, lat);
 
     qemu_mutex_unlock(&s->lock);
     kv_apply_lat(req, lat);

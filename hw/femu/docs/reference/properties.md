@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 178 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 180 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -266,6 +266,13 @@ Devices:
 | `context_switch_time` | `uint64` | `200` | No effect, kept for CEMU compatibility. A value other than the default warns at realize |
 | `csf_runtime_scale` | `uint16` | `3` | CSD: non-zero multiplier applied to the host run time of a program that sets neither a runtime nor its own scale |
 | `csd_program_dir` | `str` | unset | CSD: host directory that shared-object and uBPF programs are loaded from, named by a file name with no slash that must resolve inside it; unset allows only the built-in phantom program type |
+
+### KV timing
+
+| Property | Type | Default | Description |
+| --- | --- | --- | --- |
+| `kv_timing` | `str` | unset | KV: media (default) times every command on the NAND model; model times Store and Retrieve from the workload mix of the last 16 of them, with the Samsung KVSSD emulator fit |
+| `kv_model_coeffs` | `str` | unset | KV with kv_timing=model: 36 comma-separated numbers, the intercept then the 35 polynomial coefficients; unset uses the Samsung fit |
 
 ### Generic PCI device properties
 

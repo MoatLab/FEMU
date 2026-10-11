@@ -17341,6 +17341,39 @@ static void femu_shared_add(QTestState *qts, const char *id, int slot,
     qobject_unref(rsp);
 }
 
+/*
+ * Shared namespaces are NoSSD or bbssd, so a controller that joins them
+ * refuses the KV timing knobs, the second one as well as the first.
+ */
+static void femu_test_kv_model_shared(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        QDict *rsp = qtest_qmp(qts,
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'kv-shared','addr':'6','subsys':'shared','devsz_mb':4,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+            "'kv_timing':'model'}}");
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s", desc);
+        g_assert_nonnull(strstr(desc, "need a key-value namespace"));
+        qobject_unref(rsp);
+        /* then a plain first controller, so the next one joins it */
+        if (i == 0) {
+            femu_shared_add(qts, "shared-plain", 5, 1);
+        }
+    }
+    qos_invalidate_command_line();
+}
+
 static void femu_test_shared_lifecycle(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -18601,6 +18634,225 @@ static void femu_test_oc20_page_types(void *obj, void *data,
     femu_disable(&c);
     guest_free(alloc, list);
     guest_free(alloc, buf);
+}
+
+/*
+ * kv_timing=model with test coefficients: kIOPS = 0.05 + 0.075 insert +
+ * 0.2 read. A window of only inserts gives 0.125 kIOPS (8 ms a command),
+ * only updates 0.05 (20 ms) and only reads 0.25 (4 ms). A 64 KiB insert
+ * window is past the 16 KiB fit, so it takes 4 x 8 = 32 ms. The media model
+ * takes well under a millisecond for each of these.
+ */
+#define KV_MODEL_TEST_TERMS \
+    ",0,0,0.075,0.2" ",0,0,0,0,0,0,0,0,0,0" ",0,0,0,0,0,0,0,0,0,0" \
+    ",0,0,0,0,0,0,0,0,0,0" ",0"
+#define KV_MODEL_TEST_COEFFS "0.05" KV_MODEL_TEST_TERMS
+/* the same on a -device line, where a comma in a value is written twice */
+#define KV_MODEL_TEST_OPT \
+    "0.05,,0,,0,,0.075,,0.2" ",,0,,0,,0,,0,,0,,0,,0,,0,,0,,0" \
+    ",,0,,0,,0,,0,,0,,0,,0,,0,,0,,0" ",,0,,0,,0,,0,,0,,0,,0,,0,,0,,0" ",,0"
+#define KV_MODEL_INSERT_MS  8
+#define KV_MODEL_UPDATE_MS  20
+#define KV_MODEL_READ_MS    4
+#define KV_MODEL_BIG_MS     32
+
+/* run one KV command and return its wall time in microseconds */
+static int64_t femu_kv_timed(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
+                             uint64_t list, uint64_t key, uint32_t len)
+{
+    NvmeCmd cmd;
+    int64_t t0;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(len > 2 * 4096 ? list : buf + 4096);
+    cmd.res1 = cpu_to_le64(key);
+    cmd.cdw10 = cpu_to_le32(len);
+    cmd.cdw11 = cpu_to_le32(8);
+    t0 = g_get_monotonic_time();
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+static int femu_cmp_i64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a;
+    int64_t y = *(const int64_t *)b;
+
+    return x < y ? -1 : x > y;
+}
+
+/*
+ * Run @n commands and return the median wall time in microseconds of the
+ * last four, when the window holds only this kind of command.
+ */
+static int64_t femu_kv_median(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
+                              uint64_t list, uint64_t key0, bool same_key,
+                              uint32_t len, int n)
+{
+    int64_t t[4];
+    int i;
+
+    g_assert_cmpint(n, >=, 16 + 4);
+    for (i = 0; i < n; i++) {
+        int64_t us = femu_kv_timed(c, opcode, buf, list,
+                                   same_key ? key0 : key0 + i, len);
+
+        if (i >= n - 4) {
+            t[i - (n - 4)] = us;
+        }
+    }
+    qsort(t, 4, sizeof(t[0]), femu_cmp_i64);
+    return (t[1] + t[2]) / 2;
+}
+
+static void femu_test_kv_model(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    bool on = data != NULL;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t list;
+    int64_t ins, upd, rd, big;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 65536);
+    list = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0x5a, 65536);
+    /* the PRP list of a 64 KiB value: every page after the first */
+    for (i = 1; i < 16; i++) {
+        uint64_t prp = cpu_to_le64(buf + i * 4096);
+
+        qtest_memwrite(femu->dev.bus->qts, list + (i - 1) * 8, &prp, 8);
+    }
+
+    ins = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, false,
+                         4096, 20);
+    /* stores over one key that the inserts made: every one an update */
+    upd = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, true,
+                         4096, 20);
+    rd = femu_kv_median(&c, FEMU_KV_CMD_RETRIEVE, buf, list, 0x1000, true,
+                        4096, 20);
+    big = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x2000, false,
+                         65536, 20);
+    g_test_message("kv_timing %s: median us insert %" PRId64 " update %"
+                   PRId64 " read %" PRId64 " 64KiB insert %" PRId64,
+                   on ? "model" : "media", ins, upd, rd, big);
+
+    if (on) {
+        /*
+         * The model time is a floor; a loaded host only adds to it. The
+         * ceiling, 1.5 times the model time plus the 1 ms poll of the test,
+         * catches a model that is wrong by half. Each median is of the two
+         * middle commands of the last four, so one late command passes.
+         */
+        g_assert_cmpint(ins, >=, KV_MODEL_INSERT_MS * 1000);
+        g_assert_cmpint(upd, >=, KV_MODEL_UPDATE_MS * 1000);
+        g_assert_cmpint(rd, >=, KV_MODEL_READ_MS * 1000);
+        g_assert_cmpint(big, >=, KV_MODEL_BIG_MS * 1000);
+        g_assert_cmpint(ins, <, KV_MODEL_INSERT_MS * 1500 + 2000);
+        g_assert_cmpint(upd, <, KV_MODEL_UPDATE_MS * 1500 + 2000);
+        g_assert_cmpint(rd, <, KV_MODEL_READ_MS * 1500 + 2000);
+        g_assert_cmpint(big, <, KV_MODEL_BIG_MS * 1500 + 2000);
+    } else {
+        /* the coefficients are set, but media timing ignores them */
+        g_assert_cmpint(ins, <, KV_MODEL_READ_MS * 1000);
+        g_assert_cmpint(upd, <, KV_MODEL_READ_MS * 1000);
+        g_assert_cmpint(rd, <, KV_MODEL_READ_MS * 1000);
+        g_assert_cmpint(big, <, KV_MODEL_READ_MS * 1000);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* a bad kv_timing or kv_model_coeffs fails realize */
+static void femu_test_kv_model_refused(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    static const char *const bad[][2] = {
+        { "fast", NULL },
+        { "model", "1,2,3" },
+        { "model", "inf" KV_MODEL_TEST_TERMS },
+        { "model", KV_MODEL_TEST_COEFFS ",0" },
+    };
+    QDict *rsp;
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(bad); i++) {
+        QDict *args = qdict_new();
+        const char *desc;
+
+        qdict_put_str(args, "driver", "femu");
+        qdict_put_str(args, "id", "kvbad");
+        qdict_put_str(args, "addr", "5");
+        qdict_put_int(args, "devsz_mb", 512);
+        qdict_put_int(args, "femu_mode", 5);
+        qdict_put_str(args, "kv_timing", bad[i][0]);
+        if (bad[i][1]) {
+            qdict_put_str(args, "kv_model_coeffs", bad[i][1]);
+        }
+        rsp = qtest_qmp(femu->dev.bus->qts,
+                        "{'execute':'device_add','arguments':%p}", args);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s", desc);
+        g_assert_nonnull(strstr(desc, i ? "kv_model_coeffs" : "kv_timing"));
+        qobject_unref(rsp);
+    }
+
+    /*
+     * The knobs time KV commands only, so a device with no KV namespace
+     * refuses them. One KV namespace among others is enough.
+     */
+    for (i = 0; i < 3; i++) {
+        QDict *args = qdict_new();
+
+        qdict_put_str(args, "driver", "femu");
+        qdict_put_str(args, "id", "kvnone");
+        qdict_put_str(args, "addr", "5");
+        qdict_put_int(args, "devsz_mb", 64);
+        qdict_put_int(args, "femu_mode", 1);
+        qdict_put_int(args, "namespaces", 2);
+        qdict_put_int(args, "secs_per_pg", 8);
+        qdict_put_int(args, "pgs_per_blk", 16);
+        qdict_put_int(args, "blks_per_pl", 80);
+        qdict_put_int(args, "pls_per_lun", 1);
+        qdict_put_int(args, "luns_per_ch", 4);
+        qdict_put_int(args, "nchs", 4);
+        if (i == 0) {
+            qdict_put_str(args, "kv_timing", "model");
+        } else {
+            qdict_put_str(args, "kv_model_coeffs", KV_MODEL_TEST_COEFFS);
+        }
+        if (i == 2) {
+            qdict_put_str(args, "kv_timing", "model");
+            qdict_put_str(args, "namespace_modes", "bbssd,kvssd");
+        }
+        rsp = qtest_qmp(femu->dev.bus->qts,
+                        "{'execute':'device_add','arguments':%p}", args);
+        if (i < 2) {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s", desc);
+            g_assert_nonnull(strstr(desc, "need a key-value namespace"));
+        } else {
+            g_assert_true(qdict_haskey(rsp, "return"));
+        }
+        qobject_unref(rsp);
+    }
+    /* the accepted device stays plugged: the next test needs a new QEMU */
+    qos_invalidate_command_line();
 }
 
 /* the page type tables stop at 512 pages per block */
@@ -31617,6 +31869,8 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-shared-lifecycle", "femu", femu_test_shared_lifecycle,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
+    qos_add_test("kv-model-shared", "femu", femu_test_kv_model_shared,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {
         .before = femu_ns_subsys_before,
@@ -31707,6 +31961,21 @@ static void femu_register_nodes(void)
     });
     qos_add_test("oc20-page-types-refused", "femu",
                  femu_test_oc20_page_types_refused, NULL);
+    qos_add_test("kv-model-off", "femu", femu_test_kv_model,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=5,kv_timing=media,"
+            "kv_model_coeffs=" KV_MODEL_TEST_OPT,
+    });
+    qos_add_test("kv-model-on", "femu", femu_test_kv_model,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=5,kv_timing=model,"
+            "kv_model_coeffs=" KV_MODEL_TEST_OPT,
+        .arg = (void *)1,
+    });
+    qos_add_test("kv-model-refused", "femu", femu_test_kv_model_refused,
+                 NULL);
     qos_add_test("oc20-page-types-on", "femu", femu_test_oc20_page_types,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

@@ -9,6 +9,8 @@ femu_unit_tests = {
   'test-femu-hybrid-oracle': files('unit/test-hybrid-oracle.c'),
   'test-femu-nand-media': files('unit/test-nand-media.c',
                                 '../nand/nand-media.c'),
+  'test-femu-kv-model': files('unit/test-kv-model.c',
+                              '../kvssd/kv-model.c'),
   'test-femu-pqueue': files('unit/test-pqueue.c', '../lib/pqueue.c'),
 }
 

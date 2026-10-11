@@ -1341,6 +1341,13 @@ static int nvme_mode_from_token(const char *tok)
  * a comma-separated per-namespace list (e.g. "znssd,bbssd") whose count must
  * equal namespaces.
  */
+/* a KV timing knob other than the default is set */
+static bool femu_kv_timing_set(FemuCtrl *n)
+{
+    return (n->kv_timing && strcmp(n->kv_timing, "media")) ||
+           n->kv_model_coeffs;
+}
+
 static int nvme_resolve_ns_modes(FemuCtrl *n, uint8_t *out_modes, Error **errp)
 {
     char *dup, *saveptr = NULL, *tok;
@@ -1672,6 +1679,23 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         }
         if (n_csd > 1) {
             error_setg(errp, "csd supports at most one namespace per controller");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
+    /* the KV timing model times KV commands only; elsewhere it does nothing */
+    if (femu_kv_timing_set(n)) {
+        bool any_kv = false;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            any_kv |= ns_modes[i] == FEMU_KVSSD_MODE;
+        }
+        if (!any_kv) {
+            error_setg(errp, "kv_timing=model and kv_model_coeffs need a "
+                       "key-value namespace (femu_mode=5 or kvssd in "
+                       "namespace_modes)");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -2634,6 +2658,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "bbssd without Streams or default protection");
             return;
         }
+        /* shared namespaces are never KV, so the KV timing knobs do nothing */
+        if (femu_kv_timing_set(n)) {
+            error_setg(errp, "kv_timing=model and kv_model_coeffs need a "
+                       "key-value namespace; shared namespaces are NoSSD or "
+                       "bbssd");
+            return;
+        }
         if (storage && (n->femu_mode != storage->femu_mode ||
                         n->meta != storage->meta || n->pi != storage->pi ||
                         n->mc != storage->mc || n->dpc != storage->dpc ||
@@ -3220,6 +3251,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT16("csf_runtime_scale", FemuCtrl,
                        csd_params.csf_runtime_scale, 3),
     DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
+    DEFINE_PROP_STRING("kv_timing", FemuCtrl, kv_timing),
+    DEFINE_PROP_STRING("kv_model_coeffs", FemuCtrl, kv_model_coeffs),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),

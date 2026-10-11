@@ -291,9 +291,35 @@ static void kvssd_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
     }
 }
 
+/* read kv_timing and kv_model_coeffs; return -1 with @errp set on a bad one */
+static int kvssd_parse_timing(FemuCtrl *n, bool *on, FemuKvModel *m,
+                              Error **errp)
+{
+    const char *why;
+
+    *on = false;
+    kv_model_default(m);
+    if (n->kv_timing && strcmp(n->kv_timing, "media")) {
+        if (strcmp(n->kv_timing, "model")) {
+            error_setg(errp, "FEMU kvssd: kv_timing=%s is not media or model",
+                       n->kv_timing);
+            return -1;
+        }
+        *on = true;
+    }
+    if (n->kv_model_coeffs && kv_model_parse(n->kv_model_coeffs, m, &why)) {
+        error_setg(errp, "FEMU kvssd: kv_model_coeffs: %s; give the intercept "
+                   "and %d coefficients", why, KV_MODEL_TERMS);
+        return -1;
+    }
+    return 0;
+}
+
 static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     FemuKvssdState *kvssd;
+    FemuKvModel model;
+    bool timing_model;
 
     /* Same shared geometry, same bounds check as bbssd (see csd_init). */
     if (bb_check_geometry(n, errp)) {
@@ -311,11 +337,16 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (ns->ext_ops.state) {
         return;
     }
+    if (kvssd_parse_timing(n, &timing_model, &model, errp)) {
+        return;
+    }
 
     kvssd = kvssd_ftl_alloc(n, ns, errp);
     if (!kvssd) {
         return;
     }
+    kvssd->timing_model = timing_model;
+    kvssd->model = model;
 
     ns->ext_ops.state = kvssd;
     /* the first KV namespace also answers admin paths that name none */

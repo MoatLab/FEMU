@@ -156,6 +156,13 @@ DEVICES = [
                 ],
             },
             {
+                "title": "KV timing",
+                "kind": "static",
+                "props": [
+                    "kv_timing", "kv_model_coeffs",
+                ],
+            },
+            {
                 "title": "Power loss trigger",
                 "kind": "runtime",
                 "props": [
