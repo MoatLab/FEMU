@@ -28,10 +28,10 @@ static const FemuPropDesc cxl_descs[] = {
     { "pages-per-block",
       "4 KiB pages per NAND block, 1 to 65536" },
     { "blocks-per-plane",
-      "NAND blocks per plane, 2 to 65536; with the FTL on, the spare lines "
-      "beyond the media must exceed the free lines gc-threshold-high keeps "
-      "by two; 0 sizes it to 5/4 of the media plus 4 blocks per plane, or "
-      "more if that rule needs it" },
+      "NAND blocks per plane, 2 to 65536; with the FTL on, the lines beyond "
+      "the free lines gc-threshold-high keeps and two more must hold the "
+      "media plus 7%; 0 sizes it to 5/4 of the media plus 4 blocks per "
+      "plane, or more if that rule needs it" },
     { "gc-threshold",
       "Percent of lines in use at which background garbage collection "
       "starts, 1 to 100" },
@@ -243,8 +243,7 @@ static const FemuPropDesc cxl_runtime_descs[] = {
       "the collection they waited for, on every LUN; stats-reset keeps it" },
     { "gc-stall-max-ns",
       "Read-only: the longest of those waits in ns; one over a second warns "
-      "once per device, with the blocks-per-plane for about 7% "
-      "over-provisioning when the NAND has less; stats-reset keeps it" },
+      "once per device; stats-reset keeps it" },
 
     { "dma-accesses",
       "Read-only: accesses made inside another device's MMIO handler or "

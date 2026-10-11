@@ -21139,8 +21139,9 @@ static void femu_cxl_refuse(QTestState *qts, const char *opts, const char *need)
 /*
  * 256 MiB fill 16 lines of 4 x 4 LUNs x 256 pages. Without a spare line
  * every program after the first fill fails; with one, the FTL runs out of
- * lines on the way. Realize asks for two more than gc-threshold-high keeps
- * free, and automatic sizing meets that.
+ * lines on the way. Realize asks for 7% of the media beyond the lines
+ * gc-threshold-high keeps free and two more, and automatic sizing meets
+ * that.
  */
 static void femu_test_cxl_nand_reserve(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -21148,12 +21149,13 @@ static void femu_test_cxl_nand_reserve(void *obj, void *data,
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
     QDict *rsp;
 
-    femu_cxl_refuse(qts, "'blocks-per-plane':16", "at least 18");
-    femu_cxl_refuse(qts, "'blocks-per-plane':17", "at least 18");
-    femu_cxl_refuse(qts, "'blocks-per-plane':22,'gc-threshold':50,"
-                    "'gc-threshold-high':75", "at least 23");
+    femu_cxl_refuse(qts, "'blocks-per-plane':16", "at least 21");
+    femu_cxl_refuse(qts, "'blocks-per-plane':18", "at least 21");
+    femu_cxl_refuse(qts, "'blocks-per-plane':20", "at least 21");
+    femu_cxl_refuse(qts, "'blocks-per-plane':25,'gc-threshold':50,"
+                    "'gc-threshold-high':75", "at least 26");
     femu_cxl_refuse(qts, "'blocks-per-plane':16,'gc-threshold':50,"
-                    "'gc-threshold-high':50", "at least 35");
+                    "'gc-threshold-high':50", "at least 39");
     rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                     "'driver':'femu-cxl-ssd','id':'ssd','bus':'rp0',"
                     "'volatile-memdev':'mem','channels':4,"
@@ -21161,7 +21163,7 @@ static void femu_test_cxl_nand_reserve(void *obj, void *data,
                     "'gc-threshold':50,'gc-threshold-high':50}}");
     g_assert_true(qdict_haskey(rsp, "return"));
     qobject_unref(rsp);
-    g_assert_cmpuint(femu_cxl_stat(qts, "blocks-per-plane"), ==, 35);
+    g_assert_cmpuint(femu_cxl_stat(qts, "blocks-per-plane"), ==, 39);
     qtest_quit(qts);
 
     /* Without the FTL there is no collection to keep room for. */
@@ -21173,9 +21175,9 @@ static void femu_test_cxl_nand_reserve(void *obj, void *data,
 }
 
 /*
- * 18 lines of 4 x 4 LUNs x 256 pages, the least realize accepts for 256 MiB.
- * Scattered rewrites leave every victim nearly full of valid pages, so
- * write-backs must wait for forced collection. None may find NAND full or go
+ * 290 lines of 4 x 4 LUNs x 16 pages, the least realize accepts for 256 MiB.
+ * With 16-page blocks, scattered rewrites still find the free lines at the
+ * forced threshold, so write-backs must wait for forced collection. None may find NAND full or go
  * uncached, and the FTL must never run out of lines.
  */
 static void femu_test_cxl_gc_stall(void *obj, void *data,
@@ -21186,7 +21188,7 @@ static void femu_test_cxl_gc_stall(void *obj, void *data,
     g_autofree char *args = g_strdup_printf(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
         "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
-        "pages-per-block=256,blocks-per-plane=18,read-ns=1000,"
+        "pages-per-block=16,blocks-per-plane=290,read-ns=1000,"
         "program-ns=1000,erase-ns=1000 2>%s", path);
     g_autofree char *errors = NULL;
     QTestState *qts = qtest_init(args);
@@ -21234,11 +21236,54 @@ static void femu_test_cxl_gc_stall(void *obj, void *data,
 }
 
 /*
- * A stall over one second warns once, with the geometry and the
- * over-provisioning that keeps stalls short. One-second erases make the
- * first forced collection stall that long; fast-load lets the accesses run
- * on without waiting for it. 256 lines of media at 271 blocks per plane,
- * the least realize accepts; 7% is 274.
+ * Scattered rewrites at 21 blocks per plane, the least realize accepts for
+ * 256 MiB of 4 x 4 LUNs x 256 pages, with the NAND timing of the
+ * run-cxlssd.sh presets. fast-load lets the accesses run on without waiting,
+ * so NAND work queues up as it does under device DMA. The spare lines beyond
+ * the forced reserve let background collection keep up: no request waits for
+ * forced collection at all. At 18 blocks, the least the old rule accepted,
+ * 170 requests waited, the longest 200 ms or more.
+ */
+static void femu_test_cxl_gc_reserve_stall(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE
+        "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
+        "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
+        "pages-per-block=256,blocks-per-plane=21,read-ns=40000,"
+        "program-ns=200000,erase-ns=2000000");
+    uint64_t line_copy = 256 * (40000 + 200000) + 2000000;
+    uint64_t pages = 256 * 1024 * 1024 / 4096;
+    uint64_t pass;
+    uint64_t i;
+
+    femu_cxl_decode(qts);
+    femu_cxl_set(qts, "fast-load", true);
+    for (pass = 0; pass < 3; pass++) {
+        for (i = 0; i < pages; i++) {
+            uint64_t lpn = pass ? i * 4099 % pages : i;
+
+            qtest_writeq(qts, FEMU_CXL_WINDOW + lpn * 4096, lpn | pass << 32);
+        }
+    }
+    femu_cxl_set(qts, "flush-cache", true);
+    g_test_message("gc-stalls %" PRIu64 " gc-stall-max-ns %" PRIu64,
+                   femu_cxl_stat(qts, "gc-stalls"),
+                   femu_cxl_stat(qts, "gc-stall-max-ns"));
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stalls"), ==, 0);
+    g_assert_cmpuint(femu_cxl_stat(qts, "gc-stall-max-ns"), <, line_copy);
+    /* Three passes program more pages than the NAND holds: collection ran. */
+    g_assert_cmpuint(3 * pages, >, 21 * 4 * 4 * 256);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-writes"), ==, 3 * pages);
+    g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * A stall over one second warns once, with the geometry. One-second erases
+ * make the first forced collection stall that long; fast-load lets the
+ * accesses run on without waiting for it. 256 lines of media at 290 blocks
+ * per plane, the least realize accepts.
  */
 static void femu_test_cxl_gc_stall_warn(void *obj, void *data,
                                         QGuestAllocator *alloc)
@@ -21258,7 +21303,7 @@ static void femu_test_cxl_gc_stall_warn(void *obj, void *data,
     args = g_strdup_printf(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
         "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
-        "pages-per-block=16,blocks-per-plane=271,read-ns=1000,"
+        "pages-per-block=16,blocks-per-plane=290,read-ns=1000,"
         "program-ns=1000,erase-ns=1000000000 2>%s", quoted);
     qts = qtest_init(args);
     femu_cxl_decode(qts);
@@ -21282,16 +21327,17 @@ static void femu_test_cxl_gc_stall_warn(void *obj, void *data,
     unlink(log);
     g_assert_cmpuint(femu_cxl_count(text, "forced garbage collection"), ==,
                      1);
-    g_assert_nonnull(strstr(text, "blocks-per-plane=271 "));
-    g_assert_nonnull(strstr(text, "blocks-per-plane=274)"));
+    g_assert_nonnull(strstr(text, "blocks-per-plane=290;"));
 }
 
 /*
- * One-page blocks make a line one page per LUN, and slow reads load only the
- * LUNs that hold a victim's valid pages. A write-back's own program can then
- * end before collection ends on another LUN, and it must still wait for that.
- * The probe writes pages never written before, so its fill reads are free and
- * its media time is the write-back alone.
+ * Four-page blocks make a line four pages per LUN, and slow reads load only
+ * the LUNs that hold a victim's valid pages. A write-back's own program can
+ * then end before collection ends on another LUN, and it must still wait for
+ * that. The probe writes pages never written before, so its fill reads are
+ * free and its media time is the write-back alone. 1155 blocks per plane is
+ * the least realize accepts, and gc-threshold=95 starts collection only at
+ * the forced threshold. Few probe pages keep the spare NAND at that least.
  */
 static void femu_test_cxl_gc_wait(void *obj, void *data,
                                   QGuestAllocator *alloc)
@@ -21299,10 +21345,10 @@ static void femu_test_cxl_gc_wait(void *obj, void *data,
     QTestState *qts = qtest_init(FEMU_CXL_MACHINE
         "-device femu-cxl-ssd,id=ssd,bus=rp0,volatile-memdev=mem,"
         "cache-pages=16,cache-ways=16,channels=4,luns-per-channel=4,"
-        "pages-per-block=1,blocks-per-plane=4313,read-ns=20000,"
-        "program-ns=1000,erase-ns=1000");
+        "pages-per-block=4,blocks-per-plane=1155,gc-threshold=95,"
+        "read-ns=20000,program-ns=1000,erase-ns=1000");
     uint64_t pages = 256 * 1024 * 1024 / 4096;
-    uint64_t probe = 2048;
+    uint64_t probe = 128;
     uint64_t used = pages - probe;
     uint64_t stalled = 0;
     uint64_t bound = 0;
@@ -21312,12 +21358,23 @@ static void femu_test_cxl_gc_wait(void *obj, void *data,
     for (i = 0; i < used; i++) {
         qtest_writeq(qts, FEMU_CXL_WINDOW + i * 4096, i);
     }
-    for (i = 0; i < used; i++) {
-        /* 4099 shares no factor with 63488 pages. */
+    /*
+     * Rewrite until collection is first forced, and probe from there: a full
+     * pass would leave every old line invalid, and background collection
+     * would then free them all before the probe.
+     */
+    for (i = 0; i < 4 * used; i++) {
+        /* 4099 shares no factor with 65408 pages. */
         uint64_t lpn = i * 4099 % used;
 
         qtest_writeq(qts, FEMU_CXL_WINDOW + lpn * 4096, lpn);
+        if (i % 64 == 0 && femu_cxl_stat(qts, "gc-stalls")) {
+            break;
+        }
     }
+    g_test_message("rewrites before the first forced collection: %" PRIu64,
+                   i);
+    g_assert_cmpuint(i, <, 4 * used);
     for (i = used; i < pages; i++) {
         uint64_t media = femu_cxl_stat(qts, "media-time-ns");
         uint64_t stalls = femu_cxl_stat(qts, "gc-stalls");
@@ -27637,6 +27694,8 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-nand-reserve", "femu", femu_test_cxl_nand_reserve,
                  NULL);
     qos_add_test("cxl-gc-stall", "femu", femu_test_cxl_gc_stall, NULL);
+    qos_add_test("cxl-gc-reserve-stall", "femu",
+                 femu_test_cxl_gc_reserve_stall, NULL);
     qos_add_test("cxl-gc-wait", "femu", femu_test_cxl_gc_wait, NULL);
     qos_add_test("cxl-gc-stall-warn", "femu", femu_test_cxl_gc_stall_warn,
                  NULL);

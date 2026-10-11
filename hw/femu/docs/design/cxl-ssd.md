@@ -428,8 +428,9 @@ NAND timing are those of the BBSSD FTL, which the
 [timing model](../concepts/timing-model.md) and the architecture page's
 [BBSSD section](../concepts/architecture.md#bbssd) describe.
 
-Realize refuses NAND whose spare lines do not exceed the forced collection
-reserve by two, so collection always frees a line. A write that finds the
+Realize refuses NAND that leaves less than 7% of the media as spare beyond
+the forced collection reserve and two working lines. Collection then always
+frees a line, and its victims hold invalid pages. A write that finds the
 free lines at the forced threshold waits until the collection erases end on
 every LUN; `gc-stalls` and `gc-stall-ns` count the waits. `media-full`
 counts programs that still find no page. Such a program is not timed, and
@@ -838,7 +839,7 @@ the binary. This table explains how they interact.
 | [Backend](../reference/properties.md#inherited-from-cxl-type3) | `volatile-memdev` | Required and the only backend accepted: `memdev`, `persistent-memdev`, `volatile-dc-memdev` and `num-dc-regions` are refused, and `lsa` only with `lsa-control=off`. Size a nonzero multiple of 256 MiB, at most 120 GiB. `der=cylon` needs it hugetlbfs, `share=on`, `prealloc=on` |
 | [Cache](../reference/properties.md#cache) | `cache-pages`, `cache-policy` | `cache-pages=0` disables the cache. Otherwise at most the media page count and divisible by `cache-ways` |
 | [Cache tunables](../reference/runtime-properties.md#cache-tunables-also-accepted-on--device) | `cache-ways`, `prefetch-degree`, `prefetch-stride` | Accepted on `-device` and changeable with `qom-set`. Ways must be nonzero and divide `cache-pages`. Prefetch values are bounded by the media page count; the effective degree is capped at `cache-pages` |
-| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must leave spare lines beyond the forced collection reserve. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these also apply to the NVMe namespace and the controller's own geometry and timing properties are ignored |
+| [NAND geometry and timing](../reference/properties.md#nand-geometry-and-timing) | `ftl`, `channels`, `luns-per-channel`, `pages-per-block`, `blocks-per-plane`, `gc-threshold`, `gc-threshold-high`, `read-ns`, `program-ns`, `erase-ns`, `channel-ns` | Feed the private BBSSD FTL. `blocks-per-plane=0` sizes the NAND to 5/4 of the media plus 4 blocks per plane; an explicit value must leave the media plus 7% beyond the forced collection reserve and two working lines. `ftl=off` drops all media timing and forbids an NVMe link. When linked, these also apply to the NVMe namespace and the controller's own geometry and timing properties are ignored |
 | Cylon media switches (same table) | `cylon-first-touch-program`, `cylon-free-writeback` | Change the media model to match published Cylon experiments; off for normal use |
 | [Direct mapping](../reference/properties.md#direct-mapping-der) | `der`, `der-replace-rate`, `cylon-kernel-ack`, `concurrent-misses` | `der=memslot` is refused under TCG. `der=cylon` without `cylon-kernel-ack=on` is refused. `der-replace-rate` matters only for `memslot`. `concurrent-misses=auto` follows whether DER is available |
 | [Caching API, control channel and logs](../reference/properties.md#caching-api-control-channel-and-logs) | `cca`, `lsa-control`, `log-dir`, `tracefs-dir`, `log-limit` | `cca=off` registers no BAR5. `lsa-control=on` refuses an `lsa` backend. `log-limit=0` opens no I/O log and takes no statistics appends. `tracefs-dir` unset makes commands 91 and 81 no-ops on the host |
@@ -846,8 +847,8 @@ the binary. This table explains how they interact.
 
 `run-cxlssd.sh` uses defaults that follow Cylon's launch script and differ
 from the device's (a cache of 1/20 of the media, direct mapped, 8 by 8
-channels and LUNs, `lsa-control=on`, and no spare NAND blocks for the `48G`
-and `96G` presets); the [guide](../modes/cxl-ssd.md#with-run-cxlssdsh) has
+channels and LUNs, `lsa-control=on`, and the least NAND the device accepts
+for the `48G` and `96G` presets); the [guide](../modes/cxl-ssd.md#with-run-cxlssdsh) has
 the table.
 
 ## Counters

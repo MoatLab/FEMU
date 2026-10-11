@@ -1490,19 +1490,32 @@ host wait; qtests validate modeled timing and BQL release independently.
 ## Full NAND
 
 A line is one block index across all channels and LUNs. Forced collection
-keeps `floor((1 - gc-threshold-high / 100) * blocks-per-plane)` lines free.
-Realize refuses a geometry whose spare lines (lines beyond the media size)
-are fewer than that reserve plus two. The error gives the smallest
-`blocks-per-plane` that meets the rule within the FTL limits, or says that
-none does. With `ftl=off` the rule does not apply.
+keeps `(1 - gc-threshold-high / 100) * blocks-per-plane` lines free, rounded
+down as the FTL computes it. Two more lines are the open line and the line
+collection writes into. Realize refuses a geometry whose other lines hold
+less than the media plus 7%:
 
-The rule removes the full-NAND case. When collection is forced, a closed
-line with an invalid page always exists, and there is room to move its
-valid pages. The guest uses the device as memory, so almost all data stays
-valid. With no spare line, every program after the first fill fails. With
-one spare line the FTL runs out of lines on the way and logs "No free
-lines". With spare lines only in the reserve, each write copies a nearly
-full line.
+```
+ blocks-per-plane lines = media + 7% or more | 2 working | reserve (kept free)
+                                  ^ collection works in this spare space
+```
+
+The error gives the smallest `blocks-per-plane` that meets the rule within
+the FTL limits, or says that none does. With `ftl=off` the rule does not
+apply. Automatic sizing (`blocks-per-plane=0`) starts at 5/4 of the media
+plus 4 blocks and steps up until the rule holds. With the default
+`gc-threshold-high=95` the start already meets it; a lower threshold keeps
+more lines free and so needs more blocks.
+
+The rule removes the full-NAND case and keeps collection cheap. The guest
+uses the device as memory, so almost all data stays valid. With no spare
+line, every program after the first fill fails. With one spare line the
+FTL runs out of lines on the way and logs "No free lines". With spare lines
+only in the reserve, nearly every line that collection takes is still full
+of valid pages. Each write that reaches the reserve then waits for a full
+line copy, and the queued copies grow into stalls of minutes. The 7% beyond
+the reserve leaves invalid pages in the victims, so background collection
+can keep up.
 
 A write that finds the free lines at the forced threshold waits for
 collection. The FTL frees the victim line in its metadata at once and books
@@ -1517,18 +1530,18 @@ program of the request itself waits for its LUN, so the wait on every LUN
 adds only the difference between LUNs. With GC delay off (the FEMU flip
 command), collection books no NAND time and no request waits.
 
-The minimum that realize accepts keeps NAND from filling, not stalls short.
-Near it, nearly every line that collection takes is still full of valid
-pages, so each collection copies a line and erases it on every LUN, and
-writes wait hundreds of milliseconds to seconds. FEMU warns once per device
-when a request is charged more than one second of collection (device DMA
-operations and `fast-load` accesses are charged without waiting). With
-less than about 7% over-provisioning (lines beyond the media), the warning
-names the current `blocks-per-plane` and the value for 7%; otherwise it
-says that the NAND timing or queued NAND work sets the stall. Use at least 7% for measurements, as the `run-cxlssd.sh`
-presets do (822 blocks per plane at 48 GiB and 1644 at 96 GiB, with 8
-channels, 8 LUNs and 256-page blocks), and report `gc-stalls` and
-`gc-stall-max-ns` with the results.
+The rule does not bound queued NAND work. Device DMA operations and
+`fast-load` accesses queue NAND work without waiting for it. A guest that
+writes faster than the NAND absorbs thus builds a backlog, and a request
+that reaches the reserve waits for all of it. FEMU warns once per device
+when a request is charged more than one second of collection. The warning
+names the current `blocks-per-plane`; more blocks per plane make such
+stalls shorter.
+
+The `run-cxlssd.sh` presets use the least that realize accepts: 867 blocks
+per plane at 48 GiB and 1732 at 96 GiB, with 8 channels, 8 LUNs and
+256-page blocks. Report `gc-stalls` and `gc-stall-max-ns` with the
+results.
 
 `media-full` counts programs that still find no free page. The rule keeps it
 at 0. If one occurs, its program is not timed and the first one reports an
@@ -1602,7 +1615,7 @@ commands 1 and 5.
 | `CXL_SIZE` | `256M` | Media size, an integer with an `M` or `G` suffix |
 | `CACHE_PAGES` | `(size_mb / 20) * 256` | `cache-pages`, a cache of size/20 MiB as in Cylon |
 | `CACHE_WAYS` | 1 | `cache-ways`, direct mapped as Cylon's default `buffer_way=0`; `full` means `cache-pages` |
-| `BLOCKS_PER_PLANE` | 822 for `48G`, 1644 for `96G`, else 0 | `blocks-per-plane`; the presets add 7% over-provisioning to Cylon's NAND size, and 0 lets FEMU size it |
+| `BLOCKS_PER_PLANE` | 867 for `48G`, 1732 for `96G`, else 0 | `blocks-per-plane`; the presets are the least realize accepts for Cylon's NAND size, and 0 lets FEMU size it |
 | `CACHE_POLICY` | `fifo` | `cache-policy` |
 | `DER` | `off` | `der` |
 | `CYLON_KERNEL_ACK` | `off` | `cylon-kernel-ack`; set `on` only on the fixed host kernel |

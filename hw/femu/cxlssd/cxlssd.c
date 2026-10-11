@@ -412,45 +412,31 @@ void femu_cxl_delay(uint64_t ns)
     femu_cxl_retake(&held);
 }
 
-/* Over-provisioning that keeps forced collection stalls short. */
+/*
+ * Spare NAND, in percent of the media, beyond the lines forced collection
+ * keeps free. Realize refuses less (cxl_spare_enough()).
+ */
 #define FEMU_CXL_OP_PERCENT 7
 
 /*
- * Report the first stall over a second, once per device. Such stalls
- * usually mean little spare NAND: nearly every line that collection takes
- * is still full of valid pages. With enough spare NAND, the NAND timing or
- * queued NAND work sets them. Under the CXL lock and the BQL, from the main
- * loop: the FTL threads must not report while they hold @lock.
+ * Report the first stall over a second, once per device. Realize keeps
+ * spare NAND for collection, so the NAND timing or queued NAND work sets
+ * such a stall. Under the CXL lock and the BQL, from the main loop: the FTL
+ * threads must not report while they hold @lock.
  */
 static void cxl_gc_stall_warn(FemuCxlMedia *s)
 {
     uint64_t wait = qatomic_read(&s->gc_stall_long_ns);
-    uint64_t line = (uint64_t)s->channels * s->luns_per_channel *
-                    s->pages_per_block;
-    uint64_t want = DIV_ROUND_UP(s->backend.size / 4096 *
-                                 (100 + FEMU_CXL_OP_PERCENT), 100 * line);
 
     if (!wait || s->gc_stall_warned) {
         return;
     }
     s->gc_stall_warned = true;
-    if (s->blocks_per_plane < want) {
-        warn_report("femu-cxl-ssd: a media request was charged %" PRIu64
-                    " ms for forced garbage collection; blocks-per-plane=%"
-                    PRIu32 " leaves little spare NAND, and about %u%% "
-                    "over-provisioning (blocks-per-plane=%" PRIu64 ") "
-                    "usually keeps such stalls short (gc-stall-max-ns)",
-                    wait / SCALE_MS, s->blocks_per_plane,
-                    FEMU_CXL_OP_PERCENT, want);
-    } else {
-        warn_report("femu-cxl-ssd: a media request was charged %" PRIu64
-                    " ms for forced garbage collection with "
-                    "blocks-per-plane=%" PRIu32 " (at least %u%% "
-                    "over-provisioning); the NAND timing or queued NAND "
-                    "work sets this stall (gc-stall-max-ns)",
-                    wait / SCALE_MS, s->blocks_per_plane,
-                    FEMU_CXL_OP_PERCENT);
-    }
+    warn_report("femu-cxl-ssd: a media request was charged %" PRIu64
+                " ms for forced garbage collection with blocks-per-plane=%"
+                PRIu32 "; the NAND timing or queued NAND work sets this "
+                "stall, and more blocks per plane make it shorter "
+                "(gc-stall-max-ns)", wait / SCALE_MS, s->blocks_per_plane);
 }
 
 /*
@@ -682,8 +668,9 @@ static void *cxl_worker(void *opaque)
 }
 
 /*
- * Realize refuses NAND whose spare lines do not exceed the forced collection
- * reserve, so collection always frees a line and no program should fail. If
+ * Realize refuses NAND without spare lines beyond the forced collection
+ * reserve (cxl_spare_enough()), so collection always frees a line and no
+ * program should fail. If
  * one still does, only its timing is lost. The payload is in host memory, so
  * the failure never vetoes an eviction or an insert.
  */
@@ -1814,19 +1801,27 @@ void femu_cxl_backlog(FemuCxlMedia *s)
 }
 
 /*
- * Whether @blocks lines leave at least two spare lines more than forced
- * collection keeps free. Collection then always finds a line with an invalid
- * page and room to move its valid ones, so a write never finds NAND full.
- * With less, the spare space would sit in the reserve: every write would copy
- * a nearly full line, and with none every program after the first fill fails.
- * The reserve is computed as bb_gc_forced_lines() computes it.
+ * Whether @blocks lines leave room for collection beyond what forced
+ * collection keeps free. Forced collection keeps a reserve of free lines,
+ * computed as bb_gc_forced_lines() computes it, and two more lines are the
+ * open line and the one collection writes into. Only the lines beyond those
+ * and the media lower the copies per collected line, so they must be at
+ * least FEMU_CXL_OP_PERCENT of the media. With less, nearly every line that
+ * collection takes is full of valid pages, each write that finds the reserve
+ * waits for a full line copy, and the queued copies grow into stalls of
+ * minutes. With no spare line at all, every program after the first fill
+ * fails.
  */
 static bool cxl_spare_enough(FemuCxlMedia *s, uint64_t size, uint64_t line,
                              uint32_t blocks)
 {
     uint64_t reserve = (uint64_t)((1 - s->gc_threshold_high / 100.0) * blocks);
 
-    return line * blocks >= size / 4096 + (reserve + 2) * line;
+    if (blocks < reserve + 2) {
+        return false;
+    }
+    return line * (blocks - reserve - 2) * 100 >=
+           size / 4096 * (100 + FEMU_CXL_OP_PERCENT);
 }
 
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp)

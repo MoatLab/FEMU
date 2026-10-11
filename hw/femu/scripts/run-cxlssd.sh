@@ -10,7 +10,7 @@ set -euo pipefail
 #   CXL_SIZE           media size, integer with M or G (256M)
 #   CACHE_PAGES        cache-pages (a size/20 MiB cache: size_mb / 20 * 256)
 #   CACHE_WAYS         cache-ways (1); "full" means CACHE_PAGES
-#   BLOCKS_PER_PLANE   blocks-per-plane (822 for 48G, 1644 for 96G, else 0,
+#   BLOCKS_PER_PLANE   blocks-per-plane (867 for 48G, 1732 for 96G, else 0,
 #                      which lets FEMU size it)
 #   CACHE_POLICY       cache-policy (fifo)
 #   DER                der (off)
@@ -64,10 +64,12 @@ if [[ $CACHE_WAYS == full ]]; then
     CACHE_WAYS=$CACHE_PAGES
 fi
 # Cylon's 48/96 GiB presets (768 and 1536 blocks) have no over-provisioning,
-# which the device refuses; these add 7%, rounded up. 0 lets FEMU size it.
+# which the device refuses. These are the least it accepts: 7% of the media
+# beyond the lines forced collection keeps free (gc-threshold-high=95) and
+# two more. 0 lets FEMU size it.
 case $size_mb in
-49152) default_blocks=822 ;;
-98304) default_blocks=1644 ;;
+49152) default_blocks=867 ;;
+98304) default_blocks=1732 ;;
 *) default_blocks=0 ;;
 esac
 BLOCKS_PER_PLANE=${BLOCKS_PER_PLANE:-$default_blocks}
