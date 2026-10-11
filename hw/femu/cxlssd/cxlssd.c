@@ -266,7 +266,7 @@ void femu_cxl_clear_need_bql(void)
 }
 
 /*
- * The CXL lock protects the gate. Accesses share it, so misses to different
+ * The CXL lock protects the guard. Accesses share it, so misses to different
  * pages wait for the media together; flush, invalidation and teardown take
  * it alone, after the accesses in progress, and new accesses wait for them.
  */
@@ -286,7 +286,7 @@ void femu_cxl_enter(FemuCxlMedia *s)
 
 /*
  * Teardown that a fault exit without the BQL left to the main loop. It takes
- * the gate alone, which waits only for accesses in progress: those see
+ * the guard alone, which waits only for accesses in progress: those see
  * @closing and leave without waiting for the main loop.
  */
 static void cxl_release_bh(void *opaque)
@@ -304,7 +304,7 @@ static void cxl_release_bh(void *opaque)
 }
 
 /*
- * Leave the teardown in @release to a bottom half, which takes the gate
+ * Leave the teardown in @release to a bottom half, which takes the guard
  * alone. Teardown stops the worker, which can be in a long collection, and
  * a thread inside a device's re-entrancy guard must not wait for that.
  */
@@ -318,14 +318,14 @@ void femu_cxl_release_later(FemuCxlMedia *s)
     }
 }
 
-/* The last one out of the gate runs what was deferred to it. */
-static void cxl_gate_idle(FemuCxlMedia *s)
+/* The last one out of the guard runs what was deferred to it. */
+static void cxl_guard_idle(FemuCxlMedia *s)
 {
     /*
-     * Teardown deferred by an unplug runs while the gate is still held. It
+     * Teardown deferred by an unplug runs while the guard is still held. It
      * stops threads and deletes the memory listener, which needs the BQL. A
-     * thread without it leaves the gate open and the teardown to a bottom
-     * half: holding the gate for the main loop would make a vCPU wait for
+     * thread without it leaves the guard open and the teardown to a bottom
+     * half: holding the guard for the main loop would make a vCPU wait for
      * it, and the main loop may be pausing vCPUs. So does a thread inside
      * a device's re-entrancy guard (see femu_cxl_release_later()).
      */
@@ -339,7 +339,7 @@ static void cxl_gate_idle(FemuCxlMedia *s)
         release(s);
     }
     s->busy = false;
-    /* Invalidation found the gate taken and did not wait for it. */
+    /* Invalidation found the guard taken and did not wait for it. */
     if (s->nvme_kick && s->nvme_bh) {
         s->nvme_kick = false;
         qemu_bh_schedule(s->nvme_bh);
@@ -348,7 +348,7 @@ static void cxl_gate_idle(FemuCxlMedia *s)
 
 void femu_cxl_leave(FemuCxlMedia *s)
 {
-    cxl_gate_idle(s);
+    cxl_guard_idle(s);
     qemu_cond_broadcast(&s->idle);
 }
 
@@ -381,7 +381,7 @@ void femu_cxl_enter_access(FemuCxlMedia *s)
 void femu_cxl_leave_access(FemuCxlMedia *s)
 {
     if (!--s->accesses) {
-        cxl_gate_idle(s);
+        cxl_guard_idle(s);
     }
     qemu_cond_broadcast(&s->idle);
 }
@@ -1063,7 +1063,7 @@ static MemTxResult cxl_access(FemuCxlMedia *s, uint64_t hpa, uint64_t dpa,
     /* Media time starts once the pages are held, not while waiting for them. */
     op.start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     /*
-     * Checked again inside the gate: a fill authorised before a cache
+     * Checked again inside the guard: a fill authorised before a cache
      * disable or pin that it waited behind must not charge a read for a
      * page that cannot stay.
      */
@@ -1331,7 +1331,7 @@ static void cxl_media_post(FemuCxlMedia *s, uint64_t lpn, bool write)
 /*
  * Serve an access made inside a device's re-entrancy guard, typically that
  * device's DMA from its MMIO handler or bottom half. The guard is a flag on
- * the device, and its MMIO needs the BQL. A wait for the gate, a held page
+ * the device, and its MMIO needs the BQL. A wait for the guard, a held page
  * or the media releases the BQL, and while it is released the device
  * refuses every other access as re-entrant: a vCPU's doorbell write would be
  * dropped. The main loop's other accesses, such as a block layer
@@ -1513,7 +1513,7 @@ bool femu_cxl_fill_conflict(FemuCxlMedia *s, uint64_t lpn)
  * holding the set's pages or recent protections of other vCPUs. Returns
  * true when a new fill can keep the page, false when it cannot, the wait
  * timed out, or the device was reset, invalidated or closed meanwhile.
- * CXL lock; the caller holds no page and is outside the gate.
+ * CXL lock; the caller holds no page and is outside the guard.
  */
 bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
                         bool keep_own)
@@ -1526,7 +1526,7 @@ bool femu_cxl_fill_wait(FemuCxlMedia *s, uint64_t lpn, int64_t deadline,
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         int64_t until = deadline;
 
-        /* Teardown frees the cache while this waits outside the gate. */
+        /* Teardown frees the cache while this waits outside the guard. */
         if (s->closing || !s->started || s->invalidations != generation) {
             return false;
         }
@@ -2041,7 +2041,7 @@ static void cxl_nvme_drop(FemuCxlMedia *s, uint64_t first, uint64_t last)
 
 /*
  * Apply what linked NVMe writes replaced. Invalidation never waits for the
- * gate: when it is taken, the holder reschedules this as it leaves.
+ * guard: when it is taken, the holder reschedules this as it leaves.
  */
 void femu_cxl_nvme_bh(void *opaque)
 {
@@ -2196,7 +2196,7 @@ void femu_cxl_stop(FemuCxlMedia *s)
     }
     /*
      * A waited request waits on a condition variable on its caller's stack,
-     * which stop cannot reach, so none may be outstanding here. The gate
+     * which stop cannot reach, so none may be outstanding here. The guard
      * guarantees it: teardown leaves the media to the last holder. Posted
      * requests may be queued; the worker runs them before it exits.
      */

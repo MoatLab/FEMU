@@ -116,16 +116,16 @@ struct FemuCxlMedia {
     uint32_t cylon_fault_stop;
     OnOffAuto concurrent;
     bool busy;
-    /* Accesses sharing the gate, and operations waiting to take it alone. */
+    /* Accesses sharing the guard, and operations waiting to take it alone. */
     uint64_t accesses;
     uint64_t exclusive_waiters;
     /* Pages held by accesses and write-backs in progress. */
     GHashTable *pages;
-    /* Threads waiting for the gate, and how often it has been taken. */
+    /* Threads waiting for the guard, and how often it has been taken. */
     uint32_t waiters;
     uint64_t entries;
     bool closing;
-    /* Set when unplug found the gate held; run by the holder as it leaves. */
+    /* Set when unplug found the guard held; run by the holder as it leaves. */
     void (*release)(struct FemuCxlMedia *s);
     /* A thread without the BQL left @release to a bottom half. */
     bool release_scheduled;
@@ -219,7 +219,7 @@ struct FemuCxlMedia {
     QEMUBH *posted_bh;
     /*
      * Accesses skip their completion wait; the NAND timelines still advance.
-     * Changed only under the gate held alone. BQL and CXL lock.
+     * Changed only under the guard held alone. BQL and CXL lock.
      */
     bool fast_load;
     /*
@@ -264,7 +264,7 @@ struct FemuCxlMedia {
      * The NVMe FTL thread appends what its writes replaced under @lock,
      * tagging each request with the batch number @nvme_taken + 1. @nvme_bh
      * takes the batch under @lock, drops those pages from the cache under
-     * the locks and the gate, then publishes its number in @nvme_done, which
+     * the locks and the guard, then publishes its number in @nvme_done, which
      * the NVMe completions wait for.
      */
     GArray *nvme_ranges;

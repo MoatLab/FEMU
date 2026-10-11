@@ -20824,7 +20824,7 @@ static void femu_test_cxl_wait(void *obj, void *data,
         qtest_writeb(qts, 0x6002, 1);
         /*
          * The config write runs inside the host bridge's dispatch guard, so
-         * it must finish while the media write still holds the gate.
+         * it must finish while the media write still holds the guard.
          */
         while (qtest_readb(qts, 0x6001) != 2) {
             g_assert_cmpint(g_get_monotonic_time(), <, deadline);
@@ -23447,7 +23447,7 @@ static void femu_test_cca_der_replace(void *obj, void *data,
 }
 
 /*
- * A Get LSA command that finds the gate held by a sleeping CCA chunk is
+ * A Get LSA command that finds the guard held by a sleeping CCA chunk is
  * queued rather than waited for inside the mailbox handler.
  */
 static void femu_test_cca_lsa_busy(void *obj, void *data,
@@ -23468,7 +23468,7 @@ static void femu_test_cca_lsa_busy(void *obj, void *data,
     }
     femu_cca_post_raw(&c, 0, CCA_CTRL_INVALIDATE, CCA_F_ALL, 0, 0, 0);
     femu_cca_kick(&c);
-    /* The first chunk now sleeps for half a second holding the gate. */
+    /* The first chunk now sleeps for half a second holding the guard. */
     femu_cca_poll_stat(c.qts, "cca-writebacks", 256);
     qtest_writel(c.qts, mbox + CXL_MAILBOX_REGISTERS_SIZE, 0);
     qtest_writel(c.qts, mbox + CXL_MAILBOX_REGISTERS_SIZE + 4, 1);
@@ -24006,7 +24006,7 @@ static void femu_test_cxl_pingpong_4(void *obj, void *data,
 /*
  * Fault exits served without the BQL, as KVM sends them, from @threads
  * vCPUs at once: test-storm runs the real service in threads that act as
- * vCPUs. Misses overlap in the gate, as with Cylon. One set of 64 ways over
+ * vCPUs. Misses overlap in the guard, as with Cylon. One set of 64 ways over
  * 128 pages, so fills evict each other, refault, protect, conflict and hand
  * pages to the emulator, while this thread reads and writes the window
  * through MMIO (the BQL path).
@@ -24723,7 +24723,7 @@ static void femu_test_cxl_storm_bench(void *obj, void *data,
 /*
  * Change the device under faults in flight: decoder commits (each an
  * invalidation between two register writes), cache way changes and flushes
- * (the gate taken alone) and a system reset, which clears the decoders.
+ * (the guard taken alone) and a system reset, which clears the decoders.
  */
 static void femu_test_cxl_storm_change(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -24753,7 +24753,7 @@ static void femu_test_cxl_storm_change(void *obj, void *data,
 }
 
 /*
- * Unplug the device under faults in flight: accesses leave the gate, the
+ * Unplug the device under faults in flight: accesses leave the guard, the
  * teardown that one of them would run goes to the main loop, and nothing
  * the faults still hold is freed under them. A new device then takes the
  * window and the remaining faults.
@@ -25492,15 +25492,15 @@ static void femu_test_cxl_nvme_unplug(void *obj, void *data,
 }
 
 /*
- * While a long caching-API command holds the gate, a linked write's
+ * While a long caching-API command holds the guard, a linked write's
  * completion waits for the invalidation that follows it. With the
  * controller removed meanwhile, the invalidation still runs later.
  *
- * Eight writebacks of 100 ms each hold the gate for about 800 ms but
+ * Eight writebacks of 100 ms each hold the guard for about 800 ms but
  * occupy only eight of the sixteen LUNs, so the NVMe write itself, on the
  * next LUN, is due after about 100 ms.
  */
-static void femu_test_cxl_nvme_gate(void *obj, void *data,
+static void femu_test_cxl_nvme_guard(void *obj, void *data,
                                     QGuestAllocator *alloc)
 {
     bool unplug = data != NULL;
@@ -27910,10 +27910,10 @@ static void femu_register_nodes(void)
     qos_add_test("cxl-nvme-unplug", "femu", femu_test_cxl_nvme_unplug, NULL);
     qos_add_test("cxl-nvme-slot-off", "femu", femu_test_cxl_nvme_unplug,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
-    qos_add_test("cxl-nvme-gate", "femu", femu_test_cxl_nvme_gate, NULL);
+    qos_add_test("cxl-nvme-guard", "femu", femu_test_cxl_nvme_guard, NULL);
     qos_add_test("cxl-nvme-barrier", "femu", femu_test_cxl_nvme_barrier,
                  NULL);
-    qos_add_test("cxl-nvme-gate-unplug", "femu", femu_test_cxl_nvme_gate,
+    qos_add_test("cxl-nvme-guard-unplug", "femu", femu_test_cxl_nvme_guard,
                  &(QOSGraphTestOptions) { .arg = (void *)1 });
     {
         static const char * const policies[] = {

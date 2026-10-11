@@ -99,27 +99,27 @@ library can be built independently of QEMU.
 CXL MMIO arrives on vCPU threads under the BQL; qtest and management operations
 also hold it. Cylon fault exits arrive on vCPU threads without it. The CXL
 lock protects payload copies, cache membership, counters and DER mappings;
-see "Locking" below. A per-device operation gate is shared by accesses and taken
+see "Locking" below. A per-device operation guard is shared by accesses and taken
 alone by cache flushes, CCA commands, linked-NVMe drops and way changes; those
-wait for the accesses in progress, and new accesses wait for them. Gate
+wait for the accesses in progress, and new accesses wait for them. Guard
 waiters release the locks using a condition variable. Invalidation never waits: configuration writes, component writes and
 CCI commands run inside another owner's re-entrancy guard, and blocking there
 would refuse unrelated accesses from other vCPUs. It revokes DER mappings at
 once and bumps the read-only `invalidations` generation; an access in flight
 does not install a mapping when the generation moved during its media delay. An access holds an object reference until completion;
 teardown marks the device closing and prevents new work. It never waits for
-the gate either: a guest unplug arrives inside the host bridge's dispatch
-guard. If an operation or any access holds the gate, teardown revokes and
+the guard either: a guest unplug arrives inside the host bridge's dispatch
+guard. If an operation or any access holds the guard, teardown revokes and
 disables DER, finishes the PCI teardown, and leaves the media (DER state, FTL
-worker, labels and I/O log) to be freed by the last one to leave the gate;
+worker, labels and I/O log) to be freed by the last one to leave the guard;
 those operations then skip their payload copy and report a transaction error.
-A waiter re-routes and re-translates after entering the gate and completes at
+A waiter re-routes and re-translates after entering the guard and completes at
 the current DPA, or with random data when media became disabled, as the parent
 Type-3 device would; only an address that no longer decodes fails.
 
 The requesting thread drops the locks both while handing work to the FTL
 worker and during the remaining media delay, while keeping its share of the
-gate.
+guard.
 An access holds the pages it touches, in ascending order, until it completes:
 accesses to one page stay ordered, a second miss to a page waits for the first
 fill instead of repeating it, and misses to different pages wait for the
@@ -143,7 +143,7 @@ a waiter never wakes for another request. The worker alone modifies FTL/NAND sta
 requests in arrival order; the NAND model overlaps them where they reach
 different LUNs. Each access, flush, way change and CCA chunk accumulates its
 own media time. Cache iterators, entries and payload stay stable because
-flush waits for the gate, teardown defers freeing them to the last holder,
+flush waits for the guard, teardown defers freeing them to the last holder,
 and invalidation touches only DER mappings. The FEMU-owned fixed-window overlay disables its own I/O recursion guard.
 It dispatches FEMU media directly, so no parent window guard remains engaged
 across a wait. The component-register overlay revokes and then enters the
@@ -151,7 +151,7 @@ parent register callback without waiting. Plain Type-3 callbacks retain their no
 Read-only QOM counters may show an operation in progress.
 The worker is joined before its state is destroyed. Stop requires that no
 waited request is outstanding, because it cannot reach the waiters'
-condition variables; the gate guarantees this. A posted request (see "Device DMA into the window" below)
+condition variables; the guard guarantees this. A posted request (see "Device DMA into the window" below)
 has no waiter, and the worker runs and frees it before it exits.
 
 The worker receives only page numbers, operation types and timestamps. It
@@ -168,7 +168,7 @@ exits, device DMA into the window and waits for garbage collection.
 #### Lock order
 
 The CXL lock (`femu_cxl_lock()` in `cxlssd.c`) is one lock for every
-`femu-cxl-ssd`. It protects the operation gate and the page holds, the
+`femu-cxl-ssd`. It protects the operation guard and the page holds, the
 cache, the protection and overflow tables, the device's QOM counters, the
 DER and Cylon bookkeeping, the adapter's window list and list of live
 devices, and the per-vCPU Cylon fault records. It is recursive within a
@@ -196,7 +196,7 @@ The rules:
   Cylon memory listener and install bottom half, the vCPU destroy hook and
   the system reset handler. The QOM type table does not change after
   startup (no modules), so QOM casts need no lock.
-- A wait (the FTL handoff, the media delay, the gate, page and fill waits,
+- A wait (the FTL handoff, the media delay, the guard, page and fill waits,
   the caching API delays and yields) releases the CXL lock completely and
   the BQL if the thread holds it. It takes them back in lock order. A
   condition wait releases the lock it sleeps on atomically. So each hold of
@@ -220,7 +220,7 @@ slower at 8 vCPUs on the R0 pilot.
 
 FEMU makes the lock a mutex once, under the BQL, before it enables version 2
 in KVM; it never goes back. A thread that holds the lock at that time takes
-the mutex. A thread that sleeps on the BQL in a gate, page or fill wait
+the mutex. A thread that sleeps on the BQL in a guard, page or fill wait
 wakes on a broadcast and sleeps on the mutex from then on. Version 1 exits
 for undecodable instructions take the BQL, as before. The `test-storm`
 qtest hook makes the lock a mutex for its mode 0 (exits without the BQL);
@@ -248,7 +248,7 @@ Some steps still need the BQL:
   `femu-cxl-ssd` below it.
 - The first map after an invalidation, which scans the QOM tree for the
   windows of the device. The exit checks this before each fill attempt
-  and again after the fill's wait for the gate, before it counts or charges
+  and again after the fill's wait for the guard, before it counts or charges
   anything.
 - A `der=memslot` device, whose mappings change the memory map.
 
@@ -260,10 +260,10 @@ version 2 now run without it:
   memory map, its ID is only reserved under the KVM slots mutex, and the
   kernel serializes slot changes. The kernel serves the TLB flush ioctl
   before it takes the vCPU mutex.
-- Teardown that unplug left to the last access out of the gate goes to a
-  bottom half when that access has no BQL. The gate stays open: accesses in
+- Teardown that unplug left to the last access out of the guard goes to a
+  bottom half when that access has no BQL. The guard stays open: accesses in
   flight see the device closing and leave, and the bottom half takes the
-  gate alone. No vCPU waits for the main loop, which may be pausing vCPUs.
+  guard alone. No vCPU waits for the main loop, which may be pausing vCPUs.
 - The last reference to a device finalizes it. A fault exit drops a
   reference to a closing device in a bottom half. Until unplug sets closing
   (under the CXL lock), the parent holds a reference.
@@ -340,7 +340,7 @@ MMIO while its guard is engaged. Such an access:
   mutex for a whole request, and a write at the forced threshold runs its
   whole collection in it, so a guarded access that queued under that mutex
   would hold the BQL and the CXL lock for that collection.
-- Never takes the gate, never holds a page, takes no direct mapping and
+- Never takes the guard, never holds a page, takes no direct mapping and
   writes no I/O log record. A fill from a fault exit is refused there;
   fault exits never run inside a guard.
 
@@ -1097,11 +1097,11 @@ lock, drains the request ring and executes commands one at a time in
 submission order. It releases them between commands and after every chunk,
 and after 64 commands it gives them up and wakes itself again, so a guest
 that keeps the ring full cannot hold them. Each command runs in chunks of at most 256 pages of work and 4096
-lookups, and each chunk holds the operation gate and then waits out its
+lookups, and each chunk holds the operation guard and then waits out its
 accumulated media time with the locks released, as a guest access does. A
-gate waiter woken as a chunk ends can still lose the locks to the thread, so
+guard waiter woken as a chunk ends can still lose the locks to the thread, so
 before
-each chunk the thread lets one waiting access take the gate first. Guest
+each chunk the thread lets one waiting access take the guard first. Guest
 accesses thus run between chunks, a long invalidation never keeps a vCPU in
 an MMIO exit, and the main loop is never blocked. INVALIDATE and
 CACHE_DISABLE revoke a chunk's direct mappings in one memory transaction
@@ -1110,13 +1110,13 @@ revokes every direct mapping once up front when any exist, and they map again
 lazily on later accesses. The worst stall a chunk adds to an access is about
 256 programs. The checks that must precede any change (the PIN budget, pinned
 pages in an INVALIDATE or CACHE_DISABLE range, the candidate snapshot) run
-in one gate hold without media time; they are bounded by the cache size,
-as a flush is. Cache membership still changes only under the gate.
+in one guard hold without media time; they are bounded by the cache size,
+as a flush is. Cache membership still changes only under the guard.
 
 Device reset reformats the rings and zeroes every slot under the locks, so
 entries posted against stale indices run as NOPs, bumps EPOCH, clears READY
 and asks the
-thread to unpin everything and end every uncached range under the gate; READY returns when
+thread to unpin everything and end every uncached range under the guard; READY returns when
 it has. An index stored just after a reset can still read as too far ahead,
 or complete zeroed NOPs into slots the guest hands out again, so the library
 reads EPOCH again after each index it stores: a changed epoch after a tail
@@ -1125,7 +1125,7 @@ more and fail the command with `-ECANCELED`. A command in flight notices the new
 dropped without a completion, as is a command still running at unplug (the
 design's `-ESHUTDOWN` has no ring left to carry it). Unplug does not wait either: the thread holds
 a reference to the device, like an access in flight; unplug sets its stop
-flag, the thread stops at the next page and cuts its media delay short, frees the media as the gate
+flag, the thread stops at the next page and cuts its media delay short, frees the media as the guard
 holder if unplug deferred that, and exits, dropping the reference.
 
 ### Commands
@@ -1248,8 +1248,8 @@ lock, because
 `nvme_pause_pollers()` waits for it under the BQL. For each command in rule 1
 it appends the page ranges and a sequence number under that mutex and
 schedules a main-loop bottom half. Like any invalidation, the bottom half
-never waits for the gate: when the gate is held it sets a flag and the holder
-reschedules it on leaving. Otherwise it takes the gate, applies the ranges in
+never waits for the guard: when the guard is held it sets a flag and the holder
+reschedules it on leaving. Otherwise it takes the guard, applies the ranges in
 one memory transaction, and publishes the last sequence applied. A poller
 does not post a completion whose sequence is not yet published; it retries on
 its next sweep, and completions due after it on that poller wait too. The
@@ -1258,10 +1258,10 @@ over 64 pages clears every direct mapping at once rather than revoking page by
 page, because Cylon revocation flushes the VM twice per page; with a direct
 ratio set it revokes page by page, since a clear would drop the ratio too.
 
-Lock order is BQL, CXL lock (the gate is a condition under it), worker
-mutex. A long gate holder (a flush, a way
+Lock order is BQL, CXL lock (the guard is a condition under it), worker
+mutex. A long guard holder (a flush, a way
 change, a caching-API chunk) delays linked write completions for as long as
-it holds the gate; reads never wait. Between the NVMe program and the bottom
+it holds the guard; reads never wait. Between the NVMe program and the bottom
 half, a CXL eviction of the same dirty page can program it once more, and a
 direct store can be discarded with the entry; both affect only accounting,
 and only for racing guests.
@@ -1275,7 +1275,7 @@ pauses the controller's pollers, stops its worker and leaves its FTL and its
 payload, still marked mapped, to the controller. The controller carries on as
 a plain bbssd over the same bytes until it is removed; the cache and pending
 invalidations go with the device. Removing the controller first unlinks it
-without waiting for the gate, and ranges it left pending are applied later.
+without waiting for the guard, and ranges it left pending are applied later.
 The controller's link holds a reference on the medium object, so the backend
 it borrowed outlives an unplug. A CXL reset or disabled media leaves the NVMe
 path working on the same payload.
@@ -1286,7 +1286,7 @@ and two queues, each dropping command, a long write
 under a direct ratio, deallocation
 without resurrection, DULBE after CXL stores and mappings, flips, pinned
 pages, both unplug orders and the slot power-off, and a completion held while
-a caching-API chunk owns the gate, with and without the controller removed
+a caching-API chunk owns the guard, with and without the controller removed
 meanwhile. Each has a mutation of the device that turns it red. A guest run
 with fio on the namespace next to devdax traffic on the window, with
 checksums on both paths, passed in every DER mode. Sustained traffic past
@@ -1373,7 +1373,7 @@ The mailbox handler runs with the device's re-entrancy guard held, and
 another vCPU's MSI-X, mailbox or component access would be refused while it
 waited, so a Get LSA command never waits there. Commands 1, 5, 7, 13, 15, 17,
 80, 81, 90 and 91 run inline, taking effect before the read returns, when the
-device's operation gate is free and no earlier command is queued. Otherwise,
+device's operation guard is free and no earlier command is queued. Otherwise,
 and always for the flushes and the way change (2, 3, 9, 11) and for unknown
 commands, the command joins an ordered queue that a main-loop bottom half
 runs, and byte zero is 2. `control-status` reads 2 until the queue drains,
@@ -1482,7 +1482,7 @@ programming on dirty cache eviction/flush. Both default off and exist to
 reproduce Cylon paper experiments; enabling them changes the media model.
 The default continues to program dirty eviction and reads unmapped pages
 without a NAND operation. Media waits run outside the BQL and the CXL lock and
-retain the device operation gate. They sleep until 100 us before the deadline
+retain the device operation guard. They sleep until 100 us before the deadline
 and spin on the realtime clock only for that tail, which absorbs sleep timer
 slack without holding a host CPU for long waits such as a cache flush. The virtual clock cannot measure this
 host wait; qtests validate modeled timing and BQL release independently.

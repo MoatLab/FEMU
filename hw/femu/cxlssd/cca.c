@@ -2,7 +2,7 @@
 /*
  * CXL caching API (CCA) on BAR5 of femu-cxl-ssd. A doorbell wakes a device
  * thread that executes commands one at a time, in chunks that hold the
- * operation gate like a guest access does, so a long invalidation never
+ * operation guard like a guest access does, so a long invalidation never
  * keeps a vCPU in an MMIO exit or stalls the main loop.
  */
 #include "qemu/osdep.h"
@@ -15,7 +15,7 @@
 #include "hw/pci/pci.h"
 #include "qemu-adapter.h"
 
-/* Pages acted on, and pages looked up, per hold of the gate and the locks. */
+/* Pages acted on, and pages looked up, per hold of the guard and the locks. */
 #define CCA_CHUNK       256
 #define CCA_SCAN        4096
 /* Above this many candidates, revoke every direct mapping at once. */
@@ -82,7 +82,7 @@ static void cca_delay(FemuCxlMedia *s, uint64_t ns, uint32_t epoch)
 
 /*
  * A waiter woken by the last leave may not get the locks before this thread
- * takes them back; let one take the gate first.
+ * takes them back; let one take the guard first.
  */
 static void cca_yield(FemuCxlMedia *s, uint32_t epoch)
 {
@@ -189,7 +189,7 @@ static bool cca_next(CcaOp *op, uint64_t *lpn)
 }
 
 /*
- * Run @page over the candidates, a chunk per gate hold. Returns false if
+ * Run @page over the candidates, a chunk per guard hold. Returns false if
  * the command was abandoned, else sets *status.
  */
 static bool cca_walk(CcaOp *op, CcaPage page, int *status)
@@ -474,7 +474,7 @@ static int cca_validate(FemuCxlMedia *s, CcaOp *op)
 }
 
 /*
- * Checks that must see the cache under the gate, before any change. Returns
+ * Checks that must see the cache under the guard, before any change. Returns
  * 0 to go on to the page walk, 1 when the command is complete, or -errno.
  */
 static int cca_prepare(CcaOp *op)
@@ -670,7 +670,7 @@ static void cca_fatal(FemuCxlCca *cca)
     cca->status |= CCA_STATUS_FATAL;
 }
 
-/* A device-wide reset clears pins and uncached ranges under the gate. */
+/* A device-wide reset clears pins and uncached ranges under the guard. */
 static void cca_apply_reset(FemuCxlMedia *s)
 {
     FemuCxlCca *cca = &s->cca;
@@ -686,7 +686,7 @@ static void cca_apply_reset(FemuCxlMedia *s)
         }
         femu_cxl_leave(s);
     }
-    /* Another reset may have arrived while waiting for the gate. */
+    /* Another reset may have arrived while waiting for the guard. */
     if (!cca->reset_pending) {
         cca->status |= CCA_STATUS_READY;
     }

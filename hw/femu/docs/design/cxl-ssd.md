@@ -129,12 +129,12 @@ rest of the component talks to it through `hw/femu/cxlssd/qemu-adapter.h`.
   |   DER: memslot aliases and Cylon slot/SPTE handling,           |
   |   femu_cxl_nvme_ops for a linked NVMe controller               |
   +----------------------------------------------------------------+
-        |  qemu-adapter.h: FemuCxlMedia, FemuCxlOp, gate, access
+        |  qemu-adapter.h: FemuCxlMedia, FemuCxlOp, guard, access
         v
   +----------------+   +-----------+   +--------------------------+
   | cxlssd.c       |   | cache.c   |   | cca.c, cca-ring.c        |
   | access path,   |   | sets and  |   | BAR5 caching API, thread |
-  | gate, worker,  |   | policies  |   +--------------------------+
+  | guard, worker, |   | policies  |   +--------------------------+
   | media delay,   |   +-----------+   spte.h, spt.h: SPTE and SPT
   | NVMe link side |                   helpers (no QEMU state)
   +----------------+
@@ -170,7 +170,7 @@ table stays empty and `cxl_ssd=` is refused.
 | --- | --- | --- |
 | `FemuCxlSsd` | `qemu-adapter.c` | `parent_obj` (the `CXLType3Dev`), `media`, `component_overlay`, `lsa_queue` (queued control commands) |
 | `FemuCxlWindow` | `qemu-adapter.c` | One per fixed window that can reach a FEMU endpoint: the window and its `io` overlay region. Shared by all FEMU devices; removed when the last one leaves |
-| `FemuCxlMedia` | `qemu-adapter.h` | `backend` (payload pointer and size), `cache`, `direct` (DER state), `cca`; the gate (`busy`, `accesses`, `exclusive_waiters`, `idle` condition variable); `pages` (pages held by accesses in progress); `invalidations` (generation); `lock`, `worker_cond`, `work`, `worker` (the FTL worker); `ns.ssd` (the private FTL); NVMe link fields `nvme`, `nvme_ranges`, `nvme_taken`, `nvme_done`, `nvme_bh`; counters |
+| `FemuCxlMedia` | `qemu-adapter.h` | `backend` (payload pointer and size), `cache`, `direct` (DER state), `cca`; the guard (`busy`, `accesses`, `exclusive_waiters`, `idle` condition variable); `pages` (pages held by accesses in progress); `invalidations` (generation); `lock`, `worker_cond`, `work`, `worker` (the FTL worker); `ns.ssd` (the private FTL); NVMe link fields `nvme`, `nvme_ranges`, `nvme_taken`, `nvme_done`, `nvme_bh`; counters |
 | `FemuCxlOp` | `qemu-adapter.h` | One access, flush or eviction chain: the media time `ns` it has accumulated and the pages it holds itself |
 | `FemuCxlWork` | `qemu-adapter.h` | One FTL request on the worker queue: an `NvmeRequest`, the returned `latency`, `done`, and `done_cond`, the waiter's condition variable |
 | `FemuCxlCache`, `FemuCxlSet`, `FemuCxlEntry` | `cache.h` | `nsets`, `ways`, `policy`, `entries` and `ghosts` hash tables; per set the `small`, `main`, `ghost` and `pinned` queues; per entry `lpn`, `dirty`, `freq`, `queue`, `der_hits`, `der_displaced` |
@@ -190,7 +190,7 @@ standalone for its unit test.
 The overlay callback `adapter_access()` runs on the vCPU thread that took
 the MMIO exit, holding the BQL. A Cylon fault exit reaches it on the vCPU
 thread without the BQL (see [Locking](../cxlssd.md#locking)). It routes the address,
-takes the CXL lock, translates, takes the device's operation gate, routes
+takes the CXL lock, translates, takes the device's operation guard, routes
 again (decoders may have changed while it waited), and calls
 `femu_cxl_access()` in `cxlssd.c`. If media is
 disabled (the parent's media-disable state), reads return random bytes and
@@ -241,7 +241,7 @@ as zeros for a fresh `memory-backend-ram`.
    | DIRECT HIT                      |      vCPU thread, CXL lock
    | CPU reads/writes host memory    |                  |
    | no exit, no counter, no timing, |      adapter_access(): route,
-   | no CLOCK/S3-FIFO reference      |      translate, enter the gate
+   | no CLOCK/S3-FIFO reference      |      translate, enter the guard
    | memslot: page stays dirty       |                  |
    | cylon: EPT D bit sampled later  |      femu_cxl_access(): hold page
    +---------------------------------+                  |
@@ -277,9 +277,9 @@ and timed. In the direct modes the first access after a miss completes in
 QEMU and installs a mapping; the guest's later accesses to that page are
 direct hits until the page is evicted or an invalidation revokes it.
 
-### The operation gate
+### The operation guard
 
-The gate (`femu_cxl_enter()`, `femu_cxl_enter_access()` and their
+The guard (`femu_cxl_enter()`, `femu_cxl_enter_access()` and their
 `leave` pairs in `cxlssd.c`) is a reader/writer style lock built on the CXL
 lock and the `idle` condition variable:
 
@@ -293,9 +293,9 @@ lock and the `idle` condition variable:
 
 An exclusive waiter blocks new shared holders, so a flush is not starved by
 a stream of accesses. Waiters release the locks while they wait. Invalidation
-and teardown never wait for the gate (see [Invalidation](#invalidation)).
+and teardown never wait for the guard (see [Invalidation](#invalidation)).
 
-`concurrent-misses` decides whether accesses share the gate. With `auto`,
+`concurrent-misses` decides whether accesses share the guard. With `auto`,
 they share it only while a direct mode is available
 (`femu_cxl_concurrent()`). Sharing lets misses to different pages wait for
 the media together, so their NAND reads overlap where they reach different
@@ -375,7 +375,7 @@ itself while prefetching, following insertion order.
 
 `cache-ways`, `prefetch-degree` and `prefetch-stride` can change while the
 guest runs (`qom-set`, or control commands 3, 5 and 7). A `cache-ways`
-change takes the gate exclusively, refuses before touching anything if the
+change takes the guard exclusively, refuses before touching anything if the
 pinned pages do not fit the new geometry, then revokes mappings, writes
 dirty pages back, rebuilds the cache with the pinned pages still resident,
 and maps a direct ratio again.
@@ -590,7 +590,7 @@ media delay does not install the mapping it translated before.
 | Component register write (HDM decoders) | `adapter_component_write()` through `component_overlay` | Revoke all, then the parent's registers, under the CXL lock |
 | Any CCI command on any transport | `adapter_pre_command()`, `adapter_post_command()` | Revoke all, then the command, under the CXL lock; except Get LSA on the primary mailbox with `lsa-control=on`, which carries a control command and revokes nothing |
 | Device reset | `adapter_reset_hold()` | Revoke all, let a failed Cylon retry, caching API reset (unpin all, end uncached ranges), free CCI background state, then the parent's hold phase |
-| Unplug | `cxl_exit()` | Tell the caching API thread to stop, mark the device closing, disable DER, and free the media now or leave that to the last gate holder |
+| Unplug | `cxl_exit()` | Tell the caching API thread to stop, mark the device closing, disable DER, and free the media now or leave that to the last guard holder |
 | Eviction | `femu_cxl_evict()` | Revoke that page only (a ratio-selected page keeps its mapping; its dirty bit is sampled) |
 | Flush, way change, commands 2, 3, 9, 11 | `cxl_flush()`, `cxl_runtime_set()` | Revoke all, write dirty pages back, drop unpinned entries, map a ratio again |
 | Caching API INVALIDATE, CACHE_DISABLE | `cca.c` | Revoke the chunk's pages, or all mappings once for more than 64 candidates |
@@ -598,7 +598,7 @@ media delay does not install the mapping it translated before.
 | Global dirty logging (Cylon) | `cylon_log_start()` | Revoke all, disable Cylon |
 | Memory map change overlapping the window (Cylon) | `cylon_region_change()` | Delete the dual slot; re-admit after fresh checks |
 
-Invalidation never waits for the gate. Configuration writes, component
+Invalidation never waits for the guard. Configuration writes, component
 writes and CCI commands run inside another owner's re-entrancy guard, and
 waiting there would refuse other vCPUs' accesses. Revocation therefore
 touches only DER state, which is safe under the CXL lock alone. Warm reset keeps
@@ -621,7 +621,7 @@ is the status: 0 success, 1 error, 2 queued.
         v  mailbox Get LSA (0x4102), vCPU thread, device re-entrancy guard held
   cxl_get_lsa()
         |
-        +-- CMD in {1,5,7,13,15,17,80,81,90,91}, gate free, queue empty
+        +-- CMD in {1,5,7,13,15,17,80,81,90,91}, guard free, queue empty
         |        -> run inline (cxl_command()), byte 0 = 0 or 1
         |
         +-- otherwise (2, 3, 9, 11, unknown, or device busy)
@@ -716,9 +716,9 @@ A doorbell write signals the detached `femu-cxl-cca` thread and never
 waits. The thread takes the BQL and the CXL lock, runs up to 64 commands in
 submission order, then gives them up and wakes itself again, so a guest that
 keeps the ring full cannot hold them. Each command runs in chunks of at most 256 pages of
-work and 4096 lookups. A chunk holds the gate exclusively, then waits out its
+work and 4096 lookups. A chunk holds the guard exclusively, then waits out its
 media time with the locks released; before each chunk the thread lets one
-waiting access take the gate first. Guest accesses therefore run between
+waiting access take the guard first. Guest accesses therefore run between
 chunks, and the worst stall a chunk adds to an access is about 256 programs.
 Device reset reformats the rings, bumps EPOCH and drops a command in flight
 without a completion. The [caching API section](../cxlssd.md#caching-api-cca)
@@ -755,7 +755,7 @@ bytes and one mapping table.
      FTL thread appends page ranges to nvme_ranges, tags request cxl_seq
                                      |
                                      v
-     main-loop BH femu_cxl_nvme_bh(): takes the gate (or sets nvme_kick
+     main-loop BH femu_cxl_nvme_bh(): takes the guard (or sets nvme_kick
      and lets the holder reschedule it), revokes mappings, drops the
      pages WITHOUT write-back (pinned pages stay, made clean),
      publishes nvme_done
@@ -783,7 +783,7 @@ Consistency rules (the full list is in the design note's
    flip 3 restores the device's own `read-ns`, `program-ns`, `erase-ns` and
    `channel-ns`.
 
-Lock order is BQL, CXL lock (the gate is a condition under it), worker
+Lock order is BQL, CXL lock (the guard is a condition under it), worker
 mutex. The NVMe FTL thread never takes the BQL or the CXL lock. The
 controller must be BBSSD with one namespace and none of namespace
 management, a subsystem, streams, `power_loss`, `buffer_size`, `op_pcent`,
@@ -798,12 +798,12 @@ case and the realize messages.
 
 | Thread | Runs | Takes |
 | --- | --- | --- |
-| vCPU, MMIO exit | MMIO overlay callback, the whole access path, Get LSA | BQL, CXL lock, gate, page holds; drops both locks to wait for the worker and for the media delay |
-| vCPU, Cylon fault exit | The fault service and its fill | CXL lock, gate, page holds; drops it to wait; takes the BQL first only when a step needs it (`der-fault-bql`) |
+| vCPU, MMIO exit | MMIO overlay callback, the whole access path, Get LSA | BQL, CXL lock, guard, page holds; drops both locks to wait for the worker and for the media delay |
+| vCPU, Cylon fault exit | The fault service and its fill | CXL lock, guard, page holds; drops it to wait; takes the BQL first only when a step needs it (`der-fault-bql`) |
 | `femu-cxl-ftl` | `cxl_worker()`: every FTL request of the medium, device DMA work queued before the last `fast-load=false` first | `s->lock`, then `post_lock` briefly; never the BQL or the CXL lock, never guest memory |
-| `femu-cxl-cca` | Caching API commands | BQL, CXL lock, gate per chunk, `cca->lock` for the doorbell flag |
-| QEMU main loop | QMP `qom-set` (flush, way change, control commands), queued LSA commands, NVMe drop BH, Cylon install BH, teardown and reference BHs left by fault exits | BQL, CXL lock; the gate, except the Cylon install BH, which pauses all vCPUs before it takes the CXL lock |
-| QEMU main loop, device DMA | Copies of other devices into the window, guarded or not (block layer completions), except qtest commands; identified by the thread that realized the device, so an IOThread's or another non-vCPU thread's copy, which also holds the BQL, keeps the full model | BQL, CXL lock, `post_lock`; never the gate or `s->lock`, never waits (`femu_cxl_access_nowait()`) |
+| `femu-cxl-cca` | Caching API commands | BQL, CXL lock, guard per chunk, `cca->lock` for the doorbell flag |
+| QEMU main loop | QMP `qom-set` (flush, way change, control commands), queued LSA commands, NVMe drop BH, Cylon install BH, teardown and reference BHs left by fault exits | BQL, CXL lock; the guard, except the Cylon install BH, which pauses all vCPUs before it takes the CXL lock |
+| QEMU main loop, device DMA | Copies of other devices into the window, guarded or not (block layer completions), except qtest commands; identified by the thread that realized the device, so an IOThread's or another non-vCPU thread's copy, which also holds the BQL, keeps the full model | BQL, CXL lock, `post_lock`; never the guard or `s->lock`, never waits (`femu_cxl_access_nowait()`) |
 | NVMe FTL thread (linked controller) | NVMe I/O on the shared FTL (`femu_cxl_nvme_ftl()`), after the device DMA work before the last `fast-load=false` is booked | `s->lock`, waits on `posted_cond` under `post_lock` with `s->lock` dropped; never the BQL or the CXL lock |
 | NVMe pollers (linked controller) | Hold a completion until its cache drop is published | Read `nvme_done` only |
 
@@ -843,7 +843,7 @@ the binary. This table explains how they interact.
 | Cylon media switches (same table) | `cylon-first-touch-program`, `cylon-free-writeback` | Change the media model to match published Cylon experiments; off for normal use |
 | [Direct mapping](../reference/properties.md#direct-mapping-der) | `der`, `der-replace-rate`, `cylon-kernel-ack`, `concurrent-misses` | `der=memslot` is refused under TCG. `der=cylon` without `cylon-kernel-ack=on` is refused. `der-replace-rate` matters only for `memslot`. `concurrent-misses=auto` follows whether DER is available |
 | [Caching API, control channel and logs](../reference/properties.md#caching-api-control-channel-and-logs) | `cca`, `lsa-control`, `log-dir`, `tracefs-dir`, `log-limit` | `cca=off` registers no BAR5. `lsa-control=on` refuses an `lsa` backend. `log-limit=0` opens no I/O log and takes no statistics appends. `tracefs-dir` unset makes commands 91 and 81 no-ops on the host |
-| [Actions and control](../reference/runtime-properties.md#actions-and-control) | `der-ratio`, `control-command`, `control-argument`, `control-status`, `flush-cache`, `stats-reset`, `fast-load`, `fast-load-drain-ns`, `fast-load-switch-ns`, `nand-idle-ns` | Run time only, except `fast-load`, which `-device` also accepts. `der-ratio` needs a direct mode and no uncached ranges; `memslot` refuses a ratio that needs more aliases than are free. `fast-load=false` holds the gate alone while it sets the `post_barrier` and waits at most 100 ms for the worker to book the device DMA work before it and then tries `lock` to read the NAND horizon, with the BQL and the CXL lock dropped; it never waits for `lock` or for the horizon. `nand-idle-ns` only tries `lock` |
+| [Actions and control](../reference/runtime-properties.md#actions-and-control) | `der-ratio`, `control-command`, `control-argument`, `control-status`, `flush-cache`, `stats-reset`, `fast-load`, `fast-load-drain-ns`, `fast-load-switch-ns`, `nand-idle-ns` | Run time only, except `fast-load`, which `-device` also accepts. `der-ratio` needs a direct mode and no uncached ranges; `memslot` refuses a ratio that needs more aliases than are free. `fast-load=false` holds the guard alone while it sets the `post_barrier` and waits at most 100 ms for the worker to book the device DMA work before it and then tries `lock` to read the NAND horizon, with the BQL and the CXL lock dropped; it never waits for `lock` or for the horizon. `nand-idle-ns` only tries `lock` |
 
 `run-cxlssd.sh` uses defaults that follow Cylon's launch script and differ
 from the device's (a cache of 1/20 of the media, direct mapped, 8 by 8
@@ -933,8 +933,8 @@ Keep new QEMU or KVM dependencies in `qemu-adapter.c`, so `cache.c`,
 | File | Contents |
 | --- | --- |
 | `hw/femu/cxlssd/qemu-adapter.c` | QOM type `femu-cxl-ssd`, realize and exit, window overlay and routing, invalidation hooks, reset chain, LSA control channel and logs, QOM properties, DER (memslot aliases, budget, replacement, ratios; Cylon prepare, install, SPTE map and revoke, listener), NVMe link ops |
-| `hw/femu/cxlssd/qemu-adapter.h` | `FemuCxlMedia`, `FemuCxlOp`, `FemuCxlWork`, gate and access API |
-| `hw/femu/cxlssd/cxlssd.c` | Gate, media delay, FTL worker, `femu_cxl_access()`, eviction callback, geometry checks, FTL start and stop, NVMe link side (`femu_cxl_nvme_ftl()`, drop BH, flips) |
+| `hw/femu/cxlssd/qemu-adapter.h` | `FemuCxlMedia`, `FemuCxlOp`, `FemuCxlWork`, guard and access API |
+| `hw/femu/cxlssd/cxlssd.c` | Guard, media delay, FTL worker, `femu_cxl_access()`, eviction callback, geometry checks, FTL start and stop, NVMe link side (`femu_cxl_nvme_ftl()`, drop BH, flips) |
 | `hw/femu/cxlssd/cache.c`, `cache.h` | Set-associative cache and the four policies, pinning |
 | `hw/femu/cxlssd/der.h` | `FemuCxlDer` and the ratio selection helpers |
 | `hw/femu/cxlssd/spte.h`, `spt.h` | Cylon EPT SPTE encodings and SPT chunk limits |

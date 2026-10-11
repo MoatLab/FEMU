@@ -484,7 +484,7 @@ static GPtrArray *adapter_live;
 
 /*
  * Let fault exits take the CXL lock without the BQL. Until now a thread
- * asleep in a gate, page or fill wait sleeps on the BQL; wake every such
+ * asleep in a guard, page or fill wait sleeps on the BQL; wake every such
  * thread, so that it waits on the CXL lock's mutex from now on. BQL and CXL
  * lock.
  */
@@ -660,7 +660,7 @@ static MemTxResult adapter_access(FemuCxlWindow *w, hwaddr offset,
 /*
  * The part of adapter_access() for a femu-cxl-ssd, under the CXL lock.
  * Returns ADAPTER_REROUTE when the decoders changed while it waited for the
- * gate, so the caller routes the access again.
+ * guard, so the caller routes the access again.
  */
 static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
                                         FemuCxlSsd *cxl, uint64_t *data,
@@ -714,7 +714,7 @@ static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
         }
         return femu_cxl_access_nowait(s, dpa, data, size, write);
     }
-    /* Inject a decoder change while this access waits for the gate. */
+    /* Inject a decoder change while this access waits for the guard. */
     if (cxl->test_change_dpa) {
         uint32_t *regs = ct3d->cxl_cstate.crb.cache_mem_registers;
 
@@ -734,7 +734,7 @@ static MemTxResult adapter_media_access(FemuCxlWindow *w, hwaddr offset,
     } else if (mapped && !bql_locked() && s->direct.fast &&
                der_windows_stale(&s->direct)) {
         /*
-         * An invalidation while this fill waited for the gate: its map
+         * An invalidation while this fill waited for the guard: its map
          * would scan the windows, so it runs under the BQL instead, before
          * it counts anything.
          */
@@ -1025,7 +1025,7 @@ static bool cxl_fast_load_get(Object *obj, Error **errp)
 }
 
 /*
- * Turning fast load off is a short barrier: the gate waits for admitted
+ * Turning fast load off is a short barrier: the guard waits for admitted
  * accesses, which skip their media wait, so none still sleeps as a fast
  * one. The NAND work they queued stays on the timelines; later accesses
  * wait behind it in their own threads. Sleeping it out here would stop the
@@ -1509,7 +1509,7 @@ static void cxl_control_set(Object *obj, Visitor *v, const char *name,
 
 /*
  * Commands that never drop the locks, so they can finish inside the mailbox
- * handler once the gate is free. Flushes and way changes wait for the media.
+ * handler once the guard is free. Flushes and way changes wait for the media.
  */
 static bool cxl_lsa_inline(uint64_t command)
 {
@@ -1766,7 +1766,7 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     }
 }
 
-/* Free the media once no operation holds the gate. */
+/* Free the media once no operation holds the guard. */
 static void cxl_media_release(FemuCxlMedia *s)
 {
     femu_cxl_der_destroy(&s->direct);
@@ -1789,8 +1789,8 @@ static void cxl_exit(PCIDevice *dev)
     /*
      * A guest unplug arrives inside the host bridge's dispatch guard, so do
      * not wait for an access sleeping in its media delay. Revoke now; that
-     * access holds a reference and frees the media as it leaves the gate.
-     * With the gate idle, the teardown still waits for the worker, which
+     * access holds a reference and frees the media as it leaves the guard.
+     * With the guard idle, the teardown still waits for the worker, which
      * can be in device DMA work and a long collection: inside a guard, a
      * bottom half runs it.
      */
@@ -3036,7 +3036,7 @@ static bool der_ratio_apply(FemuCxlSsd *dev, CXLFixedWindow *fw, Error **errp)
     return true;
 }
 
-/* Map the current ratio; the caller holds the gate and revoked everything. */
+/* Map the current ratio; the caller holds the guard and revoked everything. */
 static bool cxl_ratio_map(FemuCxlSsd *dev, Error **errp)
 {
     FemuCxlMedia *s = &dev->media;
@@ -4908,7 +4908,7 @@ static uint64_t cylon_storm_result(const char *name)
 
 /*
  * qtest only: the bookkeeping that concurrent faults share must add up once
- * they are idle: the gate and page holds are free, every set's queues hold
+ * they are idle: the guard and page holds are free, every set's queues hold
  * the cache's entries, and each protection and overflow count matches the
  * vCPU records that own it. Returns what is wrong, or NULL.
  */
@@ -4925,7 +4925,7 @@ static const char *cylon_storm_check(FemuCxlSsd *dev)
     assert(femu_cxl_locked());
     if (s->busy || s->accesses || s->waiters || s->exclusive_waiters ||
         g_hash_table_size(s->pages)) {
-        return "the gate or a page hold is still taken";
+        return "the guard or a page hold is still taken";
     }
     for (i = 0; s->started && i < s->cache.nsets; i++) {
         FemuCxlSet *set = &s->cache.sets[i];
