@@ -213,40 +213,17 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                NvmeRequest *req)
 {
-    Oc20Namespace *lns = ns->state;
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     uint8_t opcode = ocrw->opcode;
-    uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;    /* 0's based, reaches 65536 */
     int ch, lun;
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
-    Oc20AddrF *addrf = &lns->lbaf;
     int i;
 
     int64_t now = req->stime;
-    uint64_t lba;
-
-    /* Erase */
-    if (opcode == OC20_CMD_VECT_ERASE) {
-        /* FIXME: vector erase */
-        for (i = 0; i < nlb; i++) {
-            lba = ((uint64_t *)req->slba)[i];
-            ch = OC20_LBA_GET_GROUP(addrf, lba);
-            lun = OC20_LBA_GET_PUNIT(addrf, lba);
-
-            int64_t ts = oc20_chip_op(n, ch, lun, now, opcode);
-            if (ts > req->expire_time) {
-                req->expire_time = ts;
-            }
-        }
-
-        return 0;
-    }
 
     int secs_idx = -1;
-    int si = 0;
-    int nb_secs_to_one_chip = 0;
 
     Oc20AddrBucket addr_bucket[max_sec_per_rq];
     oc20_parse_lba_list(n, ns, cmd, req, addr_bucket, &secs_idx);
@@ -256,10 +233,6 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
            opcode == NVME_CMD_WRITE || opcode == OC20_CMD_VECT_WRITE);
     assert(secs_idx > 0);
     for (i = 0; i < secs_idx; i++) {
-        lba = ((uint64_t *)(req->slba))[si];
-        nb_secs_to_one_chip = addr_bucket[i].cnt;
-        si += nb_secs_to_one_chip;
-
         ch = addr_bucket[i].ch;
         lun = addr_bucket[i].lun;
 
@@ -470,7 +443,8 @@ static uint16_t oc20_rw_check_vector_req(FemuCtrl *n, NvmeCmd *cmd,
 }
 
 static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
-                                    uint64_t lba, hwaddr mptr, NvmeRequest *req)
+                                    uint64_t lba, NvmeRequest *req,
+                                    bool *erased)
 {
     Oc20Params *params = &n->params.oc20;
     Oc20Namespace *lns = ns->state;
@@ -478,6 +452,7 @@ static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
     Oc20CS *chunk_meta;
     uint32_t resetfail_prob = 0;
 
+    *erased = false;
     chunk_meta = oc20_chunk_get_state(n, ns, lba);
     if (!chunk_meta) {
         return OC20_INVALID_RESET | NVME_DNR;
@@ -489,9 +464,11 @@ static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
 
     if (resetfail_prob) {
         if ((rand() % 100) < resetfail_prob) {
+            /* the erase ran and failed: the chunk is marked offline */
             chunk_meta->state = OC20_CHUNK_OFFLINE;
             chunk_meta->wp = 0xffff;
-            return OC20_INVALID_RESET | NVME_DNR;
+            *erased = true;
+            return OC20_OFFLINE_CHUNK | NVME_DNR;
         }
     }
 
@@ -512,10 +489,7 @@ static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
         chunk_meta->state = OC20_CHUNK_FREE;
         chunk_meta->wear_index++;
         chunk_meta->wp = 0;
-
-        if (mptr) {
-            nvme_addr_write(n, mptr, chunk_meta, sizeof(*chunk_meta));
-        }
+        *erased = true;
 
         return NVME_SUCCESS;
     }
@@ -906,12 +880,38 @@ static uint16_t oc20_identify(FemuCtrl *n, NvmeCmd *cmd)
                          sizeof(Oc20NamespaceGeometry), cmd);
 }
 
+/*
+ * A chunk reset takes its parallel unit for one erase, so resets of chunks on
+ * one unit queue up behind each other and resets on other units overlap.
+ */
+static void oc20_charge_reset(FemuCtrl *n, NvmeNamespace *ns,
+                              NvmeRequest *req, uint64_t lba)
+{
+    Oc20Namespace *lns = ns->state;
+    int ch = OC20_LBA_GET_GROUP(&lns->lbaf, lba);
+    int lun = OC20_LBA_GET_PUNIT(&lns->lbaf, lba);
+    int64_t ts = oc20_chip_op(n, ch, lun, req->stime, OC20_CMD_VECT_ERASE);
+
+    if (ts > req->expire_time) {
+        req->expire_time = ts;
+    }
+}
+
+/*
+ * Vector Chunk Reset works on each entry of the LBA list on its own. An entry
+ * that fails does not stop the others; its bit in Dword 0 and 1 of the
+ * completion is set, and the command reports the status of the first failure.
+ * With a metadata pointer, each entry gets the chunk descriptor after the
+ * command, in list order.
+ */
 static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     Oc20RwCmd *dm = (Oc20RwCmd *)cmd;
     hwaddr mptr = le64_to_cpu(cmd->mptr);
     uint64_t lbal = le64_to_cpu(dm->lbal);
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
+    uint64_t *lbas;
+    uint64_t failed = 0;
     int i;
 
     uint16_t status = NVME_SUCCESS;
@@ -928,44 +928,43 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 
     req->nlb = nlb;
-    req->slba = (uint64_t)g_malloc0(nlb * sizeof(uint64_t));
+    lbas = g_malloc0(nlb * sizeof(uint64_t));
+    req->slba = (uint64_t)lbas;
 
     if (nlb > 1) {
-        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(uint64_t));
+        nvme_addr_read(n, lbal, lbas, nlb * sizeof(uint64_t));
     } else {
-        ((uint64_t *)req->slba)[0] = lbal;
+        lbas[0] = lbal;
     }
 
-    /* the address list belongs to this command, as it does for read/write */
     for (i = 0; i < nlb; i++) {
-        Oc20CS *cs;
-        if (NULL == (cs = oc20_chunk_get_state(n, req->ns, ((uint64_t *)
-                                                            req->slba)[i]))) {
-            status = OC20_INVALID_RESET;
-            break;
-        }
+        Oc20CS *cs = oc20_chunk_get_state(n, req->ns, lbas[i]);
+        bool erased = false;
+        uint16_t err;
 
-        status = oc20_chunk_set_free(n, req->ns, ((uint64_t *) req->slba)[i],
-                                     mptr, req);
-        if (status) {
-            break;
+        err = cs ? oc20_chunk_set_free(n, req->ns, lbas[i], req, &erased) :
+                   OC20_INVALID_RESET | NVME_DNR;
+        if (err) {
+            failed |= 1ULL << i;
+            if (status == NVME_SUCCESS) {
+                status = err;
+            }
+        }
+        if (erased) {
+            oc20_charge_reset(n, req->ns, req, lbas[i]);
         }
 
         if (mptr) {
+            if (cs) {
+                nvme_addr_write(n, mptr, cs, sizeof(*cs));
+            }
             mptr += sizeof(Oc20CS);
         }
     }
 
-    /*
-     * Erasing a block takes the die for the length of an erase, and the
-     * address list is what says which dies. The model for it was here from
-     * the start and nothing called it, so a chunk reset cost nothing at all.
-     */
-    if (status == NVME_SUCCESS) {
-        oc20_advance_status(n, req->ns, cmd, req);
-    }
+    req->cqe.res64 = cpu_to_le64(failed);
 
-    g_free((void *)req->slba);
+    g_free(lbas);
     req->slba = 0;
 
     return status;

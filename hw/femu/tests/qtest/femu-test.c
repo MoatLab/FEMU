@@ -1269,6 +1269,150 @@ static void femu_test_oc20_vector_io(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* Dword 0 and 1 of the completion femu_complete() consumed last on @q. */
+static uint64_t femu_last_res64(FemuCtrlState *c, FemuQueue *q)
+{
+    uint16_t head = (q->cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE;
+
+    return qtest_readq(c->pdev->bus->qts, q->cq_addr + head * sizeof(NvmeCqe));
+}
+
+/*
+ * Vector Chunk Reset (OCSSD 2.0, 2.2.1 and 2.2.2) works on each entry of its
+ * LBA list. Dword 0 and 1 of the completion hold one bit per entry that failed,
+ * and the metadata buffer gets one chunk descriptor per entry, in list order.
+ * A failed entry must not stop the entries after it, and every chunk that the
+ * command resets takes its unit for one erase.
+ */
+static void femu_test_oc20_vector_reset(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const int n = 34;                   /* entry 33 is in Dword 1 */
+    NvmeCmd cmd;
+    uint64_t geo, buf, list, meta, outside, lba[34];
+    uint8_t g[128], desc[32];
+    uint8_t lun_len, chk_len, sec_len;
+    uint16_t num_grp, got;
+    int64_t start;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    geo = guest_alloc(alloc, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(geo);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, geo, g, sizeof(g));
+    lun_len = g[9];
+    chk_len = g[10];
+    sec_len = g[11];
+    num_grp = lduw_le_p(g + 64);
+    g_assert_cmpuint(lduw_le_p(g + 66), >=, 2);      /* units per group */
+    g_assert_cmpuint(ldl_le_p(g + 68), >=, 17);      /* chunks per unit */
+    outside = (uint64_t)num_grp << (sec_len + chk_len + lun_len);
+
+    /*
+     * The device backs the first two units of group 0. Entry i names unit
+     * i % 2, chunk i / 2. Open the chunks of entries 0 to 32 with one write
+     * each; the chunk of entry 33 stays free.
+     */
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5c, 4096);
+    for (i = 0; i < n; i++) {
+        lba[i] = ((uint64_t)(i % 2) << (sec_len + chk_len)) |
+                 ((uint64_t)(i / 2) << sec_len);
+        if (i == n - 1) {
+            break;
+        }
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_OC20_VECT_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)lba[i]);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(lba[i] >> 32));
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    lba[5] = outside;                                /* no such chunk */
+
+    list = guest_alloc(alloc, 4096);
+    meta = guest_alloc(alloc, 4096);
+    for (i = 0; i < n; i++) {
+        qtest_writeq(qts, list + 8 * i, lba[i]);
+    }
+    qtest_memset(qts, meta, 0xee, n * 32);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_ERASE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.mptr = cpu_to_le64(meta);
+    cmd.cdw10 = cpu_to_le32((uint32_t)list);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw12 = cpu_to_le32(n - 1);
+    start = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==, 0x2c1);
+
+    /*
+     * Unit 0 resets 17 chunks, one erase after another, 3 ms each. A command
+     * that stopped at entry 5 would erase three of them.
+     */
+    g_assert_cmpint(g_get_monotonic_time() - start, >, 45000);
+    g_assert_cmphex(femu_last_res64(&c, &c.io), ==, (1ULL << 5) | (1ULL << 33));
+
+    for (i = 0; i < n; i++) {
+        qtest_memread(qts, meta + 32 * i, desc, sizeof(desc));
+        if (i == 5) {
+            g_assert_cmpuint(desc[0], ==, 0xee);     /* nothing to describe */
+            continue;
+        }
+        g_assert_cmpuint(desc[0], ==, 0x1);          /* free */
+        g_assert_cmphex(ldq_le_p(desc + 8), ==, lba[i]);
+        g_assert_cmpuint(ldq_le_p(desc + 24), ==, 0);
+    }
+
+    /* the entries after the failure were reset: a second reset is refused */
+    for (i = 6; i < 33; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_OC20_VECT_ERASE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw10 = cpu_to_le32((uint32_t)lba[i]);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(lba[i] >> 32));
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        0x2c1);
+        g_assert_cmphex(femu_last_res64(&c, &c.io), ==, 1);
+    }
+
+    /* the largest list, 64 entries: entry 63 is bit 31 of Dword 1 */
+    for (i = 0; i < 64; i++) {
+        qtest_writeq(qts, list + 8 * i, outside);
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_ERASE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)list);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw12 = cpu_to_le32(63);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==, 0x2c1);
+    g_assert_cmphex(femu_last_res64(&c, &c.io), ==, ~0ULL);
+
+    guest_free(alloc, meta);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    guest_free(alloc, geo);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static uint16_t femu_zone_action(FemuCtrlState *c, uint64_t slba,
                                   uint32_t action)
 {
@@ -28002,6 +28146,16 @@ static void femu_register_nodes(void)
          */
         .edge.extra_device_opts =
             "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1"
+    });
+    qos_add_test("oc20-vector-reset", "femu", femu_test_oc20_vector_reset,
+                 &(QOSGraphTestOptions) {
+        /*
+         * A size of its own gives this test a new device: qos reuses the
+         * QEMU of oc20-vector-io, whose chunks are no longer free.
+         */
+        .edge.extra_device_opts =
+            "devsz_mb=768,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
             "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1"
     });
     qos_add_test("zoned-format-index", "femu", femu_test_zoned_format_index,

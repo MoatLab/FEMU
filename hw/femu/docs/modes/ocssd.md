@@ -172,6 +172,25 @@ again. Open-Channel 1.2 does not check; a rewrite of a written page silently
 replaces its data, which real flash would not allow. A write outside the
 geometry fails in both.
 
+A 2.0 Vector Chunk Reset (opcode 0x90) handles each entry of its LBA list
+on its own. An entry that fails does not stop the entries after it:
+
+- Dword 0 and 1 of the completion have one bit for each entry that failed.
+  The command status is the status of the first failure.
+- With a metadata pointer, each entry gets its chunk descriptor after the
+  command, 32 bytes each, in list order. An address with no chunk leaves its
+  32 bytes as they were.
+- Each chunk that the command resets takes its parallel unit for one erase.
+  Resets on one unit run one after another, and resets on other units
+  overlap.
+
+```
+ LBA list:  [u0 c0] [u1 c0] [no chunk] [u0 c1] [free c]
+ result:      reset   reset   0xC1       reset   0xC1
+ Dword 0/1:   0       0       1          0       1
+ unit 0:    |erase c0|erase c1|      unit 1: |erase c0|
+```
+
 ## Verify
 
 1. `sudo nvme list` shows the model `FEMU OpenChannel-SSD Controller`.
