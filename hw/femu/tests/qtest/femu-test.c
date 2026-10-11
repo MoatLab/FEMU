@@ -4827,6 +4827,13 @@ static void femu_test_gc_copyback(void *obj, void *data,
                    " by copyback, slowest write %" PRId64 " ms",
                    mode, gc, cb, max_ms);
     if (!strcmp(mode, "off")) {
+        /* a device that does not ask for copyback has it off */
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/gc-test',"
+                               "'property':'gc_copyback'}}");
+
+        g_assert_false(qdict_get_bool(rsp, "return"));
+        qobject_unref(rsp);
         g_assert_cmpuint(gc, ==, 64);
         g_assert_cmpuint(cb, ==, 0);
         g_assert_cmpint(max_ms, >, 100);
@@ -9099,6 +9106,124 @@ static uint64_t femu_fdp_hbmw(FemuCtrlState *c, uint64_t buf)
     g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, buf, 64), ==,
                     NVME_SUCCESS);
     return qtest_readq(c->pdev->bus->qts, buf);
+}
+
+/*
+ * Copyback in FDP collection, on the geometry of femu_test_gc_copyback() with
+ * an 11 MiB namespace: a reclaim unit is one 128-page line over 2 channels x
+ * 2 LUNs, and collection starts with half the units in use. A transfer
+ * takes 2 ms and every array step 0.1 ms. Placement 0 fills a unit, half of
+ * it is deallocated, and placement 1 writes until collection has moved its
+ * 64 valid pages. "pi" collects into the handle's own collection unit.
+ * "ii" (fdpsub-ii) writes the victim through placement 3, the Initially
+ * Isolated last handle, and 16 more pages after it, so collection writes
+ * into that handle's active unit, part used: 16 + 64 of its 128 pages. RUAMW
+ * counts host writes only, so 48 more host pages through placement 3 then
+ * fill that unit and the handle shows a fresh one. On, every move finds its
+ * destination die; off, every move puts two transfers on the channels. The
+ * media byte counters must show the moves.
+ */
+static void femu_test_fdp_copyback(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_has_suffix(data, "on");
+    bool ii = g_str_has_prefix(data, "ii");
+    uint16_t vpid = ii ? 3 : 0;
+    uint64_t ruamw0, ruamw1;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t lpn, gc0, gc = 0, cb, mbmw, hbmw, mbe;
+    uint64_t mapped, lost, orphans;
+    int64_t max_ms = 0;
+    uint8_t st[64];
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    for (lpn = 0; lpn < (ii ? 144 : 128); lpn += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf, list,
+                                                        vpid)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 64, list), ==, NVME_SUCCESS);
+    gc0 = femu_c0h_field(&c, log, 16);
+    /* at most up to the end of the 11 MiB namespace */
+    for (n = 0; n < 160 && gc < 64; n++) {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf, list,
+                                                        1)), ==, NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        lpn += 16;
+        gc = femu_c0h_field(&c, log, 16) - gc0;
+    }
+    /* the write after collection waits for whatever it left on the media */
+    {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf, list,
+                                                        1)), ==, NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+    }
+    gc = femu_c0h_field(&c, log, 16) - gc0;
+    cb = femu_c0h_field(&c, log, 248);
+    g_test_message("FDP gc_copyback %s: %" PRIu64 " moved, %" PRIu64
+                   " by copyback, slowest write %" PRId64 " ms",
+                   (const char *)data, gc, cb, max_ms);
+    g_assert_cmpuint(gc, ==, 64);
+
+    /* every live page still maps to the one copy that holds it */
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, lpn + 16 - 64);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    /* media bytes are host bytes plus the moves; erases are whole blocks */
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, st, sizeof(st));
+    hbmw = ldq_le_p(st);
+    mbmw = ldq_le_p(st + 16);
+    mbe = ldq_le_p(st + 32);
+    g_assert_cmpuint(hbmw, ==, (lpn + 16) * 4096);
+    g_assert_cmpuint(mbmw, ==, hbmw + gc * 4096);
+    g_assert_cmpuint(mbe % (32 * 4096), ==, 0);
+    g_assert_cmpuint(mbe, >=, 4 * 32 * 4096);
+
+    if (on) {
+        g_assert_cmpuint(cb, ==, 64);
+        g_assert_cmpint(max_ms, <, 60);
+    } else {
+        g_assert_cmpuint(cb, ==, 0);
+        g_assert_cmpint(max_ms, >, 100);
+    }
+
+    if (ii) {
+        /* the moves went into placement 3's active unit: 48 pages fill it */
+        lpn += 16;
+        ruamw0 = femu_ruh_ruamw(&c, log, 3);
+        for (n = 0; n < 3; n++, lpn += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf,
+                                                            list, 3)), ==,
+                            NVME_SUCCESS);
+        }
+        ruamw1 = femu_ruh_ruamw(&c, log, 3);
+        g_test_message("RUAMW of placement 3: %" PRIu64 " before, %" PRIu64
+                       " after 48 pages", ruamw0, ruamw1);
+        g_assert_cmpuint(ruamw0, ==, 112 * 8);
+        g_assert_cmpuint(ruamw1, ==, 128 * 8);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
 }
 
 /*
@@ -28564,6 +28689,46 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-copyback-pi-off", "femu", femu_test_fdp_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pi-off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,subsys=fdpsub"
+    });
+    qos_add_test("fdp-copyback-pi-on", "femu", femu_test_fdp_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pi-on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,subsys=fdpsub,gc_copyback=on"
+    });
+    qos_add_test("fdp-copyback-ii-off", "femu", femu_test_fdp_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"ii-off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,subsys=fdpsub-ii"
+    });
+    qos_add_test("fdp-copyback-ii-on", "femu", femu_test_fdp_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"ii-on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,subsys=fdpsub-ii,gc_copyback=on"
     });
     qos_add_test("fdp-background-gc", "femu", femu_test_fdp_background_gc,
                  &(QOSGraphTestOptions) {

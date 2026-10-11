@@ -409,12 +409,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "written, in proportion to its valid pages, instead of in one pass; "
       "the forced pass stays as the last resort; off (default)" },
     { "gc_copyback",
-      "bbssd, CSD: line collection moves a page on its die (copyback) when "
-      "the destination is on the same channel, LUN and plane and the read "
-      "needs no extra ECC time; collection then takes victim pages in the "
-      "order of the destination dies. Saves the channel data phases. Read "
-      "reclaim and retention refresh still move off-chip. Not for KV. "
-      "Refused with gc_pace, pe_suspend, FDP, cxl_ssd, namespace_modes, "
+      "bbssd, CSD, FDP: collection moves a page on its die (copyback) when "
+      "the destination is on the same channel, LUN and plane; collection "
+      "takes victim pages in the order of the destination dies. A copyback "
+      "skips ECC: the data never reaches the controller, so a real SSD "
+      "does not correct its bit errors, and they can add up over repeated "
+      "copybacks. FEMU models no bit errors, so here only the timing "
+      "changes. For that reason a page whose read has extra ECC time, and "
+      "every read reclaim or retention refresh, moves off-chip. Not for "
+      "KV. Refused with gc_pace, pe_suspend, cxl_ssd, namespace_modes, "
       "ns_mgmt, shared namespaces and the hybrid and fast mappings; off "
       "(default)" },
     { "age_scale",

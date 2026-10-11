@@ -358,7 +358,7 @@ parallelism, except for the batched operations below.
 | FDP reads and writes, KV writes | no, one operation per page | `bbssd/ftl-fdp.c`, `kvssd/kvssd-ftl.c` |
 | GC page moves | no | `gc_read_page()`, `gc_write_page()` |
 | ZNS zone reset | no batching needed: each plane has its own rule, so per-plane erases overlap | `zns_zone_reset()` |
-| Copyback (`nand_media_copyback()`) | no: one read and one program on one die | BBSSD line GC with `gc_copyback` (`bbssd/ftl-line-gc.c`) |
+| Copyback (`nand_media_copyback()`) | no: one read and one program on one die, no data phase, no ECC adder (it skips the controller's ECC) | BBSSD line GC and FDP GC with `gc_copyback` (`bbssd/ftl-line-gc.c`, `bbssd/ftl-fdp.c`) |
 
 `trcbsy` is accepted for compatibility and has no effect; setting it warns
 at realize. With the defaults (no bus, no `tplebsy`) a two-plane erase
@@ -859,8 +859,11 @@ make -C hw/femu/tests check
   Only line erases are batched.
 - Cache read pipelining: the code path exists but no mode enables it. There
   is no cache program model.
-- Copyback outside BBSSD line GC. FDP, paced collection, read reclaim and
-  retention refresh move pages off-chip.
+- Copyback outside BBSSD line GC and FDP GC. Paced collection, read
+  reclaim and retention refresh move pages off-chip.
+- Bit errors of a copyback. A real copyback skips ECC, so its bit errors
+  are not corrected and can add up; FEMU models no bit errors, so a
+  copyback changes only timing.
 - Program suspend for programs, or erase suspend by another erase. Only reads
   suspend.
 - Per-die power or thermal limits, and temperature-dependent timing.

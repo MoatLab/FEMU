@@ -597,8 +597,8 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa)
  * read and the program run on one die and the data never crosses the
  * channel.
  */
-static void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
-                                   struct ppa *new_ppa)
+void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
+                            struct ppa *new_ppa)
 {
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 

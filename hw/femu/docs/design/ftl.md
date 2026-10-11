@@ -544,6 +544,28 @@ reserve keep a valid configuration from getting there.
 
 Copyback reads a page into the die's page register and programs it into
 another block of the same die and plane. The data never crosses the channel.
+It is off by default.
+
+A copyback skips ECC. ECC decode and correction run in the controller,
+and the data of a copyback never reaches the controller. On a real SSD the
+bit errors of the page are not corrected, so they can add up over repeated
+copybacks:
+
+```
+ off-chip move:  die --tR--> page register --channel--> controller (ECC decode,
+                 correct) --channel--> page register --tPROG--> die
+ copyback:       die --tR--> page register --tPROG--> die
+                 (no channel, no ECC: bit errors move with the data)
+```
+
+FEMU models no ECC decode and no bit errors, so in FEMU a copyback changes
+only timing. Two rules exist because a copyback skips ECC:
+
+- A page whose read has extra ECC time (`ecc_step_ns` wear or retention
+  tier) moves off-chip, so the controller would correct it.
+- Read reclaim and retention refresh always move off-chip. They rewrite
+  data so that the controller corrects it.
+
 The data pointer steps to the next die on every page (channel fastest, then
 LUN, then plane), so a victim walked in its own order meets its destination
 die only once in `nchs x luns_per_ch x pls_per_lun` moves. With `gc_copyback`
@@ -567,13 +589,13 @@ on, line collection walks the victim in the order of the destination dies:
 - The walk changes only which victim page goes to which destination page.
   The line, the pointer and the pages moved stay the same, so wear
   levelling still fills the worn line exactly.
-- A page whose read has extra ECC time (`ecc_step_ns` wear or retention
-  tier) moves off-chip, so the controller decodes it. This is a timing rule:
-  FEMU stores no bit errors, and nothing limits how often one page moves by
-  copyback.
-- Read reclaim and retention refresh always move off-chip: they rewrite data
-  so that the controller corrects it. A line queued for refresh that
-  collection takes first also moves off-chip.
+- The ECC rules above are timing rules: FEMU stores no bit errors, and
+  nothing limits how often one page moves by copyback. A line queued for
+  refresh that collection takes first also moves off-chip.
+- FDP collection uses the same walk, with the pointer of the unit it writes.
+  For a Persistently Isolated handle that is the handle's own collection
+  unit. For an Initially Isolated one it is the current unit of the last
+  handle.
 - The later bus phases of a channel share a queue of 32 bookings. A burst of
   collection fills it, and the channel is then held to the end of each new
   phase, as for an off-chip burst. Copyback books one window per move, where
@@ -585,9 +607,8 @@ on, line collection walks the victim in the order of the destination dies:
 
 Refused with `gc_pace` (its steps keep a cursor in reclaim order),
 `pe_suspend` (a suspended read would not move the booked program command),
-FDP (it moves pages through reclaim units), the hybrid and fast mappings
-(they merge), `cxl_ssd`, `ns_mgmt` and shared namespaces (their FTL comes
-from another device), and `namespace_modes`.
+the hybrid and fast mappings (they merge), `cxl_ssd`, `ns_mgmt` and shared
+namespaces (their FTL comes from another device), and `namespace_modes`.
 
 ### How GC time is charged
 
@@ -1133,8 +1154,8 @@ calibrated against a specific commercial drive.
 - Data placement is modelled per page; the FTL never tracks sectors within a
   page, so writes smaller than a page cost a whole page program.
 - GC relocations go through the data pointer (or a stream pointer for
-  stream data). Only line collection with `gc_copyback` moves a page on its
-  die; FDP and paced collection do not. GC runs on the FTL thread, one line
+  stream data). Only line and FDP collection with `gc_copyback` move a page
+  on its die; paced collection does not. GC runs on the FTL thread, one line
   at a time.
 - There is no explicit wear levelling, and bad blocks do not affect
   placement.

@@ -654,36 +654,33 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
 };
 
 /*
- * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
- * Returns false when there is nowhere to put it, which leaves the page where it
- * is: the caller must then not erase the block it came from.
+ * The page collection writes next for @dest_ruh, or INVALID_PPA with
+ * *@dest_ru NULL when no unit can take it.
  */
-static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
-                                    FemuRuHandle *dest_ruh, uint16_t rgidx)
+static struct ppa fdp_gc_dest_page(struct ssd *ssd, FemuRuHandle *dest_ruh,
+                                   uint16_t rgidx, FemuReclaimUnit **dest_ru)
 {
-    struct ppa new_ppa;
-    uint64_t lpn = get_rmap_ent(ssd, old_ppa);
-    FemuReclaimUnit *dest_ru=NULL;
-    FemuReclaimUnit *ret_ru=NULL;
-    ftl_assert(valid_lpn(ssd, lpn));
-    ftl_assert(dest_ruh!=NULL);
+    struct ppa ppa = { .ppa = INVALID_PPA };
 
+    ftl_assert(dest_ruh != NULL);
     /* the frontier may have been dropped by this or an earlier pass */
-    dest_ru = fdp_gc_frontier(ssd, dest_ruh, rgidx);
-    if (!dest_ru) {
-        return false;
+    *dest_ru = fdp_gc_frontier(ssd, dest_ruh, rgidx);
+    if (*dest_ru) {
+        ppa = fdp_get_new_page(ssd, *dest_ru);
     }
+    return ppa;
+}
 
-    new_ppa = fdp_get_new_page(ssd, dest_ru);
-    ssd_gc_move_page(ssd, lpn, old_ppa, &new_ppa, &fdp_gc_move_ops, dest_ru);
+/* relocate @old_ppa to @new_ppa, which fdp_gc_dest_page() chose */
+static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
+                           struct ppa *new_ppa, FemuReclaimUnit *dest_ru,
+                           FemuRuHandle *dest_ruh, bool copyback)
+{
+    uint64_t lpn = get_rmap_ent(ssd, old_ppa);
+    FemuReclaimUnit *ret_ru = NULL;
 
-    // FDP_TRACE(ssd, "GC_MIGRATE lpn=%lu src(ch=%u/lun=%u/blk=%u/pg=%u) "
-    //           "dst(ch=%u/lun=%u/blk=%u/pg=%u) dest_ruhid=%u\n",
-    //           lpn, (unsigned)old_ppa->g.ch, (unsigned)old_ppa->g.lun,
-    //           (unsigned)old_ppa->g.blk, (unsigned)old_ppa->g.pg,
-    //           (unsigned)new_ppa.g.ch, (unsigned)new_ppa.g.lun,
-    //           (unsigned)new_ppa.g.blk, (unsigned)new_ppa.g.pg,
-    //           dest_ruh->ruhid);
+    ftl_assert(valid_lpn(ssd, lpn));
+    ssd_gc_move_page(ssd, lpn, old_ppa, new_ppa, &fdp_gc_move_ops, dest_ru);
 
     /*
      * fdp_advance_ru_pointer() can be called from both the foreground write
@@ -738,9 +735,107 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
         ftl_err("FDP: no free reclaim unit while relocating; device is full\n");
     }
 
-    ssd_gc_charge_move(ssd, &new_ppa);
+    if (copyback) {
+        ssd_gc_charge_copyback(ssd, old_ppa, new_ppa);
+    } else {
+        ssd_gc_charge_move(ssd, new_ppa);
+    }
+}
+
+/*
+ * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
+ * Returns false when there is nowhere to put it, which leaves the page where it
+ * is: the caller must then not erase the block it came from.
+ */
+static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
+                                    FemuRuHandle *dest_ruh, uint16_t rgidx)
+{
+    FemuReclaimUnit *dest_ru;
+    struct ppa new_ppa = fdp_gc_dest_page(ssd, dest_ruh, rgidx, &dest_ru);
+
+    if (!dest_ru) {
+        return false;
+    }
+    fdp_gc_move_to(ssd, old_ppa, &new_ppa, dest_ru, dest_ruh, false);
 
     /* this page is relocated; whether the next one can be is the next call */
+    return true;
+}
+
+/*
+ * Empty @victim_ru for copyback, as reclaim_line_copyback() does for a line:
+ * before each move, look where @dest_ruh's collection unit writes next and
+ * take a valid page of the victim on that die and plane; when none is left
+ * there, take the next valid page in reclaim order and move it off-chip.
+ * Counts the moves in @moved. Returns false, with the moves kept, when there
+ * is no room.
+ */
+static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
+                                    FemuReclaimUnit *victim_ru,
+                                    FemuRuHandle *dest_ruh, int *moved)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int npos = spp->nchs * spp->luns_per_ch * spp->pls_per_lun;
+    int nlines = spp->lines_per_ru;
+    g_autofree int *next = g_new0(int, nlines * npos);
+    int total = nlines * spp->pgs_per_line;
+    int seq = 0;
+
+    while (victim_ru->vpc) {
+        FemuReclaimUnit *dest_ru;
+        struct ppa dst = fdp_gc_dest_page(ssd, dest_ruh, victim_ru->rgidx,
+                                          &dest_ru);
+        struct ppa src;
+        bool found = false;
+        bool copyback;
+        int pos;
+
+        if (!dest_ru) {
+            return false;
+        }
+        pos = (dst.g.ch * spp->luns_per_ch + dst.g.lun) * spp->pls_per_lun +
+              dst.g.pl;
+        src.ppa = 0;
+        src.g.ch = dst.g.ch;
+        src.g.lun = dst.g.lun;
+        src.g.pl = dst.g.pl;
+        for (int i = 0; i < nlines && !found; i++) {
+            int *cur = &next[i * npos + pos];
+
+            src.g.blk = victim_ru->lines[i]->id;
+            while (!found && *cur < spp->pgs_per_blk) {
+                src.g.pg = (*cur)++;
+                found = get_pg(ssd, &src)->status == PG_VALID;
+            }
+        }
+        while (!found && seq < total) {
+            int i = seq;
+
+            seq++;
+            src.ppa = 0;
+            src.g.pg = i % spp->pgs_per_blk;
+            i /= spp->pgs_per_blk;
+            src.g.pl = i % spp->pls_per_lun;
+            i /= spp->pls_per_lun;
+            src.g.lun = i % spp->luns_per_ch;
+            i /= spp->luns_per_ch;
+            src.g.ch = i % spp->nchs;
+            src.g.blk = victim_ru->lines[i / spp->nchs]->id;
+            found = get_pg(ssd, &src)->status == PG_VALID;
+        }
+        if (!found) {
+            /* a valid count with no valid page: never erase such a unit */
+            ftl_err("FDP: RU %u counts %d valid pages it does not hold\n",
+                    victim_ru->ruidx, victim_ru->vpc);
+            return false;
+        }
+        copyback = ssd_copyback_ok(ssd, &src, &dst);
+        if (!copyback) {
+            gc_read_page(ssd, &src);
+        }
+        fdp_gc_move_to(ssd, &src, &dst, dest_ru, dest_ruh, copyback);
+        (*moved)++;
+    }
     return true;
 }
 
@@ -904,7 +999,14 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
      * not moved; a block erased before that point would be counted erased
      * again when the unit is next collected.
      */
-    for (int i = 0; i < spp->lines_per_ru; i++) {
+    if (spp->gc_copyback) {
+        if (!fdp_reclaim_ru_copyback(ssd, victim_ru, dest_ruh, &vpc_cnt)) {
+            fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
+            fdp_victim_enqueue(ssd, victim_ru);
+            return -1;
+        }
+    }
+    for (int i = 0; i < spp->lines_per_ru && !spp->gc_copyback; i++) {
         ppa.g.blk = victim_ru->lines[i]->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -1248,6 +1350,26 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
 
         fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
         if (!fresh && do_gc_fdp_style(ssd, rgid, ruh->ruhid, true) != -1) {
+            /*
+             * The last handle of an Initially Isolated configuration is also
+             * where collection writes. Collection can fill @old and retire
+             * it; retiring it again would put it on a list twice.
+             */
+            if (ruh->curr_ru != old) {
+                nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
+                if (ruh->curr_ru) {
+                    continue;
+                }
+                fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+                if (!fresh) {
+                    req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                    return;
+                }
+                ruh->rus[rgid] = fresh;
+                ruh->curr_ru = fresh;
+                ruh->ruh->rus[rgid] = fresh->nvme_ru;
+                continue;
+            }
             fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
         }
         if (!fresh) {

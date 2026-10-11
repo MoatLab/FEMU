@@ -281,6 +281,8 @@ void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
                       struct ppa *new_ppa, const struct ssd_gc_move_ops *ops,
                       void *dest);
 void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa);
+void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
+                            struct ppa *new_ppa);
 int do_gc(struct ssd *ssd, bool force);
 int do_read_reclaim(struct ssd *ssd);
 int do_wear_level(struct ssd *ssd);

@@ -284,6 +284,12 @@ of space part way, the pass stops before erasing anything: the pages already
 moved live at their new location, the rest stay in the victim, and the
 victim goes back on the queue to be finished by a later pass.
 
+With `gc_copyback` on, the pass takes the victim's pages in the order of
+the destination dies. A page whose destination is on its own die and plane
+moves by copyback, with no data on the channel. A copyback skips
+ECC, so on a real SSD its bit errors are not corrected; FEMU models no bit
+errors, so only timing changes ([copyback](ftl.md#copyback-gc_copyback)).
+
 Both destinations can be left without a unit: one that fills with no free
 unit to follow it is dropped. The next pass with a page to move takes a free
 unit for it from the victim's reclaim group, whatever state the handle's
@@ -402,6 +408,7 @@ of the property reference; the controller-side ones are under
 | `gc_strategy` | `femu` | Victim policy, above. No effect without FDP. |
 | `fdp_trim_erase_all` | `femu` | Whole-device reset on deallocate. No effect without FDP. |
 | `gc_thres_pcent`, `gc_thres_pcent_high` | `femu` | Background and foreground watermarks, as fractions of the units. |
+| `gc_copyback` | `femu` | Moves collected pages on their die; off by default. A copyback skips ECC (timing only in FEMU). |
 | BlackBox geometry (`nchs`, `luns_per_ch`, `pls_per_lun`, `blks_per_pl`, `pgs_per_blk`, `secs_per_pg`, `secsz`) | `femu` | Sets RUNS (one superblock) and the number of lines, hence units. |
 
 Refused under FDP on a bbssd controller: `buffer_size`, `hot_cold_sep`,

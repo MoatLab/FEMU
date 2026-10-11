@@ -2479,11 +2479,11 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
 }
 
 /*
- * Copyback runs in line collection of the bbssd and CSD FTL this controller
- * builds. Each refused setting moves pages some other way, or runs an FTL
- * built from other settings: paced steps keep a cursor in reclaim order, FDP
- * relocates through reclaim units, the other mappings merge, and a cxl_ssd
- * link or a shared namespace uses an FTL another device made.
+ * Copyback runs in line and reclaim unit collection of the bbssd and CSD FTL
+ * this controller builds. Each refused setting moves pages some other way, or
+ * runs an FTL built from other settings: paced steps keep a cursor in reclaim
+ * order, the other mappings merge, and a cxl_ssd link or a shared namespace
+ * uses an FTL another device made.
  */
 static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
 {
@@ -2503,8 +2503,6 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
     } else if (n->cxl_dev) {
         /* a linked controller borrows the medium's FTL and its settings */
         why = "cxl_ssd";
-    } else if (n->subsys && n->subsys->params.fdp.enabled) {
-        why = "FDP";
     } else if (bp->gc_pace) {
         why = "gc_pace";
     } else if (bp->pe_suspend) {

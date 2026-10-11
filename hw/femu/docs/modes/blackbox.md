@@ -190,6 +190,11 @@ All of these are off by default.
   proportion to its valid pages, instead of in one pass. A write then waits
   for about one copy instead of a whole line. The forced pass stays as the
   last resort. It is refused where `blk_pe_limit` is.
+- `gc_copyback` (off by default) moves collected pages on their die, with no
+  data on the channel, and works with FDP too. A copyback skips ECC: on a
+  real SSD its bit errors are not corrected and can add up. FEMU models no
+  bit errors, so only timing changes; pages with extra ECC time and refresh
+  moves stay off-chip ([design](../design/ftl.md#copyback-gc_copyback)).
 - `age_scale` makes data age faster than wall time for `retention_limit_sec`
   and `ecc_retention_sec`, so a study of months of retention runs in
   minutes. I/O timing and collection order stay as they are.
