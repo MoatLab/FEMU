@@ -74,6 +74,16 @@ typedef struct NandLoc {
     uint32_t xfer_secs;
 } NandLoc;
 
+/*
+ * ECC read time wear model shared by the modes: a read pays ecc_step_ns
+ * more for each NAND_ECC_PE_PER_TIER erases of its block, up to
+ * NAND_ECC_MAX_TIERS steps.
+ */
+enum {
+    NAND_ECC_PE_PER_TIER = 750,
+    NAND_ECC_MAX_TIERS   = 4,
+};
+
 typedef struct NandMediaTiming {
     /* flat scalars (bbssd-compat) */
     int64_t rd_ns;
@@ -94,7 +104,7 @@ typedef struct NandMediaTiming {
     int64_t tplpbsy_ns;
     int64_t tplrbsy_ns;
     int64_t tplebsy_ns;
-    /* ECC wear-on-read */
+    /* ECC wear-on-read: see NAND_ECC_PE_PER_TIER for the usual tier size */
     int64_t ecc_step_ns;
     int32_t ecc_pe_per_tier;
     int32_t ecc_max_tiers;

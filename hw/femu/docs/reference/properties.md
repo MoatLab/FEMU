@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 170 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 172 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -216,6 +216,8 @@ Devices:
 | `zns_pe_suspend` | `int32` | `0` | ZNS: non-zero lets a read suspend a program or erase on its plane |
 | `zns_lun_contention` | `int32` | `0` | ZNS: non-zero makes the planes of one LUN share the die, so their operations run one at a time; a zone reset erases each LUN's planes in one multi-plane operation |
 | `zns_reset_by_fill` | `int32` | `0` | ZNS: non-zero makes a zone reset erase only the blocks that hold programmed pages, so its time and wear follow the zone's fill |
+| `zns_page_types` | `int32` | `0` | ZNS: non-zero gives each read the latency of its page type (lower to upper page), spread around the read latency of the flash type; programs keep one latency per wordline |
+| `zns_ecc_step_ns` | `int64` | `0` | ZNS: ECC read time in ns added per 750 erases of the block, up to 4 steps, as bbssd ecc_step_ns; 0 or more |
 | `zns_tsusp_ns` | `int64` | `0` | ZNS: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `zns_max_active` | `uint32` | `0` | ZNS: Maximum Active Resources (zones), at most the zone count; 0 means no limit |
 | `zns_max_open` | `uint32` | `0` | ZNS: Maximum Open Resources (zones), at most the zone count and zns_max_active; 0 means no limit |

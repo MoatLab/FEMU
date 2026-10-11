@@ -2015,6 +2015,163 @@ static void femu_test_zns_wear(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * One QLC wordline of a one-plane zone holds 16 4 KiB pages: four NAND pages,
+ * one of each page type, in LBA order. The write cache programs it when a
+ * 17th write arrives. Returns the time of a read of 4 KiB page @lpn in ms.
+ */
+static int64_t femu_zns_read_ms(FemuCtrlState *c, uint64_t lpn, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ,
+                                    lpn * (FEMU_DATA_SIZE / c->lba_size), buf)),
+                    ==, NVME_SUCCESS);
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+/* fill the first wordline; returns the time of the write that programs it */
+static int64_t femu_zns_fill_wordline(FemuCtrlState *c, uint64_t buf)
+{
+    int64_t t0 = 0;
+    int i;
+
+    for (i = 0; i < 17; i++) {
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        i * (FEMU_DATA_SIZE / c->lba_size),
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+/*
+ * zns_page_types: with a mean read time of 200 ms, the lower page (type 0)
+ * reads in about 107 ms and the upper page (type 3) in about 307 ms, the
+ * spread of the shared QLC table. Without it both take 200 ms. A program
+ * writes a whole wordline, so it keeps its one time of 100 ms either way.
+ * @data is "on" when the device has page types on.
+ */
+static void femu_test_zns_page_types(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    int64_t lower, upper, program;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    program = femu_zns_fill_wordline(&c, buf);
+    g_test_message("page types %s: program %" PRId64 " ms",
+                   on ? "on" : "off", program);
+    g_assert_cmpint(program, >=, 100);
+    g_assert_cmpint(program, <, 160);
+
+    lower = femu_zns_read_ms(&c, 0, buf);
+    upper = femu_zns_read_ms(&c, 12, buf);
+    g_test_message("page types %s: lower %" PRId64 " ms, upper %" PRId64
+                   " ms", on ? "on" : "off", lower, upper);
+    if (on) {
+        g_assert_cmpint(lower, >=, 107);
+        g_assert_cmpint(lower, <, 160);
+        g_assert_cmpint(upper, >=, 307);
+        g_assert_cmpint(upper, <, 380);
+    } else {
+        g_assert_cmpint(lower, >=, 200);
+        g_assert_cmpint(lower, <, 260);
+        g_assert_cmpint(upper, >=, 200);
+        g_assert_cmpint(upper, <, 260);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * zns_ecc_step_ns: a read pays one ECC step more once its block has 750
+ * erases. Each round writes one page to zone 0, so the zone is open, and
+ * resets it, which erases its block. The read takes 50 ms before and
+ * 50 + 150 ms after.
+ */
+/*
+ * PLC has no page type table, so zns_page_types on PLC is refused, and so
+ * is an ECC step past one hour.
+ */
+static void femu_test_zns_page_types_plc(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+    const char *desc;
+
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'plc',"
+        "'addr':'5','devsz_mb':32,'femu_mode':3,'zns_flash_type':5,"
+        "'zns_pg_rd_lat':1000,'zns_pg_wr_lat':1000,'zns_blk_er_lat':1000,"
+        "'zns_page_types':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "type 5 has no page type table"));
+    qobject_unref(rsp);
+
+    /* past one hour, the scaled read or four ECC steps could overflow */
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'big',"
+        "'addr':'5','devsz_mb':32,'femu_mode':3,"
+        "'zns_ecc_step_ns':3600000000001}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "at most 3600000000000 ns"));
+    qobject_unref(rsp);
+}
+
+static void femu_test_zns_ecc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    int64_t before, after;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    femu_zns_fill_wordline(&c, buf);
+    before = femu_zns_read_ms(&c, 0, buf);
+
+    for (i = 0; i < 760; i++) {
+        g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    femu_zns_fill_wordline(&c, buf);
+    after = femu_zns_read_ms(&c, 0, buf);
+    g_test_message("ECC: read %" PRId64 " ms new, %" PRId64
+                   " ms after 760 resets", before, after);
+    g_assert_cmpint(before, >=, 50);
+    g_assert_cmpint(before, <, 110);
+    g_assert_cmpint(after, >=, 200);
+    g_assert_cmpint(after, <, 260);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * LUN contention on ZNS. One LUN has two planes, and a program or an erase
  * takes ZNS_LUN_OP_MS. An SLC page is 16 KiB, so the write cache holds
  * ZNS_LUN_FILL 4 KiB pages, and the next write programs both planes. Each plane runs on its own by default, so that write takes one
@@ -28927,6 +29084,36 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
             "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,pe_cycles_rated=1"
+    });
+    qos_add_test("zns-page-types-off", "femu", femu_test_zns_page_types,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=1,zns_num_blk=32,zns_num_wc=1,"
+            "zns_blk_er_lat=1000,zns_pg_rd_lat=200000000,"
+            "zns_pg_wr_lat=100000000"
+    });
+    qos_add_test("zns-page-types-on", "femu", femu_test_zns_page_types,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=1,zns_num_blk=32,zns_num_wc=1,"
+            "zns_blk_er_lat=1000,zns_pg_rd_lat=200000000,"
+            "zns_pg_wr_lat=100000000,zns_page_types=1"
+    });
+    qos_add_test("zns-page-types-plc", "femu", femu_test_zns_page_types_plc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=32,femu_mode=3"
+    });
+    qos_add_test("zns-ecc", "femu", femu_test_zns_ecc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=1,zns_num_blk=32,zns_num_wc=1,"
+            "zns_pg_wr_lat=1000000,zns_blk_er_lat=1000,zns_pg_rd_lat=50000000,"
+            "zns_ecc_step_ns=150000000"
     });
     qos_add_test("zns-lun-off", "femu", femu_test_zns_lun,
                  &(QOSGraphTestOptions) {

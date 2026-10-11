@@ -175,9 +175,9 @@ Each mode configures the layer differently:
 | --- | --- | --- |
 | `array_contend` | `NAND_CONTEND_LUN_ONLY` | `NAND_CONTEND_PLANE_ONLY`; `NAND_CONTEND_LUN_AND_PLANE` with `zns_lun_contention` |
 | `channel_mode` | `NAND_CH_STAGED` when any bus phase is non-zero, else `NAND_CH_OFF` | same rule |
-| `use_flat_timing` | true when `nand_cell_type=0`, false with a cell type | false (per-type table, page type always 0) |
+| `use_flat_timing` | true when `nand_cell_type=0`, false when it is set | false (per-type table; page type 0, or `pg % zns_flash_type` for reads with `zns_page_types`) |
 | `pe_suspend` | `pe_suspend` property | `zns_pe_suspend` property |
-| `ecc_on_read` | true; the adder is still 0 unless `ecc_step_ns` is set | false |
+| `ecc_on_read` | true; the adder is still 0 unless `ecc_step_ns` is set | true; the adder is still 0 unless `zns_ecc_step_ns` is set |
 
 The enum also has `NAND_CH_NOOP`. No mode selects it today.
 
@@ -285,8 +285,8 @@ Reads and erases are not scaled.
 
 ### ZNS and OCSSD
 
-ZNS keeps one read, program and erase time per cell type and always uses page
-type 0. Each `zns_*_lat` property replaces the built-in value for the
+ZNS keeps one read, program and erase time per flash type. It uses page type
+0, except for reads with `zns_page_types` (see [ZNS](../modes/zns.md#nand-timing)). Each `zns_*_lat` property replaces the built-in value for the
 configured `zns_flash_type` only. OCSSD uses the `nand_cell_type` tables
 above, selected by `flash_type`; Open-Channel 1.2 looks up the page type of
 each page, Open-Channel 2.0 always uses page type 0.
@@ -459,10 +459,11 @@ with suspend on also leaves the lock-free fast path described in
 ```
 
 `pe_cycles` is the block's erase count, `age_sec` the time since its line was
-filled (`line.close_time`). The constants are `FEMU_ECC_PE_PER_TIER` and
-`FEMU_ECC_MAX_TIERS` in `bbssd/ftl.h`. A multi-plane read pays the largest
+filled (`line.close_time`). The constants are `NAND_ECC_PE_PER_TIER` and
+`NAND_ECC_MAX_TIERS` in `nand/nand-media.h`. A multi-plane read pays the largest
 extra of its planes. Read-retry as a sequence of separate array reads is not
-modelled; this adder stands in for it. ZNS and OCSSD have no ECC time.
+modelled; this adder stands in for it. ZNS has the wear term with
+`zns_ecc_step_ns`, and no retention term. OCSSD has no ECC time.
 
 ## From operations to a completion time
 

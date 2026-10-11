@@ -141,6 +141,28 @@ By default a reset of a non-empty zone erases every block of the zone.
 `zns_reset_by_fill=1` erases only the blocks that hold programmed pages, so
 the reset time and the wear follow the zone's fill. See the [timing model](../concepts/timing-model.md#zns-write-cache).
 
+A read takes one latency per flash type by default. `zns_page_types=1` gives
+each read the latency of its page type, from SLC to QLC. A program writes a
+whole wordline, one page of each type, so it keeps its one latency. A
+flush after a partial eviction can start in the middle of a wordline and
+still pays one program time. The
+spread between types comes from the shared NAND table. It is scaled so that
+the mean over a wordline is the read latency of the flash type, which
+`zns_pg_rd_lat` can set.
+
+```
+ QLC wordline, read latency 85 us (the default mean)
+ page type    lower   lower-center   upper-center   upper
+ shared (us)  59.3    85.3           127.2          169.6
+ ZNS (us)     45.7    65.7            98.0          130.6    mean 85
+```
+
+`zns_ecc_step_ns` adds ECC read time as the block wears, as bbssd
+`ecc_step_ns` does: one step per 750 erases of the block, up to 4 steps.
+ZNS counts the wear only, with no retention term. Both are off by default.
+`zns_ecc_step_ns`, and `zns_pg_rd_lat` with `zns_page_types`, must be at
+most one hour.
+
 ### Optional zone features
 
 All of these are off by default.

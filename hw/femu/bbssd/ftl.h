@@ -25,8 +25,8 @@ enum {
 
 /* ECC read-latency wear model: P/E cycles per latency tier, and the tier cap */
 enum {
-    FEMU_ECC_PE_PER_TIER = 750,
-    FEMU_ECC_MAX_TIERS   = 4,
+    FEMU_ECC_PE_PER_TIER = NAND_ECC_PE_PER_TIER,
+    FEMU_ECC_MAX_TIERS   = NAND_ECC_MAX_TIERS,
 };
 
 enum {

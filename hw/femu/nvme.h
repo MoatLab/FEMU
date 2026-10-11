@@ -2086,6 +2086,10 @@ typedef struct ZNSCtrlParams {
     int32_t zns_lun_contention;
     /* zone reset erases only programmed blocks (0 = off: every block) */
     int32_t zns_reset_by_fill;
+    /* reads take the latency of their page type (0 = off: one latency) */
+    int32_t zns_page_types;
+    /* ECC read time per wear step, ns (0 = off) */
+    int64_t zns_ecc_step_ns;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_num_wc;      /* write caches (0 = zns_max_open, or 3 when unlimited) */

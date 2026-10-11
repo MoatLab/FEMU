@@ -2081,6 +2081,12 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.lun_contention = (n->zns_params.zns_lun_contention != 0);
     /* reset by fill: default off, so a reset erases every block as before */
     id_zns->timing.reset_by_fill = (n->zns_params.zns_reset_by_fill != 0);
+    /* page types and ECC wear: default off, so a read keeps one latency */
+    id_zns->timing.page_types = (n->zns_params.zns_page_types != 0);
+    id_zns->timing.ecc_step_ns = n->zns_params.zns_ecc_step_ns;
+    if (id_zns->timing.page_types) {
+        init_nand_flash(n);     /* the shared per-page-type tables */
+    }
 
     /*
      * Optional write-fault injection. One write in N fails and takes its zone
@@ -2199,6 +2205,13 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
         return false;
     }
+    /* the shared page type tables stop at QLC */
+    if (p->zns_page_types && p->zns_flash_type > QLC) {
+        error_setg(errp, "zns_page_types needs zns_flash_type %d to %d; "
+                   "type %d has no page type table", SLC, QLC,
+                   p->zns_flash_type);
+        return false;
+    }
     /*
      * The caches are allocated before the zone count is known, so bound the
      * count here by the most zones this geometry could have; the exact bound
@@ -2213,8 +2226,21 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     if (p->zns_pg_rd_lat < 0 || p->zns_pg_wr_lat < 0 || p->zns_blk_er_lat < 0 ||
         p->zns_cmd_addr_lat < 0 || p->zns_pg_xfer_lat < 0 ||
-        p->zns_status_lat < 0 || p->zns_tsusp_ns < 0) {
+        p->zns_status_lat < 0 || p->zns_tsusp_ns < 0 ||
+        p->zns_ecc_step_ns < 0) {
         error_setg(errp, "zns NAND timing knobs must not be negative");
+        return false;
+    }
+    /*
+     * The page type spread multiplies the read time by up to the number of
+     * page types, and four ECC steps add four times the step; keep both
+     * well inside 64-bit nanoseconds.
+     */
+    if (p->zns_ecc_step_ns > ZNS_TIMING_MAX_NS ||
+        (p->zns_page_types && p->zns_pg_rd_lat > ZNS_TIMING_MAX_NS)) {
+        error_setg(errp, "zns_ecc_step_ns, and zns_pg_rd_lat with "
+                   "zns_page_types, must be at most %" PRId64 " ns (1 hour)",
+                   (int64_t)ZNS_TIMING_MAX_NS);
         return false;
     }
     /*

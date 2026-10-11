@@ -101,6 +101,7 @@ listed one by one.
 - Optional program/erase suspend for reads (`zns_pe_suspend`, `zns_tsusp_ns`) (9ec423985).
 - Optional LUN contention (`zns_lun_contention`): the planes of one LUN run their operations one at a time, and a zone reset erases each LUN's planes in one multi-plane operation. Off by default, so the timing does not change.
 - Optional zone reset by fill (`zns_reset_by_fill`): a zone reset erases only the blocks that hold programmed pages, so its time and the SMART wear follow the zone's fill. Off by default, so a reset of a non-empty zone still erases every block.
+- Opt-in ZNS read timing by page type (`zns_page_types`) and ECC read time by block wear (`zns_ecc_step_ns`). The page types keep the mean read latency of the flash type.
 
 #### BlackBox SSD (bbssd) and NAND media
 

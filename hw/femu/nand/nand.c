@@ -206,15 +206,22 @@ static void init_nand_flash_timing(FemuCtrl *n)
     };
 }
 
+/*
+ * The tables do not depend on the device. Fill them once: a later device's
+ * realize must not write them while an earlier device's FTL thread reads them.
+ */
 int init_nand_flash(void *opaque)
 {
+    static gsize filled;
     FemuCtrl *n = (FemuCtrl *)opaque;
 
-    init_mlc_page_pairing(n);
-    init_tlc_page_pairing(n);
-    init_qlc_page_pairing(n);
-
-    init_nand_flash_timing(n);
+    if (g_once_init_enter(&filled)) {
+        init_mlc_page_pairing(n);
+        init_tlc_page_pairing(n);
+        init_qlc_page_pairing(n);
+        init_nand_flash_timing(n);
+        g_once_init_leave(&filled, 1);
+    }
 
     return 0;
 }

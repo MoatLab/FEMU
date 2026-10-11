@@ -87,12 +87,41 @@ static const NandTimelineOps zns_timeline_ops = {
 };
 
 /*
+ * A ZNS program writes one page of every type of a wordline at once, so its
+ * single program time stays. (A flush after a partial eviction may start
+ * mid-wordline; it still pays one program time, as before.) A read takes one page, whose type sets its
+ * time: page pg has type pg % flash_type, as flash_type is the number of
+ * pages in a wordline. The shared table gives the spread between types,
+ * scaled so that their mean is the read latency of the flash type, which
+ * zns_pg_rd_lat may set.
+ */
+static void zns_read_page_types(struct zns_ssd *zns, NandMediaConfig *cfg)
+{
+    int ft = zns->flash_type;
+    int64_t sum = 0;
+    int p;
+
+    for (p = 0; p < ft; p++) {
+        sum += get_page_read_latency(ft, p);
+    }
+    if (sum <= 0) {
+        return;     /* no table: realize refuses this type */
+    }
+    for (p = 0; p < ft; p++) {
+        cfg->timing.rd_table_ns[ft][p] =
+            (int64_t)((double)zns->timing.pg_rd_lat[ft] *
+                      get_page_read_latency(ft, p) * ft / sum + 0.5);
+    }
+}
+
+/*
  * Configure the shared NAND media layer to reproduce the ZNS timing exactly:
  * the array is bound by the plane alone, which is what the enum's PLANE_ONLY
  * mode was named for, and the per-op latency comes from the same
  * per-flash-type values the device already carries. The channel bus is off
  * unless a bus phase is configured.
- * Page type is left at 0 so a flash type resolves to one latency, as before.
+ * Page type is left at 0 so a flash type resolves to one latency, as before,
+ * unless zns_page_types is set.
  */
 void zns_nand_media_init(struct zns_ssd *zns)
 {
@@ -108,6 +137,14 @@ void zns_nand_media_init(struct zns_ssd *zns)
         cfg.timing.wr_table_ns[ft][0] = zns->timing.pg_wr_lat[ft];
         cfg.timing.er_table_ns[ft] = zns->timing.blk_er_lat[ft];
     }
+    if (zns->timing.page_types) {
+        zns_read_page_types(zns, &cfg);
+    }
+    /* the same wear tiers as bbssd; inert while ecc_step_ns is 0 */
+    cfg.timing.ecc_step_ns = zns->timing.ecc_step_ns;
+    cfg.timing.ecc_pe_per_tier = NAND_ECC_PE_PER_TIER;
+    cfg.timing.ecc_max_tiers = NAND_ECC_MAX_TIERS;
+    cfg.policy.ecc_on_read = true;
     cfg.policy.use_flat_timing = false;
     /*
      * By default each plane runs on its own, as before. zns_lun_contention
@@ -161,7 +198,8 @@ static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
         .blk = ppa->g.blk,
         .pg = ppa->g.pg,
         .flash_type = get_blk(zns, ppa)->nand_type,
-        .page_type = 0,
+        .page_type = zns->timing.page_types && ncmd->cmd == NAND_READ ?
+                     ppa->g.pg % zns->flash_type : 0,
         .pe_cycles = get_blk(zns, ppa)->erase_cnt,
     };
 

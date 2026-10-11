@@ -35,6 +35,9 @@
 #define TLC_PROGRAM_LATENCY_NS (937500)
 #define QLC_PROGRAM_LATENCY_NS (12196000)
 
+/* the largest zns_pg_rd_lat (with page types) and zns_ecc_step_ns: 1 hour */
+#define ZNS_TIMING_MAX_NS   (3600LL * 1000 * 1000 * 1000)
+
 #define SLC_READ_LATENCY_NS (4000)
 #define TLC_READ_LATENCY_NS (32000)
 #define QLC_READ_LATENCY_NS (85000)
@@ -132,6 +135,10 @@ typedef struct SSDNandFlashTiming {
     bool     lun_contention;
     /* a zone reset erases only the blocks that hold programmed pages */
     bool     reset_by_fill;
+    /* a read takes the latency of its page type, around the mean above */
+    bool     page_types;
+    /* ECC read time per wear step (ns); 0 = off */
+    int64_t  ecc_step_ns;
 } SSDNandFlashTiming;
 
 struct zns_write_cache{
