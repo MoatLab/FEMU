@@ -524,7 +524,8 @@ static void test_copyback(void)
      */
     {
         NandLoc other = { .lun = 2 };
-        uint64_t after_cb, after_off;
+        uint64_t after_cb = 0;
+        uint64_t after_off = 0;
 
         for (int pass = 0; pass < 2; pass++) {
             bb_config(&cfg);
