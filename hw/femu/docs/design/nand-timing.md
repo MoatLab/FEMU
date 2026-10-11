@@ -358,7 +358,7 @@ parallelism, except for the batched operations below.
 | FDP reads and writes, KV writes | no, one operation per page | `bbssd/ftl-fdp.c`, `kvssd/kvssd-ftl.c` |
 | GC page moves | no | `gc_read_page()`, `gc_write_page()` |
 | ZNS zone reset | no batching needed: each plane has its own rule, so per-plane erases overlap | `zns_zone_reset()` |
-| Copyback (`nand_media_copyback()`) | not called | none |
+| Copyback (`nand_media_copyback()`) | no: one read and one program on one die | BBSSD line GC with `gc_copyback` (`bbssd/ftl-line-gc.c`) |
 
 `trcbsy` is accepted for compatibility and has no effect; setting it warns
 at realize. With the defaults (no bus, no `tplebsy`) a two-plane erase
@@ -859,8 +859,8 @@ make -C hw/femu/tests check
   Only line erases are batched.
 - Cache read pipelining: the code path exists but no mode enables it. There
   is no cache program model.
-- Copyback for GC. The function exists and has no caller, because GC's
-  destination is almost never on the source LUN.
+- Copyback outside BBSSD line GC. FDP, paced collection, read reclaim and
+  retention refresh move pages off-chip.
 - Program suspend for programs, or erase suspend by another erase. Only reads
   suspend.
 - Per-die power or thermal limits, and temperature-dependent timing.

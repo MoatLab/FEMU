@@ -208,11 +208,16 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
                                        NandMediaOp op, uint64_t stime);
 
 /*
- * On-chip copyback: src read + dst program, skips the bus when configured.
- * No caller yet -- GC picks its destination from the striped write pointer, so
- * source and destination almost never share a LUN, which copyback requires.
+ * On-chip copyback: src read + dst program on one die, with no data phase on
+ * the channel. In the staged model the read books its command/address and
+ * status phases and the program its command/address. The caller checks that
+ * src and dst share a die and a plane; bbssd line collection calls this when
+ * gc_copyback is set.
  */
 NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime);
+
+/* the extra correction time a read of @loc takes; 0 when the model is off */
+uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc);
 
 #endif /* __FEMU_NAND_MEDIA_H */

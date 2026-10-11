@@ -1216,7 +1216,8 @@ typedef struct FemuStatsLog {
     uint64_t    pace_copies;      /* pages paced steps copied, also at 16 */
     uint64_t    pace_lines;       /* lines paced collection finished */
     uint64_t    pace_takeovers;   /* paced lines a forced pass finished */
-    uint8_t     rsvd248[264];
+    uint64_t    gc_copyback_pages; /* pages moved on their die, also at 16 */
+    uint8_t     rsvd256[256];
 } FemuStatsLog;
 
 /*
@@ -2029,6 +2030,7 @@ typedef struct BbCtrlParams {
     int age_scale;            /* data age per wall-time unit; 1 = real time */
     int wl_spread;            /* wear gap that starts wear levelling; 0 = off */
     bool gc_pace;             /* collect a line a few pages per host write */
+    bool gc_copyback;         /* collection moves pages on their die */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -2898,6 +2900,7 @@ uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
+uint64_t ssd_gc_copyback_pages(struct ssd *ssd);
 void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
                     uint64_t *takeovers);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);

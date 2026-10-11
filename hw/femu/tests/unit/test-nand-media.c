@@ -478,6 +478,88 @@ static void test_copyback(void)
     check("a busy destination LUN delays the program",
           c.done_ns, 5000000000ULL + 500000 + 40000);
     nand_media_destroy(&m);
+
+    /*
+     * Staged channel: the read books command/address and status, the program
+     * command/address, and neither books data. cmd 100, status 50, transfer
+     * 1000 (never booked): 100 + 10000 + 50 + 100 + 40000. Two transfers
+     * would add 2000.
+     */
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.timing.cmd_addr_ns = 100;
+    cfg.timing.status_ns = 50;
+    cfg.timing.page_xfer_ns = 1000;
+    nand_media_init(&m, &cfg);
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    dst.blk = 1;
+    c = nand_media_copyback(&m, &src, &dst, 1000000000ULL);
+    check("staged copyback: command and status phases only",
+          c.done_ns, 1000000000ULL + 100 + 10000 + 50 + 100 + 40000);
+
+    /* the read skips the ECC adder: the controller never decodes it */
+    bb_config(&cfg);
+    nand_media_destroy(&m);
+    cfg.timing.ecc_step_ns = 7000;
+    nand_media_init(&m, &cfg);
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    src.pe_cycles = 3000;
+    dst.blk = 1;
+    check("copyback read has no ECC adder",
+          nand_media_copyback(&m, &src, &dst, 1000000000ULL).done_ns,
+          1000000000ULL + 10000 + 40000);
+    check("the same read off-chip has one",
+          nand_media_read_ecc_ns(&m, &src), 4 * 7000);
+    nand_media_destroy(&m);
+
+    /*
+     * A whole collection burst on one channel: two LUNs, 64 moves. The later
+     * phases share a bounded booking queue, and when it fills the channel is
+     * held to the end of a phase. Copyback books one window per move where an
+     * off-chip move books two and holds the channel for its data-in, so a
+     * read on a third LUN after the burst never waits longer than after the
+     * same burst moved off-chip.
+     */
+    {
+        NandLoc other = { .lun = 2 };
+        uint64_t after_cb, after_off;
+
+        for (int pass = 0; pass < 2; pass++) {
+            bb_config(&cfg);
+            cfg.policy.channel_mode = NAND_CH_STAGED;
+            cfg.timing.cmd_addr_ns = 100;
+            cfg.timing.status_ns = 50;
+            cfg.timing.page_xfer_ns = 1000;
+            nand_media_init(&m, &cfg);
+            for (int i = 0; i < 64; i++) {
+                memset(&src, 0, sizeof(src));
+                memset(&dst, 0, sizeof(dst));
+                src.lun = dst.lun = i % 2;
+                dst.blk = 1;
+                if (pass == 0) {
+                    nand_media_copyback(&m, &src, &dst, 1000000000ULL);
+                } else {
+                    nand_media_op(&m, &src, NAND_MEDIA_READ, 1000000000ULL);
+                    nand_media_op(&m, &dst, NAND_MEDIA_PROGRAM,
+                                  1000000000ULL);
+                }
+            }
+            c = nand_media_op(&m, &other, NAND_MEDIA_READ, 1000000000ULL);
+            if (pass == 0) {
+                after_cb = c.done_ns;
+            } else {
+                after_off = c.done_ns;
+            }
+            nand_media_destroy(&m);
+        }
+        printf("# read after the burst: copyback %llu ns, off-chip %llu ns\n",
+               (unsigned long long)(after_cb - 1000000000ULL),
+               (unsigned long long)(after_off - 1000000000ULL));
+        check_lt("a read beside a copyback burst waits no longer than "
+                 "beside an off-chip one", after_cb, after_off + 1);
+    }
 }
 
 /*

@@ -214,6 +214,7 @@ struct ssdparams {
     int age_scale;
     int wl_spread;
     bool gc_pace;
+    bool gc_copyback; /* collection moves a page on its die when it can */
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -574,6 +575,7 @@ struct ssd {
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */
+    uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
      * Lines that forced collection freed with GC delay on, and when the NAND
      * work of the last of them ends on every LUN. A front end that blocks
@@ -644,6 +646,9 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);
 uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
                                        int nppas, struct nand_cmd *ncmd);
+bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst);
+uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
+                              struct ppa *dst);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \

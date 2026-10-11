@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 168 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 169 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -174,6 +174,7 @@ Devices:
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle |
 | `wl_spread` | `int32` | `0` | bbssd, CSD: static wear levelling starts when the erases of lines in service differ by more than this and stops at half of it; it moves the least worn full line into the most worn free line and copies at most a quarter of the host pages; 0 (default) turns it off |
 | `gc_pace` | `bool` | `off` | bbssd, CSD: collect the victim line a few pages per host page written, in proportion to its valid pages, instead of in one pass; the forced pass stays as the last resort; off (default) |
+| `gc_copyback` | `bool` | `off` | bbssd, CSD: line collection moves a page on its die (copyback) when the destination is on the same channel, LUN and plane and the read needs no extra ECC time; collection then takes victim pages in the order of the destination dies. Saves the channel data phases. Read reclaim and retention refresh still move off-chip. Not for KV. Refused with gc_pace, pe_suspend, FDP, cxl_ssd, namespace_modes, ns_mgmt, shared namespaces and the hybrid and fast mappings; off (default) |
 | `mapping` | `str` | unset | bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, hybrid or fast; unset is page, and FDP supports only page |
 | `mapping_cache_mb` | `uint32` | `0` | bbssd, CSD with mapping=dftl: size of the cached mapping table in MiB; 0 means 4 |
 | `read_cache_mb` | `uint32` | `0` | bbssd, CSD: size of the DRAM read cache in MiB; 0 disables it |

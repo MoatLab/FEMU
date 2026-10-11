@@ -144,6 +144,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
+    ssd->gc_copyback_pages = 0;
     ssd->victim_digest = 0;
     ssd->forced_gc_timed = 0;
     ssd->forced_gc_end = 0;
@@ -428,6 +429,11 @@ uint64_t ssd_wl_relocations(struct ssd *ssd)
 uint64_t ssd_wl_pages(struct ssd *ssd)
 {
     return ssd->wl_pages;
+}
+
+uint64_t ssd_gc_copyback_pages(struct ssd *ssd)
+{
+    return ssd->gc_copyback_pages;
 }
 
 void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,

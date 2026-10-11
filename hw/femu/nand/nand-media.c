@@ -601,23 +601,49 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime)
 {
     NandOpCompletion c;
+    bool staged = m->cfg.policy.channel_mode == NAND_CH_STAGED;
+    uint64_t t = stime;
     uint64_t s;
 
     /*
-     * On-chip read then program; no bus phases. Same contention rule as
-     * every other op here: an operation cannot begin before it was requested,
-     * and it goes through the configured rule rather than the accumulators
+     * On-chip read then program. The page stays in the die's page register,
+     * so neither step moves data over the channel. In the staged model the
+     * read sends its command and address, and its status poll and the
+     * program's command and address follow back to back as one booking; the
+     * program ends at the array, as an ordinary program does. The read gets
+     * no ECC adder: the controller never sees the data. As for every other
+     * op here, an operation cannot begin before it was requested, and its
+     * start comes from array_contend_start() rather than the accumulators
      * directly, so a LUN-only caller's unset plane_avail is never read.
      */
-    s = array_contend_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
+    if (m->cfg.timeline->lock_lun) {
+        m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, src);
+    }
+    if (staged) {
+        t = bus_now(m, src->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+    }
+    s = array_contend_start(m, src, t) + array_lat(m, src, NAND_MEDIA_READ) -
+        ecc_extra_ns(m, src);
     array_commit(m, src, s);
     /* the on-chip read is part of the program, so it is suspended with it */
     suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
+    if (staged) {
+        s = bus_later(m, src->ch, stime, s, m->cfg.timing.status_ns +
+                      m->cfg.timing.cmd_addr_ns);
+    }
     s = array_contend_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
     array_commit(m, dst, s);
     suspend_note(m, dst, NAND_MEDIA_PROGRAM, s);
+    if (m->cfg.timeline->unlock_lun) {
+        m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, src);
+    }
 
     c.done_ns = s;
-    c.latency_ns = 0; /* GC-internal; host effect is via freed channel + LUN busy */
+    c.latency_ns = s - stime;
     return c;
+}
+
+uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc)
+{
+    return ecc_extra_ns(m, loc);
 }

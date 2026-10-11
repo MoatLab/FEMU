@@ -587,6 +587,28 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa)
     lun->gc_endtime = lun->next_lun_avail_time;
 }
 
+/*
+ * ssd_gc_charge_copyback - time a relocation done on the die
+ * @ssd: the device
+ * @old_ppa: the page read into the die's page register
+ * @new_ppa: the page programmed from it
+ *
+ * The copyback counterpart of gc_read_page() plus ssd_gc_charge_move(): the
+ * read and the program run on one die and the data never crosses the
+ * channel.
+ */
+static void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
+                                   struct ppa *new_ppa)
+{
+    struct nand_lun *lun = get_lun(ssd, new_ppa);
+
+    if (ssd->sp.enable_gc_delay) {
+        ssd_advance_copyback(ssd, old_ppa, new_ppa);
+    }
+    lun->gc_endtime = lun->next_lun_avail_time;
+    ssd->gc_copyback_pages++;
+}
+
 static void gc_mark_valid(struct ssd *ssd, struct ppa *ppa, void *dest)
 {
     (void)dest;
@@ -598,38 +620,38 @@ static const struct ssd_gc_move_ops gc_line_move_ops = {
     .mark_invalid = mark_page_invalid,
 };
 
-/* move valid page data (already in DRAM) from victim line to a new page */
-/* true when the page was relocated; false when there is nowhere to put it */
-static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+/*
+ * The page collection writes next for a line with stream @tag, and the
+ * stream pointer that holds it (NULL for the data pointer). It takes a line
+ * for a pointer that has none, as the write that follows would.
+ */
+static struct ppa gc_dest_page(struct ssd *ssd, uint64_t tag,
+                               struct write_pointer **stream_wp)
 {
-    struct ppa new_ppa;
+    *stream_wp = NULL;
+    if (tag) {
+        *stream_wp = ssd_stream_gc_pointer(ssd, tag);
+        return ssd_stream_pointer_page(ssd, *stream_wp, tag);
+    }
+    if (!ssd->wp.curline) {
+        return ssd_stream_pointer_page(ssd, &ssd->wp, 0);
+    }
+    return get_new_page(ssd);
+}
+
+/* relocate @old_ppa to @new_ppa, which gc_dest_page() chose */
+static void gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
+                       struct ppa *new_ppa, struct write_pointer *stream_wp,
+                       uint64_t tag, bool copyback)
+{
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
-    uint64_t tag = get_line(ssd, old_ppa)->stream_tag;
-    struct write_pointer *stream_wp = NULL;
 
     ftl_assert(valid_lpn(ssd, lpn));
-    if (tag) {
-        stream_wp = ssd_stream_gc_pointer(ssd, tag);
-        new_ppa = ssd_stream_pointer_page(ssd, stream_wp, tag);
-    } else if (!ssd->wp.curline) {
-        new_ppa = ssd_stream_pointer_page(ssd, &ssd->wp, 0);
-    } else {
-        new_ppa = get_new_page(ssd);
-    }
-    if (!mapped_ppa(&new_ppa)) {
-        /*
-         * Relocating with nowhere to relocate to used to mark a page valid a
-         * second time, which carried the line's valid count past its capacity
-         * -- and the test that returns a line to collection is an equality,
-         * so that line was never collected again. Leave the page where it is.
-         */
-        return false;
-    }
-    ssd_gc_move_page(ssd, lpn, old_ppa, &new_ppa, &gc_line_move_ops, NULL);
+    ssd_gc_move_page(ssd, lpn, old_ppa, new_ppa, &gc_line_move_ops, NULL);
     if (exp_lpn_watched(lpn)) {
-        exp_watch_blk[new_ppa.g.blk] = 1; /* track the new block too */
+        exp_watch_blk[new_ppa->g.blk] = 1; /* track the new block too */
         EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
-                lpn, PPA_ARG(old_ppa), PPA_ARG(&new_ppa));
+                lpn, PPA_ARG(old_ppa), PPA_ARG(new_ppa));
     }
 
     /* need to advance the write pointer here */
@@ -642,7 +664,32 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
         ssd_advance_write_pointer(ssd);
     }
 
-    ssd_gc_charge_move(ssd, &new_ppa);
+    if (copyback) {
+        ssd_gc_charge_copyback(ssd, old_ppa, new_ppa);
+    } else {
+        ssd_gc_charge_move(ssd, new_ppa);
+    }
+}
+
+/* move valid page data (already in DRAM) from victim line to a new page */
+/* true when the page was relocated; false when there is nowhere to put it */
+static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+{
+    uint64_t tag = get_line(ssd, old_ppa)->stream_tag;
+    struct write_pointer *stream_wp;
+    struct ppa new_ppa;
+
+    new_ppa = gc_dest_page(ssd, tag, &stream_wp);
+    if (!mapped_ppa(&new_ppa)) {
+        /*
+         * Relocating with nowhere to relocate to used to mark a page valid a
+         * second time, which carried the line's valid count past its capacity
+         * -- and the test that returns a line to collection is an equality,
+         * so that line was never collected again. Leave the page where it is.
+         */
+        return false;
+    }
+    gc_move_to(ssd, old_ppa, &new_ppa, stream_wp, tag, false);
     return true;
 }
 
@@ -1048,8 +1095,79 @@ static void requeue_line(struct ssd *ssd, struct line *line)
  */
 static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line);
 
-static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
+static void pace_ppa(struct ssd *ssd, struct line *line, int i,
+                     struct ppa *ppa);
+
+/*
+ * Empty @victim for copyback. Copyback needs the source and the destination
+ * on one die and plane, and the destination pointer moves to the next die
+ * after every page. So before each move, look where the pointer writes next
+ * and take a valid page of the victim on that die and plane; when that die
+ * has none left, take the next valid page in reclaim order and move it
+ * off-chip. A cursor per die and one in reclaim order only ever move
+ * forward, because collection is the only thing changing pages meanwhile.
+ * Returns false, with the copies made so far kept, when there is no room.
+ */
+static bool reclaim_line_copyback(struct ssd *ssd, struct line *victim)
 {
+    struct ssdparams *spp = &ssd->sp;
+    int npos = spp->nchs * spp->luns_per_ch * spp->pls_per_lun;
+    g_autofree int *next = g_new0(int, npos);
+    uint64_t tag = victim->stream_tag;
+    int seq = 0;
+
+    while (victim->vpc) {
+        struct write_pointer *stream_wp;
+        struct ppa dst = gc_dest_page(ssd, tag, &stream_wp);
+        struct ppa src;
+        bool found = false;
+        bool copyback;
+        int pos;
+
+        if (!mapped_ppa(&dst)) {
+            return false;
+        }
+        pos = (dst.g.ch * spp->luns_per_ch + dst.g.lun) * spp->pls_per_lun +
+              dst.g.pl;
+        src.ppa = 0;
+        src.g.blk = victim->id;
+        src.g.ch = dst.g.ch;
+        src.g.lun = dst.g.lun;
+        src.g.pl = dst.g.pl;
+        while (!found && next[pos] < spp->pgs_per_blk) {
+            src.g.pg = next[pos]++;
+            found = get_pg(ssd, &src)->status == PG_VALID;
+        }
+        while (!found && seq < spp->pgs_per_line) {
+            pace_ppa(ssd, victim, seq++, &src);
+            found = get_pg(ssd, &src)->status == PG_VALID;
+        }
+        if (!found) {
+            /* a valid count with no valid page: never erase such a line */
+            ftl_err("line %d counts %d valid pages it does not hold\n",
+                    victim->id, victim->vpc);
+            return false;
+        }
+        copyback = ssd_copyback_ok(ssd, &src, &dst);
+        if (!copyback) {
+            gc_read_page(ssd, &src);
+        }
+        gc_move_to(ssd, &src, &dst, stream_wp, tag, copyback);
+    }
+    return true;
+}
+
+/*
+ * Empty @victim_line, then erase and free it. @copyback lets the moves run
+ * on the die; a refresh passes false, because it rewrites data so that the
+ * controller corrects it, and a copyback never shows the data to the
+ * controller.
+ */
+static bool reclaim_line(struct ssd *ssd, struct line *victim_line,
+                         bool copyback)
+{
+    /* a line queued for refresh may be taken by collection first */
+    copyback = copyback && victim_line != ssd->read_reclaim_line;
     struct ssdparams *spp = &ssd->sp;
     struct ppa ppa;
     int ch, lun, pl;
@@ -1065,6 +1183,15 @@ static bool reclaim_line(struct ssd *ssd, struct line *victim_line)
     ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
     ftl_note_victim(ssd, victim_line->id);
+
+    if (copyback) {
+        if (!reclaim_line_copyback(ssd, victim_line)) {
+            requeue_line(ssd, victim_line);
+            return false;
+        }
+        reclaim_line_tail(ssd, victim_line);
+        return true;
+    }
 
     for (ch = 0; ch < spp->nchs && victim_line->vpc; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -1172,7 +1299,7 @@ int do_gc(struct ssd *ssd, bool force)
               pqueue_size(ssd->lm.victim_line_pq),
               ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
 
-    if (!reclaim_line(ssd, victim_line)) {
+    if (!reclaim_line(ssd, victim_line, ssd->sp.gc_copyback)) {
         return -1;
     }
     if (force && ssd->sp.enable_gc_delay) {
@@ -1250,7 +1377,7 @@ int do_read_reclaim(struct ssd *ssd)
     }
 
     line->reclaiming = true;
-    if (!reclaim_line(ssd, line)) {
+    if (!reclaim_line(ssd, line, false)) {
         line->reclaiming = false;
         return -1;
     }
@@ -1374,7 +1501,7 @@ int do_wear_level(struct ssd *ssd)
     lm->full_line_cnt--;
     copied = ssd->gc_write_pages;
     src->reclaiming = true;
-    if (!reclaim_line(ssd, src)) {
+    if (!reclaim_line(ssd, src, ssd->sp.gc_copyback)) {
         src->reclaiming = false;
         return -1;
     }

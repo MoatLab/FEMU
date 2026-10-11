@@ -2478,6 +2478,48 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * Copyback runs in line collection of the bbssd and CSD FTL this controller
+ * builds. Each refused setting moves pages some other way, or runs an FTL
+ * built from other settings: paced steps keep a cursor in reclaim order, FDP
+ * relocates through reclaim units, the other mappings merge, and a cxl_ssd
+ * link or a shared namespace uses an FTL another device made.
+ */
+static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *map = bp->mapping_scheme;
+    const char *why = NULL;
+
+    if (!bp->gc_copyback) {
+        return true;
+    }
+    if (!BBSSD(n) && !CSD(n)) {
+        why = "a mode other than bbssd or CSD";
+    } else if (n->namespace_modes) {
+        why = "namespace_modes";
+    } else if (nvme_ns_shared(n) || n->ns_mgmt) {
+        why = "ns_mgmt or shared namespaces";
+    } else if (n->cxl_dev) {
+        /* a linked controller borrows the medium's FTL and its settings */
+        why = "cxl_ssd";
+    } else if (n->subsys && n->subsys->params.fdp.enabled) {
+        why = "FDP";
+    } else if (bp->gc_pace) {
+        why = "gc_pace";
+    } else if (bp->pe_suspend) {
+        /* a suspend would move the array, not the booked program command */
+        why = "pe_suspend";
+    } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
+        why = "a mapping other than page or dftl";
+    }
+    if (why) {
+        error_setg(errp, "femu: gc_copyback is not supported with %s", why);
+        return false;
+    }
+    return true;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -2527,6 +2569,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
+        return;
+    }
+    if (!femu_check_copyback_props(n, errp)) {
         return;
     }
 
@@ -3178,6 +3223,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("age_scale", FemuCtrl, bb_params.age_scale, 1),
     DEFINE_PROP_INT32("wl_spread", FemuCtrl, bb_params.wl_spread, 0),
     DEFINE_PROP_BOOL("gc_pace", FemuCtrl, bb_params.gc_pace, false),
+    DEFINE_PROP_BOOL("gc_copyback", FemuCtrl, bb_params.gc_copyback, false),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

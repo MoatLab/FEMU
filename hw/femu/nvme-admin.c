@@ -2051,6 +2051,7 @@ typedef struct FemuMediaStats {
     uint64_t retired_lines;
     uint64_t wl_relocations;
     uint64_t wl_pages;
+    uint64_t gc_copyback_pages;
     uint64_t pace[3];           /* copies, lines, takeovers */
     uint64_t partial_page_writes;
     uint64_t plane_ops[3];      /* read, program, erase */
@@ -2129,6 +2130,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->retired_lines += ssd_retired_lines(ns->ssd);
         st->wl_relocations += ssd_wl_relocations(ns->ssd);
         st->wl_pages += ssd_wl_pages(ns->ssd);
+        st->gc_copyback_pages += ssd_gc_copyback_pages(ns->ssd);
         {
             uint64_t c, l, t;
 
@@ -2216,6 +2218,7 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.pace_copies = cpu_to_le64(st.pace[0]);
     stats.pace_lines = cpu_to_le64(st.pace[1]);
     stats.pace_takeovers = cpu_to_le64(st.pace[2]);
+    stats.gc_copyback_pages = cpu_to_le64(st.gc_copyback_pages);
     *log = stats;
 }
 

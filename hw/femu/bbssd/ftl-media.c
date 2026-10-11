@@ -267,3 +267,54 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
                 qatomic_read(&ssd->media_plane_ops[op]) + nppas);
     return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;
 }
+
+/**
+ * ssd_copyback_ok - may collection move @src to @dst on the die?
+ * @ssd: the device
+ * @src: the valid page collection moves
+ * @dst: the destination page collection chose
+ *
+ * Copyback keeps the page in the die's page register, so source and
+ * destination must share a channel, a LUN and a plane. The controller never
+ * sees the data and cannot correct it, so a page whose read needs correction
+ * goes off-chip instead.
+ */
+bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
+{
+    NandLoc loc;
+
+    if (!ssd->sp.gc_copyback || src->g.ch != dst->g.ch ||
+        src->g.lun != dst->g.lun || src->g.pl != dst->g.pl) {
+        return false;
+    }
+    loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    return nand_media_read_ecc_ns(&ssd->media, &loc) == 0;
+}
+
+/**
+ * ssd_advance_copyback - time a collection move done on the die
+ * @ssd: the device
+ * @src: the page read into the page register
+ * @dst: the page programmed from it
+ *
+ * Counts as one read of the source block and one program, like the off-chip
+ * move it replaces, and returns the latency of both steps.
+ */
+uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
+                              struct ppa *dst)
+{
+    uint64_t stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    NandLoc sloc;
+    NandLoc dloc;
+
+    get_blk(ssd, src)->read_cnt++;
+    ssd->media_ops[NAND_MEDIA_READ]++;
+    ssd->media_ops[NAND_MEDIA_PROGRAM]++;
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_READ],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) + 1);
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM]) + 1);
+    sloc = bb_decode_loc(ssd, src, stime);
+    dloc = bb_decode_loc(ssd, dst, stime);
+    return nand_media_copyback(&ssd->media, &sloc, &dloc, stime).latency_ns;
+}

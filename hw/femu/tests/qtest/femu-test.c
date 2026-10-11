@@ -4379,8 +4379,10 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
     int i;
 
     bool wz = g_str_has_prefix(data, "wz ");
+    bool cb = g_str_has_prefix(data, "cb ");
 
-    g_assert_cmpint(sscanf(wz ? data + 3 : data, "%" SCNu64 " %" SCNu64,
+    g_assert_cmpint(sscanf(wz || cb ? data + 3 : data,
+                           "%" SCNu64 " %" SCNu64,
                            &want_spread, &want_moves), ==, 2);
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -4418,6 +4420,14 @@ static void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(pages * 4, <=, host);
     g_assert_cmpuint(hi - lo, ==, want_spread);
     g_assert_cmpuint(moves, ==, want_moves);
+    if (cb) {
+        /*
+         * A full line is valid on every die, so each of its moves matches,
+         * and this workload leaves collection nothing else to move.
+         */
+        g_test_message("%" PRIu64 " pages by copyback", ldq_le_p(page + 248));
+        g_assert_cmpuint(ldq_le_p(page + 248), ==, pages);
+    }
     femu_query_check_lines(qts, "/machine/peripheral/gc-test", 256);
 
     guest_free(alloc, log);
@@ -4730,6 +4740,147 @@ static void femu_test_gc_pace_timing(void *obj, void *data,
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Copyback on 2 channels x 2 LUNs, 32-page blocks, so a line is 128 pages and
+ * page k of line 0 sits on channel k % 2, LUN (k / 2) % 2. A transfer takes
+ * 2 ms and every array step 0.1 ms. Line 0 is filled, then:
+ *   "on", "off": pages 0-63 are deallocated, so each die keeps 16 valid
+ *     pages. Collection moves 64 pages. Off, each move puts two transfers
+ *     on the channels, about 128 ms per channel, and the write that waits
+ *     for them is slow. On, every move finds its destination die and goes
+ *     by copyback, with no transfer.
+ *   "oneddie": only pages with k % 4 == 0 stay, all 32 on channel 0 LUN 0.
+ *     The destination steps through the four dies, so a quarter of the 32
+ *     moves land on that die and go by copyback; the rest go off-chip.
+ */
+static void femu_test_gc_copyback(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc = 0, gc0, cb, gc;
+    uint64_t mapped, lost, orphans, dealloc;
+    int64_t max_ms = 0;
+    char *st = NULL;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    for (lpn = 0; lpn < 128; lpn += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!strcmp(mode, "oneddie")) {
+        for (n = 0; n < 128; n++) {
+            if (n % 4) {
+                g_assert_cmphex(femu_dealloc_pages(&c, n, 1, list), ==,
+                                NVME_SUCCESS);
+            }
+        }
+    } else {
+        g_assert_cmphex(femu_dealloc_pages(&c, 0, 64, list), ==,
+                        NVME_SUCCESS);
+    }
+    gc0 = femu_c0h_field(&c, log, 16);
+    for (n = 0; n < 216; n++) {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        lpn += 16;
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        if (strcmp(st, "victim")) {
+            break;
+        }
+    }
+    /* the write after collection waits for whatever it left on the media */
+    {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+    }
+    g_assert_cmpstr(st, ==, "free");
+    /* every live page still maps to the one copy that holds it */
+    dealloc = strcmp(mode, "oneddie") ? 64 : 96;
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, lpn + 16 - dealloc);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_query_check_lines(qts, path, mapped);
+    gc = femu_c0h_field(&c, log, 16) - gc0;
+    cb = femu_c0h_field(&c, log, 248);
+    g_test_message("gc_copyback %s: %" PRIu64 " moved, %" PRIu64
+                   " by copyback, slowest write %" PRId64 " ms",
+                   mode, gc, cb, max_ms);
+    if (!strcmp(mode, "off")) {
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 0);
+        g_assert_cmpint(max_ms, >, 100);
+    } else if (!strcmp(mode, "on")) {
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 64);
+        g_assert_cmpint(max_ms, <, 60);
+    } else {
+        g_assert_cmpuint(gc, ==, 32);
+        g_assert_cmpuint(cb, ==, 8);
+    }
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* gc_copyback refuses the settings that move pages some other way */
+static void femu_test_gc_copyback_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *extra;
+        const char *why;
+    } cases[] = {
+        { "'femu_mode':1,'gc_pace':true", "with gc_pace" },
+        { "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
+        { "'femu_mode':1,'mapping':'hybrid'",
+          "a mapping other than page or dftl" },
+        { "'femu_mode':0", "a mode other than bbssd or CSD" },
+        { "'femu_mode':3", "a mode other than bbssd or CSD" },
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'cb-refused','addr':'5','devsz_mb':16,"
+            "'gc_copyback':true,%s}", cases[i].extra);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].extra, desc);
+        g_assert_nonnull(strstr(desc, "gc_copyback"));
+        g_assert_nonnull(strstr(desc, cases[i].why));
+        qobject_unref(rsp);
+    }
     qos_invalidate_command_line();
 }
 
@@ -27810,6 +27961,14 @@ static void femu_register_nodes(void)
             ",wl_spread=4"
     });
 
+    qos_add_test("wear-level-copyback", "femu", femu_test_wear_level,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cb 19 61",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
+            ",wl_spread=4,gc_copyback=on"
+    });
     qos_add_test("wear-level-wz", "femu", femu_test_wear_level,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"wz 19 61",
@@ -27889,6 +28048,38 @@ static void femu_register_nodes(void)
             "pgs_per_blk=128,blks_per_pl=12,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_rd_lat=200000,pg_wr_lat=4000000,blk_er_lat=1000000"
     });
+    qos_add_test("gc-copyback-off", "femu", femu_test_gc_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000"
+    });
+    qos_add_test("gc-copyback-on", "femu", femu_test_gc_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,gc_copyback=on"
+    });
+    qos_add_test("gc-copyback-oneddie", "femu", femu_test_gc_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"oneddie",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,gc_copyback=on"
+    });
+    qos_add_test("gc-copyback-refused", "femu", femu_test_gc_copyback_refused,
+                 NULL);
     qos_add_test("thermal-idle", "femu", femu_test_thermal,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"idle",

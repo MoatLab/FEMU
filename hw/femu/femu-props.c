@@ -408,6 +408,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: collect the victim line a few pages per host page "
       "written, in proportion to its valid pages, instead of in one pass; "
       "the forced pass stays as the last resort; off (default)" },
+    { "gc_copyback",
+      "bbssd, CSD: line collection moves a page on its die (copyback) when "
+      "the destination is on the same channel, LUN and plane and the read "
+      "needs no extra ECC time; collection then takes victim pages in the "
+      "order of the destination dies. Saves the channel data phases. Read "
+      "reclaim and retention refresh still move off-chip. Not for KV. "
+      "Refused with gc_pace, pe_suspend, FDP, cxl_ssd, namespace_modes, "
+      "ns_mgmt, shared namespaces and the hybrid and fast mappings; off "
+      "(default)" },
     { "age_scale",
       "bbssd, CSD: data ages this many times faster than wall time, for "
       "retention_limit_sec and ecc_retention_sec only; 1 (default) or more. "

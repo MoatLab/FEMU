@@ -531,14 +531,63 @@ on when commands arrive.
 ```
 
 The relocated page goes wherever the data pointer is, not to the victim's
-LUN: the model has no copyback. Every valid page is moved before any block
-is erased. If the data pointer runs out of lines part way, the victim goes
+LUN, unless `gc_copyback` is on (next section). Every valid page is moved
+before any block is erased. If the data pointer runs out of lines part way, the victim goes
 back to the victim queue (or the full list, if nothing was moved from a full
 line) holding the pages it still has, and nothing is erased. The pages that
 were moved are already invalid in the victim, so its counts stay true and a
 later step moves only what is left. Writes that then find no line fail with
 Capacity Exceeded. The watermark floor, per-page forced GC and the capacity
 reserve keep a valid configuration from getting there.
+
+### Copyback (`gc_copyback`)
+
+Copyback reads a page into the die's page register and programs it into
+another block of the same die and plane. The data never crosses the channel.
+The data pointer steps to the next die on every page (channel fastest, then
+LUN, then plane), so a victim walked in its own order meets its destination
+die only once in `nchs x luns_per_ch x pls_per_lun` moves. With `gc_copyback`
+on, line collection walks the victim in the order of the destination dies:
+
+```
+ while the victim holds valid pages:
+   dst = next page of the destination pointer
+   src = next valid victim page on dst's channel, LUN and plane
+         else next valid victim page in reclaim order
+   same channel, LUN and plane, and zero extra ECC time --> copyback
+   otherwise                                           --> read + program
+```
+
+| Move | Charged |
+| --- | --- |
+| Copyback, staged channel | src cmd/addr, tR, status and program cmd/addr, tPROG; no data phase |
+| Copyback, no channel model | tR then tPROG on the die |
+| Off-chip | the ordinary GC read (with data-out) and program (with data-in) |
+
+- The walk changes only which victim page goes to which destination page.
+  The line, the pointer and the pages moved stay the same, so wear
+  levelling still fills the worn line exactly.
+- A page whose read has extra ECC time (`ecc_step_ns` wear or retention
+  tier) moves off-chip, so the controller decodes it. This is a timing rule:
+  FEMU stores no bit errors, and nothing limits how often one page moves by
+  copyback.
+- Read reclaim and retention refresh always move off-chip: they rewrite data
+  so that the controller corrects it. A line queued for refresh that
+  collection takes first also moves off-chip.
+- The later bus phases of a channel share a queue of 32 bookings. A burst of
+  collection fills it, and the channel is then held to the end of each new
+  phase, as for an off-chip burst. Copyback books one window per move, where
+  an off-chip move books two.
+- An off-chip GC program does not wait for its own read; copyback chains the
+  two. The saving shows in the channel time, with `pg_xfer_lat` set.
+- Log page C0h offset 248 counts the pages moved by copyback, which offset
+  16 also counts.
+
+Refused with `gc_pace` (its steps keep a cursor in reclaim order),
+`pe_suspend` (a suspended read would not move the booked program command),
+FDP (it moves pages through reclaim units), the hybrid and fast mappings
+(they merge), `cxl_ssd`, `ns_mgmt` and shared namespaces (their FTL comes
+from another device), and `namespace_modes`.
 
 ### How GC time is charged
 
@@ -1084,8 +1133,9 @@ calibrated against a specific commercial drive.
 - Data placement is modelled per page; the FTL never tracks sectors within a
   page, so writes smaller than a page cost a whole page program.
 - GC relocations go through the data pointer (or a stream pointer for
-  stream data), never back to the victim's LUN (no copyback), and GC runs on the FTL thread, one line at a
-  time.
+  stream data). Only line collection with `gc_copyback` moves a page on its
+  die; FDP and paced collection do not. GC runs on the FTL thread, one line
+  at a time.
 - There is no explicit wear levelling, and bad blocks do not affect
   placement.
 - Read reclaim and retention refresh act only on reads followed by writes.
