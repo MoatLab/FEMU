@@ -3971,6 +3971,8 @@ static void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
     femu_query_fails(qts, "'nsid':2", "not attached");
     femu_query_fails(qts, "'nsid':0", "not attached");
     femu_query_fails(qts, "'kind':'zones'", "only to znssd");
+    femu_query_fails(qts, "'kind':'reclaim-units'",
+                     "only with flexible data placement");
     femu_query_fails(qts, "'path':'/machine'", "not a femu device");
     femu_query_fails(qts, "'path':'/machine/peripheral/none'",
                      "not a femu device");
@@ -9510,6 +9512,358 @@ static uint64_t femu_fdp_hbmw(FemuCtrlState *c, uint64_t buf)
     g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, buf, 64), ==,
                     NVME_SUCCESS);
     return qtest_readq(c->pdev->bus->qts, buf);
+}
+
+/*
+ * The FDP members of one query-femu reply against the device: the handle
+ * byte counters sum to the FDP Statistics log, every reclaim unit is listed
+ * once, the states add up to the unit counts, and the valid pages of the
+ * units are the FTL's mappings. Returns the host bytes of each handle.
+ */
+static void femu_query_check_fdp(FemuCtrlState *c, uint64_t log,
+                                 uint64_t want_valid, uint64_t *host)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t sum_host = 0;
+    uint64_t sum_media = 0;
+    uint64_t vpc = 0;
+    uint64_t mapped, lost, orphans;
+    uint32_t seen[5] = { 0 };
+    uint32_t n = 0;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'reclaim-units','limit':4096",
+                              &rsp);
+    QDict *fdp = qdict_get_qdict(ns, "fdp");
+    QDict *cnt = qdict_get_qdict(fdp, "unit-counts");
+    QList *handles = qdict_get_qlist(fdp, "handles");
+    QList *rus = qdict_get_qlist(fdp, "reclaim-units");
+    uint32_t per = qdict_get_int(fdp, "units-per-group");
+    uint32_t i = 0;
+
+    g_assert_false(qdict_haskey(ns, "line-counts"));
+    g_assert_false(qdict_haskey(ns, "next-offset"));
+    QLIST_FOREACH_ENTRY(handles, e) {
+        QDict *h = qobject_to(QDict, qlist_entry_obj(e));
+
+        g_assert_cmpuint(qdict_get_int(h, "id"), ==, i);
+        host[i++] = qdict_get_int(h, "host-bytes");
+        sum_host += qdict_get_int(h, "host-bytes");
+        sum_media += qdict_get_int(h, "media-bytes");
+        g_assert_cmpuint(qdict_get_int(h, "host-bytes"), <=,
+                         qdict_get_int(h, "media-bytes"));
+    }
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, log, 64), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(sum_host, ==, qtest_readq(qts, log));
+    g_assert_cmpuint(sum_media, ==, qtest_readq(qts, log + 16));
+
+    g_assert_cmpuint(qlist_size(rus), ==, qdict_get_int(cnt, "total"));
+    QLIST_FOREACH_ENTRY(rus, e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+        const char *st = qdict_get_str(u, "state");
+        static const char *const names[] = { "free", "open", "full",
+                                             "victim", "unlisted" };
+        int k;
+
+        g_assert_cmpuint(qdict_get_int(u, "group") * per +
+                         qdict_get_int(u, "unit"), ==, n++);
+        for (k = 0; k < 5 && strcmp(st, names[k]); k++) {
+        }
+        g_assert_cmpint(k, <, 4);
+        seen[k]++;
+        vpc += qdict_get_int(u, "vpc");
+        g_assert_cmpuint(qdict_get_int(u, "vpc") + qdict_get_int(u, "ipc"),
+                         <=, qdict_get_int(fdp, "pages-per-unit"));
+        g_assert_cmpuint(qdict_get_int(u, "erase-min"), <=,
+                         qdict_get_int(u, "erase-max"));
+        if (k == 0) {
+            g_assert_false(qdict_haskey(u, "handle"));
+            g_assert_cmpuint(qdict_get_int(u, "vpc"), ==, 0);
+        } else {
+            g_assert_true(qdict_haskey(u, "handle"));
+            g_assert_cmpuint(qdict_get_int(u, "handle"), <,
+                             qlist_size(handles));
+        }
+    }
+    g_assert_cmpuint(seen[0], ==, qdict_get_int(cnt, "free"));
+    g_assert_cmpuint(seen[1], ==, qdict_get_int(cnt, "open"));
+    g_assert_cmpuint(seen[2], ==, qdict_get_int(cnt, "full"));
+    g_assert_cmpuint(seen[3], ==, qdict_get_int(cnt, "victim"));
+    qobject_unref(rsp);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_test_message("units: %" PRIu64 " valid, %" PRIu64 " mapped; host %"
+                   PRIu64 " B, media %" PRIu64 " B", vpc, mapped, sum_host,
+                   sum_media);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(vpc, ==, mapped);
+    g_assert_cmpuint(vpc, ==, want_valid);
+}
+
+/* @rus records from @offset, and where the listing continues (0 = end) */
+static void femu_query_ru_window(QTestState *qts, uint32_t offset,
+                                 uint32_t limit, uint32_t want, uint32_t next)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'reclaim-units','offset':%u,'limit':%u", offset, limit);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QList *rus = qdict_get_qlist(qdict_get_qdict(ns, "fdp"), "reclaim-units");
+
+    g_assert_cmpuint(qlist_size(rus), ==, want);
+    g_assert_cmpuint(qdict_get_int(ns, "offset"), ==, offset);
+    g_assert_cmpuint(qdict_get_int(qobject_to(QDict, qlist_peek(rus)),
+                                   "unit"), ==, offset);
+    if (next) {
+        g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, next);
+    } else {
+        g_assert_false(qdict_haskey(ns, "next-offset"));
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * query-femu on an FDP namespace with four handles: writes through two
+ * handles show up on those handles only, the counters agree with the FDP
+ * Statistics log before and after collection, and the reclaim unit listing
+ * accounts for every valid page.
+ */
+static void femu_test_query_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t host[4] = { 0 };
+    uint64_t gc;
+    uint32_t total;
+    uint32_t seed = 7;
+    QDict *rsp;
+    QDict *ns;
+    QDict *fdp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "bbssd");
+    g_assert_false(qdict_haskey(ns, "line-counts"));
+    fdp = qdict_get_qdict(ns, "fdp");
+    g_assert_false(qdict_haskey(fdp, "reclaim-units"));
+    g_assert_cmpuint(qdict_get_int(fdp, "reclaim-groups"), ==, 1);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(fdp, "handles")), ==, 4);
+    total = qdict_get_int(qdict_get_qdict(fdp, "unit-counts"), "total");
+    g_assert_cmpuint(total, ==, 25);
+    g_assert_cmpuint(total, ==, qdict_get_int(fdp, "units-per-group"));
+    g_assert_cmpuint(qdict_get_int(fdp, "pages-per-unit"), ==, 16);
+    /* each handle starts with a unit open: units 0 to 3, the rest free */
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "open"), ==, 4);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "free"), ==, 21);
+    qobject_unref(rsp);
+    ns = femu_query_ns(qts, "'kind':'reclaim-units','limit':1", &rsp);
+    fdp = qdict_get_qdict(ns, "fdp");
+    {
+        QDict *u = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                                  fdp, "reclaim-units")));
+        QDict *h = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                                  fdp, "handles")));
+
+        g_assert_cmpstr(qdict_get_str(u, "state"), ==, "open");
+        g_assert_cmpuint(qdict_get_int(u, "handle"), ==, 0);
+        g_assert_cmpstr(qdict_get_str(h, "type"), ==, "persistently-isolated");
+    }
+    g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, 1);
+    qobject_unref(rsp);
+    femu_query_check_fdp(&c, log, 0, host);
+
+    /* placement 1 then 2 */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 64, buf, list, 1)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 64, 32, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    femu_query_check_fdp(&c, log, 96, host);
+    g_assert_cmpuint(host[0], ==, 0);
+    g_assert_cmpuint(host[1], ==, 64 * 4096);
+    g_assert_cmpuint(host[2], ==, 32 * 4096);
+    g_assert_cmpuint(host[3], ==, 0);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        (i / 64) % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < 1200; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, page, npages, buf,
+                                                        list,
+                                                        (seed >> 4) % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    ns = femu_query_ns(qts, "", &rsp);
+    gc = qdict_get_int(qdict_get_qdict(ns, "counters"), "gc-write-pages");
+    g_test_message("collection moved %" PRIu64 " pages", gc);
+    g_assert_cmpuint(gc, >, 0);
+    qobject_unref(rsp);
+    femu_query_check_fdp(&c, log, pages, host);
+
+    /* windows */
+    femu_query_ru_window(qts, 0, 5, 5, 5);
+    femu_query_ru_window(qts, 5, 5, 5, 10);
+    femu_query_ru_window(qts, total - 1, 10, 1, 0);
+    femu_query_ru_window(qts, 0, 4096, total, 0);
+    {
+        g_autofree char *past = g_strdup_printf(
+            "'kind':'reclaim-units','offset':%u", total);
+
+        femu_query_fails(qts, past, "past its last reclaim unit");
+    }
+    femu_query_fails(qts, "'kind':'reclaim-units','limit':0", "limit must be");
+    femu_query_fails(qts, "'kind':'lines'", "use 'reclaim-units'");
+    femu_query_fails(qts, "'kind':'zones'", "only to znssd");
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* the state, valid and invalid pages of unit @unit of group 0 */
+static void femu_query_ru(QTestState *qts, uint32_t unit, const char **state,
+                          uint32_t *vpc, uint32_t *ipc, QDict **rsp)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'reclaim-units','offset':%u,'limit':1", unit);
+    QDict *ns = femu_query_ns(qts, args, rsp);
+    QDict *u = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                              qdict_get_qdict(ns, "fdp"), "reclaim-units")));
+
+    *state = qdict_get_str(u, "state");
+    *vpc = qdict_get_int(u, "vpc");
+    *ipc = qdict_get_int(u, "ipc");
+}
+
+/*
+ * A Reclaim Unit Handle Update closes the open unit of handle 0 after one
+ * page. The unit is a garbage collection candidate with no invalid page.
+ */
+static void femu_test_query_fdp_update(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    const char *state;
+    uint32_t vpc, ipc;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_query_ru(qts, 0, &state, &vpc, &ipc, &rsp);
+    g_assert_cmpstr(state, ==, "open");
+    g_assert_cmpuint(vpc, ==, 1);
+    qobject_unref(rsp);
+
+    qtest_writew(qts, pids, 0);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    femu_query_ru(qts, 0, &state, &vpc, &ipc, &rsp);
+    g_assert_cmpstr(state, ==, "victim");
+    g_assert_cmpuint(vpc, ==, 1);
+    g_assert_cmpuint(ipc, ==, 0);
+    qobject_unref(rsp);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* host bytes of handle 0 from query-femu, and HBMW from log page 22h */
+static void femu_query_fdp_hbmw(FemuCtrlState *c, uint64_t log,
+                                uint64_t *handle0, uint64_t *hbmw)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *h = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                              qdict_get_qdict(ns, "fdp"), "handles")));
+
+    *handle0 = qdict_get_int(h, "host-bytes");
+    qobject_unref(rsp);
+    *hbmw = femu_fdp_hbmw(c, log);
+}
+
+/*
+ * A controller replaces another on the same FDP subsystem. The log keeps
+ * the bytes the old controller wrote, and query-femu must report the same.
+ */
+static void femu_test_query_fdp_replace(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuCtrlState c2 = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t handle0, hbmw;
+    QPCIDevice *pdev;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 8, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_query_fdp_hbmw(&c, log, &handle0, &hbmw);
+    g_assert_cmpuint(hbmw, ==, 8 * 4096);
+    g_assert_cmpuint(handle0, ==, hbmw);
+    femu_disable(&c);
+
+    qtest_qmp_device_del_send(qts, "qr");
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'qr2',"
+        "'addr':'4','devsz_mb':1,'femu_mode':1,'secsz':512,"
+        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(4, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c2, pdev, alloc);
+    femu_query_fdp_hbmw(&c2, log, &handle0, &hbmw);
+    g_test_message("after the replacement: handle 0 %" PRIu64 " B, log %"
+                   PRIu64 " B", handle0, hbmw);
+    g_assert_cmpuint(hbmw, ==, 8 * 4096);
+    g_assert_cmpuint(handle0, ==, hbmw);
+    femu_disable(&c2);
+    g_free(pdev);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
 }
 
 /*
@@ -29141,11 +29495,24 @@ static void femu_register_nodes(void)
             "id=qu,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
             "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
     });
-    qos_add_test("query-unsupported-fdp", "femu", femu_test_query_unsupported,
+    qos_add_test("query-fdp-update", "femu", femu_test_query_fdp_update,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"does not support flexible data placement",
         .edge.extra_device_opts =
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("query-fdp-replace", "femu", femu_test_query_fdp_replace,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qr,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("query-fdp", "femu", femu_test_query_fdp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
     });

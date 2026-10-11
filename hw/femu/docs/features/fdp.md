@@ -166,6 +166,14 @@ without it:
 sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4
 ```
 
+The QMP command [`query-femu`](../reference/query-femu.md) reads the same
+state from the host, with no guest tools. It shows the bytes that each
+reclaim unit handle wrote and moved, and the state of each reclaim unit:
+
+```json
+{"execute": "query-femu", "arguments": {"kind": "reclaim-units"}}
+```
+
 ## Limits and refusals
 
 | Message | Cause and fix |

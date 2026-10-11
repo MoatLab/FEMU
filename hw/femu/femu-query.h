@@ -22,11 +22,31 @@ typedef struct FemuQueryLine {
     FemuLineState state;
 } FemuQueryLine;
 
+typedef struct FemuQueryRuh {
+    uint32_t id;
+    FemuRuHandleType type;
+    uint64_t host_bytes;
+    uint64_t media_bytes;
+} FemuQueryRuh;
+
+typedef struct FemuQueryRu {
+    uint32_t group;
+    uint32_t unit;
+    uint32_t handle;
+    uint32_t vpc;
+    uint32_t ipc;
+    uint32_t erase_min;
+    uint32_t erase_max;
+    FemuReclaimUnitState state;
+    bool has_handle;
+} FemuQueryRu;
+
 /*
  * One namespace. The caller fills nsid, generation, offset, max_lines and
- * the two buffers; the FTL thread fills the rest. The buffers are sized
- * from the geometry before the request is posted, so the FTL thread never
- * allocates.
+ * the buffers; the FTL thread fills the rest. The buffers are sized from
+ * the geometry before the request is posted, so the FTL thread never
+ * allocates. With flexible data placement, the reclaim unit fields replace
+ * the line fields.
  */
 typedef struct FemuQueryNs {
     uint32_t nsid;
@@ -59,6 +79,19 @@ typedef struct FemuQueryNs {
     FemuQueryLine *lines;       /* max_lines entries, or NULL for a summary */
     uint8_t *state;             /* state_cap entries, or NULL for a summary */
     uint32_t state_cap;
+
+    bool fdp;
+    uint32_t nrg;
+    uint32_t rus_per_rg;
+    uint32_t pgs_per_ru;
+    uint32_t ru_counts[FEMU_RECLAIM_UNIT_STATE__MAX];
+    uint32_t nr_ruhs;
+    FemuQueryRuh *ruhs;         /* nr_ruhs entries, sized by the caller */
+    uint32_t max_rus;
+    uint32_t nr_rus;
+    FemuQueryRu *rus;           /* max_rus entries, or NULL for a summary */
+    uint8_t *ru_state;          /* ru_state_cap entries, or NULL */
+    uint32_t ru_state_cap;
 } FemuQueryNs;
 
 typedef struct FemuQueryReq {

@@ -4,9 +4,10 @@
 controller to the host. It needs no guest tools. The schema is in
 `qapi/femu.json`, and `query-qmp-schema` also returns it.
 
-This release supports BlackBox (`bbssd`) and zoned (`znssd`) namespaces.
-A selected namespace in another mode, with flexible data placement, or
-backed by a `femu-cxl-ssd` medium returns an error that names the mode.
+This release supports BlackBox (`bbssd`) namespaces, also with flexible
+data placement (FDP), and zoned (`znssd`) namespaces. A selected
+namespace in another mode, or backed by a `femu-cxl-ssd` medium, returns
+an error that names the mode.
 A controller in an unsupported mode returns that error even when the
 guest has not enabled it.
 
@@ -42,14 +43,20 @@ query works. The NVMe driver does this when it binds to the device. A
 | --- | --- | --- | --- |
 | `path` | string | the only `femu` device | QOM path of the device, for example `/machine/peripheral/femu0` |
 | `nsid` | integer | every attached namespace | the namespace to report |
-| `kind` | `summary`, `lines` or `zones` | `summary` | `lines` adds one record per line of a `bbssd` namespace; `zones` adds one record per zone of a `znssd` namespace |
-| `offset` | integer | 0 | with `lines` or `zones`, the first line or zone to report |
-| `limit` | integer | 256 | with `lines` or `zones`, the most records to report, 1 to 4096 |
+| `kind` | `summary`, `lines`, `zones` or `reclaim-units` | `summary` | `lines` adds one record per line of a `bbssd` namespace; `zones` adds one record per zone of a `znssd` namespace; `reclaim-units` adds one record per reclaim unit of an FDP namespace |
+| `offset` | integer | 0 | with a listing kind, the first record to report |
+| `limit` | integer | 256 | with a listing kind, the most records to report, 1 to 4096 |
 
-`offset` and `limit` with `kind` `summary` are an error. With `kind`
-`lines` or `zones`, give `nsid` if the controller has more than one
-namespace. `lines` on a `znssd` namespace, and `zones` on a `bbssd`
-namespace, are an error.
+`offset` and `limit` with `kind` `summary` are an error. With a listing
+kind, give `nsid` if the controller has more than one namespace. Each
+listing kind fits one namespace type:
+
+```
+ kind            bbssd   bbssd + FDP   znssd
+ lines           yes     error         error
+ reclaim-units   error   yes           error
+ zones           error   error         yes
+```
 
 ## Reply
 
@@ -66,9 +73,10 @@ A `bbssd` entry has these members:
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
 | `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, and `waf` |
-| `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total` |
+| `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
+| `fdp` | with FDP only: see [FDP namespaces](#fdp-namespaces) |
 | `lines` | with `kind` `lines`: `id`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each line |
-| `offset`, `next-offset` | with `kind` `lines`: the first line in `lines`, and the offset of the next call; `next-offset` is absent after the last line |
+| `offset`, `next-offset` | with `kind` `lines` or `reclaim-units`: the first record in the listing, and the offset of the next call; `next-offset` is absent after the last record |
 
 The page counters are the counters of [log page C0h](log-pages-and-counters.md#vendor-log-page-c0h)
 for one namespace. C0h adds them over the namespaces of the controller.
@@ -93,6 +101,43 @@ The `state` of a line is one of these values:
 | `unlisted` | on no list; a correct FTL does not report this state |
 | `retired` | out of service: a block in it wore out (`blk_pe_limit`) |
 | `spare` | held back so its blocks can replace worn-out ones (`spare_lines`) |
+
+### FDP namespaces
+
+With FDP, reclaim units hold the lines, so the entry has `fdp` in place of
+`line-counts`. The `geometry` and `counters` members do not change. `fdp`
+has these members:
+
+| Member | Content |
+| --- | --- |
+| `reclaim-groups`, `units-per-group` | reclaim groups, and reclaim units in each group |
+| `pages-per-unit` | NAND pages in each reclaim unit |
+| `handles` | each reclaim unit handle: `id`, `type` (`initially-isolated` or `persistently-isolated`), `host-bytes` and `media-bytes` |
+| `unit-counts` | reclaim units that are `free`, `open`, `full` and `victim`, and the `total` |
+| `reclaim-units` | with `kind` `reclaim-units`: `group`, `unit`, `handle`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each unit, by group and then by unit |
+
+`host-bytes` counts the NAND pages that the host wrote through the
+handle, in bytes, so a 512-byte write on a 4 KiB page adds 4096.
+`media-bytes` adds the data that garbage collection moved out of the
+handle's units. Both keep their values when a controller replaces another
+on the same subsystem.
+The FDP Statistics log (log page 22h) reports the sum of each counter over
+the handles. Its fields are Host Bytes with Metadata Written (HBMW) and
+Media Bytes with Metadata Written (MBMW). The counters stop at the largest 64-bit value.
+
+```
+ host write via handle h  --> host-bytes[h] += n   media-bytes[h] += n
+ GC moves m bytes out of
+ a unit that h wrote      -->                      media-bytes[h] += m
+ log page 22h: HBMW = sum(host-bytes)   MBMW = sum(media-bytes)
+```
+
+The `state` of a unit is `free`, `open`, `full`, `victim` or `unlisted`.
+An `open` unit gets host data or collected data from a handle. A `victim`
+unit has invalid or unwritten pages. A Reclaim Unit Handle Update makes a
+`victim` of the open unit, also when it is not full. A correct
+FTL does not report `unlisted`. `handle` is the handle that wrote the unit, and it
+is absent for a free unit. Page counts are in NAND pages.
 
 ### Zoned namespaces
 
@@ -138,6 +183,38 @@ when the zone holds a zone random write area.
 To read all lines, call again with `offset` set to `next-offset` until the
 reply has no `next-offset`.
 
+An FDP namespace with four handles, just after the guest enabled it.
+Each handle has one unit open:
+
+```json
+{"execute": "query-femu", "arguments": {"kind": "reclaim-units", "limit": 1}}
+```
+
+```json
+{"return": {"path": "/machine/peripheral/femu0", "mode": "bbssd", "namespaces": [{
+  "nsid": 1, "mode": "bbssd",
+  "geometry": {"channels": 2, "luns-per-channel": 2, "planes-per-lun": 1,
+               "blocks-per-plane": 25, "pages-per-block": 4,
+               "page-size": 4096, "pages-per-line": 16},
+  "counters": {"host-write-pages": 0, "nand-write-pages": 0,
+               "gc-write-pages": 0, "block-erases": 0},
+  "fdp": {"reclaim-groups": 1, "units-per-group": 25, "pages-per-unit": 16,
+          "handles": [{"id": 0, "type": "persistently-isolated",
+                       "host-bytes": 0, "media-bytes": 0},
+                      {"id": 1, "type": "persistently-isolated",
+                       "host-bytes": 0, "media-bytes": 0},
+                      {"id": 2, "type": "persistently-isolated",
+                       "host-bytes": 0, "media-bytes": 0},
+                      {"id": 3, "type": "persistently-isolated",
+                       "host-bytes": 0, "media-bytes": 0}],
+          "unit-counts": {"free": 21, "open": 4, "full": 0, "victim": 0,
+                          "total": 25},
+          "reclaim-units": [{"group": 0, "unit": 0, "handle": 0,
+                             "state": "open", "vpc": 0, "ipc": 0,
+                             "erase-min": 0, "erase-max": 0}]},
+  "offset": 0, "next-offset": 1}]}}
+```
+
 A zoned namespace with one zone written and one zone finished:
 
 ```json
@@ -163,7 +240,8 @@ A zoned namespace with one zone written and one zone finished:
 
 The FTL thread of the controller copies the state of a `bbssd` namespace
 between two I/O requests. Thus the counters, line counts and lines of one
-namespace in one reply agree with each other. The main loop copies a
+namespace in one reply agree with each other. The same holds for the
+handles and reclaim units of an FDP namespace. The main loop copies a
 `znssd` namespace while it holds the zone lock, so its zone counts and
 zones also agree. Different namespaces, and different calls, show
 different points in time. A listing in pages is not one snapshot.
@@ -176,7 +254,8 @@ kept with each state change, so the copy reads only the zones it lists.
 The copy occupies the FTL thread for a short time. It does not stop the
 pollers, and the main loop continues while the command waits. With
 `kind` `lines`, the FTL thread walks the free, full and victim lists of the
-namespace once per call. The command fails with an error in these cases:
+namespace once per call. With FDP, it walks the unit lists of each reclaim
+group once per call, also for a summary. The command fails with an error in these cases:
 
 - A `bbssd` namespace is selected and the controller is not enabled.
 - The FTL thread does not take the query in 5 seconds, for example because

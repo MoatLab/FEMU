@@ -58,24 +58,141 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
 }
 
 /* A line takes block index @id in every plane of every LUN. */
-static void ssd_query_line_wear(struct ssd *ssd, int id, FemuQueryLine *out)
+static void ssd_query_block_wear(struct ssd *ssd, int id, uint32_t *lo,
+                                 uint32_t *hi)
 {
     struct ssdparams *spp = &ssd->sp;
-    uint32_t lo = UINT32_MAX;
-    uint32_t hi = 0;
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 uint32_t e = ssd->ch[ch].lun[lun].pl[pl].blk[id].erase_cnt;
 
-                lo = MIN(lo, e);
-                hi = MAX(hi, e);
+                *lo = MIN(*lo, e);
+                *hi = MAX(*hi, e);
             }
         }
     }
+}
+
+static void ssd_query_line_wear(struct ssd *ssd, int id, FemuQueryLine *out)
+{
+    uint32_t lo = UINT32_MAX;
+    uint32_t hi = 0;
+
+    ssd_query_block_wear(ssd, id, &lo, &hi);
     out->erase_min = lo;
     out->erase_max = hi;
+}
+
+/* Unit @u of group @g, at index g * units-per-group + u in @state. */
+static uint32_t ssd_query_ru_index(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    return ru->rgidx * ssd->rg[0].tt_nru + ru->ruidx;
+}
+
+/*
+ * Like lines, a reclaim unit's state is the list or heap that holds it, or
+ * the handle that writes to it. Free comes first: a free unit keeps the
+ * handle that last wrote it.
+ */
+static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
+{
+    FemuReclaimUnit *ru;
+
+    memset(state, FEMU_RECLAIM_UNIT_STATE_UNLISTED,
+           ssd->nrg * ssd->rg[0].tt_nru);
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+
+        QTAILQ_FOREACH(ru, &rm->full_ru_list, entry) {
+            state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FULL;
+        }
+        for (int i = 0; i < ssd->rg[g].tt_nru; i++) {
+            if (ssd->rg[g].rus[i].pos) {
+                state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
+                    FEMU_RECLAIM_UNIT_STATE_VICTIM;
+            }
+        }
+    }
+    for (uint64_t h = 0; h < ssd->nruhs; h++) {
+        FemuRuHandle *ruh = &ssd->ruhs[h];
+
+        if (ruh->curr_ru) {
+            state[ssd_query_ru_index(ssd, ruh->curr_ru)] =
+                FEMU_RECLAIM_UNIT_STATE_OPEN;
+        }
+        if (ruh->gc_ru) {
+            state[ssd_query_ru_index(ssd, ruh->gc_ru)] =
+                FEMU_RECLAIM_UNIT_STATE_OPEN;
+        }
+    }
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        QTAILQ_FOREACH(ru, &ssd->rg[g].ru_mgmt->free_ru_list, entry) {
+            state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FREE;
+        }
+    }
+}
+
+static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
+{
+    uint32_t total = ssd->nrg * ssd->rg[0].tt_nru;
+    uint32_t end;
+
+    q->nrg = ssd->nrg;
+    q->rus_per_rg = ssd->rg[0].tt_nru;
+    q->pgs_per_ru = ssd->rg[0].rus[0].npages;
+    if (ssd->nruhs != q->nr_ruhs || total > q->ru_state_cap) {
+        q->status = -ENOENT;    /* rebuilt since the caller sized the buffers */
+        return;
+    }
+    for (uint32_t h = 0; h < q->nr_ruhs; h++) {
+        FemuRuHandle *ruh = &ssd->ruhs[h];
+
+        q->ruhs[h].id = ruh->ruhid;
+        q->ruhs[h].type = ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED ?
+                          FEMU_RU_HANDLE_TYPE_PERSISTENTLY_ISOLATED :
+                          FEMU_RU_HANDLE_TYPE_INITIALLY_ISOLATED;
+        /*
+         * The subsystem's handle lives as long as the FDP Statistics log; the
+         * controller's copy starts again at zero when a controller replaces
+         * another on the same subsystem.
+         */
+        q->ruhs[h].host_bytes = ruh->ruh ? ruh->ruh->hbmw : ruh->hbmw;
+        q->ruhs[h].media_bytes = ruh->ruh ? ruh->ruh->mbmw : ruh->mbmw;
+    }
+
+    ssd_query_ru_states(ssd, q->ru_state);
+    memset(q->ru_counts, 0, sizeof(q->ru_counts));
+    for (uint32_t i = 0; i < total; i++) {
+        q->ru_counts[q->ru_state[i]]++;
+    }
+
+    q->nr_rus = 0;
+    if (!q->rus || q->offset >= total) {
+        return;
+    }
+    end = MIN(total, q->offset + q->max_rus);
+    for (uint32_t i = q->offset; i < end; i++) {
+        FemuReclaimUnit *ru = &ssd->rg[i / q->rus_per_rg].rus[i % q->rus_per_rg];
+        FemuQueryRu *out = &q->rus[q->nr_rus++];
+        uint32_t lo = UINT32_MAX;
+        uint32_t hi = 0;
+
+        out->group = ru->rgidx;
+        out->unit = ru->ruidx;
+        out->state = q->ru_state[i];
+        out->has_handle = out->state != FEMU_RECLAIM_UNIT_STATE_FREE &&
+                          ru->ruh;
+        out->handle = out->has_handle ? ru->ruh->ruhid : 0;
+        out->vpc = ru->vpc;
+        out->ipc = ru->ipc;
+        for (int l = 0; l < ru->n_lines; l++) {
+            ssd_query_block_wear(ssd, ru->lines[l]->id, &lo, &hi);
+        }
+        out->erase_min = lo;
+        out->erase_max = hi;
+    }
 }
 
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
@@ -97,6 +214,12 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->nand_pages = ssd->nand_write_pages;
     q->gc_pages = ssd->gc_write_pages;
     q->erases = ssd->total_erases;
+
+    q->fdp = ssd->fdp_enabled;
+    if (q->fdp) {
+        ssd_query_fdp(ssd, q);
+        return;
+    }
 
     q->free_lines = lm->free_line_cnt;
     q->victim_lines = pqueue_size(lm->victim_line_pq);

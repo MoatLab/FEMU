@@ -50,8 +50,7 @@ static FemuMode femu_query_mode(uint8_t mode)
 /* A namespace the FTL thread copies. */
 static bool femu_query_supported(NvmeNamespace *ns)
 {
-    return NS_BBSSD(ns) && ns->ssd && !ns->ssd->fdp_enabled &&
-           !ns->ssd_borrowed;
+    return NS_BBSSD(ns) && ns->ssd && !ns->ssd_borrowed;
 }
 
 /* A namespace the main loop copies under its zone lock. */
@@ -140,9 +139,10 @@ static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
     if (femu_query_zoned(ns)) {
         FemuQueryZoned *q = &zoned[*nr_zoned];
 
-        if (kind == FEMU_QUERY_KIND_LINES) {
-            error_setg(errp, "namespace %u: kind 'lines' applies only to "
-                       "bbssd namespaces", ns->id);
+        if (kind == FEMU_QUERY_KIND_LINES ||
+            kind == FEMU_QUERY_KIND_RECLAIM_UNITS) {
+            error_setg(errp, "namespace %u: kind '%s' applies only to "
+                       "bbssd namespaces", ns->id, FemuQueryKind_str(kind));
             return false;
         }
         q->nsid = ns->id;
@@ -165,9 +165,7 @@ static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
     if (!femu_query_supported(ns)) {
         const char *what = FemuMode_str(sel->mode);
 
-        if (NS_BBSSD(ns) && ns->ssd && ns->ssd->fdp_enabled) {
-            what = "flexible data placement";
-        } else if (NS_BBSSD(ns) && ns->ssd_borrowed) {
+        if (NS_BBSSD(ns) && ns->ssd_borrowed) {
             what = "CXL-backed";
         }
         error_setg(errp, "namespace %u: query-femu does not support %s "
@@ -180,12 +178,42 @@ static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
         return false;
     }
 
+    if (kind == FEMU_QUERY_KIND_LINES && ns->ssd->fdp_enabled) {
+        error_setg(errp, "namespace %u: kind 'lines' does not apply with "
+                   "flexible data placement; use 'reclaim-units'", ns->id);
+        return false;
+    }
+    if (kind == FEMU_QUERY_KIND_RECLAIM_UNITS && !ns->ssd->fdp_enabled) {
+        error_setg(errp, "namespace %u: kind 'reclaim-units' applies only "
+                   "with flexible data placement", ns->id);
+        return false;
+    }
+
     {
         FemuQueryNs *q = &req->ns[req->nr_ns];
 
         q->nsid = ns->id;
         q->generation = ns->creation_generation;
-        if (kind == FEMU_QUERY_KIND_LINES) {
+        if (ns->ssd->fdp_enabled) {
+            struct ssd *ssd = ns->ssd;
+            uint32_t total = ssd->rg ? ssd->nrg * ssd->rg[0].tt_nru : 0;
+
+            q->nr_ruhs = ssd->nruhs;
+            q->ruhs = g_new0(FemuQueryRuh, MAX(q->nr_ruhs, 1));
+            q->ru_state_cap = total;
+            q->ru_state = g_malloc0(MAX(total, 1));
+            if (kind == FEMU_QUERY_KIND_RECLAIM_UNITS) {
+                if (offset >= total) {
+                    error_setg(errp, "namespace %u: offset %u is past its "
+                               "last reclaim unit (%u units)", ns->id, offset,
+                               total);
+                    goto fail;
+                }
+                q->offset = offset;
+                q->max_rus = limit;
+                q->rus = g_new0(FemuQueryRu, limit);
+            }
+        } else if (kind == FEMU_QUERY_KIND_LINES) {
             if (offset >= (uint32_t)ns->ssd->lm.tt_lines) {
                 error_setg(errp, "namespace %u: offset %u is past its last "
                            "line (%d lines)", ns->id, offset,
@@ -202,6 +230,12 @@ static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
     sel->zoned = false;
     sel->idx = req->nr_ns++;
     return true;
+
+fail:
+    /* req->nr_ns does not count this entry yet; free its buffers here */
+    g_clear_pointer(&req->ns[req->nr_ns].ruhs, g_free);
+    g_clear_pointer(&req->ns[req->nr_ns].ru_state, g_free);
+    return false;
 }
 
 static void femu_query_free(FemuQueryReq *req)
@@ -209,6 +243,9 @@ static void femu_query_free(FemuQueryReq *req)
     for (uint32_t i = 0; i < req->nr_ns; i++) {
         g_free(req->ns[i].lines);
         g_free(req->ns[i].state);
+        g_free(req->ns[i].ruhs);
+        g_free(req->ns[i].rus);
+        g_free(req->ns[i].ru_state);
     }
     g_free(req->ns);
     g_free(req);
@@ -308,6 +345,55 @@ static void coroutine_fn femu_query_zoned_run(FemuCtrl *n,
     }
 }
 
+static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
+{
+    FemuFdpInfo *fdp = g_new0(FemuFdpInfo, 1);
+    FemuReclaimUnitCounts *cnt = g_new0(FemuReclaimUnitCounts, 1);
+    FemuRuHandleInfoList **htail = &fdp->handles;
+
+    fdp->reclaim_groups = q->nrg;
+    fdp->units_per_group = q->rus_per_rg;
+    fdp->pages_per_unit = q->pgs_per_ru;
+    for (uint32_t h = 0; h < q->nr_ruhs; h++) {
+        FemuRuHandleInfo *hi = g_new0(FemuRuHandleInfo, 1);
+
+        hi->id = q->ruhs[h].id;
+        hi->type = q->ruhs[h].type;
+        hi->host_bytes = q->ruhs[h].host_bytes;
+        hi->media_bytes = q->ruhs[h].media_bytes;
+        QAPI_LIST_APPEND(htail, hi);
+    }
+
+    cnt->free = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_FREE];
+    cnt->open = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_OPEN];
+    cnt->full = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_FULL];
+    cnt->victim = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_VICTIM];
+    cnt->total = q->nrg * q->rus_per_rg;
+    fdp->unit_counts = cnt;
+
+    if (q->rus) {
+        FemuReclaimUnitInfoList **tail = &fdp->reclaim_units;
+
+        fdp->has_reclaim_units = true;
+        for (uint32_t i = 0; i < q->nr_rus; i++) {
+            FemuReclaimUnitInfo *ri = g_new0(FemuReclaimUnitInfo, 1);
+
+            ri->group = q->rus[i].group;
+            ri->unit = q->rus[i].unit;
+            ri->has_handle = q->rus[i].has_handle;
+            ri->handle = q->rus[i].handle;
+            ri->state = q->rus[i].state;
+            ri->vpc = q->rus[i].vpc;
+            ri->ipc = q->rus[i].ipc;
+            ri->erase_min = q->rus[i].erase_min;
+            ri->erase_max = q->rus[i].erase_max;
+            QAPI_LIST_APPEND(tail, ri);
+        }
+    }
+
+    return fdp;
+}
+
 static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
 {
     FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
@@ -339,6 +425,21 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     }
     info->counters = ctr;
 
+    if (q->fdp) {
+        g_free(cnt);
+        info->fdp = femu_query_fdp_info(q);
+        if (q->rus) {
+            uint32_t total = q->nrg * q->rus_per_rg;
+
+            info->has_offset = true;
+            info->offset = q->offset;
+            if (q->offset + q->nr_rus < total) {
+                info->has_next_offset = true;
+                info->next_offset = q->offset + q->nr_rus;
+            }
+        }
+        return ns_info;
+    }
     cnt->free = q->free_lines;
     cnt->victim = q->victim_lines;
     cnt->full = q->full_lines;
@@ -454,8 +555,8 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
     }
     window = kind != FEMU_QUERY_KIND_SUMMARY;
     if (!window && (has_offset || has_limit)) {
-        error_setg(errp, "offset and limit apply only to kind 'lines' or "
-                   "'zones'");
+        error_setg(errp, "offset and limit apply only to kind 'lines', "
+                   "'zones' or 'reclaim-units'");
         return NULL;
     }
     if (!has_limit) {

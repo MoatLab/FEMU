@@ -38,19 +38,24 @@
 # What @query-femu reports for each namespace.
 #
 # @summary: identity, and the members of the namespace mode: for a
-#     blackbox namespace the geometry, write counters and line counts,
+#     blackbox namespace the geometry, write counters and line counts
+#     (reclaim unit counts and handles with flexible data placement),
 #     for a zoned namespace the zone geometry, limits and zone counts
 #
 # @lines: the summary and one record per line, for a window of lines.
-#     Blackbox namespaces only.
+#     Blackbox namespaces without flexible data placement only.
 #
 # @zones: the summary and one record per zone, for a window of zones.
 #     Zoned namespaces only.
 #
+# @reclaim-units: the summary and one record per reclaim unit, for a
+#     window of units.  Blackbox namespaces with flexible data placement
+#     only.
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuQueryKind',
-  'data': [ 'summary', 'lines', 'zones' ] }
+  'data': [ 'summary', 'lines', 'zones', 'reclaim-units' ] }
 
 ##
 # @FemuLineState:
@@ -279,6 +284,140 @@
             'zrwa': 'bool' } }
 
 ##
+# @FemuReclaimUnitState:
+#
+# Where the flash translation layer holds a reclaim unit.
+#
+# @free: on the free list, erased and ready to program
+#
+# @open: a handle writes host data or collected data to it
+#
+# @full: closed with every page valid
+#
+# @victim: closed with invalid or unwritten pages, a garbage collection
+#     candidate.  A Reclaim Unit Handle Update closes a unit before it
+#     fills.
+#
+# @unlisted: on no list the FTL keeps
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuReclaimUnitState',
+  'data': [ 'free', 'open', 'full', 'victim', 'unlisted' ] }
+
+##
+# @FemuRuHandleType:
+#
+# Isolation of a reclaim unit handle.
+#
+# @initially-isolated: garbage collection may mix its data with the
+#     data of other initially isolated handles
+#
+# @persistently-isolated: garbage collection keeps its data apart
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuRuHandleType',
+  'data': [ 'initially-isolated', 'persistently-isolated' ] }
+
+##
+# @FemuRuHandleInfo:
+#
+# One reclaim unit handle.  The byte counters count whole NAND pages,
+# as the FDP Statistics log does, keep their values when a controller
+# replaces another on the same subsystem, and saturate.
+#
+# @id: handle index, from 0
+#
+# @type: isolation of the handle
+#
+# @host-bytes: bytes of the NAND pages the host wrote through the handle
+#
+# @media-bytes: bytes programmed for the handle: host writes and data
+#     that garbage collection moved out of its units
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuRuHandleInfo',
+  'data': { 'id': 'uint32', 'type': 'FemuRuHandleType',
+            'host-bytes': 'uint64', 'media-bytes': 'uint64' } }
+
+##
+# @FemuReclaimUnitCounts:
+#
+# How many reclaim units are in each state.
+#
+# @free: units on the free list
+#
+# @open: units a handle writes to
+#
+# @full: closed units with every page valid
+#
+# @victim: units waiting for garbage collection
+#
+# @total: every reclaim unit, over every reclaim group
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuReclaimUnitCounts',
+  'data': { 'free': 'uint32', 'open': 'uint32', 'full': 'uint32',
+            'victim': 'uint32', 'total': 'uint32' } }
+
+##
+# @FemuReclaimUnitInfo:
+#
+# One reclaim unit.  Page counts are in NAND pages.
+#
+# @group: reclaim group index, from 0
+#
+# @unit: unit index in its group, from 0
+#
+# @handle: the handle that wrote the unit.  Absent for a free unit.
+#
+# @state: where the FTL holds the unit
+#
+# @vpc: valid pages in the unit
+#
+# @ipc: invalid pages in the unit
+#
+# @erase-min: fewest erases of a block in the unit
+#
+# @erase-max: most erases of a block in the unit
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuReclaimUnitInfo',
+  'data': { 'group': 'uint32', 'unit': 'uint32', '*handle': 'uint32',
+            'state': 'FemuReclaimUnitState', 'vpc': 'uint32',
+            'ipc': 'uint32', 'erase-min': 'uint32', 'erase-max': 'uint32' } }
+
+##
+# @FemuFdpInfo:
+#
+# Flexible data placement state of a blackbox namespace.
+#
+# @reclaim-groups: reclaim groups
+#
+# @units-per-group: reclaim units in each group
+#
+# @pages-per-unit: NAND pages in each reclaim unit
+#
+# @handles: every reclaim unit handle, in index order
+#
+# @unit-counts: reclaim units in each state
+#
+# @reclaim-units: with kind @reclaim-units, the units from the offset,
+#     at most limit of them, by group and then by unit
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuFdpInfo',
+  'data': { 'reclaim-groups': 'uint32', 'units-per-group': 'uint32',
+            'pages-per-unit': 'uint32', 'handles': [ 'FemuRuHandleInfo' ],
+            'unit-counts': 'FemuReclaimUnitCounts',
+            '*reclaim-units': [ 'FemuReclaimUnitInfo' ] } }
+
+##
 # @FemuBbssdInfo:
 #
 # State of a blackbox namespace, copied by the FTL thread between two
@@ -288,22 +427,26 @@
 #
 # @counters: write and erase counters
 #
-# @line-counts: lines in each state
+# @line-counts: lines in each state.  Absent with flexible data
+#     placement, where reclaim units hold the lines.
+#
+# @fdp: flexible data placement state.  Present only when it is on.
 #
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
 #
-# @offset: with kind @lines, the index of the first line in @lines
+# @offset: with kind @lines or @reclaim-units, the index of the first
+#     record in the listing
 #
-# @next-offset: with kind @lines, the offset that continues the
-#     listing.  Absent after the last line.
+# @next-offset: with kind @lines or @reclaim-units, the offset that
+#     continues the listing.  Absent after the last record.
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuBbssdInfo',
   'data': { 'geometry': 'FemuGeometry',
             'counters': 'FemuWriteCounters',
-            'line-counts': 'FemuLineCounts',
+            '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 
@@ -382,9 +525,9 @@
 # @query-femu:
 #
 # Report the flash translation layer state of a FEMU NVMe controller.
-# Blackbox (bbssd) and zoned (znssd) namespaces are supported.  A
-# selected namespace in another mode, with flexible data placement,
-# or backed by a CXL SSD medium makes the command fail.  The
+# Blackbox (bbssd) namespaces, also with flexible data placement, and
+# zoned (znssd) namespaces are supported.  A selected namespace in
+# another mode, or backed by a CXL SSD medium, makes the command fail.  The
 # controller must be enabled when a blackbox namespace is selected.
 # Each namespace is one copy, but two namespaces, and two calls, can
 # show different points in time.
@@ -393,18 +536,18 @@
 #     exists.
 #
 # @nsid: namespace to report.  Default every attached namespace.
-#     With kind lines or zones, required when the controller has more
-#     than one attached namespace.
+#     With a kind other than summary, required when the controller has
+#     more than one attached namespace.
 #
 # @kind: what to report (default summary).  Kind lines needs a
-#     blackbox namespace, and kind zones a zoned namespace.
+#     blackbox namespace without flexible data placement, kind
+#     reclaim-units one with it, and kind zones a zoned namespace.
 #
-# @offset: the first line or zone to report (default 0).  Only with
-#     kind lines or zones; an error with kind summary.
+# @offset: the first line, zone or reclaim unit to report (default
+#     0).  An error with kind summary.
 #
-# @limit: the most lines or zones to report, 1 to 4096 (default
-#     256).  Only with kind lines or zones; an error with kind
-#     summary.
+# @limit: the most lines, zones or reclaim units to report, 1 to 4096
+#     (default 256).  An error with kind summary.
 #
 # Returns: the state of the controller and its selected namespaces
 #
@@ -453,6 +596,51 @@
 #                           "start-lba": 131072, "capacity": 131072,
 #                           "write-pointer": 131080, "zrwa": false } ],
 #              "offset": 0, "next-offset": 2 } ] } }
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu",
+#          "arguments": { "kind": "reclaim-units", "limit": 1 } }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "mode": "bbssd",
+#            "namespaces": [ {
+#              "nsid": 1, "mode": "bbssd",
+#              "geometry": { "channels": 2, "luns-per-channel": 2,
+#                            "planes-per-lun": 1,
+#                            "blocks-per-plane": 25,
+#                            "pages-per-block": 4, "page-size": 4096,
+#                            "pages-per-line": 16 },
+#              "counters": { "host-write-pages": 0,
+#                            "nand-write-pages": 0,
+#                            "gc-write-pages": 0, "block-erases": 0 },
+#              "fdp": { "reclaim-groups": 1, "units-per-group": 25,
+#                       "pages-per-unit": 16,
+#                       "handles": [ { "id": 0,
+#                                      "type": "persistently-isolated",
+#                                      "host-bytes": 0,
+#                                      "media-bytes": 0 },
+#                                    { "id": 1,
+#                                      "type": "persistently-isolated",
+#                                      "host-bytes": 0,
+#                                      "media-bytes": 0 },
+#                                    { "id": 2,
+#                                      "type": "persistently-isolated",
+#                                      "host-bytes": 0,
+#                                      "media-bytes": 0 },
+#                                    { "id": 3,
+#                                      "type": "persistently-isolated",
+#                                      "host-bytes": 0,
+#                                      "media-bytes": 0 } ],
+#                       "unit-counts": { "free": 21, "open": 4,
+#                                        "full": 0, "victim": 0,
+#                                        "total": 25 },
+#                       "reclaim-units": [ { "group": 0, "unit": 0,
+#                                            "handle": 0,
+#                                            "state": "open",
+#                                            "vpc": 0, "ipc": 0,
+#                                            "erase-min": 0,
+#                                            "erase-max": 0 } ] },
+#              "offset": 0, "next-offset": 1 } ] } }
 ##
 { 'command': 'query-femu',
   'data': { '*path': 'str', '*nsid': 'uint32', '*kind': 'FemuQueryKind',
