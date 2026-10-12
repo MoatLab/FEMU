@@ -44,6 +44,26 @@ uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units)
 }
 
 /*
+ * Pages per wordline for the program disturb edge term: the pages per
+ * wordline of nand_cell_type (1 SLC to 4 QLC), else cell_pages as ssd_init()
+ * settles it (3 when only pgtype_lat is set), else one. A synthetic grouping
+ * of contiguous pages; the page pairing tables give page types, not
+ * wordlines.
+ */
+int bb_pd_wl_pages(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+
+    if (n->nand_cell_type >= SLC && n->nand_cell_type <= QLC) {
+        return n->nand_cell_type;
+    }
+    if (p->cell_pages > 0) {
+        return p->cell_pages;
+    }
+    return p->pgtype_lat ? 3 : 1;
+}
+
+/*
  * Validate the configured geometry before any of it is used to size an
  * allocation or drive the datapath.
  *
@@ -279,6 +299,10 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->wl_spread = n->bb_params.wl_spread;
     spp->gc_pace = n->bb_params.gc_pace;
     spp->gc_copyback = n->bb_params.gc_copyback;
+    spp->pd_edge_wls = n->bb_params.pd_edge_wls;
+    spp->pd_edge_tiers = n->bb_params.pd_edge_tiers;
+    spp->pd_open_tiers = n->bb_params.pd_open_tiers;
+    spp->pd_open_age = n->bb_params.pd_open_age;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;

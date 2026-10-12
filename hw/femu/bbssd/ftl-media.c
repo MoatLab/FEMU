@@ -10,8 +10,38 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
-/* Decode a bbssd ppa into the media's normalized NandLoc. */
-static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
+/*
+ * Program disturb ECC tiers for a read of @ppa: an opt-in sensitivity model,
+ * with tier counts the user picks rather than ones fitted to measured error
+ * rates. The bottom wordlines of a block take pd_edge_tiers, and a block that
+ * is only part programmed takes pd_open_tiers.
+ */
+static uint8_t bb_pd_tiers(struct ssd *ssd, struct ppa *ppa)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct nand_block *blk;
+    int tiers = 0;
+
+    if (spp->pd_edge_wls &&
+        ppa->g.pg / spp->pd_wl_pages < spp->pd_edge_wls) {
+        tiers += spp->pd_edge_tiers;
+    }
+    if (spp->pd_open_tiers) {
+        blk = get_blk(ssd, ppa);
+        if (blk->wp > 0 && blk->wp < spp->pgs_per_blk) {
+            tiers += spp->pd_open_tiers;
+        }
+    }
+    return (uint8_t)tiers;
+}
+
+/*
+ * Decode a bbssd ppa into the media's normalized NandLoc. @data is false for a
+ * translation page access, which addresses a placeholder block: it keeps the
+ * wear and close-time age and takes no program disturb term.
+ */
+static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
+                             bool data)
 {
     int ct = (ssd->n) ? ssd->n->nand_cell_type : 0;
     NandLoc loc = {
@@ -43,10 +73,22 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
      * filled; a line still being written has none yet.
      */
     if (ssd->sp.ecc_step_ns && ssd->sp.ecc_retention_sec) {
-        uint64_t age = ssd_data_age_ns(ssd, get_line(ssd, ppa)->close_time,
-                                       stime) / NANOSECONDS_PER_SECOND;
+        struct line *line = get_line(ssd, ppa);
+        /*
+         * With pd_open_age the age starts at the line's first program, so data
+         * in a line still being written ages too, and a close does not start
+         * it again. One time per line makes later pages look older than they
+         * are.
+         */
+        uint64_t from = data && ssd->sp.pd_open_age ? line->open_time :
+                        line->close_time;
+        uint64_t age = ssd_data_age_ns(ssd, from, stime) /
+                       NANOSECONDS_PER_SECOND;
 
         loc.age_sec = (uint32_t)MIN(age, UINT32_MAX);
+    }
+    if (data && ssd->sp.ecc_step_ns) {
+        loc.extra_tiers = bb_pd_tiers(ssd, ppa);
     }
     return loc;
 }
@@ -216,7 +258,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     /* the thermal model reads these from the main loop */
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
-    loc = bb_decode_loc(ssd, ppa, stime);
+    loc = bb_decode_loc(ssd, ppa, stime, ncmd->type != MAP_IO);
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
 
@@ -259,7 +301,7 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
         if (op == NAND_MEDIA_READ) {
             get_blk(ssd, &ppas[i])->read_cnt++;
         }
-        locs[i] = bb_decode_loc(ssd, &ppas[i], stime);
+        locs[i] = bb_decode_loc(ssd, &ppas[i], stime, ncmd->type != MAP_IO);
     }
 
     ssd->media_ops[op]++;
@@ -287,7 +329,8 @@ bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
         src->g.lun != dst->g.lun || src->g.pl != dst->g.pl) {
         return false;
     }
-    loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                        true);
     return nand_media_read_ecc_ns(&ssd->media, &loc) == 0;
 }
 
@@ -314,7 +357,7 @@ uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
                 qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) + 1);
     qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM],
                 qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM]) + 1);
-    sloc = bb_decode_loc(ssd, src, stime);
-    dloc = bb_decode_loc(ssd, dst, stime);
+    sloc = bb_decode_loc(ssd, src, stime, true);
+    dloc = bb_decode_loc(ssd, dst, stime, true);
     return nand_media_copyback(&ssd->media, &sloc, &dloc, stime).latency_ns;
 }

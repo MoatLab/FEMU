@@ -2082,6 +2082,10 @@ typedef struct BbCtrlParams {
     int wl_spread;            /* wear gap that starts wear levelling; 0 = off */
     bool gc_pace;             /* collect a line a few pages per host write */
     bool gc_copyback;         /* collection moves pages on their die */
+    int pd_edge_wls;          /* bottom wordlines with program disturb tiers */
+    int pd_edge_tiers;        /* ECC tiers for a read of those wordlines */
+    int pd_open_tiers;        /* ECC tiers, read of a part-programmed block */
+    bool pd_open_age;         /* data age counts from a line's first program */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */

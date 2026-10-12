@@ -96,7 +96,8 @@ static void bb_config(NandMediaConfig *cfg)
  * previous op's completion forward and every latency after the first is the
  * sum of those before it.
  */
-static uint64_t read_lat(const NandMediaConfig *cfg, uint32_t pe, uint32_t age)
+static uint64_t read_lat_x(const NandMediaConfig *cfg, uint32_t pe,
+                           uint32_t age, uint8_t extra)
 {
     NandMedia m;
     NandLoc loc;
@@ -106,12 +107,18 @@ static uint64_t read_lat(const NandMediaConfig *cfg, uint32_t pe, uint32_t age)
     memset(&loc, 0, sizeof(loc));
     loc.pe_cycles = pe;
     loc.age_sec = age;
+    loc.extra_tiers = extra;
     {
         uint64_t lat = nand_media_op(&m, &loc, NAND_MEDIA_READ,
                                      1000000000ULL).latency_ns;
         nand_media_destroy(&m);
         return lat;
     }
+}
+
+static uint64_t read_lat(const NandMediaConfig *cfg, uint32_t pe, uint32_t age)
+{
+    return read_lat_x(cfg, pe, age, 0);
 }
 
 static void test_ecc(void)
@@ -150,6 +157,16 @@ static void test_ecc(void)
     check("age is capped at ecc_max_tiers", read_lat(&cfg, 0, 6000), 10000 + 4 * 200000);
     check("wear and age tiers add", read_lat(&cfg, 750, 20), 10000 + 3 * 200000);
     check("their sum shares one cap", read_lat(&cfg, 2250, 30), 10000 + 4 * 200000);
+
+    /* the caller's extra tiers (program disturb) add under the same cap */
+    check("extra tiers add", read_lat_x(&cfg, 0, 0, 2), 10000 + 2 * 200000);
+    check("extra, wear and age tiers add", read_lat_x(&cfg, 750, 10, 1),
+          10000 + 3 * 200000);
+    check("extra tiers share the cap", read_lat_x(&cfg, 1500, 20, 2),
+          10000 + 4 * 200000);
+    bb_config(&cfg);
+    check("extra tiers cost nothing without ecc_step_ns",
+          read_lat_x(&cfg, 0, 0, 3), 10000);
 }
 
 /* one op on an idle array and bus, latency only */

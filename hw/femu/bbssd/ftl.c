@@ -121,6 +121,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     if (spp->pgtype_lat && spp->cell_pages < 1) {
         spp->cell_pages = 3; /* TLC */
     }
+    spp->pd_wl_pages = bb_pd_wl_pages(n);
 
     /* factory bad-block count, reported via SMART available_spare; clamp to the
      * total block count so a misconfigured value cannot exceed 100% depletion */

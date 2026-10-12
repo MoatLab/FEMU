@@ -394,6 +394,10 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | --- | --- | --- | --- |
 | `ecc_step_ns` | ns per tier | 0 disables | extra read time per ECC tier: one per 750 erases of the block, one per `ecc_retention_sec` of data age, at most 4 |
 | `ecc_retention_sec` | seconds | 0 counts wear only | data age that adds one tier |
+| `pd_edge_wls` | wordlines | 0 disables; set with `pd_edge_tiers` and `ecc_step_ns`; below the wordlines of a block | bottom wordlines of each block that pay `pd_edge_tiers` on a read |
+| `pd_edge_tiers` | ECC tiers | 0 to 4 | program disturb tiers for a read of a `pd_edge_wls` wordline |
+| `pd_open_tiers` | ECC tiers | 0 to 4; needs `ecc_step_ns` | program disturb tiers for a read of a part-programmed block |
+| `pd_open_age` | on/off | off (default); needs `ecc_step_ns` and `ecc_retention_sec` | data age counts from the first program of the line |
 | `pe_cycles_rated` | P/E cycles | 0 takes the rating of `nand_cell_type` | denominator of SMART Percentage Used |
 | `nand_bad_blocks` | blocks | capped at the block count | blocks bad from the start; lowers SMART Available Spare |
 | `blk_pe_limit` | P/E cycles | 0 disables; bbssd and CSD, one namespace, page or dftl mapping, one plane per LUN, no buffer, Streams, hot/cold separation, FDP or `nand_bad_blocks` | erases a block survives; its line then retires while enough lines remain, else the block stays in service and sets SMART critical warning bit 2 |

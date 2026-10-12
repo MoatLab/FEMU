@@ -5145,6 +5145,10 @@ static void femu_test_gc_copyback(void *obj, void *data,
         g_assert_cmpuint(gc, ==, 64);
         g_assert_cmpuint(cb, ==, 64);
         g_assert_cmpint(max_ms, <, 60);
+    } else if (!strcmp(mode, "pd")) {
+        /* pages 16-19 of each block are edge wordlines with an ECC cost */
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 48);
     } else {
         g_assert_cmpuint(gc, ==, 32);
         g_assert_cmpuint(cb, ==, 8);
@@ -5641,6 +5645,487 @@ static void femu_test_age_fdp_reuse(void *obj, void *data,
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+static uint16_t femu_kv_store(FemuCtrlState *c, uint64_t key, uint64_t buf,
+                              uint32_t len);
+static uint16_t femu_stream_write(FemuCtrlState *c, uint32_t nsid,
+                                  uint64_t slba, uint64_t buf,
+                                  uint8_t dtype, uint16_t sid);
+static uint16_t femu_directive(FemuCtrlState *c, bool receive,
+                               uint32_t nsid, uint32_t dw11, uint32_t dw12,
+                               uint64_t buf, uint32_t bytes, uint32_t *result);
+
+/*
+ * Program disturb tests. A single-LUN device with 16-page blocks puts page k
+ * of a fresh device on page k of block 0, line 0. The ECC step is 10 ms, so
+ * one tier stands far above the read time and the few ms a die can be busy.
+ */
+#define FEMU_PD_STEP_NS         10000000ULL
+#define FEMU_PD_GEO \
+    "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,nchs=1," \
+    "ecc_step_ns=10000000"
+
+/* modelled time of a read of 4 KiB page @page */
+static uint64_t femu_pd_read_ns(FemuCtrlState *c, QTestState *qts,
+                                uint64_t page, uint64_t buf)
+{
+    uint64_t before = femu_ftl_trace_field(qts, 1);
+
+    g_assert_cmphex(femu_rw(c, NVME_CMD_READ, page * (4096 / c->lba_size),
+                            buf), ==, NVME_SUCCESS);
+    return femu_ftl_trace_field(qts, 1) - before;
+}
+
+/* modelled time of a write of @npages pages from @page */
+static uint64_t femu_pd_write_ns(FemuCtrlState *c, QTestState *qts,
+                                 uint64_t page, uint32_t npages,
+                                 uint64_t buf, uint64_t list)
+{
+    uint64_t before = femu_ftl_trace_field(qts, 1);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages(c, page, npages, buf, list)), ==,
+                    NVME_SUCCESS);
+    return femu_ftl_trace_field(qts, 1) - before;
+}
+
+/*
+ * @data selects the case; each one names what a broken model would show.
+ *   "off":   ECC timing on and every pd_* term off. Open data 20 ms old at
+ *            age_scale 10^6 pays nothing, as on master.
+ *   "edge":  pd_edge_wls=1, pd_edge_tiers=2 and cell_pages=2: pages 0 and 1
+ *            share wordline 0 and pay 2 tiers; page 2 and page 4 pay none.
+ *   "cap":   the same block, aged 50 ms at age_scale 10^6: the age alone
+ *            reaches the cap of 4 tiers, so page 0 pays no more than page 4.
+ *   "open":  two channels, so a line holds two blocks. 31 pages fill the
+ *            channel 0 block and leave the channel 1 block one page short:
+ *            only a read of the short block pays pd_open_tiers. A 32nd page
+ *            fills it and the term goes.
+ *   "age":   pd_open_age with one age tier per 100 ms of wall time: data
+ *            in an open line reaches the cap of 4 tiers in 500 ms. A read
+ *            right after the line closes still pays them; an age that the
+ *            close started again would show less than one tier.
+ */
+static void femu_test_pd(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t0, t1, t2, t4;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3d, 32 * 4096);
+
+    if (!strcmp(mode, "off")) {
+        femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+        g_usleep(20 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        g_test_message("pd off: page 0 of an open block %" PRIu64 " ns", t0);
+        g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "edge")) {
+        femu_pd_write_ns(&c, qts, 0, 16, buf, list);
+        g_usleep(10 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t1 = femu_pd_read_ns(&c, qts, 1, buf);
+        t2 = femu_pd_read_ns(&c, qts, 2, buf);
+        t4 = femu_pd_read_ns(&c, qts, 4, buf);
+        g_test_message("pd edge: pages 0 1 2 4 took %" PRIu64 " %" PRIu64
+                       " %" PRIu64 " %" PRIu64 " ns", t0, t1, t2, t4);
+        g_assert_cmpuint(t4, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t2, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0 - t4, >=, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0 - t4, <, 3 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1 - t4, >=, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1 - t4, <, 3 * FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "cap")) {
+        femu_pd_write_ns(&c, qts, 0, 16, buf, list);
+        g_usleep(50 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t4 = femu_pd_read_ns(&c, qts, 4, buf);
+        g_test_message("pd cap: pages 0 4 took %" PRIu64 " %" PRIu64 " ns",
+                       t0, t4);
+        g_assert_cmpuint(t4, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0, <, 5 * FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "open")) {
+        femu_pd_write_ns(&c, qts, 0, 31, buf, list);
+        g_usleep(10 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t1 = femu_pd_read_ns(&c, qts, 1, buf);
+        femu_pd_write_ns(&c, qts, 31, 1, buf, list);
+        g_usleep(10 * 1000);
+        t2 = femu_pd_read_ns(&c, qts, 1, buf);
+        g_test_message("pd open: full block %" PRIu64 ", short block %" PRIu64
+                       ", then full %" PRIu64 " ns", t0, t1, t2);
+        g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, <, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t2, <, FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "age")) {
+        femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+        g_usleep(500 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        femu_pd_write_ns(&c, qts, 8, 8, buf, list);
+        t1 = femu_pd_read_ns(&c, qts, 0, buf);
+        g_test_message("pd age: open %" PRIu64 ", just closed %" PRIu64 " ns",
+                       t0, t1);
+        g_assert_cmpuint(t0, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, 4 * FEMU_PD_STEP_NS);
+    } else {
+        g_assert_not_reached();
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Releasing a stream seals the free pages of its line as invalid, with no
+ * program. The block stays part programmed, so its reads still pay
+ * pd_open_tiers.
+ */
+static void femu_test_pd_stream(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101,
+                                   0, 0, NULL), ==, NVME_SUCCESS);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, i * (4096 / c.lba_size),
+                                          buf, 1, 7), ==, NVME_SUCCESS);
+    }
+    /* release stream 7: DSPEC 7, DTYPE 1 (Streams), DOPER 1 */
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x070101, 0, 0, 0, NULL),
+                    ==, NVME_SUCCESS);
+    g_usleep(10 * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pd stream: sealed block read %" PRIu64 " ns", t0);
+    g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(t0, <, 2 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * FDP, two cases. A Reclaim Unit Handle Update retires the unit part
+ * written, and neither term may change at that point.
+ *   "open": pd_open_tiers only. Two pages leave the unit's blocks part
+ *           programmed, so a read pays 1 tier before and after the update.
+ *   "age":  pd_open_age only, one age tier per 100 ms of wall time. 500 ms
+ *           after the first program a read pays the cap of 4 tiers, and it
+ *           still does right after the update.
+ */
+static void femu_test_pd_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool age = g_str_equal(data, "age");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t0, t1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5e, 4096);
+    femu_pd_write_ns(&c, qts, 0, 1, buf, list);
+    femu_pd_write_ns(&c, qts, 1, 1, buf, list);
+    g_usleep((age ? 500 : 10) * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    qtest_writew(qts, list, 0);
+    g_assert_cmphex(femu_ruh_update(&c, list, 1), ==, NVME_SUCCESS);
+    t1 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pd fdp %s: before %" PRIu64 ", after handle update %"
+                   PRIu64 " ns", age ? "age" : "open", t0, t1);
+    if (age) {
+        g_assert_cmpuint(t0, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, 4 * FEMU_PD_STEP_NS);
+    } else {
+        g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0, <, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, <, 2 * FEMU_PD_STEP_NS);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Key value: a Retrieve reads the value page of a block that holds one value,
+ * so with @data "on" it pays pd_open_tiers (200 ms here). The index lookup is
+ * a translation read and pays nothing. Wall time measures it.
+ */
+static void femu_test_pd_kv(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    NvmeCmd cmd;
+    int64_t start, spent;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6f, 4096);
+    g_assert_cmphex(femu_kv_store(&c, 42, buf, 4096), ==, NVME_SUCCESS);
+    g_usleep(20 * 1000);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.res1 = cpu_to_le64(42);
+    cmd.cdw10 = cpu_to_le32(4096);
+    cmd.cdw11 = cpu_to_le32(8);
+    start = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    spent = g_get_monotonic_time() - start;
+    g_test_message("pd kv %s: retrieve took %" PRId64 " us",
+                   on ? "on" : "off", spent);
+    if (on) {
+        g_assert_cmpint(spent, >=, 200000);
+    } else {
+        g_assert_cmpint(spent, <, 100000);
+    }
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A dftl translation read addresses page 0 of block 0, a placeholder with no
+ * data page. The first touch of each translation page (512 pages here) is a
+ * miss that reads it. Every pd_* term is on, with one age tier per 0.1 ms.
+ *   - Pages 0 to 2 leave block 0 open; 50 ms later the miss of translation
+ *     page 1 pays no edge, open or open-age term: less than one tier.
+ *   - Pages 4 to 15 close line 0; 50 ms later the miss of translation page
+ *     2 pays the close-time age it pays on master: 4 tiers.
+ */
+static void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t1, t2;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x7a, 16 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 3, buf, list);
+    g_usleep(50 * 1000);
+    t1 = femu_pd_write_ns(&c, qts, 600, 1, buf, list);
+    femu_pd_write_ns(&c, qts, 4, 12, buf, list);
+    g_usleep(50 * 1000);
+    t2 = femu_pd_write_ns(&c, qts, 1100, 1, buf, list);
+    g_test_message("pd map: miss on an open block %" PRIu64
+                   ", on a closed line %" PRIu64 " ns", t1, t2);
+    g_assert_cmpuint(t1, <, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(t2, >=, 4 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A reused line: three passes over the namespace recycle every line, then
+ * eight pages open a recycled one and everything else is deallocated, so
+ * collection only erases. Age is one tier per 500 ms of wall time, and the
+ * new line opens 2.5 s after the passes. A fresh line pays pd_open_tiers and
+ * no age (10 ms) for the 500 ms after its first program; a block count left
+ * from the last generation drops the open term, and a first-program time
+ * left from it adds the 4 age tiers. A read can also wait behind an erase,
+ * so the check counts reads.
+ */
+static void femu_test_pd_reuse(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int fresh = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2c, 64 * 4096);
+    for (i = 0; i < 3 * 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i % 256, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_usleep(2500 * 1000);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_dealloc_pages(&c, 8, 248, list), ==, NVME_SUCCESS);
+    g_usleep(20 * 1000);
+    for (i = 0; i < 8; i++) {
+        uint64_t t = femu_pd_read_ns(&c, qts, i, buf);
+
+        g_test_message("pd reuse: page %d took %" PRIu64 " ns", i, t);
+        if (t >= FEMU_PD_STEP_NS && t < 2 * FEMU_PD_STEP_NS) {
+            fresh++;
+        }
+    }
+    g_assert_cmpint(fresh, >=, 6);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * mp_read with two planes: page k goes to plane k % 2. After 31 pages the
+ * plane 0 block is full and the plane 1 block one page short, so a two-page
+ * read of pages 0 and 1 pays one open tier, the larger of the two planes.
+ * After a 32nd page it pays none.
+ */
+static void femu_test_pd_mp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before, a, b;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x1d, 32 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 31, buf, list);
+    g_usleep(10 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    a = femu_ftl_trace_field(qts, 1) - before;
+    femu_pd_write_ns(&c, qts, 31, 1, buf, list);
+    g_usleep(10 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    b = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("pd mp: short plane %" PRIu64 ", full %" PRIu64 " ns",
+                   a, b);
+    g_assert_cmpuint(b, <, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(a - b, >=, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(a - b, <, 2 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Realize refuses program disturb settings that cannot work: bad values, a
+ * term with no ECC step, an edge wider than the block, a namespace whose mode
+ * builds its own media locations, and an FTL another device owns. A ZNS
+ * controller whose only namespace is bbssd takes them.
+ */
+static void femu_test_pd_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':1,'pd_open_tiers':-1", "must not be negative" },
+        { "'femu_mode':1,'pd_open_tiers':5", "the ECC tier cap" },
+        { "'femu_mode':1,'pd_edge_wls':1,'pd_edge_tiers':5",
+          "the ECC tier cap" },
+        { "'femu_mode':1,'pd_edge_tiers':1", "must be set together" },
+        { "'femu_mode':1,'pd_open_tiers':1,'ecc_step_ns':-1000000",
+          "need ecc_step_ns" },
+        { "'femu_mode':1,'pd_open_age':true,'ecc_retention_sec':-1",
+          "needs ecc_retention_sec" },
+        { "'femu_mode':1,'pd_open_tiers':1,'pd_edge_wls':1",
+          "must be set together" },
+        { "'femu_mode':1,'pd_open_tiers':1,'ecc_step_ns':0,"
+          "'pd_open_age':false",
+          "need ecc_step_ns" },
+        { "'femu_mode':1,'pd_open_age':true", "needs ecc_retention_sec" },
+        { "'femu_mode':1,'pd_edge_wls':16,'pd_edge_tiers':1",
+          "must be below 16" },
+        { "'femu_mode':1,'pd_edge_wls':8,'pd_edge_tiers':1,'cell_pages':2",
+          "must be below 8" },
+        { "'femu_mode':1,'pd_open_tiers':1,'ns_mgmt':true",
+          "ns_mgmt or shared" },
+        { "'femu_mode':3,'pd_open_tiers':1", "namespace 1 is not" },
+        { "'femu_mode':2,'pd_open_tiers':1", "namespace 1 is not" },
+        { "'femu_mode':1,'pd_open_tiers':1,'namespaces':2,"
+          "'namespace_modes':'bbssd,znssd'", "namespace 2 is not" },
+        { "'femu_mode':1,'pd_open_tiers':1,'namespaces':2,"
+          "'namespace_modes':'znssd,bbssd'", "namespace 1 is not" },
+        { "'femu_mode':1,'pd_open_tiers':1,'namespaces':2,"
+          "'namespace_modes':'bbssd,nossd'", "namespace 2 is not" },
+        { "'femu_mode':0,'pd_open_tiers':1", "namespace 1 is not" },
+        { "'femu_mode':0,'lver':1,'pd_open_tiers':1", "namespace 1 is not" },
+        { "'femu_mode':1,'pd_open_tiers':1,'namespaces':2,"
+          "'namespace_modes':'nossd,bbssd'", "namespace 1 is not" },
+        { "'femu_mode':1,'pd_edge_wls':-1,'pd_edge_tiers':1",
+          "must not be negative" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'pd-bad','addr':'5','devsz_mb':4,"
+            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,%s%s}}",
+            strstr(cases[i].opts, "ecc_step_ns") ? "" :
+            "'ecc_step_ns':1000000,", cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("pd refused %s: %s", cases[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'pd-ok','addr':'6','devsz_mb':4,"
+                    "'femu_mode':3,'namespace_modes':'bbssd',"
+                    "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                    "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
+                    "'nchs':1,'ecc_step_ns':1000000,'pd_open_tiers':1}}");
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("pd accepted case: %s",
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
     qos_invalidate_command_line();
 }
 
@@ -26439,6 +26924,10 @@ static void femu_test_cxl_nvme_link(void *obj, void *data,
                            "'meta':8,'mc':2", "protection information");
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
                            "'devsz_mb':512", "devsz_mb must be unset or 256");
+    /* the medium's FTL takes its settings from the CXL device */
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'ecc_step_ns':1000000,'pd_open_tiers':1",
+                           "not supported with cxl_ssd");
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'rp0'", NULL);
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'later'", NULL);
     rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
@@ -30197,6 +30686,113 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "ecc_step_ns=1000000,ecc_retention_sec=100,age_scale=1000000,"
             "subsys=fdpsub"
+    });
+    qos_add_test("pd-off", "femu", femu_test_pd,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",ecc_retention_sec=100,age_scale=1000000"
+    });
+    qos_add_test("pd-edge", "femu", femu_test_pd,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"edge",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",cell_pages=2,pd_edge_wls=1,pd_edge_tiers=2"
+    });
+    qos_add_test("pd-edge-cap", "femu", femu_test_pd,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cap",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",cell_pages=2,pd_edge_wls=1,pd_edge_tiers=2,"
+            "ecc_retention_sec=100,age_scale=1000000"
+    });
+    qos_add_test("pd-open", "femu", femu_test_pd,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"open",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=2,ecc_step_ns=10000000,pd_open_tiers=1"
+    });
+    qos_add_test("pd-open-age", "femu", femu_test_pd,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"age",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",pd_open_age=on,ecc_retention_sec=100000,age_scale=1000000"
+    });
+    qos_add_test("pd-stream", "femu", femu_test_pd_stream,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,ecc_step_ns=10000000,streams=on,pd_open_tiers=1"
+    });
+    qos_add_test("pd-fdp-open", "femu", femu_test_pd_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"open",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=10000000,pd_open_tiers=1,subsys=fdpsub"
+    });
+    qos_add_test("pd-fdp-age", "femu", femu_test_pd_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"age",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "ecc_step_ns=10000000,pd_open_age=on,ecc_retention_sec=100000,"
+            "age_scale=1000000,subsys=fdpsub"
+    });
+    qos_add_test("pd-kv-on", "femu", femu_test_pd_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8,ecc_step_ns=200000000,pd_open_tiers=1"
+    });
+    qos_add_test("pd-kv-off", "femu", femu_test_pd_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8,ecc_step_ns=200000000"
+    });
+    qos_add_test("pd-map", "femu", femu_test_pd_map,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=6,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,ecc_step_ns=10000000,mapping=dftl,pd_edge_wls=1,"
+            "pd_edge_tiers=2,pd_open_tiers=1,pd_open_age=on,"
+            "ecc_retention_sec=100,age_scale=1000000"
+    });
+    qos_add_test("pd-reuse", "femu", femu_test_pd_reuse,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",pd_open_tiers=1,pd_open_age=on,ecc_retention_sec=500000,"
+            "age_scale=1000000"
+    });
+    qos_add_test("pd-mp", "femu", femu_test_pd_mp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=2,luns_per_ch=1,"
+            "nchs=1,ecc_step_ns=10000000,mp_read=1,pd_open_tiers=1"
+    });
+    qos_add_test("pd-refused", "femu", femu_test_pd_refused, NULL);
+    qos_add_test("gc-copyback-pd", "femu", femu_test_gc_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pd",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "pg_xfer_lat=2000000,gc_copyback=on,ecc_step_ns=1000000,"
+            "pd_edge_wls=20,pd_edge_tiers=1"
     });
     qos_add_test("age-fdp-reuse", "femu", femu_test_age_fdp_reuse,
                  &(QOSGraphTestOptions) {

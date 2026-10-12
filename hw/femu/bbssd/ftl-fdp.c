@@ -372,10 +372,14 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
     blk = get_blk(ssd, ppa);
     ftl_assert(blk->vpc >= 0 && blk->vpc < ssd->sp.pgs_per_blk);
     blk->vpc++;
+    blk->wp++; /* a program; invalidation never takes it back */
 
     line = get_line(ssd, ppa);
     ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
     line->vpc++;
+    if (ssd->sp.pd_open_age && !line->open_time) {
+        line->open_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
 
     /* update RU vpc from its line (single-line RU fast path) */
     ftl_assert(line->my_ru == ru);
@@ -912,6 +916,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
         ru->lines[i]->ipc = 0;
         ru->lines[i]->vpc = 0;
         ru->lines[i]->close_time = 0;
+        ru->lines[i]->open_time = 0;
     }
 
     ru->vpc = 0;

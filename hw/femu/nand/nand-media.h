@@ -68,6 +68,11 @@ typedef struct NandLoc {
     uint32_t pe_cycles;
     uint32_t age_sec;   /* seconds since the data was programmed; 0 = untracked */
     /*
+     * ECC tiers the caller adds for a read, on top of the wear and age tiers,
+     * under the same cap; 0 for every mode that does not set it.
+     */
+    uint8_t  extra_tiers;
+    /*
      * Sectors the data phase moves, when the controller transfers part of a
      * page (OC 1.2); 0 = the whole page. Needs cfg.secs_per_page.
      */

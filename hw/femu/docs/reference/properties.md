@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 174 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 178 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -146,6 +146,10 @@ Devices:
 | --- | --- | --- | --- |
 | `ecc_step_ns` | `int32` | `0` | bbssd, CSD, KV: extra read time in ns per ECC tier, one tier per 750 erases of the block plus one per ecc_retention_sec of data age, at most 4 tiers; 0 turns the model off |
 | `ecc_retention_sec` | `int32` | `0` | bbssd, CSD, KV: data age in seconds that adds one ECC tier, with ecc_step_ns; 0 counts wear only |
+| `pd_edge_wls` | `int32` | `0` | bbssd, CSD, KV: program disturb, bottom wordlines of each block whose reads take pd_edge_tiers more ECC tiers; set with pd_edge_tiers and ecc_step_ns; 0 (default) turns the term off. A wordline is the pages per wordline of nand_cell_type (else the effective cell_pages, 3 with pgtype_lat, else 1) contiguous pages |
+| `pd_edge_tiers` | `int32` | `0` | bbssd, CSD, KV: program disturb, ECC tiers added to a read of a pd_edge_wls wordline, 0 to 4, under the shared tier cap; chosen values for sensitivity studies, not fitted to error rates |
+| `pd_open_tiers` | `int32` | `0` | bbssd, CSD, KV: program disturb, ECC tiers added to a read of a block that is only part programmed, 0 to 4, under the shared tier cap; needs ecc_step_ns; 0 (default) turns the term off |
+| `pd_open_age` | `bool` | `off` | bbssd, CSD, KV: data age for the ECC age tiers counts from the first program of the line instead of the line close, so open data ages too; one time per line; needs ecc_step_ns and ecc_retention_sec; off (default) |
 | `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type (ZNS: zns_flash_type), or reports none |
 | `nand_bad_blocks` | `uint32` | `0` | bbssd, CSD, KV: blocks marked bad at start, capped at the block count, which lowers SMART Available Spare |
 | `blk_pe_limit` | `uint32` | `0` | bbssd, CSD: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. A worn-out block stays in service and sets the SMART reliability warning |

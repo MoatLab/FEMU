@@ -83,6 +83,7 @@ void ssd_init_lines(struct ssd *ssd)
         line->vpc = 0;
         line->pos = 0;
         line->close_time = 0;
+        line->open_time = 0;
         line->close_seq = 0;
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
@@ -458,11 +459,15 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
     blk = get_blk(ssd, ppa);
     ftl_assert(blk->vpc >= 0 && blk->vpc < ssd->sp.pgs_per_blk);
     blk->vpc++;
+    blk->wp++; /* a program; invalidation never takes it back */
 
     /* update corresponding line status */
     line = get_line(ssd, ppa);
     ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
     line->vpc++;
+    if (ssd->sp.pd_open_age && !line->open_time) {
+        line->open_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
 }
 
 /*
@@ -523,6 +528,7 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     }
     ssd->total_erases++;
     blk->read_cnt = 0; /* the stress an erase clears */
+    blk->wp = 0;
     if (exp_watch_blk[ppa->g.blk])
         EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%u (vpc/ipc reset)\n",
                 PPA_ARG(ppa), blk->erase_cnt);
@@ -1000,6 +1006,7 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
     line->ipc = 0;
     line->vpc = 0;
     line->close_time = 0;
+    line->open_time = 0;
     line->stream_tag = 0;
     line->retired = true;
     lm->retired_line_cnt++;
@@ -1068,6 +1075,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     line->ipc = 0;
     line->vpc = 0;
     line->close_time = 0;
+    line->open_time = 0;
     line->stream_tag = 0;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);

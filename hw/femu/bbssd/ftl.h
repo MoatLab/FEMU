@@ -104,7 +104,8 @@ struct nand_block {
      * read_reclaim_limit; the largest value is also reported in log page C0h.
      */
     uint64_t read_cnt;
-    int wp; /* current write pointer */
+    /* data pages programmed since the last erase; 0 < wp < npgs: open */
+    int wp;
 };
 
 struct nand_plane {
@@ -216,6 +217,12 @@ struct ssdparams {
     int wl_spread;
     bool gc_pace;
     bool gc_copyback; /* collection moves a page on its die when it can */
+    /* program disturb read terms; all 0 = off (see bb_decode_loc()) */
+    int pd_edge_wls;
+    int pd_edge_tiers;
+    int pd_open_tiers;
+    bool pd_open_age;
+    int pd_wl_pages;  /* pages per wordline of the edge term */
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -243,6 +250,8 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
+    /* first program since the line was freed, in ns; only with pd_open_age */
+    uint64_t open_time;
     /* order in which lines filled; the FIFO policy's key */
     uint64_t close_seq;
     uint64_t stream_tag;
@@ -621,6 +630,7 @@ struct ssd {
 };
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);
+int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */

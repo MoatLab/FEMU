@@ -211,9 +211,10 @@ static uint64_t bus_later(NandMedia *m, uint32_t ch, uint64_t now,
 }
 
 /*
- * Extra read time spent on error correction. Both wear and retention age push a
- * block towards more correction work, so their tiers add and are capped
- * together. Returns 0 unless the caller enabled the model and gave a step.
+ * Extra read time spent on error correction. Wear, retention age and the
+ * caller's extra tiers (program disturb) push a block towards more correction
+ * work, so their tiers add and are capped together. Returns 0 unless the
+ * caller enabled the model and gave a step.
  */
 static uint64_t ecc_extra_ns(NandMedia *m, const NandLoc *loc)
 {
@@ -229,6 +230,7 @@ static uint64_t ecc_extra_ns(NandMedia *m, const NandLoc *loc)
     if (t->ecc_retention_per_tier_sec) {
         tiers += loc->age_sec / (uint32_t)t->ecc_retention_per_tier_sec;
     }
+    tiers += loc->extra_tiers;
     if (tiers > (uint64_t)t->ecc_max_tiers) {
         tiers = t->ecc_max_tiers;
     }

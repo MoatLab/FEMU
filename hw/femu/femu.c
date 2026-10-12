@@ -1511,6 +1511,15 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n)
     return true;
 }
 
+/* any program disturb property set, a negative one included */
+static bool femu_pd_on(FemuCtrl *n)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+
+    return bp->pd_edge_wls || bp->pd_edge_tiers || bp->pd_open_tiers ||
+           bp->pd_open_age;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1558,6 +1567,19 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
 
     for (i = 0; i < n->num_namespaces; i++) {
+        /*
+         * Only the line FTL of bbssd, CSD and KV reads the program disturb
+         * terms; the other modes build their media locations themselves.
+         */
+        if (femu_pd_on(n) && ns_modes[i] != FEMU_BBSSD_MODE &&
+            ns_modes[i] != FEMU_CSD_MODE && ns_modes[i] != FEMU_KVSSD_MODE) {
+            error_setg(errp, "femu: the pd_* program disturb properties need "
+                       "bbssd, CSD or KV namespaces; namespace %u is not one",
+                       i + 1);
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
         if (n->bb_params.plane_first && (BBSSD(n) || CSD(n)) &&
             ns_modes[i] != FEMU_BBSSD_MODE && ns_modes[i] != FEMU_CSD_MODE) {
             warn_report("femu: plane_first has no effect on namespace %u; "
@@ -2492,6 +2514,67 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
 }
 
 /*
+ * Program disturb adds ECC tiers to reads in the FTL this controller builds.
+ * A term needs the ECC step to cost anything, and the age term needs the age
+ * step. A cxl_ssd link or a shared namespace uses an FTL another device made,
+ * with that device's settings, so the terms are refused there. The namespace
+ * modes are checked in nvme_init_namespaces().
+ */
+static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    int wls;
+
+    if (!femu_pd_on(n)) {
+        return true;
+    }
+    if (bp->pd_edge_wls < 0 || bp->pd_edge_tiers < 0 || bp->pd_open_tiers < 0) {
+        error_setg(errp, "femu: pd_edge_wls, pd_edge_tiers and pd_open_tiers "
+                   "must not be negative");
+        return false;
+    }
+    if (bp->pd_edge_tiers > FEMU_ECC_MAX_TIERS ||
+        bp->pd_open_tiers > FEMU_ECC_MAX_TIERS) {
+        error_setg(errp, "femu: pd_edge_tiers and pd_open_tiers must be at "
+                   "most %d, the ECC tier cap", FEMU_ECC_MAX_TIERS);
+        return false;
+    }
+    if (!bp->pd_edge_wls != !bp->pd_edge_tiers) {
+        error_setg(errp, "femu: pd_edge_wls and pd_edge_tiers must be set "
+                   "together");
+        return false;
+    }
+    if (bp->ecc_step_ns <= 0) {
+        error_setg(errp, "femu: the pd_* program disturb properties need "
+                   "ecc_step_ns above 0");
+        return false;
+    }
+    if (bp->pd_open_age && bp->ecc_retention_sec <= 0) {
+        error_setg(errp, "femu: pd_open_age needs ecc_retention_sec above 0");
+        return false;
+    }
+    if (bp->pd_edge_wls && bp->pgs_per_blk > 0) {
+        wls = DIV_ROUND_UP(bp->pgs_per_blk, bb_pd_wl_pages(n));
+        if (bp->pd_edge_wls >= wls) {
+            error_setg(errp, "femu: pd_edge_wls must be below %d, the "
+                       "wordlines of a block", wls);
+            return false;
+        }
+    }
+    if (n->cxl_dev) {
+        error_setg(errp, "femu: the pd_* properties are not supported with "
+                   "cxl_ssd");
+        return false;
+    }
+    if (nvme_ns_shared(n) || n->ns_mgmt) {
+        error_setg(errp, "femu: the pd_* properties are not supported with "
+                   "ns_mgmt or shared namespaces");
+        return false;
+    }
+    return true;
+}
+
+/*
  * Copyback runs in line and reclaim unit collection of the bbssd and CSD FTL
  * this controller builds. Each refused setting moves pages some other way, or
  * runs an FTL built from other settings: paced steps keep a cursor in reclaim
@@ -2583,6 +2666,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_check_copyback_props(n, errp)) {
+        return;
+    }
+    if (!femu_check_pd_props(n, errp)) {
         return;
     }
 
@@ -3250,6 +3336,10 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("wl_spread", FemuCtrl, bb_params.wl_spread, 0),
     DEFINE_PROP_BOOL("gc_pace", FemuCtrl, bb_params.gc_pace, false),
     DEFINE_PROP_BOOL("gc_copyback", FemuCtrl, bb_params.gc_copyback, false),
+    DEFINE_PROP_INT32("pd_edge_wls", FemuCtrl, bb_params.pd_edge_wls, 0),
+    DEFINE_PROP_INT32("pd_edge_tiers", FemuCtrl, bb_params.pd_edge_tiers, 0),
+    DEFINE_PROP_INT32("pd_open_tiers", FemuCtrl, bb_params.pd_open_tiers, 0),
+    DEFINE_PROP_BOOL("pd_open_age", FemuCtrl, bb_params.pd_open_age, false),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

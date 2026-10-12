@@ -351,6 +351,25 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "ecc_retention_sec",
       "bbssd, CSD, KV: data age in seconds that adds one ECC tier, with "
       "ecc_step_ns; 0 counts wear only" },
+    { "pd_edge_wls",
+      "bbssd, CSD, KV: program disturb, bottom wordlines of each block whose "
+      "reads take pd_edge_tiers more ECC tiers; set with pd_edge_tiers and "
+      "ecc_step_ns; 0 (default) turns the term off. A wordline is "
+      "the pages per wordline of nand_cell_type (else the effective "
+      "cell_pages, 3 with pgtype_lat, else 1) contiguous pages" },
+    { "pd_edge_tiers",
+      "bbssd, CSD, KV: program disturb, ECC tiers added to a read of a "
+      "pd_edge_wls wordline, 0 to 4, under the shared tier cap; chosen "
+      "values for sensitivity studies, not fitted to error rates" },
+    { "pd_open_tiers",
+      "bbssd, CSD, KV: program disturb, ECC tiers added to a read of a block "
+      "that is only part programmed, 0 to 4, under the shared tier cap; "
+      "needs ecc_step_ns; 0 (default) turns the term off" },
+    { "pd_open_age",
+      "bbssd, CSD, KV: data age for the ECC age tiers counts from the first "
+      "program of the line instead of the line close, so open data ages "
+      "too; one time per line; needs ecc_step_ns and ecc_retention_sec; "
+      "off (default)" },
     { "pe_cycles_rated",
       "bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART "
       "Percentage Used; 0 takes the rating of nand_cell_type (ZNS: "
