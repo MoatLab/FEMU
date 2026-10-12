@@ -65,13 +65,14 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
      * A zone reset encodes the zone's block index into ppa.g.blk and indexes the
      * per-plane block array (get_blk() in zftl.c), so the geometry has to supply
      * a block for every zone. Full-width zones take one block each; narrower
-     * zones share a block index between the num_ch/chnls_per_zone zones that sit
-     * on different channel groups. Integer truncation of the derived
+     * zones share a block index between the zones that sit on different
+     * channel and LUN groups. Integer truncation of the derived
      * pages-per-block can otherwise leave more zones than blocks, and a later
      * reset would write past the block array.
      */
     {
-        uint64_t groups = ns->zns->num_ch / ns->zns->chnls_per_zone;
+        uint64_t groups = ns->zns->num_ch / ns->zns->chnls_per_zone *
+                          (ns->zns->num_lun / ns->zns->luns_per_zone);
         uint64_t zones_per_blk = groups ? groups : 1;
 
         if (ns->num_zones > ns->zns->num_blk * zones_per_blk) {
@@ -1978,6 +1979,10 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
      */
     id_zns->chnls_per_zone = ns->zns_chnls_per_zone ? ns->zns_chnls_per_zone :
                                                       id_zns->num_ch;
+    /* the same rule for the LUNs a zone spans on each of its channels */
+    id_zns->luns_per_zone = ns->zns_luns_per_zone ? ns->zns_luns_per_zone :
+                                                    id_zns->num_lun;
+    id_zns->zone_order_lun = ns->zns_zone_order_lun;
 
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
     for (i =0; i < id_zns->num_ch; i++) {
@@ -2124,7 +2129,8 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
     struct zns_ssd* zns  = ns->zns;
     n->zoned = true;
     n->zasl_bs = n->zns_params.zns_zasl_bs;
-    ns->zone_size_bs = zns->chnls_per_zone*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
+    ns->zone_size_bs = zns->chnls_per_zone * zns->luns_per_zone *
+                       zns->num_plane * zns->num_page * ZNS_PAGE_SIZE;
     /* keep a user-set capacity; 0 means the zone is fully usable */
     /* cross_zone_read comes from the device property; do not clear it here */
     /*
@@ -2201,6 +2207,17 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                    ns->zns_chnls_per_zone, p->zns_num_ch);
         return false;
     }
+    if (ns->zns_luns_per_zone && p->zns_num_lun % ns->zns_luns_per_zone) {
+        error_setg(errp, "zns_luns_per_zone %u must divide zns_num_lun %u",
+                   ns->zns_luns_per_zone, p->zns_num_lun);
+        return false;
+    }
+    if (p->zns_zone_order && strcmp(p->zns_zone_order, "ch") &&
+        strcmp(p->zns_zone_order, "lun")) {
+        error_setg(errp, "zns_zone_order must be ch or lun, not '%s'",
+                   p->zns_zone_order);
+        return false;
+    }
     if (p->zns_flash_type < SLC || p->zns_flash_type >= MAX_FLASH_TYPE) {
         error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
         return false;
@@ -2216,13 +2233,19 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * The caches are allocated before the zone count is known, so bound the
      * count here by the most zones this geometry could have; the exact bound
      * is applied once the zones exist. Unbounded, a large value failed the
-     * allocation and aborted.
+     * allocation and aborted. Each LUN group of a channel holds its own
+     * zones, so a narrower zns_luns_per_zone allows more.
      */
-    if (p->zns_num_wc > (uint64_t)p->zns_num_ch * p->zns_num_blk) {
-        error_setg(errp, "zns_num_wc (%u) exceeds the %u zones this geometry "
-                   "can have at most", p->zns_num_wc,
-                   (unsigned)(p->zns_num_ch * p->zns_num_blk));
-        return false;
+    {
+        uint64_t lun_groups = ns->zns_luns_per_zone ?
+                              p->zns_num_lun / ns->zns_luns_per_zone : 1;
+        uint64_t most = (uint64_t)p->zns_num_ch * p->zns_num_blk * lun_groups;
+
+        if (p->zns_num_wc > most) {
+            error_setg(errp, "zns_num_wc (%u) exceeds the %" PRIu64 " zones "
+                       "this geometry can have at most", p->zns_num_wc, most);
+            return false;
+        }
     }
     if (p->zns_pg_rd_lat < 0 || p->zns_pg_wr_lat < 0 || p->zns_blk_er_lat < 0 ||
         p->zns_cmd_addr_lat < 0 || p->zns_pg_xfer_lat < 0 ||

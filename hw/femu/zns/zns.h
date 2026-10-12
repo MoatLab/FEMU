@@ -224,6 +224,14 @@ struct zns_ssd {
      * progress is tracked per zone, since zones fill independently.
      */
     uint64_t chnls_per_zone;
+    /*
+     * LUNs a zone spans on each of its channels; luns_per_zone == num_lun is
+     * the default. Zones that sit on different LUN groups of one channel
+     * group also share a block index. zone_order_lun steps a zone's slots
+     * through its LUNs before its channels.
+     */
+    uint64_t luns_per_zone;
+    bool zone_order_lun;
     uint64_t *zone_wp_slot;
     /*
      * First plane of the zone's current die slot that holds no data yet. A

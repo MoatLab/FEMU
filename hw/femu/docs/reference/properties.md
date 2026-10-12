@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 180 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 182 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -210,7 +210,7 @@ Devices:
 | `zns_num_ch` | `uint8` | `2` | ZNS: number of channels, 1 to 128 |
 | `zns_num_lun` | `uint8` | `4` | ZNS: LUNs (dies) per channel, 1 or more |
 | `zns_num_plane` | `uint8` | `2` | ZNS: planes per LUN, 1 to 8; the program unit grows with it |
-| `zns_num_blk` | `uint8` | `32` | ZNS: blocks per plane, 1 or more; the zone count is zns_num_blk times zns_num_ch divided by the zone width and zns_num_plane |
+| `zns_num_blk` | `uint8` | `32` | ZNS: blocks per plane, 1 or more; the zone count is zns_num_blk times zns_num_ch times zns_num_lun, divided by the zone width, the zone LUNs and zns_num_plane |
 | `zns_flash_type` | `int32` | `4` | ZNS: cell type, 1 SLC, 2 MLC, 3 TLC, 4 QLC or 5 PLC; MLC and PLC have no built-in timing and need zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat |
 | `zns_pg_rd_lat` | `int64` | `0` | ZNS: page read time in ns, 0 or more; 0 uses the built-in time of zns_flash_type |
 | `zns_pg_wr_lat` | `int64` | `0` | ZNS: page program time in ns, 0 or more; 0 uses the built-in time of zns_flash_type |
@@ -231,6 +231,8 @@ Devices:
 | `zns_num_conv_zones` | `uint32` | `0` | ZNS: number of leading conventional zones, which take random writes; capped at the zone count |
 | `zns_zone_cap` | `size` | `0` | ZNS: zone capacity in bytes, at least one logical block and at most the zone size; 0 means the zone size |
 | `zns_chnls_per_zone` | `uint32` | `0` | ZNS: channels one zone spans (zone width), dividing zns_num_ch; 0 means all channels |
+| `zns_luns_per_zone` | `uint32` | `0` | ZNS: LUNs one zone spans on each of its channels, dividing zns_num_lun; 0 means all LUNs |
+| `zns_zone_order` | `str` | unset | ZNS: ch (default) fills a zone channel first, then LUN; lun fills it LUN first, so consecutive programs share a channel |
 | `zns_zrwa_size` | `uint64` | `0` | ZNS: Zone Random Write Area size in logical blocks, at most 65535 and a multiple of zns_zrwafg_size; 0 disables ZRWA |
 | `zns_zrwafg_size` | `uint64` | `0` | ZNS: ZRWA flush granularity in logical blocks, 1 to 65535 with ZRWA and 0 without; the zone capacity must be a multiple of it |
 | `zns_zrwa_num` | `uint32` | `0` | ZNS: number of zones that may hold a ZRWA at once, 1 or more with ZRWA and 0 without |

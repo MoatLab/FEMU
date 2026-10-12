@@ -1732,6 +1732,9 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->num_conv_zones = n->zns_params.zns_num_conv_zones;
         ns->zone_cap_bs = n->zns_params.zns_zone_cap;
         ns->zns_chnls_per_zone = n->zns_params.zns_chnls_per_zone;
+        ns->zns_luns_per_zone = n->zns_params.zns_luns_per_zone;
+        ns->zns_zone_order_lun = n->zns_params.zns_zone_order &&
+                                 !strcmp(n->zns_params.zns_zone_order, "lun");
         ns->zrwa_size = n->zns_params.zns_zrwa_size;
         ns->zrwafg_size = n->zns_params.zns_zrwafg_size;
         ns->zrwa_num = n->zns_params.zns_zrwa_num;
@@ -3279,6 +3282,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_SIZE("zns_zone_cap", FemuCtrl, zns_params.zns_zone_cap, 0),
     DEFINE_PROP_UINT32("zns_chnls_per_zone", FemuCtrl,
                        zns_params.zns_chnls_per_zone, 0),
+    DEFINE_PROP_UINT32("zns_luns_per_zone", FemuCtrl,
+                       zns_params.zns_luns_per_zone, 0),
+    DEFINE_PROP_STRING("zns_zone_order", FemuCtrl, zns_params.zns_zone_order),
     DEFINE_PROP_UINT64("zns_zrwa_size", FemuCtrl, zns_params.zns_zrwa_size, 0),
     DEFINE_PROP_UINT64("zns_zrwafg_size", FemuCtrl,
                        zns_params.zns_zrwafg_size, 0),

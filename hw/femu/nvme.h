@@ -1975,6 +1975,8 @@ typedef struct NvmeNamespace {
     uint32_t        zd_extension_size;
     uint32_t        num_conv_zones; /* leading conventional zones (0 = none) */
     uint32_t        zns_chnls_per_zone; /* channels a zone spans (0 = full width) */
+    uint32_t        zns_luns_per_zone;  /* LUNs a zone spans per channel (0 = all) */
+    bool            zns_zone_order_lun; /* a zone steps LUNs before channels */
     uint64_t        zrwa_size;   /* ZRWA window in LBAs (0 = ZRWA off) */
     uint64_t        zrwafg_size; /* ZRWA flush granularity in LBAs */
     uint32_t        zrwa_num;    /* zones that may hold a ZRWA at once */
@@ -2150,6 +2152,8 @@ typedef struct ZNSCtrlParams {
     uint32_t zns_num_conv_zones; /* leading conventional zones (0 = all sequential) */
     uint64_t zns_zone_cap;       /* usable bytes per zone; 0 = the whole zone */
     uint32_t zns_chnls_per_zone; /* channels a zone spans (0 = full width) */
+    uint32_t zns_luns_per_zone;  /* LUNs a zone spans per channel (0 = all) */
+    char *zns_zone_order;        /* "ch" (default) or "lun": what a zone steps first */
     uint64_t zns_zrwa_size;      /* ZRWA window, LBAs (0 = ZRWA off) */
     uint64_t zns_zrwafg_size;    /* ZRWA flush granularity, LBAs */
     uint32_t zns_zrwa_num;       /* how many zones may hold a ZRWA at once */

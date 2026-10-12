@@ -96,6 +96,7 @@ listed one by one.
 - Configurable zone resource limits (`zns_max_active`, `zns_max_open`) and zone descriptor extension size (6404dd233).
 - Optional conventional zones (`zns_num_conv_zones`) (6e7395b55).
 - Configurable zone width (`zns_chnls_per_zone`) (e04e4e901).
+- A zone can span fewer LUNs (`zns_luns_per_zone`), and `zns_zone_order=lun` fills a zone LUN first instead of channel first. The defaults keep the full-width, channel-first zone.
 - Zone Random Write Area support (`zns_zrwa_*`) (b18f56b2b, 9f51854d7).
 - An injected write fault (`err_write_fail_ppm`) takes the zone read only and lists it in the Changed Zone List (ccdae5d3b).
 - Changed Zone List log page (569608a41).

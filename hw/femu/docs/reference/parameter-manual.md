@@ -442,6 +442,8 @@ Reference: [ZNS](properties.md#zns). Design: [ZNS](../design/zns.md).
 | `zns_num_plane` | planes | 1 to 8 | planes per LUN; the program unit grows with it |
 | `zns_num_blk` | blocks | >= 1 | blocks per plane |
 | `zns_chnls_per_zone` | channels | divides `zns_num_ch`; 0 = all | zone width |
+| `zns_luns_per_zone` | LUNs | divides `zns_num_lun`; 0 = all | LUNs of a zone on each of its channels |
+| `zns_zone_order` | name | `ch` (default) or `lun` | axis a zone fills first |
 | `zns_zone_cap` | bytes | one block to the zone size; 0 = zone size | writable part of each zone |
 | `zns_flash_type` | type | 1 SLC, 2 MLC, 3 TLC, 4 QLC, 5 PLC | cell type; MLC and PLC need the three times below |
 | `zns_pg_rd_lat`, `zns_pg_wr_lat`, `zns_blk_er_lat` | ns | >= 0; 0 = built-in | override the cell type's times |
@@ -462,8 +464,9 @@ Derived quantities (when the divisions are exact):
 ```text
 pages per block = namespace size / 16 KiB / (zns_num_ch x zns_num_lun x zns_num_blk)
 zone width      = zns_chnls_per_zone, or zns_num_ch when 0
-zone size       = zone width x zns_num_lun x zns_num_plane x pages per block x 16 KiB
-zone count      = zns_num_ch x zns_num_blk / (zone width x zns_num_plane)
+zone LUNs       = zns_luns_per_zone, or zns_num_lun when 0
+zone size       = zone width x zone LUNs x zns_num_plane x pages per block x 16 KiB
+zone count      = zns_num_ch x zns_num_lun x zns_num_blk / (zone width x zone LUNs x zns_num_plane)
 ```
 
 Interactions:

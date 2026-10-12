@@ -533,7 +533,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "ZNS: planes per LUN, 1 to 8; the program unit grows with it" },
     { "zns_num_blk",
       "ZNS: blocks per plane, 1 or more; the zone count is zns_num_blk "
-      "times zns_num_ch divided by the zone width and zns_num_plane" },
+      "times zns_num_ch times zns_num_lun, divided by the zone width, the "
+      "zone LUNs and zns_num_plane" },
     { "zns_flash_type",
       "ZNS: cell type, 1 SLC, 2 MLC, 3 TLC, 4 QLC or 5 PLC; MLC and PLC "
       "have no built-in timing and need zns_pg_rd_lat, zns_pg_wr_lat and "
@@ -593,6 +594,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "zns_chnls_per_zone",
       "ZNS: channels one zone spans (zone width), dividing zns_num_ch; 0 "
       "means all channels" },
+    { "zns_luns_per_zone",
+      "ZNS: LUNs one zone spans on each of its channels, dividing "
+      "zns_num_lun; 0 means all LUNs" },
+    { "zns_zone_order",
+      "ZNS: ch (default) fills a zone channel first, then LUN; lun fills "
+      "it LUN first, so consecutive programs share a channel" },
     { "zns_zrwa_size",
       "ZNS: Zone Random Write Area size in logical blocks, at most 65535 "
       "and a multiple of zns_zrwafg_size; 0 disables ZRWA" },

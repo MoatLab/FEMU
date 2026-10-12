@@ -1614,6 +1614,180 @@ static void femu_test_zone_reset(void *obj, void *data,
     femu_disable(&c);
 }
 
+static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
+                             uint32_t len, uint64_t off);
+
+/*
+ * Zone parallelism. Two channels of two LUNs, one plane, two blocks: with
+ * zns_chnls_per_zone=1 and zns_luns_per_zone=1 each zone owns one die, and
+ * four zones share each block index. Zone 2 sits on channel 0, LUN 1. With
+ * zns_reset_by_fill a reset erases only programmed blocks, and SMART
+ * Percentage Used (rating 1, 8 blocks) counts 12 per erase. A zone 0
+ * write evicts a zone 2 write from the only write cache, which programs
+ * only zone 2's die. Zone 0 then holds data, but none on the media, so its
+ * reset erases nothing. A reset of zone 2 erases one block. Zone 6 is on
+ * the same die as zone 2, one block index up: a program of zone 6 must not
+ * reach zone 2's block.
+ */
+static void femu_test_zns_lpz(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf;
+    uint64_t log;
+    uint64_t zsze;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    log = guest_alloc(alloc, 512);
+    femu_zone_report(&c, buf, report);
+    zsze = ldq_le_p(report + 64 + 64 + 16);
+    /* one die of 64 SLC pages of 16 KiB */
+    g_assert_cmpuint(zsze, ==, 64 * 16384 / c.lba_size);
+
+    qtest_memset(qts, buf, 0x2d, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2 * zsze, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 5), ==, 0);
+
+    g_assert_cmpint(femu_zone_action(&c, 2 * zsze, FEMU_ZONE_ACTION_RESET),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 5), ==, 100 / 8);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 6 * zsze, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2 * zsze, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 2 * zsze, FEMU_ZONE_ACTION_RESET),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 5), ==, 100 / 8);
+    g_assert_cmpint(femu_zone_action(&c, 6 * zsze, FEMU_ZONE_ACTION_RESET),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 5), ==, 2 * 100 / 8);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Interleave order of a zone. Two channels of two LUNs and one plane; a
+ * page transfer holds its channel for ZNS_ORDER_XFER_MS. Eight 4 KiB writes
+ * fill two 16 KiB slots of a zone, and a write to the next zone evicts the
+ * only write cache. Channel order (the default) programs the two slots on
+ * two channels, so the transfers overlap. LUN order programs both on
+ * channel 0, so they take turns. Host delays only add time, so the check
+ * uses the fastest of three such flushes. @data is "ch" or "lun".
+ */
+#define ZNS_ORDER_XFER_MS 400
+
+static void femu_test_zns_order(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool lun = g_str_equal(data, "lun");
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf;
+    uint64_t zsze;
+    int64_t t0;
+    int64_t ms;
+    int64_t best = INT64_MAX;
+    int r;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    femu_zone_report(&c, buf, report);
+    zsze = ldq_le_p(report + 64 + 64 + 16);
+    /* the first I/O command pays a one-time start cost; keep it out */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x3e, FEMU_DATA_SIZE);
+    for (r = 0; r < 3; r++) {
+        for (i = 0; i < 8; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            2 * r * zsze +
+                                            i * (FEMU_DATA_SIZE / c.lba_size),
+                                            buf)), ==, NVME_SUCCESS);
+        }
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (2 * r + 1) * zsze, buf)), ==,
+                        NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - t0) / 1000;
+        best = MIN(best, ms);
+    }
+    g_test_message("order %s: fastest two-slot flush took %" PRId64 " ms",
+                   (char *)data, best);
+    if (lun) {
+        g_assert_cmpint(best, >=, 2 * ZNS_ORDER_XFER_MS);
+    } else {
+        g_assert_cmpint(best, >=, ZNS_ORDER_XFER_MS);
+        g_assert_cmpint(best, <, ZNS_ORDER_XFER_MS * 3 / 2);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * zns_luns_per_zone must divide zns_num_lun; zns_zone_order is ch or lun.
+ * One-die zones on two channels of two LUNs and two blocks make eight
+ * zones, so eight write caches are allowed.
+ */
+static void femu_test_zns_lpz_refused(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *opts[] = { "'zns_luns_per_zone':3", "'zns_zone_order':'die'" };
+    const char *msg[] = { "zns_luns_per_zone 3 must divide zns_num_lun 4",
+                          "zns_zone_order must be ch or lun" };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(opts); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'zns-lpz','addr':'5','devsz_mb':32,'femu_mode':3,"
+            "'zns_num_lun':4,%s}}", opts[i]);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), msg[i]));
+        qobject_unref(rsp);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'zns-wc','addr':'6','devsz_mb':8,"
+                    "'femu_mode':3,'zns_num_ch':2,'zns_num_lun':2,"
+                    "'zns_num_plane':1,'zns_num_blk':2,'zns_flash_type':1,"
+                    "'zns_chnls_per_zone':1,'zns_luns_per_zone':1,"
+                    "'zns_num_wc':8}}");
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
 /*
  * More zones written at once than there are write caches: every 16 KiB a
  * zone writes evicts another zone's cache, and that flush fills only part
@@ -30629,6 +30803,31 @@ static void femu_register_nodes(void)
             "pe_cycles_rated=1,zns_pg_wr_lat=1000000,zns_blk_er_lat=300000000,"
             "zns_reset_by_fill=1,zns_num_wc=1,zns_lun_contention=1"
     });
+    qos_add_test("zns-lpz-one", "femu", femu_test_zns_lpz,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=8,femu_mode=3,secsz=512,zns_num_ch=2,zns_num_lun=2,"
+            "zns_num_plane=1,zns_num_blk=2,zns_flash_type=1,"
+            "pe_cycles_rated=1,zns_num_wc=1,zns_reset_by_fill=1,"
+            "zns_chnls_per_zone=1,zns_luns_per_zone=1"
+    });
+    qos_add_test("zns-order-ch", "femu", femu_test_zns_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"ch",
+        .edge.extra_device_opts =
+            "devsz_mb=8,femu_mode=3,secsz=512,zns_num_ch=2,zns_num_lun=2,"
+            "zns_num_plane=1,zns_num_blk=8,zns_flash_type=1,zns_num_wc=1,"
+            "zns_pg_xfer_lat=400000000"
+    });
+    qos_add_test("zns-order-lun", "femu", femu_test_zns_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lun",
+        .edge.extra_device_opts =
+            "devsz_mb=8,femu_mode=3,secsz=512,zns_num_ch=2,zns_num_lun=2,"
+            "zns_num_plane=1,zns_num_blk=8,zns_flash_type=1,zns_num_wc=1,"
+            "zns_pg_xfer_lat=400000000,zns_zone_order=lun"
+    });
+    qos_add_test("zns-lpz-refused", "femu", femu_test_zns_lpz_refused, NULL);
     qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

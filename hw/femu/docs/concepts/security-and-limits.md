@@ -138,6 +138,8 @@ recent additions:
 | `lver` (OCSSD) | other than 1 or 2 |
 | `flash_type` (OCSSD) | outside 1 to 4 |
 | `zns_chnls_per_zone` | a value that does not divide `zns_num_ch` |
+| `zns_luns_per_zone` | a value that does not divide `zns_num_lun` |
+| `zns_zone_order` | a value other than `ch` or `lun` |
 
 The message names the property, for example:
 

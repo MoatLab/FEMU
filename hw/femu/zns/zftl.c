@@ -281,29 +281,63 @@ static inline bool mapped_ppa(struct ppa *ppa)
 }
 
 /*
- * Place the next physical page for a write to zone_idx. A full-width zone walks
- * every channel and then every LUN, which is what the shared write pointer used
- * to do. A narrower zone binds num_ch/chnls_per_zone zones to one block index,
- * each on its own channel group, so per-channel page use is unchanged. The slot
- * counter is per zone because zones fill independently.
+ * The dies a zone owns: cpz channels from *ch_lo and lpz LUNs from *lun_lo,
+ * all at block index *blk. The zones that share a block index sit on
+ * different channel and LUN groups, num_ch/cpz * num_lun/lpz of them, so
+ * the dies of one block index split evenly between them.
+ */
+static void zns_zone_span(struct zns_ssd *zns, uint32_t zone_idx,
+                          uint32_t *ch_lo, uint32_t *lun_lo, uint32_t *blk)
+{
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t lpz = zns->luns_per_zone;
+    uint64_t ch_groups = zns->num_ch / cpz;
+    uint64_t groups = ch_groups * (zns->num_lun / lpz);
+    uint64_t g = zone_idx % groups;
+
+    *ch_lo = (g % ch_groups) * cpz;
+    *lun_lo = (g / ch_groups) * lpz;
+    *blk = zone_idx / groups;
+}
+
+/*
+ * The die of slot @slot of a zone. Channel order (the default) steps the
+ * zone's channels first, then its LUNs; LUN order steps the LUNs first, so
+ * consecutive slots share a channel.
+ */
+static void zns_zone_die(struct zns_ssd *zns, uint32_t zone_idx,
+                         uint64_t slot, uint32_t *ch, uint32_t *lun,
+                         uint32_t *blk)
+{
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t lpz = zns->luns_per_zone;
+    uint32_t ch_lo, lun_lo;
+
+    zns_zone_span(zns, zone_idx, &ch_lo, &lun_lo, blk);
+    if (zns->zone_order_lun) {
+        *lun = lun_lo + slot % lpz;
+        *ch = ch_lo + (slot / lpz) % cpz;
+    } else {
+        *ch = ch_lo + slot % cpz;
+        *lun = lun_lo + (slot / cpz) % lpz;
+    }
+}
+
+/*
+ * Place the next physical page for a write to zone_idx: the die of the
+ * zone's next slot. The slot counter is per zone because zones fill
+ * independently.
  */
 static struct ppa get_new_page(struct zns_ssd *zns, uint32_t zone_idx)
 {
-    uint64_t cpz = zns->chnls_per_zone;
     uint64_t slot = zns->zone_wp_slot ? zns->zone_wp_slot[zone_idx] : 0;
+    uint32_t ch, lun, blk;
     struct ppa ppa;
     ppa.ppa = 0;
-    if (cpz == zns->num_ch) {
-        ppa.g.ch = slot % zns->num_ch;
-        ppa.g.fc = (slot / zns->num_ch) % zns->num_lun;
-        ppa.g.blk = zone_idx;
-    } else {
-        uint64_t groups = zns->num_ch / cpz;
-
-        ppa.g.ch = (zone_idx % groups) * cpz + (slot % cpz);
-        ppa.g.fc = (slot / cpz) % zns->num_lun;
-        ppa.g.blk = zone_idx / groups;
-    }
+    zns_zone_die(zns, zone_idx, slot, &ch, &lun, &blk);
+    ppa.g.ch = ch;
+    ppa.g.fc = lun;
+    ppa.g.blk = blk;
     ppa.g.V = 1; //not padding page
     if(!valid_ppa(zns,&ppa))
     {
@@ -379,30 +413,22 @@ static void zns_invalidate_zone_mappings(struct zns_ssd *zns, uint32_t zone_idx,
 
 static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
 {
-    uint64_t cpz = zns->chnls_per_zone;
-    uint64_t groups = (cpz && cpz < zns->num_ch) ? zns->num_ch / cpz : 1;
-    uint32_t blk_idx = zone_idx;
-    int ch, lun, pl, ch_lo = 0, ch_hi = zns->num_ch;
+    uint32_t blk_idx, ch_lo, lun_lo;
+    int ch, lun, pl, ch_hi, lun_hi;
     struct ppa ppa;
     struct zns_blk *blk;
 
     /*
-     * Address the same blocks get_new_page() writes. A narrower zone binds
-     * num_ch/chnls_per_zone zones to one block index, each zone on its own
-     * channel group, so the block index is zone_idx/groups and only that
-     * group's channels hold the zone. Using zone_idx as the block index here
-     * would clear a block the zone does not own -- and, since the geometry
-     * check admits up to num_blk*groups zones, would index past the block
-     * array once zone_idx reached num_blk.
+     * Address the same blocks get_new_page() writes: only the zone's own
+     * channels and LUNs, at its block index. Any other block at that index
+     * belongs to another zone.
      */
-    if (groups > 1) {
-        blk_idx = zone_idx / groups;
-        ch_lo = (zone_idx % groups) * cpz;
-        ch_hi = ch_lo + cpz;
-    }
+    zns_zone_span(zns, zone_idx, &ch_lo, &lun_lo, &blk_idx);
+    ch_hi = ch_lo + zns->chnls_per_zone;
+    lun_hi = lun_lo + zns->luns_per_zone;
 
     for (ch = ch_lo; ch < ch_hi; ch++) {
-        for (lun = 0; lun < zns->num_lun; lun++) {
+        for (lun = lun_lo; lun < lun_hi; lun++) {
             for (pl = 0; pl < zns->num_plane; pl++) {
                 ppa.ppa = 0; /* clear rsv/unused bits before field writes */
                 ppa.g.ch = ch;
@@ -438,21 +464,17 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime)
 {
-    uint64_t cpz = zns->chnls_per_zone;
-    uint64_t groups = (cpz && cpz < zns->num_ch) ? zns->num_ch / cpz : 1;
-    uint32_t blk_idx = zone_idx;
-    int ch, lun, pl, ch_lo = 0, ch_hi = zns->num_ch;
+    uint32_t blk_idx, ch_lo, lun_lo;
+    int ch, lun, pl, ch_hi, lun_hi;
     struct ppa ppa;
     struct nand_cmd erase_cmd;
     uint64_t sublat, maxlat = 0;
     uint64_t total_blocks_erased = 0;
 
     /* erase the blocks the zone owns: see zns_reset_block_state() */
-    if (groups > 1) {
-        blk_idx = zone_idx / groups;
-        ch_lo = (zone_idx % groups) * cpz;
-        ch_hi = ch_lo + cpz;
-    }
+    zns_zone_span(zns, zone_idx, &ch_lo, &lun_lo, &blk_idx);
+    ch_hi = ch_lo + zns->chnls_per_zone;
+    lun_hi = lun_lo + zns->luns_per_zone;
 
     ftl_debug("=== Zone Reset Started for Zone %u ===\n", zone_idx);
 
@@ -472,7 +494,7 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     erase_cmd.stime = stime;
 
     for (ch = ch_lo; ch < ch_hi; ch++) {
-        for (lun = 0; lun < zns->num_lun; lun++) {
+        for (lun = lun_lo; lun < lun_hi; lun++) {
             if (zns->timing.lun_contention) {
                 /*
                  * The die is held for the whole erase, so erase every plane

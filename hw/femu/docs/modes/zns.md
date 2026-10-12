@@ -59,9 +59,11 @@ size and the geometry:
 ```
 pages per block = namespace size / 16 KiB / (zns_num_ch * zns_num_lun * zns_num_blk)
 zone width      = zns_chnls_per_zone, or zns_num_ch when it is 0
-zone size       = zone width * zns_num_lun * zns_num_plane * pages per block * 16 KiB
+zone LUNs       = zns_luns_per_zone, or zns_num_lun when it is 0
+zone size       = zone width * zone LUNs * zns_num_plane * pages per block * 16 KiB
 zone count      = namespace size / zone size
-                = zns_num_ch * zns_num_blk / (zone width * zns_num_plane)
+                = zns_num_ch * zns_num_lun * zns_num_blk
+                  / (zone width * zone LUNs * zns_num_plane)
 ```
 
 So, when the divisions are exact, the zone count does not depend on the
@@ -87,6 +89,26 @@ To get more, smaller zones, raise `zns_num_blk` or narrow the zones with
 
 A narrower zone spans fewer channels, so a single zone has less internal
 parallelism.
+
+`zns_luns_per_zone` narrows a zone on the LUN axis in the same way. It must
+divide `zns_num_lun`. With both at 1, each zone owns one die, as in the
+single-die zone of ConfZNS (SYSTOR '23):
+
+<!-- femu-example: zns-one-die-zones -->
+```
+-device femu,devsz_mb=4096,femu_mode=3,zns_num_ch=8,zns_num_lun=4,zns_num_plane=2,zns_num_blk=32,zns_chnls_per_zone=1,zns_luns_per_zone=1
+```
+
+`zns_zone_order` sets which axis a zone fills first. `ch` (the default)
+puts consecutive programs on different channels. `lun` puts them on the
+LUNs of one channel, so their page transfers take turns on that channel:
+
+```
+ zns_chnls_per_zone=2, zns_luns_per_zone=2: the slots of one zone
+
+ order ch:   slot 0 ch0/LUN0   slot 1 ch1/LUN0   slot 2 ch0/LUN1   slot 3 ch1/LUN1
+ order lun:  slot 0 ch0/LUN0   slot 1 ch0/LUN1   slot 2 ch1/LUN0   slot 3 ch1/LUN1
+```
 
 Linux uses a ZNS namespace only when its zone size is a power of two. Keep
 `devsz_mb` (or each ZNS namespace's size), `zns_num_ch`, `zns_num_lun`,
@@ -313,12 +335,14 @@ applications.
 | `zns_num_wc value N exceeds the number of zones M`, `zns_num_wc (N) exceeds the M zones this geometry can have at most` | `zns_num_wc` above the zone count. |
 | `max_open_zones value 10 exceeds max_active_zones 8` | `zns_max_open` above `zns_max_active`. |
 | `zns_chnls_per_zone 3 must divide zns_num_ch 2` | The zone width must divide the channel count. |
+| `zns_luns_per_zone 3 must divide zns_num_lun 4` | The LUNs of a zone must divide the LUN count. |
+| `zns_zone_order must be ch or lun, not 'die'` | An unknown fill order. |
 | `zns_flash_type 2 has no built-in timing; set zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat` | MLC or PLC without the three latencies. |
 | `zns_flash_type must be in [1, 5]` | A cell type outside SLC to PLC. |
 | `zoned namespaces need a logical block of 4 KiB or less; lba_index selects 8192 bytes` | `lba_index` picks a block larger than 4 KiB. |
 | `zns geometry gives N pages per block; must be in [1, 65536]` | The namespace is too small or too large for `zns_num_ch * zns_num_lun * zns_num_blk`. |
 | `FEMU zns: N zones exceed M blocks per plane ...` | Raise `zns_num_blk` or the namespace size. |
-| `the device is too small to hold a single zone of N logical blocks` | The geometry gives less than one zone: `zns_num_ch * zns_num_blk` is below the zone width times `zns_num_plane`. Raise `zns_num_blk` or `zns_num_ch`, or lower `zns_num_plane` or `zns_chnls_per_zone`. |
+| `the device is too small to hold a single zone of N logical blocks` | The geometry gives less than one zone: `zns_num_ch * zns_num_lun * zns_num_blk` is below the zone width times the zone LUNs times `zns_num_plane`. Raise `zns_num_blk` or `zns_num_ch`, or lower `zns_num_plane`, `zns_chnls_per_zone` or `zns_luns_per_zone`. |
 | `zns_zrwafg_size must be between 1 and 65535 when ZRWA is enabled, got 0` | ZRWA needs all three `zns_zrwa*` properties. Other messages check that the window is a multiple of the flush granularity and that the zone capacity is too. |
 | `zns_zasl_bs N must be a power-of-two multiple of the 4096 byte controller page size` | Fix `zns_zasl_bs`. |
 
