@@ -2002,7 +2002,13 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     //Misao: init sram
     /* one program covers every plane of a die; the flush walks the same set */
     id_zns->program_unit = ZNS_PAGE_SIZE * id_zns->flash_type * id_zns->num_plane;
-    id_zns->stripe_unit = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
+    /*
+     * A stripe is one program unit on each die of a zone, so a full cache
+     * programs each die once. Sized from the whole device, a narrow zone's
+     * cache held several programs per die, and a flush ran them in series.
+     */
+    id_zns->stripe_unit = id_zns->program_unit * id_zns->chnls_per_zone *
+                          id_zns->luns_per_zone;
     /*
      * One write cache stages the partial stripe of one zone, so a device
      * needs as many as it lets the host keep open: an open-zone limit

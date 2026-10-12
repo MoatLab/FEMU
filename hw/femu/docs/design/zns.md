@@ -168,7 +168,7 @@ counter `zone_wp_slot[zone]`, through `zns_zone_die()`. A slot is one
  16 KiB (4 logical 4 KiB pages each):
 
    program unit = 16 KiB * zns_flash_type * zns_num_plane
-   stripe unit  = program unit * zns_num_ch * zns_num_lun
+   stripe unit  = program unit * zone width * zone LUNs
 ```
 
 With `run-zns.sh` (8 channels, 4 LUNs, 2 planes, QLC) the program unit is

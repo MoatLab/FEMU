@@ -206,6 +206,7 @@ was not doing anything.
 - Compare, Write Zeroes, Verify and Copy are on by default: the `oncs` default is now 0x19d instead of 0x14. A guest that sees Write Zeroes in ONCS can send it, and on bbssd the FTL programs the range unless Deallocate is set. `oncs=0x14` gives the old set. Write Uncorrectable still needs bit 0x2.
 - Compare and Verify take the NAND read time of a Read on bbssd, CSD and ZNS namespaces, also after a miscompare. Before, both completed with no media read.
 - A Copy on bbssd issues its destination write when its source reads end. On one LUN, a one-page Copy took the read time twice: 600 ms instead of 500 ms with a 100 ms read and a 400 ms program.
+- A zone write cache holds one program unit for each die of its zone. A cache sized from the whole device made a narrow zone (`zns_chnls_per_zone` below `zns_num_ch`) program each of its dies several times in series per flush. Full-width zones keep their timing.
 - A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on

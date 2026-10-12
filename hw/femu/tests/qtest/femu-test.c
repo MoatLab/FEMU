@@ -1751,6 +1751,61 @@ static void femu_test_zns_order(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * The write cache of a zone holds one program unit for each die of the
+ * zone. A zone of one die (one channel of two, or one LUN of two, and one
+ * plane) takes four 4 KiB writes per 16 KiB SLC page. Four writes fill the
+ * cache, and the next write flushes it: writes 5, 9, 13, ... each pay one
+ * program of ZNS_CAP_PROG_MS. A cache sized from both dies held two
+ * programs: writes 5, 13 and 21 were fast, and writes 9, 17 and 25 paid two
+ * programs in series. Host delays only add time, so each check uses the
+ * fastest write of its position.
+ */
+#define ZNS_CAP_PROG_MS 300
+
+static void femu_test_zns_cache_cap(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    int64_t odd = INT64_MAX;
+    int64_t even = INT64_MAX;
+    int64_t t0;
+    int64_t ms;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    /* the first I/O command pays a one-time start cost; keep it out */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x4f, FEMU_DATA_SIZE);
+    for (i = 1; i <= 25; i++) {
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (i - 1) * (FEMU_DATA_SIZE / c.lba_size),
+                                        buf)), ==, NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - t0) / 1000;
+        if (i % 8 == 5) {
+            odd = MIN(odd, ms);
+        } else if (i > 1 && i % 8 == 1) {
+            even = MIN(even, ms);
+        }
+    }
+    g_test_message("fastest of writes 5/13/21: %" PRId64 " ms, of writes "
+                   "9/17/25: %" PRId64 " ms", odd, even);
+    g_assert_cmpint(odd, >=, ZNS_CAP_PROG_MS);
+    g_assert_cmpint(even, >=, ZNS_CAP_PROG_MS);
+    g_assert_cmpint(even, <, 2 * ZNS_CAP_PROG_MS);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * zns_luns_per_zone must divide zns_num_lun; zns_zone_order is ch or lun.
  * One-die zones on two channels of two LUNs and two blocks make eight
  * zones, so eight write caches are allowed.
@@ -30828,6 +30883,20 @@ static void femu_register_nodes(void)
             "zns_pg_xfer_lat=400000000,zns_zone_order=lun"
     });
     qos_add_test("zns-lpz-refused", "femu", femu_test_zns_lpz_refused, NULL);
+    qos_add_test("zns-cache-cap", "femu", femu_test_zns_cache_cap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=8,femu_mode=3,secsz=512,zns_num_ch=2,zns_num_lun=1,"
+            "zns_num_plane=1,zns_num_blk=2,zns_flash_type=1,zns_num_wc=1,"
+            "zns_chnls_per_zone=1,zns_pg_wr_lat=300000000"
+    });
+    qos_add_test("zns-cache-cap-lun", "femu", femu_test_zns_cache_cap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=8,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=2,"
+            "zns_num_plane=1,zns_num_blk=2,zns_flash_type=1,zns_num_wc=1,"
+            "zns_luns_per_zone=1,zns_pg_wr_lat=300000000"
+    });
     qos_add_test("zns-flush-plane", "femu", femu_test_zns_flush_plane,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
