@@ -6366,9 +6366,12 @@ static void femu_test_pd_refused(void *obj, void *data,
  * The ONFI profile sets the channel bus phases from a timing mode. A read or
  * a write of one 4 KiB page on an idle device pays, in ns (Tables 4-34,
  * 4-36 and 4-38; tR 40000 and tPROG 200000, the defaults):
- *   "m26":      one LUN, mode 26: read 275 + 40000 + (50 + 855 + 115) + 246,
- *               write 562 + (57 + 855 + 125) + 200000
- *   "m26-2lun": two LUNs, mode 26: read 275 + 40000 + (200 + 855 + 115) + 321
+ *   "m26":      one LUN, mode 26: read 275 + 40000 + 246 + (50 + 855 + 115),
+ *               write 562 + (57 + 855 + 125) + 200000 + 246; a read sends
+ *               its status before its data out, and a write ends at its
+ *               status
+ *   "m26-2lun": two LUNs, mode 26: read 275 + 40000 + 321 + (200 + 855 + 115),
+ *               write ends at a 78h status of 321
  *   "m0":       one LUN, mode 0: read 275 + 40000 + (50 + 61440 + 115) + 275
  *   "mts":      one LUN, mode 26 at 3200 MT/s: page 1280, read 41966
  *   "spare":    one LUN, mode 26, 512 spare bytes: page 961, read 41647
@@ -6396,15 +6399,19 @@ static void femu_test_onfi(void *obj, void *data, QGuestAllocator *alloc)
 
     if (!strcmp(mode, "m26")) {
         want_rd = 275 + 40000 + 50 + 855 + 115 + 246;
-        want_wr = 562 + 57 + 855 + 125 + 200000;
+        want_wr = 562 + 57 + 855 + 125 + 200000 + 246;
     } else if (!strcmp(mode, "m26-2lun")) {
         want_rd = 275 + 40000 + 200 + 855 + 115 + 321;
+        want_wr = 562 + 57 + 855 + 125 + 200000 + 321;
     } else if (!strcmp(mode, "m0")) {
         want_rd = 275 + 40000 + 50 + 61440 + 115 + 275;
+        want_wr = 562 + 57 + 61440 + 125 + 200000 + 275;
     } else if (!strcmp(mode, "mts")) {
         want_rd = 275 + 40000 + 50 + 1280 + 115 + 246;
+        want_wr = 562 + 57 + 1280 + 125 + 200000 + 246;
     } else if (!strcmp(mode, "spare")) {
         want_rd = 275 + 40000 + 50 + 961 + 115 + 246;
+        want_wr = 562 + 57 + 961 + 125 + 200000 + 246;
     } else if (!strcmp(mode, "off")) {
         want_rd = 1000 + 40000 + 10000 + 500;
         want_wr = 1000 + 10000 + 200000;
@@ -6457,6 +6464,8 @@ static void femu_test_onfi_refused(void *obj, void *data,
         { "'femu_mode':1,'onfi_mode':26,'status_lat':1000",
           "status_lat is refused with onfi_mode" },
         { "'femu_mode':1,'onfi_mode':26,'ns_mgmt':true", "ns_mgmt or shared" },
+        { "'femu_mode':1,'onfi_mode':26,'pe_suspend':1",
+          "pe_suspend is refused with onfi_mode" },
         { "'femu_mode':3,'onfi_mode':26", "namespace 1 is not" },
         { "'femu_mode':2,'onfi_mode':26", "namespace 1 is not" },
         { "'femu_mode':0,'onfi_mode':26", "namespace 1 is not" },

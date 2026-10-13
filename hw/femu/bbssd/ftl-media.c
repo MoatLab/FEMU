@@ -237,6 +237,15 @@ void bb_nand_media_init(struct ssd *ssd)
              * which would close the gaps the profile's later phases leave.
              */
             cfg.policy.bus_res_unbounded = true;
+            /*
+             * ONFI order: status before a read's data out and after a
+             * program. A page register holds its LUN to the end of the op,
+             * and with several LUNs a multi-plane program or erase reads one
+             * 78h status per plane.
+             */
+            cfg.policy.onfi_order = true;
+            cfg.policy.page_reg_hold = true;
+            cfg.policy.mp_status_per_plane = in.multi_lun;
         }
     }
 

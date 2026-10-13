@@ -341,9 +341,10 @@ tBERS. The default, -1, turns the profile off and changes nothing.
  Table 4-34 constants --> per-op command, status and burst phases
  pg_rd_lat, pg_wr_lat, blk_er_lat ------------------> array times (unchanged)
 
- read     |00h addr 30h tWB|..... tR .....|00h pre| page |post|70h status|
- program  |80h addr tADL|edges| page |10h tWB|...... tPROG ......|
+ read     |00h addr 30h tWB|..... tR .....|70h status|00h pre| page |post|
+ program  |80h addr tADL|edges| page |10h tWB|...... tPROG ......|70h status|
  erase    |60h addr D0h tWB|.............. tBERS ..............|70h status|
+           ^ sent only when the LUN is ready (RDY)       LUN held to here ^
 ```
 
 The profile derives these phases (`nand/onfi.c`). Each one is a sum in ps,
@@ -368,8 +369,18 @@ row address cycles.
 - `onfi_tccs_ns` gives tCCS. ONFI 6.0 has no value, so 0 charges nothing.
 - A `tplpbsy`, `tplrbsy` or `tplebsy` left at 0 takes 500 ns, the Table 4-30
   typical value.
-- The phases keep the scheduling of the staged model above. Only their
-  lengths change.
+- A read sends its status before its data out (Section 6.14). A program,
+  erase or copyback ends at its status.
+- An op sends its command only when its LUN is ready, because the page
+  register is in use until then. The LUN stays busy to the end of the
+  read's data out, or of the program, erase or copyback status.
+- A command that waits for a busy LUN books a future window, so an op on
+  an idle LUN can use the bus first.
+- A multi-plane program sends every plane's command and data, with the
+  tPLPBSY gaps, as one bus window (Section 3.1.3). A multi-plane read or
+  erase books each later plane command after its gap.
+- With several LUNs, a multi-plane program or erase reads one 78h status
+  per plane. With one LUN, one 70h status reads the composite.
 
 Approximations:
 
@@ -390,7 +401,9 @@ Realize refuses these settings:
   because a DDR burst moves bytes in pairs;
 - `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat` or `status_lat` with the profile;
 - a namespace that is not bbssd, CSD or KV;
-- `cxl_ssd`, `ns_mgmt` or shared namespaces.
+- `cxl_ssd`, `ns_mgmt` or shared namespaces;
+- `pe_suspend`, because ONFI 6.0 has no suspend and a held page register
+  has no suspend rule.
 
 `onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns` without `onfi_mode` warns.
 

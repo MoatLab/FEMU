@@ -299,7 +299,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, KV: ONFI 6.0 NV-LPDDR4 timing mode 0 to 26; the channel "
       "bus phases then follow the spec for that mode and pg_rd_lat, "
       "pg_wr_lat and blk_er_lat stay the array times; -1 (default) is off. "
-      "Refused with cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat" },
+      "Refused with cmd_addr_lat, pg_xfer_lat, ch_xfer_lat, status_lat or "
+      "pe_suspend" },
     { "onfi_mts",
       "bbssd, CSD, KV: with onfi_mode, the page payload rate in MT/s in "
       "place of the mode's own rate, 1 to 100000; 0 (default) uses the mode" },

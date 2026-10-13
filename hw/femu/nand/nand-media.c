@@ -409,6 +409,105 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
     return true;
 }
 
+/*
+ * The prune time of an ONFI op. Op times are not monotonic (a copy's write
+ * starts at its read's end), and a command that waits for its LUN leaves
+ * ch_avail behind. The channel floor keeps the latest start time seen, and
+ * no phase starts before it (onfi_earliest()), so windows that end before
+ * the floor can go. Without a staged list there is nothing to prune.
+ */
+static uint64_t onfi_prune_now(NandMedia *m, uint32_t ch, uint64_t stime)
+{
+    if (m->bus_res && stime > m->bus_res[ch].floor) {
+        m->bus_res[ch].floor = stime;
+    }
+    return m->bus_res ? m->bus_res[ch].floor : stime;
+}
+
+/* the earliest start of an ONFI phase: never before the channel floor */
+static uint64_t onfi_earliest(const NandMedia *m, uint32_t ch, uint64_t t)
+{
+    return m->bus_res ? mx(t, m->bus_res[ch].floor) : t;
+}
+
+/*
+ * A phase that waits for its LUN: at @a, when the LUN was free at the op's
+ * start @stime, it happens now; when the LUN frees later, it is a future
+ * window, so another die can use the bus before @a. @pnow prunes the
+ * windows (onfi_prune_now()).
+ */
+static uint64_t bus_at(NandMedia *m, uint32_t ch, uint64_t stime,
+                       uint64_t pnow, uint64_t a, uint64_t len)
+{
+    a = onfi_earliest(m, ch, a);
+    return a > stime ? bus_later(m, ch, pnow, a, len) :
+                       bus_now(m, ch, pnow, a, len);
+}
+
+static bool onfi_path(const NandMedia *m)
+{
+    return m->cfg.policy.onfi_order || m->cfg.policy.page_reg_hold;
+}
+
+/*
+ * One op under the ONFI ordering bits (see NandMediaPolicy). The array and
+ * ECC math are those of the staged path; only the phase order and the time
+ * the LUN is held change. Suspend is refused with these bits.
+ */
+static NandOpCompletion onfi_op(NandMedia *m, const NandLoc *loc,
+                                NandMediaOp op, uint64_t stime)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    bool hold = m->cfg.policy.page_reg_hold;
+    bool order = m->cfg.policy.onfi_order;
+    uint64_t alat = array_lat(m, loc, op);
+    uint64_t a = hold ? array_contend_start(m, loc, stime) : stime;
+    uint64_t pnow = onfi_prune_now(m, loc->ch, stime);
+    uint64_t d, end, held;
+    NandOpCompletion c;
+
+    if (op == NAND_MEDIA_READ) {
+        uint64_t out;
+
+        d = array_contend_start(m, loc,
+                                bus_at(m, loc->ch, stime, pnow, a,
+                                       cmd_phase_ns(m, op))) + alat;
+        if (order) {
+            end = bus_later(m, loc->ch, pnow, d, tm->status_ns);
+            out = end = bus_later(m, loc->ch, pnow, end, dout_ns(m, loc));
+        } else {
+            out = bus_later(m, loc->ch, pnow, d, dout_ns(m, loc));
+            end = bus_later(m, loc->ch, pnow, out, tm->status_ns);
+        }
+        held = out;
+    } else if (op == NAND_MEDIA_PROGRAM) {
+        uint64_t in;
+
+        if (hold) {
+            in = bus_at(m, loc->ch, stime, pnow, a,
+                        cmd_phase_ns(m, op) + din_ns(m, loc));
+        } else {
+            in = bus_now(m, loc->ch, pnow, a, cmd_phase_ns(m, op));
+            in = bus_now(m, loc->ch, pnow, in, din_ns(m, loc));
+        }
+        d = array_contend_start(m, loc, in) + alat;
+        end = order ? bus_later(m, loc->ch, pnow, d, tm->status_ns) : d;
+        held = end;
+    } else {
+        d = array_contend_start(m, loc,
+                                bus_at(m, loc->ch, stime, pnow, a,
+                                       cmd_phase_ns(m, op))) + alat;
+        end = bus_later(m, loc->ch, pnow, d, tm->status_ns);
+        held = end;
+    }
+    held = hold ? held : d;
+    array_commit(m, loc, held);
+    suspend_note(m, loc, op, held);
+    c.done_ns = end;
+    c.latency_ns = end - stime;
+    return c;
+}
+
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime)
 {
@@ -497,6 +596,13 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     if (m->cfg.timeline->lock_lun) {
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
     }
+    if (onfi_path(m)) {
+        c = onfi_op(m, loc, op, stime);
+        if (m->cfg.timeline->unlock_lun) {
+            m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, loc);
+        }
+        return c;
+    }
     if (op == NAND_MEDIA_READ) {
         t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
         /*
@@ -554,6 +660,96 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     return c;
 }
 
+/*
+ * A multi-plane group under the ONFI ordering bits. A program sends every
+ * plane's command and data with the tPLPBSY gaps as one bus window, so no
+ * other phase enters between planes (Section 3.1.3). A read or erase books
+ * each later plane command as a future window after the gap. With
+ * mp_status_per_plane a program or erase reads one status per plane.
+ */
+static NandOpCompletion onfi_multiplane(NandMedia *m, const NandLoc *locs,
+                                        int nlocs, NandMediaOp op,
+                                        uint64_t stime)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    bool hold = m->cfg.policy.page_reg_hold;
+    uint32_t ch = locs[0].ch;
+    uint64_t plbusy = op == NAND_MEDIA_PROGRAM ? tm->tplpbsy_ns :
+                      op == NAND_MEDIA_ERASE ? tm->tplebsy_ns :
+                                               tm->tplrbsy_ns;
+    uint64_t a = stime;
+    uint64_t pnow = onfi_prune_now(m, ch, stime);
+    uint64_t t, start, alat, done, held;
+    NandOpCompletion c;
+    int i;
+
+    if (hold) {
+        for (i = 0; i < nlocs; i++) {
+            a = mx(a, array_contend_start(m, &locs[i], stime));
+        }
+    }
+    if (op == NAND_MEDIA_PROGRAM) {
+        uint64_t plane = cmd_phase_ns(m, op) + tm->din_burst_ns +
+                         tm->page_xfer_ns + tm->wr_post_ns;
+
+        t = bus_at(m, ch, stime, pnow, a,
+                   nlocs * plane + (nlocs - 1) * plbusy);
+    } else {
+        t = bus_at(m, ch, stime, pnow, a, cmd_phase_ns(m, op));
+        for (i = 1; i < nlocs; i++) {
+            t = bus_later(m, ch, pnow, t + plbusy, cmd_phase_ns(m, op));
+        }
+    }
+
+    start = t;
+    for (i = 0; i < nlocs; i++) {
+        start = mx(start, array_contend_start(m, &locs[i], start));
+    }
+    if (op == NAND_MEDIA_READ) {
+        uint64_t worst = 0;
+
+        alat = m->cfg.policy.use_flat_timing ? tm->rd_ns :
+               tm->rd_table_ns[locs[0].flash_type][locs[0].page_type];
+        for (i = 0; i < nlocs; i++) {
+            worst = mx(worst, ecc_extra_ns(m, &locs[i]));
+        }
+        alat += worst;
+    } else {
+        alat = array_lat(m, &locs[0], op);
+    }
+    done = start + alat;
+
+    t = done;
+    if (op == NAND_MEDIA_READ) {
+        uint64_t sel = tm->dout_mp_pre_ns ? (uint64_t)tm->dout_mp_pre_ns :
+                       (uint64_t)tm->cmd_addr_ns;
+
+        t = bus_later(m, ch, pnow, t, tm->status_ns);
+        /*
+         * A plane's column select and its page form one window: traffic of
+         * another LUN between them would change the selected output.
+         */
+        for (i = 0; i < nlocs; i++) {
+            t = bus_later(m, ch, pnow, t, sel + tm->page_xfer_ns +
+                          tm->dout_post_ns);
+        }
+    } else {
+        int nst = m->cfg.policy.mp_status_per_plane ? nlocs : 1;
+
+        for (i = 0; i < nst; i++) {
+            t = bus_later(m, ch, pnow, t, tm->status_ns);
+        }
+    }
+    held = hold ? t : done;
+    for (i = 0; i < nlocs; i++) {
+        array_commit(m, &locs[i], held);
+        suspend_note(m, &locs[i], op, held);
+    }
+    c.done_ns = t;
+    c.latency_ns = t - stime;
+    return c;
+}
+
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime)
 {
@@ -564,6 +760,10 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
                  (op == NAND_MEDIA_ERASE)   ? m->cfg.timing.tplebsy_ns :
                                               m->cfg.timing.tplrbsy_ns;
     int i;
+
+    if (m->cfg.policy.channel_mode == NAND_CH_STAGED && onfi_path(m)) {
+        return onfi_multiplane(m, locs, nlocs, op, stime);
+    }
 
     /* per-plane command/address (+ data-in for programs) serialized on the bus */
     for (i = 0; i < nlocs; i++) {
@@ -652,6 +852,39 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
      */
     if (m->cfg.timeline->lock_lun) {
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, src);
+    }
+    if (staged && onfi_path(m)) {
+        /*
+         * ONFI ordering: the command waits for the die, the program ends at
+         * its status, and the die is held to the end of the whole sequence.
+         */
+        bool hold = m->cfg.policy.page_reg_hold;
+        uint64_t a = hold ? array_contend_start(m, src, stime) : stime;
+        uint64_t pnow = onfi_prune_now(m, src->ch, stime);
+        uint64_t r, p, end;
+
+        t = bus_at(m, src->ch, stime, pnow, a, m->cfg.timing.cb_rd_cmd_ns ?
+                   m->cfg.timing.cb_rd_cmd_ns : m->cfg.timing.cmd_addr_ns);
+        r = array_contend_start(m, src, t) +
+            array_lat(m, src, NAND_MEDIA_READ) - ecc_extra_ns(m, src);
+        t = bus_later(m, src->ch, pnow, r, m->cfg.timing.status_ns +
+                      (m->cfg.timing.cb_wr_cmd_ns ?
+                       m->cfg.timing.cb_wr_cmd_ns :
+                       m->cfg.timing.cmd_addr_ns));
+        p = array_contend_start(m, dst, t) +
+            array_lat(m, dst, NAND_MEDIA_PROGRAM);
+        end = m->cfg.policy.onfi_order ?
+              bus_later(m, src->ch, pnow, p, m->cfg.timing.status_ns) : p;
+        array_commit(m, src, hold ? end : r);
+        suspend_note(m, src, NAND_MEDIA_PROGRAM, hold ? end : r);
+        array_commit(m, dst, hold ? end : p);
+        suspend_note(m, dst, NAND_MEDIA_PROGRAM, hold ? end : p);
+        if (m->cfg.timeline->unlock_lun) {
+            m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, src);
+        }
+        c.done_ns = end;
+        c.latency_ns = end - stime;
+        return c;
     }
     if (staged) {
         t = bus_now(m, src->ch, stime, t, m->cfg.timing.cb_rd_cmd_ns ?

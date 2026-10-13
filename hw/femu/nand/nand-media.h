@@ -146,6 +146,17 @@ typedef struct NandMediaPolicy {
      * list that grows; false keeps the 32-entry list and its fallback.
      */
     bool            bus_res_unbounded;
+    /*
+     * ONFI profile ordering (staged bus only). onfi_order: a read sends its
+     * status before its data out, and a program ends at its status.
+     * page_reg_hold: an op sends its command only when its LUN is ready,
+     * and holds the LUN until its data out (read) or status (program,
+     * erase, copyback) ends. mp_status_per_plane: a multi-plane program or
+     * erase reads one status per plane (78h with several LUNs).
+     */
+    bool            onfi_order;
+    bool            page_reg_hold;
+    bool            mp_status_per_plane;
 } NandMediaPolicy;
 
 /*
@@ -198,6 +209,12 @@ typedef struct NandBusResList {
     /* policy.bus_res_unbounded: the windows live here instead of in r[] */
     NandBusRes *grown;
     int cap;
+    /*
+     * ONFI ordering only: the latest op start time seen on the channel. No
+     * phase of a later op starts before it, so windows that end before it
+     * can go, while ch_avail stays free for an idle LUN.
+     */
+    uint64_t floor;
 } NandBusResList;
 
 /*

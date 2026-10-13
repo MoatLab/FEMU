@@ -2669,6 +2669,11 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
                    "channel bus phases", knob);
         return false;
     }
+    /* ONFI 6.0 has no suspend, and a held page register has no suspend rule */
+    if (bp->pe_suspend) {
+        error_setg(errp, "femu: pe_suspend is refused with onfi_mode");
+        return false;
+    }
     if (n->cxl_dev) {
         error_setg(errp, "femu: onfi_mode is not supported with cxl_ssd");
         return false;
