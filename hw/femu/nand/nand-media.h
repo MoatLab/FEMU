@@ -174,6 +174,13 @@ typedef struct NandTimelineOps {
      */
     void      (*lock_lun)(void *opaque, const NandLoc *loc);
     void      (*unlock_lun)(void *opaque, const NandLoc *loc);
+    /*
+     * Optional: told of each bus phase of non-zero length, [start, end) on
+     * @ch. No controller sets it; the unit tests use it to check that no
+     * two phases overlap.
+     */
+    void      (*bus_phase)(void *opaque, uint32_t ch, uint64_t start,
+                           uint64_t end);
 } NandTimelineOps;
 
 typedef struct NandMediaConfig {
@@ -198,6 +205,15 @@ typedef struct NandMediaConfig {
  */
 #define NAND_BUS_RES_MAX 32
 
+/*
+ * ONFI ordering with a grown list: when an op starts and more than this
+ * many windows end at or before the latest op start time, the channel
+ * keeps the newest half of the cap. The op can then add a few more. An
+ * op older than what is left starts no earlier than the end of the
+ * newest window that went (NandBusResList.low).
+ */
+#define NAND_BUS_HISTORY_MAX 1024
+
 typedef struct NandBusRes {
     uint64_t start;
     uint64_t end;
@@ -210,11 +226,16 @@ typedef struct NandBusResList {
     NandBusRes *grown;
     int cap;
     /*
-     * ONFI ordering only: the latest op start time seen on the channel. No
-     * phase of a later op starts before it, so windows that end before it
-     * can go, while ch_avail stays free for an idle LUN.
+     * ONFI ordering only. @high is the latest op start time seen on the
+     * channel. No phase of a later op starts before @low, and @low never
+     * falls, so windows that end at or before it can go. A bounded list
+     * keeps @low at @high. A grown list raises @low only when more than
+     * @hist_cap windows end at or before @high, so an older op can still
+     * use an idle gap before @high.
      */
-    uint64_t floor;
+    uint64_t high;
+    uint64_t low;
+    uint32_t hist_cap;
 } NandBusResList;
 
 /*

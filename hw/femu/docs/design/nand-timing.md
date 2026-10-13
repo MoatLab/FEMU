@@ -376,6 +376,35 @@ row address cycles.
   read's data out, or of the program, erase or copyback status.
 - A command that waits for a busy LUN books a future window, so an op on
   an idle LUN can use the bus first.
+- Op start times are not monotonic. A copy's write starts at the end of
+  its reads, and garbage collection starts at the wall clock. An op with
+  an older start time can still use an idle bus gap before the latest
+  start time on its channel.
+
+```text
+ latest start time on the channel: high
+ dropped      | kept history (ends <= high)  | future windows
+ [=] [==]     | [==]  [=]   [===] ... [==]   | [====]  [==]
+              low                           high
+ an op with start t >= low:  can use any idle gap after t
+ an op with start t <  low:  starts no earlier than low (the fallback)
+```
+
+- At the start of each op, a grown list drops old windows. When more than
+  1024 windows end before `high` in time, it keeps the newest 512. The
+  `NAND_BUS_HISTORY_MAX` value sets this cap. Then `low` moves to the end
+  of the newest dropped window, and the op can add a few windows of its
+  own.
+- A window that ends before `ch_avail` also goes, because no phase can
+  start before it. A bounded 32-entry list has no room for history, so it
+  keeps `low` at `high`.
+- An op that starts at or after `low` gets the gaps it would get from a
+  list that never drops a window. Its LUN and `ch_avail` can still delay
+  it.
+- A phase that happens now (a command to a ready LUN) still starts after
+  `ch_avail` in arrival order, as without the profile.
+- Future windows stay until they end, so the list grows with the media
+  ops in flight: one set of windows per queued op.
 - A multi-plane program sends every plane's command and data, with the
   tPLPBSY gaps, as one bus window (Section 3.1.3). A multi-plane read or
   erase books each later plane command after its gap.

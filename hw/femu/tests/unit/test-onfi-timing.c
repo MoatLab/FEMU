@@ -462,24 +462,6 @@ static void test_onfi_order(void)
           275 + 45000 + 246 + 3582);
     nand_media_destroy(&m);
 
-    /*
-     * One busy LUN, each read issued 100 ns before the one before ends: at
-     * most two ops are in flight, so at most a few windows stay booked.
-     */
-    order_config(&cfg, &t, 1, false);
-    nand_media_init(&m, &cfg);
-    {
-        uint64_t now = 0;
-        int most = 0;
-
-        for (int i = 0; i < 2000; i++) {
-            now = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns - 100;
-            most = m.bus_res[0].n > most ? m.bus_res[0].n : most;
-        }
-        check("windows stay few under a busy LUN", most <= 8, 1);
-    }
-    nand_media_destroy(&m);
-
     printf("# gap probes: the LUN is held, not only the bus\n");
     gap_config(&cfg, &t, 515);
     nand_media_init(&m, &cfg);
@@ -510,6 +492,377 @@ static void test_onfi_order(void)
           nand_media_op(&m, &l0, NAND_MEDIA_ERASE, 1000).latency_ns,
           245385 + 225 + 2000000 + 246 - 1000);
     nand_media_destroy(&m);
+}
+
+/*
+ * Bus history. Every bus phase of non-zero length goes to the bus_phase
+ * observer, also the ones whose window was dropped later and the ones that
+ * advance ch_avail, so the check sees every phase that ever ran.
+ */
+static uint64_t rng_state;
+static uint32_t rng(void);
+
+typedef struct PhaseLog {
+    NandBusRes *r;
+    size_t n;
+    size_t cap;
+} PhaseLog;
+
+static PhaseLog phase_log[T_CHS];
+
+static void log_phase(void *o, uint32_t ch, uint64_t start, uint64_t end)
+{
+    PhaseLog *l = &phase_log[ch % T_CHS];
+
+    (void)o;
+    if (l->n == l->cap) {
+        l->cap = l->cap ? 2 * l->cap : 1024;
+        l->r = realloc(l->r, l->cap * sizeof(*l->r));
+        if (!l->r) {
+            abort();
+        }
+    }
+    l->r[l->n].start = start;
+    l->r[l->n++].end = end;
+}
+
+static const NandTimelineOps logged_timeline = {
+    .ch_avail = t_ch, .lun_avail = t_lun, .plane_avail = t_pl,
+    .bus_phase = log_phase,
+};
+
+static int cmp_start(const void *a, const void *b)
+{
+    const NandBusRes *x = a;
+    const NandBusRes *y = b;
+
+    return x->start < y->start ? -1 : x->start > y->start;
+}
+
+/* the number of overlapping phase pairs (by sweep), and clear the log */
+static uint64_t phase_overlaps(void)
+{
+    uint64_t bad = 0;
+
+    for (int ch = 0; ch < T_CHS; ch++) {
+        PhaseLog *l = &phase_log[ch];
+        uint64_t end = 0;
+
+        qsort(l->r, l->n, sizeof(*l->r), cmp_start);
+        for (size_t i = 0; i < l->n; i++) {
+            if (i && l->r[i].start < end) {
+                bad++;
+            }
+            end = l->r[i].end > end ? l->r[i].end : end;
+        }
+        free(l->r);
+        memset(l, 0, sizeof(*l));
+    }
+    return bad;
+}
+
+/* the windows of channel 0 that end at or before @t */
+static uint32_t history(const NandMedia *m, uint64_t t)
+{
+    const NandBusResList *l = &m->bus_res[0];
+    const NandBusRes *r = l->grown ? l->grown : l->r;
+    uint32_t k = 0;
+
+    while (k < (uint32_t)l->n && r[k].end <= t) {
+        k++;
+    }
+    return k;
+}
+
+/* a second timeline, so two media can run side by side */
+static uint64_t ch_b[T_CHS];
+static uint64_t lun_b[T_CHS * T_LUNS];
+
+static uint64_t *t_ch_b(void *o, uint32_t ch)
+{
+    (void)o;
+    return &ch_b[ch % T_CHS];
+}
+
+static uint64_t *t_lun_b(void *o, const NandLoc *l)
+{
+    (void)o;
+    return &lun_b[(l->ch * T_LUNS + l->lun) % (T_CHS * T_LUNS)];
+}
+
+static const NandTimelineOps timeline_b = {
+    .ch_avail = t_ch_b, .lun_avail = t_lun_b,
+};
+
+/*
+ * Mode 26, 16 KiB, one-LUN fields (as in test_onfi_order()): a read is
+ * 275 + 40000 + 246 + 3582 = 44103 on an idle LUN.
+ */
+static void test_bus_history(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc l0 = { .ch = 0, .lun = 0 };
+    NandLoc l1 = { .ch = 0, .lun = 1 };
+    OnfiTiming t;
+    int rc;
+
+    printf("# bus history: older ops and earlier gaps\n");
+    t = derive(26, 0, 16384, false, 0, &rc);
+
+    /*
+     * LUN 0 programs from 0 to 204407. A read on LUN 0 at 100000 waits for
+     * it and books its command at 204407; ch_avail stays at 4161. A read on
+     * LUN 1 at 50000 is older than 100000 and finds the bus idle there.
+     */
+    order_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &l0, NAND_MEDIA_PROGRAM, 0);
+    nand_media_op(&m, &l0, NAND_MEDIA_READ, 100000);
+    check("an older op uses an earlier bus gap",
+          nand_media_op(&m, &l1, NAND_MEDIA_READ, 50000).done_ns,
+          50000 + 44103);
+    nand_media_destroy(&m);
+
+    /*
+     * A bounded list keeps the latest start time as its prune mark: it has
+     * no room to keep history next to future windows. Five paced reads on
+     * LUN 0, ten more at the same time, then an idle LUN 1 read at that time.
+     */
+    order_config(&cfg, &t, 1, false);
+    cfg.policy.bus_res_unbounded = false;
+    nand_media_init(&m, &cfg);
+    {
+        uint64_t now = 0;
+
+        for (int i = 0; i < 5; i++) {
+            now = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns - 100;
+        }
+        for (int i = 0; i < 10; i++) {
+            nand_media_op(&m, &l0, NAND_MEDIA_READ, now);
+        }
+        check("a bounded list keeps the latest start as its prune mark",
+              nand_media_op(&m, &l1, NAND_MEDIA_READ, now).done_ns, 268721);
+    }
+    nand_media_destroy(&m);
+
+    /*
+     * One busy LUN, each read 100 ns before the one before ends: ch_avail
+     * stays at the first command, and history piles up behind the latest
+     * start. The cap keeps it bounded (Codex code review round 2).
+     */
+    order_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    {
+        uint64_t now = 0;
+        int most = 0;
+
+        for (int i = 0; i < 100000; i++) {
+            now = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns - 100;
+            most = m.bus_res[0].n > most ? m.bus_res[0].n : most;
+        }
+        check("history stays at most the cap plus one op under a busy LUN",
+              most <= NAND_BUS_HISTORY_MAX + 8, 1);
+        check("the list does not grow past twice the cap",
+              m.bus_res[0].cap <= 2 * NAND_BUS_HISTORY_MAX, 1);
+    }
+    nand_media_destroy(&m);
+
+    /*
+     * The cap itself: with k windows at or before the latest start, k at
+     * most the cap leaves the prune mark alone, and k above it raises the
+     * mark to the end of window k - cap/2 - 1, which keeps cap/2 of them.
+     * Several caps make k meet the cap exactly and pass it by one.
+     */
+    {
+        bool at_cap = false, past_cap = false, rule_ok = true;
+
+        for (uint32_t c = 6; c <= 14; c += 2) {
+            uint64_t now = 0;
+
+            order_config(&cfg, &t, 1, false);
+            nand_media_init(&m, &cfg);
+            m.bus_res[0].hist_cap = c;
+            for (int i = 0; i < 40; i++) {
+                const NandBusResList *l = &m.bus_res[0];
+                uint64_t high = l->high > now ? l->high : now;
+                uint32_t k = history(&m, high);
+                uint64_t want = l->low;
+
+                if (k > c && l->grown[k - c / 2 - 1].end > want) {
+                    want = l->grown[k - c / 2 - 1].end;
+                }
+                at_cap |= k == c;
+                past_cap |= k == c + 1;
+                now = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns -
+                      100;
+                rule_ok &= m.bus_res[0].low == want;
+            }
+            nand_media_destroy(&m);
+        }
+        check("the prune mark follows the cap rule", rule_ok, 1);
+        check("a run meets the cap exactly", at_cap, 1);
+        check("a run passes the cap by one window", past_cap, 1);
+    }
+
+    /*
+     * The same op stream on a list with a small cap (a) and on one whose
+     * cap never applies (b). Starts that never fall behind the prune mark
+     * give the same times on both. Then an op at exactly the mark, and one
+     * between the mark and the latest start, still match. An op before the
+     * mark starts at the mark on (a), the fallback.
+     */
+    {
+        NandMediaConfig cb;
+        NandMedia b;
+        uint64_t now = 0, low;
+        bool same = true;
+
+        order_config(&cfg, &t, 1, false);
+        nand_media_init(&m, &cfg);
+        m.bus_res[0].hist_cap = 8;
+        cb = cfg;
+        cb.timeline = &timeline_b;
+        memset(ch_b, 0, sizeof(ch_b));
+        memset(lun_b, 0, sizeof(lun_b));
+        nand_media_init(&b, &cb);
+        b.bus_res[0].hist_cap = UINT32_MAX;
+        for (int i = 0; i < 30; i++) {
+            uint64_t da = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns;
+            uint64_t db = nand_media_op(&b, &l0, NAND_MEDIA_READ, now).done_ns;
+
+            same &= da == db;
+            now = da - 100;
+        }
+        low = m.bus_res[0].low;
+        check("a cap was crossed", low > 0, 1);
+        check("starts at or after the mark: same times as with no cap", same,
+              1);
+        check("an op at the mark: same time as with no cap",
+              nand_media_op(&m, &l1, NAND_MEDIA_READ, low).done_ns,
+              nand_media_op(&b, &l1, NAND_MEDIA_READ, low).done_ns);
+        {
+            NandLoc l2 = { .ch = 0, .lun = 2 };
+            uint64_t mid = low + (m.bus_res[0].high - low) / 2;
+
+            check("an op between the mark and the latest start: same time",
+                  nand_media_op(&m, &l2, NAND_MEDIA_PROGRAM, mid).done_ns,
+                  nand_media_op(&b, &l2, NAND_MEDIA_PROGRAM, mid).done_ns);
+        }
+        {
+            NandLoc l3 = { .ch = 0, .lun = 3 };
+            uint64_t da = nand_media_op(&m, &l3, NAND_MEDIA_READ,
+                                        low - 1000).done_ns;
+
+            check("an op before the mark starts at the mark", da >= low + 44103,
+                  1);
+        }
+        nand_media_destroy(&b);
+        nand_media_destroy(&m);
+    }
+
+    /*
+     * Zero-length phases do not move ch_avail, so ch_avail can stay below
+     * the prune mark. Hand-set phases with the hold off: tR and tPROG 100,
+     * program command 5, page 10, no status or read command. Ten reads on
+     * LUN 0, each 1 ns before the one before ends, then a program on idle
+     * LUN 1 at 100: its command and data must start no earlier than the
+     * prune mark, past the dropped transfer [100, 110). A bounded list and
+     * a grown list with a cap of 2 give their own prune marks.
+     */
+    for (int grown = 0; grown < 2; grown++) {
+        uint64_t now = 0, done;
+
+        memset(&cfg, 0, sizeof(cfg));
+        reset_timelines();
+        cfg.nchs = T_CHS;
+        cfg.luns_per_ch = T_LUNS;
+        cfg.planes_per_lun = 1;
+        cfg.timing.rd_ns = 100;
+        cfg.timing.wr_ns = 100;
+        cfg.timing.wr_cmd_ns = 5;
+        cfg.timing.page_xfer_ns = 10;
+        cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
+        cfg.policy.channel_mode = NAND_CH_STAGED;
+        cfg.policy.use_flat_timing = true;
+        cfg.policy.onfi_order = true;
+        cfg.policy.bus_res_unbounded = grown;
+        cfg.timeline = &logged_timeline;
+        nand_media_init(&m, &cfg);
+        if (grown) {
+            m.bus_res[0].hist_cap = 2;
+        }
+        for (int i = 0; i < 10; i++) {
+            now = nand_media_op(&m, &l0, NAND_MEDIA_READ, now).done_ns - 1;
+        }
+        done = nand_media_op(&m, &l1, NAND_MEDIA_PROGRAM, 100).done_ns;
+        check(grown ? "zero-length phases, grown list: program after low"
+                    : "zero-length phases, bounded list: program after low",
+              done, grown ? 770 : 1097);
+        check("zero-length phases: no two bus phases overlap",
+              phase_overlaps(), 0);
+        nand_media_destroy(&m);
+    }
+
+    /*
+     * Random op streams with start times that run back by up to 300 us, on
+     * every timing mode: no two bus phases that ever ran overlap. A small
+     * cap makes older ops fall behind the prune mark often; the bounded
+     * list takes its own rule. Variant 3 turns the page register hold off,
+     * so a program sends its command and data at once.
+     */
+    {
+        uint64_t bad = 0, phases = 0;
+
+        for (int mode = 0; mode < ONFI_NUM_MODES; mode++) {
+            for (int v = 0; v < 4; v++) {
+                OnfiTiming tv = derive(mode, 0, 16384, v != 1, 0, &rc);
+                uint64_t now = 0;
+
+                order_config(&cfg, &tv, 2, v != 1);
+                cfg.timeline = &logged_timeline;
+                cfg.policy.bus_res_unbounded = v != 2;
+                cfg.policy.page_reg_hold = v != 3;
+                nand_media_init(&m, &cfg);
+                if (v == 0 || v == 3) {
+                    m.bus_res[0].hist_cap = 8;
+                    m.bus_res[1].hist_cap = 8;
+                }
+                rng_state = 1000 + mode * 3 + v;
+                for (int i = 0; i < 1500; i++) {
+                    NandLoc l = { .ch = rng() % T_CHS, .lun = rng() % T_LUNS,
+                                  .pl = rng() % 2 };
+                    NandLoc g[2] = { l, l };
+                    uint64_t back = rng() % 300000;
+                    uint64_t st = now > back ? now - back : 0;
+                    uint32_t k = rng() % 8;
+
+                    g[0].pl = 0;
+                    g[1].pl = 1;
+                    now += rng() % 20000;
+                    if (k < 3) {
+                        nand_media_op(&m, &l, NAND_MEDIA_READ, st);
+                    } else if (k < 5) {
+                        nand_media_op(&m, &l, NAND_MEDIA_PROGRAM, st);
+                    } else if (k == 5) {
+                        nand_media_op(&m, &l, NAND_MEDIA_ERASE, st);
+                    } else if (k == 6) {
+                        nand_media_multiplane(&m, g, 2,
+                                              (NandMediaOp)(rng() % 3), st);
+                    } else {
+                        nand_media_copyback(&m, &l, &l, st);
+                    }
+                }
+                for (int ch = 0; ch < T_CHS; ch++) {
+                    phases += phase_log[ch].n;
+                }
+                bad += phase_overlaps();
+                nand_media_destroy(&m);
+            }
+        }
+        printf("# %llu bus phases checked\n", (unsigned long long)phases);
+        check("no two bus phases overlap, every mode, older ops", bad, 0);
+    }
 }
 
 /*
@@ -688,6 +1041,7 @@ int main(void)
     test_command_fields();
     test_media_phases();
     test_onfi_order();
+    test_bus_history();
     test_legacy_hash();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;

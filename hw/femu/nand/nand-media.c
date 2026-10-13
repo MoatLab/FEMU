@@ -31,6 +31,7 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
 
             for (ch = 0; ch < cfg->nchs; ch++) {
                 m->bus_res[ch].cap = NAND_BUS_RES_MAX;
+                m->bus_res[ch].hist_cap = NAND_BUS_HISTORY_MAX;
                 m->bus_res[ch].grown = malloc(NAND_BUS_RES_MAX *
                                               sizeof(NandBusRes));
                 if (!m->bus_res[ch].grown) {
@@ -93,16 +94,38 @@ static NandBusRes *bus_windows(const NandBusResList *l)
     return l->grown ? l->grown : (NandBusRes *)l->r;
 }
 
+/*
+ * The first window that ends after @t. Each window is fitted around every
+ * listed one and inserted by start, so the windows are disjoint and their
+ * ends rise with their starts: a binary search on the ends is exact.
+ */
+static int bus_first_after(const NandBusResList *l, uint64_t t)
+{
+    const NandBusRes *r = bus_windows(l);
+    int lo = 0, hi = l->n;
+
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+
+        if (r[mid].end > t) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+/* drop the windows that end at or before @now: a prefix of the list */
 static void bus_prune(NandBusResList *l, uint64_t now)
 {
     NandBusRes *r = bus_windows(l);
-    int i, j = 0;
-    for (i = 0; i < l->n; i++) {
-        if (r[i].end > now) {
-            r[j++] = r[i];
-        }
+    int cut = bus_first_after(l, now);
+
+    if (cut) {
+        memmove(r, r + cut, (l->n - cut) * sizeof(*r));
+        l->n -= cut;
     }
-    l->n = j;
 }
 
 /* earliest s >= start such that [s, s + len) overlaps no booked window */
@@ -110,16 +133,22 @@ static uint64_t bus_fit(const NandBusResList *l, uint64_t start, uint64_t len)
 {
     const NandBusRes *r = bus_windows(l);
     int i;
-    for (i = 0; i < l->n; i++) {          /* windows are kept sorted by start */
-        if (r[i].end <= start) {
-            continue;
-        }
+
+    for (i = bus_first_after(l, start); i < l->n; i++) {
         if (r[i].start >= start + len) {
             break;
         }
         start = r[i].end;
     }
     return start;
+}
+
+/* tell the optional observer of a bus phase of non-zero length */
+static void bus_note(NandMedia *m, uint32_t ch, uint64_t start, uint64_t end)
+{
+    if (m->cfg.timeline->bus_phase) {
+        m->cfg.timeline->bus_phase(m->cfg.timeline_opaque, ch, start, end);
+    }
 }
 
 static bool bus_book(NandBusResList *l, uint64_t start, uint64_t end)
@@ -210,6 +239,7 @@ static uint64_t bus_now(NandMedia *m, uint32_t ch, uint64_t now,
         start = bus_fit(&m->bus_res[ch], start, len);
     }
     *cha = start + len;
+    bus_note(m, ch, start, *cha);
     return *cha;
 }
 
@@ -228,10 +258,12 @@ static uint64_t bus_later(NandMedia *m, uint32_t ch, uint64_t now,
         bus_prune(&m->bus_res[ch], now);
         start = bus_fit(&m->bus_res[ch], start, len);
         if (bus_book(&m->bus_res[ch], start, start + len)) {
+            bus_note(m, ch, start, start + len);
             return start + len;
         }
     }
     *cha = start + len;   /* no room to book: bus held from now, as before */
+    bus_note(m, ch, start, *cha);
     return *cha;
 }
 
@@ -410,24 +442,48 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
 }
 
 /*
- * The prune time of an ONFI op. Op times are not monotonic (a copy's write
- * starts at its read's end), and a command that waits for its LUN leaves
- * ch_avail behind. The channel floor keeps the latest start time seen, and
- * no phase starts before it (onfi_earliest()), so windows that end before
- * the floor can go. Without a staged list there is nothing to prune.
+ * The prune time of an ONFI op, at its start @stime. Op times are not
+ * monotonic (a copy's write starts at its read's end), so an older op may
+ * still use a gap before the latest start time @high. Every phase of
+ * non-zero length starts at or after ch_avail, and at or after @low
+ * (onfi_earliest()), and neither mark falls, so a window that ends at or
+ * before both can go. A grown list raises @low only past hist_cap history
+ * windows, and then keeps the newest half; a bounded list has no room for
+ * history and keeps @low at @high. Without a staged list nothing is pruned.
+ *
+ *   dropped  | history (end <= high)       | future windows
+ *   [=] [==] | [==] [=]  [===]  ...  [==]  | [====]  [==]
+ *            low                          high
  */
 static uint64_t onfi_prune_now(NandMedia *m, uint32_t ch, uint64_t stime)
 {
-    if (m->bus_res && stime > m->bus_res[ch].floor) {
-        m->bus_res[ch].floor = stime;
+    NandBusResList *l;
+    uint64_t now;
+    uint32_t k;
+
+    if (!m->bus_res) {
+        return stime;
     }
-    return m->bus_res ? m->bus_res[ch].floor : stime;
+    l = &m->bus_res[ch];
+    l->high = mx(l->high, stime);
+    if (!l->grown) {
+        l->low = l->high;
+        bus_prune(l, l->low);
+        return l->low;
+    }
+    k = bus_first_after(l, l->high);
+    if (k > l->hist_cap) {
+        l->low = mx(l->low, bus_windows(l)[k - l->hist_cap / 2 - 1].end);
+    }
+    now = mx(l->low, *m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch));
+    bus_prune(l, now);
+    return now;
 }
 
-/* the earliest start of an ONFI phase: never before the channel floor */
+/* the earliest start of an ONFI phase: never before the channel's @low */
 static uint64_t onfi_earliest(const NandMedia *m, uint32_t ch, uint64_t t)
 {
-    return m->bus_res ? mx(t, m->bus_res[ch].floor) : t;
+    return m->bus_res ? mx(t, m->bus_res[ch].low) : t;
 }
 
 /*
@@ -461,8 +517,9 @@ static NandOpCompletion onfi_op(NandMedia *m, const NandLoc *loc,
     bool hold = m->cfg.policy.page_reg_hold;
     bool order = m->cfg.policy.onfi_order;
     uint64_t alat = array_lat(m, loc, op);
-    uint64_t a = hold ? array_contend_start(m, loc, stime) : stime;
     uint64_t pnow = onfi_prune_now(m, loc->ch, stime);
+    uint64_t a = onfi_earliest(m, loc->ch, hold ?
+                               array_contend_start(m, loc, stime) : stime);
     uint64_t d, end, held;
     NandOpCompletion c;
 
