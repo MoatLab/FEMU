@@ -418,6 +418,100 @@
             '*reclaim-units': [ 'FemuReclaimUnitInfo' ] } }
 
 ##
+# @FemuMediaTiming:
+#
+# The NAND bus timing a namespace charges.  The values are the ones
+# the media layer uses, after its fallbacks: a command phase that the
+# ONFI profile does not set takes cmd_addr_lat.  With @staged-bus false
+# the bus costs nothing, so every bus phase is 0.  Times are in
+# nanoseconds.
+#
+# @staged-bus: the channel bus phases are charged
+#
+# @onfi-profile: the ONFI 6.0 profile (onfi_mode 0 to 26) sets the bus
+#     phases
+#
+# @onfi-mode: the ONFI 6.0 timing mode.  Present only with
+#     @onfi-profile.
+#
+# @page-transfer-ns: one page on the bus
+#
+# @read-command-ns: command and address of a read
+#
+# @program-command-ns: command and address of a program
+#
+# @erase-command-ns: command and address of an erase
+#
+# @copyback-read-command-ns: command and address of the read of a
+#     copyback
+#
+# @copyback-program-command-ns: command and address of the program of
+#     a copyback
+#
+# @status-ns: one status read
+#
+# @data-out-lead-ns: the command and preamble before the page of a
+#     read
+#
+# @data-out-tail-ns: the postamble and turnaround after the page of a
+#     read
+#
+# @plane-select-ns: the column select before each page of a
+#     multi-plane read
+#
+# @data-in-edges-ns: the preamble and postamble of the page of a
+#     program
+#
+# @program-confirm-ns: the confirm cycle after the page of a program
+#
+# @plane-read-busy-ns: tPLRBSY, the gap between the planes of a
+#     multi-plane read.  It applies with the bus on or off.
+#
+# @plane-program-busy-ns: tPLPBSY, the same gap for a program
+#
+# @plane-erase-busy-ns: tPLEBSY, the same gap for an erase
+#
+# @onfi-order: a read reads its status before its data out, and a
+#     program or erase ends at its status
+#
+# @page-register-hold: an op sends its command only when its LUN is
+#     ready, and holds the LUN until its last bus phase ends
+#
+# @status-per-plane: a multi-plane program or erase reads one status
+#     for each plane
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuMediaTiming',
+  'data': { 'staged-bus': 'bool', 'onfi-profile': 'bool',
+            '*onfi-mode': 'uint8', 'page-transfer-ns': 'uint64',
+            'read-command-ns': 'uint64', 'program-command-ns': 'uint64',
+            'erase-command-ns': 'uint64',
+            'copyback-read-command-ns': 'uint64',
+            'copyback-program-command-ns': 'uint64',
+            'status-ns': 'uint64', 'data-out-lead-ns': 'uint64',
+            'data-out-tail-ns': 'uint64', 'plane-select-ns': 'uint64',
+            'data-in-edges-ns': 'uint64', 'program-confirm-ns': 'uint64',
+            'plane-read-busy-ns': 'uint64',
+            'plane-program-busy-ns': 'uint64',
+            'plane-erase-busy-ns': 'uint64', 'onfi-order': 'bool',
+            'page-register-hold': 'bool', 'status-per-plane': 'bool' } }
+
+##
+# @FemuMediaInfo:
+#
+# A namespace that @query-femu reports only the NAND bus timing of:
+# a computational storage (csd), key-value (kvssd) or OpenChannel
+# (ocssd) namespace.
+#
+# @media: NAND bus timing
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuMediaInfo',
+  'data': { 'media': 'FemuMediaTiming' } }
+
+##
 # @FemuBbssdInfo:
 #
 # State of a blackbox namespace, copied by the FTL thread between two
@@ -426,6 +520,8 @@
 # @geometry: NAND geometry
 #
 # @counters: write and erase counters
+#
+# @media: NAND bus timing
 #
 # @line-counts: lines in each state.  Absent with flexible data
 #     placement, where reclaim units hold the lines.
@@ -446,6 +542,7 @@
 { 'struct': 'FemuBbssdInfo',
   'data': { 'geometry': 'FemuGeometry',
             'counters': 'FemuWriteCounters',
+            'media': 'FemuMediaTiming',
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
@@ -471,6 +568,8 @@
 #
 # @zone-counts: zones in each state
 #
+# @media: NAND bus timing
+#
 # @zones: with kind @zones, the zones from @offset, at most limit of
 #     them
 #
@@ -485,6 +584,7 @@
   'data': { 'lba-size': 'uint32', 'zone-size': 'uint64',
             'zone-capacity': 'uint64', 'max-open': 'uint32',
             'max-active': 'uint32', 'zone-counts': 'FemuZoneCounts',
+            'media': 'FemuMediaTiming',
             '*zones': [ 'FemuZoneInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 
@@ -502,7 +602,9 @@
 { 'union': 'FemuNamespaceInfo',
   'base': { 'nsid': 'uint32', 'mode': 'FemuMode' },
   'discriminator': 'mode',
-  'data': { 'bbssd': 'FemuBbssdInfo', 'znssd': 'FemuZonedInfo' } }
+  'data': { 'bbssd': 'FemuBbssdInfo', 'znssd': 'FemuZonedInfo',
+            'csd': 'FemuMediaInfo', 'kvssd': 'FemuMediaInfo',
+            'ocssd': 'FemuMediaInfo' } }
 
 ##
 # @FemuInfo:
@@ -526,8 +628,10 @@
 #
 # Report the flash translation layer state of a FEMU NVMe controller.
 # Blackbox (bbssd) namespaces, also with flexible data placement, and
-# zoned (znssd) namespaces are supported.  A selected namespace in
-# another mode, or backed by a CXL SSD medium, makes the command fail.  The
+# zoned (znssd) namespaces are supported.  For a computational storage
+# (csd), key-value (kvssd) or OpenChannel (ocssd) namespace, the reply
+# has the NAND bus timing only.  A selected no-SSD (nossd) namespace,
+# or one backed by a CXL SSD medium, makes the command fail.  The
 # controller must be enabled when a blackbox namespace is selected.
 # Each namespace is one copy, but two namespaces, and two calls, can
 # show different points in time.
@@ -541,7 +645,8 @@
 #
 # @kind: what to report (default summary).  Kind lines needs a
 #     blackbox namespace without flexible data placement, kind
-#     reclaim-units one with it, and kind zones a zoned namespace.
+#     reclaim-units one with it, and kind zones a zoned namespace.  A
+#     csd, kvssd or ocssd namespace takes kind summary only.
 #
 # @offset: the first line, zone or reclaim unit to report (default
 #     0).  An error with kind summary.
@@ -570,6 +675,21 @@
 #                            "nand-write-pages": 1024,
 #                            "gc-write-pages": 0, "block-erases": 0,
 #                            "waf": 1.0 },
+#              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "page-transfer-ns": 0, "read-command-ns": 0,
+#                         "program-command-ns": 0,
+#                         "erase-command-ns": 0,
+#                         "copyback-read-command-ns": 0,
+#                         "copyback-program-command-ns": 0,
+#                         "status-ns": 0, "data-out-lead-ns": 0,
+#                         "data-out-tail-ns": 0, "plane-select-ns": 0,
+#                         "data-in-edges-ns": 0,
+#                         "program-confirm-ns": 0,
+#                         "plane-read-busy-ns": 0,
+#                         "plane-program-busy-ns": 0,
+#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "page-register-hold": false,
+#                         "status-per-plane": false },
 #              "line-counts": { "free": 255, "victim": 0, "full": 0,
 #                               "retired": 0, "spare": 0,
 #                               "total": 256 } } ] } }
@@ -588,6 +708,21 @@
 #                               "explicitly-open": 0, "closed": 0,
 #                               "read-only": 0, "full": 1,
 #                               "offline": 0, "total": 16 },
+#              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "page-transfer-ns": 0, "read-command-ns": 0,
+#                         "program-command-ns": 0,
+#                         "erase-command-ns": 0,
+#                         "copyback-read-command-ns": 0,
+#                         "copyback-program-command-ns": 0,
+#                         "status-ns": 0, "data-out-lead-ns": 0,
+#                         "data-out-tail-ns": 0, "plane-select-ns": 0,
+#                         "data-in-edges-ns": 0,
+#                         "program-confirm-ns": 0,
+#                         "plane-read-busy-ns": 0,
+#                         "plane-program-busy-ns": 0,
+#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "page-register-hold": false,
+#                         "status-per-plane": false },
 #              "zones": [ { "index": 0, "type": "sequential",
 #                           "state": "full", "start-lba": 0,
 #                           "capacity": 131072, "zrwa": false },
@@ -613,6 +748,21 @@
 #              "counters": { "host-write-pages": 0,
 #                            "nand-write-pages": 0,
 #                            "gc-write-pages": 0, "block-erases": 0 },
+#              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "page-transfer-ns": 0, "read-command-ns": 0,
+#                         "program-command-ns": 0,
+#                         "erase-command-ns": 0,
+#                         "copyback-read-command-ns": 0,
+#                         "copyback-program-command-ns": 0,
+#                         "status-ns": 0, "data-out-lead-ns": 0,
+#                         "data-out-tail-ns": 0, "plane-select-ns": 0,
+#                         "data-in-edges-ns": 0,
+#                         "program-confirm-ns": 0,
+#                         "plane-read-busy-ns": 0,
+#                         "plane-program-busy-ns": 0,
+#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "page-register-hold": false,
+#                         "status-per-plane": false },
 #              "fdp": { "reclaim-groups": 1, "units-per-group": 25,
 #                       "pages-per-unit": 16,
 #                       "handles": [ { "id": 0,
@@ -641,6 +791,42 @@
 #                                            "erase-min": 0,
 #                                            "erase-max": 0 } ] },
 #              "offset": 0, "next-offset": 1 } ] } }
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu" }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "mode": "bbssd",
+#            "namespaces": [ {
+#              "nsid": 1, "mode": "bbssd",
+#              "geometry": { "channels": 8, "luns-per-channel": 8,
+#                            "planes-per-lun": 1,
+#                            "blocks-per-plane": 256,
+#                            "pages-per-block": 256, "page-size": 4096,
+#                            "pages-per-line": 16384 },
+#              "counters": { "host-write-pages": 0,
+#                            "nand-write-pages": 0,
+#                            "gc-write-pages": 0, "block-erases": 0 },
+#              "media": { "staged-bus": true, "onfi-profile": true,
+#                         "onfi-mode": 26, "page-transfer-ns": 855,
+#                         "read-command-ns": 275,
+#                         "program-command-ns": 562,
+#                         "erase-command-ns": 225,
+#                         "copyback-read-command-ns": 275,
+#                         "copyback-program-command-ns": 275,
+#                         "status-ns": 321, "data-out-lead-ns": 200,
+#                         "data-out-tail-ns": 115,
+#                         "plane-select-ns": 200,
+#                         "data-in-edges-ns": 57,
+#                         "program-confirm-ns": 125,
+#                         "plane-read-busy-ns": 500,
+#                         "plane-program-busy-ns": 500,
+#                         "plane-erase-busy-ns": 500, "onfi-order": true,
+#                         "page-register-hold": true,
+#                         "status-per-plane": true },
+#              "line-counts": { "free": 255, "victim": 0, "full": 0,
+#                               "retired": 0, "spare": 0,
+#                               "total": 256 } } ] } }
 ##
 { 'command': 'query-femu',
   'data': { '*path': 'str', '*nsid': 'uint32', '*kind': 'FemuQueryKind',

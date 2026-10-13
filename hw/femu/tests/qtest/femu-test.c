@@ -4461,6 +4461,178 @@ static void femu_test_query_unsupported(void *obj, void *data,
 }
 
 /*
+ * The media timing query-femu reports. @onfi -1 means no "onfi-mode" key.
+ * The bus phases are in the order of FemuMediaTiming.
+ */
+typedef struct FemuMediaWant {
+    const char *name;
+    const char *mode;
+    bool staged;
+    int onfi;
+    uint64_t ns[15];
+    bool order;
+    bool hold;
+    bool per_plane;
+} FemuMediaWant;
+
+static const char *const femu_media_keys[15] = {
+    "page-transfer-ns", "read-command-ns", "program-command-ns",
+    "erase-command-ns", "copyback-read-command-ns",
+    "copyback-program-command-ns", "status-ns", "data-out-lead-ns",
+    "data-out-tail-ns", "plane-select-ns", "data-in-edges-ns",
+    "program-confirm-ns", "plane-read-busy-ns", "plane-program-busy-ns",
+    "plane-erase-busy-ns",
+};
+
+/*
+ * Mode 26 values from the design table (x8, 2 column and 3 row cycles,
+ * tWC 25, tWB 100, tADL 412, tWHR 80, tRHW 100, tRPRE2 25, tRPSTH 15,
+ * tDSC 0.417): page ceil(4096 * 417 / 2000) = 855; read 7 * 25 + 100;
+ * program 6 * 25 + 412; erase 5 * 25 + 100; status 25 + 80 + 25 + 0.417 +
+ * 15 + 100, or with 78h 4 * 25 + ...; lead 25 + 25, or 7 * 25 + 25; tail
+ * 15 + 100; edges 25 + 6.5 + 25; confirm 25 + 100; tPL*BSY 500.
+ */
+static const FemuMediaWant femu_media_wants[] = {
+    { "m26-2lun", "bbssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 321, 200, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, true },
+    { "m26-1lun", "bbssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 246, 50, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, false },
+    /* today's default: no bus, no plane gap */
+    { "default", "bbssd", false, -1, { 0 }, false, false, false },
+    /* the hand-set phases: every command and the plane select take 1000 */
+    { "staged", "bbssd", true, -1,
+      { 10000, 1000, 1000, 1000, 1000, 1000, 500, 0, 0, 1000, 0, 0,
+        0, 0, 900 }, false, false, false },
+    { "csd-m26", "csd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 246, 50, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, false },
+    { "kvssd", "kvssd", false, -1, { 0 }, false, false, false },
+    { "zns", "znssd", true, -1,
+      { 3000, 700, 700, 700, 700, 700, 200, 0, 0, 700, 0, 0, 0, 0, 0 },
+      false, false, false },
+    /* OC 1.2 keeps a page time, which the bus charges only when it is on */
+    { "oc12-off", "ocssd", false, -1, { 0 }, false, false, false },
+    { "oc12-on", "ocssd", true, -1, { 7000 }, false, false, false },
+    { "oc20", "ocssd", false, -1, { 0 }, false, false, false },
+    /* FDP and the KV timing model keep the profile's media timing */
+    { "fdp-m26", "bbssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 321, 200, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, true },
+    { "kvssd-m26", "kvssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 321, 200, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, true },
+    /* a plane gap applies with the bus off */
+    { "gap-no-bus", "bbssd", false, -1,
+      { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 900 },
+      false, false, false },
+};
+
+/*
+ * Q5 and Q6: query-femu reports the bus phases the media layer charges, for
+ * every mode that has a media layer. kind lines is refused on a namespace
+ * that has the media timing only.
+ */
+static const FemuMediaWant *femu_media_want(const char *name)
+{
+    for (int i = 0; i < ARRAY_SIZE(femu_media_wants); i++) {
+        if (!strcmp(femu_media_wants[i].name, name)) {
+            return &femu_media_wants[i];
+        }
+    }
+    g_assert_not_reached();
+}
+
+static bool femu_media_only(const char *mode)
+{
+    return !strcmp(mode, "csd") || !strcmp(mode, "kvssd") ||
+           !strcmp(mode, "ocssd");
+}
+
+/* one namespace entry of a query-femu reply against @w */
+static void femu_media_check(QDict *ns, const FemuMediaWant *w)
+{
+    QDict *md;
+
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, w->mode);
+    md = qdict_get_qdict(ns, "media");
+    g_assert_nonnull(md);
+    /* a media-only entry has nothing but its identity and the timing */
+    if (femu_media_only(w->mode)) {
+        g_assert_cmpuint(qdict_size(ns), ==, 3);
+    }
+    g_assert_cmpint(qdict_get_bool(md, "staged-bus"), ==, w->staged);
+    g_assert_cmpint(qdict_get_bool(md, "onfi-profile"), ==, w->onfi >= 0);
+    g_assert_cmpint(qdict_haskey(md, "onfi-mode"), ==, w->onfi >= 0);
+    if (w->onfi >= 0) {
+        g_assert_cmpint(qdict_get_int(md, "onfi-mode"), ==, w->onfi);
+    }
+    for (int i = 0; i < ARRAY_SIZE(femu_media_keys); i++) {
+        g_test_message("%s %s: %" PRId64, w->name, femu_media_keys[i],
+                       qdict_get_int(md, femu_media_keys[i]));
+        g_assert_cmpuint(qdict_get_int(md, femu_media_keys[i]), ==,
+                         w->ns[i]);
+    }
+    g_assert_cmpint(qdict_get_bool(md, "onfi-order"), ==, w->order);
+    g_assert_cmpint(qdict_get_bool(md, "page-register-hold"), ==, w->hold);
+    g_assert_cmpint(qdict_get_bool(md, "status-per-plane"), ==,
+                    w->per_plane);
+}
+
+static void femu_test_query_media(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuMediaWant *w = femu_media_want(data);
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+
+    /* a namespace with the media timing only needs no enabled controller */
+    if (femu_media_only(w->mode)) {
+        femu_media_check(femu_query_ns(qts, "", &rsp), w);
+        qobject_unref(rsp);
+        femu_query_fails(qts, "'nsid':1,'kind':'lines'", "does not apply");
+    }
+    femu_enable(&c, &femu->dev, alloc);
+    femu_media_check(femu_query_ns(qts, "", &rsp), w);
+    qobject_unref(rsp);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A controller with a bbssd and a kvssd namespace and the ONFI profile:
+ * one reply, both entries with the same media timing, and kind lines
+ * refused on the kvssd one.
+ */
+static void femu_test_query_media_mixed(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const FemuMediaWant *kv = femu_media_want("kvssd-m26");
+    QDict *rsp;
+    QList *nss;
+
+    femu_enable(&c, &femu->dev, alloc);
+    rsp = femu_query(qts, "");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    nss = qdict_get_qlist(qdict_get_qdict(rsp, "return"), "namespaces");
+    g_assert_cmpuint(qlist_size(nss), ==, 2);
+    femu_media_check(qobject_to(QDict, qlist_entry_obj(qlist_first(nss))),
+                     femu_media_want("m26-2lun"));
+    femu_media_check(qobject_to(QDict, qlist_entry_obj(
+                         qlist_next(qlist_first(nss)))), kv);
+    qobject_unref(rsp);
+    femu_query_fails(qts, "'nsid':2,'kind':'lines'", "does not apply");
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Random writes spread over every placement handle of a namespace the device
  * accepted. Each handle keeps a unit open and each persistently isolated
  * handle another to collect into, so a namespace that fits only once those
@@ -32154,15 +32326,89 @@ static void femu_register_nodes(void)
                  femu_test_query_unsupported, &(QOSGraphTestOptions) {
         .arg = (void *)"does not support nossd namespaces",
     });
-    qos_add_test("query-unsupported-ocssd", "femu",
-                 femu_test_query_unsupported, &(QOSGraphTestOptions) {
-        .arg = (void *)"does not support ocssd namespaces",
+    qos_add_test("query-media-m26-2lun", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26-2lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=2,onfi_mode=26"
+    });
+    qos_add_test("query-media-m26-1lun", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26-1lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=26"
+    });
+    qos_add_test("query-media-default", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"default",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=2"
+    });
+    qos_add_test("query-media-staged", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"staged",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=2,cmd_addr_lat=1000,pg_xfer_lat=10000,"
+            "status_lat=500,tplebsy=900"
+    });
+    qos_add_test("query-media-csd", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"csd-m26",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,onfi_mode=26"
+    });
+    qos_add_test("query-media-kvssd", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"kvssd",
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    });
+    qos_add_test("query-media-zns", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"zns",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_cmd_addr_lat=700,"
+            "zns_pg_xfer_lat=3000,zns_status_lat=200"
+    });
+    qos_add_test("query-media-oc12-off", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"oc12-off",
+        .edge.extra_device_opts = "femu_mode=0,lver=1,ch_xfer_lat=7000"
+    });
+    qos_add_test("query-media-oc20", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"oc20",
         .edge.extra_device_opts = "femu_mode=0,lver=2"
     });
-    qos_add_test("query-unsupported-kvssd", "femu",
-                 femu_test_query_unsupported, &(QOSGraphTestOptions) {
-        .arg = (void *)"does not support kvssd namespaces",
-        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    qos_add_test("query-media-fdp", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp-m26",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,onfi_mode=26"
+    });
+    qos_add_test("query-media-kvssd-m26", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"kvssd-m26",
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=5,kv_timing=model,onfi_mode=26"
+    });
+    qos_add_test("query-media-gap-no-bus", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gap-no-bus",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=2,tplebsy=900"
+    });
+    qos_add_test("query-media-mixed", "femu", femu_test_query_media_mixed,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,namespaces=2,namespace_modes=bbssd,,kvssd,"
+            FEMU_CAPS_GEO ",onfi_mode=26"
+    });
+    qos_add_test("query-media-oc12-on", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"oc12-on",
+        .edge.extra_device_opts =
+            "femu_mode=0,lver=1,ch_xfer_lat=7000,oc12_channel_timing=on"
     });
     qos_add_test("query-unplug", "femu", femu_test_query_unplug,
                  &(QOSGraphTestOptions) {

@@ -407,6 +407,12 @@ Realize refuses these settings:
 
 `onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns` without `onfi_mode` warns.
 
+QMP [`query-femu`](../reference/query-femu.md#media-timing) reports the
+phases a namespace charges in its `media` member, for every mode with a
+media layer, with the profile on or off. The values come after the
+fallbacks: a command phase of 0 takes `cmd_addr_ns`, and with the bus off
+every bus phase is 0.
+
 ## Plane parallelism and multi-plane operations
 
 The array rule decides which operations exclude each other:

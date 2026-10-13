@@ -917,3 +917,35 @@ uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc)
 {
     return ecc_extra_ns(m, loc);
 }
+
+/* the fallbacks below are the ones cmd_phase_ns() and the op paths take */
+void nand_media_phases(const NandMedia *m, NandMediaPhases *out)
+{
+    const NandMediaTiming *t = &m->cfg.timing;
+    const NandMediaPolicy *p = &m->cfg.policy;
+    uint64_t ca = t->cmd_addr_ns;
+
+    memset(out, 0, sizeof(*out));
+    out->tplrbsy_ns = t->tplrbsy_ns;
+    out->tplpbsy_ns = t->tplpbsy_ns;
+    out->tplebsy_ns = t->tplebsy_ns;
+    out->staged = p->channel_mode == NAND_CH_STAGED;
+    if (!out->staged) {
+        return;
+    }
+    out->onfi_order = p->onfi_order;
+    out->page_reg_hold = p->page_reg_hold;
+    out->mp_status_per_plane = p->mp_status_per_plane;
+    out->page_xfer_ns = t->page_xfer_ns;
+    out->rd_cmd_ns = cmd_phase_ns(m, NAND_MEDIA_READ);
+    out->wr_cmd_ns = cmd_phase_ns(m, NAND_MEDIA_PROGRAM);
+    out->er_cmd_ns = cmd_phase_ns(m, NAND_MEDIA_ERASE);
+    out->cb_rd_cmd_ns = t->cb_rd_cmd_ns ? (uint64_t)t->cb_rd_cmd_ns : ca;
+    out->cb_wr_cmd_ns = t->cb_wr_cmd_ns ? (uint64_t)t->cb_wr_cmd_ns : ca;
+    out->status_ns = t->status_ns;
+    out->dout_pre_ns = t->dout_pre_ns;
+    out->dout_post_ns = t->dout_post_ns;
+    out->dout_mp_pre_ns = t->dout_mp_pre_ns ? (uint64_t)t->dout_mp_pre_ns : ca;
+    out->din_burst_ns = t->din_burst_ns;
+    out->wr_post_ns = t->wr_post_ns;
+}

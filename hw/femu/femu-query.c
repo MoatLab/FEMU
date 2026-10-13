@@ -120,21 +120,69 @@ static FemuCtrl *femu_query_find(const char *path, Error **errp)
     return FEMU(obj);
 }
 
-/* One selected namespace: which copy holds it, and its mode. */
+/*
+ * One selected namespace: which copy holds it, its mode, and its media
+ * timing. A csd, kvssd or ocssd namespace has the media timing only.
+ */
 typedef struct FemuQuerySel {
     FemuMode mode;
     bool zoned;
+    bool media_only;
+    uint32_t nsid;
     uint32_t idx;               /* into req->ns, or into the zoned copies */
+    int onfi_mode;              /* -1 without the ONFI profile */
+    NandMediaPhases media;
 } FemuQuerySel;
 
-/* Check one namespace and size the buffers of its copy. */
-static bool femu_query_prepare(NvmeNamespace *ns, FemuQueryKind kind,
-                               uint32_t offset, uint32_t limit,
-                               FemuQueryReq *req, FemuQueryZoned *zoned,
-                               uint32_t *nr_zoned, FemuQuerySel *sel,
-                               Error **errp)
+/*
+ * The media layer of a namespace, or NULL. Realize builds it. Later only
+ * admin commands change it (delay emulation, OCSSD timing). They run
+ * under the BQL, as this command does, so the copy here needs no request
+ * to the FTL thread.
+ */
+static const NandMedia *femu_query_media(FemuCtrl *n, NvmeNamespace *ns,
+                                         int *onfi_mode)
 {
+    *onfi_mode = -1;
+    if ((NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) && ns->ssd &&
+        !ns->ssd_borrowed) {
+        *onfi_mode = ns->ssd->sp.onfi_mode;
+        return &ns->ssd->media;
+    }
+    if (femu_query_zoned(ns)) {
+        return zns_query_media(ns);
+    }
+    if (NS_OCSSD(ns)) {
+        return oc_query_media(n);
+    }
+    return NULL;
+}
+
+/* Check one namespace and size the buffers of its copy. */
+static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
+                               FemuQueryKind kind, uint32_t offset,
+                               uint32_t limit, FemuQueryReq *req,
+                               FemuQueryZoned *zoned, uint32_t *nr_zoned,
+                               FemuQuerySel *sel, Error **errp)
+{
+    const NandMedia *media = femu_query_media(n, ns, &sel->onfi_mode);
+
     sel->mode = femu_query_mode(ns->femu_mode);
+    sel->nsid = ns->id;
+    if (media) {
+        nand_media_phases(media, &sel->media);
+    }
+
+    if (media && (NS_CSD(ns) || NS_KVSSD(ns) || NS_OCSSD(ns))) {
+        if (kind != FEMU_QUERY_KIND_SUMMARY) {
+            error_setg(errp, "namespace %u: kind '%s' does not apply to %s "
+                       "namespaces", ns->id, FemuQueryKind_str(kind),
+                       FemuMode_str(sel->mode));
+            return false;
+        }
+        sel->media_only = true;
+        return true;
+    }
 
     if (femu_query_zoned(ns)) {
         FemuQueryZoned *q = &zoned[*nr_zoned];
@@ -394,6 +442,59 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     return fdp;
 }
 
+static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
+{
+    FemuMediaTiming *mt = g_new0(FemuMediaTiming, 1);
+    const NandMediaPhases *ph = &sel->media;
+
+    mt->staged_bus = ph->staged;
+    mt->onfi_profile = sel->onfi_mode >= 0;
+    mt->has_onfi_mode = mt->onfi_profile;
+    mt->onfi_mode = mt->onfi_profile ? sel->onfi_mode : 0;
+    mt->page_transfer_ns = ph->page_xfer_ns;
+    mt->read_command_ns = ph->rd_cmd_ns;
+    mt->program_command_ns = ph->wr_cmd_ns;
+    mt->erase_command_ns = ph->er_cmd_ns;
+    mt->copyback_read_command_ns = ph->cb_rd_cmd_ns;
+    mt->copyback_program_command_ns = ph->cb_wr_cmd_ns;
+    mt->status_ns = ph->status_ns;
+    mt->data_out_lead_ns = ph->dout_pre_ns;
+    mt->data_out_tail_ns = ph->dout_post_ns;
+    mt->plane_select_ns = ph->dout_mp_pre_ns;
+    mt->data_in_edges_ns = ph->din_burst_ns;
+    mt->program_confirm_ns = ph->wr_post_ns;
+    mt->plane_read_busy_ns = ph->tplrbsy_ns;
+    mt->plane_program_busy_ns = ph->tplpbsy_ns;
+    mt->plane_erase_busy_ns = ph->tplebsy_ns;
+    mt->onfi_order = ph->onfi_order;
+    mt->page_register_hold = ph->page_reg_hold;
+    mt->status_per_plane = ph->mp_status_per_plane;
+    return mt;
+}
+
+static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
+{
+    FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
+    FemuMediaTiming *mt = femu_query_media_info(sel);
+
+    ns_info->nsid = sel->nsid;
+    ns_info->mode = sel->mode;
+    switch (sel->mode) {
+    case FEMU_MODE_CSD:
+        ns_info->u.csd.media = mt;
+        break;
+    case FEMU_MODE_KVSSD:
+        ns_info->u.kvssd.media = mt;
+        break;
+    case FEMU_MODE_OCSSD:
+        ns_info->u.ocssd.media = mt;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    return ns_info;
+}
+
 static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
 {
     FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
@@ -586,7 +687,7 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
             error_setg(errp, "namespace %u is not attached", nsid);
             goto out;
         }
-        if (!femu_query_prepare(ns, kind, offset, limit, req, zoned,
+        if (!femu_query_prepare(n, ns, kind, offset, limit, req, zoned,
                                 &nr_zoned, &sel[0], errp)) {
             goto out;
         }
@@ -604,8 +705,8 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
                            FemuQueryKind_str(kind));
                 goto out;
             }
-            if (!femu_query_prepare(ns, kind, offset, limit, req, zoned,
-                                    &nr_zoned, &sel[nr_sel], errp)) {
+            if (!femu_query_prepare(n, ns, kind, offset, limit, req,
+                                    zoned, &nr_zoned, &sel[nr_sel], errp)) {
                 goto out;
             }
             nr_sel++;
@@ -658,11 +759,18 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
         FemuNamespaceInfoList **tail = &info->namespaces;
 
         for (i = 0; i < nr_sel; i++) {
-            FemuNamespaceInfo *ns_info = sel[i].zoned ?
-                femu_query_zoned_info(&zoned[sel[i].idx]) :
-                femu_query_ns_info(&req->ns[sel[i].idx],
-                                   kind == FEMU_QUERY_KIND_LINES);
+            FemuNamespaceInfo *ns_info;
 
+            if (sel[i].media_only) {
+                ns_info = femu_query_media_ns_info(&sel[i]);
+            } else if (sel[i].zoned) {
+                ns_info = femu_query_zoned_info(&zoned[sel[i].idx]);
+                ns_info->u.znssd.media = femu_query_media_info(&sel[i]);
+            } else {
+                ns_info = femu_query_ns_info(&req->ns[sel[i].idx],
+                                             kind == FEMU_QUERY_KIND_LINES);
+                ns_info->u.bbssd.media = femu_query_media_info(&sel[i]);
+            }
             QAPI_LIST_APPEND(tail, ns_info);
         }
     }

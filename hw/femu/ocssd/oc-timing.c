@@ -2,6 +2,7 @@
 #include "./oc12.h"
 #include "./oc20.h"
 #include "./oc-timing.h"
+#include "../femu-query.h"
 
 /*
  * Both versions keep a LUN timeline array indexed by the flat LUN id --
@@ -74,4 +75,16 @@ void oc_set_latency(FemuCtrl *n, uint32_t rd_upper, uint32_t rd_lower,
         oc20_refresh_timing(n);
     }
     nvme_resume_pollers(n, resume);
+}
+
+/* query-femu: the media layer of this controller, once realize built it */
+const NandMedia *oc_query_media(FemuCtrl *n)
+{
+    if (n->lver == OCSSD12 && n->oc12_ctrl) {
+        return &n->oc12_ctrl->media;
+    }
+    if (n->lver == OCSSD20 && n->ext_ops.state) {
+        return &((Oc20Ctrl *)n->ext_ops.state)->media;
+    }
+    return NULL;
 }

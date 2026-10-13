@@ -5,9 +5,10 @@ controller to the host. It needs no guest tools. The schema is in
 `qapi/femu.json`, and `query-qmp-schema` also returns it.
 
 This release supports BlackBox (`bbssd`) namespaces, also with flexible
-data placement (FDP), and zoned (`znssd`) namespaces. A selected
-namespace in another mode, or backed by a `femu-cxl-ssd` medium, returns
-an error that names the mode.
+data placement (FDP), and zoned (`znssd`) namespaces. For a `csd`,
+`kvssd` or `ocssd` namespace the reply has the NAND bus timing only. A
+selected `nossd` namespace, or one backed by a `femu-cxl-ssd` medium,
+returns an error that names the mode.
 A controller in an unsupported mode returns that error even when the
 guest has not enabled it.
 
@@ -52,10 +53,11 @@ kind, give `nsid` if the controller has more than one namespace. Each
 listing kind fits one namespace type:
 
 ```
- kind            bbssd   bbssd + FDP   znssd
- lines           yes     error         error
- reclaim-units   error   yes           error
- zones           error   error         yes
+ kind            bbssd   bbssd + FDP   znssd   csd, kvssd, ocssd
+ summary         yes     yes           yes     yes (media only)
+ lines           yes     error         error   error
+ reclaim-units   error   yes           error   error
+ zones           error   error         yes     error
 ```
 
 ## Reply
@@ -73,6 +75,7 @@ A `bbssd` entry has these members:
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
 | `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, and `waf` |
+| `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `fdp` | with FDP only: see [FDP namespaces](#fdp-namespaces) |
 | `lines` | with `kind` `lines`: `id`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each line |
@@ -150,6 +153,7 @@ blocks.
 | `zone-size`, `zone-capacity` | logical blocks per zone, and the writable part of a zone |
 | `max-open`, `max-active` | the zone resource limits; 0 means no limit |
 | `zone-counts` | zones that are `empty`, `implicitly-open`, `explicitly-open`, `closed`, `read-only`, `full` and `offline`, and the `total` |
+| `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `zones` | with `kind` `zones`: `index`, `type`, `state`, `start-lba`, `capacity`, `write-pointer` and `zrwa` of each zone |
 | `offset`, `next-offset` | with `kind` `zones`: the first zone in `zones`, and the offset of the next call; `next-offset` is absent after the last zone |
 
@@ -158,6 +162,70 @@ gives. `write-pointer` is absent where Report Zones has no valid write
 pointer: in a `conventional` zone, and in a `full`, `read-only` or
 `offline` zone. `type` is `sequential` or `conventional`. `zrwa` is true
 when the zone holds a zone random write area.
+
+### Media timing
+
+Every namespace entry except `nossd` has a `media` member. A `csd`,
+`kvssd` or `ocssd` entry has this member only. It gives the bus phases
+the [NAND media layer](../design/nand-timing.md) charges, after its
+fallbacks. Times are in ns.
+
+```
+ knobs (pg_xfer_lat, cmd_addr_lat, status_lat, tpl*bsy, onfi_mode, ...)
+   |
+   v
+ media config --> fallbacks (a command phase of 0 takes cmd_addr_lat;
+   |                          the bus off sets every bus phase to 0)
+   v
+ query-femu "media"  =  what each op is charged
+```
+
+| Member | Content |
+| --- | --- |
+| `staged-bus` | true when the channel bus phases are charged |
+| `onfi-profile`, `onfi-mode` | true when `onfi_mode` 0 to 26 sets the bus phases; `onfi-mode` is present only then |
+| `page-transfer-ns` | one page on the bus |
+| `read-command-ns`, `program-command-ns`, `erase-command-ns` | the command and address phase of each op |
+| `copyback-read-command-ns`, `copyback-program-command-ns` | the two command phases of a copyback |
+| `status-ns` | one status read |
+| `data-out-lead-ns`, `data-out-tail-ns` | the command and preamble before the page of a read, and the postamble and turnaround after it |
+| `plane-select-ns` | the column select before each page of a multi-plane read |
+| `data-in-edges-ns`, `program-confirm-ns` | the burst edges of the page of a program, and the confirm cycle after it |
+| `plane-read-busy-ns`, `plane-program-busy-ns`, `plane-erase-busy-ns` | tPLRBSY, tPLPBSY and tPLEBSY between the planes of a multi-plane op; they apply with the bus on or off |
+| `onfi-order` | a read reads its status before its data out, and a program or erase ends at its status |
+| `page-register-hold` | an op sends its command only when its LUN is ready, and holds the LUN until its last bus phase ends |
+| `status-per-plane` | a multi-plane program or erase reads one status per plane |
+
+With `onfi_mode=26`, 4 KiB pages and two LUNs on a channel, `media` holds
+the values of the [ONFI 6.0 profile table](../design/nand-timing.md#onfi-60-profile-bbssd-csd-kv):
+
+```json
+"media": {"staged-bus": true, "onfi-profile": true, "onfi-mode": 26,
+          "page-transfer-ns": 855, "read-command-ns": 275,
+          "program-command-ns": 562, "erase-command-ns": 225,
+          "copyback-read-command-ns": 275, "copyback-program-command-ns": 275,
+          "status-ns": 321, "data-out-lead-ns": 200, "data-out-tail-ns": 115,
+          "plane-select-ns": 200, "data-in-edges-ns": 57,
+          "program-confirm-ns": 125, "plane-read-busy-ns": 500,
+          "plane-program-busy-ns": 500, "plane-erase-busy-ns": 500,
+          "onfi-order": true, "page-register-hold": true,
+          "status-per-plane": true}
+```
+
+A default `bbssd` device has no bus phases: `staged-bus` and every rule
+are false, and every time is 0. With `cmd_addr_lat=1000`, the five
+command phases and `plane-select-ns` report 1000, because they fall back
+to it. OCSSD 1.2 keeps a page time also with `oc12_channel_timing` off,
+but the bus is off, so `page-transfer-ns` reports 0.
+
+The command reads `media` when it starts, under the BQL. Realize sets
+the values. Later only admin commands change them (delay emulation,
+OCSSD timing), and these also run under the BQL. Thus a namespace that
+reports only `media` needs no enabled controller.
+
+With `kv_timing=model`, a KV namespace still charges its NAND ops, so
+`media` is correct for the media timelines. The time a Store or Retrieve
+command takes comes from the model instead.
 
 ## Example
 
@@ -173,6 +241,14 @@ when the zone holds a zone random write area.
                "page-size": 4096, "pages-per-line": 16384},
   "counters": {"host-write-pages": 20480, "nand-write-pages": 20480,
                "gc-write-pages": 0, "block-erases": 0, "waf": 1.0},
+  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+            "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
+            "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
+            "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
+            "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
+            "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
+            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "page-register-hold": false, "status-per-plane": false},
   "line-counts": {"free": 254, "victim": 0, "full": 1, "retired": 0, "spare": 0,
                   "total": 256},
   "lines": [{"id": 0, "state": "full", "vpc": 16384, "ipc": 0, "erase-min": 0, "erase-max": 0},
@@ -198,6 +274,14 @@ Each handle has one unit open:
                "page-size": 4096, "pages-per-line": 16},
   "counters": {"host-write-pages": 0, "nand-write-pages": 0,
                "gc-write-pages": 0, "block-erases": 0},
+  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+            "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
+            "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
+            "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
+            "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
+            "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
+            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "page-register-hold": false, "status-per-plane": false},
   "fdp": {"reclaim-groups": 1, "units-per-group": 25, "pages-per-unit": 16,
           "handles": [{"id": 0, "type": "persistently-isolated",
                        "host-bytes": 0, "media-bytes": 0},
@@ -228,6 +312,14 @@ A zoned namespace with one zone written and one zone finished:
   "zone-counts": {"empty": 14, "implicitly-open": 1, "explicitly-open": 0,
                   "closed": 0, "read-only": 0, "full": 1, "offline": 0,
                   "total": 16},
+  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+            "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
+            "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
+            "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
+            "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
+            "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
+            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "page-register-hold": false, "status-per-plane": false},
   "zones": [{"index": 0, "type": "sequential", "state": "full",
              "start-lba": 0, "capacity": 131072, "zrwa": false},
             {"index": 1, "type": "sequential", "state": "implicitly-open",

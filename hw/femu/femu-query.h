@@ -8,6 +8,7 @@
 #define HW_FEMU_FEMU_QUERY_H
 
 #include "qapi/qapi-types-femu.h"
+#include "nand/nand-media.h"
 
 /* The most line or zone records one call reports per namespace. */
 #define FEMU_QUERY_MAX_LINES        4096
@@ -149,5 +150,8 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q);
  * Returns false, with @q unchanged, when a poller holds the lock.
  */
 bool zns_query_collect(struct NvmeNamespace *ns, FemuQueryZoned *q);
+/* The media layer of a zoned namespace or an OCSSD controller, or NULL. */
+const NandMedia *zns_query_media(struct NvmeNamespace *ns);
+const NandMedia *oc_query_media(struct FemuCtrl *n);
 
 #endif

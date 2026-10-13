@@ -267,4 +267,33 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
 /* the extra correction time a read of @loc takes; 0 when the model is off */
 uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc);
 
+/*
+ * The bus phase lengths an op is charged, after the fallbacks: a command
+ * field of 0 takes cmd_addr_ns, and every bus phase is 0 when the staged
+ * bus is off. The tPL*BSY gaps apply with the bus on or off.
+ */
+typedef struct NandMediaPhases {
+    bool     staged;              /* channel_mode is NAND_CH_STAGED */
+    bool     onfi_order;
+    bool     page_reg_hold;
+    bool     mp_status_per_plane;
+    uint64_t page_xfer_ns;
+    uint64_t rd_cmd_ns;
+    uint64_t wr_cmd_ns;
+    uint64_t er_cmd_ns;
+    uint64_t cb_rd_cmd_ns;
+    uint64_t cb_wr_cmd_ns;
+    uint64_t status_ns;
+    uint64_t dout_pre_ns;
+    uint64_t dout_post_ns;
+    uint64_t dout_mp_pre_ns;      /* per-plane select of a multi-plane read */
+    uint64_t din_burst_ns;
+    uint64_t wr_post_ns;
+    uint64_t tplrbsy_ns;
+    uint64_t tplpbsy_ns;
+    uint64_t tplebsy_ns;
+} NandMediaPhases;
+
+void nand_media_phases(const NandMedia *m, NandMediaPhases *out);
+
 #endif /* __FEMU_NAND_MEDIA_H */

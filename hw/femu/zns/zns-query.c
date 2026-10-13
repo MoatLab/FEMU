@@ -80,3 +80,8 @@ bool zns_query_collect(NvmeNamespace *ns, FemuQueryZoned *q)
     qemu_mutex_unlock(&ns->zns->zone_lock);
     return true;
 }
+
+const NandMedia *zns_query_media(NvmeNamespace *ns)
+{
+    return ns->zns ? &ns->zns->media : NULL;
+}
