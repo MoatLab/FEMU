@@ -8,6 +8,7 @@
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
+#include "../nand/onfi.h"
 #include "ftl-internal.h"
 
 /*
@@ -188,6 +189,55 @@ void bb_nand_media_init(struct ssd *ssd)
         cfg.timing.er_table_ns[ft] = get_blk_erase_latency(ft);
         cfg.policy.use_flat_timing = false;
         cfg.timing.pgtype_lat = false; /* the table path already carries pairing */
+    }
+
+    /*
+     * ONFI 6.0 profile: the timing mode gives every bus phase, and the array
+     * times stay as set above. Realize refuses the hand-set phase knobs with
+     * it, so none of them is overwritten here. A tPL*BSY left at 0 takes the
+     * Table 4-30 typical value.
+     */
+    if (spp->onfi_mode >= 0) {
+        OnfiInput in = {
+            .mode = spp->onfi_mode,
+            .mts = spp->onfi_mts,
+            .page_bytes = (uint64_t)spp->secsz * spp->secs_per_pg +
+                          spp->onfi_spare_bytes,
+            .col_cycles = 2,
+            .row_cycles = 3,
+            .multi_lun = spp->luns_per_ch > 1,
+            .tccs_ns = spp->onfi_tccs_ns,
+        };
+        OnfiTiming ot;
+
+        if (onfi_derive(&in, &ot) == 0) {
+            cfg.timing.page_xfer_ns = ot.page_xfer_ns;
+            cfg.timing.status_ns = ot.status_ns;
+            cfg.timing.rd_cmd_ns = ot.rd_cmd_ns;
+            cfg.timing.wr_cmd_ns = ot.wr_cmd_ns;
+            cfg.timing.er_cmd_ns = ot.er_cmd_ns;
+            cfg.timing.cb_rd_cmd_ns = ot.cb_rd_cmd_ns;
+            cfg.timing.cb_wr_cmd_ns = ot.cb_wr_cmd_ns;
+            cfg.timing.din_burst_ns = ot.din_burst_ns;
+            cfg.timing.wr_post_ns = ot.wr_post_ns;
+            cfg.timing.dout_pre_ns = ot.dout_pre_ns;
+            cfg.timing.dout_post_ns = ot.dout_post_ns;
+            cfg.timing.dout_mp_pre_ns = ot.dout_mp_pre_ns;
+            if (!cfg.timing.tplpbsy_ns) {
+                cfg.timing.tplpbsy_ns = ot.plbusy_ns;
+            }
+            if (!cfg.timing.tplrbsy_ns) {
+                cfg.timing.tplrbsy_ns = ot.plbusy_ns;
+            }
+            if (!cfg.timing.tplebsy_ns) {
+                cfg.timing.tplebsy_ns = ot.plbusy_ns;
+            }
+            /*
+             * A full bounded window list books the bus from now instead,
+             * which would close the gaps the profile's later phases leave.
+             */
+            cfg.policy.bus_res_unbounded = true;
+        }
     }
 
     cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;

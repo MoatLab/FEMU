@@ -295,6 +295,23 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "0 uses ch_xfer_lat" },
     { "status_lat",
       "bbssd, CSD, KV: status read phase on the channel bus in ns" },
+    { "onfi_mode",
+      "bbssd, CSD, KV: ONFI 6.0 NV-LPDDR4 timing mode 0 to 26; the channel "
+      "bus phases then follow the spec for that mode and pg_rd_lat, "
+      "pg_wr_lat and blk_er_lat stay the array times; -1 (default) is off. "
+      "Refused with cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat" },
+    { "onfi_mts",
+      "bbssd, CSD, KV: with onfi_mode, the page payload rate in MT/s in "
+      "place of the mode's own rate, 1 to 100000; 0 (default) uses the mode" },
+    { "onfi_spare_bytes",
+      "bbssd, CSD, KV: with onfi_mode, the spare bytes moved with each page "
+      "on the bus; the page on the bus must be an even number of bytes; 0 "
+      "(default) moves the data bytes only" },
+    { "onfi_tccs_ns",
+      "bbssd, CSD, KV: with onfi_mode, tCCS in ns from a datasheet, paid "
+      "before a data out when several LUNs share a channel and per plane of "
+      "a multi-plane read; ONFI 6.0 gives no value, so 0 (default) pays "
+      "nothing" },
     { "tplpbsy",
       "bbssd, CSD: busy time in ns between the planes of a multi-plane "
       "program; only with mp_program, and a value without it warns at "

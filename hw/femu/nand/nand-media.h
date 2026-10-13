@@ -105,6 +105,21 @@ typedef struct NandMediaTiming {
     int64_t cmd_addr_ns;
     int64_t page_xfer_ns;
     int64_t status_ns;
+    /*
+     * Per-op bus phases of the ONFI profile (nand/onfi.c). Each is 0 unless
+     * the profile is on; a 0 command field falls back to cmd_addr_ns and a
+     * 0 extra adds nothing, so the staged model keeps its lengths.
+     */
+    int64_t rd_cmd_ns;       /* read command and address, tWB */
+    int64_t wr_cmd_ns;       /* program command and address, tADL */
+    int64_t er_cmd_ns;       /* erase command and address, tWB */
+    int64_t cb_rd_cmd_ns;    /* copyback read command and address, tWB */
+    int64_t cb_wr_cmd_ns;    /* copyback program command, no data, tWB */
+    int64_t din_burst_ns;    /* write preamble and postamble of a data in */
+    int64_t wr_post_ns;      /* confirm cycle after data in, tWB */
+    int64_t dout_pre_ns;     /* command and preamble before a data out */
+    int64_t dout_post_ns;    /* postamble hold and tRHW after a data out */
+    int64_t dout_mp_pre_ns;  /* per-plane column select of a multi-plane read */
     /* multi-plane inter-plane busy */
     int64_t tplpbsy_ns;
     int64_t tplrbsy_ns;

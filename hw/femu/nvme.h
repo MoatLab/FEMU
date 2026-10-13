@@ -2107,6 +2107,10 @@ typedef struct BbCtrlParams {
     int tplrbsy;      /* multi-plane read inter-plane busy (ns); 0 = off */
     int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
     int trcbsy;       /* accepted for compatibility; nothing reads it */
+    int onfi_mode;    /* ONFI 6.0 timing mode 0 to 26; -1 = off */
+    int onfi_mts;     /* payload rate (MT/s) instead of the mode's; 0 = mode */
+    int onfi_spare_bytes; /* spare bytes moved with each page */
+    int onfi_tccs_ns; /* tCCS from a datasheet (ns); 0 charges nothing */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */

@@ -10,6 +10,7 @@
 
 #include "./nvme.h"
 #include "./bbssd/ftl.h"
+#include "./nand/onfi.h"
 #include "./femu-props.h"
 #include "./femu-query.h"
 
@@ -1518,6 +1519,12 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n)
     return true;
 }
 
+/* the ONFI profile asked for, a bad mode included; -1 is off */
+static bool femu_onfi_on(FemuCtrl *n)
+{
+    return n->bb_params.onfi_mode != -1;
+}
+
 /* any program disturb property set, a negative one included */
 static bool femu_pd_on(FemuCtrl *n)
 {
@@ -1583,6 +1590,15 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             error_setg(errp, "femu: the pd_* program disturb properties need "
                        "bbssd, CSD or KV namespaces; namespace %u is not one",
                        i + 1);
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        /* the other modes build their own media timing */
+        if (femu_onfi_on(n) && ns_modes[i] != FEMU_BBSSD_MODE &&
+            ns_modes[i] != FEMU_CSD_MODE && ns_modes[i] != FEMU_KVSSD_MODE) {
+            error_setg(errp, "femu: onfi_mode needs bbssd, CSD or KV "
+                       "namespaces; namespace %u is not one", i + 1);
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -2602,6 +2618,70 @@ static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
 }
 
 /*
+ * The ONFI profile derives the channel bus phases of the FTL this controller
+ * builds from a timing mode, so the hand-set phase knobs cannot join it. A
+ * cxl_ssd link or a shared namespace uses an FTL another device made. The
+ * namespace modes are checked in nvme_init_namespaces().
+ */
+static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *knob = NULL;
+
+    if (!femu_onfi_on(n)) {
+        if (bp->onfi_mts || bp->onfi_spare_bytes || bp->onfi_tccs_ns) {
+            warn_report("femu: onfi_mts, onfi_spare_bytes and onfi_tccs_ns "
+                        "have no effect without onfi_mode");
+        }
+        return true;
+    }
+    if (bp->onfi_mode < 0 || bp->onfi_mode >= ONFI_NUM_MODES) {
+        error_setg(errp, "femu: onfi_mode must be -1 (off) or 0 to %d",
+                   ONFI_NUM_MODES - 1);
+        return false;
+    }
+    if (bp->onfi_mts < 0 || bp->onfi_mts > ONFI_MAX_MTS) {
+        error_setg(errp, "femu: onfi_mts must be 0 to %d", ONFI_MAX_MTS);
+        return false;
+    }
+    if (bp->onfi_spare_bytes < 0 || bp->onfi_tccs_ns < 0) {
+        error_setg(errp, "femu: onfi_spare_bytes and onfi_tccs_ns must not "
+                   "be negative");
+        return false;
+    }
+    /* a DDR burst moves bytes in pairs */
+    if (((uint64_t)bp->secsz * bp->secs_per_pg + bp->onfi_spare_bytes) % 2) {
+        error_setg(errp, "femu: onfi_mode needs an even page size on the bus "
+                   "(secsz * secs_per_pg + onfi_spare_bytes)");
+        return false;
+    }
+    if (bp->cmd_addr_lat) {
+        knob = "cmd_addr_lat";
+    } else if (bp->pg_xfer_lat) {
+        knob = "pg_xfer_lat";
+    } else if (bp->ch_xfer_lat) {
+        knob = "ch_xfer_lat";
+    } else if (bp->status_lat) {
+        knob = "status_lat";
+    }
+    if (knob) {
+        error_setg(errp, "femu: %s is refused with onfi_mode, which sets the "
+                   "channel bus phases", knob);
+        return false;
+    }
+    if (n->cxl_dev) {
+        error_setg(errp, "femu: onfi_mode is not supported with cxl_ssd");
+        return false;
+    }
+    if (nvme_ns_shared(n) || n->ns_mgmt) {
+        error_setg(errp, "femu: onfi_mode is not supported with ns_mgmt or "
+                   "shared namespaces");
+        return false;
+    }
+    return true;
+}
+
+/*
  * Copyback runs in line and reclaim unit collection of the bbssd and CSD FTL
  * this controller builds. Each refused setting moves pages some other way, or
  * runs an FTL built from other settings: paced steps keep a cursor in reclaim
@@ -2703,6 +2783,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_check_pd_props(n, errp)) {
+        return;
+    }
+    if (!femu_check_onfi_props(n, errp)) {
         return;
     }
 
@@ -3328,6 +3411,11 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("tplrbsy", FemuCtrl, bb_params.tplrbsy, 0),
     DEFINE_PROP_INT32("tplebsy", FemuCtrl, bb_params.tplebsy, 0),
     DEFINE_PROP_INT32("trcbsy", FemuCtrl, bb_params.trcbsy, 0),
+    DEFINE_PROP_INT32("onfi_mode", FemuCtrl, bb_params.onfi_mode, -1),
+    DEFINE_PROP_INT32("onfi_mts", FemuCtrl, bb_params.onfi_mts, 0),
+    DEFINE_PROP_INT32("onfi_spare_bytes", FemuCtrl, bb_params.onfi_spare_bytes,
+                      0),
+    DEFINE_PROP_INT32("onfi_tccs_ns", FemuCtrl, bb_params.onfi_tccs_ns, 0),
     DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
     DEFINE_PROP_INT32("plane_first", FemuCtrl, bb_params.plane_first, 0),
     DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),

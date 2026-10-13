@@ -329,6 +329,71 @@ as OCSSD 1.2 charges a partial page.
  [52,62) moves to 62
 ```
 
+### ONFI 6.0 profile (BBSSD, CSD, KV)
+
+`onfi_mode` (0 to 26) sets every channel bus phase from an ONFI 6.0
+NV-LPDDR4 timing mode. ONFI 6.0 gives no array times, so `pg_rd_lat`,
+`pg_wr_lat`, `blk_er_lat` and `nand_cell_type` still set tR, tPROG and
+tBERS. The default, -1, turns the profile off and changes nothing.
+
+```text
+ onfi_mode, onfi_mts --> tDSC --> page_xfer = bytes * tDSC / 2 (x8, DDR)
+ Table 4-34 constants --> per-op command, status and burst phases
+ pg_rd_lat, pg_wr_lat, blk_er_lat ------------------> array times (unchanged)
+
+ read     |00h addr 30h tWB|..... tR .....|00h pre| page |post|70h status|
+ program  |80h addr tADL|edges| page |10h tWB|...... tPROG ......|
+ erase    |60h addr D0h tWB|.............. tBERS ..............|70h status|
+```
+
+The profile derives these phases (`nand/onfi.c`). Each one is a sum in ps,
+rounded up to whole ns once. The table shows mode 26 with 2 column and 3
+row address cycles.
+
+| Phase | Sequence | Mode 26 |
+| --- | --- | --- |
+| read command | 00h, 5 address cycles, 30h, tWB | 275 ns |
+| program command | 80h, 5 address cycles, tADL | 562 ns |
+| data in edges | tWPRE2 + tWPST2 + tWPSTH2 | 57 ns |
+| program confirm | 10h, tWB | 125 ns |
+| erase command | 60h, 3 address cycles, D0h, tWB | 225 ns |
+| status | 70h (78h + 3 cycles with several LUNs), tWHR, tRPRE2, one byte, tRPSTH, tRHW | 246 ns (321 ns) |
+| data out lead | 00h, tRPRE2; with several LUNs 06h, 5 cycles, E0h, tCCS, tRPRE2 | 50 ns (200 ns) |
+| data out tail | tRPSTH, tRHW | 115 ns |
+| page of 4 KiB | 4096 bytes at 0.417 ns per 2 bytes | 855 ns |
+
+- `onfi_mts` replaces the mode's rate for the page only:
+  `ceil(bytes * 1000 / mts)` ns. The status byte keeps the mode's tDSC.
+- `onfi_spare_bytes` adds spare bytes to each page on the bus.
+- `onfi_tccs_ns` gives tCCS. ONFI 6.0 has no value, so 0 charges nothing.
+- A `tplpbsy`, `tplrbsy` or `tplebsy` left at 0 takes 500 ns, the Table 4-30
+  typical value.
+- The phases keep the scheduling of the staged model above. Only their
+  lengths change.
+
+Approximations:
+
+- The status and data out phases charge tRPSTH (15 ns) and not tRPST.
+  tRPST is tDQSRE plus half a tRC, and tDQSRE is 1 to 25 ns by device
+  (Table 4-38).
+- Warmup cycles are not modelled. Section 4.12 calls them optional, but
+  Section 4.15 note 12 asks for them above 800 MT/s.
+- The profile assumes the program page register clear enhancement is on.
+- With the profile, the channel keeps every future window it books, so a
+  full list never books the bus from now.
+
+Realize refuses these settings:
+
+- `onfi_mode` outside -1 to 26, or `onfi_mts` above 100000;
+- a negative `onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns`;
+- an odd page size on the bus (`secsz * secs_per_pg + onfi_spare_bytes`),
+  because a DDR burst moves bytes in pairs;
+- `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat` or `status_lat` with the profile;
+- a namespace that is not bbssd, CSD or KV;
+- `cxl_ssd`, `ns_mgmt` or shared namespaces.
+
+`onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns` without `onfi_mode` warns.
+
 ## Plane parallelism and multi-plane operations
 
 The array rule decides which operations exclude each other:

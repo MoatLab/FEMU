@@ -316,6 +316,10 @@ Reference: [NAND timing](properties.md#nand-timing-bbssd-csd-kv). Design:
 | `pg_xfer_lat` | ns | >= 0 | channel bus data phase per page; 0 uses `ch_xfer_lat` |
 | `ch_xfer_lat` | ns | >= 0 | data phase when `pg_xfer_lat` is 0; also the OCSSD 1.2 transfer time |
 | `status_lat` | ns | >= 0 | channel bus status phase |
+| `onfi_mode` | mode | -1 (off), 0 to 26 | ONFI 6.0 NV-LPDDR4 timing mode; sets every bus phase, refused with the four phase knobs above |
+| `onfi_mts` | MT/s | 0 to 100000 | with `onfi_mode`, the page rate instead of the mode's; 0 uses the mode |
+| `onfi_spare_bytes` | bytes | >= 0; the page on the bus must be even | with `onfi_mode`, spare bytes moved with each page |
+| `onfi_tccs_ns` | ns | >= 0 | with `onfi_mode`, tCCS before a data out on a shared channel; 0 charges nothing |
 | `tplebsy` | ns | >= 0 | busy time between the planes of a multi-plane erase (GC with `pls_per_lun` > 1) |
 | `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0 | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns` |
 | `trim_lat_ns` | ns per range | >= 0; bbssd and CSD, also under FDP | time charged per Dataset Management deallocate range |

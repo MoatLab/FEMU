@@ -162,6 +162,31 @@ static uint64_t bus_xfer_ns(const NandMedia *m, const NandLoc *loc)
     return (page * loc->xfer_secs + spp - 1) / spp;
 }
 
+/* the command phase of @op: the profile's own field, else cmd_addr_ns */
+static uint64_t cmd_phase_ns(const NandMedia *m, NandMediaOp op)
+{
+    const NandMediaTiming *t = &m->cfg.timing;
+    int64_t v = op == NAND_MEDIA_READ ? t->rd_cmd_ns :
+                op == NAND_MEDIA_PROGRAM ? t->wr_cmd_ns :
+                op == NAND_MEDIA_ERASE ? t->er_cmd_ns : 0;
+
+    return v ? v : t->cmd_addr_ns;
+}
+
+/* a read's data out: the page plus what goes before and after it */
+static uint64_t dout_ns(const NandMedia *m, const NandLoc *loc)
+{
+    return m->cfg.timing.dout_pre_ns + bus_xfer_ns(m, loc) +
+           m->cfg.timing.dout_post_ns;
+}
+
+/* a program's data in: the page plus its burst edges and confirm cycle */
+static uint64_t din_ns(const NandMedia *m, const NandLoc *loc)
+{
+    return m->cfg.timing.din_burst_ns + bus_xfer_ns(m, loc) +
+           m->cfg.timing.wr_post_ns;
+}
+
 /*
  * Windows that ended before the op now being timed started can no longer be
  * hit: every later op starts no earlier than this one. Pruning on the op's
@@ -473,7 +498,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
     }
     if (op == NAND_MEDIA_READ) {
-        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
         /*
          * Program/erase suspend: a read that finds its array mid-program or
          * mid-erase starts after a small suspend overhead instead of waiting
@@ -488,7 +513,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 uint64_t done = rs + alat;
 
                 array_suspend_extend(m, loc, t, shift);
-                t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
+                t = bus_later(m, loc->ch, stime, done, dout_ns(m, loc));
                 t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
                 c.done_ns = t;
                 c.latency_ns = c.done_ns - stime;
@@ -502,19 +527,19 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
-        t = bus_later(m, loc->ch, stime, done, bus_xfer_ns(m, loc));
+        t = bus_later(m, loc->ch, stime, done, dout_ns(m, loc));
         t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
         c.done_ns = t;
     } else if (op == NAND_MEDIA_PROGRAM) {
-        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
-        t = bus_now(m, loc->ch, stime, t, bus_xfer_ns(m, loc));
+        t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
+        t = bus_now(m, loc->ch, stime, t, din_ns(m, loc));
         uint64_t s = array_contend_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
         c.done_ns = done;
     } else { /* erase */
-        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
         uint64_t s = array_contend_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
@@ -542,9 +567,10 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
 
     /* per-plane command/address (+ data-in for programs) serialized on the bus */
     for (i = 0; i < nlocs; i++) {
-        t = bus_now(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, ch, stime, t, cmd_phase_ns(m, op));
         if (op == NAND_MEDIA_PROGRAM) {
-            t = bus_now(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
+            t = bus_now(m, ch, stime, t, m->cfg.timing.din_burst_ns +
+                        m->cfg.timing.page_xfer_ns + m->cfg.timing.wr_post_ns);
         }
         if (i < nlocs - 1) {
             t += plbusy;
@@ -586,9 +612,15 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     if (op == NAND_MEDIA_READ) {
         if (m->cfg.timing.status_ns)
             t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
+        /* each plane's column select, then its page */
+        uint64_t sel = m->cfg.timing.dout_mp_pre_ns ?
+                       (uint64_t)m->cfg.timing.dout_mp_pre_ns :
+                       (uint64_t)m->cfg.timing.cmd_addr_ns;
+
         for (i = 0; i < nlocs; i++) {
-            t = bus_later(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
-            t = bus_later(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, ch, stime, t, sel);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.page_xfer_ns +
+                          m->cfg.timing.dout_post_ns);
         }
     } else if (m->cfg.timing.status_ns) {
         t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
@@ -622,7 +654,8 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, src);
     }
     if (staged) {
-        t = bus_now(m, src->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, src->ch, stime, t, m->cfg.timing.cb_rd_cmd_ns ?
+                    m->cfg.timing.cb_rd_cmd_ns : m->cfg.timing.cmd_addr_ns);
     }
     s = array_contend_start(m, src, t) + array_lat(m, src, NAND_MEDIA_READ) -
         ecc_extra_ns(m, src);
@@ -631,7 +664,9 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
     suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
     if (staged) {
         s = bus_later(m, src->ch, stime, s, m->cfg.timing.status_ns +
-                      m->cfg.timing.cmd_addr_ns);
+                      (m->cfg.timing.cb_wr_cmd_ns ?
+                       m->cfg.timing.cb_wr_cmd_ns :
+                       m->cfg.timing.cmd_addr_ns));
     }
     s = array_contend_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
     array_commit(m, dst, s);

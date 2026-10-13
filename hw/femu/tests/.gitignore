@@ -5,3 +5,5 @@ test-femu-hybrid-oracle
 test-femu-cxl-cache
 test-femu-cxl-spte
 test-femu-cxl-cca-ring
+test-femu-kv-model
+test-femu-onfi-timing

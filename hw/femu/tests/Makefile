@@ -19,7 +19,7 @@ PKG_CONFIG ?= pkg-config
 # after, so the test is skipped only in the first pass.
 HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
 UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte \
-             test-femu-cxl-cca-ring test-femu-kv-model
+             test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing
 ifeq ($(HAVE_GLIB),1)
 UNIT_TESTS += test-femu-cxl-cache
 endif
@@ -29,6 +29,14 @@ test-femu-nand-media: $(TEST_SRC) nand-media.o ../nand/nand-media.h
 
 nand-media.o: ../nand/nand-media.c ../nand/nand-media.h
 	$(CC) $(CFLAGS_LIB) $(INCLUDES) -c -o $@ ../nand/nand-media.c
+
+onfi.o: ../nand/onfi.c ../nand/onfi.h
+	$(CC) $(CFLAGS_LIB) $(INCLUDES) -c -o $@ ../nand/onfi.c
+
+test-femu-onfi-timing: unit/test-onfi-timing.c nand-media.o onfi.o \
+                       ../nand/nand-media.h ../nand/onfi.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-onfi-timing.c \
+	    nand-media.o onfi.o
 
 test-femu-kv-model: unit/test-kv-model.c ../kvssd/kv-model.c ../kvssd/kv-model.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-kv-model.c \
@@ -78,6 +86,7 @@ check-docs:
 
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
-	      test-femu-cxl-cca-ring test-femu-kv-model nand-media.o
+	      test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
+	      nand-media.o onfi.o
 
 .PHONY: check check-docs clean

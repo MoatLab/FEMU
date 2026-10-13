@@ -5891,6 +5891,10 @@ static uint16_t femu_directive(FemuCtrlState *c, bool receive,
  * of a fresh device on page k of block 0, line 0. The ECC step is 10 ms, so
  * one tier stands far above the read time and the few ms a die can be busy.
  */
+/* a one-channel bbssd device for the ONFI timing tests; luns_per_ch follows */
+#define FEMU_ONFI_GEO \
+    "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,nchs=1,"
 #define FEMU_PD_STEP_NS         10000000ULL
 #define FEMU_PD_GEO \
     "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
@@ -6351,6 +6355,151 @@ static void femu_test_pd_refused(void *obj, void *data,
                     "'nchs':1,'ecc_step_ns':1000000,'pd_open_tiers':1}}");
     if (qdict_haskey(rsp, "error")) {
         g_test_message("pd accepted case: %s",
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The ONFI profile sets the channel bus phases from a timing mode. A read or
+ * a write of one 4 KiB page on an idle device pays, in ns (Tables 4-34,
+ * 4-36 and 4-38; tR 40000 and tPROG 200000, the defaults):
+ *   "m26":      one LUN, mode 26: read 275 + 40000 + (50 + 855 + 115) + 246,
+ *               write 562 + (57 + 855 + 125) + 200000
+ *   "m26-2lun": two LUNs, mode 26: read 275 + 40000 + (200 + 855 + 115) + 321
+ *   "m0":       one LUN, mode 0: read 275 + 40000 + (50 + 61440 + 115) + 275
+ *   "mts":      one LUN, mode 26 at 3200 MT/s: page 1280, read 41966
+ *   "spare":    one LUN, mode 26, 512 spare bytes: page 961, read 41647
+ *   "off":      the profile off with cmd_addr_lat 1000, pg_xfer_lat 10000
+ *               and status_lat 500: read 51500, write 211000, as on master
+ */
+static void femu_test_onfi(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t rd, wr, want_rd, want_wr = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x0f, 4096);
+    wr = femu_pd_write_ns(&c, qts, 0, 1, buf, list);
+    g_usleep(10 * 1000);
+    rd = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("onfi %s: write %" PRIu64 ", read %" PRIu64 " ns", mode,
+                   wr, rd);
+
+    if (!strcmp(mode, "m26")) {
+        want_rd = 275 + 40000 + 50 + 855 + 115 + 246;
+        want_wr = 562 + 57 + 855 + 125 + 200000;
+    } else if (!strcmp(mode, "m26-2lun")) {
+        want_rd = 275 + 40000 + 200 + 855 + 115 + 321;
+    } else if (!strcmp(mode, "m0")) {
+        want_rd = 275 + 40000 + 50 + 61440 + 115 + 275;
+    } else if (!strcmp(mode, "mts")) {
+        want_rd = 275 + 40000 + 50 + 1280 + 115 + 246;
+    } else if (!strcmp(mode, "spare")) {
+        want_rd = 275 + 40000 + 50 + 961 + 115 + 246;
+    } else if (!strcmp(mode, "off")) {
+        want_rd = 1000 + 40000 + 10000 + 500;
+        want_wr = 1000 + 10000 + 200000;
+    } else {
+        g_assert_not_reached();
+    }
+    g_assert_cmpuint(rd, ==, want_rd);
+    if (want_wr) {
+        g_assert_cmpuint(wr, ==, want_wr);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Realize refuses an ONFI profile that cannot apply: a bad mode or rate, a
+ * hand-set bus phase knob, a namespace whose mode builds its own media
+ * timing, and an FTL another device owns. A ZNS controller whose only
+ * namespace is bbssd takes it.
+ */
+static void femu_test_onfi_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':1,'onfi_mode':27", "must be -1 (off) or 0 to 26" },
+        { "'femu_mode':1,'onfi_mode':-2", "must be -1 (off) or 0 to 26" },
+        { "'femu_mode':1,'onfi_mode':26,'onfi_mts':-1", "onfi_mts must be" },
+        { "'femu_mode':1,'onfi_mode':26,'onfi_mts':100001",
+          "onfi_mts must be" },
+        { "'femu_mode':1,'onfi_mode':26,'onfi_spare_bytes':-1",
+          "must not be negative" },
+        { "'femu_mode':1,'onfi_mode':26,'onfi_tccs_ns':-1",
+          "must not be negative" },
+        { "'femu_mode':1,'onfi_mode':26,'onfi_spare_bytes':511",
+          "needs an even page size" },
+        { "'femu_mode':1,'onfi_mode':26,'cmd_addr_lat':1000",
+          "cmd_addr_lat is refused with onfi_mode" },
+        { "'femu_mode':1,'onfi_mode':26,'pg_xfer_lat':1000",
+          "pg_xfer_lat is refused with onfi_mode" },
+        { "'femu_mode':1,'onfi_mode':26,'ch_xfer_lat':1000",
+          "ch_xfer_lat is refused with onfi_mode" },
+        { "'femu_mode':1,'onfi_mode':26,'status_lat':1000",
+          "status_lat is refused with onfi_mode" },
+        { "'femu_mode':1,'onfi_mode':26,'ns_mgmt':true", "ns_mgmt or shared" },
+        { "'femu_mode':3,'onfi_mode':26", "namespace 1 is not" },
+        { "'femu_mode':2,'onfi_mode':26", "namespace 1 is not" },
+        { "'femu_mode':0,'onfi_mode':26", "namespace 1 is not" },
+        { "'femu_mode':1,'onfi_mode':26,'namespaces':2,"
+          "'namespace_modes':'bbssd,znssd'", "namespace 2 is not" },
+        { "'femu_mode':1,'onfi_mode':26,'namespaces':2,"
+          "'namespace_modes':'nossd,bbssd'", "namespace 1 is not" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'onfi-bad','addr':'5','devsz_mb':4,"
+            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,%s}}", cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("onfi refused %s: %s", cases[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
+    /* an odd sector size gives an odd page with no spare bytes at all */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'onfi-odd','addr':'5','devsz_mb':1,"
+                    "'femu_mode':1,'secsz':513,'secs_per_pg':1,"
+                    "'pgs_per_blk':16,'blks_per_pl':160,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1,'onfi_mode':26}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "needs an even page size"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'onfi-ok','addr':'6','devsz_mb':4,"
+                    "'femu_mode':3,'namespace_modes':'bbssd',"
+                    "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                    "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
+                    "'nchs':1,'onfi_mode':26}}");
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("onfi accepted case: %s",
                        qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
     }
     g_assert_false(qdict_haskey(rsp, "error"));
@@ -31303,6 +31452,40 @@ static void femu_register_nodes(void)
             "nchs=1,ecc_step_ns=10000000,mp_read=1,pd_open_tiers=1"
     });
     qos_add_test("pd-refused", "femu", femu_test_pd_refused, NULL);
+    qos_add_test("onfi-refused", "femu", femu_test_onfi_refused, NULL);
+    qos_add_test("onfi-m26", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=26"
+    });
+    qos_add_test("onfi-m26-2lun", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26-2lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=2,onfi_mode=26"
+    });
+    qos_add_test("onfi-m0", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m0",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=0"
+    });
+    qos_add_test("onfi-mts", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"mts",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,onfi_mts=3200"
+    });
+    qos_add_test("onfi-spare", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"spare",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,onfi_spare_bytes=512"
+    });
+    qos_add_test("onfi-off", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,cmd_addr_lat=1000,pg_xfer_lat=10000,status_lat=500"
+    });
     qos_add_test("gc-copyback-pd", "femu", femu_test_gc_copyback,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"pd",

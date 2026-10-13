@@ -11,6 +11,8 @@ femu_unit_tests = {
                                 '../nand/nand-media.c'),
   'test-femu-kv-model': files('unit/test-kv-model.c',
                               '../kvssd/kv-model.c'),
+  'test-femu-onfi-timing': files('unit/test-onfi-timing.c',
+                                 '../nand/nand-media.c', '../nand/onfi.c'),
   'test-femu-pqueue': files('unit/test-pqueue.c', '../lib/pqueue.c'),
 }
 

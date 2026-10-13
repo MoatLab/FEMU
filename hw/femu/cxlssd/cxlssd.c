@@ -2153,6 +2153,8 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     p->pg_wr_lat = s->program_ns;
     p->blk_er_lat = s->erase_ns;
     p->ch_xfer_lat = s->channel_ns;
+    /* a zeroed field would select ONFI timing mode 0 */
+    p->onfi_mode = -1;
     p->gc_thres_pcent = s->gc_threshold;
     p->gc_thres_pcent_high = s->gc_threshold_high;
     s->ns.ctrl = n;
