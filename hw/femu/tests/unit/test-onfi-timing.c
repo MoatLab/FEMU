@@ -885,8 +885,6 @@ static uint64_t fnv(uint64_t h, uint64_t v)
     return h;
 }
 
-static uint64_t rng_state;
-
 static uint32_t rng(void)
 {
     rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
