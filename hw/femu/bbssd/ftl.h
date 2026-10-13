@@ -633,6 +633,10 @@ struct ssd {
     uint64_t err_write_injected;
 
     FemuCtrl *n;
+    NvmeNamespace *ns;  /* the namespace whose blocks this FTL maps */
+    /* FDP: 512-byte pieces of the FTL space the FTL holds as written */
+    unsigned long *fdp_written;
+    uint64_t fdp_written_bits;
 };
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);

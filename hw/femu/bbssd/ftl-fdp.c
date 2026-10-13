@@ -154,6 +154,114 @@ static void fdp_drop_active_ru(FemuRuHandle *ruh, uint16_t rgidx)
 }
 
 /*
+ * The pages one collection or refresh pass moved out of @victim. @pages
+ * counts them all, for MBMW; the rest describes the moves event 80h has not
+ * reported yet: the written blocks they hold, and the first of those.
+ */
+struct fdp_moves {
+    FemuReclaimUnit *victim;
+    int pages;
+    int unreported;
+    uint64_t nlb;
+    uint64_t lba;
+    bool lbav;
+};
+
+#define FDP_WRITTEN_SHIFT 9     /* fdp_written tracks 512-byte pieces */
+
+/*
+ * Note which blocks of page @lpn the write of blocks [@slba, @slba + @nlb)
+ * programs, as the FTL programs the page. The FTL maps whole pages and a write
+ * can cover part of one, so this tells the moves of a page which of its blocks
+ * hold data. The namespace's own bitmap will not do: it changes before the
+ * FTL takes the write, and a move the write runs first would count it.
+ */
+static void fdp_mark_written(struct ssd *ssd, NvmeRequest *req, uint64_t slba,
+                             uint64_t nlb, uint64_t lpn)
+{
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t beg = ssd_lba_byte_offset(ssd, req, slba);
+    uint64_t b = MAX(beg, lpn * pg) >> FDP_WRITTEN_SHIFT;
+    uint64_t e = MIN(beg + (nlb << lbads), lpn * pg + pg) >> FDP_WRITTEN_SHIFT;
+
+    e = MIN(e, ssd->fdp_written_bits);
+    if (ssd->fdp_written && b < e) {
+        bitmap_set(ssd->fdp_written, b, e - b);
+    }
+}
+
+/*
+ * Count the move of page @lpn, and the blocks of it the FTL holds as written.
+ * A block counts in the page that holds its first byte.
+ */
+static void fdp_moves_add(struct ssd *ssd, struct fdp_moves *mv, uint64_t lpn)
+{
+    NvmeNamespace *ns = ssd->ns;
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t base, bs, lba, end;
+
+    mv->pages++;
+    mv->unreported++;
+    if (!ns || !ssd->fdp_written) {
+        return;
+    }
+    base = ssd_ns_byte_base(ssd, ns);
+    bs = 1ULL << ns->lbaf.lbads;
+    if (lpn * pg + pg <= base) {
+        return;
+    }
+    lba = lpn * pg < base ? 0 : DIV_ROUND_UP(lpn * pg - base, bs);
+    end = MIN(DIV_ROUND_UP(lpn * pg + pg - base, bs),
+              le64_to_cpu(ns->id_ns.nsze));
+    for (; lba < end; lba++) {
+        uint64_t piece = (base + (lba << ns->lbaf.lbads)) >> FDP_WRITTEN_SHIFT;
+
+        if (piece < ssd->fdp_written_bits &&
+            test_bit(piece, ssd->fdp_written)) {
+            if (!mv->lbav) {
+                mv->lba = lba;
+                mv->lbav = true;
+            }
+            mv->nlb++;
+        }
+    }
+}
+
+/*
+ * Report the moves not yet reported, as event 80h when the victim's handle is
+ * initially isolated. A persistently isolated handle keeps its data apart for
+ * good, so moving it is no news to the host.
+ */
+static void fdp_report_moves(struct ssd *ssd, struct fdp_moves *mv)
+{
+    FemuReclaimUnit *ru = mv->victim;
+
+    if (mv->unreported &&
+        ru->ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
+        nvme_fdp_note_media_realloc(ssd->n, ssd->ns, ru->rgidx,
+                                    ru->ruh->ruhid, mv->nlb, mv->lbav,
+                                    mv->lba);
+    }
+    mv->unreported = 0;
+    mv->nlb = 0;
+    mv->lbav = false;
+}
+
+/*
+ * A move, not the host, gave initially isolated handle @ruh a new unit in
+ * group @rgidx: event 81h. The moves before it are reported first, so the log
+ * keeps the order in which things happened. A persistently isolated handle
+ * moves into a unit the host never sees, so it never gets here.
+ */
+static void fdp_note_ruh_modified(struct ssd *ssd, FemuRuHandle *ruh,
+                                  uint16_t rgidx, struct fdp_moves *mv)
+{
+    fdp_report_moves(ssd, mv);
+    nvme_fdp_note_ruh_modified(ssd->n, ssd->ns, rgidx, ruh->ruhid);
+}
+
+/*
  * fdp_get_new_page - get next PPA from an RU's write pointer
  */
 static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
@@ -480,7 +588,7 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
  * handle's active unit: that may be the one dropped.
  */
 static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
-                                        uint16_t rgidx)
+                                        uint16_t rgidx, struct fdp_moves *mv)
 {
     FemuReclaimUnit *ru;
 
@@ -500,6 +608,7 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
         ruh->curr_ru = ru;
         ruh->rus[rgidx] = ru;
         ruh->ruh->rus[rgidx] = ru->nvme_ru;
+        fdp_note_ruh_modified(ssd, ruh, rgidx, mv);
     }
     return ruh->curr_ru;
 }
@@ -666,13 +775,14 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
  * *@dest_ru NULL when no unit can take it.
  */
 static struct ppa fdp_gc_dest_page(struct ssd *ssd, FemuRuHandle *dest_ruh,
-                                   uint16_t rgidx, FemuReclaimUnit **dest_ru)
+                                   uint16_t rgidx, FemuReclaimUnit **dest_ru,
+                                   struct fdp_moves *mv)
 {
     struct ppa ppa = { .ppa = INVALID_PPA };
 
     ftl_assert(dest_ruh != NULL);
     /* the frontier may have been dropped by this or an earlier pass */
-    *dest_ru = fdp_gc_frontier(ssd, dest_ruh, rgidx);
+    *dest_ru = fdp_gc_frontier(ssd, dest_ruh, rgidx, mv);
     if (*dest_ru) {
         ppa = fdp_get_new_page(ssd, *dest_ru);
     }
@@ -682,13 +792,15 @@ static struct ppa fdp_gc_dest_page(struct ssd *ssd, FemuRuHandle *dest_ruh,
 /* relocate @old_ppa to @new_ppa, which fdp_gc_dest_page() chose */
 static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
                            struct ppa *new_ppa, FemuReclaimUnit *dest_ru,
-                           FemuRuHandle *dest_ruh, bool copyback)
+                           FemuRuHandle *dest_ruh, bool copyback,
+                           struct fdp_moves *mv)
 {
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
     FemuReclaimUnit *ret_ru = NULL;
 
     ftl_assert(valid_lpn(ssd, lpn));
     ssd_gc_move_page(ssd, lpn, old_ppa, new_ppa, &fdp_gc_move_ops, dest_ru);
+    fdp_moves_add(ssd, mv, lpn);
 
     /*
      * fdp_advance_ru_pointer() can be called from both the foreground write
@@ -734,7 +846,9 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
             ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
             ssd->ruhs[gcruh_id].curr_ru = ret_ru;
             ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
+            fdp_note_ruh_modified(ssd, dest_ruh, dest_ru->rgidx, mv);
         } else if (!ret_ru) {
+            /* no unit follows yet: the one taken later is the change */
             fdp_drop_active_ru(dest_ruh, dest_ru->rgidx);
         }
     }
@@ -756,15 +870,16 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
  * is: the caller must then not erase the block it came from.
  */
 static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
-                                    FemuRuHandle *dest_ruh, uint16_t rgidx)
+                                    FemuRuHandle *dest_ruh, uint16_t rgidx,
+                                    struct fdp_moves *mv)
 {
     FemuReclaimUnit *dest_ru;
-    struct ppa new_ppa = fdp_gc_dest_page(ssd, dest_ruh, rgidx, &dest_ru);
+    struct ppa new_ppa = fdp_gc_dest_page(ssd, dest_ruh, rgidx, &dest_ru, mv);
 
     if (!dest_ru) {
         return false;
     }
-    fdp_gc_move_to(ssd, old_ppa, &new_ppa, dest_ru, dest_ruh, false);
+    fdp_gc_move_to(ssd, old_ppa, &new_ppa, dest_ru, dest_ruh, false, mv);
 
     /* this page is relocated; whether the next one can be is the next call */
     return true;
@@ -775,12 +890,13 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
  * before each move, look where @dest_ruh's collection unit writes next and
  * take a valid page of the victim on that die and plane; when none is left
  * there, take the next valid page in reclaim order and move it off-chip.
- * Counts the moves in @moved. Returns false, with the moves kept, when there
+ * Counts the moves in @mv. Returns false, with the moves kept, when there
  * is no room.
  */
 static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
                                     FemuReclaimUnit *victim_ru,
-                                    FemuRuHandle *dest_ruh, int *moved)
+                                    FemuRuHandle *dest_ruh,
+                                    struct fdp_moves *mv)
 {
     struct ssdparams *spp = &ssd->sp;
     int npos = spp->nchs * spp->luns_per_ch * spp->pls_per_lun;
@@ -792,7 +908,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
     while (victim_ru->vpc) {
         FemuReclaimUnit *dest_ru;
         struct ppa dst = fdp_gc_dest_page(ssd, dest_ruh, victim_ru->rgidx,
-                                          &dest_ru);
+                                          &dest_ru, mv);
         struct ppa src;
         bool found = false;
         bool copyback;
@@ -841,8 +957,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
         if (!copyback) {
             gc_read_page(ssd, &src);
         }
-        fdp_gc_move_to(ssd, &src, &dst, dest_ru, dest_ruh, copyback);
-        (*moved)++;
+        fdp_gc_move_to(ssd, &src, &dst, dest_ru, dest_ruh, copyback, mv);
     }
     return true;
 }
@@ -858,7 +973,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
  */
 static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
                                       FemuRuHandle *dest_ruh, uint16_t rgidx,
-                                      int *moved)
+                                      struct fdp_moves *mv)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter;
@@ -874,10 +989,9 @@ static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
              * moved keep their new home, and the ones still in this block have
              * to keep theirs, so the block must not be erased.
              */
-            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh, rgidx)) {
+            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh, rgidx, mv)) {
                 return false;
             }
-            (*moved)++;
         }
     }
 
@@ -885,16 +999,20 @@ static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
     return true;
 }
 
-/* charge relocated pages to MBMW, also when a pass stops part way */
+/*
+ * Charge relocated pages to MBMW and report them, also when a pass stops part
+ * way, since the moves stay.
+ */
 static void fdp_count_gc_writes(struct ssd *ssd, FemuReclaimUnit *victim_ru,
-                                int pages)
+                                struct fdp_moves *mv)
 {
     struct ssdparams *spp = &ssd->sp;
-    uint64_t gc_bytes = (uint64_t)pages * spp->secsz * spp->secs_per_pg;
+    uint64_t gc_bytes = (uint64_t)mv->pages * spp->secsz * spp->secs_per_pg;
 
     nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, gc_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->mbmw, gc_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbmw, gc_bytes);
+    fdp_report_moves(ssd, mv);
 }
 
 /*
@@ -978,16 +1096,16 @@ static void fdp_file_back(struct ssd *ssd, FemuReclaimUnit *ru)
 /*
  * Empty @victim_ru into @dest_ruh's collection frontier, erase it and free it.
  * The caller has taken it off every list. @copyback lets pages move on their
- * die; @event logs the handle change collection reports. Returns -1, with the
- * unit filed back and the moves kept, when there is no room.
+ * die. Returns -1, with the unit filed back and the moves kept, when there is
+ * no room.
  */
 static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
-                          FemuRuHandle *dest_ruh, bool copyback, bool event)
+                          FemuRuHandle *dest_ruh, bool copyback)
 {
     struct ssdparams *spp = &ssd->sp;
     FemuRuHandle *victim_ruh = victim_ru->ruh;
+    struct fdp_moves mv = { .victim = victim_ru };
     struct ppa ppa;
-    int vpc_cnt = 0;
     int blk_cnt = 0;
 
     /*
@@ -996,7 +1114,8 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
      * degrades to a device-full write. One with none needs nowhere, and must
      * be collected even then: it is what gives the frontier a unit again.
      */
-    if (victim_ru->vpc && !fdp_gc_frontier(ssd, dest_ruh, victim_ru->rgidx)) {
+    if (victim_ru->vpc &&
+        !fdp_gc_frontier(ssd, dest_ruh, victim_ru->rgidx, &mv)) {
         fdp_file_back(ssd, victim_ru);
         return -1;
     }
@@ -1021,8 +1140,8 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
      * again when the unit is next collected.
      */
     if (copyback) {
-        if (!fdp_reclaim_ru_copyback(ssd, victim_ru, dest_ruh, &vpc_cnt)) {
-            fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
+        if (!fdp_reclaim_ru_copyback(ssd, victim_ru, dest_ruh, &mv)) {
+            fdp_count_gc_writes(ssd, victim_ru, &mv);
             fdp_file_back(ssd, victim_ru);
             return -1;
         }
@@ -1036,9 +1155,8 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                     ppa.g.pl = pl;
                     if (!clean_one_block_fdp_style(ssd, &ppa, dest_ruh,
-                                                   victim_ru->rgidx,
-                                                   &vpc_cnt)) {
-                        fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
+                                                   victim_ru->rgidx, &mv)) {
+                        fdp_count_gc_writes(ssd, victim_ru, &mv);
                         fdp_file_back(ssd, victim_ru);
                         return -1;
                     }
@@ -1060,38 +1178,20 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     }
 
     /* update FDP statistics: media bytes written (GC writes) */
-    uint64_t gc_bytes = (uint64_t)vpc_cnt * spp->secsz * spp->secs_per_pg;
+    uint64_t gc_bytes = (uint64_t)mv.pages * spp->secsz * spp->secs_per_pg;
     uint64_t erase_bytes = (uint64_t)blk_cnt * spp->secsz * spp->secs_per_pg
                            * spp->pgs_per_blk;
 
     FDP_TRACE(ssd, "GC_DONE victim_ru=%u pages_migrated=%d "
               "blocks_erased=%d mbmw_delta=%lu mbe_delta=%lu\n",
-              victim_ru->ruidx, vpc_cnt, blk_cnt, gc_bytes, erase_bytes);
-    fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
+              victim_ru->ruidx, mv.pages, blk_cnt, gc_bytes, erase_bytes);
+    fdp_count_gc_writes(ssd, victim_ru, &mv);
     nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbe, erase_bytes);
 
     if (ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt > 0) {
         ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt--;
-    }
-
-    /* generate controller event for RU change due to GC */
-    if (event && ssd->n->subsys) {
-        NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
-        NvmeRuHandle *nvme_ruh = victim_ru->ruh->ruh;
-        if (nvme_ruh &&
-            (nvme_ruh->event_filter >>
-             nvme_fdp_evf_shifts[FDP_EVT_RUH_IMPLICIT_RU_CHANGE]) & 0x1) {
-            NvmeFdpEvent e = {
-                .type = FDP_EVT_RUH_IMPLICIT_RU_CHANGE,
-                .flags = FDPEF_LV,
-                .rgid = cpu_to_le16(victim_ru->rgidx),
-                .ruhid = victim_ru->ruh->ruhid,
-            };
-
-            nvme_fdp_record_event(ssd->n, endgrp, false, &e);
-        }
     }
 
     /*
@@ -1128,16 +1228,15 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
      */
     copyback = ssd->sp.gc_copyback && !(queued && queued->my_ru == victim_ru);
     return fdp_collect_ru(ssd, victim_ru, fdp_dest_ruh(ssd, victim_ru),
-                          copyback, true);
+                          copyback);
 }
 
 /*
  * Refresh the unit holding the line the read path queued, for read stress or
  * retention age, as do_read_reclaim() does for a line. One unit per write,
  * and only when no group is short of free units. The pages move through the
- * controller (no copyback), to where collection would move them. The move
- * logs no FDP event, even when it rotates an initially isolated handle's
- * unit: the event reporting of moves is an open item.
+ * controller (no copyback), to where collection would move them, and report
+ * the same FDP events.
  */
 static void fdp_do_read_reclaim(struct ssd *ssd)
 {
@@ -1176,7 +1275,7 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     }
 
     ru->reclaiming = true;
-    ok = fdp_collect_ru(ssd, ru, fdp_dest_ruh(ssd, ru), false, false);
+    ok = fdp_collect_ru(ssd, ru, fdp_dest_ruh(ssd, ru), false);
     ru->reclaiming = false;
     if (ok < 0) {
         /* filed back with pages still on it: try again on a later write */
@@ -1212,12 +1311,14 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
  * ssd_stream_write - FDP write path: placement-aware page allocation
  */
 /*
- * Program [start_lpn, end_lpn] into the reclaim unit the request places into.
- * Write and Write Zeroes both land here: the second hands over no data, but
- * the pages it leaves holding zeros are programmed and counted the same way.
+ * Program [start_lpn, end_lpn], the pages of blocks [slba, slba + nlb), into
+ * the reclaim unit the request places into. Write and Write Zeroes both land
+ * here: the second hands over no data, but the pages it leaves holding zeros
+ * are programmed and counted the same way.
  */
 static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
-                                      NvmeRequest *req, uint64_t start_lpn,
+                                      NvmeRequest *req, uint64_t slba,
+                                      uint64_t nlb, uint64_t start_lpn,
                                       uint64_t end_lpn)
 {
     uint64_t passes;
@@ -1245,8 +1346,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT && ssd->n->subsys) {
             NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
             NvmeRuHandle *def_ruh = &endgrp->fdp.ruhs[ns->fdp.phs[0]];
-            if ((def_ruh->event_filter >>
-                 nvme_fdp_evf_shifts[FDP_EVT_INVALID_PID]) & 0x1) {
+            if (nvme_fdp_event_enabled(endgrp, def_ruh,
+                                       FDP_EVT_INVALID_PID)) {
                 NvmeFdpEvent e = {
                     .type = FDP_EVT_INVALID_PID,
                     .flags = FDPEF_PIV | FDPEF_NSIDV,
@@ -1376,6 +1477,7 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         set_maptbl_ent(ssd, lpn, &ppa);
         set_rmap_ent(ssd, lpn, &ppa);
         mark_page_valid_fdp(ssd, &ppa, ru);
+        fdp_mark_written(ssd, req, slba, nlb, lpn);
         ssd->nand_write_pages++; /* a user page programmed into NAND */
         /*
          * Counted here rather than for the whole command before the loop: the
@@ -1504,7 +1606,8 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
     ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
 
-    return ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
+    return ssd_stream_write_lpns(n, ssd, req, req->slba, req->nlb, start_lpn,
+                                 end_lpn);
 }
 
 /*
@@ -1697,6 +1800,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeNamespace *ns = &n->namespaces[0];
+    uint64_t bits;
     NvmeSubsystem *subsys = n->subsys;
     NvmeEnduranceGroup *endgrp = &subsys->endgrp;
     uint16_t nruh = subsys->params.fdp.nruh;
@@ -1705,6 +1809,19 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
     ssd->ruhs = g_malloc0(nruh * sizeof(FemuRuHandle));
     ssd->nruhs = nruh;
     ruhid = ns->fdp.phs;
+    /*
+     * The bitmap covers the FTL space up to the end of the namespace, which no
+     * write passes. A piece must not straddle two pages, or unmapping one page
+     * would forget a block of the next, and the bitmap calls take a long.
+     * Without the bitmap, event 80h reports no count.
+     */
+    bits = MIN((uint64_t)ssd->sp.tt_pgs * ssd->sp.secsz * ssd->sp.secs_per_pg,
+               ssd_ns_byte_base(ssd, ns) + ns->size) >> FDP_WRITTEN_SHIFT;
+    if (!(((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) %
+          (1 << FDP_WRITTEN_SHIFT)) && bits <= LONG_MAX) {
+        ssd->fdp_written_bits = bits;
+        ssd->fdp_written = bitmap_new(bits);
+    }
 
     for (ph = 0; ph < ns->fdp.nphs; ph++, ruhid++) {
         uint16_t i = *ruhid;
@@ -1806,6 +1923,9 @@ static void ssd_reset_maptbl(struct ssd *ssd)
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
         ssd->rmap[i] = INVALID_LPN;
     }
+    if (ssd->fdp_written) {
+        bitmap_zero(ssd->fdp_written, ssd->fdp_written_bits);
+    }
 }
 
 /*
@@ -1816,11 +1936,19 @@ static void ssd_reset_maptbl(struct ssd *ssd)
 static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
                                    uint64_t end_lpn, int *already_invalid)
 {
+    uint64_t per = ((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) >>
+                   FDP_WRITTEN_SHIFT;
     int deallocated = 0;
     uint64_t lpn;
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+        /* the whole page goes, so none of its blocks holds data now */
+        if (ssd->fdp_written && lpn * per < ssd->fdp_written_bits) {
+            bitmap_clear(ssd->fdp_written, lpn * per,
+                         MIN(per, ssd->fdp_written_bits - lpn * per));
+        }
 
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             (*already_invalid)++;
@@ -1918,7 +2046,9 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
 
         ssd_count_partial_pages(ssd, req, le64_to_cpu(rw->slba),
                                 le16_to_cpu(rw->nlb) + 1);
-        lat = ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
+        lat = ssd_stream_write_lpns(n, ssd, req, le64_to_cpu(rw->slba),
+                                    le16_to_cpu(rw->nlb) + 1, start_lpn,
+                                    end_lpn);
 
         fdp_count_write(req->ns, ssd, req);
         return lat;
@@ -2154,6 +2284,10 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
 void femu_fdp_ssd_free(struct ssd *ssd)
 {
     uint64_t i;
+
+    g_free(ssd->fdp_written);
+    ssd->fdp_written = NULL;
+    ssd->fdp_written_bits = 0;
 
     if (ssd->ruhs) {
         for (i = 0; i < ssd->nruhs; i++) {

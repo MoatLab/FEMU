@@ -1269,7 +1269,7 @@ static uint16_t nvme_get_feature_fdp_events(FemuCtrl *n, NvmeCmd *cmd,
         uint8_t ev = nvme_fdp_events_supported[i];
 
         edescr[i].evt = ev;
-        edescr[i].evta = (ruh->event_filter >> nvme_fdp_evf_shifts[ev]) & 1;
+        edescr[i].evta = nvme_fdp_event_enabled(&n->subsys->endgrp, ruh, ev);
     }
 
     cqe->n.result = cpu_to_le32(ARRAY_SIZE(edescr));
@@ -1835,11 +1835,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             }
             mask |= 1ULL << nvme_fdp_evf_shifts[events[i]];
         }
-        if (enable) {
-            ruh->event_filter |= mask;
-        } else {
-            ruh->event_filter &= ~mask;
-        }
+        nvme_fdp_event_filter_set(&n->subsys->endgrp, ruh, mask, enable);
         femu_pel_set_feature(n, cmd, events, noet);
         return NVME_SUCCESS;
     }

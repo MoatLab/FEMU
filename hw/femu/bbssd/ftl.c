@@ -82,6 +82,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     ftl_assert(ssd);
     ssd->n = n;
+    ssd->ns = ns;
 
     /* read the data-remanence experiment env vars once (debug only, off by default) */
     exp_load_cfg();

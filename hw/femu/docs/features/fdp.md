@@ -131,7 +131,11 @@ Reclaim Unit Handle 3 Attributes: 0x1 (Host Specified)
 ```
 
 `events -E` shows host events, such as a write with an invalid placement
-identifier; every event type is enabled by default.
+identifier; every event type is enabled by default. Without `-E`, `events`
+shows controller events. When collection or a read refresh moves data of the
+Initially Isolated handle, it logs 80h (Media Reallocated) with the number
+of blocks moved. When such a move gives that handle a new reclaim unit, it
+logs 81h (Implicitly Modified Reclaim Unit Handle).
 
 ### Write with a placement identifier
 

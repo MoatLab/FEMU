@@ -1995,9 +1995,33 @@ bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
     return nvme_ph_valid(ns, *ph) && nvme_rg_valid(ns->endgrp, *rg);
 }
 
-static inline int log_event(NvmeRuHandle *ruh, uint8_t event_type)
+/*
+ * Whether handle @ruh has event @type enabled. The FTL thread and the pollers
+ * ask while Set Features may change the filter; a 64-bit atomic is not on
+ * every host, so the ring's lock guards the filter too.
+ */
+bool nvme_fdp_event_enabled(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
+                            uint8_t type)
 {
-    return (ruh->event_filter >> nvme_fdp_evf_shifts[event_type]) & 0x1;
+    bool on;
+
+    qemu_mutex_lock(&eg->fdp.events_lock);
+    on = (ruh->event_filter >> nvme_fdp_evf_shifts[type]) & 0x1;
+    qemu_mutex_unlock(&eg->fdp.events_lock);
+    return on;
+}
+
+/* turn the event types in @mask on or off for handle @ruh */
+void nvme_fdp_event_filter_set(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
+                               uint64_t mask, bool on)
+{
+    qemu_mutex_lock(&eg->fdp.events_lock);
+    if (on) {
+        ruh->event_filter |= mask;
+    } else {
+        ruh->event_filter &= ~mask;
+    }
+    qemu_mutex_unlock(&eg->fdp.events_lock);
 }
 
 /*
@@ -2040,18 +2064,91 @@ void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
         return;
     }
     ruhid = ns->fdp.phs[ph];
-    if (log_event(&endgrp->fdp.ruhs[ruhid], FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
+    if (nvme_fdp_event_enabled(endgrp, &endgrp->fdp.ruhs[ruhid],
+                               FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
         NvmeFdpEvent e = {
             .type = FDP_EVT_RU_NOT_FULLY_WRITTEN,
             .flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV,
             .pid = cpu_to_le16(pid),
             .nsid = cpu_to_le32(ns->id),
             .rgid = cpu_to_le16(rg),
-            .ruhid = ruhid,
+            .ruhid = cpu_to_le16(ruhid),
         };
 
         nvme_fdp_record_event(n, endgrp, true, &e);
     }
+}
+
+/*
+ * Fill the location of a controller event about handle @ruhid in group @rg.
+ * The handle is always known; the namespace and the placement identifier only
+ * when the FTL that moved the data knows its namespace and that namespace
+ * reaches the handle through one of its placement handles.
+ */
+static void nvme_fdp_ctrl_event_loc(NvmeNamespace *ns, uint16_t rg,
+                                    uint16_t ruhid, NvmeFdpEvent *e)
+{
+    e->flags = FDPEF_LV;
+    e->rgid = cpu_to_le16(rg);
+    e->ruhid = cpu_to_le16(ruhid);
+    if (!ns) {
+        return;
+    }
+    e->flags |= FDPEF_NSIDV;
+    e->nsid = cpu_to_le32(ns->id);
+    for (uint16_t ph = 0; ph < ns->fdp.nphs; ph++) {
+        if (ns->fdp.phs[ph] == ruhid) {
+            e->flags |= FDPEF_PIV;
+            e->pid = cpu_to_le16(nvme_make_pid(ns, rg, ph));
+            break;
+        }
+    }
+}
+
+/*
+ * Report that collection or a refresh moved @nlb written blocks of Initially
+ * Isolated data out of a unit of handle @ruhid; with @lbav, @lba is one of
+ * them, in @ns. A count of 0 means none is reported.
+ */
+void nvme_fdp_note_media_realloc(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                 uint16_t ruhid, uint64_t nlb, bool lbav,
+                                 uint64_t lba)
+{
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+    NvmeFdpEventRealloc r = {
+        .nlbam = cpu_to_le16(MIN(nlb, UINT16_MAX)),
+    };
+    NvmeFdpEvent e = { .type = FDP_EVT_MEDIA_REALLOC };
+
+    if (!nvme_fdp_event_enabled(endgrp, &endgrp->fdp.ruhs[ruhid],
+                                FDP_EVT_MEDIA_REALLOC)) {
+        return;
+    }
+    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
+    if (ns && lbav) {
+        r.sef = FDP_REALLOC_LBAV;
+        r.lba = cpu_to_le64(lba);
+    }
+    memcpy(e.type_specific, &r, sizeof(r));
+    nvme_fdp_record_event(n, endgrp, false, &e);
+}
+
+/*
+ * Report that a move, not the host, changed the unit handle @ruhid references
+ * in group @rg.
+ */
+void nvme_fdp_note_ruh_modified(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                uint16_t ruhid)
+{
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+    NvmeFdpEvent e = { .type = FDP_EVT_RUH_IMPLICIT_RU_CHANGE };
+
+    if (!nvme_fdp_event_enabled(endgrp, &endgrp->fdp.ruhs[ruhid],
+                                FDP_EVT_RUH_IMPLICIT_RU_CHANGE)) {
+        return;
+    }
+    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
+    nvme_fdp_record_event(n, endgrp, false, &e);
 }
 
 /* A handle with no media behind it leaves its unit by starting it afresh */

@@ -306,6 +306,17 @@ uint64_t ftl_gc_rand(struct ssd *ssd);
 extern const struct femu_mapping_ops femu_mapping_hybrid_ops;
 extern const struct femu_mapping_ops femu_mapping_fast_ops;
 
+/* byte offset in the FTL of block 0 of @ns */
+static inline uint64_t ssd_ns_byte_base(struct ssd *ssd, NvmeNamespace *ns)
+{
+    /* Managed namespaces index their private FTL independently of placement. */
+    if (!ns || (ssd->n->ns_mgmt &&
+                (le16_to_cpu(ssd->n->id_ctrl.oacs) & NVME_OACS_NS_MGMT))) {
+        return 0;
+    }
+    return ns->backend_offset;
+}
+
 /*
  * Translate blocks [slba, slba + nlb) using the namespace's current format.
  * Fixed namespaces retain device-relative numbering; managed namespaces use
@@ -316,14 +327,8 @@ static inline uint64_t ssd_lba_byte_offset(struct ssd *ssd, NvmeRequest *req,
                                            uint64_t slba)
 {
     uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
-    uint64_t off = req->ns ? req->ns->backend_offset : 0;
 
-    /* Managed namespaces index their private FTL independently of placement. */
-    if (ssd->n->ns_mgmt &&
-        (le16_to_cpu(ssd->n->id_ctrl.oacs) & NVME_OACS_NS_MGMT)) {
-        off = 0;
-    }
-    return off + (slba << lbads);
+    return ssd_ns_byte_base(ssd, req->ns) + (slba << lbads);
 }
 
 static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,

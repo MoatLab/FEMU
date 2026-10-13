@@ -153,10 +153,23 @@ typedef struct QEMU_PACKED NvmeFdpEvent {
     uint32_t nsid;
     uint64_t type_specific[2];
     uint16_t rgid;
-    uint8_t  ruhid;
-    uint8_t  rsvd35[5];
+    uint16_t ruhid;     /* one byte, 34, until Base 2.3 widened it */
+    uint8_t  rsvd36[4];
     uint64_t vendor[3];
 } NvmeFdpEvent;
+
+/* Event Type Specific field of Media Reallocated (NVM Command Set 1.2) */
+typedef struct QEMU_PACKED NvmeFdpEventRealloc {
+    uint8_t  sef;
+    uint8_t  rsvd1;
+    uint16_t nlbam;
+    uint64_t lba;
+    uint8_t  rsvd12[4];
+} NvmeFdpEventRealloc;
+
+enum {
+    FDP_REALLOC_LBAV = 1 << 0,
+};
 
 typedef struct QEMU_PACKED NvmeFdpEventDescr {
     uint8_t evt;
@@ -1603,6 +1616,7 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeFdpStatsLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEventsLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEvent) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEventRealloc) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFdpEventDescr) != 2);
     QEMU_BUILD_BUG_ON(sizeof(NvmeRuhStatus) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeRuhStatusDescr) != 32);
@@ -2957,6 +2971,15 @@ bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
 void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
                            const NvmeReclaimUnit *ru);
+bool nvme_fdp_event_enabled(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
+                            uint8_t type);
+void nvme_fdp_event_filter_set(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
+                               uint64_t mask, bool on);
+void nvme_fdp_note_media_realloc(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                 uint16_t ruhid, uint64_t nlb, bool lbav,
+                                 uint64_t lba);
+void nvme_fdp_note_ruh_modified(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                uint16_t ruhid);
 void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
                            const NvmeFdpEvent *ev);
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,
