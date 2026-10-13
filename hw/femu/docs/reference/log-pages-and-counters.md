@@ -17,8 +17,8 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 16 | 8 | Pages relocated by garbage collection |
 | 24 | 8 | Pages actually programmed |
 | 32 | 8 | Reads of the most-read block since its erase |
-| 40 | 8 | Lines rewritten because of read stress |
-| 48 | 8 | Lines rewritten because of retention age |
+| 40 | 8 | Lines rewritten because of read stress (reclaim units under FDP) |
+| 48 | 8 | Lines rewritten because of retention age (reclaim units under FDP) |
 | 56 | 8 | Host read pages the write buffer saw |
 | 64 | 8 | Of those, pages the buffer held |
 | 72 | 8 | Host write pages the write buffer saw |

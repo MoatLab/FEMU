@@ -3611,6 +3611,24 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
                            mapped, lost, orphans);
 }
 
+/* FDP reclaim units of namespace 1 that sit in no place or in two */
+static char *femu_test_fdp_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    uint64_t bad;
+    bool resume;
+
+    if (!ns || !ns->ssd || !ns->ssd->fdp_enabled) {
+        error_setg(errp, "FDP check requires an FDP namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    bad = ssd_fdp_check_units(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return g_strdup_printf("%" PRIu64, bad);
+}
+
 /*
  * Completed commands, their summed modelled latency, namespace 1's host,
  * NAND and relocated pages and erases, the read, program and erase
@@ -3777,6 +3795,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,

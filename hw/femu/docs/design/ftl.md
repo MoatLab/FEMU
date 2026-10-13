@@ -1073,7 +1073,7 @@ does inside the FTL and what it interacts with.
 | `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | under FDP, a line's age counts from the retirement of its reclaim unit |
 | `pd_edge_wls`, `pd_edge_tiers`, `pd_open_tiers`, `pd_open_age` | program disturb: extra ECC tiers for bottom wordlines and part-programmed blocks; age from the first program | chosen tier values; `nand_block.wp` counts programs since the erase; refused with ZNS, OCSSD, NoSSD, `cxl_ssd` and shared namespaces ([NAND timing](nand-timing.md#program-disturb-terms)) |
 | `err_read_unc_ppm`, `err_write_fail_ppm` | fixed-period command failures | counted in SMART media errors |
-| `read_reclaim_limit` | read count that queues a line for rewrite | needs host writes to act; refused with FDP |
+| `read_reclaim_limit` | read count that queues a line for rewrite | needs host writes to act; under FDP it refreshes the whole reclaim unit ([FDP](fdp.md)) |
 | `wl_spread` | static wear levelling (`do_wear_level()`): at a fresh data line, swap it for the most worn free line and move the least worn full line into it | no write pointer of its own; credit of one per host page programmed, four lines per move; the earlier attempts are described in the function comment |
 | `age_scale` | multiplies data age (`ssd_data_age_ns()`) for retention refresh and the ECC age tier | not for cost-benefit collection, whose order one factor on every age does not change |
 | `retention_limit_sec` | line age that queues a line for rewrite | same |
@@ -1098,9 +1098,8 @@ layer.
 
 ### Interactions and refusals
 
-- **FDP** refuses `buffer_size`, `hot_cold_sep`, `read_reclaim_limit`,
-  `retention_limit_sec`, a `mapping` other than `page` and a `gc_policy`
-  other than `greedy`, with
+- **FDP** refuses `buffer_size`, `hot_cold_sep`, a `mapping` other than
+  `page` and a `gc_policy` other than `greedy`, with
   `FEMU bbssd: <name> has no effect under FDP`.
 - **Unknown names** for `mapping`, `gc_policy` and `cache_evict` are refused
   at realize.

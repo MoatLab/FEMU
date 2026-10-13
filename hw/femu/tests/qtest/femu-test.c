@@ -11554,6 +11554,224 @@ static void femu_test_query_fdp_replace(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* reclaim units x-fdp-check finds in no list, heap or frontier, or in two */
+static uint64_t femu_fdp_check(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-fdp-check'}}");
+    uint64_t bad;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    bad = g_ascii_strtoull(qdict_get_str(rsp, "return"), NULL, 10);
+    qobject_unref(rsp);
+    return bad;
+}
+
+/* valid pages in the reclaim units query-femu reports for handle @h */
+static uint64_t femu_fdp_handle_vpc(QTestState *qts, int h)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'reclaim-units','limit':4096",
+                              &rsp);
+    QList *rus = qdict_get_qlist(qdict_get_qdict(ns, "fdp"), "reclaim-units");
+    uint64_t vpc = 0;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(rus, e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (qdict_haskey(u, "handle") && qdict_get_int(u, "handle") == h) {
+            vpc += qdict_get_int(u, "vpc");
+        }
+    }
+    qobject_unref(rsp);
+    return vpc;
+}
+
+/*
+ * Read reclaim and retention refresh under FDP. Placement 0 fills unit A
+ * (128 pages), which retires full. The read path then queues A, and the
+ * next write, through placement 1, refreshes A into handle 0's own
+ * collection unit. @data selects the case:
+ *   "reads":    read_reclaim_limit=8, eight reads of page 0
+ *   "age":      retention_limit_sec at age_scale 10^6, one read of page 0
+ *   "open":     the reads hit A while it is still the active unit, so the
+ *               request is dropped; after A retires, nothing refreshes it
+ *   "copyback": gc_copyback=on; the refresh still reads every page
+ *   "off":      no knob; eight reads queue nothing
+ *   "victim":   16 pages of A are overwritten first, so A waits on a victim
+ *               heap (greedy, cost-benefit or per handle, by gc_strategy)
+ *               when the refresh takes it; 112 pages move
+ *   "gcqueue":  gc_copyback=on and background collection on every command.
+ *               A Deallocate of 120 pages of the queued A makes it a victim,
+ *               and collection takes it before any write: 8 pages move with
+ *               no copyback, and no refresh is counted
+ * Afterwards overwrite passes, 56 units of writes, make collection erase, so a
+ * unit left on two lists shows up as a lost page, a failed write or an
+ * x-fdp-check count.
+ */
+static void femu_test_fdp_refresh(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool age = !strcmp(mode, "age");
+    bool open = !strcmp(mode, "open");
+    bool off = !strcmp(mode, "off");
+    bool victim = !strcmp(mode, "victim");
+    bool gcq = !strcmp(mode, "gcqueue");
+    uint64_t moved = victim ? 112 : 128;
+    uint64_t host = victim ? 160 : 144;
+    uint64_t span = gcq ? 512 : 1024;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t gc0, rr0, rt0, cb0, ruamw3, gc, rr, rt, cb, hbmw, mbmw;
+    uint64_t mapped, lost, orphans;
+    uint64_t hosts[8];
+    uint64_t lpn;
+    uint8_t st[64];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6d, 16 * 4096);
+    if (open) {
+        /* A is the active unit: reads now, the rest of A afterwards */
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list,
+                                                        0)), ==, NVME_SUCCESS);
+        for (i = 0; i < 8; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        for (lpn = 16; lpn < 128; lpn += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf,
+                                                            list, 0)), ==,
+                            NVME_SUCCESS);
+        }
+    } else {
+        for (lpn = 0; lpn < 128; lpn += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf,
+                                                            list, 0)), ==,
+                            NVME_SUCCESS);
+        }
+        if (victim) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 112, 16, buf,
+                                                            list, 1)), ==,
+                            NVME_SUCCESS);
+        }
+        g_usleep(10 * 1000);
+        for (i = 0; i < (age ? 1 : 8); i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    gc0 = femu_c0h_field(&c, log, 16);
+    rr0 = femu_c0h_field(&c, log, 40);
+    rt0 = femu_c0h_field(&c, log, 48);
+    cb0 = femu_c0h_field(&c, log, 248);
+    ruamw3 = femu_ruh_ruamw(&c, log, 3);
+    qtest_memset(qts, buf, 0x6d, 16 * 4096);
+    if (gcq) {
+        g_assert_cmphex(femu_dealloc_pages(&c, 8, 120, list), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 128, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    gc = femu_c0h_field(&c, log, 16) - gc0;
+    rr = femu_c0h_field(&c, log, 40) - rr0;
+    rt = femu_c0h_field(&c, log, 48) - rt0;
+    cb = femu_c0h_field(&c, log, 248) - cb0;
+    g_test_message("FDP refresh %s: %" PRIu64 " read reclaims, %" PRIu64
+                   " retention refreshes, %" PRIu64 " pages moved, %" PRIu64
+                   " by copyback", mode, rr, rt, gc, cb);
+
+    /* media bytes are host bytes plus the moves */
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, st, sizeof(st));
+    hbmw = ldq_le_p(st);
+    mbmw = ldq_le_p(st + 16);
+    g_assert_cmpuint(hbmw, ==, host * 4096);
+    g_assert_cmpuint(mbmw, ==, hbmw + gc * 4096);
+
+    if (open || off) {
+        g_assert_cmpuint(rr + rt, ==, 0);
+        g_assert_cmpuint(gc, ==, 0);
+    } else if (gcq) {
+        /* collection took the queued unit: no copyback, no refresh counted */
+        g_assert_cmpuint(rr + rt, ==, 0);
+        g_assert_cmpuint(gc, ==, 8);
+        g_assert_cmpuint(cb, ==, 0);
+    } else {
+        g_assert_cmpuint(rr, ==, age ? 0 : 1);
+        g_assert_cmpuint(rt, ==, age ? 1 : 0);
+        g_assert_cmpuint(gc, ==, moved);
+        /* no copyback: the refresh passes every page through the controller */
+        g_assert_cmpuint(cb, ==, 0);
+        /* handle 0 is persistently isolated: its pages stay with it */
+        g_assert_cmpuint(femu_fdp_handle_vpc(qts, 0), ==, moved);
+        g_assert_cmpuint(femu_fdp_handle_vpc(qts, 3), ==, 0);
+        g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, ruamw3);
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, gcq ? 24 : 144);
+    /* every unit's state agrees with the lists and heaps that count it */
+    femu_query_check_fdp(&c, log, gcq ? 24 : 144, hosts);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0x6d);
+    g_assert_cmphex(qtest_readb(qts, buf + 511), ==, 0x6d);
+
+    /*
+     * One full pass over the namespace, then twelve over half of its 16-page
+     * chunks, each in its own order (37 and the chunk count are coprime).
+     * Free units fall below the collection threshold, so collection must
+     * take units from the heaps the refresh touched and erase them.
+     */
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, st, sizeof(st));
+    gc0 = ldq_le_p(st + 32);
+    for (i = 0; i < 13; i++) {
+        uint64_t chunks = span / 16;
+
+        for (uint64_t j = 0; j < (i ? chunks / 2 : chunks); j++) {
+            lpn = ((j * 37 + i * 11) % chunks) * 16;
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf,
+                                                            list, i & 1)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, span);
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, st, sizeof(st));
+    g_assert_cmpuint(ldq_le_p(st + 32), >, gc0);
+    femu_query_check_fdp(&c, log, span, hosts);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    if (gcq) {
+        /* the request died with the unit; reuse must not revive it */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 40) - rr0, ==, 0);
+    }
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * Copyback in FDP collection, on the geometry of femu_test_gc_copyback() with
  * an 11 MiB namespace: a reclaim unit is one 128-page line over 2 channels x
@@ -18649,20 +18867,20 @@ static void femu_test_fdp_csd_knobs(void *obj, void *data,
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    const char *knobs[] = { "buffer_size", "read_reclaim_limit" };
-    unsigned values[] = { 16, 1000 };
     int modes[] = { 1, 4 };
     QDict *rsp;
 
     for (int m = 0; m < ARRAY_SIZE(modes); m++) {
-        for (int k = 0; k < ARRAY_SIZE(knobs); k++) {
+        for (int k = 0; k < 2; k++) {
+            /* buffer_size=16, then gc_policy=fifo */
             rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                             "'driver':'femu','id':'fdp-knob','addr':'5',"
                             "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
                             "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
                             "'blks_per_pl':80,'pls_per_lun':1,"
                             "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
-                            "%s:%u}}", modes[m], knobs[k], values[k]);
+                            "'buffer_size':%d,'gc_policy':%s}}", modes[m],
+                            k ? 0 : 16, k ? "fifo" : "greedy");
             g_assert_true(qdict_haskey(rsp, "error"));
             g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
                                                                   "error"),
@@ -32195,6 +32413,78 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-refresh-reads", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"reads",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8"
+    });
+    qos_add_test("fdp-refresh-age", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"age",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,retention_limit_sec=100,age_scale=1000000"
+    });
+    qos_add_test("fdp-refresh-open", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"open",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8"
+    });
+    qos_add_test("fdp-refresh-copyback", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"copyback",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8,gc_copyback=on"
+    });
+    qos_add_test("fdp-refresh-off", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub"
+    });
+    qos_add_test("fdp-refresh-victim", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"victim",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8"
+    });
+    qos_add_test("fdp-refresh-victim-cb", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"victim",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8,gc_strategy=1"
+    });
+    qos_add_test("fdp-refresh-victim-ruh", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"victim",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8,gc_strategy=4"
+    });
+    qos_add_test("fdp-refresh-gcqueue", "femu", femu_test_fdp_refresh,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gcqueue",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=2,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,read_reclaim_limit=8,gc_copyback=on,gc_thres_pcent=10,gc_thres_pcent_high=40"
     });
     qos_add_test("fdp-copyback-pi-off", "femu", femu_test_fdp_copyback,
                  &(QOSGraphTestOptions) {

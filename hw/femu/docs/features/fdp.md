@@ -211,7 +211,7 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of this geometry, or unset` | `fdp.runs` does not match the geometry. |
 | `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | `namespaces` above 1. |
 | `femu-subsys with fdp=on takes a single controller` | A second controller joins the FDP subsystem. |
-| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. The same message names `hot_cold_sep`, `read_reclaim_limit`, `retention_limit_sec`, a `mapping` other than `page` and a `gc_policy` other than `greedy`. A CSD controller gets the same messages with `FEMU csd:`. |
+| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. The same message names `hot_cold_sep`, a `mapping` other than `page` and a `gc_policy` other than `greedy`. A CSD controller gets the same messages with `FEMU csd:`. |
 | `meta: not supported with placement (fdp)` | `meta` (with a valid `mc`) under FDP. |
 | `streams requires bbssd or NoSSD with FDP disabled` | `streams=on` under FDP. |
 | `the key-value command set and FDP cannot share a controller: ...` | A KV namespace under FDP. |

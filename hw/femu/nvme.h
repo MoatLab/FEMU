@@ -2990,6 +2990,8 @@ uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
                        uint64_t *orphans);
+/* reclaim units not held by exactly one list, heap or frontier; 0 is right */
+uint64_t ssd_fdp_check_units(struct ssd *ssd);
 void ssd_hybrid_stats(struct ssd *ssd, uint64_t *switches,
                       uint64_t *full, uint64_t *erases);
 uint64_t ssd_max_block_reads(struct ssd *ssd);

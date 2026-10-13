@@ -411,11 +411,37 @@ of the property reference; the controller-side ones are under
 | `gc_copyback` | `femu` | Moves collected pages on their die; off by default. A copyback skips ECC (timing only in FEMU). |
 | BlackBox geometry (`nchs`, `luns_per_ch`, `pls_per_lun`, `blks_per_pl`, `pgs_per_blk`, `secs_per_pg`, `secsz`) | `femu` | Sets RUNS (one superblock) and the number of lines, hence units. |
 
-Refused under FDP on a bbssd controller: `buffer_size`, `hot_cold_sep`,
-`read_reclaim_limit`, `retention_limit_sec`, a `mapping` other than `page`,
-and a `gc_policy` other than `greedy`. `trim_lat_ns` and `ecc_retention_sec`
-apply as without FDP. A unit's lines take their close time when the unit
-retires, and lose it when collection frees the unit. Refused on any controller with FDP: more than one namespace, a
+Refused under FDP on a bbssd controller:
+
+- `buffer_size` and `hot_cold_sep`;
+- a `mapping` other than `page`;
+- a `gc_policy` other than `greedy`.
+
+The FTL applies `trim_lat_ns` and `ecc_retention_sec` as without FDP. A unit's lines
+take their close time when the unit retires, and lose it when collection
+frees the unit.
+
+`read_reclaim_limit` and `retention_limit_sec` refresh a whole reclaim unit.
+A read queues the unit of its line, as in line mode. The next write moves
+its valid pages to where collection would move them, then erases the unit.
+
+```
+ read of unit U: read count >= read_reclaim_limit, or age >= retention_limit_sec
+   --> U queued (one at a time)
+ next write: no group at the high watermark, 2 or more free units
+   --> U active (curr_ru or gc_ru)   --> request dropped
+   --> U full or a victim            --> taken off its list
+   --> move every valid page, no copyback --> erase U, free U
+   --> C0h read_reclaims or retention_refreshes + 1, MBMW + moved bytes
+```
+
+The refresh logs no FDP event. A move of initially isolated data, and a
+rotation of that handle's unit by the move, go unreported. The event
+reporting of moves is an open item, for collection too.
+Collection that frees a queued unit first drops the request, and the
+counters do not move. A collection of a queued unit does not use copyback.
+
+Refused on any controller with FDP: more than one namespace, a
 second controller in the subsystem, `meta`, `streams`, a KV namespace.
 Each message is listed in the [feature guide](../features/fdp.md#limits-and-refusals).
 

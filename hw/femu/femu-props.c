@@ -440,11 +440,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "read_reclaim_limit",
       "bbssd, CSD: when a host read finds its block has taken this many "
       "reads since its erase, that line is queued and rewritten on a "
-      "following write, one line at a time; 0 disables, refused with FDP" },
+      "following write, one line at a time (under FDP, its reclaim unit); "
+      "0 disables" },
     { "retention_limit_sec",
       "bbssd, CSD: when a host read hits a line filled at least this many "
       "seconds earlier, the line is queued and rewritten on a following "
-      "write; 0 disables, refused with FDP" },
+      "write (under FDP, its reclaim unit); 0 disables" },
     { "wl_spread",
       "bbssd, CSD: static wear levelling starts when the erases of lines in "
       "service differ by more than this and stops at half of it; it moves "

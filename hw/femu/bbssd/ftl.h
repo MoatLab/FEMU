@@ -350,6 +350,8 @@ struct FemuReclaimUnit {
     /* cost-benefit GC attributes */
     uint64_t last_invalidated_time;
     float my_cb;
+    /* a refresh has taken the unit off every list for its move */
+    bool reclaiming;
 };
 
 struct FemuRuHandle {

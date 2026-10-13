@@ -461,7 +461,8 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
              (float)ru->last_invalidated_time));
     }
     fdp_victim_reprioritize(ssd, ru);
-    if (was_full_ru) {
+    /* a unit a refresh is moving is on no list until the move ends */
+    if (was_full_ru && !ru->reclaiming) {
         QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
         fdp_victim_enqueue(ssd, ru);
     }
@@ -925,6 +926,13 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ru->ruh_pos = 0;
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
+    ru->reclaiming = false;
+
+    /* a refresh queued for this unit has nothing left to move */
+    if (ssd->read_reclaim_line && ssd->read_reclaim_line->my_ru == ru) {
+        ssd->read_reclaim_line = NULL;
+        ssd->reclaim_by_age = false;
+    }
 
     fdp_set_ru_write_pointer(ssd, ru);
 
@@ -939,42 +947,48 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
 }
 
 /*
- * do_gc_fdp_style - FDP garbage collection: select victim RU, migrate valid
- * pages to GC RU, then free the victim
- *  gaurantees one RU to be reclaimed, if victim is valid.
+ * The handle a unit's valid pages move to: a persistently isolated handle
+ * keeps its own data (gc_ru), and the initially isolated ones share the last
+ * handle's active unit.
  */
-int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
-                           bool force)
+static FemuRuHandle *fdp_dest_ruh(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    if (ru->ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        return ru->ruh;
+    }
+    ftl_assert(ru->ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED);
+    return &ssd->ruhs[ssd->nruhs - 1];
+}
+
+/*
+ * File a unit a pass could not empty back where a collection finds it: on
+ * the full list while every page is valid, otherwise as a victim.
+ */
+static void fdp_file_back(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
+
+    if (ru->vpc == ru->npages) {
+        QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
+    } else {
+        fdp_victim_enqueue(ssd, ru);
+    }
+}
+
+/*
+ * Empty @victim_ru into @dest_ruh's collection frontier, erase it and free it.
+ * The caller has taken it off every list. @copyback lets pages move on their
+ * die; @event logs the handle change collection reports. Returns -1, with the
+ * unit filed back and the moves kept, when there is no room.
+ */
+static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
+                          FemuRuHandle *dest_ruh, bool copyback, bool event)
 {
     struct ssdparams *spp = &ssd->sp;
-    FemuReclaimUnit *victim_ru;
-    //FemuReclaimUnit *new_ru;
+    FemuRuHandle *victim_ruh = victim_ru->ruh;
     struct ppa ppa;
     int vpc_cnt = 0;
     int blk_cnt = 0;
-    victim_ru = select_victim_ru(ssd, rgid, force);
-    if (!victim_ru) {
-        //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
-        return -1;
-    }
-
-    /*
-     * Where the victim's pages go depends on its handle's isolation: a
-     * persistently isolated handle relocates into a unit of its own (gc_ru),
-     * so collected data never mixes with another handle's; the initially
-     * isolated one, always the last handle, relocates into its active unit.
-     */
-    FemuRuHandle *victim_ruh = victim_ru->ruh;
-    FemuRuHandle *dest_ruh = NULL;
-
-    if (victim_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-        dest_ruh = victim_ruh;
-    } else if (victim_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
-        dest_ruh = &ssd->ruhs[ssd->nruhs - 1];
-    } else {
-        ftl_err("Undefined RUHT.");
-        ftl_assert(false && __LINE__);
-    }
 
     /*
      * A victim with pages to move needs somewhere to put them; with no free
@@ -983,10 +997,9 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
      * be collected even then: it is what gives the frontier a unit again.
      */
     if (victim_ru->vpc && !fdp_gc_frontier(ssd, dest_ruh, victim_ru->rgidx)) {
-        fdp_victim_enqueue(ssd, victim_ru);
+        fdp_file_back(ssd, victim_ru);
         return -1;
     }
-    ftl_assert(dest_ruh!=NULL);
     /* sanity: don't GC an active RU */
     if (victim_ru == victim_ru->ruh->curr_ru) {
         ftl_err("Victim RU %d is active, skipping GC\n", victim_ru->ruidx);
@@ -996,11 +1009,10 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     }
 
     ftl_note_victim(ssd, (uint64_t)victim_ru->rgidx << 16 | victim_ru->ruidx);
-    FDP_TRACE(ssd, "GC_START rgid=%u ruhid=%u victim_ru=%u "
-              "victim_vpc=%d isolation=%s gc_type=%s\n",
-              rgid, ruhid, victim_ru->ruidx, victim_ru->vpc,
+    FDP_TRACE(ssd, "GC_START victim_ru=%u victim_vpc=%d isolation=%s\n",
+              victim_ru->ruidx, victim_ru->vpc,
               (victim_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) ?
-              "PI" : "II", (force) ? "FORCE" : "BACK" );
+              "PI" : "II");
 
     /*
      * Migrate every valid page before erasing any block. If the destination
@@ -1008,14 +1020,14 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
      * not moved; a block erased before that point would be counted erased
      * again when the unit is next collected.
      */
-    if (spp->gc_copyback) {
+    if (copyback) {
         if (!fdp_reclaim_ru_copyback(ssd, victim_ru, dest_ruh, &vpc_cnt)) {
             fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
-            fdp_victim_enqueue(ssd, victim_ru);
+            fdp_file_back(ssd, victim_ru);
             return -1;
         }
     }
-    for (int i = 0; i < spp->lines_per_ru && !spp->gc_copyback; i++) {
+    for (int i = 0; i < spp->lines_per_ru && !copyback; i++) {
         ppa.g.blk = victim_ru->lines[i]->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -1027,7 +1039,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                                                    victim_ru->rgidx,
                                                    &vpc_cnt)) {
                         fdp_count_gc_writes(ssd, victim_ru, vpc_cnt);
-                        fdp_victim_enqueue(ssd, victim_ru);
+                        fdp_file_back(ssd, victim_ru);
                         return -1;
                     }
                 }
@@ -1065,7 +1077,7 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     }
 
     /* generate controller event for RU change due to GC */
-    if (ssd->n->subsys) {
+    if (event && ssd->n->subsys) {
         NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
         NvmeRuHandle *nvme_ruh = victim_ru->ruh->ruh;
         if (nvme_ruh &&
@@ -1090,6 +1102,95 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
      */
     mark_ru_free(ssd, victim_ru->rgidx, victim_ru);
     return 0;
+}
+
+/*
+ * do_gc_fdp_style - FDP garbage collection: select victim RU, migrate valid
+ * pages to GC RU, then free the victim
+ *  gaurantees one RU to be reclaimed, if victim is valid.
+ */
+int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
+                           bool force)
+{
+    FemuReclaimUnit *victim_ru;
+    struct line *queued = ssd->read_reclaim_line;
+    bool copyback;
+
+    victim_ru = select_victim_ru(ssd, rgid, force);
+    if (!victim_ru) {
+        //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
+        return -1;
+    }
+
+    /*
+     * A unit queued for a refresh holds data the refresh must pass through
+     * the controller's ECC, so collecting it first must not copy it on die.
+     */
+    copyback = ssd->sp.gc_copyback && !(queued && queued->my_ru == victim_ru);
+    return fdp_collect_ru(ssd, victim_ru, fdp_dest_ruh(ssd, victim_ru),
+                          copyback, true);
+}
+
+/*
+ * Refresh the unit holding the line the read path queued, for read stress or
+ * retention age, as do_read_reclaim() does for a line. One unit per write,
+ * and only when no group is short of free units. The pages move through the
+ * controller (no copyback), to where collection would move them. The move
+ * logs no FDP event, even when it rotates an initially isolated handle's
+ * unit: the event reporting of moves is an open item.
+ */
+static void fdp_do_read_reclaim(struct ssd *ssd)
+{
+    struct line *line = ssd->read_reclaim_line;
+    FemuReclaimUnit *ru;
+    struct ru_mgmt *rm;
+    bool by_age;
+    int ok;
+
+    if (!line || should_gc_high_fdp_style(ssd) >= 0) {
+        return;
+    }
+    ru = line->my_ru;
+    rm = ssd->rg[ru->rgidx].ru_mgmt;
+    if (rm->free_ru_cnt < 2) {
+        return;
+    }
+
+    ssd->read_reclaim_line = NULL;
+    by_age = ssd->reclaim_by_age;
+    ssd->reclaim_by_age = false;
+
+    /* data still being written: leave it alone, as line mode does */
+    for (int i = 0; i < (int)ssd->nruhs; i++) {
+        if (ssd->ruhs[i].curr_ru == ru || ssd->ruhs[i].gc_ru == ru) {
+            return;
+        }
+    }
+    if (ru->pos || ru->ruh_pos) {
+        fdp_victim_dequeue(ssd, ru);
+    } else if (ru->vpc == ru->npages) {
+        QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
+    } else {
+        /* on no list: free, so there is nothing to move */
+        return;
+    }
+
+    ru->reclaiming = true;
+    ok = fdp_collect_ru(ssd, ru, fdp_dest_ruh(ssd, ru), false, false);
+    ru->reclaiming = false;
+    if (ok < 0) {
+        /* filed back with pages still on it: try again on a later write */
+        if (ru->vpc && !ssd->read_reclaim_line) {
+            ssd->read_reclaim_line = line;
+            ssd->reclaim_by_age = by_age;
+        }
+        return;
+    }
+    if (by_age) {
+        ssd->retention_refreshes++;
+    } else {
+        ssd->read_reclaims++;
+    }
 }
 
 static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
@@ -1236,6 +1337,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
      */
     passes = ssd->gc_stall_passes;
     fdp_gc_until_clear(ssd, rgid, ruhid);
+    /* refresh at most one read-stressed or aged unit per write */
+    fdp_do_read_reclaim(ssd);
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
@@ -1945,6 +2048,100 @@ uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
     return lat;
+}
+
+/* count one place that holds @ru */
+static void fdp_check_place(struct ssd *ssd, FemuReclaimUnit *ru,
+                            uint8_t *seen)
+{
+    uint64_t i = (uint64_t)ru->rgidx * ssd->rg[0].tt_nru + ru->ruidx;
+
+    if (seen[i] < UINT8_MAX) {
+        seen[i]++;
+    }
+}
+
+/*
+ * Heap @pq: each entry is one place, and its stored position must match.
+ * Entries sit in d[1] to d[size - 1]; pqueue_size() is size - 1.
+ */
+static void fdp_check_heap(struct ssd *ssd, pqueue_t *pq, bool ruh_heap,
+                           uint8_t *seen, uint64_t *bad)
+{
+    for (size_t i = 1; i < pq->size; i++) {
+        FemuReclaimUnit *ru = pq->d[i];
+
+        fdp_check_place(ssd, ru, seen);
+        if ((size_t)(ruh_heap ? ru->ruh_pos : ru->pos) != i) {
+            (*bad)++;
+        }
+    }
+}
+
+/*
+ * ssd_fdp_check_units - count reclaim units not held by exactly one place:
+ * the free list, the full list, a group victim heap, or a handle's write or
+ * collection frontier. Under the per-handle strategy a victim of a
+ * persistently isolated handle must also sit once in that handle's heap,
+ * and no other unit may. Heap entries whose stored position is wrong count
+ * too. A test hook; 0 is consistent.
+ */
+uint64_t ssd_fdp_check_units(struct ssd *ssd)
+{
+    uint64_t total = ssd->nrg * ssd->rg[0].tt_nru;
+    g_autofree uint8_t *seen = g_new0(uint8_t, total);
+    g_autofree uint8_t *in_grp = g_new0(uint8_t, total);
+    g_autofree uint8_t *in_ruh = g_new0(uint8_t, total);
+    uint64_t bad = 0;
+    FemuReclaimUnit *ru;
+
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+
+        QTAILQ_FOREACH(ru, &rm->free_ru_list, entry) {
+            fdp_check_place(ssd, ru, seen);
+        }
+        QTAILQ_FOREACH(ru, &rm->full_ru_list, entry) {
+            fdp_check_place(ssd, ru, seen);
+        }
+        fdp_check_heap(ssd, rm->victim_ru_pq, false, in_grp, &bad);
+        if (rm->victim_ru_cb != rm->victim_ru_pq && rm->victim_ru_cb) {
+            fdp_check_heap(ssd, rm->victim_ru_cb, false, in_grp, &bad);
+        }
+    }
+    for (uint64_t h = 0; h < ssd->nruhs; h++) {
+        FemuRuHandle *ruh = &ssd->ruhs[h];
+
+        if (ruh->curr_ru) {
+            fdp_check_place(ssd, ruh->curr_ru, seen);
+        }
+        if (ruh->gc_ru && ruh->gc_ru != ruh->curr_ru) {
+            fdp_check_place(ssd, ruh->gc_ru, seen);
+        }
+        /* a handle's heap repeats victims its group heap holds */
+        if (ruh->ru_mgmt && ruh->ru_mgmt->victim_ru_pq) {
+            pqueue_t *pq = ruh->ru_mgmt->victim_ru_pq;
+
+            fdp_check_heap(ssd, pq, true, in_ruh, &bad);
+            for (size_t i = 1; i < pq->size; i++) {
+                bad += ((FemuReclaimUnit *)pq->d[i])->ruh != ruh;
+            }
+        }
+    }
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+
+        for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
+            FemuReclaimUnit *u = &ssd->rg[g].rus[j];
+            uint64_t i = g * ssd->rg[0].tt_nru + j;
+            bool want_ruh = in_grp[i] && rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
+                            u->ruh && u->ruh->ru_mgmt;
+
+            bad += seen[i] + in_grp[i] != 1;
+            bad += in_ruh[i] != (want_ruh ? 1 : 0);
+        }
+    }
+    return bad;
 }
 
 /*
