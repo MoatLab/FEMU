@@ -12269,6 +12269,66 @@ static uint64_t femu_fdp_check(QTestState *qts)
     return bad;
 }
 
+static int femu_pd2_events(FemuCtrlState *c, uint64_t log, bool host,
+                           uint8_t type, uint16_t *ruhid);
+static uint16_t femu_fdp_wb_flush(FemuCtrlState *c);
+
+/*
+ * RUH Update on a CSD namespace moves the handle to a fresh unit, as on a
+ * BlackBox one. It used to reset only the RUAMW of the unit the FTL kept
+ * writing. 128-page units: 2 pages, an update (full room, the unit check
+ * holds, host event 0h for the part-written unit), then 1 page. With
+ * @data "buffer" the pages are held: the update writes the 2 pages to the
+ * old unit first, and the last page reaches the unit at a Flush.
+ */
+static void femu_test_fdp_csd_ruh_update(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool held = data && !strcmp(data, "buffer");
+    uint16_t ruhid = 0xffff;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t bpp = 4096 / 512;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x77, 2 * 4096);
+    qtest_writew(qts, pids, 0);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 2, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, held ? 0 : 2);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, (held ? 128 : 126) * bpp);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 2);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 128 * bpp);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    g_assert_cmpint(femu_pd2_events(&c, log, true, 0x00, &ruhid), ==, 1);
+    g_assert_cmpint(ruhid, ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 2, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    if (held) {
+        g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 128 * bpp);
+        g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 127 * bpp);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_read_pages(&c, 1, 1, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x77);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* valid pages in the reclaim units query-femu reports for handle @h */
 static uint64_t femu_fdp_handle_vpc(QTestState *qts, int h)
 {
@@ -12812,8 +12872,9 @@ static void femu_test_fdp_buffer(void *obj, void *data, QGuestAllocator *alloc)
  * "ii" (fdpsub-ii) writes the victim through placement 3, the Initially
  * Isolated last handle, and 16 more pages after it, so collection writes
  * into that handle's active unit, part used: 16 + 64 of its 128 pages. RUAMW
- * counts host writes only, so 48 more host pages through placement 3 then
- * fill that unit and the handle shows a fresh one. On, every move finds its
+ * counts the moves too, so it shows 48 pages of room, and 48 more host pages
+ * through placement 3 fill that unit: the handle shows a fresh one. On, every
+ * move finds its
  * destination die; off, every move puts two transfers on the channels. The
  * media byte counters must show the moves.
  */
@@ -12909,7 +12970,7 @@ static void femu_test_fdp_copyback(void *obj, void *data,
         ruamw1 = femu_ruh_ruamw(&c, log, 3);
         g_test_message("RUAMW of placement 3: %" PRIu64 " before, %" PRIu64
                        " after 48 pages", ruamw0, ruamw1);
-        g_assert_cmpuint(ruamw0, ==, 112 * 8);
+        g_assert_cmpuint(ruamw0, ==, 48 * 8);
         g_assert_cmpuint(ruamw1, ==, 128 * 8);
     }
 
@@ -32179,7 +32240,7 @@ static void femu_pd2_fdp_bytes(FemuCtrlState *c, uint64_t log, uint64_t *hbmw,
  *              no new 81h: the host never sees a collection unit.
  *   "read-ii": the same first step on fdpsub-ii through placement 3, the
  *              initially isolated handle that collection also writes: the
- *              2 pages move into its fresh unit.
+ *              2 pages move into its fresh unit, and its RUAMW shows them.
  *   "quiet":   "read" with event 81h turned off for placement 0: the move
  *              and the refresh happen, and no 81h is logged. The device
  *              also uses the per-handle collection policy (gc_strategy=4),
@@ -32252,6 +32313,10 @@ static void femu_test_pd2_fdp(void *obj, void *data, QGuestAllocator *alloc)
         femu_pd2_fdp_bytes(&c, log, &hbmw, &mbmw);
         g_assert_cmpuint(hbmw - hbmw0, ==, 4096);
         g_assert_cmpuint(mbmw - mbmw0, ==, 4096 + 2 * 4096);
+        if (ii) {
+            g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==,
+                             (16 - 2) * per_page);
+        }
         nmapped = 5;
         if (!ii) {
             /* page 0 now sits in handle 0's open collection unit */
@@ -32279,6 +32344,112 @@ static void femu_test_pd2_fdp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
     femu_pd2_readback(&c, qts, buf, 4, 0x6e);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * RUAMW counts every program into a unit, also a relocation into the active
+ * unit of the initially isolated handle. fdpsub-ii, one LUN, 16-page units,
+ * buffer_size=32, pd_open_read_limit=4, ONFI read cache sequences. An FUA
+ * write puts 2 pages in handle 3's unit: 14 pages of room. Two reads of
+ * both pages queue the open unit. A buffered write through placement 1
+ * moves handle 3 to a fresh unit and refreshes the old one into it, so the
+ * fresh unit has 14 pages of room, not 16. One more held page through
+ * placement 3 and a Flush leave 13.
+ */
+static void femu_test_pd2_fdp_ruamw(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t per_page = 4096 / 512;
+    uint64_t mapped, lost, orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x71, 2 * 4096);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 0, 2, buf, list, 3, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(femu_read_pages(&c, 0, 2, buf, list), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_fdp_wb_write(&c, 50, 1, buf, list, 1, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+    g_test_message("RUAMW of placement 3 after the refresh: %" PRIu64,
+                   femu_ruh_ruamw(&c, log, 3));
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    g_assert_cmpuint(femu_fdp_open_vpc(qts, 3), ==, 2);
+
+    g_assert_cmphex(femu_fdp_wb_write(&c, 60, 1, buf, list, 3, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 13 * per_page);
+
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 4);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 2, 0x71);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Format keeps the pages a unit has programmed, so RUAMW must not report
+ * them as room again. FDP, 16-page units: 2 pages through placement 0, then
+ * a Format to the same 512-byte blocks leaves 14 pages of room, and a Format
+ * to 4 KiB blocks counts the same room in 4 KiB blocks. A write after it
+ * takes one more page. x-fdp-check holds RUAMW against the pages each time.
+ */
+static void femu_test_fdp_format_ruamw(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x72, 2 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 2, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 14 * 8);
+
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 14 * 8);
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 3, 0)), ==, NVME_SUCCESS);
+    c.lba_size = 4096;
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 14);
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 13);
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_readback(&c, qts, buf, 1, 0x72);
 
     guest_free(alloc, log);
     guest_free(alloc, list);
@@ -33621,6 +33792,21 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "pd_open_read_limit=4,subsys=fdpsub-ii"
     });
+    qos_add_test("pd2-fdp-ruamw", "femu", femu_test_pd2_fdp_ruamw,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=25,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "buffer_size=32,pd_open_read_limit=4,onfi_mode=26,"
+            "onfi_cache_read=1,subsys=fdpsub-ii"
+    });
+    qos_add_test("fdp-format-ruamw", "femu", femu_test_fdp_format_ruamw,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub"
+    });
     qos_add_test("onfi-refused", "femu", femu_test_onfi_refused, NULL);
     qos_add_test("onfi-page", "femu", femu_test_onfi_page, NULL);
     qos_add_test("onfi-m26", "femu", femu_test_onfi,
@@ -34494,6 +34680,21 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
+    });
+    qos_add_test("fdp-csd-ruh-update", "femu", femu_test_fdp_csd_ruh_update,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,femu_mode=4,fdm_size=1"
+    });
+    qos_add_test("fdp-csd-ruh-update-buffer", "femu",
+                 femu_test_fdp_csd_ruh_update, &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,femu_mode=4,fdm_size=1,buffer_size=16"
     });
     qos_add_test("fdp-ruh-update-full", "femu", femu_test_fdp_ruh_update_full,
                  &(QOSGraphTestOptions) {

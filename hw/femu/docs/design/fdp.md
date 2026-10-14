@@ -207,6 +207,26 @@ per placement handle and reclaim group: PID, RUHID, EARUTR (always 0) and
 the RUAMW of the handle's current unit, or 0 while the handle has none
 because its last unit filled with no free unit to follow it.
 
+RUAMW is the room left in a unit, in logical blocks. Each unit counts the
+bytes programmed into it since its erase, from every path:
+
+```text
+ host program (direct, FUA, Write Zeroes) --+
+ buffer write-back                         --+--> ru->prog_bytes += page size
+ relocation (collection, refresh, copyback) -+         |
+ pad (pd_open_close_sec)                   --+         v
+                          RUAMW = (RU size - prog_bytes) >> LBA size bits
+ unit freed (erase)  --> prog_bytes = 0, RUAMW = a full unit
+ Format              --> RUAMW from prog_bytes again, in the new LBA size
+```
+
+Collection writes into the active unit of the last handle of an
+Initially Isolated configuration, so that handle's RUAMW drops for the
+moved pages too. The remaining bytes round down once, so a page smaller
+than a block counts the same on every path. `x-fdp-check` (a test hook)
+counts a unit whose bytes differ from its valid and invalid pages, or
+whose RUAMW differs from the room they leave.
+
 ## Garbage collection
 
 ```text
@@ -514,8 +534,8 @@ different blocks of it. The other commands:
 
 HBMW counts pages a write accepts, and MBMW pages that reach the media,
 so MBMW can be below HBMW when the buffer absorbs rewrites. RUAMW drops
-when a page reaches its unit. With a buffer, each unit counts its own
-host bytes for RUAMW, for written back and direct pages alike. The
+when a page reaches its unit, for written back and direct pages alike
+(see RUAMW above). The
 admin commands above charge no modelled time for their write-back.
 
 The program disturb actions work on units too

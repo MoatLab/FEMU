@@ -2309,8 +2309,8 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
         }
     }
 
-    /* units with media behind them belong to the FTL thread */
-    if (NS_BBSSD(ns)) {
+    /* units with media behind them belong to the FTL thread, CSD's too */
+    if (NS_BBSSD(ns) || NS_CSD(ns)) {
         req->nr_fdp_pids = npid;
         req->fdp_pids = g_steal_pointer(&pids);
         return NVME_SUCCESS;

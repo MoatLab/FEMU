@@ -371,8 +371,11 @@ struct FemuReclaimUnit {
 
     /* retirement order for the fifo policy; 0 while the unit is free */
     uint64_t close_seq;
-    /* host bytes programmed into the unit, for RUAMW with a write buffer */
-    uint64_t wb_bytes;
+    /*
+     * Bytes programmed since the unit was erased: host pages, write-backs,
+     * relocations and pads. RUAMW is the room this leaves.
+     */
+    uint64_t prog_bytes;
 
     /* cost-benefit GC attributes */
     uint64_t last_invalidated_time;

@@ -129,7 +129,9 @@ sudo nvme fdp status /dev/nvme0n1
 `configs` lists the handles and the reclaim unit size, `usage` gives each
 handle's attributes, `stats` gives host and media bytes written, and
 `status` lists the placement identifiers the namespace accepts with the
-space left in each one's reclaim unit (RUAMW).
+space left in each one's reclaim unit (RUAMW). Every page programmed into
+the unit counts. This includes pages that collection moves into the unit
+of an Initially Isolated handle. A Format does not give the room back.
 Every handle backs a placement handle of the namespace, so `usage` reports
 each one as host specified:
 

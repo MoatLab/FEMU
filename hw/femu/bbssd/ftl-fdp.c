@@ -842,6 +842,33 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
 };
 
 /*
+ * Set the RUAMW of @ru from the bytes programmed into it. The remaining
+ * bytes round down to whole logical blocks, so a page smaller than a block
+ * and a page of any program path count the same way.
+ */
+static void fdp_ru_sync_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
+
+    if (ru->nvme_ru && ssd->ns) {
+        ru->nvme_ru->ruamw = (runs - MIN(runs, ru->prog_bytes)) >>
+                             ssd->ns->lbaf.lbads;
+    }
+}
+
+/*
+ * @pages were programmed into @ru. Every program counts, also a relocation:
+ * collection writes into the active unit of an Initially Isolated handle,
+ * which the host sees.
+ */
+static void fdp_ru_programmed(struct ssd *ssd, FemuReclaimUnit *ru,
+                              uint64_t pages)
+{
+    ru->prog_bytes += pages * ssd->sp.secsz * ssd->sp.secs_per_pg;
+    fdp_ru_sync_ruamw(ssd, ru);
+}
+
+/*
  * The page collection writes next for @dest_ruh, or INVALID_PPA with
  * *@dest_ru NULL when no unit can take it.
  */
@@ -872,6 +899,7 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
     ftl_assert(valid_lpn(ssd, lpn));
     ssd_gc_move_page(ssd, lpn, old_ppa, new_ppa, &fdp_gc_move_ops, dest_ru);
     fdp_moves_add(ssd, mv, lpn);
+    fdp_ru_programmed(ssd, dest_ru, 1);
 
     /*
      * fdp_advance_ru_pointer() can be called from both the foreground write
@@ -1116,7 +1144,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
     ru->close_seq = 0;
-    ru->wb_bytes = 0;
+    ru->prog_bytes = 0;
     ru->reclaiming = false;
 
     /* a refresh queued for this unit has nothing left to move */
@@ -1361,6 +1389,7 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
         for (int i = 0; i < ru->n_lines; i++) {
             pads += ssd_pad_line(ssd, ru->lines[i], stime);
         }
+        fdp_ru_programmed(ssd, ru, pads);
         ru->ipc = 0;
         for (int i = 0; i < ru->n_lines; i++) {
             ru->ipc += ru->lines[i]->ipc;
@@ -1565,20 +1594,18 @@ static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
  * Program host page @lpn into @ruh's active unit, which the caller has made
  * sure exists. The written pieces are those of blocks [@slba, @slba + @nlb)
  * of @req, if given, and those of @held, the mask a buffer entry kept.
- * RUAMW counts from *@media, the bytes already programmed; with NULL it
- * counts from the bytes the unit took, wb_bytes. Returns the program time.
+ * Returns the program time.
  */
 static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
                                  FemuRuHandle *ruh, uint64_t lpn,
                                  uint64_t stime, NvmeRequest *req,
                                  uint64_t slba, uint64_t nlb,
-                                 const unsigned long *held, uint64_t *media)
+                                 const unsigned long *held)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
     uint64_t per = pg >> FDP_WRITTEN_SHIFT;
     FemuReclaimUnit *ru = ruh->curr_ru;
-    uint8_t lbads = ssd->ns->lbaf.lbads;
     struct nand_cmd swr;
     struct ppa ppa;
 
@@ -1606,17 +1633,7 @@ static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
         }
     }
     ssd->nand_write_pages++; /* a user page programmed into NAND */
-
-    /* RUAMW counts blocks, and a page may hold several or half of one */
-    if (!media) {
-        media = &ru->wb_bytes;
-    }
-    if (ru->nvme_ru) {
-        uint64_t blks = ((*media + pg) >> lbads) - (*media >> lbads);
-
-        ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw, blks);
-    }
-    *media += pg;
+    fdp_ru_programmed(ssd, ru, 1);
 
     /* advance RU write pointer; may allocate new RU */
     FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
@@ -1655,7 +1672,6 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     struct ssdparams *spp = &ssd->sp;
     FemuReclaimGroup *rg;
     FemuRuHandle *ruh;
-    uint64_t media = 0;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     uint64_t written = 0;
@@ -1734,14 +1750,9 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
             maxlat = MAX(maxlat, curlat);
         }
 
-        /*
-         * With a buffer the unit's own byte count drives RUAMW, since its
-         * pages arrive from write-back as well as from here.
-         */
         held = ssd->write_buffer_cnt ? ssd_buffer_lookup(ssd, lpn) : NULL;
         curlat = fdp_program_page(ssd, rg, ruh, lpn, req->stime, req, slba,
-                                  nlb, held ? held->written : NULL,
-                                  spp->buffer_size > 0 ? NULL : &media);
+                                  nlb, held ? held->written : NULL);
         maxlat = MAX(maxlat, curlat);
         if (held) {
             ssd_buffer_discard(ssd, lpn);
@@ -1794,7 +1805,7 @@ uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
             maxlat = MAX(maxlat, curlat);
         }
         curlat = fdp_program_page(ssd, &ssd->rg[e->rgid], ruh, e->lpn, stime,
-                                  NULL, 0, 0, e->written, NULL);
+                                  NULL, 0, 0, e->written);
         maxlat = MAX(maxlat, curlat);
         nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, pg);
         nvme_fdp_stat_inc(&ruh->mbmw, pg);
@@ -2373,13 +2384,23 @@ static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
     return deallocated;
 }
 
-/* Deallocate every page under FDP; see bbssd_deallocate_all(). */
+/*
+ * Deallocate every page under FDP; see bbssd_deallocate_all(). A Format
+ * resets each unit's RUAMW to a full unit, but the units keep the pages
+ * already programmed, so set RUAMW from them again, in the block size the
+ * Format chose.
+ */
 void ssd_deallocate_fdp_all(struct ssd *ssd)
 {
     int already_invalid = 0;
 
     if (ssd->sp.tt_pgs) {
         ssd_deallocate_fdp_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
+    }
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
+            fdp_ru_sync_ruamw(ssd, &ssd->rg[g].rus[j]);
+        }
     }
 }
 
@@ -2621,13 +2642,31 @@ static void fdp_check_heap(struct ssd *ssd, pqueue_t *pq, bool ruh_heap,
     }
 }
 
+/* 1 if @ru's programmed bytes or RUAMW disagree with its pages, else 0 */
+static int fdp_check_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
+
+    if (!ru->nvme_ru || !ssd->ns) {
+        return 0;
+    }
+    if (ru->prog_bytes != ((uint64_t)ru->vpc + (uint64_t)ru->ipc) * pg) {
+        return 1;
+    }
+    return ru->nvme_ru->ruamw != (runs - MIN(runs, ru->prog_bytes)) >>
+                                 ssd->ns->lbaf.lbads;
+}
+
 /*
  * ssd_fdp_check_units - count reclaim units not held by exactly one place:
  * the free list, the full list, a group victim heap, or a handle's write or
  * collection frontier. Under the per-handle strategy a victim of a
  * persistently isolated handle must also sit once in that handle's heap,
  * and no other unit may. Heap entries whose stored position is wrong count
- * too. A test hook; 0 is consistent.
+ * too, and so does a unit whose programmed bytes differ from its valid and
+ * invalid pages, or whose RUAMW differs from the room they leave. A test
+ * hook; 0 is consistent.
  */
 uint64_t ssd_fdp_check_units(struct ssd *ssd)
 {
@@ -2643,6 +2682,8 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
 
         QTAILQ_FOREACH(ru, &rm->free_ru_list, entry) {
             fdp_check_place(ssd, ru, seen);
+            /* an erased unit has programmed nothing */
+            bad += ru->prog_bytes != 0;
         }
         QTAILQ_FOREACH(ru, &rm->full_ru_list, entry) {
             fdp_check_place(ssd, ru, seen);
@@ -2682,6 +2723,7 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
 
             bad += seen[i] + in_grp[i] != 1;
             bad += in_ruh[i] != (want_ruh ? 1 : 0);
+            bad += fdp_check_ruamw(ssd, u);
         }
     }
     return bad;
