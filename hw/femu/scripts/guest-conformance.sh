@@ -10,12 +10,14 @@
 #   blktests-zbd    blktests "zbd" group on a ZNS SSD
 #   nvme-cli        the nvme-cli end-to-end suite on a BlackBox SSD with the
 #                   optional NVM commands and a volatile write cache on
-#   all             the three above
+#   zenfs-crash     RocksDB with ZenFS, killed and checked again and again,
+#                   on a ZNS SSD with 64 zones
+#   all             the four above
 #
 # The guest is the one make-guest-image.sh builds: user femu, an SSH key,
 # and passwordless sudo. The suites fetch their sources and packages, so
 # the guest needs network access through QEMU's user networking. A suite
-# takes 10 to 40 minutes.
+# takes 5 to 60 minutes; zenfs-crash builds RocksDB first.
 
 set -euo pipefail
 
@@ -27,7 +29,7 @@ image=${OSIMGF:-$imgdir/u20s.qcow2}
 ssh_key=${SSH_KEY:-$imgdir/femu-guest-key}
 ssh_port=${SSH_PORT:-8090}
 outdir=""
-suite_timeout=3600
+suite_timeout=""
 boot_timeout=300
 use_sudo=0
 keep=0
@@ -40,13 +42,19 @@ zns_dev+=",pgs_per_blk=256,blks_per_pl=64,pls_per_lun=1,luns_per_ch=4,nchs=4"
 # Compare, Write Uncorrectable, Dataset Management, Write Zeroes,
 # Save/Select, Verify and Copy (0x19f), plus Flush through vwc=1.
 cli_dev="$bb_dev,oncs=415,vwc=1"
+# 64 zones of 64 MiB: ZenFS needs at least 32 zones.
+zenfs_dev="devsz_mb=4096,namespaces=1,femu_mode=3,zns_num_ch=4"
+zenfs_dev+=",zns_num_lun=4,zns_num_plane=1,zns_num_blk=64"
+dev_override=""
+smp_override=""
+mem_override=""
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options] SUITE...
 
-Run blktests and the nvme-cli end-to-end suite in a FEMU guest.
-SUITE is blktests-block, blktests-zbd, nvme-cli or all.
+Run conformance suites in a FEMU guest.
+SUITE is blktests-block, blktests-zbd, nvme-cli, zenfs-crash or all.
 
 Options:
   --qemu PATH       qemu-system-x86_64 to run (default: \$QEMU or
@@ -57,14 +65,21 @@ Options:
   --port N          host port forwarded to the guest's SSH port
                     (default: \$SSH_PORT or 8090)
   --outdir DIR      result directory (default: ./conformance-DATE-TIME)
-  --timeout SEC     time limit of one suite (default: 3600)
+  --timeout SEC     time limit of one suite (default: 7200 for zenfs-crash,
+                    else 3600)
   --boot-timeout SEC  time limit for the guest to answer SSH (default: 300)
+  --device PROPS    FEMU device properties instead of the suite's own (for
+                    a control run, such as zenfs-crash on a BlackBox SSD)
+  --smp N           guest vCPUs (default: 16 for zenfs-crash, else 4)
+  --mem SIZE        guest memory (default: 16G for zenfs-crash, else 4G)
   --sudo            start QEMU with sudo (default: as you; needs /dev/kvm)
   --keep            keep each suite's overlay image
   -h, --help        show this help
 
-BLKTESTS_REPO, BLKTESTS_REF, NVMECLI_REPO and NVMECLI_REF are passed on
-to the guest scripts when set.
+These variables are passed on to the guest scripts when set:
+BLKTESTS_REPO, BLKTESTS_REF, NVMECLI_REPO, NVMECLI_REF, ROCKSDB_REPO,
+ROCKSDB_REF, ZENFS_REPO, ZENFS_REF, ZENFS_ROUNDS, ZENFS_INTERVAL,
+ZENFS_THREADS, ZENFS_KEYS and ZENFS_CONTROL.
 Exit status: 0 if every suite passed, 1 if a suite failed, 2 on a usage
 or setup error and no suite failed.
 EOF
@@ -84,12 +99,16 @@ while [[ $# -gt 0 ]]; do
 	--outdir) outdir=${2:?--outdir needs a directory}; shift 2 ;;
 	--timeout) suite_timeout=${2:?--timeout needs seconds}; shift 2 ;;
 	--boot-timeout) boot_timeout=${2:?--boot-timeout needs seconds}; shift 2 ;;
+	--device) dev_override=${2:?--device needs properties}; shift 2 ;;
+	--smp) smp_override=${2:?--smp needs a number}; shift 2 ;;
+	--mem) mem_override=${2:?--mem needs a size}; shift 2 ;;
 	--sudo) use_sudo=1; shift ;;
 	--keep) keep=1; shift ;;
 	-h | --help) usage; exit 0 ;;
 	-*) usage >&2; die "unknown option $1" ;;
-	all) suites+=(blktests-block blktests-zbd nvme-cli); shift ;;
-	blktests-block | blktests-zbd | nvme-cli) suites+=("$1"); shift ;;
+	all) suites+=(blktests-block blktests-zbd nvme-cli zenfs-crash); shift ;;
+	blktests-block | blktests-zbd | nvme-cli | zenfs-crash)
+		suites+=("$1"); shift ;;
 	*) usage >&2; die "unknown suite $1" ;;
 	esac
 done
@@ -99,10 +118,16 @@ done
 [[ -r $image ]] || die "guest image not found: $image (build one with make-guest-image.sh)"
 [[ -r $ssh_key ]] || die "SSH key not found: $ssh_key (use --key)"
 [[ $ssh_port =~ ^[0-9]+$ ]] || die "bad port: $ssh_port"
+[[ -z $suite_timeout || $suite_timeout =~ ^[1-9][0-9]*$ ]] ||
+	die "bad --timeout: $suite_timeout"
+[[ -z $smp_override || $smp_override =~ ^[1-9][0-9]*$ ]] ||
+	die "bad --smp: $smp_override"
+[[ -z $mem_override || $mem_override =~ ^[1-9][0-9]*[MG]$ ]] ||
+	die "bad --mem: $mem_override (use a size such as 8G)"
 for tool in qemu-img ssh scp timeout; do
 	command -v "$tool" >/dev/null || die "$tool is not installed"
 done
-for f in blktests-guest.sh nvme-cli-e2e-guest.sh; do
+for f in blktests-guest.sh nvme-cli-e2e-guest.sh zenfs-crash-guest.sh; do
 	[[ -r $SCRIPT_DIR/$f ]] || die "missing $SCRIPT_DIR/$f"
 done
 
@@ -159,7 +184,7 @@ guest_ssh() {
 # in qemu_pid. Every step checks its own status: the caller runs this
 # function in a condition, where set -e does not apply.
 start_guest() {
-	local name=$1 dev=$2 overlay=$3
+	local name=$1 dev=$2 overlay=$3 smp=$4 mem=$5
 	local pidfile=$outdir/$name.pid
 	# A nonce in an SMBIOS OEM string tells this guest from another guest
 	# that answers on the same port.
@@ -181,7 +206,7 @@ start_guest() {
 	}
 	((use_sudo)) && cmd+=(sudo)
 	cmd+=("$qemu" -name "femu-conformance-$name" -enable-kvm -cpu host
-		-smp 4 -m 4G -pidfile "$pidfile"
+		-smp "$smp" -m "$mem" -pidfile "$pidfile"
 		-smbios "type=11,value=$nonce"
 		-device "virtio-scsi-pci,id=scsi0" -device "scsi-hd,drive=hd0"
 		-drive "file=$overlay,if=none,cache=none,format=qcow2,id=hd0"
@@ -226,24 +251,39 @@ start_guest() {
 
 # Return 0 when the suite passed, 1 when it failed, 2 on a setup error.
 run_suite() {
-	local name=$1 dev script
-	local -a args=() envs=()
+	local name=$1 dev script smp=4 mem=4G tmo=3600
+	local -a args=() envs=() extra=()
 
 	case $name in
 	blktests-block) dev=$bb_dev; script=blktests-guest.sh; args=(block) ;;
 	blktests-zbd) dev=$zns_dev; script=blktests-guest.sh; args=(zbd) ;;
 	nvme-cli) dev=$cli_dev; script=nvme-cli-e2e-guest.sh ;;
+	zenfs-crash)
+		dev=$zenfs_dev; script=zenfs-crash-guest.sh; smp=16; mem=16G; tmo=7200 ;;
 	esac
-	for v in BLKTESTS_REPO BLKTESTS_REF NVMECLI_REPO NVMECLI_REF; do
+	dev=${dev_override:-$dev}
+	smp=${smp_override:-$smp}
+	mem=${mem_override:-$mem}
+	tmo=${suite_timeout:-$tmo}
+	for v in BLKTESTS_REPO BLKTESTS_REF NVMECLI_REPO NVMECLI_REF \
+		ROCKSDB_REPO ROCKSDB_REF ZENFS_REPO ZENFS_REF ZENFS_ROUNDS \
+		ZENFS_INTERVAL ZENFS_THREADS ZENFS_KEYS ZENFS_CONTROL; do
 		[[ -n ${!v:-} ]] && envs+=("$v=${!v}")
 	done
 
 	local overlay=$outdir/$name.qcow2 log=$outdir/$name.log rc=0
-	local remote_script=/tmp/femu-conformance-$$-$script
-	echo "=== $name: device femu,$dev"
-	start_guest "$name" "$dev" "$overlay" || { stop_guest; return 2; }
-	if ! scp "${ssh_opts[@]}" -P "$ssh_port" "$SCRIPT_DIR/$script" \
-		"femu@localhost:$remote_script" >/dev/null; then
+	local remote_dir=/tmp/femu-conformance-$$
+	local remote_script=$remote_dir/$script
+	local -a files=()
+	local f
+	for f in "$script" "${extra[@]}"; do
+		files+=("$SCRIPT_DIR/$f")
+	done
+	echo "=== $name: device femu,$dev (smp $smp, mem $mem)"
+	start_guest "$name" "$dev" "$overlay" "$smp" "$mem" || { stop_guest; return 2; }
+	if ! guest_ssh mkdir -p "$remote_dir" ||
+		! scp "${ssh_opts[@]}" -P "$ssh_port" "${files[@]}" \
+			"femu@localhost:$remote_dir/" >/dev/null; then
 		echo "$name: cannot copy $script into the guest"
 		stop_guest
 		return 2
@@ -251,16 +291,16 @@ run_suite() {
 	# ssh joins its arguments into one remote command; quote each word.
 	local remote
 	remote=$(printf '%q ' sudo env "${envs[@]}" bash "$remote_script" "${args[@]}")
-	timeout "$suite_timeout" ssh "${ssh_opts[@]}" -p "$ssh_port" \
+	timeout "$tmo" ssh "${ssh_opts[@]}" -p "$ssh_port" \
 		femu@localhost "$remote" >"$log" 2>&1 || rc=$?
 	stop_guest
 	((keep)) || rm -f "$overlay"
 
-	grep -E '^(BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP|BLKTESTS_ABNORMAL|E2E_ABNORMAL)' \
+	grep -E '^(BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP|BLKTESTS_ABNORMAL|E2E_ABNORMAL|ROCKSDB_COMMIT|ZENFS_)' \
 		"$log" || true
 	case $rc in
 	0 | 1 | 2) ;;
-	124) echo "$name: no result within ${suite_timeout}s"; rc=1 ;;
+	124) echo "$name: no result within ${tmo}s"; rc=1 ;;
 	255) echo "$name: SSH to the guest failed"; rc=2 ;;
 	*) echo "$name: the guest script ended with status $rc"; rc=1 ;;
 	esac

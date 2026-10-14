@@ -179,9 +179,11 @@ All of them are listed in the [scripts reference](../reference/scripts.md#guest-
 Two external suites check FEMU as Linux sees it:
 [blktests](https://github.com/linux-blktests/blktests) and the
 end-to-end tests of [nvme-cli](https://github.com/linux-nvme/nvme-cli).
-`guest-conformance.sh` runs them on the host. For each suite it boots a
-fresh guest with one FEMU device, runs the suite inside, and stops the
-guest:
+A third suite checks FEMU under a real workload. `zenfs-crash` runs a
+RocksDB crash test on [ZenFS](https://github.com/westerndigitalcorporation/zenfs)
+on a ZNS namespace. `guest-conformance.sh` runs the
+suites on the host. For each suite it boots a fresh guest with one FEMU
+device, runs the suite inside, and stops the guest:
 
 ```text
  host: guest-conformance.sh SUITE...
@@ -191,7 +193,7 @@ guest:
        v
      QEMU + KVM + FEMU (suite device options) --ssh--> guest
                                                         |
-                                    blktests-guest.sh or nvme-cli-e2e-guest.sh
+                                    SUITE's guest script
                                     (apt-get, git clone, build, run)
        |
        v
@@ -203,24 +205,31 @@ guest:
 | `blktests-block` | BlackBox SSD, 768 MiB | blktests `block` group with `TEST_DEVS=(/dev/nvme0n1)` |
 | `blktests-zbd` | ZNS SSD, 1 GiB | blktests `zbd` group |
 | `nvme-cli` | BlackBox SSD with `oncs=415,vwc=1` (Compare, Write Uncorrectable, Dataset Management, Write Zeroes, Verify, Copy and Flush) | nvme-cli `tests/nvme-cli-e2e`, tag `v3.1` by default |
+| `zenfs-crash` | ZNS SSD, 4 GiB in 64 zones of 64 MiB; the guest gets 16 vCPUs and 16 GiB | `zenfs-crash-guest.sh`: RocksDB `v9.10.0` with ZenFS `919c2eb`, a blackbox crash test |
 
 The guest is the image that `make-guest-image.sh` builds. The suites fetch
 packages and sources, so the guest needs network access; QEMU's user
-networking gives it. Run from `build-femu/`; a suite takes 10 to 40
-minutes:
+networking gives it. Run from `build-femu/`. A suite takes 5 to 60
+minutes, and `zenfs-crash` builds RocksDB first:
 
 <!-- femu-untested: needs a guest image, KVM and network access -->
 ```bash
 ../femu-scripts/guest-conformance.sh all
 ../femu-scripts/guest-conformance.sh --outdir /tmp/conf nvme-cli
+../femu-scripts/guest-conformance.sh --keep zenfs-crash
 ```
 
-`--help` lists the options: the QEMU binary, the image, the SSH key and
-port, the result directory and the time limits. `BLKTESTS_REF` and
-`NVMECLI_REF` select a blktests commit and an nvme-cli tag. The script
-prints `RESULT SUITE PASS`, `FAIL` or `SETUP-ERROR` for each suite. The
-exit status is 0 when every suite passed and 1 when a suite failed. It is
-2 when a suite could not run and no suite failed.
+`--help` lists the options. They set the QEMU binary, the image, the SSH
+key and port, and the result directory. Others set the time limits, the
+guest size and a device for control runs.
+
+`BLKTESTS_REF` and `NVMECLI_REF` select a blktests commit and an nvme-cli
+tag. `ROCKSDB_REF` and `ZENFS_REF` select the RocksDB tag and the ZenFS
+commit.
+
+The script prints `RESULT SUITE PASS`, `FAIL` or `SETUP-ERROR` for each
+suite. The exit status is 0 when every suite passed and 1 when a suite
+failed. It is 2 when a suite could not run and no suite failed.
 
 A blktests suite fails when a test that ran on the FEMU namespace failed.
 It also fails when the run stopped before every test reported a status. Some tests use `null_blk`, `scsi_debug` or device-mapper instead of
@@ -234,14 +243,65 @@ namespace ID. When that test fails, the script runs the same command with
 the numeric namespace ID. If the command passes, the log shows the test as
 `KNOWN_DEFECT` and the suite still passes. If it fails, FEMU fails the test.
 
-The two guest scripts also run on their own in any guest:
+#### ZenFS crash test
+
+`zenfs-crash-guest.sh` builds RocksDB with the ZenFS plugin in the guest
+and runs the RocksDB blackbox crash test on the zoned namespace:
+
+```text
+ zenfs mkfs --zbd=nvme0n1
+   |
+   v
+ round 1..6:  db_stress (60 s) --SIGKILL-->  next round opens the database
+              and checks it against the expected state on the host
+   |
+   v
+ final:       db_stress --verification_only=1 checks every key
+   |
+   v
+ blkzone report: data zones past the 3 ZenFS metadata zones hold data
+```
+
+The test passes when all of these are true:
+
+- `zenfs mkfs` succeeds.
+- Each round runs until the SIGKILL of its timeout and writes nothing to
+  stderr. Each round opens the database and checks it first.
+- In each round, a `db_stress` thread reports at least 1000 finished
+  operations, and the SMART host write count grows.
+- The final run exits 0, prints `Verification successful` and writes
+  nothing to stderr.
+- ZenFS wrote data zones on the device.
+
+The options are those of ZenFS's own crash test, with zone-sized SST
+files and no injected RocksDB faults. ZenFS keeps unsynced WAL data in
+the process, and a SIGKILL loses it. Thus `--sync=1` syncs each write,
+and every write that completed must survive the kill. ZenFS's own driver passes
+`--expected_values_path`, a flag that RocksDB removed before 7.0. Thus
+the script starts `db_stress` itself, as RocksDB's `db_crashtest.py` does.
+The build goes to `/opt/femu-zenfs`. A kept overlay (`--keep`) can serve as
+the `--image` of a later run, which then skips the build.
+
+Two control runs show that the test can fail:
+
+- `ZENFS_CONTROL=reset-zones` resets every data zone that holds data after
+  round 1. Round 2 must then fail. A control run that passes ends as a
+  setup error.
+- `--device` with BlackBox SSD properties gives a conventional namespace.
+  `zenfs mkfs` must then refuse it.
+
+#### Guest scripts on their own
+
+The guest scripts also run on their own in any guest:
 
 ```sh
 sudo bash blktests-guest.sh block /dev/nvme0n1
 sudo bash nvme-cli-e2e-guest.sh /dev/nvme0 /dev/nvme0n1
+sudo bash zenfs-crash-guest.sh nvme0n1
 ```
 
-Both write to the namespace, and the nvme-cli suite can format it.
+All of them write to the namespace. The nvme-cli suite can format it, and
+`zenfs-crash-guest.sh` formats it with ZenFS.
 
 ## Adding a test
 

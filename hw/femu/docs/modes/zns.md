@@ -360,6 +360,9 @@ without going through the zone state machine. Reset the zone instead.
 4. From the host, the QMP command
    [`query-femu`](../reference/query-femu.md) with `kind` `zones` shows the
    same zone states and write pointers. It needs no guest tools.
+5. For a check under a real workload, the `zenfs-crash` suite of
+   `guest-conformance.sh` runs a RocksDB crash test on ZenFS. See
+   [ZenFS crash test](../guides/testing.md#zenfs-crash-test).
 
 ## Troubleshooting
 
