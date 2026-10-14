@@ -19422,6 +19422,55 @@ static void femu_test_fdp_csd_knobs(void *obj, void *data,
 }
 
 /*
+ * hot_cold_sep and the log-block mappings write host data through pointers
+ * of their own, past the unit a placement handle names, so FDP refuses them
+ * on black-box and computational storage controllers alike, and says why.
+ */
+static void femu_test_fdp_knobs_refused(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *knob;
+        const char *want;
+    } cases[] = {
+        { "'hot_cold_sep':true", "hot_cold_sep is not supported under FDP: "
+          "the placement handle of a write chooses its reclaim unit" },
+        { "'mapping':'hybrid'", "mapping=hybrid is not supported under FDP: "
+          "the log-block mappings" },
+        { "'mapping':'fast'", "mapping=fast is not supported under FDP: "
+          "the log-block mappings" },
+    };
+    int modes[] = { 1, 4 };
+    QDict *rsp;
+
+    for (int m = 0; m < ARRAY_SIZE(modes); m++) {
+        for (int k = 0; k < ARRAY_SIZE(cases); k++) {
+            g_autofree char *want = g_strdup_printf(
+                "FEMU %s: %s", modes[m] == 1 ? "bbssd" : "csd",
+                cases[k].want);
+            g_autofree char *args = g_strdup_printf(
+                "{'driver':'femu','id':'fdp-knob','addr':'5',"
+                "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,'secsz':512,"
+                "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+                "'pls_per_lun':1,'luns_per_ch':4,'nchs':4,"
+                "'subsys':'fdpsub',%s}", modes[m], cases[k].knob);
+            const char *desc;
+
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                            qobject_from_json(args, &error_abort));
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s", desc);
+            g_assert_nonnull(strstr(desc, want));
+            qobject_unref(rsp);
+        }
+    }
+    qos_invalidate_command_line();
+}
+
+/*
  * The reclaim unit the host is told about is the FTL's superblock, for a
  * computational storage controller as for a black-box one: four channels of
  * four LUNs of sixteen 4 KiB pages make 1 MiB, not the 96 MiB default.
@@ -33463,6 +33512,8 @@ static void femu_register_nodes(void)
     qos_add_test("namespace-sizes-rounding", "femu",
                  femu_test_namespace_sizes_rounding, NULL);
     qos_add_test("fdp-csd-knobs", "femu", femu_test_fdp_csd_knobs, NULL);
+    qos_add_test("fdp-knobs-refused", "femu", femu_test_fdp_knobs_refused,
+                 NULL);
     qos_add_test("fdp-csd-runs", "femu", femu_test_fdp_csd_runs,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

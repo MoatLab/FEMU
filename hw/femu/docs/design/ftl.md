@@ -1098,9 +1098,11 @@ layer.
 
 ### Interactions and refusals
 
-- **FDP** refuses `buffer_size`, `hot_cold_sep`, a `mapping` other than
-  `page` and a `gc_policy` other than `greedy`, with
-  `FEMU bbssd: <name> has no effect under FDP`.
+- **FDP** refuses `buffer_size`, `mapping=dftl` and a `gc_policy` other
+  than `greedy`, with `FEMU bbssd: <name> has no effect under FDP`. It
+  refuses `hot_cold_sep` and the `hybrid` and `fast` mappings with a
+  message that says why: they write through pointers of their own, past
+  the unit the placement handle names.
 - **Unknown names** for `mapping`, `gc_policy` and `cache_evict` are refused
   at realize.
 - **Watermarks** outside [1, 100], or a high watermark below the low one, are

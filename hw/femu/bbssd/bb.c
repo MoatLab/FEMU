@@ -143,8 +143,8 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 }
 
 /*
- * FDP keeps its own write and reclaim path, which none of the knobs below
- * reach; refuse them rather than accept them silently. trim_lat_ns and
+ * FDP keeps its own write and reclaim path. Refuse the knobs it does not
+ * take rather than accept them silently. trim_lat_ns and
  * ecc_retention_sec are media costs that FDP charges too, and FDP refreshes
  * a whole reclaim unit for read_reclaim_limit and retention_limit_sec, so
  * those pass. Every mode that runs this FTL under FDP needs the refusal
@@ -160,10 +160,28 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
         return 0;
     }
 
+    /*
+     * Under FDP the placement handle of a write names the unit it goes to.
+     * Both knobs below program host data through write pointers of their
+     * own, so they would put it in units no handle references.
+     */
+    if (p->hot_cold_sep) {
+        error_setg(errp, "FEMU %s: hot_cold_sep is not supported under FDP: "
+                   "the placement handle of a write chooses its reclaim "
+                   "unit, and the overwrite pointer writes past it; give "
+                   "hot data a handle of its own", mode);
+        return -1;
+    }
+    if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
+        error_setg(errp, "FEMU %s: mapping=%s is not supported under FDP: "
+                   "the log-block mappings write and merge through lines "
+                   "that are not FDP-aware; use page", mode,
+                   p->mapping_scheme);
+        return -1;
+    }
+
     if (p->buffer_size) {
         knob = "buffer_size";
-    } else if (p->hot_cold_sep) {
-        knob = "hot_cold_sep";
     } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
         knob = "mapping";
     } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
