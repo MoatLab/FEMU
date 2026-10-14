@@ -44,6 +44,7 @@ listed one by one.
 - FDP accepts `trim_lat_ns` and `ecc_retention_sec`. A deallocate pays the same time per range as without FDP. The age of a reclaim unit counts from its retirement and starts again when collection frees it.
 - FDP accepts `read_reclaim_limit` and `retention_limit_sec`. A read queues the reclaim unit of its line. The next write moves the valid pages of that unit to where collection would move them. The moves count in MBMW and in the C0h refresh counters.
 - FDP accepts `gc_policy`. Each name picks the reclaim unit version of its policy: `cost-benefit` and `random` are `gc_strategy` 1 and 2, `fifo` takes the unit retired first, and `d-choice` the fewest valid pages of 4 random units. A name other than `greedy` needs `gc_strategy=0`.
+- FDP accepts `mapping=dftl`. A placed write charges the translation page of each page it programs, as a write without FDP does.
 - FDP still refuses `hot_cold_sep` and the `hybrid` and `fast` mappings, and the message now says why: they write host data through pointers of their own, past the unit the placement handle names.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).

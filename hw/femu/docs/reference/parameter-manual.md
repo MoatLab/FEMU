@@ -505,7 +505,7 @@ Interactions:
 - The controller's `gc_strategy`, `gc_policy`, `fdp_trim_erase_all`,
   `read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec` and
   `trim_lat_ns` apply. A `gc_policy` other than `greedy` together with a
-  `gc_strategy` other than 0, a `mapping` other than `page`,
+  `gc_strategy` other than 0, `mapping=hybrid` or `fast`,
   `buffer_size`, `hot_cold_sep`, `meta`, `streams` and `ns_mgmt` are
   refused.
 - KV is refused under FDP; NoSSD, ZNS and OCSSD report FDP but ignore it

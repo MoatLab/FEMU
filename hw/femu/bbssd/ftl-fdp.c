@@ -1526,6 +1526,12 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
             break;
         }
 
+        /* dftl: the translation page of this lpn, as a line-mode write */
+        if (ssd->cmt.capacity) {
+            curlat = cmt_touch(ssd, lpn, req->stime, true);
+            maxlat = MAX(maxlat, curlat);
+        }
+
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
             mark_page_invalid_fdp(ssd, &ppa);

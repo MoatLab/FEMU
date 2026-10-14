@@ -453,7 +453,7 @@ Refused under FDP on a bbssd controller:
 - `buffer_size`;
 - `hot_cold_sep`: the placement handle of a write names its unit, and the
   hot write pointer writes past it;
-- `mapping=dftl`; `hybrid` and `fast`, whose log and data lines are not
+- `mapping=hybrid` and `mapping=fast`, whose log and data lines are not
   FDP-aware;
 - a `gc_policy` other than `greedy` together with a `gc_strategy` other
   than 0.
@@ -506,7 +506,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-dftl`, `fdp-dftl-page`, `fdp-dftl-csd`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
 | Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-policy-random` (`gc_policy=random`, the same trace), `ftl-trace-fdp-fifo` and `ftl-trace-fdp-d-choice` (`gc_policy`), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
@@ -523,8 +523,7 @@ last:
   the handle's RUAMW and records event 0h if the unit still had room; no
   data is placed. CSD uses the bbssd path, with the same refused knobs and
   RUNS. KV is refused.
-- Page mapping only, no write buffer, no read reclaim or retention model
-  under FDP.
+- Page or DFTL mapping only, and no write buffer
 - EARUTR is always 0; there is no active reclaim unit time limit, so event
   1h is never raised.
 - The 128-bit statistics carry only their low 64 bits.

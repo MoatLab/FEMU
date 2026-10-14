@@ -219,10 +219,10 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of this geometry, or unset` | `fdp.runs` does not match the geometry. |
 | `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | `namespaces` above 1. |
 | `femu-subsys with fdp=on takes a single controller` | A second controller joins the FDP subsystem. |
-| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. The same message names `mapping=dftl`. A CSD controller gets the same messages with `FEMU csd:`. |
+| `FEMU bbssd: buffer_size has no effect under FDP` | FDP has its own write path. A CSD controller gets the same messages with `FEMU csd:`. |
 | `FEMU bbssd: set gc_policy or gc_strategy under FDP, not both` | Both pick the reclaim unit strategy. Set one of them, or leave `gc_policy` at `greedy`. |
 | `FEMU bbssd: hot_cold_sep is not supported under FDP: the placement handle of a write chooses its reclaim unit, ...` | The placement handle of a write names its reclaim unit, and the hot write pointer writes past it. Give hot data a placement handle of its own. |
-| `FEMU bbssd: mapping=hybrid is not supported under FDP: the log-block mappings write and merge through lines that are not FDP-aware; use page` | The same for `mapping=fast`. The log-block mappings keep their own log and data lines. |
+| `FEMU bbssd: mapping=hybrid is not supported under FDP: the log-block mappings write and merge through lines that are not FDP-aware; use page or dftl` | The same for `mapping=fast`. The log-block mappings keep their own log and data lines. |
 | `meta: not supported with placement (fdp)` | `meta` (with a valid `mc`) under FDP. |
 | `streams requires bbssd or NoSSD with FDP disabled` | `streams=on` under FDP. |
 | `the key-value command set and FDP cannot share a controller: ...` | A KV namespace under FDP. |

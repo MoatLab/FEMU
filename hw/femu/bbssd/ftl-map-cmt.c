@@ -4,9 +4,9 @@
  * (and a write-back if a dirty TP is evicted). Timing-only: the flat maptbl in
  * ftl-map.c stays the source of truth. cmt_touch is the datapath entry point.
  *
- * Scope: the cost is charged for the USER read/write datapath (ssd_read /
- * ssd_write). Bulk mapping updates from base GC relocation, TRIM, and the FDP
- * write path update the flat maptbl directly and are not separately charged,
+ * Scope: the cost is charged for the USER read/write datapath (ssd_read,
+ * ssd_write and the FDP host write). Bulk mapping updates from GC
+ * relocation and TRIM update the flat maptbl directly and are not charged,
  * so the CMT models the host-facing translation cost rather than every internal
  * table mutation.
  */

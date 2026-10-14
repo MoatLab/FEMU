@@ -172,10 +172,11 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                    "hot data a handle of its own", mode);
         return -1;
     }
+    /* dftl adds only translation-page timing, which places no data */
     if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
         error_setg(errp, "FEMU %s: mapping=%s is not supported under FDP: "
                    "the log-block mappings write and merge through lines "
-                   "that are not FDP-aware; use page", mode,
+                   "that are not FDP-aware; use page or dftl", mode,
                    p->mapping_scheme);
         return -1;
     }
@@ -190,8 +191,6 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
 
     if (p->buffer_size) {
         knob = "buffer_size";
-    } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
-        knob = "mapping";
     }
     if (knob) {
         error_setg(errp, "FEMU %s: %s has no effect under FDP", mode, knob);

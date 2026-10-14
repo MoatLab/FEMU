@@ -268,9 +268,10 @@ flat `maptbl` stays the source of truth, and `cmt_touch()` in
 With `mapping_cache_mb` left at 0, DFTL uses 4 MiB, which holds 1024
 translation pages and so covers 2 GiB of logical space on a 4 KiB page. The
 translation-page traffic occupies the LUN timelines like any other NAND
-operation but is not counted as host or GC writes. Host reads, host writes and
-buffer write-backs are charged; GC relocation, deallocate, Write Zeroes and
-the FDP write path update `maptbl` without a CMT access.
+operation but is not counted as host or GC writes. Host reads, host writes
+and buffer write-backs are charged, and under FDP placed writes and Write
+Zeroes without Deallocate too. GC relocation, deallocate and, without FDP,
+Write Zeroes update `maptbl` without a CMT access.
 
 ### Log-block mapping: BAST (`mapping=hybrid`) and FAST (`mapping=fast`)
 
@@ -334,7 +335,7 @@ the merge, and the relocated pages count in the write amplification factor.
 | `hybrid` | BAST log blocks | switch and full merges per log | LOG | C0h bytes 88 to 111 |
 | `fast` | FAST log blocks | bounded random merges, sequential switch merges | LOG | none exported |
 
-Streams need `page` or `dftl`. FDP supports only `page`.
+Streams and FDP need `page` or `dftl`.
 
 ## Lines, superblocks and write pointers
 
@@ -1051,7 +1052,7 @@ does inside the FTL and what it interacts with.
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
 | `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is |
 | `gc_strategy` | reclaim unit victim selection | FDP only; a `gc_policy` other than `greedy` replaces it |
-| `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams; FDP needs `page` |
+| `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams and FDP |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
 | `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `pg_rd_lat` / 16 at realize; 0xEF does not change it |
 | `hot_cold_sep` | hot write pointer for overwrites | page or DFTL only; reserves a line; refused with FDP |
@@ -1098,8 +1099,8 @@ layer.
 
 ### Interactions and refusals
 
-- **FDP** refuses `buffer_size` and `mapping=dftl`, with
-  `FEMU bbssd: <name> has no effect under FDP`, and a `gc_policy` other
+- **FDP** refuses `buffer_size`, with
+  `FEMU bbssd: buffer_size has no effect under FDP`, and a `gc_policy` other
   than `greedy` together with a `gc_strategy` other than 0. It
   refuses `hot_cold_sep` and the `hybrid` and `fast` mappings with a
   message that says why: they write through pointers of their own, past

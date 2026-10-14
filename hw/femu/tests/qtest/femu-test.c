@@ -7504,6 +7504,62 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
 }
 
 /*
+ * mapping=dftl under FDP: a placed write charges the translation page of
+ * each page it programs, as a line-mode write does. A translation page holds
+ * 512 mappings of 4 KiB pages. Four writes, each to a page of a translation
+ * page not cached yet, read four translation pages; two more writes to those
+ * translation pages read none. @data is "dftl" or "page"; with page mapping
+ * nothing is read.
+ */
+static void femu_test_fdp_dftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool dftl = g_str_equal(data, "dftl");
+    static const uint64_t cold[] = { 0, 512, 1024, 1536 };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t rd0, pr0, rd1, pr1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3d, 4096);
+
+    rd0 = femu_c0h_field(&c, log, 160);
+    pr0 = femu_c0h_field(&c, log, 168);
+    for (int i = 0; i < ARRAY_SIZE(cold); i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, cold[i], 1, buf,
+                                                        list, i & 1)), ==,
+                        NVME_SUCCESS);
+    }
+    rd1 = femu_c0h_field(&c, log, 160);
+    pr1 = femu_c0h_field(&c, log, 168);
+    g_test_message("%s: %" PRIu64 " reads, %" PRIu64 " programs",
+                   (const char *)data, rd1 - rd0, pr1 - pr0);
+    g_assert_cmpuint(rd1 - rd0, ==, dftl ? 4 : 0);
+    g_assert_cmpuint(pr1 - pr0, ==, 4);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 1, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 513, 1, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 160), ==, rd1);
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_read_pages(&c, 512, 1, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x3d);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Which of two victims the first collection takes, for the policy that
  * gc_policy or gc_strategy selects. @data is "fifo", "cb" or "greedy" and
  * the pages that collection must move. Placement 0 fills unit A and
@@ -19535,23 +19591,18 @@ static void femu_test_fdp_csd_knobs(void *obj, void *data,
     QDict *rsp;
 
     for (int m = 0; m < ARRAY_SIZE(modes); m++) {
-        for (int k = 0; k < 2; k++) {
-            /* buffer_size=16, then mapping=dftl */
-            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
-                            "'driver':'femu','id':'fdp-knob','addr':'5',"
-                            "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
-                            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
-                            "'blks_per_pl':80,'pls_per_lun':1,"
-                            "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
-                            "'buffer_size':%d,'mapping':%s}}", modes[m],
-                            k ? 0 : 16, k ? "dftl" : "page");
-            g_assert_true(qdict_haskey(rsp, "error"));
-            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
-                                                                  "error"),
-                                                  "desc"),
-                                    "has no effect under FDP"));
-            qobject_unref(rsp);
-        }
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'fdp-knob','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
+                        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                        "'blks_per_pl':80,'pls_per_lun':1,"
+                        "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
+                        "'buffer_size':16}}", modes[m]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                "has no effect under FDP"));
+        qobject_unref(rsp);
     }
     qos_invalidate_command_line();
 }
@@ -33282,6 +33333,30 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=4,fdm_size=1,gc_policy=fifo,subsys=fdpsub",
+    });
+    qos_add_test("fdp-dftl", "femu", femu_test_fdp_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"dftl",
+        .edge.extra_device_opts =
+            "devsz_mb=11,secsz=512,secs_per_pg=8,pgs_per_blk=32,"
+            "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,subsys=fdpsub"
+    });
+    qos_add_test("fdp-dftl-page", "femu", femu_test_fdp_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"page",
+        .edge.extra_device_opts =
+            "devsz_mb=11,secsz=512,secs_per_pg=8,pgs_per_blk=32,"
+            "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,subsys=fdpsub"
+    });
+    qos_add_test("fdp-dftl-csd", "femu", femu_test_fdp_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"dftl",
+        .edge.extra_device_opts =
+            "devsz_mb=11,secsz=512,secs_per_pg=8,pgs_per_blk=32,"
+            "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=4,fdm_size=1,mapping=dftl,subsys=fdpsub"
     });
     qos_add_test("fdp-policy-refused", "femu", femu_test_fdp_policy_refused,
                  NULL);

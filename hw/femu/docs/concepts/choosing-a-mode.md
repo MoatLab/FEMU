@@ -57,8 +57,8 @@ placement then has no effect on where data goes. FDP requires a single
 controller in the subsystem, a single namespace (`namespaces=1`), `fdp.nrg=1`
 and `fdp.nruh` from 1 to `fdp.nru`. It cannot be combined with a KV namespace,
 `meta`, Streams or a subsystem with `ns_mgmt=on`. A BBSSD controller under FDP
-also refuses `buffer_size`, `hot_cold_sep` and a `mapping` other than
-`page`.
+also refuses `buffer_size`, `hot_cold_sep` and the `hybrid` and `fast`
+mappings.
 
 **Several namespaces and per-namespace modes.** `namespaces` is 1 to 256. The
 backend of `devsz_mb` MiB is split evenly, or by `namespace_sizes`.

@@ -495,7 +495,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "greedy picks it instead" },
     { "mapping",
       "bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, "
-      "hybrid or fast; unset is page, and FDP supports only page" },
+      "hybrid or fast; unset is page, and FDP takes page or dftl" },
     { "mapping_cache_mb",
       "bbssd, CSD with mapping=dftl: size of the cached mapping table in "
       "MiB; 0 means 4" },
