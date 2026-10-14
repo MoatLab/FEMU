@@ -184,17 +184,19 @@ device /machine/peripheral-anon/device[0]  bbssd  PCI 00:02.0
     media: bus phases not charged
 ```
 
-A configuration that FEMU refuses gives FEMU's message and exit status 1:
+A configuration that FEMU refuses gives FEMU's message and exit status 1. The
+example uses a small geometry, because FEMU allocates the memory backend
+before it checks the size:
 
 <!-- femu-example: config-check-refused; exit: 1 -->
 ```sh
-../femu-scripts/femu-config-check.py -device femu,femu_mode=1,devsz_mb=20000
+../femu-scripts/femu-config-check.py -device femu,femu_mode=1,devsz_mb=80,nchs=2,luns_per_ch=2,blks_per_pl=64,pgs_per_blk=64
 ```
 
 <!-- femu-untested: output of the refused example above -->
 ```
 femu-config-check: REFUSED
-  qemu-system-x86_64: -device femu,femu_mode=1,devsz_mb=20000: FEMU bbssd: namespace 1 exposes 20000 MiB of the 16384 MiB this geometry has, leaving garbage collection no room; expose at most 15552 MiB per namespace (lower devsz_mb, or set op_pcent)
+  qemu-system-x86_64: -device femu,femu_mode=1,devsz_mb=80,nchs=2,luns_per_ch=2,blks_per_pl=64,pgs_per_blk=64: FEMU bbssd: namespace 1 exposes 80 MiB of the 64 MiB this geometry has, leaving garbage collection no room; expose at most 60 MiB per namespace (lower devsz_mb, or set op_pcent)
 ```
 
 FDP needs its `femu-subsys`, and ZNS takes the bare `-device` value:
