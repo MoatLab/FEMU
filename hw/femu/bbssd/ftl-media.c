@@ -203,8 +203,8 @@ void bb_nand_media_init(struct ssd *ssd)
             .mts = spp->onfi_mts,
             .page_bytes = (uint64_t)spp->secsz * spp->secs_per_pg +
                           spp->onfi_spare_bytes,
-            .col_cycles = 2,
-            .row_cycles = 3,
+            .col_cycles = spp->onfi_col_cycles,
+            .row_cycles = spp->onfi_row_cycles,
             .multi_lun = spp->luns_per_ch > 1,
             .tccs_ns = spp->onfi_tccs_ns,
         };
@@ -386,6 +386,10 @@ bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
 
     if (!ssd->sp.gc_copyback || src->g.ch != dst->g.ch ||
         src->g.lun != dst->g.lun || src->g.pl != dst->g.pl) {
+        return false;
+    }
+    /* a parameter page without odd to even copyback (bytes 6-7 bit 4) */
+    if (ssd->sp.onfi_cb_parity && ((src->g.pg ^ dst->g.pg) & 1)) {
         return false;
     }
     loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),

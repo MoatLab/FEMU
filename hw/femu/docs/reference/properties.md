@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 188 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 189 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -130,6 +130,7 @@ Devices:
 | `onfi_mts` | `int32` | `0` | bbssd, CSD, KV: with onfi_mode, the page payload rate in MT/s in place of the mode's own rate, 1 to 100000; 0 (default) uses the mode |
 | `onfi_spare_bytes` | `int32` | `0` | bbssd, CSD, KV: with onfi_mode, the spare bytes moved with each page on the bus; the page on the bus must be an even number of bytes; 0 (default) moves the data bytes only |
 | `onfi_tccs_ns` | `int32` | `0` | bbssd, CSD, KV: with onfi_mode, tCCS in ns from a datasheet, paid before a data out when several LUNs share a channel and per plane of a multi-plane read; ONFI 6.0 gives no value, so 0 (default) pays nothing |
+| `onfi_param_page` | `str` | unset | bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes per copy, CRC checked, redundant copies tried). It turns the ONFI profile on, gives the mode when onfi_mode is -1, and sets the spare bytes and address cycles. Realize refuses a page whose geometry, features or modes do not match the device; unset (default) uses none |
 | `tplpbsy` | `int32` | `0` | bbssd, CSD: busy time in ns between the planes of a multi-plane program; only with mp_program, and a value without it warns at realize. Negative is refused |
 | `tplrbsy` | `int32` | `0` | bbssd, CSD: busy time in ns between the planes of a multi-plane read; only with mp_read, and a value without it warns at realize. Negative is refused |
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |

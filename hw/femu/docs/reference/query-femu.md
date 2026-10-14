@@ -187,7 +187,8 @@ fallbacks. Times are in ns.
 | Member | Content |
 | --- | --- |
 | `staged-bus` | true when the channel bus phases are charged |
-| `onfi-profile`, `onfi-mode` | true when `onfi_mode` 0 to 26 sets the bus phases; `onfi-mode` is present only then |
+| `onfi-profile`, `onfi-mode` | true when `onfi_mode` 0 to 26 or `onfi_param_page` sets the bus phases; `onfi-mode` is present only then, and with a parameter page and `onfi_mode=-1` it is the highest mode the page lists |
+| `column-cycles`, `row-cycles` | the address cycles of each command with the profile: 2 and 3, or the page's byte 101; 0 without the profile |
 | `page-transfer-ns` | one page on the bus |
 | `read-command-ns`, `program-command-ns`, `erase-command-ns` | the command and address phase of each op |
 | `copyback-read-command-ns`, `copyback-program-command-ns` | the two command phases of a copyback |
@@ -205,7 +206,7 @@ the values of the [ONFI 6.0 profile table](../design/nand-timing.md#onfi-60-prof
 
 ```json
 "media": {"staged-bus": true, "onfi-profile": true, "onfi-mode": 26,
-          "page-transfer-ns": 855, "read-command-ns": 275,
+          "column-cycles": 2, "row-cycles": 3, "page-transfer-ns": 855, "read-command-ns": 275,
           "program-command-ns": 562, "erase-command-ns": 225,
           "copyback-read-command-ns": 275, "copyback-program-command-ns": 275,
           "status-ns": 321, "data-out-lead-ns": 200, "data-out-tail-ns": 115,
@@ -245,7 +246,8 @@ command takes comes from the model instead.
                "page-size": 4096, "pages-per-line": 16384},
   "counters": {"host-write-pages": 20480, "nand-write-pages": 20480,
                "gc-write-pages": 0, "block-erases": 0, "waf": 1.0},
-  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+  "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
+            "row-cycles": 0, "page-transfer-ns": 0,
             "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
             "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
@@ -278,7 +280,8 @@ Each handle has one unit open:
                "page-size": 4096, "pages-per-line": 16},
   "counters": {"host-write-pages": 0, "nand-write-pages": 0,
                "gc-write-pages": 0, "block-erases": 0},
-  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+  "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
+            "row-cycles": 0, "page-transfer-ns": 0,
             "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
             "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
@@ -316,7 +319,8 @@ A zoned namespace with one zone written and one zone finished:
   "zone-counts": {"empty": 14, "implicitly-open": 1, "explicitly-open": 0,
                   "closed": 0, "read-only": 0, "full": 1, "offline": 0,
                   "total": 16},
-  "media": {"staged-bus": false, "onfi-profile": false, "page-transfer-ns": 0,
+  "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
+            "row-cycles": 0, "page-transfer-ns": 0,
             "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
             "copyback-read-command-ns": 0, "copyback-program-command-ns": 0,
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,

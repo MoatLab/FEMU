@@ -278,9 +278,26 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->tplpbsy = n->bb_params.tplpbsy;
     spp->tplrbsy = n->bb_params.tplrbsy;
     spp->tplebsy = n->bb_params.tplebsy;
+    /*
+     * A parameter page gives the mode when onfi_mode is -1, and the spare
+     * bytes and address cycles always. Without one, a profile takes 2
+     * column and 3 row cycles.
+     */
     spp->onfi_mode = n->bb_params.onfi_mode;
-    spp->onfi_mts = n->bb_params.onfi_mts;
     spp->onfi_spare_bytes = n->bb_params.onfi_spare_bytes;
+    spp->onfi_col_cycles = 2;
+    spp->onfi_row_cycles = 3;
+    spp->onfi_cb_parity = false;
+    if (n->bb_params.onfi_page_loaded) {
+        if (spp->onfi_mode < 0) {
+            spp->onfi_mode = n->bb_params.onfi_page_mode;
+        }
+        spp->onfi_spare_bytes = n->bb_params.onfi_page_spare;
+        spp->onfi_col_cycles = n->bb_params.onfi_page_col;
+        spp->onfi_row_cycles = n->bb_params.onfi_page_row;
+        spp->onfi_cb_parity = n->bb_params.onfi_page_parity;
+    }
+    spp->onfi_mts = n->bb_params.onfi_mts;
     spp->onfi_tccs_ns = n->bb_params.onfi_tccs_ns;
     spp->pe_suspend = n->bb_params.pe_suspend;
     spp->tsusp_ns = n->bb_params.tsusp_ns;

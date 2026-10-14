@@ -2130,6 +2130,14 @@ typedef struct BbCtrlParams {
     int onfi_mts;     /* payload rate (MT/s) instead of the mode's; 0 = mode */
     int onfi_spare_bytes; /* spare bytes moved with each page */
     int onfi_tccs_ns; /* tCCS from a datasheet (ns); 0 charges nothing */
+    char *onfi_param_page; /* parameter page image file; NULL = none */
+    /* from a good onfi_param_page, set at realize; unused unless loaded */
+    bool onfi_page_loaded;
+    int onfi_page_mode;     /* the highest mode the page lists */
+    int onfi_page_spare;    /* spare bytes per page */
+    int onfi_page_col;      /* column address cycles */
+    int onfi_page_row;      /* row address cycles */
+    bool onfi_page_parity;  /* copyback keeps the page parity */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */

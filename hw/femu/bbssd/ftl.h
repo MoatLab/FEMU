@@ -173,6 +173,9 @@ struct ssdparams {
     int onfi_mts;     /* payload rate (MT/s) instead of the mode's; 0 = mode */
     int onfi_spare_bytes; /* spare bytes moved with each page */
     int onfi_tccs_ns; /* tCCS (ns); 0 charges nothing */
+    int onfi_col_cycles; /* column address cycles of the profile */
+    int onfi_row_cycles; /* row address cycles of the profile */
+    bool onfi_cb_parity; /* copyback only between pages of one parity */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */

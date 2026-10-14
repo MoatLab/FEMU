@@ -313,6 +313,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "before a data out when several LUNs share a channel and per plane of "
       "a multi-plane read; ONFI 6.0 gives no value, so 0 (default) pays "
       "nothing" },
+    { "onfi_param_page",
+      "bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes "
+      "per copy, CRC checked, redundant copies tried). It turns the ONFI "
+      "profile on, gives the mode when onfi_mode is -1, and sets the spare "
+      "bytes and address cycles. Realize refuses a page whose geometry, "
+      "features or modes do not match the device; unset (default) uses none" },
     { "tplpbsy",
       "bbssd, CSD: busy time in ns between the planes of a multi-plane "
       "program; only with mp_program, and a value without it warns at "

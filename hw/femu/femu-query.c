@@ -131,6 +131,8 @@ typedef struct FemuQuerySel {
     uint32_t nsid;
     uint32_t idx;               /* into req->ns, or into the zoned copies */
     int onfi_mode;              /* -1 without the ONFI profile */
+    int onfi_col;               /* address cycles of the profile */
+    int onfi_row;
     NandMediaPhases media;
 } FemuQuerySel;
 
@@ -141,12 +143,18 @@ typedef struct FemuQuerySel {
  * to the FTL thread.
  */
 static const NandMedia *femu_query_media(FemuCtrl *n, NvmeNamespace *ns,
-                                         int *onfi_mode)
+                                         FemuQuerySel *sel)
 {
-    *onfi_mode = -1;
+    sel->onfi_mode = -1;
+    sel->onfi_col = 0;
+    sel->onfi_row = 0;
     if ((NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) && ns->ssd &&
         !ns->ssd_borrowed) {
-        *onfi_mode = ns->ssd->sp.onfi_mode;
+        sel->onfi_mode = ns->ssd->sp.onfi_mode;
+        if (sel->onfi_mode >= 0) {
+            sel->onfi_col = ns->ssd->sp.onfi_col_cycles;
+            sel->onfi_row = ns->ssd->sp.onfi_row_cycles;
+        }
         return &ns->ssd->media;
     }
     if (femu_query_zoned(ns)) {
@@ -165,7 +173,7 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
                                FemuQueryZoned *zoned, uint32_t *nr_zoned,
                                FemuQuerySel *sel, Error **errp)
 {
-    const NandMedia *media = femu_query_media(n, ns, &sel->onfi_mode);
+    const NandMedia *media = femu_query_media(n, ns, sel);
 
     sel->mode = femu_query_mode(ns->femu_mode);
     sel->nsid = ns->id;
@@ -451,6 +459,8 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
     mt->onfi_profile = sel->onfi_mode >= 0;
     mt->has_onfi_mode = mt->onfi_profile;
     mt->onfi_mode = mt->onfi_profile ? sel->onfi_mode : 0;
+    mt->column_cycles = sel->onfi_col;
+    mt->row_cycles = sel->onfi_row;
     mt->page_transfer_ns = ph->page_xfer_ns;
     mt->read_command_ns = ph->rd_cmd_ns;
     mt->program_command_ns = ph->wr_cmd_ns;

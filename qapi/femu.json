@@ -437,7 +437,14 @@
 #     phases
 #
 # @onfi-mode: the ONFI 6.0 timing mode.  Present only with
-#     @onfi-profile.
+#     @onfi-profile.  With a parameter page and onfi_mode -1, it is the
+#     highest mode that the page lists.
+#
+# @column-cycles: the column address cycles of a command, or 0 without
+#     @onfi-profile
+#
+# @row-cycles: the row address cycles of a command, or 0 without
+#     @onfi-profile
 #
 # @page-transfer-ns: one page on the bus
 #
@@ -489,7 +496,8 @@
 ##
 { 'struct': 'FemuMediaTiming',
   'data': { 'staged-bus': 'bool', 'onfi-profile': 'bool',
-            '*onfi-mode': 'uint8', 'page-transfer-ns': 'uint64',
+            '*onfi-mode': 'uint8', 'column-cycles': 'uint8',
+            'row-cycles': 'uint8', 'page-transfer-ns': 'uint64',
             'read-command-ns': 'uint64', 'program-command-ns': 'uint64',
             'erase-command-ns': 'uint64',
             'copyback-read-command-ns': 'uint64',
@@ -681,6 +689,7 @@
 #                            "gc-write-pages": 0, "block-erases": 0,
 #                            "waf": 1.0 },
 #              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "column-cycles": 0, "row-cycles": 0,
 #                         "page-transfer-ns": 0, "read-command-ns": 0,
 #                         "program-command-ns": 0,
 #                         "erase-command-ns": 0,
@@ -714,6 +723,7 @@
 #                               "read-only": 0, "full": 1,
 #                               "offline": 0, "total": 16 },
 #              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "column-cycles": 0, "row-cycles": 0,
 #                         "page-transfer-ns": 0, "read-command-ns": 0,
 #                         "program-command-ns": 0,
 #                         "erase-command-ns": 0,
@@ -754,6 +764,7 @@
 #                            "nand-write-pages": 0,
 #                            "gc-write-pages": 0, "block-erases": 0 },
 #              "media": { "staged-bus": false, "onfi-profile": false,
+#                         "column-cycles": 0, "row-cycles": 0,
 #                         "page-transfer-ns": 0, "read-command-ns": 0,
 #                         "program-command-ns": 0,
 #                         "erase-command-ns": 0,
@@ -813,7 +824,8 @@
 #                            "nand-write-pages": 0,
 #                            "gc-write-pages": 0, "block-erases": 0 },
 #              "media": { "staged-bus": true, "onfi-profile": true,
-#                         "onfi-mode": 26, "page-transfer-ns": 855,
+#                         "onfi-mode": 26, "column-cycles": 2,
+#                         "row-cycles": 3, "page-transfer-ns": 855,
 #                         "read-command-ns": 275,
 #                         "program-command-ns": 562,
 #                         "erase-command-ns": 225,

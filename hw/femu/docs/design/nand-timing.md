@@ -436,6 +436,64 @@ Realize refuses these settings:
 
 `onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns` without `onfi_mode` warns.
 
+#### Parameter page (`onfi_param_page`)
+
+`onfi_param_page` names a file with an ONFI parameter page image (Section
+6.7.1, Table 6-4). The page turns the profile on, also with
+`onfi_mode=-1`. Then the mode is the highest one that the page lists.
+
+```text
+ file --> copy 0, 1, 2, ... (256 bytes each)
+            signature: 2 or more of "ONFI" (6.7.1.1)
+            CRC-16: poly 8005h, init 4F4Eh, bytes 0-253 (6.7.1.42)
+        --> first good copy
+        --> checks against the device --> mode, spare bytes, address cycles
+```
+
+| Bytes | Field | Use |
+| --- | --- | --- |
+| 4-5 | revision | bit 15 (ONFI 6.0) must be set |
+| 6-7 | features | bit 9 (NV-LPDDR4) must be set and bit 0 (x16) clear; see the rules below |
+| 8-9 | optional commands | Read Status Enhanced, Change Read Column Enhanced and Copyback, when the device needs them |
+| 80-83, 84-85 | data and spare bytes per page | data must equal `secsz * secs_per_pg`; spare bytes go on the bus |
+| 92-95, 96-99 | pages per block, blocks per LUN | must equal `pgs_per_blk` and `blks_per_pl * pls_per_lun` |
+| 100 | LUNs per target | must divide `luns_per_ch` |
+| 101 | address cycles | column cycles (bits 4-7) and row cycles (bits 0-3) set the command lengths |
+| 102 | bits per memory entry | must equal `nand_cell_type` when both are set |
+| 113, 114 | plane address bits, multi-plane attributes | `pls_per_lun` must be `1 << bits`; several planes need the concurrent form |
+| 118-121 | NV-LPDDR4 modes | bit 0 is modes 0 to 3, bit k is mode k + 3 |
+
+Realize refuses the page in these cases. The error names the field and
+both values.
+
+- The file is missing or shorter than 256 bytes, or no copy has a
+  signature and a good CRC.
+- The data bytes per page are not a power of two of 512 or more.
+- The pages per block are not a multiple of 32.
+- A geometry field differs from the device, or an address field is too
+  short for it (Section 3.1).
+- `onfi_spare_bytes` is set and differs from bytes 84-85.
+- `onfi_mode` is set and the page does not list it, or the page lists no
+  mode.
+- The listed modes are not one range, as Section 6.7.1.30 asks.
+- Byte 102 (bits per memory entry) is 0.
+- Several LUNs per target (byte 100) without multiple LUN operations
+  (bytes 6-7 bit 1) and the program page register clear enhancement
+  (bit 8). The held page register model needs both.
+- Several LUNs per channel without Read Status Enhanced (bytes 8-9 bit 3),
+  or several LUNs or planes without Change Read Column Enhanced (bit 6).
+- Several planes without multi-plane program and erase (bytes 6-7 bit 3),
+  which garbage collection uses, or with overlapped multi-plane only
+  (byte 114 bit 0). FEMU models the concurrent form.
+- `mp_read` without multi-plane read (bytes 6-7 bit 6), or `gc_copyback`
+  without Copyback (bytes 8-9 bit 4).
+
+A page can clear odd to even copyback (bytes 6-7 bit 4). Then
+`gc_copyback` moves a page on the die only when the source and the
+destination page have the same parity. Other moves go off the die. The page gives no array times in
+ONFI 6.0, so `pg_rd_lat`, `pg_wr_lat` and `blk_er_lat` still set them.
+Pages of older ONFI revisions are refused.
+
 QMP [`query-femu`](../reference/query-femu.md#media-timing) reports the
 phases a namespace charges in its `media` member, for every mode with a
 media layer, with the profile on or off. The values come after the

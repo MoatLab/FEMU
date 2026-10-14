@@ -4570,6 +4570,10 @@ static void femu_media_check(QDict *ns, const FemuMediaWant *w)
     if (w->onfi >= 0) {
         g_assert_cmpint(qdict_get_int(md, "onfi-mode"), ==, w->onfi);
     }
+    /* without a parameter page, 2 column and 3 row cycles */
+    g_assert_cmpint(qdict_get_int(md, "column-cycles"), ==,
+                    w->onfi >= 0 ? 2 : 0);
+    g_assert_cmpint(qdict_get_int(md, "row-cycles"), ==, w->onfi >= 0 ? 3 : 0);
     for (int i = 0; i < ARRAY_SIZE(femu_media_keys); i++) {
         g_test_message("%s %s: %" PRId64, w->name, femu_media_keys[i],
                        qdict_get_int(md, femu_media_keys[i]));
@@ -5483,6 +5487,22 @@ static void femu_test_gc_pace_timing(void *obj, void *data,
  *     The destination steps through the four dies, so a quarter of the 32
  *     moves land on that die and go by copyback; the rest go off-chip.
  */
+static char *femu_onfi_page_file(int mutate, bool good_crc);
+
+/* the parameter page of gc-copyback-parity, made when its QEMU starts */
+static char *femu_cb_page;
+
+static void *femu_cb_page_before(GString *cmd_line, void *arg)
+{
+    const char *mark = strstr(cmd_line->str, "@ONFI@");
+
+    g_assert_nonnull(mark);
+    femu_cb_page = femu_onfi_page_file(3, true);
+    g_string_erase(cmd_line, mark - cmd_line->str, strlen("@ONFI@"));
+    g_string_insert(cmd_line, mark - cmd_line->str, femu_cb_page);
+    return arg;
+}
+
 static void femu_test_gc_copyback(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
@@ -5500,6 +5520,10 @@ static void femu_test_gc_copyback(void *obj, void *data,
     char *st = NULL;
     int n;
 
+    if (femu_cb_page && !strcmp(mode, "parity")) {
+        unlink(femu_cb_page);
+        g_clear_pointer(&femu_cb_page, g_free);
+    }
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x5a, 16 * 4096);
@@ -5517,6 +5541,15 @@ static void femu_test_gc_copyback(void *obj, void *data,
     } else {
         g_assert_cmphex(femu_dealloc_pages(&c, 0, 64, list), ==,
                         NVME_SUCCESS);
+    }
+    /*
+     * One more page on each of the 4 LUNs moves every write pointer by
+     * one page, so source and destination pages differ in parity.
+     */
+    if (!strcmp(mode, "parity")) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+        lpn += 4;
     }
     gc0 = femu_c0h_field(&c, log, 16);
     for (n = 0; n < 216; n++) {
@@ -5572,6 +5605,14 @@ static void femu_test_gc_copyback(void *obj, void *data,
         /* pages 16-19 of each block are edge wordlines with an ECC cost */
         g_assert_cmpuint(gc, ==, 64);
         g_assert_cmpuint(cb, ==, 48);
+    } else if (!strcmp(mode, "parity")) {
+        /*
+         * A parameter page without odd to even copyback (bytes 6-7 bit 4):
+         * a move between pages of other parity goes off the die, and the
+         * extra page above puts every move there.
+         */
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 0);
     } else {
         g_assert_cmpuint(gc, ==, 32);
         g_assert_cmpuint(cb, ==, 8);
@@ -6734,6 +6775,145 @@ static void femu_test_onfi_refused(void *obj, void *data,
                        qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
     }
     g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
+/* CRC-16 of an ONFI parameter page (Section 6.7.1.42) */
+static uint16_t femu_onfi_crc(const uint8_t *p, size_t n)
+{
+    uint16_t crc = 0x4f4e;
+
+    while (n--) {
+        crc ^= (uint16_t)*p++ << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x8005 : 0));
+        }
+    }
+    return crc;
+}
+
+/*
+ * A one-copy ONFI 6.0 parameter page for one LUN of 4096 data bytes per
+ * page, 32 pages per block and 12 blocks per LUN, with 3 column and 4 row
+ * address cycles, modes 0 to 22. @mutate changes one thing, then the CRC
+ * is set (@good_crc) or left wrong. @mutate 3 is the gc-copyback-parity
+ * device: 32 blocks per LUN, 2 column and 3 row cycles, Copyback without
+ * odd to even copyback.
+ */
+static char *femu_onfi_page_file(int mutate, bool good_crc)
+{
+    uint8_t p[256] = { 'O', 'N', 'F', 'I' };
+    g_autoptr(GError) err = NULL;
+    char *path = NULL;
+    uint16_t crc;
+    int fd;
+
+    p[5] = 0x80;                     /* revision bit 15: ONFI 6.0 */
+    p[7] = 0x02;                     /* features bit 9: NV-LPDDR4 */
+    p[8] = 0x48;                     /* Read Status and Column Enhanced */
+    p[81] = 0x10;                    /* 4096 data bytes */
+    p[92] = 32;
+    p[96] = 12;
+    p[100] = 1;
+    p[101] = 0x34;
+    p[102] = 0xff;
+    p[118] = 0xff;                   /* bits 0 to 19: modes 0 to 22 */
+    p[119] = 0xff;
+    p[120] = 0x0f;
+    if (mutate == 1) {
+        p[0] = p[1] = p[2] = 0;      /* one signature byte left */
+    } else if (mutate == 2) {
+        p[92] = 64;                  /* pages per block */
+    } else if (mutate == 3) {
+        p[96] = 32;
+        p[101] = 0x23;
+        p[8] |= 0x10;                /* Copyback */
+    }
+    crc = femu_onfi_crc(p, 254);
+    p[254] = crc & 0xff;
+    p[255] = (crc >> 8) ^ (good_crc ? 0 : 1);
+    fd = g_file_open_tmp("femu-onfi-XXXXXX", &path, &err);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(write(fd, p, sizeof(p)), ==, sizeof(p));
+    close(fd);
+    return path;
+}
+
+/*
+ * onfi_param_page: realize refuses a missing file, a page with no
+ * signature, a bad CRC, a geometry that differs and a mode the page does
+ * not list. A good page turns the profile on with its own highest mode
+ * and address cycles: read command 2 + 3 + 4 cycles + tWB = 325 ns, page
+ * ceil(4096 * 555 / 2000) = 1137 ns at mode 22. The accepted device is a
+ * CSD one, whose media timing query-femu reports with no enabled
+ * controller.
+ */
+static void femu_test_onfi_page(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *good = femu_onfi_page_file(0, true);
+    g_autofree char *nosig = femu_onfi_page_file(1, true);
+    g_autofree char *badcrc = femu_onfi_page_file(0, false);
+    g_autofree char *geom = femu_onfi_page_file(2, true);
+    const struct {
+        const char *page;
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "/nonexistent/femu-onfi-page", "", "onfi_param_page" },
+        { nosig, "", "no copy has the ONFI signature" },
+        { badcrc, "", "good CRC" },
+        { geom, "", "pages per block (bytes 92-95) 64, FEMU 32" },
+        { good, ",'onfi_mode':26", "do not list onfi_mode 26" },
+        { good, ",'pg_xfer_lat':1000", "pg_xfer_lat is refused" },
+    };
+    QDict *rsp;
+    QDict *md;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'onfi-bad','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':32,"
+            "'blks_per_pl':12,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+            "'onfi_param_page':'%s'%s}}", cases[i].page, cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("onfi page refused %s: %s", cases[i].msg,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'onfi-page','addr':'6',"
+                    "'devsz_mb':1,'femu_mode':4,'fdm_size':16,'secsz':512,"
+                    "'secs_per_pg':8,'pgs_per_blk':32,'blks_per_pl':12,"
+                    "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+                    "'onfi_param_page':%s}}", good);
+    /* realize has read the files */
+    unlink(good);
+    unlink(nosig);
+    unlink(badcrc);
+    unlink(geom);
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("onfi page accepted case: %s",
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    md = qdict_get_qdict(femu_query_ns(qts,
+                                       "'path':'/machine/peripheral/onfi-page'",
+                                       &rsp), "media");
+    g_assert_true(qdict_get_bool(md, "onfi-profile"));
+    g_assert_cmpint(qdict_get_int(md, "onfi-mode"), ==, 22);
+    g_assert_cmpint(qdict_get_int(md, "column-cycles"), ==, 3);
+    g_assert_cmpint(qdict_get_int(md, "row-cycles"), ==, 4);
+    g_assert_cmpint(qdict_get_int(md, "read-command-ns"), ==, 325);
+    g_assert_cmpint(qdict_get_int(md, "page-transfer-ns"), ==, 1137);
     qobject_unref(rsp);
     qos_invalidate_command_line();
 }
@@ -33334,6 +33514,7 @@ static void femu_register_nodes(void)
             "pd_open_read_limit=4,subsys=fdpsub-ii"
     });
     qos_add_test("onfi-refused", "femu", femu_test_onfi_refused, NULL);
+    qos_add_test("onfi-page", "femu", femu_test_onfi_page, NULL);
     qos_add_test("onfi-m26", "femu", femu_test_onfi,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"m26",
@@ -33532,6 +33713,17 @@ static void femu_register_nodes(void)
             "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
             "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
             "pg_xfer_lat=2000000"
+    });
+    qos_add_test("gc-copyback-parity", "femu", femu_test_gc_copyback,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"parity",
+        .before = femu_cb_page_before,
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=14,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=75,gc_thres_pcent_high=94,"
+            "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
+            "gc_copyback=on,onfi_param_page=@ONFI@"
     });
     qos_add_test("gc-copyback-on", "femu", femu_test_gc_copyback,
                  &(QOSGraphTestOptions) {

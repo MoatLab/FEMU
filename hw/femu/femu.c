@@ -1519,10 +1519,15 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n)
     return true;
 }
 
-/* the ONFI profile asked for, a bad mode included; -1 is off */
+/*
+ * The ONFI profile asked for, a bad mode included. onfi_mode -1 with no
+ * parameter page is off.
+ */
 static bool femu_onfi_on(FemuCtrl *n)
 {
-    return n->bb_params.onfi_mode != -1;
+    const char *page = n->bb_params.onfi_param_page;
+
+    return n->bb_params.onfi_mode != -1 || (page && *page);
 }
 
 /* a program disturb read term set, a negative one included */
@@ -2664,11 +2669,64 @@ static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
  * cxl_ssd link or a shared namespace uses an FTL another device made. The
  * namespace modes are checked in nvme_init_namespaces().
  */
+/*
+ * Read the parameter page image named by onfi_param_page, find a good copy
+ * and check it against the device settings. On success the page's mode,
+ * spare bytes and address cycles are kept for the FTL.
+ */
+static bool femu_load_onfi_page(FemuCtrl *n, Error **errp)
+{
+    BbCtrlParams *bp = &n->bb_params;
+    g_autofree gchar *buf = NULL;
+    g_autoptr(GError) gerr = NULL;
+    OnfiParamPage page;
+    OnfiGeometry geo = {
+        .data_bytes = (uint64_t)bp->secsz * bp->secs_per_pg,
+        .spare_bytes = bp->onfi_spare_bytes,
+        .pages_per_block = bp->pgs_per_blk,
+        .blocks_per_lun = (uint32_t)bp->blks_per_pl * bp->pls_per_lun,
+        .luns_per_ch = bp->luns_per_ch,
+        .planes_per_lun = bp->pls_per_lun,
+        .bits_per_entry = n->nand_cell_type,
+        .mode = bp->onfi_mode,
+        .mp_program = bp->mp_program && bp->pls_per_lun > 1,
+        .mp_read = bp->mp_read && bp->pls_per_lun > 1,
+        .copyback = bp->gc_copyback,
+    };
+    const char *why;
+    char msg[256];
+    gsize len;
+
+    if (!g_file_get_contents(bp->onfi_param_page, &buf, &len, &gerr)) {
+        error_setg(errp, "femu: onfi_param_page: %s", gerr->message);
+        return false;
+    }
+    if (onfi_param_parse((const uint8_t *)buf, len, &page, &why)) {
+        error_setg(errp, "femu: onfi_param_page %s: %s",
+                   bp->onfi_param_page, why);
+        return false;
+    }
+    if (onfi_param_check(&page, &geo, msg, sizeof(msg))) {
+        error_setg(errp, "femu: onfi_param_page %s: %s",
+                   bp->onfi_param_page, msg);
+        return false;
+    }
+    bp->onfi_page_mode = onfi_param_max_mode(&page);
+    bp->onfi_page_spare = page.spare_bytes;
+    bp->onfi_page_col = page.col_cycles;
+    bp->onfi_page_row = page.row_cycles;
+    bp->onfi_page_parity = !(page.features & ONFI_FEAT_ODD_EVEN_CB);
+    bp->onfi_page_loaded = true;
+    return true;
+}
+
 static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
 {
-    const BbCtrlParams *bp = &n->bb_params;
+    BbCtrlParams *bp = &n->bb_params;
+    const char *page = bp->onfi_param_page;
     const char *knob = NULL;
 
+    bp->onfi_page_loaded = false;
     if (!femu_onfi_on(n)) {
         if (bp->onfi_mts || bp->onfi_spare_bytes || bp->onfi_tccs_ns) {
             warn_report("femu: onfi_mts, onfi_spare_bytes and onfi_tccs_ns "
@@ -2676,7 +2734,7 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
         }
         return true;
     }
-    if (bp->onfi_mode < 0 || bp->onfi_mode >= ONFI_NUM_MODES) {
+    if (bp->onfi_mode < -1 || bp->onfi_mode >= ONFI_NUM_MODES) {
         error_setg(errp, "femu: onfi_mode must be -1 (off) or 0 to %d",
                    ONFI_NUM_MODES - 1);
         return false;
@@ -2690,8 +2748,13 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
                    "be negative");
         return false;
     }
+    /* the page checks the even size with its own spare bytes */
+    if (page && *page && !femu_load_onfi_page(n, errp)) {
+        return false;
+    }
     /* a DDR burst moves bytes in pairs */
-    if (((uint64_t)bp->secsz * bp->secs_per_pg + bp->onfi_spare_bytes) % 2) {
+    if (!bp->onfi_page_loaded &&
+        ((uint64_t)bp->secsz * bp->secs_per_pg + bp->onfi_spare_bytes) % 2) {
         error_setg(errp, "femu: onfi_mode needs an even page size on the bus "
                    "(secsz * secs_per_pg + onfi_spare_bytes)");
         return false;
@@ -3462,6 +3525,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("onfi_spare_bytes", FemuCtrl, bb_params.onfi_spare_bytes,
                       0),
     DEFINE_PROP_INT32("onfi_tccs_ns", FemuCtrl, bb_params.onfi_tccs_ns, 0),
+    DEFINE_PROP_STRING("onfi_param_page", FemuCtrl, bb_params.onfi_param_page),
     DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
     DEFINE_PROP_INT32("plane_first", FemuCtrl, bb_params.plane_first, 0),
     DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),

@@ -161,6 +161,274 @@ static void test_command_fields(void)
     check("a rate override keeps the mode's status byte", t.status_ns, 275);
 }
 
+/*
+ * Parameter page (Section 6.7.1). A good page for a device of 4096 data
+ * and 256 spare bytes per page, 32 pages per block, 24 blocks per LUN,
+ * one LUN per target, one plane and every NV-LPDDR4 mode.
+ */
+static void put16(uint8_t *p, uint32_t v)
+{
+    p[0] = v & 0xff;
+    p[1] = (v >> 8) & 0xff;
+}
+
+static void put32(uint8_t *p, uint32_t v)
+{
+    put16(p, v & 0xffff);
+    put16(p + 2, v >> 16);
+}
+
+static void seal_page(uint8_t *p)
+{
+    put16(p + 254, onfi_crc16(p, 254));
+}
+
+static void make_page(uint8_t *p)
+{
+    memset(p, 0, ONFI_PARAM_PAGE_BYTES);
+    memcpy(p, "ONFI", 4);
+    put16(p + 4, ONFI_REV_6_0);
+    put16(p + 6, ONFI_FEAT_NV_LPDDR4 | ONFI_FEAT_MULTI_LUN |
+          ONFI_FEAT_PR_CLEAR | ONFI_FEAT_MP_PROG_ERASE | ONFI_FEAT_MP_READ);
+    put16(p + 8, ONFI_OPT_READ_CACHE | ONFI_OPT_STATUS_ENH |
+          ONFI_OPT_COPYBACK | ONFI_OPT_COLUMN_ENH);
+    put32(p + 80, 4096);
+    put16(p + 84, 256);
+    put32(p + 92, 32);
+    put32(p + 96, 24);
+    p[100] = 1;
+    p[101] = 0x23;          /* 2 column, 3 row cycles */
+    p[102] = 0xff;
+    p[113] = 0;
+    put32(p + 118, 0xffffff);
+    seal_page(p);
+}
+
+static OnfiGeometry page_geometry(void)
+{
+    OnfiGeometry g = {
+        .data_bytes = 4096, .pages_per_block = 32, .blocks_per_lun = 24,
+        .luns_per_ch = 1, .planes_per_lun = 1, .mode = -1,
+    };
+
+    return g;
+}
+
+/* 0 when @p parses and passes the check against @g; else -1 */
+static int page_ok(const uint8_t *p, size_t len, const OnfiGeometry *g,
+                   const char *want)
+{
+    OnfiParamPage pg;
+    const char *why;
+    char msg[256];
+    int rc;
+
+    if (onfi_param_parse(p, len, &pg, &why)) {
+        rc = -1;
+        snprintf(msg, sizeof(msg), "%s", why);
+    } else {
+        rc = onfi_param_check(&pg, g, msg, sizeof(msg));
+    }
+    if (rc && want && !strstr(msg, want)) {
+        printf("# refused for another reason: %s\n", msg);
+        return -2;
+    }
+    return rc;
+}
+
+static void test_param_page(void)
+{
+    uint8_t buf[3 * ONFI_PARAM_PAGE_BYTES];
+    uint8_t *p = buf;
+    OnfiGeometry g = page_geometry();
+    OnfiParamPage pg;
+    const char *why;
+    int rc;
+
+    printf("# parameter page: CRC-16, copies, modes, geometry\n");
+    /*
+     * Hand value: polynomial division of the message with its first 16
+     * bits XORed by 4F4Eh, which is what the initial value does.
+     */
+    check("CRC of \"123456789\"", onfi_crc16((const uint8_t *)"123456789", 9),
+          0x2771);
+    check("CRC of nothing is the initial value", onfi_crc16(buf, 0), 0x4f4e);
+
+    make_page(p);
+    rc = onfi_param_parse(p, ONFI_PARAM_PAGE_BYTES, &pg, &why);
+    check("good page parses", rc, 0);
+    check("copy 0 used", pg.copy, 0);
+    check("data bytes", pg.data_bytes, 4096);
+    check("spare bytes", pg.spare_bytes, 256);
+    check("column cycles", pg.col_cycles, 2);
+    check("row cycles", pg.row_cycles, 3);
+    check("every mode: highest is 26", onfi_param_max_mode(&pg), 26);
+    check("good page passes the check", page_ok(p, ONFI_PARAM_PAGE_BYTES,
+                                                &g, NULL), 0);
+
+    pg.modes = 1;
+    check("bit 0 only: modes 0 to 3, highest 3", onfi_param_max_mode(&pg), 3);
+    check("bit 0 lists mode 2", onfi_param_has_mode(&pg, 2), 1);
+    check("bit 0 does not list mode 4", onfi_param_has_mode(&pg, 4), 0);
+    pg.modes = 1u << 1;
+    check("bit 1 is mode 4", onfi_param_max_mode(&pg), 4);
+    pg.modes = 1u << 23;
+    check("bit 23 is mode 26", onfi_param_max_mode(&pg), 26);
+    check("bit 23 lists mode 26", onfi_param_has_mode(&pg, 26), 1);
+    check("bit 23 does not list mode 25", onfi_param_has_mode(&pg, 25), 0);
+    pg.modes = 0;
+    check("no bit: no mode", (uint64_t)(int64_t)onfi_param_max_mode(&pg),
+          (uint64_t)-1);
+
+    /* copy 0 with a bad CRC, copy 1 good, copy 2 without a signature */
+    make_page(buf);
+    make_page(buf + ONFI_PARAM_PAGE_BYTES);
+    memset(buf + 2 * ONFI_PARAM_PAGE_BYTES, 0, ONFI_PARAM_PAGE_BYTES);
+    buf[50] ^= 1;
+    rc = onfi_param_parse(buf, sizeof(buf), &pg, &why);
+    check("bad copy 0, good copy 1: parses", rc, 0);
+    check("bad copy 0, good copy 1: copy 1 used", pg.copy, 1);
+    check("bad CRC in every copy: refused",
+          page_ok(buf, ONFI_PARAM_PAGE_BYTES, &g, "good CRC"), (uint64_t)-1);
+    make_page(buf);
+    buf[0] = buf[1] = buf[2] = 0;
+    seal_page(buf);
+    check("one signature byte: no copy present",
+          page_ok(buf, ONFI_PARAM_PAGE_BYTES, &g, "signature"), (uint64_t)-1);
+    make_page(buf);
+    buf[0] = buf[1] = 0;
+    seal_page(buf);
+    check("two signature bytes: present", page_ok(buf, ONFI_PARAM_PAGE_BYTES,
+                                                  &g, NULL), 0);
+    check("short file refused", page_ok(buf, 255, &g, "shorter"),
+          (uint64_t)-1);
+
+    printf("# parameter page refusals\n");
+    {
+        static const struct {
+            const char *what;
+            int off;
+            int width;
+            uint32_t val;
+            const char *msg;
+        } bad[] = {
+            { "revision without 6.0", 4, 2, 1u << 14, "bytes 4-5" },
+            { "no NV-LPDDR4", 6, 2, ONFI_FEAT_MULTI_LUN, "bit 9" },
+            { "x16 bus", 6, 2, ONFI_FEAT_NV_LPDDR4 | ONFI_FEAT_X16,
+              "16-bit" },
+            { "data bytes differ", 80, 4, 8192, "bytes 80-83" },
+            { "data bytes not a power of two", 80, 4, 3072, "power of two" },
+            { "data bytes under 512", 80, 4, 256, "power of two" },
+            { "pages per block differ", 92, 4, 64, "bytes 92-95" },
+            { "pages per block not a multiple of 32", 92, 4, 16,
+              "multiple of 32" },
+            { "blocks per LUN differ", 96, 4, 48, "bytes 96-99" },
+            { "no LUN count", 100, 1, 0, "byte 100" },
+            { "one column cycle for 4352 bytes", 101, 1, 0x13,
+              "column cycles cannot" },
+            { "one row cycle for 10 row bits", 101, 1, 0x21,
+              "row cycles cannot" },
+            { "plane bits for two planes", 113, 1, 1, "byte 113" },
+            { "no mode", 118, 4, 0, "list no mode" },
+            { "a hole in the modes: 0-3 and 5", 118, 4, 0x5, "one range" },
+            { "bits per memory entry 0", 102, 1, 0, "byte 102" },
+            { "odd spare bytes", 84, 2, 255, "odd" },
+        };
+
+        for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            make_page(p);
+            if (bad[i].width == 1) {
+                p[bad[i].off] = bad[i].val;
+            } else if (bad[i].width == 2) {
+                put16(p + bad[i].off, bad[i].val);
+            } else {
+                put32(p + bad[i].off, bad[i].val);
+            }
+            seal_page(p);
+            check(bad[i].what, page_ok(p, ONFI_PARAM_PAGE_BYTES, &g,
+                                       bad[i].msg), (uint64_t)-1);
+        }
+    }
+    make_page(p);
+    p[100] = 2;
+    put16(p + 6, ONFI_FEAT_NV_LPDDR4 | ONFI_FEAT_MULTI_LUN);
+    seal_page(p);
+    g.luns_per_ch = 2;
+    check("two LUNs per target without the clear enhancement",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, "bit 8"), (uint64_t)-1);
+    g = page_geometry();
+    g.luns_per_ch = 3;
+    make_page(p);
+    p[100] = 2;
+    seal_page(p);
+    check("3 LUNs per channel, 2 per target", page_ok(p, ONFI_PARAM_PAGE_BYTES,
+                                                      &g, "byte 100"),
+          (uint64_t)-1);
+    g = page_geometry();
+    g.luns_per_ch = 2;
+    make_page(p);
+    put16(p + 8, ONFI_OPT_COLUMN_ENH);
+    seal_page(p);
+    check("two LUNs need Read Status Enhanced",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, "bit 3"), (uint64_t)-1);
+    g = page_geometry();
+    g.spare_bytes = 128;
+    make_page(p);
+    check("onfi_spare_bytes that differs", page_ok(p, ONFI_PARAM_PAGE_BYTES,
+                                                   &g, "onfi_spare_bytes"),
+          (uint64_t)-1);
+    g = page_geometry();
+    g.mode = 12;
+    make_page(p);
+    put32(p + 118, 1u << 1);
+    seal_page(p);
+    check("onfi_mode the page does not list",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, "onfi_mode 12"), (uint64_t)-1);
+    g = page_geometry();
+    g.copyback = true;
+    make_page(p);
+    put16(p + 8, ONFI_OPT_READ_CACHE);
+    seal_page(p);
+    check("gc_copyback without Copyback", page_ok(p, ONFI_PARAM_PAGE_BYTES,
+                                                  &g, "Copyback"),
+          (uint64_t)-1);
+    g = page_geometry();
+    g.planes_per_lun = 2;
+    g.blocks_per_lun = 24;
+    make_page(p);
+    p[113] = 1;
+    p[114] = ONFI_MP_OVERLAPPED;
+    seal_page(p);
+    check("two planes, overlapped only", page_ok(p, ONFI_PARAM_PAGE_BYTES,
+                                                 &g, "overlapped"),
+          (uint64_t)-1);
+    make_page(p);
+    p[113] = 1;
+    put16(p + 6, ONFI_FEAT_NV_LPDDR4);
+    seal_page(p);
+    check("two planes without multi-plane erase",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, "bit 3"), (uint64_t)-1);
+    make_page(p);
+    p[113] = 1;
+    seal_page(p);
+    check("two planes, concurrent: accepted",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, NULL), 0);
+
+    printf("# address cycles set the command lengths\n");
+    {
+        OnfiInput in = {
+            .mode = 26, .page_bytes = 4096, .col_cycles = 3, .row_cycles = 4,
+        };
+        OnfiTiming t;
+
+        onfi_derive(&in, &t);
+        check("3 column + 4 row: read 9 cycles + tWB", t.rd_cmd_ns,
+              9 * 25 + 100);
+        check("3 column + 4 row: erase 6 cycles + tWB", t.er_cmd_ns,
+              6 * 25 + 100);
+    }
+}
+
 /* bbssd's staged config with the profile's fields for @t */
 static void onfi_config(NandMediaConfig *cfg, const OnfiTiming *t,
                         uint32_t planes)
@@ -548,7 +816,9 @@ static uint64_t phase_overlaps(void)
         PhaseLog *l = &phase_log[ch];
         uint64_t end = 0;
 
-        qsort(l->r, l->n, sizeof(*l->r), cmp_start);
+        if (l->n > 1) {
+            qsort(l->r, l->n, sizeof(*l->r), cmp_start);
+        }
         for (size_t i = 0; i < l->n; i++) {
             if (i && l->r[i].start < end) {
                 bad++;
@@ -1037,6 +1307,7 @@ int main(void)
     test_mode_table();
     test_page_xfer();
     test_command_fields();
+    test_param_page();
     test_media_phases();
     test_onfi_order();
     test_bus_history();
