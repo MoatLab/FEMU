@@ -32458,6 +32458,290 @@ static void femu_test_fdp_format_ruamw(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * Combinations of the FDP write buffer, the program disturb actions, the
+ * ONFI protocols and the FDP victim policies. Each case runs the pieces
+ * together, which their own tests run apart.
+ */
+
+/* one 4 KiB page at @page with Force Unit Access, unplaced */
+static void femu_combo_fua_page(FemuCtrlState *c, uint64_t buf, uint64_t page)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(4096 / c->lba_size - 1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(c, (NvmeCmd *)&rw)), ==, NVME_SUCCESS);
+}
+
+/*
+ * Held pages follow their handle to the unit that replaces its unit. FDP,
+ * 16-page units, buffer_size=16. @data names the case:
+ *   "pad":  pd_open_close_sec=1. 2 pages through placement 0 with FUA, 4
+ *           held. After 1.1 s a read pads the unit (14 pages) and moves
+ *           handle 0 to a fresh unit with host event 01h. A Flush puts the
+ *           4 held pages in the fresh unit: 12 pages of room.
+ *   "seal": fdpsub-ii, pd_open_read_limit=4, placement 3 (the initially
+ *           isolated handle). 2 pages with FUA, 4 held, 4 reads of page 0.
+ *           A held write through placement 1 seals the unit: event 81h,
+ *           then 80h for the 2 pages moved into the fresh unit. A Flush
+ *           adds the 4 held pages there: 6 valid pages, 10 pages of room.
+ */
+static void femu_test_combo_fdp_hold(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool pad = !strcmp(data, "pad");
+    int ph = pad ? 0 : 3;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint16_t ruhid = 0xffff;
+    uint8_t ev[8 * 64];
+    uint32_t nev;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x73, 4 * 4096);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 0, 2, buf, list, ph, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 2, 4, buf, list, ph, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 2);
+    if (pad) {
+        g_usleep(1100 * 1000);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 14);
+        g_assert_cmpint(femu_pd2_events(&c, log, true, 0x01, &ruhid), ==, 1);
+        g_assert_cmpint(ruhid, ==, 0);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==, 0);
+    } else {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmphex(femu_fdp_wb_write(&c, 50, 1, buf, list, 1, false), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+        /* the handle leaves its unit before the moves land in the new one */
+        nev = femu_fdp_ctrl_events(&c, log, ev, 8);
+        g_test_message("combo seal: %u controller events, first %02x %02x",
+                       nev, ev[0], nev > 1 ? ev[64] : 0);
+        g_assert_cmpuint(nev, ==, 2);
+        g_assert_cmphex(ev[0], ==, FEMU_FDP_EVT_RUH_MODIFIED);
+        g_assert_cmphex(ev[64], ==, FEMU_FDP_EVT_MEDIA_REALLOC);
+        g_assert_cmpint(lduw_le_p(ev + 34), ==, 3);
+    }
+    /* the held pages were never in the old unit */
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 2);
+    g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fdp_open_vpc(qts, ph), ==, pad ? 4 : 6);
+    g_assert_cmpuint(femu_fdp_handle_vpc(qts, ph), ==, 6);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, ph), ==, (pad ? 12 : 10) * 8);
+
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pad ? 6 : 7);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 6, 0x73);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The open-block read limit counts media reads only, with the write buffer
+ * and onfi_cache_read on. Line mode, one LUN, 16-page blocks,
+ * pd_open_read_limit=4. Pages 0 to 3 go to the open line with FUA, then
+ * pages 2 and 3 are rewritten into the buffer. A read of pages 0 to 3 reads
+ * 2 pages from the media and 2 from the buffer, so the block has 2 reads
+ * and the next write refreshes nothing. A second read of the 4 pages
+ * reaches 4, and the next write refreshes the line. @data "m0" (mode 0)
+ * reads the 2 media pages as one sequence: 105555 + 65005 = 170560 ns.
+ */
+static void femu_test_combo_read_limit(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans, hits0, before, rd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x74, 4 * 4096);
+    for (int p = 0; p < 4; p++) {
+        femu_combo_fua_page(&c, buf, p);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 2, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 4);
+
+    hits0 = femu_c0h_field(&c, log, 64);
+    g_usleep(50 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(femu_read_pages(&c, 0, 4, buf, list), ==, NVME_SUCCESS);
+    rd = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("combo read limit %s: 4-page read %" PRIu64 " ns",
+                   (const char *)data, rd);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 64) - hits0, ==, 2);
+    if (!strcmp(data, "m0")) {
+        g_assert_cmpuint(rd, ==, 170560);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 0);
+
+    g_assert_cmphex(femu_read_pages(&c, 0, 4, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 101, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), >, 0);
+
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 4, 0x74);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Pads are NAND programs on the ONFI bus, with and without SCA. Line mode,
+ * one LUN, mode 26, pd_open_close_sec=1 at age_scale 1000. 8 pages, then
+ * 20 ms: the next read pads the other 8 pages first, so it waits behind 8
+ * programs of 200 us. The read after it does not.
+ */
+static void femu_test_combo_pad_onfi(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t t0, t1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x75, 8 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+    g_usleep(20 * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    t1 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pad %s: reads %" PRIu64 " and %" PRIu64 " ns",
+                   (const char *)data, t0, t1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 8);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+    g_assert_cmpuint(t0, >=, t1 + 8 * 200000);
+    g_assert_cmpuint(t1, <, 200000);
+    femu_pd2_readback(&c, qts, buf, 8, 0x75);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Each FDP victim policy with units that a program disturb action retires
+ * early. FDP, 16-page units. Placed writes over 72 pages run for 8 passes
+ * and until collection has erased units; a pass gives handles 0 to 3 20,
+ * 20, 16 and 16 pages. @data is "<policy>/<action>", one action per device, so one
+ * action cannot take a unit before the other:
+ *   "seal": pd_open_read_limit=4. 4 reads of a page just written seal its
+ *           unit, and the refresh moves its pages; no unit is padded.
+ *   "pad":  pd_open_close_sec=1 at age_scale 10, a 100 ms limit, and a
+ *           150 ms pause per pass. Handle 1 leaves 4 pages in a fresh unit
+ *           at the end of a pass, and the next request pads that unit.
+ *           A padded unit holds no valid page, so collection may move
+ *           nothing. Every unit stays in one place
+ * (x-fdp-check 0) and every mapping holds.
+ */
+static void femu_test_combo_policy(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool seal = g_str_has_suffix(data, "/seal");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans, gc = 0, mbe = 0, seals, pads;
+    int round;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x76, 4 * 4096);
+    for (round = 0; round < 40 && (round < 8 || !mbe); round++) {
+        for (int p = 0; p < 72; p += 4) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, p, 4, buf,
+                                                            list,
+                                                            (p / 4) % 4)),
+                            ==, NVME_SUCCESS);
+            for (int i = 0; seal && p % 16 == 0 && i < 4; i++) {
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                        p * (4096 / c.lba_size), buf),
+                                ==, NVME_SUCCESS);
+            }
+        }
+        if (!seal) {
+            g_usleep(150 * 1000);
+        }
+        gc = femu_c0h_field(&c, log, 16);
+        g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log, 64),
+                        ==, NVME_SUCCESS);
+        mbe = qtest_readq(qts, log + 32);
+        g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    }
+    seals = femu_c0h_field(&c, log, 256);
+    pads = femu_c0h_field(&c, log, 264);
+    g_test_message("policy %s: %d rounds, %" PRIu64 " moved, %" PRIu64
+                   " bytes erased, %" PRIu64 " open reclaims, %" PRIu64
+                   " pads", (const char *)data, round, gc, mbe, seals, pads);
+    /* collection erased units; with pads their pages are all invalid */
+    g_assert_cmpuint(mbe, >, 0);
+    if (seal) {
+        g_assert_cmpuint(gc, >, 0);
+    }
+    g_assert_cmpuint(seal ? seals : pads, >, 0);
+    g_assert_cmpuint(seal ? pads : seals, ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 72);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 8, 0x76);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -33799,6 +34083,129 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=25,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "buffer_size=32,pd_open_read_limit=4,onfi_mode=26,"
             "onfi_cache_read=1,subsys=fdpsub-ii"
+    });
+    qos_add_test("combo-fdp-hold-pad", "femu", femu_test_combo_fdp_hold,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "buffer_size=16,pd_open_close_sec=1,subsys=fdpsub"
+    });
+    qos_add_test("combo-fdp-hold-seal", "femu", femu_test_combo_fdp_hold,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "buffer_size=16,pd_open_read_limit=4,subsys=fdpsub-ii"
+    });
+    qos_add_test("combo-read-limit-m0", "femu", femu_test_combo_read_limit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m0",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=0,onfi_cache_read=1,buffer_size=16,"
+            "pd_open_read_limit=4"
+    });
+    qos_add_test("combo-read-limit-m26", "femu", femu_test_combo_read_limit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,onfi_cache_read=1,buffer_size=16,"
+            "pd_open_read_limit=4"
+    });
+    qos_add_test("combo-pad-conv", "femu", femu_test_combo_pad_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"conv",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,pd_open_close_sec=1,age_scale=1000"
+    });
+    qos_add_test("combo-pad-sca", "femu", femu_test_combo_pad_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"sca",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,onfi_sca=1,pd_open_close_sec=1,"
+            "age_scale=1000"
+    });
+    qos_add_test("combo-policy-greedy-seal", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"greedy/seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_policy=greedy,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-greedy-pad", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"greedy/pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,age_scale=10,gc_policy=greedy,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-fifo-seal", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fifo/seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_policy=fifo,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-fifo-pad", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fifo/pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,age_scale=10,gc_policy=fifo,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-d-choice-seal", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"d-choice/seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_policy=d-choice,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-d-choice-pad", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"d-choice/pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,age_scale=10,gc_policy=d-choice,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-cost-benefit-seal", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cost-benefit/seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_policy=cost-benefit,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-cost-benefit-pad", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cost-benefit/pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,age_scale=10,gc_policy=cost-benefit,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-random-seal", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"random/seal",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_policy=random,subsys=fdpsub"
+    });
+    qos_add_test("combo-policy-random-pad", "femu", femu_test_combo_policy,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"random/pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,age_scale=10,gc_policy=random,subsys=fdpsub"
     });
     qos_add_test("fdp-format-ruamw", "femu", femu_test_fdp_format_ruamw,
                  &(QOSGraphTestOptions) {
