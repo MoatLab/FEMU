@@ -33,6 +33,24 @@ enum {
     ONFI_TPLBSY_PS = 500000,   /* multi-plane short busy, typical (Table 4-30) */
 };
 
+/* SCA protocol timing, ps (Table 5-9; Section 5.7) */
+enum {
+    SCA_TCACI_PS    = 4000,    /* CA_CLK input cycle */
+    SCA_PACKET_PS   = 3 * SCA_TCACI_PS, /* 4-bit header + 8-bit body, DDR x2 */
+    SCA_HEADER_PS   = SCA_TCACI_PS,     /* a CA output header: 4 bits */
+    SCA_TCDL_PS     = 400000,  /* 12h to the end of the write preamble */
+    SCA_TCACO_PS    = 10000,   /* CA_CLK output cycle */
+    SCA_TW2R_PS     = 20000,   /* output header to the first output clock */
+    SCA_TR2W_PS     = (30000 + SCA_TCACO_PS / 2) + 30000 + 20000,
+                               /* tCACOPST + tCEH2 + tCELCLK */
+    SCA_TSCR_PS     = 50000,   /* SCE to RE_n low */
+    SCA_TRPRE2_PS   = 30000,   /* read preamble with SCA */
+    SCA_TDQSRE_PS   = 25000,   /* RE_n to DQS, maximum (Table 5-9) */
+    SCA_TSCD_PS     = 50000,   /* SCE to DQS low */
+    SCA_TWPRE2_PS   = 25000,   /* write preamble */
+    SCA_THOLD_PS    = 50000,   /* tRPSTH_CA, tWPSTH_CA: hold after SCT */
+};
+
 int onfi_tdsc_ps(int mode)
 {
     if (mode < 0 || mode >= ONFI_NUM_MODES) {
@@ -44,6 +62,56 @@ int onfi_tdsc_ps(int mode)
 static int64_t ps_to_ns(uint64_t ps)
 {
     return (int64_t)((ps + 999) / 1000);
+}
+
+/*
+ * SCA (Section 5): commands, addresses and status move to the CA bus, so
+ * these fields are CA lengths. A data burst owns the DQ bus from its SCE
+ * packet to the hold after its SCT packet (Sections 5.9.4, 5.9.5):
+ *
+ *   read   SCE, tSCR, tRPRE2, page, tRPST_CA - P, SCT, tRPSTH_CA
+ *   write  SCE, tSCD, tWPRE2, page, SCT, tWPSTH_CA
+ *
+ * tRPST_CA is tDQSRE (its maximum) plus half a tRC. tCDL runs from the
+ * 12h packet to the end of the write preamble (Table 5-9 note 1).
+ */
+static void onfi_derive_sca(const OnfiInput *in, uint64_t tdsc,
+                            OnfiTiming *out)
+{
+    uint64_t p = SCA_PACKET_PS;
+    uint64_t addr = in->col_cycles + in->row_cycles;
+    uint64_t sel = in->multi_lun ? 1 + in->row_cycles : 1;
+    uint64_t wlead = p + SCA_TSCD_PS + SCA_TWPRE2_PS;
+    uint64_t tail = p + SCA_THOLD_PS;
+    uint64_t rpst = SCA_TDQSRE_PS + (tdsc + 1) / 2;
+
+    out->rd_cmd_ns = ps_to_ns((2 + addr) * p + ONFI_TWB_PS);
+    /* 80h, address, 12h; the data waits tCDL */
+    out->wr_cmd_ns = ps_to_ns((2 + addr) * p);
+    out->din_gap_ns = ps_to_ns(SCA_TCDL_PS - wlead);
+    out->din_burst_ns = ps_to_ns(wlead + tail);
+    /* 10h, then tWB */
+    out->wr_post_ns = ps_to_ns(p + ONFI_TWB_PS);
+    out->er_cmd_ns = ps_to_ns((2 + in->row_cycles) * p + ONFI_TWB_PS);
+    out->cb_rd_cmd_ns = ps_to_ns((2 + addr) * p + ONFI_TWB_PS);
+    /* 85h, address, 12h, 10h */
+    out->cb_wr_cmd_ns = ps_to_ns((3 + addr) * p + ONFI_TWB_PS);
+    /*
+     * 70h or 78h with a row address, tWHR, the CA output header, tW2R_CA,
+     * one byte on CA[1] at two bits per tCACO, then CA_CE# high and
+     * tR2W_CA before the next header (Section 5.7.2).
+     */
+    out->status_ns = ps_to_ns(sel * p + ONFI_TWHR_PS + SCA_HEADER_PS +
+                              SCA_TW2R_PS + 4 * SCA_TCACO_PS + SCA_TR2W_PS);
+    /* Change Read Column Enhanced, with one LUN too (Section 5.9.6) */
+    out->dout_pre_ns = ps_to_ns((2 + addr) * p);
+    out->dout_mp_pre_ns = out->dout_pre_ns;
+    out->ccs_ns = (int64_t)in->tccs_ns;
+    out->dout_post_ns = 0;
+    out->dout_edge_ns = ps_to_ns(p + SCA_TSCR_PS + SCA_TRPRE2_PS + rpst +
+                                 SCA_THOLD_PS);
+    out->sca_packet_ns = ps_to_ns(p);
+    out->sca_tail_ns = ps_to_ns(tail);
 }
 
 int onfi_derive(const OnfiInput *in, OnfiTiming *out)
@@ -106,6 +174,9 @@ int onfi_derive(const OnfiInput *in, OnfiTiming *out)
     out->dout_mp_pre_ns = ps_to_ns((2 + addr) * c + tccs + ONFI_TRPRE2_PS);
     out->dout_post_ns = ps_to_ns(ONFI_TRPSTH_PS + ONFI_TRHW_PS);
     out->plbusy_ns = ps_to_ns(ONFI_TPLBSY_PS);
+    if (in->sca) {
+        onfi_derive_sca(in, tdsc, out);
+    }
     return 0;
 }
 
@@ -345,6 +416,15 @@ int onfi_param_check(const OnfiParamPage *p, const OnfiGeometry *g,
     if (g->mp_program && !(p->features & ONFI_FEAT_MP_PROG_ERASE)) {
         ONFI_REFUSE("features (bytes 6-7) 0x%04x: mp_program needs "
                     "multi-plane program (bit 3)", p->features);
+    }
+    /* SCA needs 06h-E0h before each data out; SCE carries 4 LUN bits */
+    if (g->sca && !(p->opt_cmds & ONFI_OPT_COLUMN_ENH)) {
+        ONFI_REFUSE("optional commands (bytes 8-9) 0x%04x: onfi_sca needs "
+                    "Change Read Column Enhanced (bit 6)", p->opt_cmds);
+    }
+    if (g->sca && p->luns > 16) {
+        ONFI_REFUSE("LUNs per target (byte 100) %u: an SCA packet addresses "
+                    "16 LUNs", p->luns);
     }
     if (g->copyback && !(p->opt_cmds & ONFI_OPT_COPYBACK)) {
         ONFI_REFUSE("optional commands (bytes 8-9) 0x%04x: gc_copyback needs "

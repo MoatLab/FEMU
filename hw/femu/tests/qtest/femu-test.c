@@ -4471,19 +4471,20 @@ typedef struct FemuMediaWant {
     const char *mode;
     bool staged;
     int onfi;
-    uint64_t ns[15];
+    uint64_t ns[17];
     bool order;
     bool hold;
     bool per_plane;
+    bool sca;
 } FemuMediaWant;
 
-static const char *const femu_media_keys[15] = {
+static const char *const femu_media_keys[17] = {
     "page-transfer-ns", "read-command-ns", "program-command-ns",
     "erase-command-ns", "copyback-read-command-ns",
     "copyback-program-command-ns", "status-ns", "data-out-lead-ns",
     "data-out-tail-ns", "plane-select-ns", "data-in-edges-ns",
     "program-confirm-ns", "plane-read-busy-ns", "plane-program-busy-ns",
-    "plane-erase-busy-ns",
+    "plane-erase-busy-ns", "data-in-gap-ns", "data-out-edges-ns",
 };
 
 /*
@@ -4529,6 +4530,16 @@ static const FemuMediaWant femu_media_wants[] = {
     { "gap-no-bus", "bbssd", false, -1,
       { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 900 },
       false, false, false },
+    /*
+     * SCA, two LUNs: 12 ns packets on the CA bus. Read 7 packets + tWB;
+     * program 80h, address, 12h; erase 5 packets + tWB; copyback program
+     * 8 packets + tWB; 78h status 4 packets + 80 + 4 + 20 + 40 + 85;
+     * select 7 packets; write burst 87 + 62; 10h + tWB; tCDL gap 313;
+     * read burst 92 + 25.209 + 50.
+     */
+    { "m26-sca-2lun", "bbssd", true, 26,
+      { 855, 184, 84, 160, 184, 196, 277, 84, 0, 84, 149, 112,
+        500, 500, 500, 313, 168 }, true, true, true, true },
 };
 
 /*
@@ -4584,6 +4595,7 @@ static void femu_media_check(QDict *ns, const FemuMediaWant *w)
     g_assert_cmpint(qdict_get_bool(md, "page-register-hold"), ==, w->hold);
     g_assert_cmpint(qdict_get_bool(md, "status-per-plane"), ==,
                     w->per_plane);
+    g_assert_cmpint(qdict_get_bool(md, "sca"), ==, w->sca);
 }
 
 static void femu_test_query_media(void *obj, void *data,
@@ -6638,6 +6650,9 @@ static void femu_test_pd_refused(void *obj, void *data,
  *   "m0":       one LUN, mode 0: read 275 + 40000 + (50 + 61440 + 115) + 275
  *   "mts":      one LUN, mode 26 at 3200 MT/s: page 1280, read 41966
  *   "spare":    one LUN, mode 26, 512 spare bytes: page 961, read 41647
+ *   "sca-2lun": two LUNs, mode 26, SCA: read 184 + 40000 + 277 + 84 +
+ *               (168 + 855); write 84 + 313 + (149 + 855) + 112 + 200000 +
+ *               277
  *   "off":      the profile off with cmd_addr_lat 1000, pg_xfer_lat 10000
  *               and status_lat 500: read 51500, write 211000, as on master
  */
@@ -6675,6 +6690,9 @@ static void femu_test_onfi(void *obj, void *data, QGuestAllocator *alloc)
     } else if (!strcmp(mode, "spare")) {
         want_rd = 275 + 40000 + 50 + 961 + 115 + 246;
         want_wr = 562 + 57 + 961 + 125 + 200000 + 246;
+    } else if (!strcmp(mode, "sca-2lun")) {
+        want_rd = 184 + 40000 + 277 + 84 + 168 + 855;
+        want_wr = 84 + 313 + 149 + 855 + 112 + 200000 + 277;
     } else if (!strcmp(mode, "off")) {
         want_rd = 1000 + 40000 + 10000 + 500;
         want_wr = 1000 + 10000 + 200000;
@@ -33542,6 +33560,12 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = FEMU_ONFI_GEO
             "luns_per_ch=1,onfi_mode=26,onfi_spare_bytes=512"
     });
+    qos_add_test("onfi-sca-2lun", "femu", femu_test_onfi,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"sca-2lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=2,onfi_mode=26,onfi_sca=1"
+    });
     qos_add_test("onfi-off", "femu", femu_test_onfi,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"off",
@@ -34047,6 +34071,12 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)"m26-2lun",
         .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=2,onfi_mode=26"
+    });
+    qos_add_test("query-media-m26-sca-2lun", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26-sca-2lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=2,onfi_mode=26,onfi_sca=1"
     });
     qos_add_test("query-media-m26-1lun", "femu", femu_test_query_media,
                  &(QOSGraphTestOptions) {

@@ -1136,6 +1136,302 @@ static void test_bus_history(void)
 }
 
 /*
+ * SCA protocol (Section 5). The CA bus has its own log; a CA phase of one
+ * packet is an SCE or SCT, and every data burst must hold exactly its own
+ * two: SCE at its start, SCT one tail before its end.
+ */
+static PhaseLog ca_log[T_CHS];
+
+static void log_ca(void *o, uint32_t ch, uint64_t start, uint64_t end)
+{
+    PhaseLog *l = &ca_log[ch % T_CHS];
+
+    (void)o;
+    if (l->n == l->cap) {
+        l->cap = l->cap ? 2 * l->cap : 1024;
+        l->r = realloc(l->r, l->cap * sizeof(*l->r));
+        if (!l->r) {
+            abort();
+        }
+    }
+    l->r[l->n].start = start;
+    l->r[l->n++].end = end;
+}
+
+static const NandTimelineOps sca_timeline = {
+    .ch_avail = t_ch, .lun_avail = t_lun, .plane_avail = t_pl,
+    .bus_phase = log_phase, .ca_phase = log_ca,
+};
+
+/* is there a CA phase of exactly [s, s + len) in the sorted log @l */
+static bool ca_has(const PhaseLog *l, uint64_t s, uint64_t len)
+{
+    size_t lo = 0, hi = l->n;
+
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+
+        if (l->r[mid].start < s) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < l->n && l->r[lo].start == s && l->r[lo].end == s + len;
+}
+
+/*
+ * Overlaps on both buses, plus bursts without their own SCE and SCT and
+ * packets outside a burst; clears both logs.
+ */
+static uint64_t sca_violations(uint64_t pkt, uint64_t tail)
+{
+    uint64_t bad = 0;
+
+    for (int ch = 0; ch < T_CHS; ch++) {
+        PhaseLog *d = &phase_log[ch];
+        PhaseLog *c = &ca_log[ch];
+        uint64_t packets = 0, end = 0;
+
+        if (c->n > 1) {
+            qsort(c->r, c->n, sizeof(*c->r), cmp_start);
+        }
+        for (size_t i = 0; i < c->n; i++) {
+            if (i && c->r[i].start < end) {
+                bad++;
+            }
+            end = c->r[i].end > end ? c->r[i].end : end;
+            packets += c->r[i].end - c->r[i].start == pkt;
+        }
+        for (size_t i = 0; i < d->n; i++) {
+            bad += !ca_has(c, d->r[i].start, pkt);
+            bad += !ca_has(c, d->r[i].end - tail, pkt);
+        }
+        bad += packets != 2 * d->n;
+        free(c->r);
+        memset(c, 0, sizeof(*c));
+    }
+    return bad + phase_overlaps();
+}
+
+static void sca_config(NandMediaConfig *cfg, const OnfiTiming *t,
+                       uint32_t planes, bool multi_lun)
+{
+    order_config(cfg, t, planes, multi_lun);
+    cfg->timing.din_gap_ns = t->din_gap_ns;
+    cfg->timing.dout_edge_ns = t->dout_edge_ns;
+    cfg->timing.ccs_ns = t->ccs_ns;
+    cfg->timing.sca_packet_ns = t->sca_packet_ns;
+    cfg->timing.sca_tail_ns = t->sca_tail_ns;
+    cfg->policy.ca_separate = true;
+}
+
+static OnfiTiming derive_sca(int mode, uint64_t bytes, bool multi_lun,
+                             uint64_t tccs)
+{
+    OnfiInput in = {
+        .mode = mode, .page_bytes = bytes, .col_cycles = 2, .row_cycles = 3,
+        .multi_lun = multi_lun, .tccs_ns = tccs, .sca = true,
+    };
+    OnfiTiming t;
+
+    memset(&t, 0, sizeof(t));
+    onfi_derive(&in, &t);
+    return t;
+}
+
+/*
+ * Mode 26, 16 KiB, one LUN: read command 184, status 241, select 84, read
+ * burst 168 + 3417; program command 84, tCDL gap 313, write burst
+ * 149 + 3417, 10h 112. Packets are 12 ns.
+ */
+static void test_sca(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc l0 = { .ch = 0, .lun = 0 };
+    NandLoc l1 = { .ch = 0, .lun = 1 };
+    OnfiTiming t;
+    uint64_t rd, d0;
+
+    printf("# SCA derived lengths, mode 26, 2 column + 3 row cycles\n");
+    t = derive_sca(26, 16384, false, 0);
+    check("read command: 7 packets + tWB", t.rd_cmd_ns, 7 * 12 + 100);
+    check("program command: 80h, 5 address, 12h", t.wr_cmd_ns, 7 * 12);
+    check("tCDL gap: 400 - (12 + 50 + 25)", t.din_gap_ns, 313);
+    check("write burst edges: 87 + 62", t.din_burst_ns, 149);
+    check("10h + tWB", t.wr_post_ns, 112);
+    check("erase command: 5 packets + tWB", t.er_cmd_ns, 160);
+    check("copyback read command", t.cb_rd_cmd_ns, 184);
+    check("copyback program command: 8 packets + tWB", t.cb_wr_cmd_ns, 196);
+    /* 12 + 80 + 4 + 20 + 40 + 85 */
+    check("status, one LUN (70h)", t.status_ns, 241);
+    check("column select: 06h, 5 address, E0h", t.dout_pre_ns, 84);
+    check("no tail after a burst", t.dout_post_ns, 0);
+    /* 12 + 50 + 30 + (25 + 0.209) + 50 */
+    check("read burst edges, mode 26", t.dout_edge_ns, 168);
+    check("packet", t.sca_packet_ns, 12);
+    check("SCT and hold", t.sca_tail_ns, 62);
+    check("page unchanged", t.page_xfer_ns, 3417);
+    t = derive_sca(26, 16384, true, 300);
+    check("status, several LUNs (78h + 3 row)", t.status_ns, 277);
+    check("tCCSR is its own wait", t.ccs_ns, 300);
+    check("tCCSR is not in the select", t.dout_pre_ns, 84);
+    t = derive_sca(0, 16384, false, 0);
+    /* tRPST_CA = 25 + 15 at mode 0 */
+    check("read burst edges, mode 0", t.dout_edge_ns, 12 + 50 + 30 + 40 + 50);
+
+    printf("# SCA ops on an idle LUN\n");
+    t = derive_sca(26, 16384, false, 0);
+    sca_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    rd = nand_media_op(&m, &l0, NAND_MEDIA_READ, 0).latency_ns;
+    check("read", rd, 184 + 40000 + 241 + 84 + 168 + 3417);
+    nand_media_destroy(&m);
+    sca_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    check("program", nand_media_op(&m, &l0, NAND_MEDIA_PROGRAM, 0).latency_ns,
+          84 + 313 + 149 + 3417 + 112 + 200000 + 241);
+    nand_media_destroy(&m);
+    sca_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    check("erase", nand_media_op(&m, &l0, NAND_MEDIA_ERASE, 0).latency_ns,
+          160 + 2000000 + 241);
+    nand_media_destroy(&m);
+    sca_config(&cfg, &t, 1, false);
+    nand_media_init(&m, &cfg);
+    check("copyback", nand_media_copyback(&m, &l0, &l1, 0).latency_ns,
+          184 + 40000 + 241 + 196 + 200000 + 241);
+    nand_media_destroy(&m);
+    sca_config(&cfg, &t, 2, false);
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p[2] = { { .ch = 0, .lun = 0, .pl = 0 },
+                         { .ch = 0, .lun = 0, .pl = 1 } };
+
+        /* per plane: command, tCDL, burst, 11h or 10h; one tDBSY gap */
+        check("multi-plane program, tDBSY = tPLPBSY",
+              nand_media_multiplane(&m, p, 2, NAND_MEDIA_PROGRAM,
+                                    0).latency_ns,
+              2 * (84 + 313 + 149 + 3417 + 112) + 500 + 200000 + 241);
+    }
+    nand_media_destroy(&m);
+    sca_config(&cfg, &t, 2, false);
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p[2] = { { .ch = 0, .lun = 0, .pl = 0 },
+                         { .ch = 0, .lun = 0, .pl = 1 } };
+
+        check("multi-plane read",
+              nand_media_multiplane(&m, p, 2, NAND_MEDIA_READ, 0).latency_ns,
+              2 * 184 + 500 + 40000 + 241 + 2 * (84 + 168 + 3417));
+    }
+    nand_media_destroy(&m);
+
+    printf("# SCA: commands leave the data bus\n");
+    t = derive_sca(26, 16384, true, 0);
+    sca_config(&cfg, &t, 1, true);
+    cfg.timeline = &sca_timeline;
+    nand_media_init(&m, &cfg);
+    d0 = nand_media_op(&m, &l0, NAND_MEDIA_READ, 0).done_ns;
+    {
+        /* a read of LUN 1 that starts 50 ns into LUN 0's burst */
+        uint64_t burst = d0 - (168 + 3417);
+        NandOpCompletion c1 = nand_media_op(&m, &l1, NAND_MEDIA_READ,
+                                            burst + 50);
+
+        check("LUN 0 burst starts after its select",
+              burst, 184 + 40000 + 277 + 84);
+        check("LUN 1 command during LUN 0's burst: an idle read",
+              c1.latency_ns, 184 + 40000 + 277 + 84 + 168 + 3417);
+    }
+    check("LUN 0 left in place, SCE and SCT inside their bursts",
+          sca_violations(12, 62), 0);
+    nand_media_destroy(&m);
+
+    /*
+     * A delayed SCT moves the whole burst. LUN 1's erase command holds CA
+     * on [44000, 44160). LUN 0's burst would start at 40545 with its SCT
+     * at 40545 + 3585 - 62 = 44068, inside that command; the burst moves
+     * so its SCT starts at 44160, and the read ends at 44160 + 62.
+     */
+    sca_config(&cfg, &t, 1, true);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &l1, NAND_MEDIA_ERASE, 44000);
+    check("a busy CA bus moves the SCT and its burst",
+          nand_media_op(&m, &l0, NAND_MEDIA_READ, 0).done_ns, 44160 + 62);
+    nand_media_destroy(&m);
+
+    printf("# SCA: an older op uses an earlier gap on both buses\n");
+    sca_config(&cfg, &t, 1, true);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &l0, NAND_MEDIA_READ, 100000);
+    check("older read on an idle LUN",
+          nand_media_op(&m, &l1, NAND_MEDIA_READ, 50000).latency_ns,
+          184 + 40000 + 277 + 84 + 168 + 3417);
+    nand_media_destroy(&m);
+
+    /*
+     * A random stream with older ops, every mode, with and without a small
+     * history cap: no overlap on either bus, and every SCE and SCT inside
+     * its own burst.
+     */
+    {
+        uint64_t bad = 0, bursts = 0;
+
+        for (int mode = 0; mode < ONFI_NUM_MODES; mode++) {
+            for (int v = 0; v < 2; v++) {
+                OnfiTiming tv = derive_sca(mode, 16384, true, 40 * v);
+                uint64_t now = 0;
+
+                sca_config(&cfg, &tv, 2, true);
+                cfg.timeline = &sca_timeline;
+                nand_media_init(&m, &cfg);
+                if (v == 0) {
+                    for (int ch = 0; ch < T_CHS; ch++) {
+                        m.bus_res[ch].hist_cap = 8;
+                        m.ca_res[ch].hist_cap = 8;
+                    }
+                }
+                rng_state = 5000 + mode * 3 + v;
+                for (int i = 0; i < 1500; i++) {
+                    NandLoc l = { .ch = rng() % T_CHS, .lun = rng() % T_LUNS,
+                                  .pl = rng() % 2 };
+                    NandLoc g[2] = { l, l };
+                    uint64_t back = rng() % 300000;
+                    uint64_t st = now > back ? now - back : 0;
+                    uint32_t k = rng() % 8;
+
+                    g[0].pl = 0;
+                    g[1].pl = 1;
+                    now += rng() % 20000;
+                    if (k < 3) {
+                        nand_media_op(&m, &l, NAND_MEDIA_READ, st);
+                    } else if (k < 5) {
+                        nand_media_op(&m, &l, NAND_MEDIA_PROGRAM, st);
+                    } else if (k == 5) {
+                        nand_media_op(&m, &l, NAND_MEDIA_ERASE, st);
+                    } else if (k == 6) {
+                        nand_media_multiplane(&m, g, 2,
+                                              (NandMediaOp)(rng() % 3), st);
+                    } else {
+                        nand_media_copyback(&m, &l, &l, st);
+                    }
+                }
+                for (int ch = 0; ch < T_CHS; ch++) {
+                    bursts += phase_log[ch].n;
+                }
+                bad += sca_violations(tv.sca_packet_ns, tv.sca_tail_ns);
+                nand_media_destroy(&m);
+            }
+        }
+        printf("# %llu SCA bursts checked\n", (unsigned long long)bursts);
+        check("SCA: no overlap on either bus, packets in their bursts",
+              bad, 0);
+    }
+}
+
+/*
  * A fixed mixed sequence with every profile field at 0. After each op the
  * hash takes the completion, every channel, LUN and plane time and the
  * suspend state; at the end it takes every booked bus window. The runs cover
@@ -1311,6 +1607,7 @@ int main(void)
     test_media_phases();
     test_onfi_order();
     test_bus_history();
+    test_sca();
     test_legacy_hash();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;

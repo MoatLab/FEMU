@@ -120,6 +120,17 @@ typedef struct NandMediaTiming {
     int64_t dout_pre_ns;     /* command and preamble before a data out */
     int64_t dout_post_ns;    /* postamble hold and tRHW after a data out */
     int64_t dout_mp_pre_ns;  /* per-plane column select of a multi-plane read */
+    /*
+     * SCA only (policy.ca_separate). The command, status and select
+     * fields above are then CA bus lengths. A data burst owns the DQ bus
+     * from its SCE packet to the hold after its SCT packet: din_burst_ns
+     * (write) or dout_edge_ns (read) plus the page.
+     */
+    int64_t din_gap_ns;      /* program command end to its burst (tCDL) */
+    int64_t dout_edge_ns;    /* read burst without the page */
+    int64_t ccs_ns;          /* column select end to the read burst */
+    int64_t sca_packet_ns;   /* the SCE and SCT packets on the CA bus */
+    int64_t sca_tail_ns;     /* SCT start to the end of its burst */
     /* multi-plane inter-plane busy */
     int64_t tplpbsy_ns;
     int64_t tplrbsy_ns;
@@ -157,6 +168,12 @@ typedef struct NandMediaPolicy {
     bool            onfi_order;
     bool            page_reg_hold;
     bool            mp_status_per_plane;
+    /*
+     * SCA protocol (staged bus, with the ONFI bits): commands, addresses
+     * and status use a CA bus per channel, and the channel bus carries
+     * only data bursts. Init grows the window lists.
+     */
+    bool            ca_separate;
 } NandMediaPolicy;
 
 /*
@@ -181,6 +198,9 @@ typedef struct NandTimelineOps {
      */
     void      (*bus_phase)(void *opaque, uint32_t ch, uint64_t start,
                            uint64_t end);
+    /* optional, as bus_phase, for each CA bus phase (policy.ca_separate) */
+    void      (*ca_phase)(void *opaque, uint32_t ch, uint64_t start,
+                          uint64_t end);
 } NandTimelineOps;
 
 typedef struct NandMediaConfig {
@@ -252,6 +272,7 @@ typedef struct NandSuspendState {
 typedef struct NandMedia {
     NandMediaConfig cfg;
     NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
+    NandBusResList *ca_res;    /* nchs CA buses; NULL unless ca_separate */
     NandSuspendState *susp;    /* NULL unless policy.pe_suspend */
 } NandMedia;
 
@@ -298,6 +319,7 @@ typedef struct NandMediaPhases {
     bool     onfi_order;
     bool     page_reg_hold;
     bool     mp_status_per_plane;
+    bool     sca;                 /* commands and status use the CA bus */
     uint64_t page_xfer_ns;
     uint64_t rd_cmd_ns;
     uint64_t wr_cmd_ns;
@@ -310,6 +332,8 @@ typedef struct NandMediaPhases {
     uint64_t dout_mp_pre_ns;      /* per-plane select of a multi-plane read */
     uint64_t din_burst_ns;
     uint64_t wr_post_ns;
+    uint64_t din_gap_ns;          /* SCA: program command end to its burst */
+    uint64_t dout_edge_ns;        /* SCA: read burst without the page */
     uint64_t tplrbsy_ns;
     uint64_t tplpbsy_ns;
     uint64_t tplebsy_ns;

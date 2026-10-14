@@ -207,6 +207,7 @@ void bb_nand_media_init(struct ssd *ssd)
             .row_cycles = spp->onfi_row_cycles,
             .multi_lun = spp->luns_per_ch > 1,
             .tccs_ns = spp->onfi_tccs_ns,
+            .sca = spp->onfi_sca,
         };
         OnfiTiming ot;
 
@@ -223,6 +224,11 @@ void bb_nand_media_init(struct ssd *ssd)
             cfg.timing.dout_pre_ns = ot.dout_pre_ns;
             cfg.timing.dout_post_ns = ot.dout_post_ns;
             cfg.timing.dout_mp_pre_ns = ot.dout_mp_pre_ns;
+            cfg.timing.din_gap_ns = ot.din_gap_ns;
+            cfg.timing.dout_edge_ns = ot.dout_edge_ns;
+            cfg.timing.ccs_ns = ot.ccs_ns;
+            cfg.timing.sca_packet_ns = ot.sca_packet_ns;
+            cfg.timing.sca_tail_ns = ot.sca_tail_ns;
             if (!cfg.timing.tplpbsy_ns) {
                 cfg.timing.tplpbsy_ns = ot.plbusy_ns;
             }
@@ -246,6 +252,8 @@ void bb_nand_media_init(struct ssd *ssd)
             cfg.policy.onfi_order = true;
             cfg.policy.page_reg_hold = true;
             cfg.policy.mp_status_per_plane = in.multi_lun;
+            /* SCA: commands, addresses and status on a CA bus */
+            cfg.policy.ca_separate = in.sca;
         }
     }
 

@@ -436,6 +436,82 @@ Realize refuses these settings:
 
 `onfi_mts`, `onfi_spare_bytes` or `onfi_tccs_ns` without `onfi_mode` warns.
 
+#### SCA protocol (`onfi_sca`)
+
+`onfi_sca=1` selects the Separate Command Address protocol (Section 5).
+Commands, addresses and status then move to a CA bus. Each channel gets
+its own CA bus. The channel bus (DQ) carries only data bursts, so a
+command of one LUN can run during the data of another.
+
+```text
+ read, P = 12 ns CA packet
+ CA  |00h A*5 30h tWB|          |70h/78h status|06h A*5 E0h|tCCS|SCE|    |SCT|
+ DQ                                                             |SCE|pre page post|SCT|hold|
+ LUN    ..RDY..|=== tR ===|.................................................held|
+ program
+ CA  |80h A*5 12h|             |SCE|    |SCT|10h tWB|               |status|
+ DQ              |<-- gap --->|SCE|pre page|SCT|hold|
+                 |<------ tCDL ----------->|  (to the end of the preamble)
+ LUN                                                |=== tPROG ===|.held|
+```
+
+- A packet is a 4-bit header and an 8-bit body on two DDR pins: 3 tCACI,
+  12 ns (Section 5.7.1, Table 5-9).
+- A data burst owns the DQ bus from its SCE packet to the 50 ns hold
+  after its SCT packet. A new SCE cannot come during another burst
+  (Section 5.9.2).
+- FEMU looks for the first start where DQ is free for the whole burst
+  and the CA bus is free for both packets. Then it books all three.
+- Every other CA phase takes the first idle CA gap after its earliest
+  time.
+- Array data out needs Change Read Column Enhanced (06h-E0h) before SCE,
+  also with one LUN (Section 5.9.6). `onfi_tccs_ns` gives tCCSR.
+- tCDL (400 ns) runs from the 12h packet to the end of the write
+  preamble. It replaces tADL.
+- A status read is a CA output: the header, tW2R_CA, one byte at tCACO
+  10 ns (two bits per cycle), then tR2W_CA.
+- The CA bus keeps its own window history and its own `low` mark, as the
+  channel bus does.
+
+| Phase | Sequence | Mode 26 |
+| --- | --- | --- |
+| read command (CA) | 00h, 5 address packets, 30h, tWB | 184 ns |
+| program command (CA) | 80h, 5 address packets, 12h | 84 ns |
+| tCDL gap | tCDL - (SCE + tSCD + tWPRE2) | 313 ns |
+| write burst (DQ) | SCE, tSCD, tWPRE2, page, SCT, tWPSTH_CA | 149 ns + page |
+| program confirm (CA) | 10h, tWB | 112 ns |
+| erase command (CA) | 60h, 3 address packets, D0h, tWB | 160 ns |
+| status (CA) | 70h (78h + 3 packets), tWHR, header, tW2R_CA, 4 tCACO, tR2W_CA | 241 ns (277 ns) |
+| column select (CA) | 06h, 5 address packets, E0h | 84 ns, then tCCSR |
+| read burst (DQ) | SCE, tSCR, tRPRE2, page, then SCT ending tRPST_CA after the page, tRPSTH_CA | 168 ns + page |
+
+tRPST_CA is tDQSRE plus half a tRC. FEMU takes tDQSRE at its 25 ns
+maximum.
+
+A multi-plane program sends 11h after each plane but the last, then waits
+tPLPBSY. The SCA figures call this busy tDBSY (Sections 5.12.5 to
+5.12.7), and ONFI 6.0 gives it no value. So `tplpbsy` sets it, and 0
+takes the 500 ns FEMU default. A value of 0 cannot model a device with no
+busy at all. Another LUN can use both buses between the planes (Figure
+5-34).
+
+The confirm opcodes are 11h and 10h (program), 32h and 30h (read), and
+D1h and D0h (erase). Each pair has the same length.
+
+Approximations:
+
+- tCDL ends at the end of the write preamble. With an idle bus the write
+  burst, SCE first, starts 313 ns after the 12h packet.
+- The 10h confirm waits for the end of the hold after SCT.
+- LUNSel and NTO packets, ODT and CA training are not modelled.
+- CA_CE# setup and hold appear only in the status turnaround.
+
+With a parameter page, SCA needs two things:
+
+- Change Read Column Enhanced (bytes 8-9 bit 6);
+- at most 16 LUNs per target (byte 100), because SCE and SCT carry 4 LUN
+  bits.
+
 #### Parameter page (`onfi_param_page`)
 
 `onfi_param_page` names a file with an ONFI parameter page image (Section

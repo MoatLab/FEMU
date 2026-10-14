@@ -193,13 +193,15 @@ fallbacks. Times are in ns.
 | `read-command-ns`, `program-command-ns`, `erase-command-ns` | the command and address phase of each op |
 | `copyback-read-command-ns`, `copyback-program-command-ns` | the two command phases of a copyback |
 | `status-ns` | one status read |
-| `data-out-lead-ns`, `data-out-tail-ns` | the command and preamble before the page of a read, and the postamble and turnaround after it |
+| `data-out-lead-ns`, `data-out-tail-ns` | the command and preamble before the page of a read, and the postamble and turnaround after it; with `sca`, the lead is the column select on the CA bus plus the tCCS wait, which holds no bus |
 | `plane-select-ns` | the column select before each page of a multi-plane read |
 | `data-in-edges-ns`, `program-confirm-ns` | the burst edges of the page of a program, and the confirm cycle after it |
 | `plane-read-busy-ns`, `plane-program-busy-ns`, `plane-erase-busy-ns` | tPLRBSY, tPLPBSY and tPLEBSY between the planes of a multi-plane op; they apply with the bus on or off |
 | `onfi-order` | a read reads its status before its data out, and a program or erase ends at its status |
 | `page-register-hold` | an op sends its command only when its LUN is ready, and holds the LUN until its last bus phase ends |
 | `status-per-plane` | a multi-plane program or erase reads one status per plane |
+| `sca` | `onfi_sca` is on: the command, status and confirm members are times on the separate CA bus, and the channel bus carries only data bursts. The lead and plane select are the CA column select plus the tCCS wait, which holds no bus |
+| `data-in-gap-ns`, `data-out-edges-ns` | with `sca`, the wait from a program command to its data burst (tCDL - SCE - tSCD - tWPRE2, as tCDL ends with the write preamble), and the burst time of a read without the page; 0 otherwise |
 
 With `onfi_mode=26`, 4 KiB pages and two LUNs on a channel, `media` holds
 the values of the [ONFI 6.0 profile table](../design/nand-timing.md#onfi-60-profile-bbssd-csd-kv):
@@ -213,9 +215,15 @@ the values of the [ONFI 6.0 profile table](../design/nand-timing.md#onfi-60-prof
           "plane-select-ns": 200, "data-in-edges-ns": 57,
           "program-confirm-ns": 125, "plane-read-busy-ns": 500,
           "plane-program-busy-ns": 500, "plane-erase-busy-ns": 500,
+          "data-in-gap-ns": 0, "data-out-edges-ns": 0, "sca": false,
           "onfi-order": true, "page-register-hold": true,
           "status-per-plane": true}
 ```
+
+With `onfi_sca=1` on the same device, the CA bus lengths replace the
+command members: `read-command-ns` 184, `program-command-ns` 84,
+`status-ns` 277, `data-out-lead-ns` 84 and `data-out-tail-ns` 0. Then
+`data-in-gap-ns` is 313 and `data-out-edges-ns` is 168.
 
 A default `bbssd` device has no bus phases: `staged-bus` and every rule
 are false, and every time is 0. With `cmd_addr_lat=1000`, the five
@@ -253,7 +261,8 @@ command takes comes from the model instead.
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
-            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "line-counts": {"free": 254, "victim": 0, "full": 1, "retired": 0, "spare": 0,
                   "total": 256},
@@ -287,7 +296,8 @@ Each handle has one unit open:
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
-            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "fdp": {"reclaim-groups": 1, "units-per-group": 25, "pages-per-unit": 16,
           "handles": [{"id": 0, "type": "persistently-isolated",
@@ -326,7 +336,8 @@ A zoned namespace with one zone written and one zone finished:
             "status-ns": 0, "data-out-lead-ns": 0, "data-out-tail-ns": 0,
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
-            "plane-erase-busy-ns": 0, "onfi-order": false,
+            "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "zones": [{"index": 0, "type": "sequential", "state": "full",
              "start-lba": 0, "capacity": 131072, "zrwa": false},

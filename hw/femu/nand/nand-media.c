@@ -15,12 +15,42 @@
 #include "qemu/osdep.h"
 #include "nand-media.h"
 
+/* nchs window lists of the grown kind, or NULL on no memory */
+static NandBusResList *bus_lists_grown(uint32_t nchs)
+{
+    NandBusResList *l = calloc(nchs, sizeof(*l));
+    uint32_t ch;
+
+    if (!l) {
+        return NULL;
+    }
+    for (ch = 0; ch < nchs; ch++) {
+        l[ch].cap = NAND_BUS_RES_MAX;
+        l[ch].hist_cap = NAND_BUS_HISTORY_MAX;
+        l[ch].grown = malloc(NAND_BUS_RES_MAX * sizeof(NandBusRes));
+        if (!l[ch].grown) {
+            abort();
+        }
+    }
+    return l;
+}
+
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
 {
     m->cfg = *cfg;
     m->bus_res = NULL;
+    m->ca_res = NULL;
     m->susp = NULL;
-    if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
+    if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs &&
+        cfg->policy.ca_separate) {
+        /* a burst must find its gaps on both buses; nothing falls back */
+        m->cfg.policy.bus_res_unbounded = true;
+        m->bus_res = bus_lists_grown(cfg->nchs);
+        m->ca_res = bus_lists_grown(cfg->nchs);
+        if (!m->bus_res || !m->ca_res) {
+            abort();
+        }
+    } else if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
         m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
         /* Without its lists an unbounded bus would silently hold the bus. */
         if (!m->bus_res && cfg->policy.bus_res_unbounded) {
@@ -69,6 +99,15 @@ void nand_media_destroy(NandMedia *m)
     }
     free(m->bus_res);
     m->bus_res = NULL;
+    if (m->ca_res) {
+        uint32_t ch;
+
+        for (ch = 0; ch < m->cfg.nchs; ch++) {
+            free(m->ca_res[ch].grown);
+        }
+    }
+    free(m->ca_res);
+    m->ca_res = NULL;
     free(m->susp);
     m->susp = NULL;
 }
@@ -455,16 +494,11 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
  *   [=] [==] | [==] [=]  [===]  ...  [==]  | [====]  [==]
  *            low                          high
  */
-static uint64_t onfi_prune_now(NandMedia *m, uint32_t ch, uint64_t stime)
+static uint64_t res_prune(NandBusResList *l, uint64_t stime, uint64_t floor)
 {
-    NandBusResList *l;
     uint64_t now;
     uint32_t k;
 
-    if (!m->bus_res) {
-        return stime;
-    }
-    l = &m->bus_res[ch];
     l->high = mx(l->high, stime);
     if (!l->grown) {
         l->low = l->high;
@@ -475,9 +509,18 @@ static uint64_t onfi_prune_now(NandMedia *m, uint32_t ch, uint64_t stime)
     if (k > l->hist_cap) {
         l->low = mx(l->low, bus_windows(l)[k - l->hist_cap / 2 - 1].end);
     }
-    now = mx(l->low, *m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch));
+    now = mx(l->low, floor);
     bus_prune(l, now);
     return now;
+}
+
+static uint64_t onfi_prune_now(NandMedia *m, uint32_t ch, uint64_t stime)
+{
+    if (!m->bus_res) {
+        return stime;
+    }
+    return res_prune(&m->bus_res[ch], stime,
+                     *m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch));
 }
 
 /* the earliest start of an ONFI phase: never before the channel's @low */
@@ -503,6 +546,270 @@ static uint64_t bus_at(NandMedia *m, uint32_t ch, uint64_t stime,
 static bool onfi_path(const NandMedia *m)
 {
     return m->cfg.policy.onfi_order || m->cfg.policy.page_reg_hold;
+}
+
+/*
+ * SCA protocol (policy.ca_separate). Commands, addresses and status are
+ * CA bus phases: each takes the first idle CA gap at or after its earliest
+ * time and the CA list's @low, with no "now" accumulator. The channel bus
+ * (DQ) carries only data bursts. A burst owns DQ from its SCE packet to
+ * the hold after its SCT packet, so no other SCE can come between them
+ * (Section 5.9.2):
+ *
+ *   CA  |SCE|                         |SCT|
+ *   DQ  |SCE| lead | page ....... | ..|SCT| hold |
+ *       t                              t+L-tail   t+L
+ *
+ * Both lists keep their own @high and @low marks (onfi_prune_now()), so
+ * each bus alone keeps the rule that no phase starts before its @low.
+ */
+static void ca_note(NandMedia *m, uint32_t ch, uint64_t start, uint64_t end)
+{
+    if (m->cfg.timeline->ca_phase) {
+        m->cfg.timeline->ca_phase(m->cfg.timeline_opaque, ch, start, end);
+    }
+}
+
+/* a CA phase of @len at or after @earliest; returns its end */
+static uint64_t ca_book(NandMedia *m, uint32_t ch, uint64_t earliest,
+                        uint64_t len)
+{
+    NandBusResList *l = &m->ca_res[ch];
+    uint64_t start;
+
+    if (!len) {
+        return earliest;
+    }
+    start = bus_fit(l, mx(earliest, l->low), len);
+    bus_book(l, start, start + len);
+    ca_note(m, ch, start, start + len);
+    return start + len;
+}
+
+/*
+ * A data burst of @len (page included) at or after @earliest. The start
+ * moves forward until DQ is free for the whole burst and CA is free for
+ * both packets. Each step jumps past the end of a booked window, so the
+ * loop ends. Returns the end of the burst.
+ */
+static uint64_t sca_burst(NandMedia *m, uint32_t ch, uint64_t earliest,
+                          uint64_t len)
+{
+    NandBusResList *dq = &m->bus_res[ch];
+    NandBusResList *ca = &m->ca_res[ch];
+    uint64_t pkt = m->cfg.timing.sca_packet_ns;
+    uint64_t off = len - m->cfg.timing.sca_tail_ns;
+    uint64_t *cha = m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch);
+    uint64_t t = mx(mx(earliest, *cha), mx(dq->low, ca->low));
+
+    for (;;) {
+        uint64_t f = bus_fit(dq, t, len);
+        uint64_t g;
+
+        if (!pkt) {
+            t = f;
+            break;
+        }
+        g = bus_fit(ca, f, pkt);
+
+        if (g != f) {
+            t = g;
+            continue;
+        }
+        g = bus_fit(ca, f + off, pkt);
+        if (g != f + off) {
+            t = g - off;
+            continue;
+        }
+        t = f;
+        break;
+    }
+    bus_book(dq, t, t + len);
+    bus_note(m, ch, t, t + len);
+    if (pkt) {
+        bus_book(ca, t, t + pkt);
+        ca_note(m, ch, t, t + pkt);
+        bus_book(ca, t + off, t + off + pkt);
+        ca_note(m, ch, t + off, t + off + pkt);
+    }
+    return t + len;
+}
+
+/* the read data out of SCA: column select, tCCS, then the burst */
+static uint64_t sca_dout(NandMedia *m, uint32_t ch, uint64_t earliest,
+                         uint64_t sel, uint64_t page)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    uint64_t s = ca_book(m, ch, earliest, sel);
+
+    return sca_burst(m, ch, s + tm->ccs_ns, tm->dout_edge_ns + page);
+}
+
+/* the program data in of SCA: command, tCDL, burst, then 10h or 11h */
+static uint64_t sca_din(NandMedia *m, uint32_t ch, uint64_t earliest,
+                        uint64_t page)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    uint64_t c = ca_book(m, ch, earliest, tm->wr_cmd_ns);
+    uint64_t z = sca_burst(m, ch, c + tm->din_gap_ns,
+                           tm->din_burst_ns + page);
+
+    return ca_book(m, ch, z, tm->wr_post_ns);
+}
+
+/* prune both buses at the start of an SCA op */
+static void sca_prune(NandMedia *m, uint32_t ch, uint64_t stime)
+{
+    onfi_prune_now(m, ch, stime);
+    res_prune(&m->ca_res[ch], stime, 0);
+}
+
+/* one op with SCA; the array, ECC and LUN rules are those of onfi_op() */
+static NandOpCompletion sca_op(NandMedia *m, const NandLoc *loc,
+                               NandMediaOp op, uint64_t stime)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    bool hold = m->cfg.policy.page_reg_hold;
+    bool order = m->cfg.policy.onfi_order;
+    uint32_t ch = loc->ch;
+    uint64_t alat = array_lat(m, loc, op);
+    uint64_t a, d, end, held;
+    NandOpCompletion c;
+
+    sca_prune(m, ch, stime);
+    a = hold ? array_contend_start(m, loc, stime) : stime;
+    if (op == NAND_MEDIA_READ) {
+        uint64_t out;
+
+        d = array_contend_start(m, loc, ca_book(m, ch, a, tm->rd_cmd_ns)) +
+            alat;
+        if (order) {
+            end = ca_book(m, ch, d, tm->status_ns);
+            out = end = sca_dout(m, ch, end, tm->dout_pre_ns,
+                                 bus_xfer_ns(m, loc));
+        } else {
+            out = sca_dout(m, ch, d, tm->dout_pre_ns, bus_xfer_ns(m, loc));
+            end = ca_book(m, ch, out, tm->status_ns);
+        }
+        held = out;
+    } else if (op == NAND_MEDIA_PROGRAM) {
+        d = array_contend_start(m, loc, sca_din(m, ch, a,
+                                                bus_xfer_ns(m, loc))) + alat;
+        end = order ? ca_book(m, ch, d, tm->status_ns) : d;
+        held = end;
+    } else {
+        d = array_contend_start(m, loc, ca_book(m, ch, a, tm->er_cmd_ns)) +
+            alat;
+        end = ca_book(m, ch, d, tm->status_ns);
+        held = end;
+    }
+    held = hold ? held : d;
+    array_commit(m, loc, held);
+    suspend_note(m, loc, op, held);
+    c.done_ns = end;
+    c.latency_ns = end - stime;
+    return c;
+}
+
+/*
+ * A multi-plane group with SCA. Each plane of a program has its own
+ * command, burst and 11h (10h for the last), then tPLPBSY, which SCA calls
+ * tDBSY; another LUN may use the buses between planes (Figure 5-34).
+ */
+static NandOpCompletion sca_multiplane(NandMedia *m, const NandLoc *locs,
+                                       int nlocs, NandMediaOp op,
+                                       uint64_t stime)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    uint32_t ch = locs[0].ch;
+    uint64_t plbusy = op == NAND_MEDIA_PROGRAM ? tm->tplpbsy_ns :
+                      op == NAND_MEDIA_ERASE ? tm->tplebsy_ns :
+                                               tm->tplrbsy_ns;
+    uint64_t cmd = op == NAND_MEDIA_READ ? tm->rd_cmd_ns : tm->er_cmd_ns;
+    uint64_t a = stime;
+    uint64_t t, start, alat, done, held;
+    NandOpCompletion c;
+    int i;
+
+    sca_prune(m, ch, stime);
+    if (m->cfg.policy.page_reg_hold) {
+        for (i = 0; i < nlocs; i++) {
+            a = mx(a, array_contend_start(m, &locs[i], stime));
+        }
+    }
+    t = a;
+    for (i = 0; i < nlocs; i++) {
+        if (i) {
+            t += plbusy;
+        }
+        t = op == NAND_MEDIA_PROGRAM ? sca_din(m, ch, t, tm->page_xfer_ns) :
+                                       ca_book(m, ch, t, cmd);
+    }
+    start = t;
+    for (i = 0; i < nlocs; i++) {
+        start = mx(start, array_contend_start(m, &locs[i], start));
+    }
+    if (op == NAND_MEDIA_READ) {
+        uint64_t worst = 0;
+
+        alat = m->cfg.policy.use_flat_timing ? tm->rd_ns :
+               tm->rd_table_ns[locs[0].flash_type][locs[0].page_type];
+        for (i = 0; i < nlocs; i++) {
+            worst = mx(worst, ecc_extra_ns(m, &locs[i]));
+        }
+        alat += worst;
+    } else {
+        alat = array_lat(m, &locs[0], op);
+    }
+    done = start + alat;
+    t = done;
+    if (op == NAND_MEDIA_READ) {
+        t = ca_book(m, ch, t, tm->status_ns);
+        for (i = 0; i < nlocs; i++) {
+            t = sca_dout(m, ch, t, tm->dout_mp_pre_ns, tm->page_xfer_ns);
+        }
+    } else {
+        int nst = m->cfg.policy.mp_status_per_plane ? nlocs : 1;
+
+        for (i = 0; i < nst; i++) {
+            t = ca_book(m, ch, t, tm->status_ns);
+        }
+    }
+    held = m->cfg.policy.page_reg_hold ? t : done;
+    for (i = 0; i < nlocs; i++) {
+        array_commit(m, &locs[i], held);
+        suspend_note(m, &locs[i], op, held);
+    }
+    c.done_ns = t;
+    c.latency_ns = t - stime;
+    return c;
+}
+
+/* copyback with SCA: every phase is on the CA bus, no data moves */
+static NandOpCompletion sca_copyback(NandMedia *m, const NandLoc *src,
+                                     const NandLoc *dst, uint64_t stime)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    bool hold = m->cfg.policy.page_reg_hold;
+    uint32_t ch = src->ch;
+    uint64_t a = hold ? array_contend_start(m, src, stime) : stime;
+    uint64_t r, p, end;
+    NandOpCompletion c;
+
+    sca_prune(m, ch, stime);
+    r = array_contend_start(m, src, ca_book(m, ch, a, tm->cb_rd_cmd_ns)) +
+        array_lat(m, src, NAND_MEDIA_READ) - ecc_extra_ns(m, src);
+    p = array_contend_start(m, dst, ca_book(m, ch, r, tm->status_ns +
+                                            tm->cb_wr_cmd_ns)) +
+        array_lat(m, dst, NAND_MEDIA_PROGRAM);
+    end = m->cfg.policy.onfi_order ? ca_book(m, ch, p, tm->status_ns) : p;
+    array_commit(m, src, hold ? end : r);
+    suspend_note(m, src, NAND_MEDIA_PROGRAM, hold ? end : r);
+    array_commit(m, dst, hold ? end : p);
+    suspend_note(m, dst, NAND_MEDIA_PROGRAM, hold ? end : p);
+    c.done_ns = end;
+    c.latency_ns = end - stime;
+    return c;
 }
 
 /*
@@ -652,6 +959,13 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
      */
     if (m->cfg.timeline->lock_lun) {
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
+    }
+    if (m->ca_res) {
+        c = sca_op(m, loc, op, stime);
+        if (m->cfg.timeline->unlock_lun) {
+            m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, loc);
+        }
+        return c;
     }
     if (onfi_path(m)) {
         c = onfi_op(m, loc, op, stime);
@@ -818,6 +1132,9 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
                                               m->cfg.timing.tplrbsy_ns;
     int i;
 
+    if (m->ca_res) {
+        return sca_multiplane(m, locs, nlocs, op, stime);
+    }
     if (m->cfg.policy.channel_mode == NAND_CH_STAGED && onfi_path(m)) {
         return onfi_multiplane(m, locs, nlocs, op, stime);
     }
@@ -910,6 +1227,13 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
     if (m->cfg.timeline->lock_lun) {
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, src);
     }
+    if (m->ca_res) {
+        c = sca_copyback(m, src, dst, stime);
+        if (m->cfg.timeline->unlock_lun) {
+            m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, src);
+        }
+        return c;
+    }
     if (staged && onfi_path(m)) {
         /*
          * ONFI ordering: the command waits for the die, the program ends at
@@ -993,6 +1317,7 @@ void nand_media_phases(const NandMedia *m, NandMediaPhases *out)
     out->onfi_order = p->onfi_order;
     out->page_reg_hold = p->page_reg_hold;
     out->mp_status_per_plane = p->mp_status_per_plane;
+    out->sca = m->ca_res != NULL;
     out->page_xfer_ns = t->page_xfer_ns;
     out->rd_cmd_ns = cmd_phase_ns(m, NAND_MEDIA_READ);
     out->wr_cmd_ns = cmd_phase_ns(m, NAND_MEDIA_PROGRAM);
@@ -1000,9 +1325,13 @@ void nand_media_phases(const NandMedia *m, NandMediaPhases *out)
     out->cb_rd_cmd_ns = t->cb_rd_cmd_ns ? (uint64_t)t->cb_rd_cmd_ns : ca;
     out->cb_wr_cmd_ns = t->cb_wr_cmd_ns ? (uint64_t)t->cb_wr_cmd_ns : ca;
     out->status_ns = t->status_ns;
-    out->dout_pre_ns = t->dout_pre_ns;
+    /* with SCA, tCCS is a wait after the select; report it in the lead */
+    out->dout_pre_ns = t->dout_pre_ns + t->ccs_ns;
     out->dout_post_ns = t->dout_post_ns;
-    out->dout_mp_pre_ns = t->dout_mp_pre_ns ? (uint64_t)t->dout_mp_pre_ns : ca;
+    out->dout_mp_pre_ns = t->dout_mp_pre_ns ?
+                          (uint64_t)(t->dout_mp_pre_ns + t->ccs_ns) : ca;
     out->din_burst_ns = t->din_burst_ns;
     out->wr_post_ns = t->wr_post_ns;
+    out->din_gap_ns = t->din_gap_ns;
+    out->dout_edge_ns = t->dout_edge_ns;
 }

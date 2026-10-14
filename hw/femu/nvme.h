@@ -2131,6 +2131,7 @@ typedef struct BbCtrlParams {
     int onfi_spare_bytes; /* spare bytes moved with each page */
     int onfi_tccs_ns; /* tCCS from a datasheet (ns); 0 charges nothing */
     char *onfi_param_page; /* parameter page image file; NULL = none */
+    int onfi_sca;           /* SCA protocol: CA bus for commands; 0 = off */
     /* from a good onfi_param_page, set at realize; unused unless loaded */
     bool onfi_page_loaded;
     int onfi_page_mode;     /* the highest mode the page lists */

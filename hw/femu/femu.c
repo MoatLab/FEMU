@@ -2692,6 +2692,7 @@ static bool femu_load_onfi_page(FemuCtrl *n, Error **errp)
         .mp_program = bp->mp_program && bp->pls_per_lun > 1,
         .mp_read = bp->mp_read && bp->pls_per_lun > 1,
         .copyback = bp->gc_copyback,
+        .sca = bp->onfi_sca != 0,
     };
     const char *why;
     char msg[256];
@@ -2728,9 +2729,10 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
 
     bp->onfi_page_loaded = false;
     if (!femu_onfi_on(n)) {
-        if (bp->onfi_mts || bp->onfi_spare_bytes || bp->onfi_tccs_ns) {
-            warn_report("femu: onfi_mts, onfi_spare_bytes and onfi_tccs_ns "
-                        "have no effect without onfi_mode");
+        if (bp->onfi_mts || bp->onfi_spare_bytes || bp->onfi_tccs_ns ||
+            bp->onfi_sca) {
+            warn_report("femu: onfi_mts, onfi_spare_bytes, onfi_tccs_ns and "
+                        "onfi_sca have no effect without onfi_mode");
         }
         return true;
     }
@@ -3526,6 +3528,7 @@ static const Property femu_props[] = {
                       0),
     DEFINE_PROP_INT32("onfi_tccs_ns", FemuCtrl, bb_params.onfi_tccs_ns, 0),
     DEFINE_PROP_STRING("onfi_param_page", FemuCtrl, bb_params.onfi_param_page),
+    DEFINE_PROP_INT32("onfi_sca", FemuCtrl, bb_params.onfi_sca, 0),
     DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
     DEFINE_PROP_INT32("plane_first", FemuCtrl, bb_params.plane_first, 0),
     DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),

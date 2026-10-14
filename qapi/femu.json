@@ -463,7 +463,8 @@
 # @status-ns: one status read
 #
 # @data-out-lead-ns: the command and preamble before the page of a
-#     read
+#     read.  With @sca, the column select on the CA bus plus the tCCS
+#     wait, which holds no bus.
 #
 # @data-out-tail-ns: the postamble and turnaround after the page of a
 #     read
@@ -482,6 +483,20 @@
 # @plane-program-busy-ns: tPLPBSY, the same gap for a program
 #
 # @plane-erase-busy-ns: tPLEBSY, the same gap for an erase
+#
+# @data-in-gap-ns: with @sca, the wait from the end of a program
+#     command to its data burst: tCDL less the SCE packet, tSCD and
+#     tWPRE2, because tCDL ends with the write preamble; else 0
+#
+# @data-out-edges-ns: with @sca, the data bus time of a read burst
+#     without the page: the SCE and SCT packets, the preambles and the
+#     holds; else 0
+#
+# @sca: the SCA protocol is on.  Then the command, status and
+#     confirm members are times on the separate command and address
+#     bus, and the data bus carries only bursts.  The lead and
+#     plane-select members are the column select on that bus plus the
+#     tCCS wait, which holds no bus.
 #
 # @onfi-order: a read reads its status before its data out, and a
 #     program or erase ends at its status
@@ -507,7 +522,9 @@
             'data-in-edges-ns': 'uint64', 'program-confirm-ns': 'uint64',
             'plane-read-busy-ns': 'uint64',
             'plane-program-busy-ns': 'uint64',
-            'plane-erase-busy-ns': 'uint64', 'onfi-order': 'bool',
+            'plane-erase-busy-ns': 'uint64', 'data-in-gap-ns': 'uint64',
+            'data-out-edges-ns': 'uint64', 'sca': 'bool',
+            'onfi-order': 'bool',
             'page-register-hold': 'bool', 'status-per-plane': 'bool' } }
 
 ##
@@ -701,7 +718,9 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "data-out-edges-ns": 0, "sca": false,
+#                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
 #              "line-counts": { "free": 255, "victim": 0, "full": 0,
@@ -735,7 +754,9 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "data-out-edges-ns": 0, "sca": false,
+#                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
 #              "zones": [ { "index": 0, "type": "sequential",
@@ -776,7 +797,9 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "onfi-order": false,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "data-out-edges-ns": 0, "sca": false,
+#                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
 #              "fdp": { "reclaim-groups": 1, "units-per-group": 25,
@@ -838,7 +861,9 @@
 #                         "program-confirm-ns": 125,
 #                         "plane-read-busy-ns": 500,
 #                         "plane-program-busy-ns": 500,
-#                         "plane-erase-busy-ns": 500, "onfi-order": true,
+#                         "plane-erase-busy-ns": 500, "data-in-gap-ns": 0,
+#                         "data-out-edges-ns": 0, "sca": false,
+#                         "onfi-order": true,
 #                         "page-register-hold": true,
 #                         "status-per-plane": true },
 #              "line-counts": { "free": 255, "victim": 0, "full": 0,

@@ -476,6 +476,9 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
     mt->plane_read_busy_ns = ph->tplrbsy_ns;
     mt->plane_program_busy_ns = ph->tplpbsy_ns;
     mt->plane_erase_busy_ns = ph->tplebsy_ns;
+    mt->data_in_gap_ns = ph->din_gap_ns;
+    mt->data_out_edges_ns = ph->dout_edge_ns;
+    mt->sca = ph->sca;
     mt->onfi_order = ph->onfi_order;
     mt->page_register_hold = ph->page_reg_hold;
     mt->status_per_plane = ph->mp_status_per_plane;

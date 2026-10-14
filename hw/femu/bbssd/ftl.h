@@ -176,6 +176,7 @@ struct ssdparams {
     int onfi_col_cycles; /* column address cycles of the profile */
     int onfi_row_cycles; /* row address cycles of the profile */
     bool onfi_cb_parity; /* copyback only between pages of one parity */
+    bool onfi_sca;       /* SCA protocol: commands on a CA bus */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */

@@ -313,6 +313,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "before a data out when several LUNs share a channel and per plane of "
       "a multi-plane read; ONFI 6.0 gives no value, so 0 (default) pays "
       "nothing" },
+    { "onfi_sca",
+      "bbssd, CSD, KV: with the ONFI profile, non-zero selects the SCA "
+      "protocol (ONFI 6.0 Section 5): commands, addresses and status use a "
+      "separate CA bus, and the channel bus carries only the data bursts; "
+      "0 (default) is the conventional protocol" },
     { "onfi_param_page",
       "bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes "
       "per copy, CRC checked, redundant copies tried). It turns the ONFI "

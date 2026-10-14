@@ -320,6 +320,7 @@ Reference: [NAND timing](properties.md#nand-timing-bbssd-csd-kv). Design:
 | `onfi_mts` | MT/s | 0 to 100000 | with `onfi_mode`, the page rate instead of the mode's; 0 uses the mode |
 | `onfi_spare_bytes` | bytes | >= 0; the page on the bus must be even | with `onfi_mode`, spare bytes moved with each page |
 | `onfi_tccs_ns` | ns | >= 0 | with `onfi_mode`, tCCS before a data out on a shared channel; 0 charges nothing |
+| `onfi_sca` | 0 or 1 | 0 (default) | with the ONFI profile, 1 selects the SCA protocol: commands, addresses and status use a separate CA bus |
 | `onfi_param_page` | path | an ONFI 6.0 parameter page image | turns the profile on; gives the mode when `onfi_mode` is -1, and the spare bytes and address cycles; refused when the page does not match the device |
 | `tplebsy` | ns | >= 0 | busy time between the planes of a multi-plane erase (GC with `pls_per_lun` > 1) |
 | `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0 | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns` |

@@ -27,6 +27,7 @@ typedef struct OnfiInput {
     uint32_t row_cycles;   /* row address cycles */
     bool     multi_lun;    /* several LUNs share the channel */
     uint64_t tccs_ns;      /* tCCS from a datasheet; 0 charges nothing */
+    bool     sca;          /* the SCA protocol (Section 5) */
 } OnfiInput;
 
 /* bus phase lengths in ns, each rounded up once */
@@ -44,6 +45,17 @@ typedef struct OnfiTiming {
     int64_t dout_post_ns;
     int64_t dout_mp_pre_ns;
     int64_t plbusy_ns;     /* Table 4-30 typical tPLRBSY/tPLPBSY/tPLEBSY */
+    /*
+     * SCA only (0 otherwise). Commands, addresses and status are then CA
+     * bus lengths. A data burst owns the DQ bus from its SCE packet to the
+     * hold after its SCT packet: din_burst_ns or dout_edge_ns plus the
+     * page. The SCT starts sca_tail_ns before the burst ends.
+     */
+    int64_t din_gap_ns;    /* 12h end to the write burst: tCDL - lead */
+    int64_t dout_edge_ns;  /* read burst without the page */
+    int64_t ccs_ns;        /* tCCSR from the column select to the burst */
+    int64_t sca_packet_ns; /* one CA input packet: SCE, SCT */
+    int64_t sca_tail_ns;   /* SCT and the hold after it */
 } OnfiTiming;
 
 /* tDSC of @mode in ps (Table 4-36), or -1 for a mode outside 0 to 26 */
@@ -124,6 +136,7 @@ typedef struct OnfiGeometry {
     bool     mp_program;
     bool     mp_read;
     bool     copyback;
+    bool     sca;
 } OnfiGeometry;
 
 /*

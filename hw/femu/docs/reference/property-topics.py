@@ -77,7 +77,7 @@ DEVICES = [
                     "pg_rd_lat", "pg_wr_lat", "blk_er_lat", "ch_xfer_lat",
                     "cmd_addr_lat", "pg_xfer_lat", "status_lat",
                     "onfi_mode", "onfi_mts", "onfi_spare_bytes",
-                    "onfi_tccs_ns", "onfi_param_page", "tplpbsy",
+                    "onfi_tccs_ns", "onfi_param_page", "onfi_sca", "tplpbsy",
                     "tplrbsy", "tplebsy", "mp_program", "mp_read",
                     "plane_first",
                     "trcbsy", "trim_lat_ns",
