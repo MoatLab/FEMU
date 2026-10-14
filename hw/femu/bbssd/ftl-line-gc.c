@@ -106,8 +106,12 @@ void ssd_init_write_pointer(struct ssd *ssd)
 
     /* wpp->curline is always our next-to-write super-block */
     ssd_wp_reset(wpp, curline);
+    ssd_init_write_buffer(ssd);
+}
 
-    /* DRAM write buffer: LRU queue plus a tree for lookup by page number */
+/* DRAM write buffer: LRU queue plus a tree for lookup by page number */
+void ssd_init_write_buffer(struct ssd *ssd)
+{
     QTAILQ_INIT(&ssd->write_buffer);
     ssd->write_buffer_cnt = 0;
     ssd->wb_tree = ssd->sp.buffer_size > 0 ? g_tree_new(comp_buffer) : NULL;

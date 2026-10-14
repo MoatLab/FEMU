@@ -710,7 +710,10 @@ The write buffer models DRAM in front of the NAND. It holds logical page
 numbers, not data: a write it accepts costs a DRAM access, and the program
 is charged later to whatever forces the page out. Repeated writes to a
 buffered page cost one program. The code is in
-`hw/femu/bbssd/ftl-datapath.c`.
+`hw/femu/bbssd/ftl-datapath.c`. Under FDP each held page also keeps the
+placement handle of its last write, and its write-back goes to that
+handle's reclaim unit (`fdp_buffer_destage()` in
+`hw/femu/bbssd/ftl-fdp.c`; see the [FDP chapter](fdp.md#parameters)).
 
 ```text
   host write, pages P..Q
@@ -1056,7 +1059,7 @@ does inside the FTL and what it interacts with.
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
 | `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `pg_rd_lat` / 16 at realize; 0xEF does not change it |
 | `hot_cold_sep` | hot write pointer for overwrites | page or DFTL only; reserves a line; refused with FDP |
-| `buffer_size`, `buffer_thres_pcent` | write buffer capacity in pages, and the write-back watermark | `vwc`, `power_loss`; refused with FDP |
+| `buffer_size`, `buffer_thres_pcent` | write buffer capacity in pages, and the write-back watermark | `vwc`, `power_loss`; under FDP each page goes to its handle's unit |
 | `fdp_trim_erase_all` | FDP deallocate resets every reclaim unit | FDP only |
 | `debug_ftl` | prints invalid page transitions and merge counts | none |
 
@@ -1099,9 +1102,8 @@ layer.
 
 ### Interactions and refusals
 
-- **FDP** refuses `buffer_size`, with
-  `FEMU bbssd: buffer_size has no effect under FDP`, and a `gc_policy` other
-  than `greedy` together with a `gc_strategy` other than 0. It
+- **FDP** refuses a `gc_policy` other than `greedy` together with a
+  `gc_strategy` other than 0. It
   refuses `hot_cold_sep` and the `hybrid` and `fast` mappings with a
   message that says why: they write through pointers of their own, past
   the unit the placement handle names.

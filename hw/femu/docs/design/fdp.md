@@ -450,7 +450,6 @@ of the property reference; the controller-side ones are under
 
 Refused under FDP on a bbssd controller:
 
-- `buffer_size`;
 - `hot_cold_sep`: the placement handle of a write names its unit, and the
   hot write pointer writes past it;
 - `mapping=hybrid` and `mapping=fast`, whose log and data lines are not
@@ -478,6 +477,44 @@ its valid pages to where collection would move them, then erases the unit.
 
 The refresh logs the same FDP events as a collection pass (see
 [Events](#events)).
+
+`buffer_size` puts the write buffer in front of placed writes. The buffer
+models time only: it holds page numbers, and the backend holds the data.
+Each held page keeps the handle and group of its last write. A write-back
+programs each page into the active unit of its own handle, so a unit takes
+only the pages of its handle.
+
+```
+ Write or Copy, no FUA, cache on
+   --> each page: held?  no, and buffer at the watermark
+         --> write back the oldest (buffer_size - watermark) pages
+         --> still at the watermark: Capacity Exceeded
+   --> entry {lpn, handle, group, written 512-byte pieces} := this write
+   --> HBMW += pages x page size; C0h host pages, 72 and 80 count
+ write-back of entry e
+   --> collect for e.handle; e.handle has no unit and none is free: stop
+   --> program into e.handle's active unit, RUAMW of that unit drops
+   --> MBMW of the group and of e.handle += page size; e leaves the buffer
+```
+
+The FTL maps whole pages. The handle of the last write to a page takes
+the whole page, with or without the buffer, also when two handles wrote
+different blocks of it. The other commands:
+
+| Command | Effect on held pages |
+| --- | --- |
+| Flush | writes every held page back; Capacity Exceeded if one finds no room, and those stay held |
+| Write with FUA, Write Zeroes without Deallocate | program at once; a held copy of a page goes when this command programs that page |
+| Volatile Write Cache off (feature 06h) | writes every held page back first; if one finds no room, the command fails and the cache stays on |
+| DSM Deallocate, Write Zeroes with Deallocate, Format | drop the held copy, which never reaches the media |
+| I/O Management Send, RUH Update | writes every held page back first, so the pages land in the units the handles named before the update; if one finds no room, no handle moves and the command returns Capacity Exceeded |
+| Read | a held page is served from the buffer |
+
+HBMW counts pages a write accepts, and MBMW pages that reach the media,
+so MBMW can be below HBMW when the buffer absorbs rewrites. RUAMW drops
+when a page reaches its unit. With a buffer, each unit counts its own
+host bytes for RUAMW, for written back and direct pages alike. The
+admin commands above charge no modelled time for their write-back.
 Collection that frees a queued unit first drops the request, and the
 counters do not move. A collection of a queued unit does not use copyback.
 
@@ -506,8 +543,8 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-dftl`, `fdp-dftl-page`, `fdp-dftl-csd`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
-| Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-policy-random` (`gc_policy=random`, the same trace), `ftl-trace-fdp-fifo` and `ftl-trace-fdp-d-choice` (`gc_policy`), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-dftl`, `fdp-dftl-page`, `fdp-dftl-csd`, `fdp-buffer-isolation`, `fdp-buffer-isolation-csd`, `fdp-buffer-rehandle`, `fdp-buffer-dealloc`, `fdp-buffer-fua`, `fdp-buffer-vwc`, `fdp-buffer-update`, `fdp-buffer-full`, `fdp-buffer-copy`, `fdp-events-gc-ii-part-buffer`, `fdp-events-gc-ii-mix-buffer`, `fdp-events-gc-ii-fua-buffer`, `fdp-events-gc-ii-redo-buffer`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
+| Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-policy-random` (`gc_policy=random`, the same trace), `ftl-trace-fdp-fifo` and `ftl-trace-fdp-d-choice` (`gc_policy`), `ftl-trace-fdp-knobs-off` (`gc_policy=greedy`, `mapping=page` and `buffer_size=0` given: the `ftl-trace-fdp` trace), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |
@@ -523,7 +560,9 @@ last:
   the handle's RUAMW and records event 0h if the unit still had room; no
   data is placed. CSD uses the bbssd path, with the same refused knobs and
   RUNS. KV is refused.
-- Page or DFTL mapping only, and no write buffer
+- Page or DFTL mapping only.
+- The CSD NVM-to-AFDM transfer reads the mapping only, without FDP as
+  well: a page the write buffer holds and never wrote back costs no read.
 - EARUTR is always 0; there is no active reclaim unit time limit, so event
   1h is never raised.
 - The 128-bit statistics carry only their low 64 bits.

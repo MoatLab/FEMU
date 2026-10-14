@@ -348,7 +348,7 @@ Design: [the BlackBox FTL](../design/ftl.md).
 | `read_cache_mb` | MiB | 0 disables | DRAM read cache; a hit costs DRAM time instead of a NAND read |
 | `cache_evict` | name | `clock`, `random`, `lru`, `arc` | read cache eviction policy |
 | `hot_cold_sep` | bool | acts with `page` or `dftl`; ignored under `hybrid` and `fast`, which still reserve its line; refused with FDP | write overwrites of mapped pages to separate hot lines |
-| `buffer_size` | NAND pages, not bytes | >= 0; refused with FDP | DRAM write buffer; 0 programs every write directly |
+| `buffer_size` | NAND pages, not bytes | >= 0; under FDP each page keeps its placement handle | DRAM write buffer; 0 programs every write directly |
 | `buffer_thres_pcent` | percent | 1 to 100 when `buffer_size` > 0 | fill level at which buffered pages are written to NAND |
 | `debug_ftl` | bool | | print FTL invariant violations and log-block merge counts |
 
@@ -506,7 +506,7 @@ Interactions:
   `read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec` and
   `trim_lat_ns` apply. A `gc_policy` other than `greedy` together with a
   `gc_strategy` other than 0, `mapping=hybrid` or `fast`,
-  `buffer_size`, `hot_cold_sep`, `meta`, `streams` and `ns_mgmt` are
+  `hot_cold_sep`, `meta`, `streams` and `ns_mgmt` are
   refused.
 - KV is refused under FDP; NoSSD, ZNS and OCSSD report FDP but ignore it
   for placement.

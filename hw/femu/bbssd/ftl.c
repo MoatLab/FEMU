@@ -235,6 +235,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         femu_fdp_ssd_init_reclaim_group(n, ssd);
         ftl_log("FDP: initializing RU handles\n");
         femu_fdp_ssd_init_ru_handles(n, ssd);
+        /* no line write pointer under FDP, but the buffer is shared */
+        ssd_init_write_buffer(ssd);
         ftl_log("FDP: init complete (nrg=%lu, nruhs=%lu)\n",
                 ssd->nrg, ssd->nruhs);
     } else {
@@ -721,7 +723,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          * and then be told a flush succeeded with pages still buffered.
          */
         lat = ssd_buffer_destage(ssd, 0, req->stime);
-        if (n->power_loss && ssd->write_buffer_cnt) {
+        /*
+         * Pages still held had no room on the media. Under FDP a handle
+         * with no free unit is a state the host can reach, so say so.
+         */
+        if ((n->power_loss || ssd->fdp_enabled) && ssd->write_buffer_cnt) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
         }
         break;
@@ -777,6 +783,16 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         break;
     case NVME_CMD_IO_MGMT_SEND:
         if (ssd->fdp_enabled && req->fdp_pids) {
+            /*
+             * Pages written before the update belong in the units the
+             * handles name until it, so write the buffer back first. If
+             * it cannot, move no handle.
+             */
+            lat = ssd_buffer_destage(ssd, 0, req->stime);
+            if (ssd->write_buffer_cnt) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                break;
+            }
             ssd_fdp_update_ruhs(n, req);
         }
         break;

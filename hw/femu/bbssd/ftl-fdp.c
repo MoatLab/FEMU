@@ -169,6 +169,19 @@ struct fdp_moves {
 
 #define FDP_WRITTEN_SHIFT 9     /* fdp_written tracks 512-byte pieces */
 
+/* the 512-byte pieces of page @lpn that blocks [@slba, @slba + @nlb) cover */
+static void fdp_page_pieces(struct ssd *ssd, NvmeRequest *req, uint64_t slba,
+                            uint64_t nlb, uint64_t lpn, uint64_t *b,
+                            uint64_t *e)
+{
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t beg = ssd_lba_byte_offset(ssd, req, slba);
+
+    *b = MAX(beg, lpn * pg) >> FDP_WRITTEN_SHIFT;
+    *e = MIN(beg + (nlb << lbads), lpn * pg + pg) >> FDP_WRITTEN_SHIFT;
+}
+
 /*
  * Note which blocks of page @lpn the write of blocks [@slba, @slba + @nlb)
  * programs, as the FTL programs the page. The FTL maps whole pages and a write
@@ -179,12 +192,9 @@ struct fdp_moves {
 static void fdp_mark_written(struct ssd *ssd, NvmeRequest *req, uint64_t slba,
                              uint64_t nlb, uint64_t lpn)
 {
-    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
-    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
-    uint64_t beg = ssd_lba_byte_offset(ssd, req, slba);
-    uint64_t b = MAX(beg, lpn * pg) >> FDP_WRITTEN_SHIFT;
-    uint64_t e = MIN(beg + (nlb << lbads), lpn * pg + pg) >> FDP_WRITTEN_SHIFT;
+    uint64_t b, e;
 
+    fdp_page_pieces(ssd, req, slba, nlb, lpn, &b, &e);
     e = MIN(e, ssd->fdp_written_bits);
     if (ssd->fdp_written && b < e) {
         bitmap_set(ssd->fdp_written, b, e - b);
@@ -1105,6 +1115,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
     ru->close_seq = 0;
+    ru->wb_bytes = 0;
     ru->reclaiming = false;
 
     /* a refresh queued for this unit has nothing left to move */
@@ -1369,40 +1380,20 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
 }
 
 /*
- * ssd_stream_write - FDP write path: placement-aware page allocation
+ * The handle and group request @req places into. A placement that names no
+ * valid handle falls back to placement 0 of group 0, and logs Invalid
+ * Placement Identifier if the host tried one.
  */
-/*
- * Program [start_lpn, end_lpn], the pages of blocks [slba, slba + nlb), into
- * the reclaim unit the request places into. Write and Write Zeroes both land
- * here: the second hands over no data, but the pages it leaves holding zeros
- * are programmed and counted the same way.
- */
-static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
-                                      NvmeRequest *req, uint64_t slba,
-                                      uint64_t nlb, uint64_t start_lpn,
-                                      uint64_t end_lpn)
+static void fdp_place(struct ssd *ssd, NvmeRequest *req, uint16_t *rgid,
+                      uint16_t *ruhid)
 {
-    uint64_t passes;
     NvmeNamespace *ns = req->ns;
-    struct ssdparams *spp = &ssd->sp;
-    FemuReclaimGroup *rg;
-    FemuRuHandle *ruh;
-    FemuReclaimUnit *ru;
-
-    uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
-    uint64_t media = 0;
-    struct ppa ppa;
-    uint64_t lpn;
-    uint64_t curlat = 0, maxlat = 0;
-    uint64_t written = 0;
-
-    /* parse placement info from request */
     uint16_t pid = req->fdp_dspec;
     uint8_t dtype = req->fdp_dtype;
-    uint16_t ph, rgid, ruhid;
+    uint16_t ph;
 
     if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
-        !nvme_parse_pid(ns, pid, &ph, &rgid)) {
+        !nvme_parse_pid(ns, pid, &ph, rgid)) {
         /* generate INVALID_PID event if placement was attempted */
         if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT && ssd->n->subsys) {
             NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
@@ -1420,64 +1411,157 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
             }
         }
         ph = 0;
-        rgid = 0;
+        *rgid = 0;
     }
 
-    ruhid = ns->fdp.phs[ph];
+    *ruhid = ns->fdp.phs[ph];
     /* safety: ruhid must be within bounds (nvme_parse_pid ensures ph is valid) */
-    if (unlikely(ruhid >= (uint16_t)ssd->nruhs)) {
+    if (unlikely(*ruhid >= (uint16_t)ssd->nruhs)) {
         ftl_err("ssd_stream_write: ruhid %u >= nruhs %lu, clamping to 0\n",
-                (unsigned)ruhid, (unsigned long)ssd->nruhs);
-        ruhid = 0;
+                (unsigned)*ruhid, (unsigned long)ssd->nruhs);
+        *ruhid = 0;
     }
+}
+
+/*
+ * Give @ruh an active unit in group @rgid if it has none. After a fill
+ * fdp_advance_ru_pointer() can leave it without one when no unit was free;
+ * collection may have freed one since. Returns false when none is free.
+ */
+static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
+{
+    FemuReclaimUnit *fresh;
+
+    if (likely(ruh->curr_ru)) {
+        return true;
+    }
+    fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+    if (!fresh) {
+        ftl_err("ssd_stream_write: device full, no RU for ruh %d\n",
+                ruh->ruhid);
+        return false;
+    }
+    ruh->rus[rgid] = fresh;
+    ruh->ruh->rus[rgid] = fresh->nvme_ru;
+    ruh->curr_ru = fresh;
+    return true;
+}
+
+/*
+ * Program host page @lpn into @ruh's active unit, which the caller has made
+ * sure exists. The written pieces are those of blocks [@slba, @slba + @nlb)
+ * of @req, if given, and those of @held, the mask a buffer entry kept.
+ * RUAMW counts from *@media, the bytes already programmed; with NULL it
+ * counts from the bytes the unit took, wb_bytes. Returns the program time.
+ */
+static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
+                                 FemuRuHandle *ruh, uint64_t lpn,
+                                 uint64_t stime, NvmeRequest *req,
+                                 uint64_t slba, uint64_t nlb,
+                                 const unsigned long *held, uint64_t *media)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t per = pg >> FDP_WRITTEN_SHIFT;
+    FemuReclaimUnit *ru = ruh->curr_ru;
+    uint8_t lbads = ssd->ns->lbaf.lbads;
+    struct nand_cmd swr;
+    struct ppa ppa;
+
+    ppa = get_maptbl_ent(ssd, lpn);
+    if (mapped_ppa(&ppa)) {
+        mark_page_invalid_fdp(ssd, &ppa);
+        set_rmap_ent(ssd, INVALID_LPN, &ppa);
+    }
+    /* the page content changes: drop any stale read-cache entry for it */
+    rcache_invalidate(ssd, lpn);
+    /* new write */
+    ppa = fdp_get_new_page(ssd, ru);
+    set_maptbl_ent(ssd, lpn, &ppa);
+    set_rmap_ent(ssd, lpn, &ppa);
+    mark_page_valid_fdp(ssd, &ppa, ru);
+    if (req) {
+        fdp_mark_written(ssd, req, slba, nlb, lpn);
+    }
+    if (held && ssd->fdp_written) {
+        for (uint64_t i = 0; i < per && lpn * per + i < ssd->fdp_written_bits;
+             i++) {
+            if (test_bit(i, held)) {
+                set_bit(lpn * per + i, ssd->fdp_written);
+            }
+        }
+    }
+    ssd->nand_write_pages++; /* a user page programmed into NAND */
+
+    /* RUAMW counts blocks, and a page may hold several or half of one */
+    if (!media) {
+        media = &ru->wb_bytes;
+    }
+    if (ru->nvme_ru) {
+        uint64_t blks = ((*media + pg) >> lbads) - (*media >> lbads);
+
+        ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw, blks);
+    }
+    *media += pg;
+
+    /* advance RU write pointer; may allocate new RU */
+    FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
+    if (ret && ret != ruh->curr_ru) {
+        ruh->rus[rg->rgidx] = ret;
+        ruh->curr_ru = ret;
+        ruh->ruh->rus[rg->rgidx] = ret->nvme_ru;
+    } else if (!ret) {
+        /* no free unit; the next page or command fails for it */
+        fdp_drop_active_ru(ruh, rg->rgidx);
+    }
+
+    swr.type = USER_IO;
+    swr.cmd = NAND_WRITE;
+    swr.stime = stime;
+    return ssd_advance_status(ssd, &ppa, &swr);
+}
+
+/*
+ * ssd_stream_write - FDP write path: placement-aware page allocation
+ */
+/*
+ * Program [start_lpn, end_lpn], the pages of blocks [slba, slba + nlb), into
+ * the reclaim unit the request places into. Write and Write Zeroes both land
+ * here: the second hands over no data, but the pages it leaves holding zeros
+ * are programmed and counted the same way. A page the write buffer holds is
+ * superseded: its entry goes when this write programs the page, and the
+ * pieces it covered stay written.
+ */
+static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
+                                      NvmeRequest *req, uint64_t slba,
+                                      uint64_t nlb, uint64_t start_lpn,
+                                      uint64_t end_lpn)
+{
+    uint64_t passes;
+    struct ssdparams *spp = &ssd->sp;
+    FemuReclaimGroup *rg;
+    FemuRuHandle *ruh;
+    uint64_t media = 0;
+    uint64_t lpn;
+    uint64_t curlat = 0, maxlat = 0;
+    uint64_t written = 0;
+    uint16_t rgid, ruhid;
+
+    fdp_place(ssd, req, &rgid, &ruhid);
     rg = &ssd->rg[rgid];
     ruh = &ssd->ruhs[ruhid];
 
-    // FDP_TRACE(ssd, "WRITE lpn=%lu-%lu dtype=%u dspec=0x%x ph=%u "
-    //           "ruhid=%u rgid=%u\n", start_lpn, end_lpn, dtype, pid,
-    //           ph, ruhid, rgid);
-
     /*
-     * Ensure this RUH has an active RU.  After a sequential fill,
-     * curr_ru may be NULL (cleared by fdp_advance_ru_pointer when it
-     * enqueued the last RU into full_ru_list and could not allocate a
-     * fresh one).  Run foreground GC first so we have a free RU.
+     * Genuinely out of reclaimable space: no unit is free for the handle.
+     * Fail the command with a capacity error instead of completing it as
+     * success with no data written.
      */
-    if (unlikely(!ruh->curr_ru)) {
-        /* try to free space via GC before allocating */
-        //Erase experimental gc behavior
-        //int max_fg_gc = (int)(ssd->nrg > 0 ?
-        //    ssd->rg[0].ru_mgmt->tt_rus : 64);
-        //for (int gi = 0; gi < max_fg_gc && !ruh->curr_ru; gi++) {
-        //    r = do_gc_fdp_style(ssd, rgid, ruhid, true);
-        //    if (r == -1) break;
-            /* GC may have freed a RU; try to grab it */
-            FemuReclaimUnit *fresh = fdp_get_new_ru(ssd, rgid, ruhid);
-            if (fresh) {
-                ruh->rus[rgid] = fresh;
-                ruh->ruh->rus[rgid] = fresh->nvme_ru;
-                ruh->curr_ru = fresh;
-            }else{
-                ftl_err("NO reclaim Unit. Device is full error\n");
-                //Fallout
-            }
-        //}
-        if (!ruh->curr_ru) {
-            /*
-             * Genuinely out of reclaimable space: the foreground backpressure
-             * GC below could not free a reclaim unit. Fail the command with a
-             * capacity error instead of completing it as success with no data
-             * written.
-             */
-            ftl_err("ssd_stream_write: device full, no RU for ruh %d\n", ruhid);
-            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
-            return 0;
-        }
+    if (!fdp_ruh_ready(ssd, ruh, rgid)) {
+        req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+        return 0;
     }
-    ru = ruh->rus[rgid];
-    ru = ruh->curr_ru;
     ftl_assert(ruh->curr_ru == ruh->rus[rgid]);
-    
+
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
                 end_lpn, spp->tt_pgs);
@@ -1502,7 +1586,15 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     /* refresh at most one read-stressed or aged unit per write */
     fdp_do_read_reclaim(ssd);
 
+    /* a disabled write cache may not keep pages back: write them out first */
+    if (ssd->write_buffer_cnt && !ssd_buffer_enabled(ssd)) {
+        curlat = fdp_buffer_destage(ssd, 0, req->stime);
+        maxlat = MAX(maxlat, curlat);
+    }
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        struct buffer_entry *held;
+
         /*
          * And per page: one command can take more units than the watermark
          * keeps free, and once the handle's last unit is gone collection has
@@ -1511,17 +1603,13 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         fdp_gc_until_clear(ssd, rgid, ruhid);
 
         /*
-         * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
-         */
-        ru = ruh->curr_ru;
-        /*
          * A previous iteration may have exhausted the last free reclaim unit:
          * fdp_advance_ru_pointer() cleared curr_ru with nothing left to allocate.
          * Writing into a NULL RU would dereference it in fdp_get_new_page(); stop
          * and fail the command with a capacity error rather than crashing or
          * reporting a silent success for pages that were never written.
          */
-        if (unlikely(!ru)) {
+        if (unlikely(!ruh->curr_ru)) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             break;
         }
@@ -1532,20 +1620,18 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
             maxlat = MAX(maxlat, curlat);
         }
 
-        ppa = get_maptbl_ent(ssd, lpn);
-        if (mapped_ppa(&ppa)) {
-            mark_page_invalid_fdp(ssd, &ppa);
-            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+        /*
+         * With a buffer the unit's own byte count drives RUAMW, since its
+         * pages arrive from write-back as well as from here.
+         */
+        held = ssd->write_buffer_cnt ? ssd_buffer_lookup(ssd, lpn) : NULL;
+        curlat = fdp_program_page(ssd, rg, ruh, lpn, req->stime, req, slba,
+                                  nlb, held ? held->written : NULL,
+                                  spp->buffer_size > 0 ? NULL : &media);
+        maxlat = MAX(maxlat, curlat);
+        if (held) {
+            ssd_buffer_discard(ssd, lpn);
         }
-        /* the page content changes: drop any stale read-cache entry for it */
-        rcache_invalidate(ssd, lpn);
-        /* new write */
-        ppa = fdp_get_new_page(ssd, ru);
-        set_maptbl_ent(ssd, lpn, &ppa);
-        set_rmap_ent(ssd, lpn, &ppa);
-        mark_page_valid_fdp(ssd, &ppa, ru);
-        fdp_mark_written(ssd, req, slba, nlb, lpn);
-        ssd->nand_write_pages++; /* a user page programmed into NAND */
         /*
          * Counted here rather than for the whole command before the loop: the
          * loop stops when the device runs out of room, so a command that wrote
@@ -1554,40 +1640,138 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
          */
         ssd->host_write_pages++;
         written++;
-
-        /* RUAMW counts blocks, and a page may hold several or half of one */
-        if (ru->nvme_ru) {
-            uint64_t blks = ((media + pg) >> ns->lbaf.lbads) -
-                            (media >> ns->lbaf.lbads);
-
-            ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw, blks);
-        }
-        media += pg;
-
-        /* advance RU write pointer; may allocate new RU */
-        FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
-        if (ret && ret != ruh->curr_ru) {
-            ruh->rus[rgid] = ret;
-            ruh->curr_ru = ret;
-            ruh->ruh->rus[rgid] = ret->nvme_ru;
-            ru = ret;
-        } else if (!ret) {
-            /* no free unit; the next page or command fails for it */
-            fdp_drop_active_ru(ruh, rgid);
-            ru = NULL;
-        }
-
-        struct nand_cmd swr;
-        swr.type = USER_IO;
-        swr.cmd = NAND_WRITE;
-        swr.stime = req->stime;
-        curlat = ssd_advance_status(ssd, &ppa, &swr);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
     /* what the caller charges its byte counters with */
     req->xfer_bytes = written * (uint64_t)spp->secs_per_pg * spp->secsz;
 
+    ssd_note_gc_stall(ssd, passes);
+    return maxlat;
+}
+
+/*
+ * Write the oldest pages of the write buffer to the media, at most @budget
+ * of them, or all with 0. Each goes to the active unit of the handle its
+ * last write placed it with, so no unit takes another handle's pages. A page
+ * whose handle has no unit and no free one stops the write-back; it stays
+ * held. Returns the modelled time of the programs.
+ */
+uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t curlat, maxlat = 0;
+    int done = 0;
+
+    while (budget <= 0 || done < budget) {
+        struct buffer_entry *e = QTAILQ_FIRST(&ssd->write_buffer);
+        FemuRuHandle *ruh;
+
+        if (!e) {
+            break;
+        }
+        ruh = &ssd->ruhs[e->ruhid];
+        fdp_gc_until_clear(ssd, e->rgid, e->ruhid);
+        if (!fdp_ruh_ready(ssd, ruh, e->rgid)) {
+            break;
+        }
+        if (ssd->cmt.capacity) {
+            curlat = cmt_touch(ssd, e->lpn, stime, true);
+            maxlat = MAX(maxlat, curlat);
+        }
+        curlat = fdp_program_page(ssd, &ssd->rg[e->rgid], ruh, e->lpn, stime,
+                                  NULL, 0, 0, e->written, NULL);
+        maxlat = MAX(maxlat, curlat);
+        nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, pg);
+        nvme_fdp_stat_inc(&ruh->mbmw, pg);
+        nvme_fdp_stat_inc(&ruh->ruh->mbmw, pg);
+        ssd_buffer_discard(ssd, e->lpn);
+        done++;
+    }
+    return maxlat;
+}
+
+/*
+ * Accept a placed write into the write buffer. Each page keeps the handle
+ * and group of this write, and the pieces it covers; the page goes to that
+ * handle's unit when it is written back. Pages past the watermark first
+ * write back a batch of the oldest ones, as without FDP. Host bytes count
+ * here, media bytes when the page reaches the media.
+ */
+static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t per = pg >> FDP_WRITTEN_SHIFT;
+    uint64_t start_lpn, end_lpn, lpn;
+    uint64_t curlat, maxlat = 0;
+    uint64_t passes, accepted = 0;
+    uint16_t rgid, ruhid;
+    bool full = false;
+    int batch = ssd_buffer_batch(ssd);
+
+    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
+    ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
+    fdp_place(ssd, req, &rgid, &ruhid);
+    if (end_lpn >= spp->tt_pgs) {
+        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
+                end_lpn, spp->tt_pgs);
+        req->status = NVME_LBA_RANGE | NVME_DNR;
+        return 0;
+    }
+
+    passes = ssd->gc_stall_passes;
+    fdp_gc_until_clear(ssd, rgid, ruhid);
+    fdp_do_read_reclaim(ssd);
+
+    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        struct buffer_entry *e;
+        uint64_t b, end;
+        bool held;
+
+        /*
+         * Admission per page, so a request larger than the buffer cannot
+         * push it past its size. A write-back that frees nothing means the
+         * handles it serves have no room: tell the host.
+         */
+        if (!ssd_buffer_hit(ssd, lpn) && ssd_buffer_at_watermark(ssd)) {
+            full = true;
+            curlat = fdp_buffer_destage(ssd, batch, req->stime);
+            maxlat = MAX(maxlat, curlat);
+            if (ssd_buffer_at_watermark(ssd)) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                break;
+            }
+        }
+
+        e = ssd_buffer_insert(ssd, lpn, &held);
+        if (held) {
+            spp->write_hit_cnt++;
+        }
+        e->ruhid = ruhid;
+        e->rgid = rgid;
+        if (ssd->fdp_written) {
+            if (!e->written) {
+                e->written = bitmap_new(per);
+            }
+            fdp_page_pieces(ssd, req, req->slba, req->nlb, lpn, &b, &end);
+            if (b < end) {
+                bitmap_set(e->written, b - lpn * per, end - b);
+            }
+        }
+        accepted++;
+    }
+
+    ssd->host_write_pages += accepted;
+    spp->write_cnt += accepted;
+    req->xfer_bytes = accepted * pg;
+    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.hbmw, req->xfer_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, req->xfer_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, req->xfer_bytes);
+    ssd->buffer_full_destages += full;
+
+    /* accepting into DRAM is not free, even though it is not a program */
+    maxlat = MAX(maxlat, ssd_buffer_hit_lat(ssd));
     ssd_note_gc_stall(ssd, passes);
     return maxlat;
 }
@@ -1712,12 +1896,23 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 {
     NvmeNamespace *ns = req->ns;
     struct ssd *ssd = n->ssd;
+    const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t lat;
 
     (void)slba;
     (void)nlb;
 
+    /* Write and Copy; Force Unit Access goes to the media at once */
+    if (ssd_buffer_enabled(ssd) && !(le16_to_cpu(rw->control) & NVME_RW_FUA)) {
+        return fdp_buffered_write(ssd, req);
+    }
+
     lat = ssd_stream_write(n, ssd, req);
+    /* with a buffer, C0h counts every write page the buffer saw go past */
+    if (ssd->sp.buffer_size > 0) {
+        ssd->sp.write_cnt += req->xfer_bytes /
+                             ((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg);
+    }
 
     /*
      * Charged from what the write actually programmed, after the fact: a
@@ -2037,6 +2232,12 @@ static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         struct ppa ppa = get_maptbl_ent(ssd, lpn);
 
+        /*
+         * A held copy goes first: a page the buffer holds may have no
+         * mapping yet, and its write-back would bring the data back.
+         */
+        ssd_buffer_discard(ssd, lpn);
+
         /* the whole page goes, so none of its blocks holds data now */
         if (ssd->fdp_written && lpn * per < ssd->fdp_written_bits) {
             bitmap_clear(ssd->fdp_written, lpn * per,
@@ -2178,6 +2379,11 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                                     0);
             }
         }
+    }
+
+    /* the pages the buffer holds go with everything else */
+    while (QTAILQ_FIRST(&ssd->write_buffer)) {
+        ssd_buffer_discard(ssd, QTAILQ_FIRST(&ssd->write_buffer)->lpn);
     }
 
     /* drain victim and full RU queues for all reclaim groups */

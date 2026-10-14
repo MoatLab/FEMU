@@ -269,6 +269,7 @@ static inline int should_gc_high_fdp_style(struct ssd *ssd)
 struct line *get_next_free_line(struct ssd *ssd);
 void ssd_init_lines(struct ssd *ssd);
 void ssd_init_write_pointer(struct ssd *ssd);
+void ssd_init_write_buffer(struct ssd *ssd);
 struct ppa ssd_stream_page(struct ssd *ssd, unsigned slot, uint64_t tag);
 void ssd_stream_advance(struct ssd *ssd, unsigned slot);
 void ssd_advance_write_pointer(struct ssd *ssd);
@@ -375,8 +376,17 @@ static inline void ssd_note_gc_stall(struct ssd *ssd, uint64_t passes_before)
     }
 }
 
-/* DRAM write buffer ordering (hw/femu/bbssd/ftl-datapath.c) */
+/* DRAM write buffer (hw/femu/bbssd/ftl-datapath.c), shared with FDP */
 int comp_buffer(const void *a, const void *b);
+bool ssd_buffer_enabled(struct ssd *ssd);
+bool ssd_buffer_at_watermark(struct ssd *ssd);
+int ssd_buffer_batch(struct ssd *ssd);
+struct buffer_entry *ssd_buffer_insert(struct ssd *ssd, uint64_t lpn,
+                                       bool *held);
+struct buffer_entry *ssd_buffer_lookup(struct ssd *ssd, uint64_t lpn);
+void ssd_buffer_discard(struct ssd *ssd, uint64_t lpn);
+bool ssd_buffer_hit(struct ssd *ssd, uint64_t lpn);
+uint64_t ssd_buffer_hit_lat(struct ssd *ssd);
 
 /* non-FDP host datapath (hw/femu/bbssd/ftl-datapath.c) */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
@@ -401,6 +411,7 @@ void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);
 void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req);
+uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                             uint32_t nlb);
 

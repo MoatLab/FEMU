@@ -1703,12 +1703,18 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         /*
-         * buffer_enabled() reads this on the FTL thread to decide whether the
-         * write buffer may still accept pages, so change it with the dataplane
-         * stopped rather than under a request in flight.
+         * ssd_buffer_enabled() reads this on the FTL thread to decide
+         * whether the write buffer may still accept pages, so change it with
+         * the dataplane stopped rather than under a request in flight.
          */
         resume = nvme_pause_pollers(n);
-        if (n->power_loss && !(dw11 & 1)) {
+        /*
+         * A disabled cache may not hold pages. Under FDP a write-back can
+         * find no room, so drain here and keep the cache on if it fails.
+         */
+        if ((n->power_loss || (n->subsys && n->subsys->endgrp.fdp.enabled &&
+                               n->bb_params.buffer_size > 0)) &&
+            !(dw11 & 1)) {
             uint16_t status = bbssd_flush_all(n);
 
             if (status) {

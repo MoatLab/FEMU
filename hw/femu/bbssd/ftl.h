@@ -295,6 +295,13 @@ typedef struct buffer_entry {
     uint64_t lpn;
     uint8_t *undo;
     uint8_t *lba_state;
+    /*
+     * Under FDP: the placement of the page's last write, and the 512-byte
+     * pieces of the page the held writes cover (for fdp_written).
+     */
+    uint16_t ruhid;
+    uint16_t rgid;
+    unsigned long *written;
     QTAILQ_ENTRY(buffer_entry) b_entry;
 } buffer_entry;
 
@@ -352,6 +359,8 @@ struct FemuReclaimUnit {
 
     /* retirement order for the fifo policy; 0 while the unit is free */
     uint64_t close_seq;
+    /* host bytes programmed into the unit, for RUAMW with a write buffer */
+    uint64_t wb_bytes;
 
     /* cost-benefit GC attributes */
     uint64_t last_invalidated_time;

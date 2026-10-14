@@ -144,17 +144,16 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 /*
  * FDP keeps its own write and reclaim path. Refuse the knobs it does not
- * take rather than accept them silently. trim_lat_ns and
- * ecc_retention_sec are media costs that FDP charges too, and FDP refreshes
- * a whole reclaim unit for read_reclaim_limit and retention_limit_sec, so
- * those pass. Every mode that runs this FTL under FDP needs the refusal
- * and the reclaim unit size, not only bbssd. A no-op without FDP.
+ * take rather than accept them silently. The write buffer keeps the handle
+ * of each page, dftl adds timing only, and gc_policy names a unit strategy,
+ * so those pass with the media and refresh knobs. Every mode that runs this
+ * FTL under FDP needs the refusal and the reclaim unit size, not only
+ * bbssd. A no-op without FDP.
  */
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp)
 {
     const BbCtrlParams *p = &n->bb_params;
-    const char *knob = NULL;
 
     if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return 0;
@@ -186,14 +185,6 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
         p->gc_strategy != GC_GLOBAL_GREEDY) {
         error_setg(errp, "FEMU %s: set gc_policy or gc_strategy under FDP, "
                    "not both", mode);
-        return -1;
-    }
-
-    if (p->buffer_size) {
-        knob = "buffer_size";
-    }
-    if (knob) {
-        error_setg(errp, "FEMU %s: %s has no effect under FDP", mode, knob);
         return -1;
     }
 

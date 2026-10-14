@@ -44,7 +44,7 @@ int comp_buffer(const void *a, const void *b)
  * buffer, the mapping, the line management and the NAND status. None of it is
  * serialised against the poller thread and none of it may be called from there.
  */
-static bool buffer_enabled(struct ssd *ssd)
+bool ssd_buffer_enabled(struct ssd *ssd)
 {
     if ((ssd->n->power_loss && !ssd->n->vwc) ||
         ssd->sp.buffer_size <= 0 || !ssd->wb_tree) {
@@ -78,7 +78,7 @@ static int buffer_watermark(struct ssd *ssd)
     return wm > 0 ? wm : 1;
 }
 
-static bool buffer_at_watermark(struct ssd *ssd)
+bool ssd_buffer_at_watermark(struct ssd *ssd)
 {
     return ssd->write_buffer_cnt >= buffer_watermark(ssd);
 }
@@ -91,7 +91,7 @@ static bool buffer_at_watermark(struct ssd *ssd)
  * most of what makes a buffer worth modelling: pages that leave together can be
  * spread over channels and LUNs, which one-in-one-out eviction cannot do.
  */
-static int buffer_destage_batch(struct ssd *ssd)
+int ssd_buffer_batch(struct ssd *ssd)
 {
     int batch = ssd->sp.buffer_size - buffer_watermark(ssd);
 
@@ -112,6 +112,7 @@ static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
     g_tree_remove(ssd->wb_tree, victim);
     g_free(victim->undo);
     g_free(victim->lba_state);
+    g_free(victim->written);
     g_free(victim);
     ssd->write_buffer_cnt--;
 
@@ -119,21 +120,23 @@ static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
 }
 
 /*
- * Accept a page into the buffer. Returns true when the page was already held,
- * which is the case the buffer exists for: the earlier write is superseded and
- * no extra program is owed. A page that is already held keeps its identity and
- * is only moved to the tail, so occupancy cannot grow on a repeat write.
+ * Accept a page into the buffer and return its entry. *@held tells whether
+ * the page was already held, which is the case the buffer exists for: the
+ * earlier write is superseded and no extra program is owed. A page that is
+ * already held keeps its identity and is only moved to the tail, so
+ * occupancy cannot grow on a repeat write.
  */
-static bool buffer_insert(struct ssd *ssd, uint64_t lpn)
+struct buffer_entry *ssd_buffer_insert(struct ssd *ssd, uint64_t lpn,
+                                       bool *held)
 {
     struct buffer_entry target = { .lpn = lpn };
-    struct buffer_entry *held = g_tree_lookup(ssd->wb_tree, &target);
-    struct buffer_entry *entry;
+    struct buffer_entry *entry = g_tree_lookup(ssd->wb_tree, &target);
 
-    if (held) {
-        QTAILQ_REMOVE(&ssd->write_buffer, held, b_entry);
-        QTAILQ_INSERT_TAIL(&ssd->write_buffer, held, b_entry);
-        return true;
+    *held = entry != NULL;
+    if (entry) {
+        QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
+        QTAILQ_INSERT_TAIL(&ssd->write_buffer, entry, b_entry);
+        return entry;
     }
 
     entry = g_new0(struct buffer_entry, 1);
@@ -142,7 +145,15 @@ static bool buffer_insert(struct ssd *ssd, uint64_t lpn)
     QTAILQ_INSERT_TAIL(&ssd->write_buffer, entry, b_entry);
     ssd->write_buffer_cnt++;
 
-    return false;
+    return entry;
+}
+
+/* the entry holding @lpn, or NULL */
+struct buffer_entry *ssd_buffer_lookup(struct ssd *ssd, uint64_t lpn)
+{
+    struct buffer_entry target = { .lpn = lpn };
+
+    return ssd->wb_tree ? g_tree_lookup(ssd->wb_tree, &target) : NULL;
 }
 
 /*
@@ -150,7 +161,7 @@ static bool buffer_insert(struct ssd *ssd, uint64_t lpn)
  * deallocated must be removed: otherwise the pending program runs later and
  * data the host discarded reappears.
  */
-static void buffer_discard(struct ssd *ssd, uint64_t lpn)
+void ssd_buffer_discard(struct ssd *ssd, uint64_t lpn)
 {
     struct buffer_entry target = { .lpn = lpn };
     struct buffer_entry *held;
@@ -168,12 +179,13 @@ static void buffer_discard(struct ssd *ssd, uint64_t lpn)
     g_tree_remove(ssd->wb_tree, held);
     g_free(held->undo);
     g_free(held->lba_state);
+    g_free(held->written);
     g_free(held);
     ssd->write_buffer_cnt--;
 }
 
 /* a read served from the buffer does not reach the media */
-static bool buffer_hit(struct ssd *ssd, uint64_t lpn)
+bool ssd_buffer_hit(struct ssd *ssd, uint64_t lpn)
 {
     struct buffer_entry target = { .lpn = lpn };
 
@@ -189,7 +201,7 @@ static bool buffer_hit(struct ssd *ssd, uint64_t lpn)
  * This is a duration, not a completion time: every latency the datapath returns
  * is added to the request's expire_time by the FTL thread.
  */
-static uint64_t buffer_hit_lat(struct ssd *ssd)
+uint64_t ssd_buffer_hit_lat(struct ssd *ssd)
 {
     uint64_t lat = ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
 
@@ -209,6 +221,7 @@ void ssd_free_write_buffer(struct ssd *ssd)
         QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
         g_free(entry->undo);
         g_free(entry->lba_state);
+        g_free(entry->written);
         g_free(entry);
     }
     ssd->write_buffer_cnt = 0;
@@ -326,7 +339,7 @@ void bbssd_power_loss(NvmeNamespace *ns)
         rcache_invalidate(ssd, entry->lpn);
     }
     while ((entry = QTAILQ_FIRST(&ssd->write_buffer))) {
-        buffer_discard(ssd, entry->lpn);
+        ssd_buffer_discard(ssd, entry->lpn);
     }
 }
 
@@ -587,6 +600,11 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     uint64_t lpn;
     int done = 0;
 
+    /* under FDP each page goes to the unit of its own placement handle */
+    if (ssd->fdp_enabled) {
+        return fdp_buffer_destage(ssd, budget, stime);
+    }
+
     while (budget <= 0 || done < budget) {
         /*
          * Tested before a victim is chosen: selecting one removes it from the
@@ -671,8 +689,8 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          * checked even when it has stopped accepting writes, since it can still
          * be holding pages that have not been written back yet.
          */
-        if (ssd->write_buffer_cnt && buffer_hit(ssd, lpn)) {
-            sublat = buffer_hit_lat(ssd);
+        if (ssd->write_buffer_cnt && ssd_buffer_hit(ssd, lpn)) {
+            sublat = ssd_buffer_hit_lat(ssd);
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             ssd->sp.read_hit_cnt++;
             continue;
@@ -781,9 +799,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * one.
      */
     /* Program stream writes directly even when a cache is enabled. */
-    if (buffer_enabled(ssd) && !fua && stream < 0 &&
+    if (ssd_buffer_enabled(ssd) && !fua && stream < 0 &&
         (!ssd->n->power_loss || req->write_data)) {
-        int batch = buffer_destage_batch(ssd);
+        int batch = ssd_buffer_batch(ssd);
 
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             /*
@@ -792,7 +810,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
              * occupancy past the configured size. Writing back a bounded batch
              * also bounds the latency a single command can absorb.
              */
-            if (!buffer_hit(ssd, lpn) && buffer_at_watermark(ssd)) {
+            if (!ssd_buffer_hit(ssd, lpn) && ssd_buffer_at_watermark(ssd)) {
                 buffer_full = true;
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
@@ -803,20 +821,23 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                  * pages that can never be programmed; the direct path tells
                  * the host instead, and so does this one.
                  */
-                if (ssd_out_of_lines(ssd) && buffer_at_watermark(ssd)) {
+                if (ssd_out_of_lines(ssd) && ssd_buffer_at_watermark(ssd)) {
                     req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                     break;
                 }
             }
 
-            if (buffer_insert(ssd, lpn)) {
+            bool held;
+
+            ssd_buffer_insert(ssd, lpn, &held);
+            if (held) {
                 ssd->sp.write_hit_cnt++;
             }
             buffer_write_data(ssd, req, lpn, true);
         }
 
         /* accepting into DRAM is not free, even though it is not a program */
-        curlat = buffer_hit_lat(ssd);
+        curlat = ssd_buffer_hit_lat(ssd);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         ssd->buffer_full_destages += buffer_full;
@@ -834,14 +855,14 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     if (ssd->write_buffer_cnt) {
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             if (!ssd->n->power_loss) {
-                buffer_discard(ssd, lpn);
+                ssd_buffer_discard(ssd, lpn);
             }
         }
         /*
          * A disabled write cache must not keep pages back at all, so drain the
          * rest too. An FUA write only owes its own pages and leaves them.
          */
-        if (!buffer_enabled(ssd)) {
+        if (!ssd_buffer_enabled(ssd)) {
             curlat = ssd_buffer_destage(ssd, 0, req->stime);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
         }
@@ -879,7 +900,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         if (ssd->n->power_loss) {
-            buffer_discard(ssd, lpn);
+            ssd_buffer_discard(ssd, lpn);
         }
         buffer_write_data(ssd, req, lpn, false);
         curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
@@ -945,7 +966,7 @@ static int ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
          * and the data the host just discarded would reach the media after it
          * had been deallocated.
          */
-        buffer_discard(ssd, lpn);
+        ssd_buffer_discard(ssd, lpn);
 
         /* nothing mapped to invalidate; the buffer entry is already gone */
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
@@ -1038,7 +1059,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
          */
         if (ssd->write_buffer_cnt) {
             for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-                buffer_discard(ssd, lpn);
+                ssd_buffer_discard(ssd, lpn);
             }
         }
 
