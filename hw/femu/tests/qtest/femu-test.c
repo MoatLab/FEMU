@@ -7182,10 +7182,11 @@ static void femu_test_fdp_gc_strategy_refused(void *obj, void *data,
 }
 
 /*
- * The capacity check sizes one namespace against the whole reclaim unit pool,
- * which holds only while nothing else can draw on that pool: a second
- * namespace on the controller, or a second controller in the subsystem. Two
- * 1 MiB namespaces on 25 lines would each fit and together overcommit it.
+ * The capacity check sizes the namespaces against the whole reclaim unit
+ * pool, which holds only while nothing else can draw on that pool: the
+ * namespaces of the controller share it, and a second controller in the
+ * subsystem is refused. Two 1 MiB namespaces on 25 lines would each fit and
+ * together overcommit it.
  */
 static void femu_test_fdp_single_pool(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -7202,7 +7203,7 @@ static void femu_test_fdp_single_pool(void *obj, void *data,
                     "'subsys':'fdpsub'}}");
     g_assert_true(qdict_haskey(rsp, "error"));
     g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
-                                         "desc"), "single namespace"));
+                                         "desc"), "the 2 namespaces expose"));
     qobject_unref(rsp);
 
     /* one namespace that fits is accepted; a second controller is not */
@@ -32841,6 +32842,1024 @@ static void femu_test_combo_policy(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * FDP with more than one namespace. The namespaces of a controller share the
+ * endurance group's reclaim units and handles, and so one FTL; each reaches
+ * the handles through its own placement handle list (namespace_phls).
+ */
+
+/* Write or read @npages 4 KiB pages from @page of namespace @nsid via @pid */
+static uint16_t femu_fdpns_io(FemuCtrlState *c, uint8_t opcode, uint32_t nsid,
+                              uint64_t page, uint32_t npages, uint64_t data,
+                              uint64_t list, int pid)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+    uint32_t i;
+
+    g_assert_cmpuint(npages, >=, 1);
+    g_assert_cmpuint(npages, <=, 4096 / 8 + 1);
+    for (i = 0; i + 1 < npages; i++) {
+        qtest_writeq(c->pdev->bus->qts, list + i * 8, data + (i + 1) * 4096);
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list :
+                               npages == 2 ? data + 4096 : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(npages * (4096 / c->lba_size) - 1);
+    if (pid >= 0) {
+        rw.control = cpu_to_le16(2 << 4);
+        rw.dspec = cpu_to_le16(pid);
+    }
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
+/* deallocate @npages 4 KiB pages from @page of namespace @nsid */
+static uint16_t femu_fdpns_dealloc(FemuCtrlState *c, uint32_t nsid,
+                                   uint64_t page, uint32_t npages,
+                                   uint64_t buf)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, npages * (4096 / c->lba_size));
+    stq_le_p(range + 8, page * (4096 / c->lba_size));
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+}
+
+/*
+ * The RUH Status of namespace @nsid: the descriptor count, and the RUH ID
+ * and RUAMW of each placement identifier, at most 8, in descriptor order.
+ */
+static uint16_t femu_fdpns_ruhs(FemuCtrlState *c, uint32_t nsid,
+                                uint64_t buf, uint16_t *ruhid,
+                                uint64_t *ruamw)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t st[16 + 8 * 32];
+    uint16_t n;
+
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(st) / 4 - 1);
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, st, sizeof(st));
+    n = lduw_le_p(st + 14);
+    for (uint16_t i = 0; i < MIN(n, 8); i++) {
+        /* one reclaim group: the placement identifier is the handle index */
+        g_assert_cmpint(lduw_le_p(st + 16 + 32 * i), ==, i);
+        ruhid[i] = lduw_le_p(st + 16 + 32 * i + 2);
+        ruamw[i] = ldq_le_p(st + 16 + 32 * i + 8);
+    }
+    return n;
+}
+
+/* query-femu of namespace @nsid, with @args added */
+static QDict *femu_fdpns_query(QTestState *qts, uint32_t nsid,
+                               const char *args, QDict **rsp)
+{
+    g_autofree char *a = g_strdup_printf("'nsid':%u%s%s", nsid,
+                                         *args ? "," : "", args);
+
+    return femu_query_ns(qts, a, rsp);
+}
+
+/* host bytes of handle @h and valid pages in its units, from namespace 1 */
+static void femu_fdpns_handle(QTestState *qts, int h, uint64_t *host,
+                              uint64_t *vpc)
+{
+    QDict *rsp;
+    QDict *ns = femu_fdpns_query(qts, 1, "'kind':'reclaim-units','limit':4096",
+                                 &rsp);
+    QDict *fdp = qdict_get_qdict(ns, "fdp");
+    QListEntry *e;
+
+    *host = 0;
+    *vpc = 0;
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "handles"), e) {
+        QDict *d = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (qdict_get_int(d, "id") == h) {
+            *host = qdict_get_int(d, "host-bytes");
+        }
+    }
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (qdict_haskey(u, "handle") && qdict_get_int(u, "handle") == h) {
+            *vpc += qdict_get_int(u, "vpc");
+        }
+    }
+    qobject_unref(rsp);
+}
+
+/* the mappings x-ftl-check counts, with none lost and no orphan */
+static uint64_t femu_fdpns_mapped(QTestState *qts)
+{
+    uint64_t mapped, lost, orphans;
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    return mapped;
+}
+
+/* mapped pages in the slices of namespaces 1 and 2 (x-fdp-ns-mapped) */
+static void femu_fdpns_ns_mapped(QTestState *qts, uint64_t *m1, uint64_t *m2)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-fdp-ns-mapped'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64, m1, m2), ==, 2);
+    qobject_unref(rsp);
+}
+
+/* each namespace holds @w1 and @w2 mapped pages, and the FTL their sum */
+static void femu_fdpns_expect(QTestState *qts, uint64_t w1, uint64_t w2)
+{
+    uint64_t m1, m2;
+
+    femu_fdpns_ns_mapped(qts, &m1, &m2);
+    g_assert_cmpuint(m1, ==, w1);
+    g_assert_cmpuint(m2, ==, w2);
+    g_assert_cmpuint(femu_fdpns_mapped(qts), ==, w1 + w2);
+}
+
+/* a 4 KiB page that names its namespace, page and write */
+static void femu_fdpns_fill(QTestState *qts, uint64_t buf, uint32_t nsid,
+                            uint64_t page, uint32_t seq)
+{
+    uint8_t pg[4096];
+
+    for (int i = 0; i < 4096; i += 16) {
+        stl_le_p(pg + i, nsid);
+        stl_le_p(pg + i + 4, page);
+        stl_le_p(pg + i + 8, seq);
+        stl_le_p(pg + i + 12, i);
+    }
+    qtest_memwrite(qts, buf, pg, sizeof(pg));
+}
+
+/* the page femu_fdpns_fill() wrote for @nsid, @page and @seq reads back */
+static void femu_fdpns_verify(FemuCtrlState *c, uint64_t buf, uint64_t list,
+                              uint32_t nsid, uint64_t page, uint32_t seq)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t pg[4096];
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_fdpns_io(c, NVME_CMD_READ, nsid, page, 1, buf, list,
+                                  -1), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, pg, sizeof(pg));
+    g_assert_cmpuint(ldl_le_p(pg), ==, nsid);
+    g_assert_cmpuint(ldl_le_p(pg + 4), ==, page);
+    g_assert_cmpuint(ldl_le_p(pg + 8), ==, seq);
+    g_assert_cmpuint(ldl_le_p(pg + 4092), ==, 4080);
+}
+
+/*
+ * Two namespaces of 128 pages on 16-page units, with lists 0:1 and 1:2:
+ * handle 1 is shared and handle 3 is unused. RUH Status and log 21h report
+ * the lists; writes through either namespace's identifier for handle 1 land
+ * in the same unit; the FTL maps both namespaces' pages apart; a deallocate
+ * of one namespace leaves the other's pages; and a random overwrite of both
+ * through collection keeps every page in a unit of a handle its namespace
+ * lists, every mapping and every page's data.
+ */
+static void femu_test_fdp_ns_phl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    static const uint16_t want_ruh[2][2] = { { 0, 1 }, { 1, 2 } };
+    uint32_t seq[2][128] = { { 0 } };
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+    uint64_t host, vpc, gc0, mapped[2] = { 0 };
+    uint8_t ruhu[8 + 4 * 8];
+    uint32_t seed = 11;
+    uint32_t next = 1;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    gc0 = femu_c0h_field(&c, log, 16);
+
+    for (uint32_t ns = 1; ns <= 2; ns++) {
+        g_assert_cmpuint(femu_fdpns_ruhs(&c, ns, log, ruhid, ruamw), ==, 2);
+        for (i = 0; i < 2; i++) {
+            g_assert_cmpuint(ruhid[i], ==, want_ruh[ns - 1][i]);
+            /* an empty unit: 16 pages of eight 512-byte blocks */
+            g_assert_cmpuint(ruamw[i], ==, 128);
+        }
+    }
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, 0, log,
+                                    sizeof(ruhu)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, ruhu, sizeof(ruhu));
+    g_assert_cmpint(lduw_le_p(ruhu), ==, 4);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(ruhu[8 + i * 8], ==, i < 3 ? 1 : 0);
+    }
+
+    /* handle 1 from both sides, 40 pages: two full units and half a third */
+    qtest_memset(qts, buf, 0x6b, 20 * 4096);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 0, 20, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 20, buf, list, 0),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 24, 8, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
+    g_assert_cmpuint(ruamw[0], ==, 128);
+    g_assert_cmpuint(ruamw[1], ==, 64);
+    femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+    g_assert_cmpuint(ruamw[0], ==, 64);
+    g_assert_cmpuint(ruamw[1], ==, 64);
+    for (i = 0; i < 4; i++) {
+        static const uint64_t want_pages[4] = { 0, 40, 8, 0 };
+
+        femu_fdpns_handle(qts, i, &host, &vpc);
+        g_assert_cmpuint(host, ==, want_pages[i] * 4096);
+        g_assert_cmpuint(vpc, ==, want_pages[i]);
+    }
+    /* the same pages of both namespaces are mapped apart */
+    femu_fdpns_expect(qts, 20, 28);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    /* namespace 2's own pages go, namespace 1's stay */
+    g_assert_cmphex(femu_fdpns_dealloc(&c, 2, 24, 8, log), ==, NVME_SUCCESS);
+    femu_fdpns_handle(qts, 2, &host, &vpc);
+    g_assert_cmpuint(vpc, ==, 0);
+    femu_fdpns_expect(qts, 20, 20);
+    g_assert_cmphex(femu_fdpns_dealloc(&c, 2, 0, 20, log), ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 20, 0);
+    g_assert_cmphex(femu_fdpns_dealloc(&c, 1, 0, 20, log), ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 0, 0);
+
+    /* random single pages and runs over both namespaces, past collection */
+    for (i = 0; i < 1500; i++) {
+        uint32_t ns, npages, pid;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        ns = 1 + ((seed >> 20) & 1);
+        pid = (seed >> 21) & 1;
+        npages = i % 8 == 7 ? 16 : 1;
+        page = (seed >> 8) % (128 - npages + 1);
+        for (uint32_t k = 0; k < npages; k++) {
+            femu_fdpns_fill(qts, buf + k * 4096, ns, page + k, next);
+            mapped[ns - 1] += !seq[ns - 1][page + k];
+            seq[ns - 1][page + k] = next;
+        }
+        next++;
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, ns, page, npages,
+                                      buf, list, pid), ==, NVME_SUCCESS);
+    }
+    g_test_message("collection moved %" PRIu64 " pages",
+                   femu_c0h_field(&c, log, 16) - gc0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), >, gc0);
+    femu_fdpns_expect(qts, mapped[0], mapped[1]);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    for (uint32_t ns = 1; ns <= 2; ns++) {
+        for (uint64_t page = 0; page < 128; page += 3) {
+            if (seq[ns - 1][page]) {
+                femu_fdpns_verify(&c, buf, list, ns, page, seq[ns - 1][page]);
+            }
+        }
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Format with two namespaces. A Format of namespace 2 drops only its pages.
+ * With @data "shared" the lists share handle 1, so a Format of one namespace
+ * to 4 KiB blocks is Invalid Format, and a Format of both is not; RUAMW then
+ * counts 4 KiB blocks. With "apart" no handle is shared: namespace 2 takes
+ * 4 KiB blocks alone, and each namespace's RUAMW counts its own blocks.
+ */
+static void femu_test_fdp_ns_format(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool shared = !strcmp(data, "shared");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2d, 20 * 4096);
+
+    /* 20 pages through placement 1 of each namespace, 4 more through 0 */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 0, 20, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 20, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 40, 4, buf, list, 0),
+                    ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 20, 24);
+
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 20, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    if (shared) {
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 2, 3, 0)), ==,
+                        NVME_INVALID_FORMAT);
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 3, 0)), ==,
+                        NVME_INVALID_FORMAT);
+        g_assert_cmphex(FEMU_SC(femu_format(&c, NVME_NSID_BROADCAST, 3, 0)),
+                        ==, NVME_SUCCESS);
+        femu_fdpns_expect(qts, 0, 0);
+        /* handle 1 holds 40 programmed pages: 8 left in its unit */
+        femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
+        g_assert_cmpuint(ruhid[1], ==, 1);
+        g_assert_cmpuint(ruamw[1], ==, 8);
+        femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+        g_assert_cmpuint(ruhid[1], ==, 1);
+        g_assert_cmpuint(ruamw[1], ==, 8);
+        /* handle 2 took 4 pages: 12 left */
+        g_assert_cmpuint(ruhid[0], ==, 2);
+        g_assert_cmpuint(ruamw[0], ==, 12);
+    } else {
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 2, 3, 0)), ==, NVME_SUCCESS);
+        femu_fdpns_expect(qts, 20, 0);
+        /* namespace 1 counts 512-byte blocks, namespace 2 4 KiB ones */
+        femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
+        g_assert_cmpuint(ruhid[1], ==, 1);
+        g_assert_cmpuint(ruamw[1], ==, 12 * 8);
+        femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+        g_assert_cmpuint(ruhid[0], ==, 2);
+        g_assert_cmpuint(ruamw[0], ==, 12);
+        g_assert_cmpuint(ruhid[1], ==, 3);
+        g_assert_cmpuint(ruamw[1], ==, 12);
+        c.lba_size = 4096;
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 2, buf, list,
+                                      1), ==, NVME_SUCCESS);
+        femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+        g_assert_cmpuint(ruamw[1], ==, 10);
+    }
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Controller and host events with two namespaces on fdpsub-ii, where handle
+ * 3 is initially isolated. Namespace 1 reaches it as placement 0 (list 3:0)
+ * and namespace 2 as placement 2 (list 1:2:3). Each writes 64 pages into
+ * one unit of handle 3 and deallocates its first 32; collection then moves
+ * 32 pages of each. Every 80h names the namespace of the blocks it counts,
+ * with that namespace's placement identifier and one of its blocks. A write
+ * with an identifier its namespace lacks logs 03h with that namespace.
+ */
+static void femu_test_fdp_ns_events(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t ev[8 * 64];
+    uint8_t hev[64 + 8 * 64];
+    uint32_t nev, seen[3] = { 0 }, nlb = 0, i;
+    uint64_t gc0, gc = 0, lpn;
+    NvmeCmd cmd = { 0 };
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 20 * 4096);
+    g_assert_cmpuint(femu_fdp_ctrl_events(&c, log, ev, 0), ==, 0);
+
+    for (lpn = 0; lpn < 64; lpn += 16) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, lpn, 16, buf,
+                                      list, 0), ==, NVME_SUCCESS);
+    }
+    for (lpn = 0; lpn < 64; lpn += 16) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, lpn, 16, buf,
+                                      list, 2), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_fdpns_dealloc(&c, 1, 0, 32, log), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_dealloc(&c, 2, 0, 32, log), ==, NVME_SUCCESS);
+
+    /* namespace 1, placement 1 (handle 0), until collection moves 64 pages */
+    gc0 = femu_c0h_field(&c, log, 16);
+    for (n = 0, lpn = 64; n < 160 && gc < 64; n++, lpn += 16) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, lpn, 16, buf,
+                                      list, 1), ==, NVME_SUCCESS);
+        gc = femu_c0h_field(&c, log, 16) - gc0;
+    }
+    g_assert_cmpuint(gc, ==, 64);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    nev = femu_fdp_ctrl_events(&c, log, ev, 8);
+    g_test_message("%u controller events", nev);
+    g_assert_cmpuint(nev, >=, 2);
+    g_assert_cmpuint(nev, <=, 8);
+    for (i = 0; i < nev; i++) {
+        const uint8_t *e = ev + i * 64;
+        uint32_t nsid = ldl_le_p(e + 12);
+
+        g_assert_cmphex(e[0], ==, FEMU_FDP_EVT_MEDIA_REALLOC);
+        g_assert_cmphex(e[1], ==, 0x7);             /* PIV, NSIDV, LV */
+        g_assert_cmpuint(nsid, >=, 1);
+        g_assert_cmpuint(nsid, <=, 2);
+        /* handle 3 is placement 0 of namespace 1 and 2 of namespace 2 */
+        g_assert_cmpint(lduw_le_p(e + 2), ==, nsid == 1 ? 0 : 2);
+        g_assert_cmpint(lduw_le_p(e + 34), ==, 3);
+        g_assert_cmphex(e[16], ==, 1);              /* LBAV */
+        g_assert_cmpuint(ldq_le_p(e + 20), >=, 32 * 8);
+        g_assert_cmpuint(ldq_le_p(e + 20), <, 64 * 8);
+        /* runs of one namespace are reported apart, so they alternate */
+        if (i) {
+            g_assert_cmpuint(nsid, !=, ldl_le_p(e - 64 + 12));
+        }
+        seen[nsid]++;
+        nlb += lduw_le_p(e + 18);
+    }
+    g_assert_cmpuint(seen[1], >=, 1);
+    g_assert_cmpuint(seen[2], >=, 1);
+    g_assert_cmpuint(nlb, ==, 64 * 8);
+
+    /* placement 2 is invalid for namespace 1 and valid for namespace 2 */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 0, 1, buf, list, 2),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 1, buf, list, 2),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 1, 1, buf, list, 3),
+                    ==, NVME_SUCCESS);
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (1 << 8) |
+                            ((sizeof(hev) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmpuint(ldl_le_p(hev), ==, 2);
+    g_assert_cmphex(hev[64], ==, 0x03);
+    g_assert_cmpint(lduw_le_p(hev + 64 + 2), ==, 2);
+    g_assert_cmpuint(ldl_le_p(hev + 64 + 12), ==, 1);
+    g_assert_cmphex(hev[128], ==, 0x03);
+    g_assert_cmpint(lduw_le_p(hev + 128 + 2), ==, 3);
+    g_assert_cmpuint(ldl_le_p(hev + 128 + 12), ==, 2);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Two namespaces with the knobs FDP takes: a write buffer, fifo collection,
+ * dftl, read refresh and the unit time limit. Both namespaces are filled,
+ * then overwritten at random through both of each one's placements, and one
+ * old page is read until its unit is refreshed. Every page reads back as last
+ * written, the FTL holds each page once in a unit of a handle its namespace
+ * lists, and log C0h counts the shared FTL once: its host pages are the
+ * pages written, not twice that.
+ */
+static void femu_test_fdp_ns_knobs(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 1408;    /* 5.5 MiB each */
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    g_autofree uint32_t *seq = g_new0(uint32_t, 2 * pages);
+    uint64_t written = 0, rr0;
+    uint32_t seed = 3, next = 1;
+    QDict *rsp;
+    QDict *ns;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    for (uint32_t n = 1; n <= 2; n++) {
+        for (uint64_t page = 0; page < pages; page += 16) {
+            for (uint32_t k = 0; k < 16; k++) {
+                femu_fdpns_fill(qts, buf + k * 4096, n, page + k, next);
+                seq[(n - 1) * pages + page + k] = next;
+            }
+            next++;
+            g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, n, page, 16,
+                                          buf, list, page / 16 % 2), ==,
+                            NVME_SUCCESS);
+            written += 16;
+        }
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t n, pid;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        n = 1 + ((seed >> 20) & 1);
+        pid = (seed >> 21) & 1;
+        /* the second half of each namespace; the first stays cold */
+        page = pages / 2 + (seed >> 8) % (pages / 2);
+        femu_fdpns_fill(qts, buf, n, page, next);
+        seq[(n - 1) * pages + page] = next++;
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, n, page, 1, buf,
+                                      list, pid), ==, NVME_SUCCESS);
+        written++;
+    }
+
+    /* reads of one cold page of namespace 2 queue its unit for a refresh */
+    rr0 = femu_c0h_field(&c, log, 40);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_READ, 2, 5, 1, buf, list,
+                                      -1), ==, NVME_SUCCESS);
+    }
+    femu_fdpns_fill(qts, buf, 1, pages - 1, next);
+    seq[pages - 1] = next++;
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, pages - 1, 1, buf,
+                                  list, 0), ==, NVME_SUCCESS);
+    written++;
+    g_assert_cmpuint(femu_c0h_field(&c, log, 40), >, rr0);
+
+    /*
+     * The buffer holds pages of both namespaces; a Flush through namespace
+     * 1 programs all of them, and a second one has nothing left.
+     */
+    {
+        NvmeCmd cmd = { 0 };
+        uint64_t nand0 = femu_c0h_field(&c, log, 24);
+        uint64_t nand1;
+
+        cmd.opcode = NVME_CMD_FLUSH;
+        cmd.nsid = cpu_to_le32(1);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        nand1 = femu_c0h_field(&c, log, 24);
+        g_test_message("Flush programmed %" PRIu64 " held pages",
+                       nand1 - nand0);
+        g_assert_cmpuint(nand1, >, nand0);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, nand1);
+    }
+    femu_fdpns_expect(qts, pages, pages);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 8), ==, written);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), >, 0);
+    /* each namespace reports the one FTL */
+    for (uint32_t n = 1; n <= 2; n++) {
+        ns = femu_fdpns_query(qts, n, "", &rsp);
+        g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                       "host-write-pages"), ==, written);
+        qobject_unref(rsp);
+    }
+    for (uint32_t n = 1; n <= 2; n++) {
+        for (uint64_t page = 0; page < pages; page += 7) {
+            femu_fdpns_verify(&c, buf, list, n, page,
+                              seq[(n - 1) * pages + page]);
+        }
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Two NoSSD namespaces, lists 0:1 and 2: RUH Status reports each list, log
+ * 21h marks handle 3 unused, and a handle update through namespace 2 logs
+ * 00h with its namespace and placement identifier.
+ */
+static void femu_test_fdp_ns_nossd(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t ruhu[8 + 4 * 8];
+    uint8_t hev[64 + 8 * 64];
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+    NvmeCmd cmd = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw), ==, 2);
+    g_assert_cmpuint(ruhid[0], ==, 0);
+    g_assert_cmpuint(ruhid[1], ==, 1);
+    g_assert_cmpuint(femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw), ==, 1);
+    g_assert_cmpuint(ruhid[0], ==, 2);
+    g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, 0, log,
+                                    sizeof(ruhu)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, ruhu, sizeof(ruhu));
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(ruhu[8 + i * 8], ==, i < 3 ? 1 : 0);
+    }
+
+    /* placement 0 of namespace 2: handle 2 */
+    qtest_writew(qts, log, 0);
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(2);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    /* placement 1 does not exist on namespace 2 */
+    qtest_writew(qts, log, 1);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (1 << 8) |
+                            ((sizeof(hev) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmpuint(ldl_le_p(hev), ==, 1);
+    g_assert_cmphex(hev[64], ==, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+    g_assert_cmpint(lduw_le_p(hev + 64 + 2), ==, 0);
+    g_assert_cmpuint(ldl_le_p(hev + 64 + 12), ==, 2);
+    g_assert_cmpint(lduw_le_p(hev + 64 + 34), ==, 2);
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* device_add of an FDP controller with @props, which realize refuses */
+static void femu_fdpns_refused(QTestState *qts, const char *props,
+                               const char *want)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'driver':'femu','id':'fdpns','addr':'5','secsz':512,"
+        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,'pls_per_lun':1,"
+        "'luns_per_ch':2,'nchs':2,%s}", props);
+    QObject *args = qobject_from_json(json, &error_abort);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           args);
+    const char *desc;
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s: %s", props, desc);
+    g_assert_nonnull(strstr(desc, want));
+    qobject_unref(rsp);
+}
+
+/* what realize refuses for FDP with more than one namespace */
+static void femu_test_fdp_ns_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *props;
+        const char *want;
+    } cases[] = {
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_modes':'bbssd,nossd'", "every namespace in bbssd" },
+        { "'devsz_mb':1,'femu_mode':3,'namespaces':2,'subsys':'fdpsub'",
+          "every namespace in bbssd" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_sizes':'514K,510K'", "whole NAND pages" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'fdp_trim_erase_all':1", "needs a single namespace" },
+        { "'devsz_mb':2,'femu_mode':1,'namespaces':2,'subsys':'fdpsub'",
+          "the 2 namespaces expose" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,"
+          "'namespace_phls':'0,1'", "needs fdp=on" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_phls':'0,1,2'", "count must equal" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_phls':'0:4,1'", "handles are 0 to 3" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_phls':'0:1:0,1'", "twice" },
+        { "'devsz_mb':1,'femu_mode':1,'namespaces':2,'subsys':'fdpsub',"
+          "'namespace_phls':'0,'", "lists no handle" },
+        { "'devsz_mb':1,'femu_mode':1,'subsys':'fdpsub',"
+          "'namespace_phls':'x'", "names handle 'x'" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        femu_fdpns_refused(qts, cases[i].props, cases[i].want);
+    }
+    qos_invalidate_command_line();
+}
+
+/* Write Zeroes of @npages pages from @page of @nsid through @pid */
+static uint16_t femu_fdpns_zeroes(FemuCtrlState *c, uint32_t nsid,
+                                  uint64_t page, uint32_t npages, int pid,
+                                  bool deac)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(page * 8);
+    cmd.cdw12 = cpu_to_le32((npages * 8 - 1) | (deac ? 1u << 25 : 0) |
+                            (2u << 20));
+    cmd.cdw13 = cpu_to_le32((uint32_t)pid << 16);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * The other commands that place data, with lists 0:1 and 1:2. A format 2
+ * Copy from namespace 2 into namespace 1 places through namespace 1's list,
+ * Write Zeroes through namespace 2's, with and without deallocation, and a
+ * handle update through namespace 1 moves the handle namespace 2 shares:
+ * both see the fresh unit, and 00h names namespace 1.
+ */
+static void femu_test_fdp_ns_cmds(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t hev[64 + 8 * 64];
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+    uint64_t host, vpc;
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* four pages of namespace 2 through its placement 0: handle 1 */
+    for (int k = 0; k < 4; k++) {
+        femu_fdpns_fill(qts, buf + k * 4096, 2, k, 1);
+    }
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 4, buf, list, 0),
+                    ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 0, 4);
+
+    /* copied to page 40 of namespace 1 through its placement 0: handle 0 */
+    qtest_memset(qts, log, 0, 512);
+    qtest_writew(qts, log + 4, 0x4);
+    g_assert_cmpint(femu_hbs(&c, true, log), ==, NVME_SUCCESS);
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writel(qts, list, 2);
+    qtest_writeq(qts, list + 8, 0);
+    qtest_writew(qts, list + 16, 32 - 1);
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(40 * 8);
+    cmd.cdw12 = cpu_to_le32((2 << 8) | (2u << 20));
+    cmd.cdw13 = cpu_to_le32(0 << 16);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    femu_fdpns_expect(qts, 4, 4);
+    femu_fdpns_handle(qts, 0, &host, &vpc);
+    g_assert_cmpuint(vpc, ==, 4);
+    femu_fdpns_handle(qts, 1, &host, &vpc);
+    g_assert_cmpuint(vpc, ==, 4);
+    femu_fdpns_verify(&c, buf, list, 2, 0, 1);
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_READ, 1, 41, 1, buf, list, -1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 2);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 1);
+
+    /* zeroes into namespace 2's placement 1, handle 2, then deallocated */
+    g_assert_cmpint(femu_fdpns_zeroes(&c, 2, 50, 4, 1, false), ==,
+                    NVME_SUCCESS);
+    femu_fdpns_expect(qts, 4, 8);
+    femu_fdpns_handle(qts, 2, &host, &vpc);
+    g_assert_cmpuint(vpc, ==, 4);
+    g_assert_cmpint(femu_fdpns_zeroes(&c, 2, 50, 4, 1, true), ==,
+                    NVME_SUCCESS);
+    femu_fdpns_expect(qts, 4, 4);
+    femu_fdpns_handle(qts, 2, &host, &vpc);
+    g_assert_cmpuint(vpc, ==, 0);
+
+    /* handle 1 holds 4 pages; namespace 1 moves it, namespace 2 sees it */
+    femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+    g_assert_cmpuint(ruhid[0], ==, 1);
+    g_assert_cmpuint(ruamw[0], ==, 12 * 8);
+    qtest_writew(qts, list, 1);
+    g_assert_cmpint(femu_ruh_update(&c, list, 1), ==, NVME_SUCCESS);
+    femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw);
+    g_assert_cmpuint(ruamw[0], ==, 16 * 8);
+    femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
+    g_assert_cmpuint(ruhid[1], ==, 1);
+    g_assert_cmpuint(ruamw[1], ==, 16 * 8);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (1 << 8) |
+                            ((sizeof(hev) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmpuint(ldl_le_p(hev), ==, 1);
+    g_assert_cmphex(hev[64], ==, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+    g_assert_cmpint(lduw_le_p(hev + 64 + 2), ==, 1);
+    g_assert_cmpuint(ldl_le_p(hev + 64 + 12), ==, 1);
+    g_assert_cmpint(lduw_le_p(hev + 64 + 34), ==, 1);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    femu_fdpns_expect(qts, 4, 4);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A controller with two namespaces and lists 0:1 and 1:2 is replaced by one
+ * with a single 4 KiB namespace and list 1:3. Handle 0 and 2 are unused
+ * again, so log 21h reports only 1 and 3, handle 1 takes the new format
+ * rather than refusing it, and its byte counters stay with the subsystem.
+ */
+static void femu_test_fdp_ns_replace(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuCtrlState c2 = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t ruhu[8 + 4 * 8];
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+    uint64_t host, vpc;
+    QPCIDevice *pdev;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 20 * 4096);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 8, buf, list, 0),
+                    ==, NVME_SUCCESS);
+    femu_disable(&c);
+
+    qtest_qmp_device_del_send(qts, "fdpns-r");
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'fdpns-r2',"
+        "'addr':'4','devsz_mb':1,'femu_mode':1,'secsz':512,"
+        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'subsys':'fdpsub',"
+        "'lba_index':3,'namespace_phls':'1:3'}}");
+    if (!qdict_haskey(rsp, "return")) {
+        g_test_message("%s", qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                           "desc"));
+    }
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(4, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c2, pdev, alloc);
+    femu_create_io_queues(&c2);
+    c2.lba_size = 4096;
+
+    g_assert_cmpint(femu_endgrp_log(&c2, FEMU_LOG_FDP_RUH_USAGE, 0, log,
+                                    sizeof(ruhu)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, ruhu, sizeof(ruhu));
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(ruhu[8 + i * 8], ==, i == 1 || i == 3);
+    }
+    g_assert_cmpuint(femu_fdpns_ruhs(&c2, 1, log, ruhid, ruamw), ==, 2);
+    g_assert_cmpuint(ruhid[0], ==, 1);
+    g_assert_cmpuint(ruhid[1], ==, 3);
+    g_assert_cmpuint(ruamw[0], ==, 16);
+    /* the 8 pages namespace 2 wrote through handle 1 stay counted */
+    femu_fdpns_handle(qts, 1, &host, &vpc);
+    g_assert_cmpuint(host, ==, 8 * 4096);
+    g_assert_cmpuint(vpc, ==, 0);
+
+    femu_disable(&c2);
+    g_free(pdev);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+
+/*
+ * A handle whose units ran out shows the host a stand-in unit with no room,
+ * which the FTL owns. With collection held off, handle updates through
+ * placement 0 use up every free unit, and a write fills the last one. The controller is then replaced by a NoSSD one on
+ * the same subsystem, whose RUH Status reads that handle's unit: it must be
+ * one of the subsystem's, not the freed stand-in. An ASan build reports the
+ * use after free that a plain build reads past.
+ */
+static void femu_test_fdp_replace_full(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuCtrlState c2 = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint16_t ruhid[8];
+    uint64_t ruamw[8];
+    uint16_t status = NVME_SUCCESS;
+    QPCIDevice *pdev;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 20 * 4096);
+    /* a page, then a fresh unit, until no unit is free to move to */
+    for (i = 0; i < 64 && status == NVME_SUCCESS; i++) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, i, 1, buf, list,
+                                      0), ==, NVME_SUCCESS);
+        qtest_writew(qts, list, 0);
+        status = femu_ruh_update(&c, list, 1);
+    }
+    g_assert_cmphex(status, ==, NVME_CAP_EXCEEDED);
+    /*
+     * The unit fills with nothing to follow it: the handle has no unit, and
+     * the rest of the write finds no room.
+     */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 100, 16, buf, list,
+                                  0), ==, NVME_CAP_EXCEEDED);
+    femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
+    g_assert_cmpuint(ruamw[0], ==, 0);
+    femu_disable(&c);
+
+    qtest_qmp_device_del_send(qts, "fdp-full");
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu',"
+        "'id':'fdp-full2','addr':'4','devsz_mb':1,'femu_mode':2,"
+        "'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(4, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c2, pdev, alloc);
+    femu_create_io_queues(&c2);
+    g_assert_cmpuint(femu_fdpns_ruhs(&c2, 1, log, ruhid, ruamw), ==, 4);
+    g_assert_cmpuint(ruhid[0], ==, 0);
+    g_assert_cmpuint(ruamw[0], >, 0);
+    femu_disable(&c2);
+    g_free(pdev);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -35149,6 +36168,74 @@ static void femu_register_nodes(void)
     qos_add_test("fdp-capacity-refused", "femu",
                  femu_test_fdp_capacity_refused, NULL);
     qos_add_test("fdp-single-pool", "femu", femu_test_fdp_single_pool, NULL);
+    qos_add_test("fdp-ns-phl", "femu", femu_test_fdp_ns_phl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,namespaces=2,namespace_phls=0:1,,1:2",
+    });
+    qos_add_test("fdp-ns-cmds", "femu", femu_test_fdp_ns_cmds,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,namespaces=2,namespace_phls=0:1,,1:2,oncs=0x10c",
+    });
+    qos_add_test("fdp-ns-format-shared", "femu", femu_test_fdp_ns_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"shared",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,namespaces=2,namespace_phls=0:1,,2:1",
+    });
+    qos_add_test("fdp-ns-format-apart", "femu", femu_test_fdp_ns_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"apart",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,namespaces=2,namespace_phls=0:1,,2:3",
+    });
+    qos_add_test("fdp-ns-events", "femu", femu_test_fdp_ns_events,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=20,gc_thres_pcent_high=94,"
+            "subsys=fdpsub-ii,namespaces=2,namespace_phls=3:0,,1:2:3",
+    });
+    qos_add_test("fdp-ns-knobs", "femu", femu_test_fdp_ns_knobs,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,namespaces=2,namespace_phls=0:1,,2:3,"
+            "buffer_size=16,vwc=1,gc_policy=fifo,mapping=dftl,"
+            "read_reclaim_limit=8,retention_limit_sec=3600",
+    });
+    qos_add_test("fdp-ns-nossd", "femu", femu_test_fdp_ns_nossd,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=2,femu_mode=2,subsys=fdpsub,namespaces=2,"
+            "namespace_phls=0:1,,2",
+    });
+    qos_add_test("fdp-ns-refused", "femu", femu_test_fdp_ns_refused, NULL);
+    qos_add_test("fdp-replace-full", "femu", femu_test_fdp_replace_full,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=fdp-full,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub",
+    });
+    qos_add_test("fdp-ns-replace", "femu", femu_test_fdp_ns_replace,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=fdpns-r,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,namespaces=2,namespace_phls=0:1,,1:2",
+    });
     /* forced only with no unit free, so a frontier can be dropped */
     qos_add_test("fdp-gc-recover", "femu", femu_test_fdp_gc_recover,
                  &(QOSGraphTestOptions) {

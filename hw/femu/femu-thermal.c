@@ -115,7 +115,8 @@ static double femu_thermal_energy_nj(FemuCtrl *n)
     for (i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (!ns->allocated || !ns->ssd ||
+        /* FDP namespaces share the first one's FTL: count it once */
+        if (!ns->allocated || !ns->ssd || ns->ssd_shared ||
             !(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns))) {
             continue;
         }

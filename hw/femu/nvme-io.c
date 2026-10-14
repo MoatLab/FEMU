@@ -2079,30 +2079,63 @@ void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
     }
 }
 
+/* the placement handle through which @ns reaches handle @ruhid, or -1 */
+int nvme_ns_ruh_ph(NvmeNamespace *ns, uint16_t ruhid)
+{
+    for (uint16_t ph = 0; ns->fdp.phs && ph < ns->fdp.nphs; ph++) {
+        if (ns->fdp.phs[ph] == ruhid) {
+            return ph;
+        }
+    }
+    return -1;
+}
+
+/*
+ * The namespace an event about handle @ruhid names. Namespaces may share a
+ * handle, so the FTL passes the one whose data the event is about, @ns, when
+ * it has one. Else, or when @ns does not use the handle, the first namespace
+ * that does; with none, @ns.
+ */
+static NvmeNamespace *nvme_fdp_event_ns(FemuCtrl *n, NvmeNamespace *ns,
+                                        uint16_t ruhid)
+{
+    if (ns && nvme_ns_ruh_ph(ns, ruhid) >= 0) {
+        return ns;
+    }
+    for (uint32_t i = 1; i <= n->namespace_limit; i++) {
+        NvmeNamespace *o = nvme_ns(n, i);
+
+        if (o && nvme_ns_ruh_ph(o, ruhid) >= 0) {
+            return o;
+        }
+    }
+    return ns;
+}
+
 /*
  * Fill the location of a controller event about handle @ruhid in group @rg.
- * The handle is always known; the namespace and the placement identifier only
- * when the FTL that moved the data knows its namespace and that namespace
- * reaches the handle through one of its placement handles.
+ * The handle is always known; the namespace when nvme_fdp_event_ns() finds
+ * one, and the placement identifier when that namespace reaches the handle
+ * through one of its placement handles. Returns the namespace named.
  */
-static void nvme_fdp_ctrl_event_loc(NvmeNamespace *ns, uint16_t rg,
-                                    uint16_t ruhid, NvmeFdpEvent *e)
+static NvmeNamespace *nvme_fdp_ctrl_event_loc(FemuCtrl *n, NvmeNamespace *ns,
+                                              uint16_t rg, uint16_t ruhid,
+                                              NvmeFdpEvent *e)
 {
     e->flags = FDPEF_LV;
     e->rgid = cpu_to_le16(rg);
     e->ruhid = cpu_to_le16(ruhid);
+    ns = nvme_fdp_event_ns(n, ns, ruhid);
     if (!ns) {
-        return;
+        return NULL;
     }
     e->flags |= FDPEF_NSIDV;
     e->nsid = cpu_to_le32(ns->id);
-    for (uint16_t ph = 0; ph < ns->fdp.nphs; ph++) {
-        if (ns->fdp.phs[ph] == ruhid) {
-            e->flags |= FDPEF_PIV;
-            e->pid = cpu_to_le16(nvme_make_pid(ns, rg, ph));
-            break;
-        }
+    if (nvme_ns_ruh_ph(ns, ruhid) >= 0) {
+        e->flags |= FDPEF_PIV;
+        e->pid = cpu_to_le16(nvme_make_pid(ns, rg, nvme_ns_ruh_ph(ns, ruhid)));
     }
+    return ns;
 }
 
 /*
@@ -2124,8 +2157,8 @@ void nvme_fdp_note_media_realloc(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
                                 FDP_EVT_MEDIA_REALLOC)) {
         return;
     }
-    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
-    if (ns && lbav) {
+    /* the LBA is one of @ns's, so only when the event names @ns */
+    if (nvme_fdp_ctrl_event_loc(n, ns, rg, ruhid, &e) == ns && ns && lbav) {
         r.sef = FDP_REALLOC_LBAV;
         r.lba = cpu_to_le64(lba);
     }
@@ -2147,7 +2180,7 @@ void nvme_fdp_note_ruh_modified(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
                                 FDP_EVT_RUH_IMPLICIT_RU_CHANGE)) {
         return;
     }
-    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
+    nvme_fdp_ctrl_event_loc(n, ns, rg, ruhid, &e);
     nvme_fdp_record_event(n, endgrp, false, &e);
 }
 
@@ -2166,7 +2199,7 @@ void nvme_fdp_note_ru_time_limit(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
                                 FDP_EVT_RU_ATL_EXCEEDED)) {
         return;
     }
-    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
+    nvme_fdp_ctrl_event_loc(n, ns, rg, ruhid, &e);
     nvme_fdp_record_event(n, endgrp, true, &e);
 }
 

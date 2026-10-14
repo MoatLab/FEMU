@@ -153,7 +153,7 @@ key space.
 | at most one `csd` namespace per controller | CSD keeps controller-wide state | `nvme_init_namespaces()` |
 | no `kvssd` with FDP | placement takes every line, leaving the KV store none | `nvme_init_namespaces()` |
 | `meta` and `streams` need every namespace to be `nossd` or `bbssd` | only the block data path carries them | `nvme_init_namespaces()` |
-| one namespace with FDP | the FDP write path addresses the FTL by command LBA, not slice | `nvme_init_namespaces()` |
+| with FDP and more than one namespace: all `bbssd` in whole NAND pages, or all `nossd`; no `fdp_trim_erase_all` | the namespaces share one FTL, one slice each, and the endurance group's handles ([FDP](fdp.md#several-namespaces)) | `nvme_check_fdp_namespaces()` |
 
 ## Namespace management
 

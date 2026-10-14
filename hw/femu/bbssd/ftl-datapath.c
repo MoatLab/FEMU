@@ -1179,7 +1179,7 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
         return;
     }
     if (ssd->fdp_enabled) {
-        ssd_deallocate_fdp_all(ssd);
+        ssd_deallocate_fdp_ns(ssd, ns);
     } else {
         ssd_deallocate_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
     }

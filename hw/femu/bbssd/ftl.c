@@ -70,7 +70,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
      * collection keeps, the data write pointer's line and one more.
      */
     ssd->wear_floor_lines =
-        DIV_ROUND_UP(DIV_ROUND_UP(ns->size, (uint64_t)spp->secsz *
+        DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), (uint64_t)spp->secsz *
                                             spp->secs_per_pg),
                      spp->pgs_per_line) + bb_gc_forced_lines(n) + 2;
 }

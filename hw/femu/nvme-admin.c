@@ -2110,7 +2110,8 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             st->percentage_used = used;
         }
 
-        if (!ns->ssd) {
+        /* FDP namespaces share the first one's FTL: count it once */
+        if (!ns->ssd || ns->ssd_shared) {
             continue;
         }
         st->media_errors += ssd_media_errors(ns->ssd);
@@ -3281,13 +3282,21 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
  * used to leave them sized for the smaller count, which the next write walked
  * past.
  */
-static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks)
+/*
+ * Give @ns bitmaps for @blks blocks: @prep, taken before any namespace
+ * changed, or new ones.
+ */
+static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks,
+                                   unsigned long **prep)
 {
     unsigned long *util, *uncorrectable;
 
     /* fallible, so Format and Create refuse rather than abort on no memory */
-    util = bitmap_try_new(blks);
-    uncorrectable = bitmap_try_new(blks);
+    util = prep ? prep[0] : bitmap_try_new(blks);
+    uncorrectable = prep ? prep[1] : bitmap_try_new(blks);
+    if (prep) {
+        prep[0] = prep[1] = NULL;
+    }
     if (!util || !uncorrectable) {
         g_free(util);
         g_free(uncorrectable);
@@ -3361,9 +3370,38 @@ static uint16_t nvme_format_check(FemuCtrl *n, const NvmeIdNs *id_ns,
     return NVME_SUCCESS;
 }
 
+/*
+ * Namespaces that share a reclaim unit handle share the format, which RUAMW
+ * counts in (NVM Command Set 1.2, 5.2.5): a Format of @ns to another index
+ * while it shares a handle with a namespace that keeps its own is refused.
+ */
+static bool nvme_fdp_format_conflict(FemuCtrl *n, NvmeNamespace *ns,
+                                     uint8_t lba_idx)
+{
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled || !ns->fdp.phs) {
+        return false;
+    }
+    for (uint32_t i = 1; i <= n->namespace_limit; i++) {
+        NvmeNamespace *o = nvme_ns_allocated(n, i);
+
+        if (!o || o == ns || !o->fdp.phs ||
+            NVME_ID_NS_FLBAS_INDEX(o->id_ns.flbas) == lba_idx) {
+            continue;
+        }
+        for (uint16_t a = 0; a < ns->fdp.nphs; a++) {
+            for (uint16_t b = 0; b < o->fdp.nphs; b++) {
+                if (ns->fdp.phs[a] == o->fdp.phs[b]) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
                                       uint8_t meta_loc, uint8_t pil, uint8_t pi,
-                                      uint8_t sec_erase)
+                                      uint8_t sec_erase, unsigned long **prep)
 {
     NvmeIdNs *id_ns = &ns->id_ns;
     FemuCtrl *n = ns->ctrl;
@@ -3390,7 +3428,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
         g_free(mdata);
         return status;
     }
-    status = nvme_format_resize(ns, blks);
+    status = nvme_format_resize(ns, blks, prep);
     if (status != NVME_SUCCESS) {
         g_free(mdata);
         return status;
@@ -3434,9 +3472,42 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     return NVME_SUCCESS;
 }
 
+/*
+ * The bitmaps a Format of every namespace gives each one, taken before any
+ * namespace changes, or NULL when one cannot be had. Namespaces that share a
+ * reclaim unit handle must not part with their common format (NVM Command
+ * Set 1.2, 5.2.5), so under FDP a broadcast Format either changes them all
+ * or none.
+ */
+static unsigned long **nvme_format_prepare(FemuCtrl *n, uint8_t lba_idx)
+{
+    unsigned long **prep = g_new0(unsigned long *, 2 * n->namespace_limit);
+
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = nvme_ns(n, i + 1);
+        uint64_t blks;
+
+        if (!ns) {
+            continue;
+        }
+        blks = ns->size >> ns->id_ns.lbaf[lba_idx].lbads;
+        prep[2 * i] = bitmap_try_new(blks);
+        prep[2 * i + 1] = bitmap_try_new(blks);
+        if (!prep[2 * i] || !prep[2 * i + 1]) {
+            for (uint32_t j = 0; j <= 2 * i + 1; j++) {
+                g_free(prep[j]);
+            }
+            g_free(prep);
+            return NULL;
+        }
+    }
+    return prep;
+}
+
 static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
+    unsigned long **prep = NULL;
     uint16_t status = NVME_SUCCESS;
     bool resume;
     bool modified = false;
@@ -3496,6 +3567,17 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         if (status != NVME_SUCCESS) {
             return status;
         }
+        if (nvme_fdp_format_conflict(n, &n->namespaces[nsid - 1], lba_idx)) {
+            return NVME_INVALID_FORMAT | NVME_DNR;
+        }
+    }
+
+    if (nsid == NVME_NSID_BROADCAST && n->subsys &&
+        n->subsys->endgrp.fdp.enabled) {
+        prep = nvme_format_prepare(n, lba_idx);
+        if (!prep) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
     }
 
     /* validated, and nothing changed yet: Format NVM Start (Figure 245) */
@@ -3518,7 +3600,8 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
                 continue;
             }
             status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-                                           sec_erase);
+                                           sec_erase,
+                                           prep ? prep + 2 * i : NULL);
             if (status != NVME_SUCCESS) {
                 break;
             }
@@ -3528,7 +3611,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     } else {
         ns = &n->namespaces[nsid - 1];
         status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-                                       sec_erase);
+                                       sec_erase, NULL);
         modified = status == NVME_SUCCESS;
         if (modified) {
             nvme_ns_format_changed(n, ns);
@@ -3549,6 +3632,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     nvme_resume_pollers(n, resume);
+
+    /* what a namespace that failed first did not take */
+    for (uint32_t i = 0; prep && i < 2 * n->namespace_limit; i++) {
+        g_free(prep[i]);
+    }
+    g_free(prep);
 
     return status;
 }
@@ -3795,7 +3884,7 @@ static uint16_t nvme_ns_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         ns = nvme_ns_allocated(n, nsid);
         status = nvme_format_namespace(ns, idx, id.flbas & 0x10,
                                        id.dps & DPS_FIRST_EIGHT,
-                                       id.dps & DPS_TYPE_MASK, 0);
+                                       id.dps & DPS_TYPE_MASK, 0, NULL);
         if (status) {
             nvme_ns_destroy(n, ns);
         }

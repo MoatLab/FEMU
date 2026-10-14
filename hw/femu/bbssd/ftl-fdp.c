@@ -168,6 +168,8 @@ struct fdp_moves {
     uint64_t nlb;
     uint64_t lba;
     bool lbav;
+    /* the namespace the unreported moves hold blocks of */
+    NvmeNamespace *ns;
 };
 
 #define FDP_WRITTEN_SHIFT 9     /* fdp_written tracks 512-byte pieces */
@@ -205,15 +207,47 @@ static void fdp_mark_written(struct ssd *ssd, NvmeRequest *req, uint64_t slba,
 }
 
 /*
+ * The namespace whose slice holds page @lpn. Every namespace of an FDP
+ * controller places into this FTL; a page past every slice, which no write
+ * makes, is put down to the namespace that built the FTL.
+ */
+static NvmeNamespace *fdp_lpn_ns(struct ssd *ssd, uint64_t lpn)
+{
+    uint64_t at = lpn * ssd->sp.secsz * ssd->sp.secs_per_pg;
+    FemuCtrl *n = ssd->n;
+
+    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        uint64_t base;
+
+        if (!ns->allocated || ns->ssd != ssd) {
+            continue;
+        }
+        base = ssd_ns_byte_base(ssd, ns);
+        if (at >= base && at < base + ns->size) {
+            return ns;
+        }
+    }
+    return ssd->ns;
+}
+
+static void fdp_report_moves(struct ssd *ssd, struct fdp_moves *mv);
+
+/*
  * Count the move of page @lpn, and the blocks of it the FTL holds as written.
- * A block counts in the page that holds its first byte.
+ * A block counts in the page that holds its first byte. An event names one
+ * namespace, so the moves of another namespace's page are reported apart.
  */
 static void fdp_moves_add(struct ssd *ssd, struct fdp_moves *mv, uint64_t lpn)
 {
-    NvmeNamespace *ns = ssd->ns;
+    NvmeNamespace *ns = fdp_lpn_ns(ssd, lpn);
     uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     uint64_t base, bs, lba, end;
 
+    if (mv->unreported && mv->ns != ns) {
+        fdp_report_moves(ssd, mv);
+    }
+    mv->ns = ns;
     mv->pages++;
     mv->unreported++;
     if (!ns || !ssd->fdp_written) {
@@ -252,7 +286,7 @@ static void fdp_report_moves(struct ssd *ssd, struct fdp_moves *mv)
 
     if (mv->unreported &&
         ru->ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
-        nvme_fdp_note_media_realloc(ssd->n, ssd->ns, ru->rgidx,
+        nvme_fdp_note_media_realloc(ssd->n, mv->ns, ru->rgidx,
                                     ru->ruh->ruhid, mv->nlb, mv->lbav,
                                     mv->lba);
     }
@@ -271,7 +305,7 @@ static void fdp_note_ruh_modified(struct ssd *ssd, FemuRuHandle *ruh,
                                   uint16_t rgidx, struct fdp_moves *mv)
 {
     fdp_report_moves(ssd, mv);
-    nvme_fdp_note_ruh_modified(ssd->n, ssd->ns, rgidx, ruh->ruhid);
+    nvme_fdp_note_ruh_modified(ssd->n, mv->ns, rgidx, ruh->ruhid);
 }
 
 /*
@@ -1417,10 +1451,11 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
     host->rus[rg] = fresh;
     host->curr_ru = fresh;
     host->ruh->rus[rg] = fresh->nvme_ru;
+    /* no data moved, so the event names a namespace that uses the handle */
     if (pad) {
-        nvme_fdp_note_ru_time_limit(ssd->n, ssd->ns, rg, host->ruhid);
+        nvme_fdp_note_ru_time_limit(ssd->n, NULL, rg, host->ruhid);
     } else {
-        nvme_fdp_note_ruh_modified(ssd->n, ssd->ns, rg, host->ruhid);
+        nvme_fdp_note_ruh_modified(ssd->n, NULL, rg, host->ruhid);
     }
     return true;
 }
@@ -1926,8 +1961,8 @@ static bool fdp_ru_unwritten(FemuReclaimUnit *ru)
  */
 void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
 {
-    struct ssd *ssd = n->ssd;
     NvmeNamespace *ns = req->ns;
+    struct ssd *ssd = ns->ssd;
 
     for (uint32_t i = 0; i < req->nr_fdp_pids; i++) {
         uint16_t pid = req->fdp_pids[i];
@@ -2029,7 +2064,7 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                            uint32_t nlb)
 {
     NvmeNamespace *ns = req->ns;
-    struct ssd *ssd = n->ssd;
+    struct ssd *ssd = ns->ssd;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t lat;
 
@@ -2232,13 +2267,14 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
     ssd->ruhs = g_malloc0(nruh * sizeof(FemuRuHandle));
     ssd->nruhs = nruh;
     /*
-     * The bitmap covers the FTL space up to the end of the namespace, which no
-     * write passes. A piece must not straddle two pages, or unmapping one page
-     * would forget a block of the next, and the bitmap calls take a long.
+     * The bitmap covers the FTL space up to the end of the last namespace,
+     * which no write passes. A piece must not straddle two pages, or
+     * unmapping one page would forget a block of the next, and the bitmap
+     * calls take a long.
      * Without the bitmap, event 80h reports no count.
      */
     bits = MIN((uint64_t)ssd->sp.tt_pgs * ssd->sp.secsz * ssd->sp.secs_per_pg,
-               ssd_ns_byte_base(ssd, ns) + ns->size) >> FDP_WRITTEN_SHIFT;
+               bb_ftl_bytes(n, ns)) >> FDP_WRITTEN_SHIFT;
     if (!(((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) %
           (1 << FDP_WRITTEN_SHIFT)) && bits <= LONG_MAX) {
         ssd->fdp_written_bits = bits;
@@ -2394,17 +2430,22 @@ static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
 }
 
 /*
- * Deallocate every page under FDP; see bbssd_deallocate_all(). A Format
- * resets each unit's RUAMW to a full unit, but the units keep the pages
- * already programmed, so set RUAMW from them again, in the block size the
- * Format chose.
+ * Deallocate every page of @ns under FDP; see bbssd_deallocate_all(). The
+ * other namespaces of the controller place into the same FTL, so only the
+ * pages of this one's slice go. A Format resets the RUAMW of its handles' units
+ * to a full unit, but the units keep the pages already programmed, so set
+ * RUAMW from them again, in the block size the Format chose.
  */
-void ssd_deallocate_fdp_all(struct ssd *ssd)
+void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns)
 {
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t base = ssd_ns_byte_base(ssd, ns);
+    uint64_t last = MIN(DIV_ROUND_UP(base + ns->size, pg),
+                        (uint64_t)ssd->sp.tt_pgs);
     int already_invalid = 0;
 
-    if (ssd->sp.tt_pgs) {
-        ssd_deallocate_fdp_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
+    if (last > base / pg) {
+        ssd_deallocate_fdp_lpns(ssd, base / pg, last - 1, &already_invalid);
     }
     for (uint64_t g = 0; g < ssd->nrg; g++) {
         for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
@@ -2423,7 +2464,7 @@ void ssd_deallocate_fdp_all(struct ssd *ssd)
  */
 static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
 {
-    struct ssd *ssd = n->ssd;
+    struct ssd *ssd = req->ns->ssd;
     struct ssdparams *spp = &ssd->sp;
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
@@ -2461,7 +2502,7 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
  */
 uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
 {
-    struct ssd *ssd = (req->ns && req->ns->ssd) ? req->ns->ssd : n->ssd;
+    struct ssd *ssd = req->ns->ssd;
     struct ssdparams *spp = &ssd->sp;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t start_lpn, end_lpn;
@@ -2508,7 +2549,7 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
 static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                                    uint32_t nlb)
 {
-    struct ssd *ssd = n->ssd;
+    struct ssd *ssd = req->ns->ssd;
     struct ssdparams *spp = &ssd->sp;
     NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
     FemuReclaimUnit *v_ru;
@@ -2603,11 +2644,12 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                             uint32_t nlb)
 {
+    struct ssd *ssd = req->ns->ssd;
     uint64_t lat = 0;
 
-    if (n->ssd->sp.trim_lat_ns > 0 && req->dsm_ranges &&
+    if (ssd->sp.trim_lat_ns > 0 && req->dsm_ranges &&
         req->dsm_nr_ranges > 0) {
-        lat = (uint64_t)n->ssd->sp.trim_lat_ns * req->dsm_nr_ranges;
+        lat = (uint64_t)ssd->sp.trim_lat_ns * req->dsm_nr_ranges;
     }
 
     if (n->bb_params.fdp_trim_erase_all) {
@@ -2667,14 +2709,42 @@ static int fdp_check_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
 }
 
 /*
+ * Mapped pages in a unit of a handle their namespace's list does not name.
+ * A handle keeps the data of the namespaces that use it, so a page of one
+ * namespace in another's unit is a write placed through the wrong list.
+ */
+static uint64_t fdp_check_isolation(struct ssd *ssd)
+{
+    uint64_t bad = 0;
+
+    for (uint64_t lpn = 0; lpn < (uint64_t)ssd->sp.tt_pgs; lpn++) {
+        struct ppa ppa = get_maptbl_ent(ssd, lpn);
+        FemuReclaimUnit *ru;
+        NvmeNamespace *ns;
+
+        if (!mapped_ppa(&ppa)) {
+            continue;
+        }
+        ru = get_line(ssd, &ppa)->my_ru;
+        ns = fdp_lpn_ns(ssd, lpn);
+        if (!ru || !ru->ruh || !ns ||
+            nvme_ns_ruh_ph(ns, ru->ruh->ruhid) < 0) {
+            bad++;
+        }
+    }
+    return bad;
+}
+
+/*
  * ssd_fdp_check_units - count reclaim units not held by exactly one place:
  * the free list, the full list, a group victim heap, or a handle's write or
  * collection frontier. Under the per-handle strategy a victim of a
  * persistently isolated handle must also sit once in that handle's heap,
  * and no other unit may. Heap entries whose stored position is wrong count
  * too, and so does a unit whose programmed bytes differ from its valid and
- * invalid pages, or whose RUAMW differs from the room they leave. A test
- * hook; 0 is consistent.
+ * invalid pages, or whose RUAMW differs from the room they leave, and every
+ * page fdp_check_isolation() finds in the wrong handle's unit. A test hook;
+ * 0 is consistent.
  */
 uint64_t ssd_fdp_check_units(struct ssd *ssd)
 {
@@ -2734,7 +2804,24 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
             bad += fdp_check_ruamw(ssd, u);
         }
     }
-    return bad;
+    return bad + fdp_check_isolation(ssd);
+}
+
+/* Mapped pages in the slice of @ns, which shares this FTL. A test hook. */
+uint64_t ssd_fdp_ns_mapped(struct ssd *ssd, NvmeNamespace *ns)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint64_t base = ssd_ns_byte_base(ssd, ns);
+    uint64_t end = MIN(DIV_ROUND_UP(base + ns->size, pg),
+                       (uint64_t)ssd->sp.tt_pgs);
+    uint64_t mapped = 0;
+
+    for (uint64_t lpn = base / pg; lpn < end; lpn++) {
+        struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+        mapped += mapped_ppa(&ppa);
+    }
+    return mapped;
 }
 
 /*
@@ -2755,6 +2842,16 @@ void femu_fdp_ssd_free(struct ssd *ssd)
     if (ssd->ruhs) {
         for (i = 0; i < ssd->nruhs; i++) {
             struct ru_mgmt *rm = ssd->ruhs[i].ru_mgmt;
+            NvmeRuHandle *nruh = ssd->ruhs[i].ruh;
+
+            /*
+             * The subsystem's handle outlives this FTL. Point it back at the
+             * unit it had before the FTL took it over, not at the stand-in
+             * for no unit, which goes with ssd->ruhs.
+             */
+            for (uint64_t g = 0; nruh && g < ssd->nrg; g++) {
+                nruh->rus[g] = &ssd->n->subsys->endgrp.fdp.rus[g][i];
+            }
 
             if (rm) {
                 pqueue_free(rm->victim_ru_pq);

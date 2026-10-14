@@ -1980,6 +1980,8 @@ typedef struct NvmeNamespace {
     FemuExtCtrlOps  ext_ops;
     struct ssd      *ssd; /* bbssd FTL for this namespace */
     bool            ssd_borrowed; /* @ssd belongs to a linked CXL medium */
+    /* @ssd belongs to the first namespace: FDP namespaces share one FTL */
+    bool            ssd_shared;
 
     NvmeIdNsZoned   *id_ns_zoned;
     NvmeZone        *zone_array;
@@ -2495,7 +2497,8 @@ typedef struct FemuCtrl {
     pthread_spinlock_t fw_cpu_lock;
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
-    char            *namespace_phls; /* per-NS FDP handle lists "0:1,2"; NULL = all */
+    /* per-NS FDP placement handle lists "0:1,2"; NULL = every handle */
+    char            *namespace_phls;
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
     char            *kv_timing;       /* KV: "media" (NULL) or "model" */
@@ -2991,6 +2994,7 @@ void femu_test_copy_hold(FemuCtrl *n);
 /* FDP helpers */
 uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid);
 uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid);
+int nvme_ns_ruh_ph(NvmeNamespace *ns, uint16_t ruhid);
 bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
                     uint16_t *ph, uint16_t *rg);
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
@@ -3042,6 +3046,7 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
                        uint64_t *orphans);
 /* reclaim units not held by exactly one list, heap or frontier; 0 is right */
 uint64_t ssd_fdp_check_units(struct ssd *ssd);
+uint64_t ssd_fdp_ns_mapped(struct ssd *ssd, NvmeNamespace *ns);
 void ssd_hybrid_stats(struct ssd *ssd, uint64_t *switches,
                       uint64_t *full, uint64_t *erases);
 uint64_t ssd_max_block_reads(struct ssd *ssd);

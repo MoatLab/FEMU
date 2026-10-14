@@ -30,7 +30,7 @@ Devices:
 | --- | --- | --- | --- |
 | `femu_mode` | `uint8` | `2` | Emulated SSD type: 0 OCSSD (Open-Channel), 1 bbssd (black-box FTL), 2 NoSSD (no media timing), 3 ZNS, 4 CSD (computational), 5 KV; other values fail realize |
 | `devsz_mb` | `uint32` | `1024` | Size of the host memory backend in MiB, split across namespaces unless namespace_sizes is set; bbssd with op_pcent sizes from the NAND geometry instead |
-| `namespaces` | `uint32` | `1` | Number of namespaces created at boot, 1 to 256; OCSSD and FDP support only 1 |
+| `namespaces` | `uint32` | `1` | Number of namespaces created at boot, 1 to 256; OCSSD supports only 1, and FDP more than 1 only when all are bbssd or all nossd |
 | `namespace_sizes` | `str` | unset | Comma-separated size in bytes of each namespace (QEMU size syntax such as 4G,2G), one non-empty entry per namespace, summing to at most the backend; unset splits the backend evenly |
 | `namespace_modes` | `str` | unset | Comma-separated mode of each namespace from nossd, bbssd, znssd, ocssd, csd and kvssd, one entry per namespace; unset gives every namespace femu_mode |
 | `namespace_phls` | `str` | unset | FDP placement handle list of each namespace: comma-separated entries, one per namespace, each a ':'-separated list of reclaim unit handle IDs such as 0:1,,2 (placement handle i selects entry i); needs fdp=on, and unset gives every namespace every handle |
@@ -391,7 +391,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-copy-held`, `x-copy-hold`, `x-fdp-check`, `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-zone-lock-hold-ms`
+- `femu`: `x-copy-held`, `x-copy-hold`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-zone-lock-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

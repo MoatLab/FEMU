@@ -281,7 +281,8 @@ sets up. In the example above the serials are `vSSD1` and `vZNSSD0`. Names under
 the `-device` options.
 
 **Fix:** see [several namespaces and devices](features/multi-namespace.md).
-OCSSD and FDP controllers have one namespace each.
+OCSSD controllers have one namespace each. FDP controllers take several
+BBSSD or NoSSD namespaces ([FDP](features/fdp.md#several-namespaces)).
 
 Related issues: #26, #121.
 

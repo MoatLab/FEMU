@@ -35,8 +35,9 @@ device, and a controller joins the subsystem with `subsys=`. Only a BlackBox
    |
    +-- femu device, femu_mode=1, subsys=   one controller
          |
+         +-- namespace 2 ...                 its own handle list, the same FTL
          +-- namespace 1                     placement handles PH 0..nruh-1
-               |                             (PH i -> RUH i)
+               |                             (default: PH i -> RUH i)
                +-- struct ssd (BlackBox FTL)
                      FemuRuHandle[nruh]       current RU, GC RU, counters
                      FemuReclaimGroup[nrg]    free list, full list,
@@ -69,9 +70,11 @@ with a single FDP configuration when the subsystem is realized:
 | MAXPIDS | 128 (reported zero-based as 127) | fixed |
 | Event filter | every supported event type enabled on every handle | Set Features 1Eh |
 
-With FDP on, a controller that joins runs `nvme_ns_init_fdp()`, which gives
-namespace 1 every handle in order: placement handle `i` is RUH `i`, the
-namespace's ENDGID is 1, and each handle's RUAMW starts at a full unit. The
+With FDP on, a controller that joins runs `nvme_ns_init_fdp()` for each
+namespace. It gives the namespace its placement handle list: the entry of
+`namespace_phls`, or, unset, every handle in order, so that placement
+handle `i` is RUH `i`. The namespace's ENDGID is 1, and each handle's RUAMW
+starts at a full unit. The
 controller then sets CTRATT bit 19 (FDP), and the effects log lists I/O
 Management Send and Receive for NVM namespaces. Without FDP, and on
 namespaces of other command sets, the two commands fail with Invalid Command
@@ -109,14 +112,85 @@ namespace as for a bbssd one, since CSD runs the same FTL
   ```
 
   The Initially Isolated handle collects into its open unit and adds
-  nothing. One namespace is checked against the whole pool because nothing
-  else can draw on it: FDP takes a single namespace and a single controller,
-  and namespace management is refused with it. A 1 MiB namespace on 64 KiB superblocks with four Persistently
+  nothing. The namespaces are checked against the whole pool together:
+  every namespace of the controller places into the one FTL, FDP takes a
+  single controller, and namespace management is refused with it. A 1 MiB namespace on 64 KiB superblocks with four Persistently
   Isolated handles needs 16 + 4 + 4 + 1 = 25 units; with 19 or 23 lines,
   both accepted before, random writes over all four handles failed nearly
   all of them. A partly exposed last page counts as a whole one. bbssd
   refuses a namespace that does not fit rather than shrink
   it, as it does without placement and with `op_pcent`.
+
+## Several namespaces
+
+Reclaim units and handles belong to the endurance group (Base 2.3,
+8.1.10). Each namespace reaches the handles through its own placement
+handle list (PHL), and namespaces may share a handle. FEMU follows that
+model: every bbssd namespace of an FDP controller places into one FTL, the
+one namespace 1 builds.
+
+```text
+ namespace_phls=0:1,,1:2            endurance group 1, one struct ssd
+ ns 1  PH 0 -> RUH 0  ------------>  RUH 0  units ...
+       PH 1 -> RUH 1  --+--------->  RUH 1  units ...   (shared)
+ ns 2  PH 0 -> RUH 1  --+
+       PH 1 -> RUH 2  ------------>  RUH 2  units ...
+                                     RUH 3  units ...   (unused: RUHA 0)
+ LPN = (backend_offset of the namespace + LBA * block size) / page size
+       [ ns 1 slice      | ns 2 slice      ]   no page holds two namespaces
+```
+
+| Part | How it works | Code |
+| --- | --- | --- |
+| FTL | namespace 1 builds it; later namespaces point at it (`ssd_shared`); the owner's exit clears their pointers | `bb_init()`, `bb_ns_exit()` |
+| Address | each namespace keeps its slice of the logical pages: `ssd_ns_byte_base()` adds its backend offset | `ssd_lpn_range()` |
+| Handles | the FTL builds every handle `0 .. fdp.nruh - 1`; a handle no list names holds its open unit too | `femu_fdp_ssd_init_ru_handles()` |
+| Placement | a write's PID selects a placement handle of its namespace's list | `fdp_place()` |
+| RUAMW | counts blocks of the format of the namespaces that use the handle (`NvmeRuHandle.lbads`) | `fdp_ru_ruamw()` |
+| Format, Sanitize | drop the pages of the slice of the namespace only | `ssd_deallocate_fdp_ns()` |
+| SMART, C0h, log 09h, thermal | count the shared FTL once | `nvme_collect_media_stats()` |
+| Release | a handle no remaining namespace lists is unused again; its byte counters stay | `nvme_ns_detach_fdp()` |
+
+Rules at realize (`nvme_check_phls()`, `nvme_check_fdp_namespaces()`):
+
+- `namespace_phls` needs `fdp=on`, one entry per namespace, 1 to
+  `MIN(fdp.nruh, 128)` handles per entry, each below `fdp.nruh`, none twice.
+  Unset gives every namespace every handle. That list can be longer than
+  128 when `fdp.nruh` is, as it always could.
+- With more than one namespace, every namespace runs bbssd, or every one
+  NoSSD. A bbssd namespace size is a whole number of NAND pages, so no page
+  holds blocks of two namespaces. `fdp_trim_erase_all` is refused, since it
+  erases every namespace.
+- The sum of the namespace sizes must fit in the units left after the
+  reserve, as one namespace does.
+
+Namespaces that share a handle share the format (NVM Command Set 1.2,
+5.2.5 and 5.2.21). A Format of one of them to another index fails with
+Invalid Format. A Format of every namespace (NSID FFFFFFFFh) takes the
+bitmaps of all of them first, so it changes all or none.
+
+Events from the FTL name a namespace by the data:
+
+```text
+ move of page lpn  --> namespace whose slice holds it
+ 80h  NSID and LBA of that namespace; PID from its list
+      a run of another namespace's pages ends the event: one 80h per run
+ 81h  the namespace of the move that changed the handle
+ 01h, 81h of an open-unit refresh   no data: the first namespace that
+                                    lists the handle
+ a namespace that does not list the handle --> the first one that does
+ no namespace lists it               --> no NSID, no PID
+```
+
+The write buffer is part of the shared FTL. A Flush of one namespace writes
+back the held pages of all of them, which Flush allows.
+
+Statistics stay per endurance group and per handle: a shared handle adds
+the writes of every namespace that uses it.
+
+NoSSD namespaces have no FTL. They report their lists in RUH Status, and
+RUH Update logs event 00h with their NSID. They count no bytes and log no
+03h, as with one namespace.
 
 ## Placement of writes
 
@@ -341,7 +415,7 @@ list them.
 | Log | Content | Code |
 | --- | --- | --- |
 | 20h FDP Configurations | header with NUMFDPC 0 (one configuration), then one descriptor: FDPA (valid, RGIF), NRG, NRUH, MAXPIDS, NNSS 256, RUNS, and NRUH handle descriptors with the RUHT of each handle | `nvme_fdp_confs()` |
-| 21h Reclaim Unit Handle Usage | header with NRUH, then one descriptor per handle with its RUHA (1 = host-specified for every handle the namespace was given) | `nvme_fdp_ruh_usage()` |
+| 21h Reclaim Unit Handle Usage | header with NRUH, then one descriptor per handle with its RUHA (1 = host-specified for a handle some namespace lists, 0 for one no list names) | `nvme_fdp_ruh_usage()` |
 | 22h FDP Statistics | HBMW, MBMW and MBE as 128-bit counters; FEMU fills the low 64 bits | `nvme_fdp_stats()` |
 | 23h FDP Events | number of events, then the events of the ring selected by LSP bit 0 (1 = host events, 0 = controller events) | `nvme_fdp_events()` |
 
@@ -564,8 +638,8 @@ first program, so an empty unit is never padded.
 Collection that frees a queued unit first drops the request, and the
 counters do not move. A collection of a queued unit does not use copyback.
 
-Refused on any controller with FDP: more than one namespace, a
-second controller in the subsystem, `meta`, `streams`, a KV namespace.
+Refused on any controller with FDP: a second controller in the
+subsystem, `meta`, `streams`, a KV namespace.
 Each message is listed in the [feature guide](../features/fdp.md#limits-and-refusals).
 
 A device with eight handles, every one Persistently Isolated except the
@@ -589,7 +663,7 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-dftl`, `fdp-dftl-page`, `fdp-dftl-csd`, `fdp-buffer-isolation`, `fdp-buffer-isolation-csd`, `fdp-buffer-rehandle`, `fdp-buffer-dealloc`, `fdp-buffer-fua`, `fdp-buffer-vwc`, `fdp-buffer-update`, `fdp-buffer-full`, `fdp-buffer-copy`, `fdp-events-gc-ii-part-buffer`, `fdp-events-gc-ii-mix-buffer`, `fdp-events-gc-ii-fua-buffer`, `fdp-events-gc-ii-redo-buffer`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-ns-phl`, `fdp-ns-cmds`, `fdp-ns-format-shared`, `fdp-ns-format-apart`, `fdp-ns-events`, `fdp-ns-knobs`, `fdp-ns-nossd`, `fdp-ns-refused`, `fdp-ns-replace`, `fdp-replace-full` (several namespaces, and a replaced controller whose handle had no unit; `x-fdp-ns-mapped` gives each namespace's mapped pages), `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-dftl`, `fdp-dftl-page`, `fdp-dftl-csd`, `fdp-buffer-isolation`, `fdp-buffer-isolation-csd`, `fdp-buffer-rehandle`, `fdp-buffer-dealloc`, `fdp-buffer-fua`, `fdp-buffer-vwc`, `fdp-buffer-update`, `fdp-buffer-full`, `fdp-buffer-copy`, `fdp-events-gc-ii-part-buffer`, `fdp-events-gc-ii-mix-buffer`, `fdp-events-gc-ii-fua-buffer`, `fdp-events-gc-ii-redo-buffer`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
 | Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-policy-random` (`gc_policy=random`, the same trace), `ftl-trace-fdp-fifo` and `ftl-trace-fdp-d-choice` (`gc_policy`), `ftl-trace-fdp-knobs-off` (`gc_policy=greedy`, `mapping=page` and `buffer_size=0` given: the `ftl-trace-fdp` trace), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
@@ -597,8 +671,8 @@ last:
 
 ## Limits
 
-- One reclaim group, one FDP configuration, one namespace and one
-  controller per FDP subsystem.
+- One reclaim group, one FDP configuration and one controller per FDP
+  subsystem.
 - An RU is exactly one line; RUNS cannot be smaller or larger than a
   superblock.
 - Only bbssd places data. A NoSSD, ZNS or OCSSD controller in an FDP
@@ -637,7 +711,7 @@ last:
 
 | File | What is there |
 | --- | --- |
-| `hw/femu/femu.c` | `femu-subsys` properties, `nvme_subsys_setup_fdp()`, `nvme_ns_init_fdp()`, `nvme_ns_refresh_fdp()`, single-controller and single-namespace checks, CTRATT |
+| `hw/femu/femu.c` | `femu-subsys` properties, `nvme_subsys_setup_fdp()`, `nvme_ns_init_fdp()`, `nvme_ns_refresh_fdp()`, `namespace_phls`, single-controller and multi-namespace checks, CTRATT |
 | `hw/femu/nvme.h` | FDP wire structures (configuration, usage, statistics, events, RUH status), endurance group and handle state, event tables |
 | `hw/femu/nvme-io.c` | DTYPE and DSPEC parsing, PID helpers, event recording, I/O Management Send and Receive |
 | `hw/femu/nvme-admin.c` | log pages 20h to 23h, Features 1Dh and 1Eh, supported logs, effects log |

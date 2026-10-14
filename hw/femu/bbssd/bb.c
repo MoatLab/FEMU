@@ -11,6 +11,26 @@ static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)
 }
 
 /*
+ * The logical bytes the FTL of @ns maps. Under FDP every namespace of the
+ * controller places into the one FTL, each in its own slice of the backend,
+ * so the FTL maps up to the end of the last slice; otherwise only @ns.
+ */
+uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns)
+{
+    uint64_t end = ns->size;
+
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+        return end;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *o = &n->namespaces[i];
+
+        end = MAX(end, o->backend_offset + o->size);
+    }
+    return end;
+}
+
+/*
  * A line is only reclaimable by relocating its valid pages somewhere else, so
  * part of the NAND has to stay unexposed. Expose all of it and a host that
  * fills the namespace leaves garbage collection nothing to free: the write
@@ -111,7 +131,18 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         reserve += endgrp->fdp.nrg *
                    bb_fdp_forced_units(n, pool / endgrp->fdp.nrg);
         usable_pgs = pool > reserve ? (pool - reserve) * pgs_per_line : 0;
-        exposed_pgs = DIV_ROUND_UP(ns->size, page_bytes);
+        /* every namespace of the controller places into this one FTL */
+        exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
+        if (exposed_pgs > usable_pgs && n->num_namespaces > 1) {
+            error_setg(errp, "FEMU bbssd: the %u namespaces expose %" PRIu64
+                       " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
+                       " reclaim units for %u handles and collection, leaving "
+                       "%" PRIu64 " KiB; lower devsz_mb or fdp.nruh, raise "
+                       "blks_per_pl, or raise op_pcent", n->num_namespaces,
+                       bb_ftl_bytes(n, ns) >> 10, reserve, pool,
+                       endgrp->fdp.nruh, (usable_pgs * page_bytes) >> 10);
+            return -1;
+        }
         if (exposed_pgs > usable_pgs) {
             error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64
                        " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
@@ -206,6 +237,20 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         ns->ssd_borrowed = true;
         n->ssd = ns->ssd;
         bb_init_ctrl_str(n, ns);
+        return;
+    }
+
+    /*
+     * Under FDP the reclaim units belong to the endurance group, so the first
+     * namespace's FTL serves every later one; realize already checked it
+     * holds them all.
+     */
+    if (n->ssd && n->subsys && n->subsys->endgrp.fdp.enabled) {
+        if (bb_init_fdp(n, ns, "bbssd", errp)) {
+            return;
+        }
+        ns->ssd = n->ssd;
+        ns->ssd_shared = true;
         return;
     }
 
@@ -371,12 +416,26 @@ static void bb_ns_exit(FemuCtrl *n, NvmeNamespace *ns)
     if (!ns->ssd) {
         return;
     }
+    if (ns->ssd_shared) {
+        ns->ssd = NULL;
+        ns->ssd_shared = false;
+        return;
+    }
     if (n->ssd == ns->ssd) {
         n->ssd = NULL;
     }
     if (ns->ssd_borrowed) {
         ns->ssd = NULL;
         return;
+    }
+    /* the namespaces that share this FTL lose it with its owner */
+    for (int i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *o = &n->namespaces[i];
+
+        if (o != ns && o->ssd == ns->ssd) {
+            o->ssd = NULL;
+            o->ssd_shared = false;
+        }
     }
     ssd_free(ns->ssd);
     g_free(ns->ssd);

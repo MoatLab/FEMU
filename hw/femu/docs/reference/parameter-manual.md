@@ -229,9 +229,10 @@ Design: [subsystems, controllers and namespaces](../design/namespaces.md).
 | --- | --- | --- | --- |
 | `femu_mode` | mode number | 0 OCSSD, 1 bbssd, 2 NoSSD, 3 ZNS, 4 CSD, 5 KV | mode of every namespace unless `namespace_modes` is set |
 | `devsz_mb` | MiB | 32-bit | host memory backend, split across the namespaces; ignored with `op_pcent` |
-| `namespaces` | count | 1 to 256; OCSSD and FDP 1 | namespaces present from boot |
+| `namespaces` | count | 1 to 256; OCSSD 1 | namespaces present from boot |
 | `namespace_sizes` | bytes, QEMU sizes | one entry per namespace, each >= 512 bytes, sum <= backend | size of each namespace; unset splits the backend evenly |
 | `namespace_modes` | list | `nossd`, `bbssd`, `znssd`, `ocssd`, `csd`, `kvssd`, one per namespace | mode of each namespace |
+| `namespace_phls` | list of lists | FDP only; one entry per namespace, each 1 to `MIN(fdp.nruh, 128)` handle IDs below `fdp.nruh`, joined with `:`, none twice | placement handle list of each namespace; unset gives every handle |
 | `op_pcent` | percent | bbssd; not with `cxl_ssd` | back the device with the full NAND and expose NAND / (1 + `op_pcent`/100) |
 | `ns_mgmt` (`femu`) | bool | standalone NoSSD or bbssd controller | Namespace Management and Attachment from the guest |
 | `bbssd_ns_limit` | count | 1 to 256, >= `namespaces` | most bbssd namespaces `ns_mgmt` may allocate, each with its own FTL |

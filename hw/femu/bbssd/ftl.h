@@ -687,6 +687,7 @@ int bb_gc_forced_lines(FemuCtrl *n);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
+uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
@@ -699,7 +700,7 @@ bool femu_ftl_policy_known(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
-void ssd_deallocate_fdp_all(struct ssd *ssd);
+void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */

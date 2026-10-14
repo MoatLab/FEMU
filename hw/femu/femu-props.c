@@ -70,8 +70,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "unless namespace_sizes is set; bbssd with op_pcent sizes from the "
       "NAND geometry instead" },
     { "namespaces",
-      "Number of namespaces created at boot, 1 to 256; OCSSD and FDP "
-      "support only 1" },
+      "Number of namespaces created at boot, 1 to 256; OCSSD supports only "
+      "1, and FDP more than 1 only when all are bbssd or all nossd" },
     { "namespace_sizes",
       "Comma-separated size in bytes of each namespace (QEMU size syntax "
       "such as 4G,2G), one non-empty entry per namespace, summing to at most "

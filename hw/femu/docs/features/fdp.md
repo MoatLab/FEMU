@@ -107,6 +107,52 @@ apply. Two properties are specific to FDP
 `FEMU_FDP_DEBUG` in QEMU's environment prints placement and reclaim traces
 ([environment variables](../reference/properties.md#environment-variables)).
 
+### Several namespaces
+
+Reclaim units and handles belong to the endurance group, so namespaces of
+one FDP controller share them. Each namespace has its own placement handle
+list (PHL): placement handle `i` of the namespace selects reclaim unit
+handle `phl[i]`. Two namespaces may list the same handle; their writes then
+go to the same reclaim unit.
+
+```text
+ namespace_phls=0:1,,2:1
+ ns 1: PH 0 -> RUH 0, PH 1 -> RUH 1  --+
+ ns 2: PH 0 -> RUH 2, PH 1 -> RUH 1  --+--> RUH 1 is shared; RUH 3 is unused
+```
+
+<!-- femu-example: fdp-namespaces -->
+```
+-device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4 -device femu,devsz_mb=1024,femu_mode=1,subsys=fdp0,namespaces=2,namespace_phls=0:1,,2:1
+```
+
+- `namespace_phls`: one entry per namespace, separated by commas (`,,` on
+  the QEMU command line). An entry lists handle IDs separated by `:`. Each
+  entry has 1 to `MIN(fdp.nruh, 128)` IDs, each below `fdp.nruh`, none twice.
+  Unset, every namespace gets every handle in order.
+- Every namespace is BlackBox, or every one is NoSSD. BlackBox namespaces
+  share one FTL, each in its own slice of the logical pages, so a namespace
+  size must be a whole number of NAND pages. The sum of the sizes must fit
+  in the reclaim units, as one namespace must.
+- `nvme fdp status /dev/nvme0n2` lists the placement identifiers of
+  namespace 2 with the handle each selects. `nvme fdp usage` reports a
+  handle no list names as unused (RUHA 0).
+- Statistics (log 22h) and C0h count the endurance group: a shared handle
+  adds the writes of every namespace that uses it.
+- Namespaces that share a handle keep one format. A Format of one of them
+  to another LBA format fails with Invalid Format; format them together
+  with NSID FFFFFFFFh. Namespaces with no shared handle may differ, and
+  RUAMW counts the blocks of each handle's namespaces.
+- Event 80h names the namespace of the blocks it counts, with that
+  namespace's placement identifier; a collection that moves blocks of two
+  namespaces logs one 80h for each run of them. Events without moved data
+  (01h, and 81h of a refresh) name the first namespace that lists the handle.
+- The write buffer (`buffer_size`) belongs to the shared FTL. A Flush of
+  one namespace writes back the held pages of every namespace, which the
+  specification allows. A RUH Update does the same before it moves a handle.
+- NoSSD namespaces have no media: RUH Status and RUH Update work, and no
+  bytes are counted.
+
 ## Use it from the guest
 
 Check that the controller supports FDP. Bit 19 (0x80000) of CTRATT is FDP:
@@ -132,8 +178,8 @@ handle's attributes, `stats` gives host and media bytes written, and
 space left in each one's reclaim unit (RUAMW). Every page programmed into
 the unit counts. This includes pages that collection moves into the unit
 of an Initially Isolated handle. A Format does not give the room back.
-Every handle backs a placement handle of the namespace, so `usage` reports
-each one as host specified:
+By default every handle backs a placement handle of the namespace, so
+`usage` reports each one as host specified:
 
 ```text
 Reclaim Unit Handle 0 Attributes: 0x1 (Host Specified)
@@ -225,7 +271,15 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 | `FEMU bbssd: placement needs N reclaim units for M handles across 1 groups and this geometry gives K; raise blks_per_pl or fdp.nru, or lower fdp.nruh` | Too few reclaim units for the handles. |
 | `FEMU bbssd: namespace 1 exposes 1024 KiB, but placement keeps 9 of the 24 reclaim units for 4 handles and collection, leaving 960 KiB; lower devsz_mb or fdp.nruh, raise blks_per_pl, or raise op_pcent` | The namespace does not fit in what placement leaves. |
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of this geometry, or unset` | `fdp.runs` does not match the geometry. |
-| `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | `namespaces` above 1. |
+| `FDP with more than one namespace needs every namespace in bbssd mode or every one in nossd mode` | Namespaces of other modes, or of mixed modes, with `namespaces` above 1. |
+| `FDP with more than one namespace needs namespace sizes in whole NAND pages (4096 bytes); namespace 1 has 526336 bytes` | Set `namespace_sizes` to multiples of the page size. |
+| `fdp_trim_erase_all erases every namespace; it needs a single namespace` | The test knob with more than one namespace. |
+| `FEMU bbssd: the 2 namespaces expose 2048 KiB, but placement keeps 9 of the 25 reclaim units ...` | The namespaces together do not fit in the reclaim units. |
+| `namespace_phls needs fdp=on on the subsystem` | Placement handle lists without FDP. |
+| `namespace_phls count must equal namespaces=2` | One entry per namespace. |
+| `namespace_phls: namespace 1 names handle '4'; handles are 0 to 3` | An ID that is not a handle. |
+| `namespace_phls: namespace 1 lists handle 0 twice` | An ID twice in one list. |
+| `namespace_phls: namespace 2 lists no handle` | An empty entry. |
 | `femu-subsys with fdp=on takes a single controller` | A second controller joins the FDP subsystem. |
 | `FEMU bbssd: set gc_policy or gc_strategy under FDP, not both` | Both pick the reclaim unit strategy. Set one of them, or leave `gc_policy` at `greedy`. |
 | `FEMU bbssd: hot_cold_sep is not supported under FDP: the placement handle of a write chooses its reclaim unit, ...` | The placement handle of a write names its reclaim unit, and the hot write pointer writes past it. Give hot data a placement handle of its own. |

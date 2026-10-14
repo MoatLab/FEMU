@@ -458,14 +458,12 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
     for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
         ruh = &endgrp->fdp.ruhs[ns->fdp.phs[i]];
 
+        /* the byte counters stay across a controller replacement */
         if (ruh->ruha == NVME_RUHA_UNUSED) {
             ruh->ruha = NVME_RUHA_HOST;
             ruh->lbafi = lbafi;
             ruh->lbads = ns->lbaf.lbads;
             ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
-            ruh->hbmw = 0;
-            ruh->mbmw = 0;
-            ruh->mbe = 0;
 
             for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
                 for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
@@ -1346,6 +1344,34 @@ void nvme_ns_common_identify(FemuCtrl *n, NvmeIdNs *id)
     memcpy(id->lbaf, caps.lbaf, sizeof(id->lbaf));
 }
 
+/*
+ * A handle no namespace lists any more is unused again (log 21h), so a
+ * controller that replaces this one on the subsystem may list it with a
+ * format of its own. Its byte counters stay: they live as long as the FDP
+ * Statistics log.
+ */
+static void nvme_ns_detach_fdp(FemuCtrl *n, NvmeNamespace *ns)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+
+    if (!endgrp || !endgrp->fdp.enabled || !ns->fdp.phs) {
+        return;
+    }
+    for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
+        bool used = false;
+
+        for (int j = 0; n->namespaces && j < n->namespace_limit; j++) {
+            NvmeNamespace *o = &n->namespaces[j];
+
+            used |= o != ns && o->allocated && o->endgrp == endgrp &&
+                    nvme_ns_ruh_ph(o, ns->fdp.phs[i]) >= 0;
+        }
+        if (!used) {
+            endgrp->fdp.ruhs[ns->fdp.phs[i]].ruha = NVME_RUHA_UNUSED;
+        }
+    }
+}
+
 static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
 {
     nvme_streams_release(ns, true);
@@ -1355,6 +1381,7 @@ static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
     g_free(ns->util);
     g_free(ns->uncorrectable);
     g_free(ns->mdata);
+    nvme_ns_detach_fdp(n, ns);
     g_free(ns->fdp.phs);
     if (ns->mdata_lock_init) {
         qemu_mutex_destroy(&ns->mdata_lock);
@@ -1651,6 +1678,47 @@ static bool femu_pd_on(FemuCtrl *n)
     return femu_pd_terms_on(n) || femu_pd_actions_on(n);
 }
 
+/*
+ * FDP with more than one namespace. The endurance group owns the reclaim
+ * units and handles, so every bbssd namespace places into one FTL, each in
+ * its own slice of the logical pages. A NAND page must then hold blocks of
+ * one namespace only, or a trim of one would drop blocks of the next. Only
+ * the NVM command set may live in an FDP endurance group (Base 2.3, 8.1.10),
+ * and only bbssd and NoSSD carry its placement; mixing the two would let a
+ * namespace with no media reset the units the FTL counts.
+ */
+static int nvme_check_fdp_namespaces(FemuCtrl *n, const uint8_t *modes,
+                                     const uint64_t *sizes, Error **errp)
+{
+    uint64_t page = (uint64_t)n->bb_params.secsz * n->bb_params.secs_per_pg;
+
+    if (n->num_namespaces < 2 || !n->subsys ||
+        !n->subsys->params.fdp.enabled) {
+        return 0;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] != modes[0] || (modes[i] != FEMU_BBSSD_MODE &&
+                                     modes[i] != FEMU_NOSSD_MODE)) {
+            error_setg(errp, "FDP with more than one namespace needs every "
+                       "namespace in bbssd mode or every one in nossd mode");
+            return -1;
+        }
+        if (modes[i] == FEMU_BBSSD_MODE && (!page || sizes[i] % page)) {
+            error_setg(errp, "FDP with more than one namespace needs "
+                       "namespace sizes in whole NAND pages (%" PRIu64
+                       " bytes); namespace %d has %" PRIu64 " bytes", page,
+                       i + 1, sizes[i]);
+            return -1;
+        }
+    }
+    if (n->bb_params.fdp_trim_erase_all) {
+        error_setg(errp, "fdp_trim_erase_all erases every namespace; it needs "
+                   "a single namespace");
+        return -1;
+    }
+    return 0;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1662,22 +1730,11 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         return 1;
     }
 
-    /*
-     * FDP keeps its reclaim groups and unit handles on the controller and places
-     * writes through its own path, which addresses the flash by the raw command
-     * LBA rather than the namespace slice. Sharing that between namespaces would
-     * let them land on the same logical pages, so keep FDP to one namespace.
-     */
-    if (n->num_namespaces > 1 && n->subsys && n->subsys->params.fdp.enabled) {
-        error_setg(errp, "FDP supports a single namespace; set namespaces=1 or "
-                   "disable FDP on the subsystem");
-        return 1;
-    }
-
     ns_sizes = g_new0(uint64_t, n->num_namespaces);
     ns_modes = g_new0(uint8_t, n->num_namespaces);
     if (nvme_resolve_ns_modes(n, ns_modes, errp) ||
-        nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp)) {
+        nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp) ||
+        nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;
@@ -3891,6 +3948,34 @@ static char *femu_test_fdp_check(Object *obj, Error **errp)
 }
 
 /*
+ * The mapped pages in each namespace's slice of the FTL, namespace 1 first:
+ * what a test needs to tell the namespaces of an FDP controller apart.
+ */
+static char *femu_test_fdp_ns_mapped(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    GString *out = g_string_new(NULL);
+    bool resume;
+
+    resume = nvme_pause_pollers(n);
+    for (uint32_t i = 1; i <= n->namespace_limit; i++) {
+        NvmeNamespace *ns = nvme_ns(n, i);
+
+        if (ns && ns->ssd && ns->ssd->fdp_enabled) {
+            g_string_append_printf(out, "%s%" PRIu64, out->len ? " " : "",
+                                   ssd_fdp_ns_mapped(ns->ssd, ns));
+        }
+    }
+    nvme_resume_pollers(n, resume);
+    if (!out->len) {
+        g_string_free(out, true);
+        error_setg(errp, "the check requires an FDP namespace");
+        return NULL;
+    }
+    return g_string_free(out, false);
+}
+
+/*
  * Completed commands, their summed modelled latency, namespace 1's host,
  * NAND and relocated pages and erases, the read, program and erase
  * commands it charged to the media layer, and a digest of the order in
@@ -4057,6 +4142,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);
+        object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
+                                NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,

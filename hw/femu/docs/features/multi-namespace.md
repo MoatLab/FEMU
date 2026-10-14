@@ -137,7 +137,8 @@ A second controller is `/dev/nvme1` with its own namespaces.
 | `csd supports at most one namespace per controller` | Only one CSD namespace. Its neighbours may use other modes. |
 | `meta: namespace 2 runs a mode without metadata support (block or no-SSD only)` | `meta` needs every namespace to be NoSSD or BlackBox. |
 | `streams requires NVM namespaces` | Streams needs every namespace to be NoSSD or BlackBox. |
-| `FDP supports a single namespace; set namespaces=1 or disable FDP on the subsystem` | FDP takes one namespace. |
+| `FDP with more than one namespace needs every namespace in bbssd mode or every one in nossd mode` | FDP namespaces share the endurance group's units, which only these modes place into. See [FDP](fdp.md#several-namespaces). |
+| `FDP with more than one namespace needs namespace sizes in whole NAND pages (4096 bytes); namespace 1 has 526336 bytes` | Set `namespace_sizes` to multiples of the page size. |
 | `FEMU bbssd: namespace 1 exposes 4096 MiB of the 2048 MiB this geometry has, ...` | A BlackBox namespace is larger than the NAND geometry allows. Each namespace is checked against the full geometry. |
 
 ## Verify
