@@ -304,6 +304,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - The write buffer no longer resurrects deallocated pages and is bounded (d4d03f127, 0ee6d211b).
 - A Format rebuilds per-block state (a79474e73, 7e7e36161).
 - Writes clear the invalid status set by Write Uncorrectable (026eb0ef0).
+- A KV Retrieve or List that returns less than the host buffer holds follows the PRP layout of the whole buffer. A transfer of 4 to 8 KiB into a larger buffer took PRP2, a list pointer, as a data pointer, and wrote the data over the host's PRP list.
 - CSD and KV commands address the namespace they name, and each namespace gets its own mode state (a93de9d54, aa6a5a8f7, d2a770601, ce5ad913f).
 - A KV command completes when its last NAND operation does: a Store that compacts no longer counts the compaction wait twice, and still pays for it when it then fails. The per-command index read is charged on a LUN chosen by the key's hash instead of always on the LUN at address 0, which had every KV command queue on one LUN (4ca11c2a0, 1e5385ae4).
 - Vendor admin command 0xEE sets an Open-Channel controller's read, program, erase and channel times; it used to write fields nothing read. Other modes refuse it with Invalid Field (949d01eb9, cdbd5bb36).

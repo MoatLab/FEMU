@@ -18548,7 +18548,7 @@ static void femu_test_report_zero_tail(void *obj, void *data,
  * KV List takes its host buffer size from the command, and with MDTS 0
  * nothing bounds it: the device allocated all of it, up to 4 GiB. Enough
  * keys to pass one page make its buffer grow instead, and every one of them
- * must still be listed.
+ * must still be listed. A buffer that large has a PRP list.
  */
 static void femu_test_kv_list_mdts0(void *obj, void *data,
                                     QGuestAllocator *alloc)
@@ -18564,7 +18564,7 @@ static void femu_test_kv_list_mdts0(void *obj, void *data,
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
-    mem = guest_alloc(alloc, 3 * 4096);
+    mem = guest_alloc(alloc, 4 * 4096);
     buf = (mem + 4095) & ~4095ULL;
 
     for (k = 0; k < keys; k++) {
@@ -18577,18 +18577,112 @@ static void femu_test_kv_list_mdts0(void *obj, void *data,
         g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
     }
 
+    /* the list page names the second data page; the data ends there */
+    qtest_writeq(qts, buf + 2 * 4096, buf + 4096);
     peak = femu_vm_peak_kb(qts);
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = FEMU_KV_CMD_LIST;
     cmd.nsid = cpu_to_le32(1);
     cmd.dptr.prp1 = cpu_to_le64(buf);
-    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 2 * 4096);
     cmd.cdw10 = cpu_to_le32(0xfffffffc);
     st = femu_io(&c, &cmd);
     g_assert_cmpuint(femu_vm_peak_kb(qts) - peak, <, 1024 * 1024);
     g_assert_cmpint(st, ==, NVME_SUCCESS);
     g_assert_cmpuint(qtest_readl(qts, buf), ==, keys);
 
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A Retrieve or a List that returns 4 to 8 KiB into a buffer of four pages.
+ * The host lays out the PRPs for the whole buffer, so PRP2 is a list
+ * pointer. Taken as a data pointer, it made the device write the second
+ * page of data over the PRP list.
+ */
+static void femu_test_kv_short_into_list(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t vlen = 6000;
+    const uint32_t hbs = 4 * 4096;
+    const int keys = 400;               /* 12 bytes each: 4804 bytes */
+    uint8_t want[6000];
+    uint8_t got[6000];
+    uint64_t ents[3];
+    uint64_t ents_after[3];
+    uint64_t mem, buf, list;
+    uint8_t *page;
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 6 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+    list = buf + hbs;
+    for (i = 0; i < 3; i++) {
+        ents[i] = cpu_to_le64(buf + (uint64_t)(i + 1) * 4096);
+    }
+
+    for (i = 0; i < (int)vlen; i++) {
+        want[i] = (uint8_t)(i * 7 + 3);
+    }
+    qtest_memwrite(qts, buf, want, vlen);
+    g_assert_cmphex(femu_kv_store(&c, 42, buf, vlen), ==, NVME_SUCCESS);
+
+    qtest_memset(qts, buf, 0, hbs);
+    qtest_memwrite(qts, list, ents, sizeof(ents));
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(list);
+    cmd.res1 = cpu_to_le64(42);
+    cmd.cdw10 = cpu_to_le32(hbs);
+    cmd.cdw11 = cpu_to_le32(8);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, got, vlen);
+    g_assert_cmpmem(got, vlen, want, vlen);
+    qtest_memread(qts, list, ents_after, sizeof(ents_after));
+    g_assert_cmpmem(ents_after, sizeof(ents_after), ents, sizeof(ents));
+
+    for (i = 1; i < keys; i++) {
+        g_assert_cmphex(femu_kv_store(&c, 1000 + i, buf, 64), ==,
+                        NVME_SUCCESS);
+    }
+    qtest_memset(qts, buf, 0, hbs);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_LIST;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(hbs);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    page = g_malloc(hbs);
+    qtest_memread(qts, buf, page, hbs);
+    g_assert_cmpuint(ldl_le_p(page), ==, keys);
+    for (i = 0; i < keys; i++) {
+        g_assert_cmpuint(lduw_le_p(page + 4 + 12 * i), ==, 8);
+    }
+    qtest_memread(qts, list, ents_after, sizeof(ents_after));
+    g_assert_cmpmem(ents_after, sizeof(ents_after), ents, sizeof(ents));
+
+    /* qos may run the next test on this device, so leave no key */
+    for (i = 0; i < keys; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_DELETE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.res1 = cpu_to_le64(i ? 1000 + i : 42);
+        cmd.cdw11 = cpu_to_le32(8);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    g_free(page);
     guest_free(alloc, mem);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -33256,6 +33350,10 @@ static void femu_register_nodes(void)
     qos_add_test("kv-list-mdts0", "femu", femu_test_kv_list_mdts0,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,mdts=0"
+    });
+    qos_add_test("kv-short-into-list", "femu", femu_test_kv_short_into_list,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
     });
     qos_add_test("kv-list-walk", "femu", femu_test_kv_list_walk,
                  &(QOSGraphTestOptions) {

@@ -803,7 +803,8 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
     lat = MAX(lat, kv_charge_index(s, req, key, kl));
     if (xfer) {
-        status = dma_read_cmd(n, &req->cmd, s->values + off, (uint32_t)xfer);
+        status = dma_read_cmd_buf(n, &req->cmd, s->values + off,
+                                  (uint32_t)xfer, hbs);
         if (status) {
             qemu_mutex_unlock(&s->lock);
             return status;
@@ -954,7 +955,7 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     lat = kv_charge_stages(s, req, start_key, start_len);
     qemu_mutex_unlock(&s->lock);
 
-    status = dma_read_cmd(n, &req->cmd, buf, len);
+    status = dma_read_cmd_buf(n, &req->cmd, buf, len, hbs);
     g_free(buf);
     if (status) {
         return status;

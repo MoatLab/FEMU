@@ -212,12 +212,20 @@ static uint16_t nvme_read_list(FemuCtrl *n, hwaddr addr, void *buf, int size)
     return status;
 }
 
-uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
-                      uint64_t prp2, uint32_t len, FemuCtrl *n)
+/*
+ * Map the first @len bytes of a host buffer of @buf_len bytes. The PRP
+ * layout follows the buffer, not the data: past two pages PRP2 is a list
+ * pointer, and the last entry of a full list page points to the next list,
+ * also when the data ends before them.
+ */
+static uint16_t nvme_map_prp_buf(QEMUSGList *qsg, QEMUIOVector *iov,
+                                 uint64_t prp1, uint64_t prp2, uint32_t len,
+                                 uint64_t buf_len, FemuCtrl *n)
 {
     hwaddr trans_len = n->page_size - (prp1 % n->page_size);
     trans_len = MIN(len, trans_len);
     int num_prps = (len >> n->page_bits) + 1;
+    uint64_t buf_left;
     uint16_t status = NVME_INVALID_FIELD | NVME_DNR;
     bool cmb = false;
 
@@ -240,11 +248,12 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
     }
 
     len -= trans_len;
+    buf_left = buf_len - trans_len;
     if (len) {
         if (!prp2) {
             goto unmap;
         }
-        if (len > n->page_size) {
+        if (buf_left > n->page_size) {
             uint64_t *prp_list = g_malloc0(sizeof(uint64_t) * n->max_prp_ents);
             uint32_t nents, prp_trans;
             int i = 0;
@@ -272,7 +281,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
-                if (i == nents - 1 && len > n->page_size) {
+                if (i == nents - 1 && buf_left > n->page_size) {
                     if (!prp_ent || prp_ent & (n->page_size - 1)) {
                         g_free(prp_list);
                         if (prp_ent) {
@@ -282,8 +291,8 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                     }
 
                     i = 0;
-                    nents = (len + n->page_size - 1) >> n->page_bits;
-                    nents = MIN(n->max_prp_ents, nents);
+                    nents = MIN(n->max_prp_ents,
+                                (buf_left + n->page_size - 1) >> n->page_bits);
                     prp_trans = nents * sizeof(uint64_t);
                     if (nvme_read_list(n, prp_ent, prp_list, prp_trans)) {
                         g_free(prp_list);
@@ -310,6 +319,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                     goto unmap;
                 }
                 len -= trans_len;
+                buf_left -= trans_len;
                 i++;
             }
             g_free(prp_list);
@@ -337,6 +347,12 @@ unmap:
     }
 
     return status;
+}
+
+uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
+                      uint64_t prp2, uint32_t len, FemuCtrl *n)
+{
+    return nvme_map_prp_buf(qsg, iov, prp1, prp2, len, len, n);
 }
 
 /*
@@ -695,6 +711,30 @@ uint16_t dma_read_cmd_fill(FemuCtrl *n, NvmeCmd *cmd, const uint8_t *ptr,
     }
 
     return dma_copy_fill(&qsg, &iov, ptr, MIN(len, xfer), xfer);
+}
+
+/*
+ * Controller to host, @len bytes into a host buffer of @buf_len bytes, as
+ * for a KV Retrieve or List that returns less than the buffer holds.
+ */
+uint16_t dma_read_cmd_buf(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr,
+                          uint32_t len, uint64_t buf_len)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    if (cmd->psdt != NVME_PSDT_PRP) {
+        return dma_read_cmd(n, cmd, ptr, len);
+    }
+    status = nvme_map_prp_buf(&qsg, &iov, le64_to_cpu(cmd->dptr.prp1),
+                              le64_to_cpu(cmd->dptr.prp2), len,
+                              MAX(buf_len, len), n);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy(n, &qsg, &iov, ptr, len, true);
 }
 
 /* controller to host, through an I/O command's data pointer */
