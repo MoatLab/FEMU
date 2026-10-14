@@ -122,6 +122,8 @@ has these members:
 | `pages-per-unit` | NAND pages in each reclaim unit |
 | `handles` | each reclaim unit handle: `id`, `type` (`initially-isolated` or `persistently-isolated`), `host-bytes` and `media-bytes` |
 | `unit-counts` | reclaim units that are `free`, `open`, `full` and `victim`, and the `total` |
+| `placement-handles` | the placement handle list of the namespace: the reclaim unit handle of placement handle 0, 1, ... |
+| `ftl-nsid` | the namespace whose FTL holds the units |
 | `reclaim-units` | with `kind` `reclaim-units`: `group`, `unit`, `handle`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each unit, by group and then by unit |
 
 `host-bytes` counts the NAND pages that the host wrote through the
@@ -141,6 +143,16 @@ Media Bytes with Metadata Written (MBMW). The counters stop at the largest 64-bi
  p pad bytes close a unit
  that h owns              -->                      media-bytes[h] += p
  log page 22h: HBMW = sum(host-bytes)   MBMW = sum(media-bytes)
+```
+
+With more than one FDP namespace, every namespace places into the FTL of
+`ftl-nsid`. Each namespace then reports the same `handles`, units and
+`counters`; only `placement-handles` differ. Add them once, not once per
+namespace.
+
+```
+ query nsid 1: placement-handles [0, 1]  ftl-nsid 1  handles, units, counters
+ query nsid 2: placement-handles [1, 2]  ftl-nsid 1  the same as nsid 1
 ```
 
 The `state` of a unit is `free`, `open`, `full`, `victim` or `unlisted`.
@@ -320,6 +332,7 @@ Each handle has one unit open:
                        "host-bytes": 0, "media-bytes": 0}],
           "unit-counts": {"free": 21, "open": 4, "full": 0, "victim": 0,
                           "total": 25},
+          "placement-handles": [0, 1, 2, 3], "ftl-nsid": 1,
           "reclaim-units": [{"group": 0, "unit": 0, "handle": 0,
                              "state": "open", "vpc": 0, "ipc": 0,
                              "erase-min": 0, "erase-max": 0}]},

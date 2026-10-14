@@ -411,6 +411,14 @@
 #
 # @unit-counts: reclaim units in each state
 #
+# @placement-handles: the placement handle list of the namespace: the
+#     reclaim unit handle that each placement handle selects, placement
+#     handle 0 first
+#
+# @ftl-nsid: the namespace whose FTL holds the reclaim units.  Every
+#     namespace of a controller under FDP places into that one FTL, so
+#     each reports the same handles, units and write counters.
+#
 # @reclaim-units: with kind @reclaim-units, the units from the offset,
 #     at most limit of them, by group and then by unit
 #
@@ -420,6 +428,7 @@
   'data': { 'reclaim-groups': 'uint32', 'units-per-group': 'uint32',
             'pages-per-unit': 'uint32', 'handles': [ 'FemuRuHandleInfo' ],
             'unit-counts': 'FemuReclaimUnitCounts',
+            'placement-handles': [ 'uint16' ], 'ftl-nsid': 'uint32',
             '*reclaim-units': [ 'FemuReclaimUnitInfo' ] } }
 
 ##
@@ -844,6 +853,8 @@
 #                       "unit-counts": { "free": 21, "open": 4,
 #                                        "full": 0, "victim": 0,
 #                                        "total": 25 },
+#                       "placement-handles": [ 0, 1, 2, 3 ],
+#                       "ftl-nsid": 1,
 #                       "reclaim-units": [ { "group": 0, "unit": 0,
 #                                            "handle": 0,
 #                                            "state": "open",

@@ -186,7 +186,9 @@ The write buffer is part of the shared FTL. A Flush of one namespace writes
 back the held pages of all of them, which Flush allows.
 
 Statistics stay per endurance group and per handle: a shared handle adds
-the writes of every namespace that uses it.
+the writes of every namespace that uses it. query-femu reports the PHL of
+each namespace (`placement-handles`) and the namespace whose FTL holds the
+units (`ftl-nsid`).
 
 NoSSD namespaces have no FTL. They report their lists in RUH Status, and
 RUH Update logs event 00h with their NSID. They count no bytes and log no

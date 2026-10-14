@@ -256,6 +256,10 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
 
             q->nr_ruhs = ssd->nruhs;
             q->ruhs = g_new0(FemuQueryRuh, MAX(q->nr_ruhs, 1));
+            /* fixed at realize: FDP refuses namespace management */
+            q->nr_phs = ns->fdp.nphs;
+            q->phs = g_memdup2(ns->fdp.phs, ns->fdp.nphs * sizeof(uint16_t));
+            q->ftl_nsid = ssd_owner_nsid(ssd);
             q->ru_state_cap = total;
             q->ru_state = g_malloc0(MAX(total, 1));
             if (kind == FEMU_QUERY_KIND_RECLAIM_UNITS) {
@@ -291,6 +295,7 @@ fail:
     /* req->nr_ns does not count this entry yet; free its buffers here */
     g_clear_pointer(&req->ns[req->nr_ns].ruhs, g_free);
     g_clear_pointer(&req->ns[req->nr_ns].ru_state, g_free);
+    g_clear_pointer(&req->ns[req->nr_ns].phs, g_free);
     return false;
 }
 
@@ -302,6 +307,7 @@ static void femu_query_free(FemuQueryReq *req)
         g_free(req->ns[i].ruhs);
         g_free(req->ns[i].rus);
         g_free(req->ns[i].ru_state);
+        g_free(req->ns[i].phs);
     }
     g_free(req->ns);
     g_free(req);
@@ -406,6 +412,7 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     FemuFdpInfo *fdp = g_new0(FemuFdpInfo, 1);
     FemuReclaimUnitCounts *cnt = g_new0(FemuReclaimUnitCounts, 1);
     FemuRuHandleInfoList **htail = &fdp->handles;
+    uint16List **ptail = &fdp->placement_handles;
 
     fdp->reclaim_groups = q->nrg;
     fdp->units_per_group = q->rus_per_rg;
@@ -419,6 +426,11 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
         hi->media_bytes = q->ruhs[h].media_bytes;
         QAPI_LIST_APPEND(htail, hi);
     }
+
+    for (uint16_t i = 0; i < q->nr_phs; i++) {
+        QAPI_LIST_APPEND(ptail, q->phs[i]);
+    }
+    fdp->ftl_nsid = q->ftl_nsid;
 
     cnt->free = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_FREE];
     cnt->open = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_OPEN];

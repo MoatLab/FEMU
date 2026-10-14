@@ -33075,6 +33075,23 @@ static void femu_test_fdp_ns_phl(void *obj, void *data, QGuestAllocator *alloc)
             g_assert_cmpuint(ruamw[i], ==, 128);
         }
     }
+    /* query-femu: each namespace's list, and the one FTL behind both */
+    for (uint32_t ns = 1; ns <= 2; ns++) {
+        QDict *rsp;
+        QDict *fdp = qdict_get_qdict(femu_fdpns_query(qts, ns, "", &rsp),
+                                     "fdp");
+        QList *phl = qdict_get_qlist(fdp, "placement-handles");
+        QListEntry *e;
+
+        i = 0;
+        QLIST_FOREACH_ENTRY(phl, e) {
+            g_assert_cmpint(qnum_get_int(qobject_to(QNum, qlist_entry_obj(e))),
+                            ==, want_ruh[ns - 1][i++]);
+        }
+        g_assert_cmpint(i, ==, 2);
+        g_assert_cmpuint(qdict_get_int(fdp, "ftl-nsid"), ==, 1);
+        qobject_unref(rsp);
+    }
     g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, 0, log,
                                     sizeof(ruhu)), ==, NVME_SUCCESS);
     qtest_memread(qts, log, ruhu, sizeof(ruhu));

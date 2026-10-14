@@ -404,8 +404,11 @@ def fdp_report(fdp: Dict[str, Any],
                prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {k: fdp[k] for k in ("reclaim-groups",
                                                "units-per-group",
-                                               "pages-per-unit", "unit-counts")
+                                               "pages-per-unit", "unit-counts",
+                                               "placement-handles", "ftl-nsid")
                            if k in fdp}
+    if FAULT == "phl-skip":
+        out.pop("placement-handles", None)
     old = {h["id"]: h for h in (prev or {}).get("handles", [])}
     handles = []
     for h in fdp.get("handles", []):
@@ -545,6 +548,14 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
         lines.append(pad + f"reclaim units: free {uc.get('free')} of "
                      f"{uc.get('total')}, open {uc.get('open')}, "
                      f"victim {uc.get('victim')}, full {uc.get('full')}")
+        phl = fdp.get("placement-handles")
+        if phl is not None:
+            # every FDP namespace of a controller shares one FTL
+            owner = fdp.get("ftl-nsid")
+            lines.append(pad + "placement handles: "
+                         + ", ".join(f"{i}->RUH {h}" for i, h in enumerate(phl))
+                         + (f" (FTL and counters of namespace {owner})"
+                            if owner not in (None, ns.get("nsid")) else ""))
         for h in fdp.get("handles", []):
             s = (f"handle {h['id']}: host {fmt_bytes(h['host-bytes'])}, "
                  f"media {fmt_bytes(h['media-bytes'])}")
@@ -1200,6 +1211,9 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
     cases = [
         ("fdp", ["-device", "femu-subsys,id=fdp0,nqn=fdp0,fdp=on,fdp.nruh=4",
                  "-device", f"femu,id=femu0,{SMALL_BB},subsys=fdp0"]),
+        ("fdp2", ["-device", "femu-subsys,id=fdp0,nqn=fdp0,fdp=on,fdp.nruh=4",
+                  "-device", f"femu,id=femu0,{SMALL_BB},subsys=fdp0,"
+                  "namespaces=2,namespace_phls=0:1,,1:2"]),
         ("zns", ["-device", "femu,id=femu0,femu_mode=3,devsz_mb=64"]),
         ("mixed", ["-device", f"femu,id=femu0,{SMALL_BB},namespaces=2,"
                    "namespace_modes=nossd,,bbssd"]),
@@ -1230,7 +1244,7 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
             ctrl.create_io_queues()
             sampler = Sampler(q.qmp, find_devices(q.qmp))
             s0 = sampler.sample()
-            nsid = 2 if name == "mixed" else 1
+            nsid = 2 if name in ("mixed", "fdp2") else 1
             if name != "kvssd":
                 t.check(f"{name}: 16 pages written",
                         write_pages(ctrl, nsid, 0, 16))
@@ -1244,6 +1258,22 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
                         ns["fdp"].get("unit-counts", {}).get("total", 0) > 0
                         and h0.get("interval-host-bytes") == 16 * 4096
                         and "reclaim units: free" in text, json.dumps(ns)[:400])
+            elif name == "fdp2":
+                # placement handle 0 of namespace 2 is handle 1
+                hs = {h["id"]: h for h in ns.get("fdp", {}).get("handles", [])}
+                t.check("fdp2: namespace 2's list, its write on handle 1, "
+                        "and the shared FTL",
+                        ns.get("fdp", {}).get("placement-handles") == [1, 2]
+                        and one_ns(rep, 1).get("fdp", {}).get(
+                            "placement-handles") == [0, 1]
+                        and hs.get(1, {}).get("interval-host-bytes")
+                        == 16 * 4096
+                        and hs.get(0, {}).get("interval-host-bytes") == 0
+                        and "placement handles: 0->RUH 1, 1->RUH 2 (FTL and "
+                            "counters of namespace 1)" in text, text)
+                t.control("placement handle list", "phl-skip",
+                          lambda: one_ns(build_report(s1, s0), 2).get(
+                              "fdp", {}).get("placement-handles") == [1, 2])
             elif name == "zns":
                 zc = ns.get("zone-counts", {})
                 t.check("zns: one zone open after the writes",

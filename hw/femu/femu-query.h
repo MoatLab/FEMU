@@ -94,6 +94,9 @@ typedef struct FemuQueryNs {
     FemuQueryRu *rus;           /* max_rus entries, or NULL for a summary */
     uint8_t *ru_state;          /* ru_state_cap entries, or NULL */
     uint32_t ru_state_cap;
+    uint16_t nr_phs;
+    uint16_t *phs;              /* the namespace's placement handle list */
+    uint32_t ftl_nsid;          /* the namespace whose FTL this is */
 } FemuQueryNs;
 
 typedef struct FemuQueryReq {
@@ -146,6 +149,7 @@ void femu_query_service(struct FemuCtrl *n, FemuQueryReq *req);
 void femu_query_cancel(FemuQueryReq *req);
 /* Copy one bbssd namespace into @q. FTL thread only. */
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q);
+uint32_t ssd_owner_nsid(struct ssd *ssd);
 /*
  * Copy one zoned namespace into @q under its zone lock. Main loop only.
  * Returns false, with @q unchanged, when a poller holds the lock.

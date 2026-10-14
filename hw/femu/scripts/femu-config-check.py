@@ -255,6 +255,20 @@ def derive(ns: Dict[str, Any], ident: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def shared_op(namespaces: List[Dict[str, Any]]) -> None:
+    """FDP namespaces of a controller share one FTL: OP is over their sum."""
+    owners: Dict[int, int] = {}
+    for e in namespaces:
+        owner = e.get("fdp", {}).get("ftl-nsid")
+        if owner is not None and e.get("capacity-bytes"):
+            owners[owner] = owners.get(owner, 0) + e["capacity-bytes"]
+    for e in namespaces:
+        owner = e.get("fdp", {}).get("ftl-nsid")
+        if owner in owners and e.get("raw-bytes") and FAULT != "op-each":
+            e["op-percent"] = round((e["raw-bytes"] / owners[owner] - 1)
+                                    * 100, 2)
+
+
 def check(qemu: str, args: List[str], timeout: float = 60.0
           ) -> Tuple[int, Dict[str, Any]]:
     """Run the check. Returns the exit status and the report. One argument
@@ -380,11 +394,18 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
                     "units-per-group": fdp.get("units-per-group"),
                     "pages-per-unit": fdp.get("pages-per-unit"),
                     "handles": [h.get("type") for h in fdp.get("handles", [])],
-                    "unit-counts": fdp.get("unit-counts")}
+                    "unit-counts": fdp.get("unit-counts"),
+                    "placement-handles": fdp.get("placement-handles"),
+                    "ftl-nsid": fdp.get("ftl-nsid")}
+                if FAULT == "phl-first" and namespaces and \
+                        "fdp" in namespaces[0]:
+                    entry["fdp"]["placement-handles"] = \
+                        namespaces[0]["fdp"]["placement-handles"]
             if "media" in ns:
                 entry["media"] = stat.media_summary(ns["media"])
             entry.update(derive(ns, ident))
             namespaces.append(entry)
+        shared_op(namespaces)
         dev["namespaces"] = namespaces
         devices.append(dev)
     report["devices"] = devices
@@ -457,6 +478,15 @@ def report_text(code: int, r: Dict[str, Any]) -> str:
                     f"{fdp['units-per-group']} units of "
                     f"{size(ns.get('unit-bytes'))}, {len(fdp['handles'])} "
                     f"handles ({', '.join(sorted(set(fdp['handles'])))})")
+                phl = fdp.get("placement-handles")
+                if phl is not None:
+                    shared = (f", FTL of namespace {fdp['ftl-nsid']}"
+                              if fdp.get("ftl-nsid") not in (None, ns["nsid"])
+                              else "")
+                    lines.append(pad + "placement handles: "
+                                 + ", ".join(f"{i}->RUH {h}"
+                                             for i, h in enumerate(phl))
+                                 + shared)
             if "zones" in ns:
                 lines.append(
                     pad + f"zones: {ns['zones']} of "
@@ -533,6 +563,25 @@ def self_test(qemu: str) -> int:
             ["persistently-isolated"] * 4
             and ns.get("unit-bytes") == ns.get("line-bytes")
             and not r.get("warnings"), json.dumps(r)[:600])
+
+    def fdp_two_ok() -> bool:
+        code, r = check(qemu, ["-device", "femu-subsys,id=s0,nqn=s0,fdp=on,"
+                               "fdp.nruh=4", "-device",
+                               f"femu,{SMALL_BB},subsys=s0,namespaces=2,"
+                               "namespace_phls=0:1,,1:2"])
+        nss = (r.get("devices") or [{}])[0].get("namespaces") or []
+        return (code == 0 and len(nss) == 2
+                and [n.get("fdp", {}).get("placement-handles") for n in nss]
+                == [[0, 1], [1, 2]]
+                and all(n["fdp"].get("ftl-nsid") == 1 for n in nss)
+                # 64 MiB of NAND behind 2 x 16 MiB: one FTL, 100 % OP
+                and all(n.get("op-percent") == 100.0 for n in nss)
+                and "placement handles: 0->RUH 1, 1->RUH 2, FTL of "
+                    "namespace 1" in report_text(code, r))
+    t.check("fdp: two namespaces, a placement handle list each",
+            fdp_two_ok())
+    t.control("fdp placement handle lists", "phl-first", fdp_two_ok)
+    t.control("fdp shared over-provisioning", "op-each", fdp_two_ok)
 
     code, r = check(qemu, ["femu,femu_mode=3,devsz_mb=64"])
     ns = ns1(r)

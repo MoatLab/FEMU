@@ -195,6 +195,12 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
     }
 }
 
+/* the namespace that built @ssd; FDP namespaces of a controller share it */
+uint32_t ssd_owner_nsid(struct ssd *ssd)
+{
+    return ssd->ns ? ssd->ns->id : 0;
+}
+
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
 {
     struct ssdparams *spp = &ssd->sp;
