@@ -128,16 +128,20 @@
 #
 # @block-erases: block erases, summed over every block
 #
+# @pad-write-pages: pages programmed with pad data to close lines or
+#     reclaim units left open past pd_open_close_sec.  Absent when no
+#     page was padded.
+#
 # @waf: write amplification factor, (@nand-write-pages +
-#     @gc-write-pages) / @host-write-pages.  Absent until the host has
-#     written a page.
+#     @gc-write-pages + @pad-write-pages) / @host-write-pages.  Absent
+#     until the host has written a page.
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuWriteCounters',
   'data': { 'host-write-pages': 'uint64', 'nand-write-pages': 'uint64',
             'gc-write-pages': 'uint64', 'block-erases': 'uint64',
-            '*waf': 'number' } }
+            '*pad-write-pages': 'uint64', '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:
@@ -333,8 +337,9 @@
 #
 # @host-bytes: bytes of the NAND pages the host wrote through the handle
 #
-# @media-bytes: bytes programmed for the handle: host writes and data
-#     that garbage collection moved out of its units
+# @media-bytes: bytes programmed for the handle: host writes, data that
+#     garbage collection moved out of its units, and pad pages that
+#     closed its units
 #
 # Since: 10.1
 ##

@@ -1015,7 +1015,7 @@ ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 | Available Spare | `ssd_available_spare()`, lowest namespace; below 20 sets the spare critical warning |
 | Media and Data Integrity Errors | injected read and write faults (and ZNS write faults) |
 | Data units, host commands | the pollers' host I/O counters, not the FTL |
-| Endurance Group Media Units Written | (NAND + GC write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
+| Endurance Group Media Units Written | (NAND + GC + pad write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
 
 ### Counters kept but not exported
 
@@ -1076,6 +1076,7 @@ does inside the FTL and what it interacts with.
 | `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2 and an open line and a free line remain; otherwise the block stays in service (overworn) and sets SMART critical warning bit 2 | refused with the settings the parameter manual lists |
 | `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | under FDP, a line's age counts from the retirement of its reclaim unit |
 | `pd_edge_wls`, `pd_edge_tiers`, `pd_open_tiers`, `pd_open_age` | program disturb: extra ECC tiers for bottom wordlines and part-programmed blocks; age from the first program | chosen tier values; `nand_block.wp` counts programs since the erase; refused with ZNS, OCSSD, NoSSD, `cxl_ssd` and shared namespaces ([NAND timing](nand-timing.md#program-disturb-terms)) |
+| `pd_open_read_limit`, `pd_open_close_sec` | program disturb actions: a lower read limit for part-programmed blocks, which takes the line out of its write frontier and rewrites it; pad and close a frontier left open too long | bbssd and CSD, also FDP units; checked at each request, served on the next Write; pads count in WAF and media bytes; refused with KV, `mapping=fast` or `hybrid` and the phase 1 refusals ([NAND timing](nand-timing.md#program-disturb-actions)) |
 | `err_read_unc_ppm`, `err_write_fail_ppm` | fixed-period command failures | counted in SMART media errors |
 | `read_reclaim_limit` | read count that queues a line for rewrite | needs host writes to act; under FDP it refreshes the whole reclaim unit ([FDP](fdp.md)) |
 | `wl_spread` | static wear levelling (`do_wear_level()`): at a fresh data line, swap it for the most worn free line and move the least worn full line into it | no write pointer of its own; credit of one per host page programmed, four lines per move; the earlier attempts are described in the function comment |

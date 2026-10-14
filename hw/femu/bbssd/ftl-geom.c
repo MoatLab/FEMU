@@ -307,6 +307,8 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pd_edge_tiers = n->bb_params.pd_edge_tiers;
     spp->pd_open_tiers = n->bb_params.pd_open_tiers;
     spp->pd_open_age = n->bb_params.pd_open_age;
+    spp->pd_open_read_limit = n->bb_params.pd_open_read_limit;
+    spp->pd_open_close_sec = n->bb_params.pd_open_close_sec;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;

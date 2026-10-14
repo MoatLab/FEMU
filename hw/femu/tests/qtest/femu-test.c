@@ -6521,6 +6521,21 @@ static void femu_test_pd_refused(void *obj, void *data,
           "'namespace_modes':'nossd,bbssd'", "namespace 1 is not" },
         { "'femu_mode':1,'pd_edge_wls':-1,'pd_edge_tiers':1",
           "must not be negative" },
+        { "'femu_mode':1,'pd_open_read_limit':-1", "must not be negative" },
+        { "'femu_mode':1,'pd_open_close_sec':-1", "must not be negative" },
+        { "'femu_mode':1,'pd_open_read_limit':9,'read_reclaim_limit':8",
+          "not be above read_reclaim_limit" },
+        { "'femu_mode':5,'pd_open_read_limit':4", "namespace 1 is KV" },
+        { "'femu_mode':5,'pd_open_close_sec':4", "namespace 1 is KV" },
+        { "'femu_mode':1,'pd_open_read_limit':4,'namespaces':2,"
+          "'namespace_modes':'bbssd,kvssd'", "namespace 2 is KV" },
+        { "'femu_mode':1,'pd_open_close_sec':1,'mapping':'hybrid'",
+          "mapping=hybrid" },
+        { "'femu_mode':1,'pd_open_read_limit':1,'mapping':'fast'",
+          "mapping=fast" },
+        { "'femu_mode':3,'pd_open_close_sec':1", "namespace 1 is not" },
+        { "'femu_mode':1,'pd_open_read_limit':4,'ns_mgmt':true",
+          "ns_mgmt or shared" },
     };
     QDict *rsp;
 
@@ -6547,6 +6562,19 @@ static void femu_test_pd_refused(void *obj, void *data,
                     "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
                     "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
                     "'nchs':1,'ecc_step_ns':1000000,'pd_open_tiers':1}}");
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("pd accepted case: %s",
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    /* the program disturb actions need no ECC step */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'pd-ok2','addr':'7','devsz_mb':4,"
+                    "'femu_mode':1,'secsz':512,'secs_per_pg':8,"
+                    "'pgs_per_blk':16,'blks_per_pl':80,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1,'pd_open_read_limit':4,"
+                    "'pd_open_close_sec':5}}");
     if (qdict_haskey(rsp, "error")) {
         g_test_message("pd accepted case: %s",
                        qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
@@ -31538,6 +31566,439 @@ static void femu_test_compare_verify_zns(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Program disturb actions (phase 2). The devices use id=trace, so the
+ * latency helpers of the phase 1 tests work, and these read the FTL checks
+ * of the same device.
+ */
+static void femu_pd2_ftl_check(QTestState *qts, uint64_t *mapped,
+                               uint64_t *lost, uint64_t *orphans)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-ftl-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           mapped, lost, orphans), ==, 3);
+    qobject_unref(rsp);
+}
+
+static uint64_t femu_pd2_fdp_check(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-fdp-check'}}");
+    uint64_t bad;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    bad = g_ascii_strtoull(qdict_get_str(rsp, "return"), NULL, 10);
+    qobject_unref(rsp);
+    return bad;
+}
+
+/* the number of FDP events of @type in the host (@host) or controller log */
+static int femu_pd2_events(FemuCtrlState *c, uint64_t log, bool host,
+                           uint8_t type, uint16_t *ruhid)
+{
+    uint8_t buf[64 + 16 * 64];
+    uint32_t numd = sizeof(buf) / 4 - 1;
+    uint32_t count;
+    NvmeCmd cmd;
+    int n = 0;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (host ? 1 << 8 : 0) |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, buf, sizeof(buf));
+    count = MIN(ldl_le_p(buf), 16);
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *ev = buf + 64 + i * 64;
+
+        if (ev[0] == type) {
+            /*
+             * PIV, NSIDV and LV, namespace 1, reclaim group 0; placement
+             * handle n of namespace 1 is handle n, so the PID is the handle
+             */
+            g_assert_cmphex(ev[1], ==, 0x7);
+            g_assert_cmpint(lduw_le_p(ev + 2), ==, lduw_le_p(ev + 34));
+            g_assert_cmpint(ldl_le_p(ev + 12), ==, 1);
+            g_assert_cmpint(lduw_le_p(ev + 32), ==, 0);
+            *ruhid = lduw_le_p(ev + 34);
+            n++;
+        }
+    }
+    return n;
+}
+
+/* query-femu pad-write-pages of namespace 1, -1 when absent, and its waf */
+static int64_t femu_pd2_query_pads(QTestState *qts, double *waf)
+{
+    QDict *rsp;
+    QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    int64_t pads = qdict_haskey(ctr, "pad-write-pages") ?
+                   qdict_get_int(ctr, "pad-write-pages") : -1;
+
+    *waf = qdict_get_double(ctr, "waf");
+    qobject_unref(rsp);
+    return pads;
+}
+
+/* query-femu media-bytes minus host-bytes of FDP handle @h */
+static uint64_t femu_pd2_handle_extra(QTestState *qts, int h)
+{
+    QDict *rsp;
+    QDict *fdp = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "fdp");
+    QList *hs = qdict_get_qlist(fdp, "handles");
+    uint64_t extra = UINT64_MAX;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(hs, e) {
+        QDict *d = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (qdict_get_int(d, "id") == h) {
+            extra = qdict_get_int(d, "media-bytes") -
+                    qdict_get_int(d, "host-bytes");
+        }
+    }
+    qobject_unref(rsp);
+    return extra;
+}
+
+/* the data of pages [0, @npages) still reads back as @pat */
+static void femu_pd2_readback(FemuCtrlState *c, QTestState *qts,
+                              uint64_t buf, int npages, uint8_t pat)
+{
+    for (int i = 0; i < npages; i++) {
+        qtest_memset(qts, buf, 0, 4096);
+        g_assert_cmphex(femu_rw(c, NVME_CMD_READ, i * (4096 / c->lba_size),
+                                buf), ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, pat);
+        g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, pat);
+    }
+}
+
+/*
+ * Line mode, 16-page blocks. @data names the case:
+ *   "read":   pd_open_read_limit=4, one LUN, gc_copyback=on. Four reads of
+ *             page 0 of the open line, then a one-page write: the FTL
+ *             seals the frontier and rewrites it, so 8 pages move, none by
+ *             copyback (C0h 248), pd_open_reclaims (256) counts 1, and
+ *             read_reclaims (40) none.
+ *   "under":  the same with three reads: nothing moves.
+ *   "master": read_reclaim_limit=4 only. The same reads queue the frontier,
+ *             and the write drops the request: nothing moves.
+ *   "closed": pd_open_read_limit=4, two channels. 31 pages fill the
+ *             channel 0 block of the frontier line and leave the channel 1
+ *             block one page short. Page 0 sits in the full block, so four
+ *             reads of it queue nothing, though its line is still open.
+ *   "pad":    pd_open_close_sec=1 at age_scale 1000 and pd_open_tiers=1.
+ *             8 pages, then 20 ms: the next read pads the other 8 pages on
+ *             the LUN first, 8 plane programs (C0h 168), so it waits 8
+ *             programs (1.6 ms), and the full block takes no open tier.
+ *             C0h 264 counts 8 pads, 272 one close, and the amplification
+ *             is (8 + 8) / 8, in C0h and in query-femu, which reports
+ *             pad-write-pages only after a pad.
+ *   "nopad":  the same without pd_open_close_sec: no pad, and the read of
+ *             the open block pays the open tier.
+ * Every case ends with overwrite passes that make collection erase the
+ * lines, then checks the mapping.
+ */
+static void femu_test_pd2(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool closed = !strcmp(mode, "closed");
+    bool pad = !strcmp(mode, "pad");
+    bool nopad = !strcmp(mode, "nopad");
+    int npages = closed ? 31 : 8;
+    int reads = !strcmp(mode, "under") ? 3 : 4;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0, rr0, or0, pp0, cb0, gc, rr, orr, pads, closes, progs, t0, t1;
+    uint64_t mapped, lost, orphans;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 32 * 4096);
+    femu_pd_write_ns(&c, qts, 0, npages, buf, list);
+
+    if (pad || nopad) {
+        g_usleep(20 * 1000);
+        pp0 = femu_c0h_field(&c, log, 168);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        progs = femu_c0h_field(&c, log, 168) - pp0;
+        t1 = femu_pd_read_ns(&c, qts, 0, buf);
+        pads = femu_c0h_field(&c, log, 264);
+        closes = femu_c0h_field(&c, log, 272);
+        g_test_message("pd2 %s: reads %" PRIu64 " %" PRIu64 " ns, %" PRIu64
+                       " pads, %" PRIu64 " closes, %" PRIu64 " programs, "
+                       "waf x1000 %" PRIu64, mode, t0, t1, pads, closes,
+                       progs, femu_c0h_field(&c, log, 0) & 0xffffffffu);
+        if (pad) {
+            g_assert_cmpuint(pads, ==, 8);
+            g_assert_cmpuint(closes, ==, 1);
+            g_assert_cmpuint(progs, ==, 8);
+            g_assert_cmpuint(t0, >=, 8 * 200000);
+            g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+            g_assert_cmpuint(t1, <, 8 * 200000);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 0) & 0xffffffffu, ==,
+                             2000);
+            g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, 8);
+            g_assert_cmpfloat(waf, ==, 2.0);
+        } else {
+            g_assert_cmpuint(pads + closes + progs, ==, 0);
+            g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 0) & 0xffffffffu, ==,
+                             1000);
+            g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, -1);
+            g_assert_cmpfloat(waf, ==, 1.0);
+        }
+    } else {
+        for (int i = 0; i < reads; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        gc0 = femu_c0h_field(&c, log, 16);
+        rr0 = femu_c0h_field(&c, log, 40);
+        or0 = femu_c0h_field(&c, log, 256);
+        cb0 = femu_c0h_field(&c, log, 248);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        /* gc_copyback is on: a refresh still reads every page */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 248), ==, cb0);
+        gc = femu_c0h_field(&c, log, 16) - gc0;
+        rr = femu_c0h_field(&c, log, 40) - rr0;
+        orr = femu_c0h_field(&c, log, 256) - or0;
+        g_test_message("pd2 %s: %" PRIu64 " open reclaims, %" PRIu64
+                       " read reclaims, %" PRIu64 " pages moved", mode, orr,
+                       rr, gc);
+        g_assert_cmpuint(rr, ==, 0);
+        if (!strcmp(mode, "read")) {
+            g_assert_cmpuint(orr, ==, 1);
+            g_assert_cmpuint(gc, ==, 8);
+        } else {
+            g_assert_cmpuint(orr, ==, 0);
+            g_assert_cmpuint(gc, ==, 0);
+        }
+        femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, npages + 1);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+    femu_pd2_readback(&c, qts, buf, npages, 0x5a);
+
+    /* three passes over the 256-page namespace make collection erase */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int p = 0; p < 256; p += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, p, 16, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 16, 0x5a);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A stream line padded and closed: one page of stream 7, then 300 ms, three
+ * times pd_open_close_sec at age_scale 10. The next request pads the 15
+ * free pages. The stream then takes a new line, and its data reads back.
+ */
+static void femu_test_pd2_stream(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4f, 4096);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101,
+                                   0, 0, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 1, 7), ==, NVME_SUCCESS);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    g_test_message("pd2 stream: %" PRIu64 " pads, %" PRIu64 " closes",
+                   femu_c0h_field(&c, log, 264), femu_c0h_field(&c, log, 272));
+    g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 15);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+    for (int i = 1; i < 8; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, i * (4096 / c.lba_size),
+                                          buf, 1, 7), ==, NVME_SUCCESS);
+    }
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 8);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 8, 0x4f);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* FDP host bytes and media bytes written, from the endurance group log */
+static void femu_pd2_fdp_bytes(FemuCtrlState *c, uint64_t log, uint64_t *hbmw,
+                               uint64_t *mbmw)
+{
+    uint8_t st[64];
+
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, st, sizeof(st));
+    *hbmw = ldq_le_p(st);
+    *mbmw = ldq_le_p(st + 16);
+}
+
+/*
+ * FDP, 16-page reclaim units. @data names the case:
+ *   "pad":     pd_open_close_sec=1, real time. Two pages through placement
+ *              0, then 1.1 s: the next request pads the other 14 pages of
+ *              the unit, moves handle 0 to a fresh unit (full RUAMW) and
+ *              logs host event 01h. MBMW grows by the pads, HBMW does not,
+ *              and only handle 0's media bytes in query-femu take them.
+ *              ERUTL stays 0: the limit counts from the first program,
+ *              not from when the handle took the unit.
+ *   "read":    pd_open_read_limit=4. Four reads of page 0 in handle 0's
+ *              open unit, then a write through placement 1: handle 0 moves
+ *              to a fresh unit (controller event 81h) and the unit is
+ *              refreshed, 2 pages, into handle 0's collection unit. Four
+ *              reads there and one more write refresh that unit too, with
+ *              no new 81h: the host never sees a collection unit.
+ *   "read-ii": the same first step on fdpsub-ii through placement 3, the
+ *              initially isolated handle that collection also writes: the
+ *              2 pages move into its fresh unit.
+ *   "quiet":   "read" with event 81h turned off for placement 0: the move
+ *              and the refresh happen, and no 81h is logged. The device
+ *              also uses the per-handle collection policy (gc_strategy=4),
+ *              whose units sit in two victim heaps.
+ */
+static void femu_test_pd2_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool pad = !strcmp(mode, "pad");
+    bool ii = !strcmp(mode, "read-ii");
+    bool quiet = !strcmp(mode, "quiet");
+    int ph = ii ? 3 : 0;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans, hbmw0, mbmw0, hbmw, mbmw, ruamw0;
+    uint64_t per_page = 4096 / 512;
+    uint16_t ruhid = 0xffff;
+    int nmapped;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6e, 4096);
+    if (quiet) {
+        femu_fdp_move_events_set(&c, log, 0, "1", false);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 2, buf, list, ph)),
+                    ==, NVME_SUCCESS);
+    femu_pd2_fdp_bytes(&c, log, &hbmw0, &mbmw0);
+    ruamw0 = femu_ruh_ruamw(&c, log, ph);
+    if (pad) {
+        g_usleep(1100 * 1000);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 14);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+        g_assert_cmpint(femu_pd2_events(&c, log, true, 0x01, &ruhid), ==, 1);
+        g_assert_cmpint(ruhid, ==, 0);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==, 0);
+        g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==,
+                         ruamw0 + 2 * per_page);
+        /* the limit counts from the first program, so ERUTL stays unset */
+        g_assert_cmpint(femu_endgrp_log(&c, NVME_LOG_FDP_CONFS, 0, log, 64),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readl(qts, log + 16 + 24), ==, 0);
+        femu_pd2_fdp_bytes(&c, log, &hbmw, &mbmw);
+        g_assert_cmpuint(hbmw, ==, hbmw0);
+        g_assert_cmpuint(mbmw - mbmw0, ==, 14 * 4096);
+        g_assert_cmpuint(femu_pd2_handle_extra(qts, 0), ==, 14 * 4096);
+        g_assert_cmpuint(femu_pd2_handle_extra(qts, 1), ==, 0);
+        nmapped = 4;
+    } else {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 50, 1, buf, list,
+                                                        1)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 40), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==,
+                        quiet ? 0 : 1);
+        if (!quiet) {
+            g_assert_cmpint(ruhid, ==, ph);
+        }
+        femu_pd2_fdp_bytes(&c, log, &hbmw, &mbmw);
+        g_assert_cmpuint(hbmw - hbmw0, ==, 4096);
+        g_assert_cmpuint(mbmw - mbmw0, ==, 4096 + 2 * 4096);
+        nmapped = 5;
+        if (!ii) {
+            /* page 0 now sits in handle 0's open collection unit */
+            for (int i = 0; i < 4; i++) {
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                                NVME_SUCCESS);
+            }
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 51, 1, buf,
+                                                            list, 1)), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 2);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 4);
+            g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid),
+                            ==, quiet ? 0 : 1);
+            nmapped = 6;
+        }
+    }
+
+    /* the handle took a fresh unit: more writes and the data are sound */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 2, 2, buf, list,
+                                                    ph)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, nmapped);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 4, 0x6e);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -32798,6 +33259,80 @@ static void femu_register_nodes(void)
             "nchs=1,ecc_step_ns=10000000,mp_read=1,pd_open_tiers=1"
     });
     qos_add_test("pd-refused", "femu", femu_test_pd_refused, NULL);
+    qos_add_test("pd2-read", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"read",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",pd_open_read_limit=4,gc_copyback=on"
+    });
+    qos_add_test("pd2-read-under", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"under",
+        .edge.extra_device_opts = FEMU_PD_GEO ",pd_open_read_limit=4"
+    });
+    qos_add_test("pd2-read-master", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"master",
+        .edge.extra_device_opts = FEMU_PD_GEO ",read_reclaim_limit=4"
+    });
+    qos_add_test("pd2-read-closed", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"closed",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=2,pd_open_read_limit=4"
+    });
+    qos_add_test("pd2-pad", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pad",
+        .edge.extra_device_opts = FEMU_PD_GEO
+            ",pd_open_tiers=1,pd_open_close_sec=1,age_scale=1000"
+    });
+    qos_add_test("pd2-nopad", "femu", femu_test_pd2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"nopad",
+        .edge.extra_device_opts = FEMU_PD_GEO ",pd_open_tiers=1,age_scale=1000"
+    });
+    qos_add_test("pd2-stream", "femu", femu_test_pd2_stream,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,streams=on,pd_open_close_sec=1,age_scale=10"
+    });
+    qos_add_test("pd2-fdp-pad", "femu", femu_test_pd2_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pad",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_close_sec=1,subsys=fdpsub"
+    });
+    qos_add_test("pd2-fdp-read", "femu", femu_test_pd2_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"read",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,subsys=fdpsub"
+    });
+    qos_add_test("pd2-fdp-quiet", "femu", femu_test_pd2_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"quiet",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,gc_strategy=4,subsys=fdpsub"
+    });
+    qos_add_test("pd2-fdp-read-ii", "femu", femu_test_pd2_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"read-ii",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pd_open_read_limit=4,subsys=fdpsub-ii"
+    });
     qos_add_test("onfi-refused", "femu", femu_test_onfi_refused, NULL);
     qos_add_test("onfi-m26", "femu", femu_test_onfi,
                  &(QOSGraphTestOptions) {

@@ -297,6 +297,9 @@ void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
                             struct ppa *new_ppa);
 int do_gc(struct ssd *ssd, bool force);
 int do_read_reclaim(struct ssd *ssd);
+uint64_t ssd_pad_line(struct ssd *ssd, struct line *line, uint64_t stime);
+void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime);
+void ssd_fdp_pd_close_aged(struct ssd *ssd, uint64_t stime);
 int do_wear_level(struct ssd *ssd);
 void ssd_pace_program(struct ssd *ssd);
 void ssd_pace_tick(struct ssd *ssd);

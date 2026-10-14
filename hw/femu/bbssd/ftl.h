@@ -227,6 +227,9 @@ struct ssdparams {
     int pd_open_tiers;
     bool pd_open_age;
     int pd_wl_pages;  /* pages per wordline of the edge term */
+    /* program disturb actions; 0 = off (see do_read_reclaim(), ssd_pd_pad()) */
+    int pd_open_read_limit;
+    int pd_open_close_sec;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -254,7 +257,10 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
-    /* first program since the line was freed, in ns; only with pd_open_age */
+    /*
+     * First program since the line was freed, in ns; only with pd_open_age
+     * or pd_open_close_sec.
+     */
     uint64_t open_time;
     /* order in which lines filled; the FIFO policy's key */
     uint64_t close_seq;
@@ -479,6 +485,13 @@ struct cmt_slot {
     bool dirty; /* dirty TP: eviction costs a write-back */
 };
 
+/* why the read path queued read_reclaim_line */
+enum ssd_reclaim_why {
+    RECLAIM_READS = 0,  /* read_reclaim_limit */
+    RECLAIM_AGE,        /* retention_limit_sec */
+    RECLAIM_OPEN,       /* pd_open_read_limit: reads of an open block */
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -571,7 +584,7 @@ struct ssd {
      * is (host + relocated) / host.
      */
     struct line *read_reclaim_line; /* line the read path asked to rewrite */
-    bool reclaim_by_age;            /* that line was queued by age, not reads */
+    enum ssd_reclaim_why reclaim_why; /* why that line was queued */
     uint64_t read_reclaims;         /* lines rewritten for read stress */
     uint64_t overworn_blocks;       /* in service past their erase limit */
     uint64_t wl_credit;             /* host pages wear levelling may spend */
@@ -605,6 +618,9 @@ struct ssd {
     QemuMutex wear_lock;
     uint64_t wear_pe_total;         /* sum of every block's erase limit */
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
+    uint64_t pd_open_reclaims;      /* lines rewritten for open-block reads */
+    uint64_t pd_pad_pages;          /* pages programmed to close open lines */
+    uint64_t pd_pad_closes;         /* lines or units those pads closed */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */

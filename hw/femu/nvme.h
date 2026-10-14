@@ -1230,7 +1230,10 @@ typedef struct FemuStatsLog {
     uint64_t    pace_lines;       /* lines paced collection finished */
     uint64_t    pace_takeovers;   /* paced lines a forced pass finished */
     uint64_t    gc_copyback_pages; /* pages moved on their die, also at 16 */
-    uint8_t     rsvd256[256];
+    uint64_t    pd_open_reclaims; /* lines rewritten for open-block reads */
+    uint64_t    pd_pad_pages;     /* pages programmed to close open lines */
+    uint64_t    pd_pad_closes;    /* lines or units those pads closed */
+    uint8_t     rsvd280[232];
 } FemuStatsLog;
 
 /*
@@ -2102,6 +2105,8 @@ typedef struct BbCtrlParams {
     int pd_edge_tiers;        /* ECC tiers for a read of those wordlines */
     int pd_open_tiers;        /* ECC tiers, read of a part-programmed block */
     bool pd_open_age;         /* data age counts from a line's first program */
+    int pd_open_read_limit;   /* reads of an open block before a refresh */
+    int pd_open_close_sec;    /* seconds a frontier stays open before a pad */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -2980,6 +2985,8 @@ void nvme_fdp_note_media_realloc(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
                                  uint64_t lba);
 void nvme_fdp_note_ruh_modified(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
                                 uint16_t ruhid);
+void nvme_fdp_note_ru_time_limit(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                 uint16_t ruhid);
 void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
                            const NvmeFdpEvent *ev);
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,
@@ -3032,6 +3039,8 @@ uint64_t ssd_plane_ops(struct ssd *ssd, int op);
 void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,
                      uint64_t *destages);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
+void ssd_pd_stats(struct ssd *ssd, uint64_t *reclaims, uint64_t *pads,
+                  uint64_t *closes);
 
 /* write buffer: host pages seen and the pages it answered without the media */
 uint64_t ssd_buffer_reads(struct ssd *ssd);

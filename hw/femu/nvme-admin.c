@@ -2069,6 +2069,7 @@ typedef struct FemuMediaStats {
     uint64_t wl_relocations;
     uint64_t wl_pages;
     uint64_t gc_copyback_pages;
+    uint64_t pd[3];             /* open reclaims, pad pages, pad closes */
     uint64_t pace[3];           /* copies, lines, takeovers */
     uint64_t partial_page_writes;
     uint64_t plane_ops[3];      /* read, program, erase */
@@ -2130,9 +2131,18 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->nand_pages += ssd_nand_write_pages(ns->ssd);
         ssd_hybrid_stats(ns->ssd, &st->hybrid_switches, &st->hybrid_full,
                          &st->hybrid_erases);
-        st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
-                            ssd_gc_write_pages(ns->ssd)) *
-                           (uint64_t)ssd_page_size(ns->ssd);
+        {
+            uint64_t r, pads, cl;
+
+            ssd_pd_stats(ns->ssd, &r, &pads, &cl);
+            st->pd[0] += r;
+            st->pd[1] += pads;
+            st->pd[2] += cl;
+            /* pad pages are media writes too */
+            st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
+                                ssd_gc_write_pages(ns->ssd) + pads) *
+                               (uint64_t)ssd_page_size(ns->ssd);
+        }
         /*
          * One walk of the media, not two: this is a scan of every block on
          * the device, and every log page that carries the counters pays it.
@@ -2200,7 +2210,8 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
      */
     if (st.host_pages) {
         stats.waf_x1000 = cpu_to_le32((uint32_t)
-            (((st.nand_pages + st.gc_pages) * 1000ull) / st.host_pages));
+            (((st.nand_pages + st.gc_pages + st.pd[1]) * 1000ull) /
+             st.host_pages));
     }
     stats.host_write_pages = cpu_to_le64(st.host_pages);
     stats.gc_write_pages = cpu_to_le64(st.gc_pages);
@@ -2236,6 +2247,9 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.pace_lines = cpu_to_le64(st.pace[1]);
     stats.pace_takeovers = cpu_to_le64(st.pace[2]);
     stats.gc_copyback_pages = cpu_to_le64(st.gc_copyback_pages);
+    stats.pd_open_reclaims = cpu_to_le64(st.pd[0]);
+    stats.pd_pad_pages = cpu_to_le64(st.pd[1]);
+    stats.pd_pad_closes = cpu_to_le64(st.pd[2]);
     *log = stats;
 }
 

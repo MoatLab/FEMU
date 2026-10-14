@@ -624,6 +624,68 @@ the wear and close-time age only. A copyback needs a source with no ECC
 cost, so a page with a program disturb term moves off chip. The model
 does not carry error tiers to the copyback destination.
 
+### Program disturb actions
+
+Two more opt-in properties add the firmware actions of the model. They
+apply to bbssd and CSD, and to FDP reclaim units. Both are 0 (off) by
+default, and neither needs `ecc_step_ns`.
+
+```text
+ trigger                                  action
+ ---------------------------------------  ----------------------------------
+ a read of a part-programmed block takes  queue the line; the next Write
+   its read count to pd_open_read_limit     seals the frontier that fills it
+                                            and rewrites the line
+ a frontier stays open pd_open_close_sec  program pad pages into its free
+   after its first program                  pages and close it
+```
+
+- **Open-block read limit.** `pd_open_read_limit` is a read limit for a
+  block with `0 < wp < pgs_per_blk`. It must not be above a non-zero
+  `read_reclaim_limit`. The read path queues the line in the same single
+  slot as `read_reclaim_limit` and `retention_limit_sec`. It is checked
+  first, and it takes over a request already queued for the same line.
+  The next Write command serves the slot, as on master. If a write
+  pointer still fills the line, the FTL seals its free pages with no
+  program, as a stream release does. It then rewrites the line with no
+  copyback and counts it in C0h `pd_open_reclaims`. On master, a request
+  for a line under a write pointer is dropped.
+- **Pad and close.** `pd_open_close_sec` limits how long a frontier stays
+  open after its first program (`line.open_time`, also set for this
+  property). The time is device time, so `age_scale` speeds it up. When
+  the FTL takes a request, it checks every write pointer: data, hot,
+  stream and stream collection. For each line past the limit, it programs
+  every free page with pad data and closes the line into the victim queue.
+  The data pointer takes a new line at once. The others take one at their
+  next write.
+
+```text
+ bb_ftl_process_req()          (every request, inside the streams lock)
+   pd_open_close_sec set?
+     for each write pointer with a line:
+       age(open_time) >= limit, not at the high watermark, 2 free lines
+         for each free page: PG_FREE -> PG_INVALID, wp++, ipc++,
+                             one single-plane program at the request time
+         close the line --> victim queue; C0h pd_pad_pages, pd_pad_closes
+```
+
+A pad is a NAND program with no data and no mapping. It counts in the
+plane programs and the energy, in the write amplification and in the
+media bytes. It does not count as a host write. The pads are not added to
+the latency of the request that finds the old line. They hold the LUNs,
+so that request and later ones can wait behind them. After the pad the
+blocks are full, so their reads no longer pay `pd_open_tiers`.
+
+The check runs only when the FTL takes a request. A device that gets no
+request pads nothing, as a device that gets no read refreshes nothing for
+age. The single queue slot is best effort: while one line waits, reads of
+other lines queue nothing. Write and the write phase of Copy serve the
+slot. In line mode, Write Zeroes and Flush do not. Under FDP, Write Zeroes
+without Deallocate serves it too.
+KV, ZNS, OCSSD and NoSSD namespaces, `mapping=fast` and `mapping=hybrid`
+are refused. The ZNS form of this action, a finish recommended limit or a
+zone active excursion, is not modelled.
+
 ## From operations to a completion time
 
 ### The per-operation rule

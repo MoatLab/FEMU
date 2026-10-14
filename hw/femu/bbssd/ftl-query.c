@@ -213,6 +213,7 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->host_pages = ssd->host_write_pages;
     q->nand_pages = ssd->nand_write_pages;
     q->gc_pages = ssd->gc_write_pages;
+    q->pad_pages = ssd->pd_pad_pages;
     q->erases = ssd->total_erases;
 
     q->fdp = ssd->fdp_enabled;

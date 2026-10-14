@@ -12,7 +12,7 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 4 | Write amplification factor, scaled by 1000: (pages programmed + pages relocated by garbage collection) x 1000 / pages the host asked to program |
+| 0 | 4 | Write amplification factor, scaled by 1000: (pages programmed + pages relocated by garbage collection + pad pages at offset 264) x 1000 / pages the host asked to program |
 | 8 | 8 | Pages the host asked to program |
 | 16 | 8 | Pages relocated by garbage collection |
 | 24 | 8 | Pages actually programmed |
@@ -44,8 +44,11 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 232 | 8 | Lines paced collection finished, freed or retired |
 | 240 | 8 | Paced lines the forced pass or the budget finished in one pass |
 | 248 | 8 | Pages collection moved by copyback on their die (`gc_copyback`; also counted at offset 16) |
+| 256 | 8 | Lines (reclaim units under FDP) rewritten for the open-block read limit (`pd_open_read_limit`); not counted at offset 40 |
+| 264 | 8 | Pages programmed with pad data to close lines or units left open (`pd_open_close_sec`) |
+| 272 | 8 | Lines or units those pads closed |
 
-Bytes 4-7 and 256-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 280-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

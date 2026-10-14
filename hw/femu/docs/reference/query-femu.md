@@ -74,7 +74,7 @@ A `bbssd` entry has these members:
 | Member | Content |
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
-| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, and `waf` |
+| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `fdp` | with FDP only: see [FDP namespaces](#fdp-namespaces) |
@@ -83,7 +83,8 @@ A `bbssd` entry has these members:
 
 The page counters are the counters of [log page C0h](log-pages-and-counters.md#vendor-log-page-c0h)
 for one namespace. C0h adds them over the namespaces of the controller.
-`waf` is (`nand-write-pages` + `gc-write-pages`) / `host-write-pages` as a
+`waf` is (`nand-write-pages` + `gc-write-pages` + `pad-write-pages`) /
+`host-write-pages` as a
 real number, and it is absent until the host writes a page. C0h reports the
 same value multiplied by 1000 as an integer.
 
@@ -122,7 +123,8 @@ has these members:
 `host-bytes` counts the NAND pages that the host wrote through the
 handle, in bytes, so a 512-byte write on a 4 KiB page adds 4096.
 `media-bytes` adds the data that garbage collection moved out of the
-handle's units. Both keep their values when a controller replaces another
+handle's units, and the pad pages that closed its units
+(`pd_open_close_sec`). Both keep their values when a controller replaces another
 on the same subsystem.
 The FDP Statistics log (log page 22h) reports the sum of each counter over
 the handles. Its fields are Host Bytes with Metadata Written (HBMW) and
@@ -132,6 +134,8 @@ Media Bytes with Metadata Written (MBMW). The counters stop at the largest 64-bi
  host write via handle h  --> host-bytes[h] += n   media-bytes[h] += n
  GC moves m bytes out of
  a unit that h wrote      -->                      media-bytes[h] += m
+ p pad bytes close a unit
+ that h owns              -->                      media-bytes[h] += p
  log page 22h: HBMW = sum(host-bytes)   MBMW = sum(media-bytes)
 ```
 

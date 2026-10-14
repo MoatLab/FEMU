@@ -1525,13 +1525,27 @@ static bool femu_onfi_on(FemuCtrl *n)
     return n->bb_params.onfi_mode != -1;
 }
 
-/* any program disturb property set, a negative one included */
-static bool femu_pd_on(FemuCtrl *n)
+/* a program disturb read term set, a negative one included */
+static bool femu_pd_terms_on(FemuCtrl *n)
 {
     const BbCtrlParams *bp = &n->bb_params;
 
     return bp->pd_edge_wls || bp->pd_edge_tiers || bp->pd_open_tiers ||
            bp->pd_open_age;
+}
+
+/* a program disturb action set: the open-block read limit or the pad */
+static bool femu_pd_actions_on(FemuCtrl *n)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+
+    return bp->pd_open_read_limit || bp->pd_open_close_sec;
+}
+
+/* any program disturb property set, a negative one included */
+static bool femu_pd_on(FemuCtrl *n)
+{
+    return femu_pd_terms_on(n) || femu_pd_actions_on(n);
 }
 
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
@@ -1589,6 +1603,15 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             ns_modes[i] != FEMU_CSD_MODE && ns_modes[i] != FEMU_KVSSD_MODE) {
             error_setg(errp, "femu: the pd_* program disturb properties need "
                        "bbssd, CSD or KV namespaces; namespace %u is not one",
+                       i + 1);
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        /* KV has no read reclaim and advances its write pointer itself */
+        if (femu_pd_actions_on(n) && ns_modes[i] == FEMU_KVSSD_MODE) {
+            error_setg(errp, "femu: pd_open_read_limit and pd_open_close_sec "
+                       "need bbssd or CSD namespaces; namespace %u is KV",
                        i + 1);
             g_free(ns_sizes);
             g_free(ns_modes);
@@ -2576,6 +2599,24 @@ static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
                    "must not be negative");
         return false;
     }
+    if (bp->pd_open_read_limit < 0 || bp->pd_open_close_sec < 0) {
+        error_setg(errp, "femu: pd_open_read_limit and pd_open_close_sec "
+                   "must not be negative");
+        return false;
+    }
+    if (bp->read_reclaim_limit > 0 &&
+        bp->pd_open_read_limit > bp->read_reclaim_limit) {
+        error_setg(errp, "femu: pd_open_read_limit must not be above "
+                   "read_reclaim_limit");
+        return false;
+    }
+    /* a log-block scheme keeps state of its own on the LOG pointer's line */
+    if (femu_pd_actions_on(n) && bp->mapping_scheme &&
+        femu_mapping_name_uses_log_class(bp->mapping_scheme)) {
+        error_setg(errp, "femu: pd_open_read_limit and pd_open_close_sec "
+                   "are not supported with mapping=%s", bp->mapping_scheme);
+        return false;
+    }
     if (bp->pd_edge_tiers > FEMU_ECC_MAX_TIERS ||
         bp->pd_open_tiers > FEMU_ECC_MAX_TIERS) {
         error_setg(errp, "femu: pd_edge_tiers and pd_open_tiers must be at "
@@ -2587,8 +2628,8 @@ static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
                    "together");
         return false;
     }
-    if (bp->ecc_step_ns <= 0) {
-        error_setg(errp, "femu: the pd_* program disturb properties need "
+    if (femu_pd_terms_on(n) && bp->ecc_step_ns <= 0) {
+        error_setg(errp, "femu: the pd_* program disturb read terms need "
                    "ecc_step_ns above 0");
         return false;
     }
@@ -3472,6 +3513,10 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("pd_edge_tiers", FemuCtrl, bb_params.pd_edge_tiers, 0),
     DEFINE_PROP_INT32("pd_open_tiers", FemuCtrl, bb_params.pd_open_tiers, 0),
     DEFINE_PROP_BOOL("pd_open_age", FemuCtrl, bb_params.pd_open_age, false),
+    DEFINE_PROP_INT32("pd_open_read_limit", FemuCtrl,
+                      bb_params.pd_open_read_limit, 0),
+    DEFINE_PROP_INT32("pd_open_close_sec", FemuCtrl,
+                      bb_params.pd_open_close_sec, 0),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

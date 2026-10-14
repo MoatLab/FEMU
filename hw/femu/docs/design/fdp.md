@@ -349,7 +349,7 @@ in 22h.
 | Counter | Grows by | Where |
 | --- | --- | --- |
 | HBMW (host bytes with metadata written) | bytes a Write, Copy or Write Zeroes without Deallocate actually programmed | `fdp_count_write()` |
-| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC | `fdp_count_write()`, `do_gc_fdp_style()` |
+| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC, plus pad bytes (`pd_open_close_sec`) | `fdp_count_write()`, `do_gc_fdp_style()`, `fdp_pd_leave_ru()` |
 | MBE (media bytes erased) | bytes of every block erased by GC | `do_gc_fdp_style()` |
 
 The ratio MBMW / HBMW is the write amplification of the endurance group.
@@ -369,7 +369,9 @@ Each event carries the Timestamp feature's current value.
 | 3h Invalid Placement Identifier | host | a placed write (Write, Copy, Write Zeroes) on a bbssd namespace has DTYPE 2 and a DSPEC that is not a valid PID; checked against the event filter of placement handle 0; other modes never raise it |
 | 80h Media Reallocated | controller | a collection or refresh pass moved pages of a unit of the Initially Isolated handle; one event per pass, split around each 81h the pass causes, also for a pass that stops part way; checked against that handle's filter |
 | 81h Implicitly Modified Reclaim Unit Handle | controller | a move, not the host, gave the Initially Isolated handle a new unit: the moves filled its active unit and a free unit follows, or the pass takes a unit for a handle left with none; checked against that handle's filter |
-| 1h, 2h | | accepted by the event filter, never generated |
+| 1h Reclaim Unit Active Time Limit Exceeded | host | `pd_open_close_sec`: the controller padded a handle's active unit and gave the handle a fresh one; LV, NSIDV and PIV as for 81h |
+| 81h, program disturb | controller | `pd_open_read_limit`: the controller took a handle's active unit away to refresh it; this one also for a Persistently Isolated handle |
+| 2h | | accepted by the event filter, never generated |
 
 A Persistently Isolated handle moves its data into a collection unit that
 the host never sees, so its moves log no event. A host write that fills a
@@ -515,6 +517,30 @@ so MBMW can be below HBMW when the buffer absorbs rewrites. RUAMW drops
 when a page reaches its unit. With a buffer, each unit counts its own
 host bytes for RUAMW, for written back and direct pages alike. The
 admin commands above charge no modelled time for their write-back.
+
+The program disturb actions work on units too
+([NAND timing](nand-timing.md#program-disturb-actions)). A unit today is one
+line, so its open time is the open time of that line.
+
+```
+ pd_open_read_limit: unit U queued for a part-programmed block
+   next write --> U a handle's curr_ru --> fresh unit to the handle first,
+                                           U retired with its free pages
+                                           unprogrammed; 81h (handle)
+              --> U a handle's gc_ru   --> U retired, gc_ru cleared; no event
+              --> then the refresh above; C0h pd_open_reclaims + 1
+ pd_open_close_sec: curr_ru or gc_ru open past the limit, at a request
+   --> its free pages padded, U retired, MBMW + pad bytes
+   --> curr_ru: fresh unit to the handle; host event 1h (handle)
+   --> ERUTL stays 0: the limit counts from the first program
+```
+
+The fresh unit is taken before anything changes. With no free unit to
+spare, or a group at the high watermark, nothing changes. The handle's
+`curr_ru`, `rus[rg]` and the unit the host is shown change together. The
+configuration descriptor keeps ERUTL at 0 (not reported). ERUTL times a
+unit from when the handle takes it, but the limit here counts from the
+first program, so an empty unit is never padded.
 Collection that frees a queued unit first drops the request, and the
 counters do not move. A collection of a queued unit does not use copyback.
 

@@ -91,6 +91,7 @@ DEVICES = [
                 "props": [
                     "ecc_step_ns", "ecc_retention_sec", "pd_edge_wls",
                     "pd_edge_tiers", "pd_open_tiers", "pd_open_age",
+                    "pd_open_read_limit", "pd_open_close_sec",
                     "pe_cycles_rated",
                     "nand_bad_blocks", "blk_pe_limit", "blk_pe_spread",
                     "blk_pe_seed", "spare_lines", "energy_read_nj",

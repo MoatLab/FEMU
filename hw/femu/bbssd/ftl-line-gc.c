@@ -254,6 +254,127 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
     memset(wp, 0, sizeof(*wp));
 }
 
+/*
+ * Program every free page of @line with pad data and no mapping, so its
+ * blocks leave the part-programmed state. Each pad is one program on its
+ * LUN from @stime; the pages count as invalid. Returns the pages padded.
+ */
+uint64_t ssd_pad_line(struct ssd *ssd, struct line *line, uint64_t stime)
+{
+    struct ssdparams *sp = &ssd->sp;
+    struct nand_cmd pad = {
+        .type = GC_IO,
+        .cmd = NAND_WRITE,
+        .stime = stime,
+    };
+    struct ppa ppa = { .ppa = 0 };
+    uint64_t pads = 0;
+
+    ppa.g.blk = line->id;
+    for (int ch = 0; ch < sp->nchs; ch++) {
+        ppa.g.ch = ch;
+        for (int lun = 0; lun < sp->luns_per_ch; lun++) {
+            ppa.g.lun = lun;
+            for (int pl = 0; pl < sp->pls_per_lun; pl++) {
+                ppa.g.pl = pl;
+                struct nand_block *blk = get_blk(ssd, &ppa);
+
+                for (int pg = 0; pg < sp->pgs_per_blk; pg++) {
+                    ppa.g.pg = pg;
+                    if (get_pg(ssd, &ppa)->status != PG_FREE) {
+                        continue;
+                    }
+                    get_pg(ssd, &ppa)->status = PG_INVALID;
+                    blk->ipc++;
+                    blk->wp++;
+                    line->ipc++;
+                    ssd_advance_status(ssd, &ppa, &pad);
+                    pads++;
+                }
+            }
+        }
+    }
+    ssd->pd_pad_pages += pads;
+    if (pads) {
+        ssd->pd_pad_closes++;
+    }
+    return pads;
+}
+
+/* the write pointer that fills @line, or NULL */
+static struct write_pointer *ssd_line_pointer(struct ssd *ssd,
+                                              struct line *line)
+{
+    if (ssd->wp.curline == line) {
+        return &ssd->wp;
+    }
+    if (ssd->hot_wp.curline == line) {
+        return &ssd->hot_wp;
+    }
+    if (ssd->log_wp.curline == line) {
+        return &ssd->log_wp;
+    }
+    if (ssd->stream_gc_wp.curline == line) {
+        return &ssd->stream_gc_wp;
+    }
+    for (int i = 0; i < (int)ARRAY_SIZE(ssd->stream_wp); i++) {
+        if (ssd->stream_wp[i].curline == line) {
+            return &ssd->stream_wp[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Close the line @wpp fills: with @pad its free pages are programmed first,
+ * otherwise they are sealed with no program. The line goes to the victim
+ * queue. The data pointer takes a new line at once, as after a fill; the
+ * others take one at their next write.
+ */
+static void ssd_pd_close_pointer(struct ssd *ssd, struct write_pointer *wpp,
+                                 bool pad, uint64_t stime)
+{
+    if (pad) {
+        ssd_pad_line(ssd, wpp->curline, stime);
+    }
+    ssd_stream_close_pointer(ssd, wpp);
+    if (wpp == &ssd->wp) {
+        ssd_out_of_lines(ssd);
+    }
+}
+
+/*
+ * Pad and close each line that has stayed open pd_open_close_sec since its
+ * first program. Firmware does this on a timer; here it runs when the FTL
+ * takes a request, so a device that gets none pads nothing.
+ */
+void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
+{
+    uint64_t limit = (uint64_t)ssd->sp.pd_open_close_sec *
+                     NANOSECONDS_PER_SECOND;
+    struct write_pointer *wps[4 + ARRAY_SIZE(ssd->stream_wp)];
+    int n = 0;
+
+    wps[n++] = &ssd->wp;
+    wps[n++] = &ssd->hot_wp;
+    wps[n++] = &ssd->stream_gc_wp;
+    for (int i = 0; i < (int)ARRAY_SIZE(ssd->stream_wp); i++) {
+        wps[n++] = &ssd->stream_wp[i];
+    }
+    for (int i = 0; i < n; i++) {
+        struct line *line = wps[i]->curline;
+
+        if (!line || ssd_data_age_ns(ssd, line->open_time, stime) < limit) {
+            continue;
+        }
+        /* the new line the data pointer takes must not starve collection */
+        if (should_gc_high(ssd) || ssd->lm.free_line_cnt < 2) {
+            return;
+        }
+        ssd_pd_close_pointer(ssd, wps[i], true, stime);
+    }
+}
+
 void ssd_release_stream(struct ssd *ssd, unsigned slot)
 {
     ssd_stream_close_pointer(ssd, &ssd->stream_wp[slot]);
@@ -469,7 +590,8 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
     line = get_line(ssd, ppa);
     ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
     line->vpc++;
-    if (ssd->sp.pd_open_age && !line->open_time) {
+    if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
+        !line->open_time) {
         line->open_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 }
@@ -1005,7 +1127,7 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
     /* what mark_line_free() resets, without putting the line back */
     if (ssd->read_reclaim_line == line) {
         ssd->read_reclaim_line = NULL;
-        ssd->reclaim_by_age = false;
+        ssd->reclaim_why = RECLAIM_READS;
     }
     line->ipc = 0;
     line->vpc = 0;
@@ -1073,7 +1195,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
      */
     if (ssd->read_reclaim_line == line) {
         ssd->read_reclaim_line = NULL;
-        ssd->reclaim_by_age = false;
+        ssd->reclaim_why = RECLAIM_READS;
     }
 
     line->ipc = 0;
@@ -1353,7 +1475,8 @@ int do_gc(struct ssd *ssd, bool force)
 int do_read_reclaim(struct ssd *ssd)
 {
     struct line *line = ssd->read_reclaim_line;
-    bool by_age;
+    enum ssd_reclaim_why why;
+    struct write_pointer *wpp;
 
     if (!line) {
         return -1;
@@ -1369,8 +1492,18 @@ int do_read_reclaim(struct ssd *ssd)
     }
 
     ssd->read_reclaim_line = NULL;
-    by_age = ssd->reclaim_by_age;
-    ssd->reclaim_by_age = false;
+    why = ssd->reclaim_why;
+    ssd->reclaim_why = RECLAIM_READS;
+
+    /*
+     * Reads of an open block usually hit the line a write pointer still
+     * fills. Seal its free pages, as a stream release does, so the line can
+     * be rewritten now: they would only take new data into a stressed block.
+     */
+    if (why == RECLAIM_OPEN && !line->pos &&
+        (wpp = ssd_line_pointer(ssd, line))) {
+        ssd_pd_close_pointer(ssd, wpp, false, 0);
+    }
 
     /*
      * A heavily read line is usually full, and invalidating the first page of a
@@ -1394,8 +1527,10 @@ int do_read_reclaim(struct ssd *ssd)
         return -1;
     }
     line->reclaiming = false;
-    if (by_age) {
+    if (why == RECLAIM_AGE) {
         ssd->retention_refreshes++;
+    } else if (why == RECLAIM_OPEN) {
+        ssd->pd_open_reclaims++;
     } else {
         ssd->read_reclaims++;
     }

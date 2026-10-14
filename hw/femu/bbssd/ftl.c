@@ -247,7 +247,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
 /*
  * Write-amplification factor scaled by 1000, so it needs no floating point on
- * the read path: pages written to NAND over pages the host wrote. Reads 1000
+ * the read path: pages written to NAND, pad pages included, over pages the
+ * host wrote. Reads 1000
  * (a factor of 1.0) before the host has written anything.
  *
  * The denominator is what the host wrote, not what reached the media, so a
@@ -258,7 +259,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 uint32_t ssd_waf_x1000(struct ssd *ssd)
 {
     uint64_t host = ssd->host_write_pages;
-    uint64_t total = ssd->nand_write_pages + ssd->gc_write_pages;
+    uint64_t total = ssd->nand_write_pages + ssd->gc_write_pages +
+                     ssd->pd_pad_pages;
 
     if (host == 0) {
         return 1000;
@@ -396,6 +398,15 @@ static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
 uint64_t ssd_read_reclaims(struct ssd *ssd)
 {
     return ssd->read_reclaims;
+}
+
+/* the program disturb actions: open-block refreshes, pad pages, pad closes */
+void ssd_pd_stats(struct ssd *ssd, uint64_t *reclaims, uint64_t *pads,
+                  uint64_t *closes)
+{
+    *reclaims = ssd->pd_open_reclaims;
+    *pads = ssd->pd_pad_pages;
+    *closes = ssd->pd_pad_closes;
 }
 
 static void ssd_wear_lock(struct ssd *ssd)
@@ -693,6 +704,14 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 
     if (n->streams) {
         qemu_mutex_lock(&n->streams_lock);
+    }
+    /* close frontiers left open too long before this request adds to them */
+    if (ssd->sp.pd_open_close_sec) {
+        if (ssd->fdp_enabled) {
+            ssd_fdp_pd_close_aged(ssd, req->stime);
+        } else {
+            ssd_pd_close_aged(ssd, req->stime);
+        }
     }
     switch (req->cmd.opcode) {
     case NVME_CMD_FLUSH:

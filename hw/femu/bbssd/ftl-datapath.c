@@ -351,6 +351,23 @@ static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
                                 uint64_t stime)
 {
     struct ssdparams *spp = &ssd->sp;
+    struct nand_block *blk = get_blk(ssd, ppa);
+
+    /*
+     * A block that is only part programmed takes read stress worse than a
+     * full one, so firmware refreshes it at a lower read count. Checked
+     * first: it is the lower limit. It also takes over a request already
+     * queued for the same line, which only a refresh for this reason may
+     * take out of a write pointer.
+     */
+    if (spp->pd_open_read_limit &&
+        (!ssd->read_reclaim_line ||
+         ssd->read_reclaim_line == get_line(ssd, ppa)) &&
+        blk->wp > 0 && blk->wp < spp->pgs_per_blk &&
+        blk->read_cnt >= (uint64_t)spp->pd_open_read_limit) {
+        ssd->read_reclaim_line = get_line(ssd, ppa);
+        ssd->reclaim_why = RECLAIM_OPEN;
+    }
 
     /*
      * Enough reads against this block to be worth refreshing the line it
@@ -360,9 +377,9 @@ static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
      * is the rate limit.
      */
     if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
-        get_blk(ssd, ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
+        blk->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
         ssd->read_reclaim_line = get_line(ssd, ppa);
-        ssd->reclaim_by_age = false;
+        ssd->reclaim_why = RECLAIM_READS;
     }
 
     /*
@@ -379,7 +396,7 @@ static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
 
         if (ssd_data_age_ns(ssd, aged->close_time, stime) >= limit) {
             ssd->read_reclaim_line = aged;
-            ssd->reclaim_by_age = true;
+            ssd->reclaim_why = RECLAIM_AGE;
         }
     }
 }

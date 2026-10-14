@@ -519,10 +519,14 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     ctr->nand_write_pages = q->nand_pages;
     ctr->gc_write_pages = q->gc_pages;
     ctr->block_erases = q->erases;
+    if (q->pad_pages) {
+        ctr->has_pad_write_pages = true;
+        ctr->pad_write_pages = q->pad_pages;
+    }
     if (q->host_pages) {
         ctr->has_waf = true;
-        ctr->waf = ((double)q->nand_pages + (double)q->gc_pages) /
-                   (double)q->host_pages;
+        ctr->waf = ((double)q->nand_pages + (double)q->gc_pages +
+                    (double)q->pad_pages) / (double)q->host_pages;
     }
     info->counters = ctr;
 

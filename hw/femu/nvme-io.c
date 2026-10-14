@@ -2151,6 +2151,25 @@ void nvme_fdp_note_ruh_modified(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
     nvme_fdp_record_event(n, endgrp, false, &e);
 }
 
+/*
+ * Report that the controller moved handle @ruhid in group @rg to a new unit
+ * because its unit stayed open too long (pd_open_close_sec): host event
+ * 01h, Reclaim Unit Active Time Limit Exceeded.
+ */
+void nvme_fdp_note_ru_time_limit(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
+                                 uint16_t ruhid)
+{
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+    NvmeFdpEvent e = { .type = FDP_EVT_RU_ATL_EXCEEDED };
+
+    if (!nvme_fdp_event_enabled(endgrp, &endgrp->fdp.ruhs[ruhid],
+                                FDP_EVT_RU_ATL_EXCEEDED)) {
+        return;
+    }
+    nvme_fdp_ctrl_event_loc(ns, rg, ruhid, &e);
+    nvme_fdp_record_event(n, endgrp, true, &e);
+}
+
 /* A handle with no media behind it leaves its unit by starting it afresh */
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
 {

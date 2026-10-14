@@ -496,7 +496,8 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
     line = get_line(ssd, ppa);
     ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
     line->vpc++;
-    if (ssd->sp.pd_open_age && !line->open_time) {
+    if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
+        !line->open_time) {
         line->open_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 
@@ -1121,7 +1122,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     /* a refresh queued for this unit has nothing left to move */
     if (ssd->read_reclaim_line && ssd->read_reclaim_line->my_ru == ru) {
         ssd->read_reclaim_line = NULL;
-        ssd->reclaim_by_age = false;
+        ssd->reclaim_why = RECLAIM_READS;
     }
 
     fdp_set_ru_write_pointer(ssd, ru);
@@ -1303,6 +1304,112 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                           copyback);
 }
 
+/* the first program in @ru since it was freed, 0 if none */
+static uint64_t fdp_ru_open_time(FemuReclaimUnit *ru)
+{
+    uint64_t t = 0;
+
+    for (int i = 0; i < ru->n_lines; i++) {
+        uint64_t o = ru->lines[i]->open_time;
+
+        if (o && (!t || o < t)) {
+            t = o;
+        }
+    }
+    return t;
+}
+
+/*
+ * Take @ru out of the frontier of the handle that writes it, with no free
+ * unit the controller cannot spare. A host frontier gets a fresh unit, and
+ * the host is told why: event 01h after a pad (@pad, the active time limit),
+ * 81h otherwise. A collection frontier is dropped; fdp_gc_frontier() takes a
+ * new one when collection next needs it. With @pad the free pages are
+ * programmed first; without, they stay free, as a handle update leaves them.
+ * The unit is then retired like a full one. Returns false if nothing changed.
+ */
+static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
+                            uint64_t stime)
+{
+    struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
+    uint16_t rg = ru->rgidx;
+    FemuRuHandle *host = NULL;
+    FemuRuHandle *gc = NULL;
+    FemuReclaimUnit *fresh = NULL;
+
+    for (int i = 0; i < (int)ssd->nruhs; i++) {
+        if (ssd->ruhs[i].curr_ru == ru) {
+            host = &ssd->ruhs[i];
+        } else if (ssd->ruhs[i].gc_ru == ru) {
+            gc = &ssd->ruhs[i];
+        }
+    }
+    if ((!host && !gc) || rm->free_ru_cnt < 2 ||
+        should_gc_high_fdp_style(ssd) >= 0) {
+        return false;
+    }
+    if (host) {
+        fresh = fdp_get_new_ru(ssd, rg, host->ruhid);
+        if (!fresh) {
+            return false;
+        }
+    }
+    if (pad) {
+        uint64_t pads = 0;
+        uint64_t bytes;
+
+        for (int i = 0; i < ru->n_lines; i++) {
+            pads += ssd_pad_line(ssd, ru->lines[i], stime);
+        }
+        ru->ipc = 0;
+        for (int i = 0; i < ru->n_lines; i++) {
+            ru->ipc += ru->lines[i]->ipc;
+        }
+        /* pads are media writes: MBMW counts them, HBMW does not */
+        bytes = pads * ssd->sp.secsz * ssd->sp.secs_per_pg;
+        nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, bytes);
+        nvme_fdp_stat_inc(&ru->ruh->mbmw, bytes);
+        nvme_fdp_stat_inc(&ru->ruh->ruh->mbmw, bytes);
+    }
+    fdp_retire_ru(ssd, ru);
+    if (gc) {
+        gc->gc_ru = NULL;
+        return true;
+    }
+    host->rus[rg] = fresh;
+    host->curr_ru = fresh;
+    host->ruh->rus[rg] = fresh->nvme_ru;
+    if (pad) {
+        nvme_fdp_note_ru_time_limit(ssd->n, ssd->ns, rg, host->ruhid);
+    } else {
+        nvme_fdp_note_ruh_modified(ssd->n, ssd->ns, rg, host->ruhid);
+    }
+    return true;
+}
+
+/*
+ * Pad and close each frontier unit that has stayed open pd_open_close_sec
+ * since its first program, the FDP reclaim unit active time limit. Like
+ * ssd_pd_close_aged(), it runs when the FTL takes a request.
+ */
+void ssd_fdp_pd_close_aged(struct ssd *ssd, uint64_t stime)
+{
+    uint64_t limit = (uint64_t)ssd->sp.pd_open_close_sec *
+                     NANOSECONDS_PER_SECOND;
+
+    for (int i = 0; i < (int)ssd->nruhs; i++) {
+        FemuRuHandle *ruh = &ssd->ruhs[i];
+        FemuReclaimUnit *rus[2] = { ruh->curr_ru, ruh->gc_ru };
+
+        for (int r = 0; r < 2; r++) {
+            if (rus[r] && ssd_data_age_ns(ssd, fdp_ru_open_time(rus[r]),
+                                          stime) >= limit) {
+                fdp_pd_leave_ru(ssd, rus[r], true, stime);
+            }
+        }
+    }
+}
+
 /*
  * Refresh the unit holding the line the read path queued, for read stress or
  * retention age, as do_read_reclaim() does for a line. One unit per write,
@@ -1315,7 +1422,7 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     struct line *line = ssd->read_reclaim_line;
     FemuReclaimUnit *ru;
     struct ru_mgmt *rm;
-    bool by_age;
+    enum ssd_reclaim_why why;
     int ok;
 
     if (!line || should_gc_high_fdp_style(ssd) >= 0) {
@@ -1328,8 +1435,13 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     }
 
     ssd->read_reclaim_line = NULL;
-    by_age = ssd->reclaim_by_age;
-    ssd->reclaim_by_age = false;
+    why = ssd->reclaim_why;
+    ssd->reclaim_why = RECLAIM_READS;
+
+    /* an open unit read past pd_open_read_limit leaves its frontier first */
+    if (why == RECLAIM_OPEN) {
+        fdp_pd_leave_ru(ssd, ru, false, 0);
+    }
 
     /* data still being written: leave it alone, as line mode does */
     for (int i = 0; i < (int)ssd->nruhs; i++) {
@@ -1353,12 +1465,14 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
         /* filed back with pages still on it: try again on a later write */
         if (ru->vpc && !ssd->read_reclaim_line) {
             ssd->read_reclaim_line = line;
-            ssd->reclaim_by_age = by_age;
+            ssd->reclaim_why = why;
         }
         return;
     }
-    if (by_age) {
+    if (why == RECLAIM_AGE) {
         ssd->retention_refreshes++;
+    } else if (why == RECLAIM_OPEN) {
+        ssd->pd_open_reclaims++;
     } else {
         ssd->read_reclaims++;
     }

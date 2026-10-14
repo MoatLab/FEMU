@@ -388,6 +388,18 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "program of the line instead of the line close, so open data ages "
       "too; one time per line; needs ecc_step_ns and ecc_retention_sec; "
       "off (default)" },
+    { "pd_open_read_limit",
+      "bbssd, CSD, FDP: program disturb, reads of a part-programmed block "
+      "that queue its line or reclaim unit; the next Write rewrites it, "
+      "after it seals a frontier line or retires a frontier unit with its "
+      "free pages unprogrammed; not above a non-zero "
+      "read_reclaim_limit; 0 (default) turns it off" },
+    { "pd_open_close_sec",
+      "bbssd, CSD, FDP: program disturb, seconds of device time (age_scale) "
+      "a frontier line or reclaim unit may stay open after its first "
+      "program; the next request pads its free pages and closes it; under "
+      "FDP the handle gets a fresh unit and event 1h; 0 (default) turns it "
+      "off" },
     { "pe_cycles_rated",
       "bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART "
       "Percentage Used; 0 takes the rating of nand_cell_type (ZNS: "

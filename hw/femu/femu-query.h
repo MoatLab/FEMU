@@ -66,6 +66,7 @@ typedef struct FemuQueryNs {
     uint64_t host_pages;
     uint64_t nand_pages;
     uint64_t gc_pages;
+    uint64_t pad_pages;
     uint64_t erases;
 
     uint32_t free_lines;
