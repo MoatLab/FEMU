@@ -4471,20 +4471,22 @@ typedef struct FemuMediaWant {
     const char *mode;
     bool staged;
     int onfi;
-    uint64_t ns[17];
+    uint64_t ns[20];
     bool order;
     bool hold;
     bool per_plane;
     bool sca;
+    bool cache;
 } FemuMediaWant;
 
-static const char *const femu_media_keys[17] = {
+static const char *const femu_media_keys[20] = {
     "page-transfer-ns", "read-command-ns", "program-command-ns",
     "erase-command-ns", "copyback-read-command-ns",
     "copyback-program-command-ns", "status-ns", "data-out-lead-ns",
     "data-out-tail-ns", "plane-select-ns", "data-in-edges-ns",
     "program-confirm-ns", "plane-read-busy-ns", "plane-program-busy-ns",
     "plane-erase-busy-ns", "data-in-gap-ns", "data-out-edges-ns",
+    "read-cache-busy-ns", "cache-step-ns", "cache-select-ns",
 };
 
 /*
@@ -4540,6 +4542,15 @@ static const FemuMediaWant femu_media_wants[] = {
     { "m26-sca-2lun", "bbssd", true, 26,
       { 855, 184, 84, 160, 184, 196, 277, 84, 0, 84, 149, 112,
         500, 500, 500, 313, 168 }, true, true, true, true },
+    /* KV reads one page at a time: no read cache sequence */
+    { "kvssd-m26-cache", "kvssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 321, 200, 115, 200, 57, 125,
+        500, 500, 500 }, true, true, true },
+    /* read cache: tRCBSY 4000 from trcbsy, 31h + tWB, 78h before it */
+    { "m26-cache-2lun", "bbssd", true, 26,
+      { 855, 275, 562, 225, 275, 275, 321, 200, 115, 200, 57, 125,
+        500, 500, 500, 0, 0, 4000, 125, 321 }, true, true, true, false,
+      true },
 };
 
 /*
@@ -4596,6 +4607,7 @@ static void femu_media_check(QDict *ns, const FemuMediaWant *w)
     g_assert_cmpint(qdict_get_bool(md, "status-per-plane"), ==,
                     w->per_plane);
     g_assert_cmpint(qdict_get_bool(md, "sca"), ==, w->sca);
+    g_assert_cmpint(qdict_get_bool(md, "cache-read"), ==, w->cache);
 }
 
 static void femu_test_query_media(void *obj, void *data,
@@ -6933,6 +6945,84 @@ static void femu_test_onfi_page(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(qdict_get_int(md, "read-command-ns"), ==, 325);
     g_assert_cmpint(qdict_get_int(md, "page-transfer-ns"), ==, 1137);
     qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
+/*
+ * onfi_cache_read: one command reads 8 pages that a fresh one-LUN device
+ * put on pages 0 to 7 of one block. Mode 0, 4 KiB: a plain read is
+ * 275 + 40000 + 275 + (50 + 61440 + 115) = 102155, and the held page
+ * register makes 8 of them 817240. As a cache sequence the bus paces it:
+ * page 0 ends at 105555, then one page per 3Fh/31h 125 + tRCBSY 3000 +
+ * status 275 + data out 61605 = 65005, so page 7 ends at 560590.
+ */
+static void femu_test_onfi_cache(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = !strcmp(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before, rd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(50 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    rd = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("onfi cache %s: 8-page read %" PRIu64 " ns",
+                   (const char *)data, rd);
+    g_assert_cmpuint(rd, ==, on ? 560590 : 817240);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* onfi_cache_read is refused with settings that delay or serve a page */
+static void femu_test_onfi_cache_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'pls_per_lun':2,'blks_per_pl':40,'mp_read':1",
+          "refused with mp_read" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'mapping':'dftl'",
+          "refused with mapping=dftl" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'read_cache_mb':1",
+          "refused with read_cache_mb" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'trcbsy':-1",
+          "trcbsy must not be negative" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'onfi-cache','addr':'5','devsz_mb':4,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'luns_per_ch':1,'nchs':1,'onfi_mode':26,'onfi_cache_read':1,"
+            "%s}}", cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("onfi cache refused %s: %s", cases[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
     qos_invalidate_command_line();
 }
 
@@ -33566,6 +33656,19 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = FEMU_ONFI_GEO
             "luns_per_ch=2,onfi_mode=26,onfi_sca=1"
     });
+    qos_add_test("onfi-cache-on", "femu", femu_test_onfi_cache,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=0,onfi_cache_read=1"
+    });
+    qos_add_test("onfi-cache-off", "femu", femu_test_onfi_cache,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=0"
+    });
+    qos_add_test("onfi-cache-refused", "femu", femu_test_onfi_cache_refused,
+                 NULL);
     qos_add_test("onfi-off", "femu", femu_test_onfi,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"off",
@@ -34077,6 +34180,19 @@ static void femu_register_nodes(void)
         .arg = (void *)"m26-sca-2lun",
         .edge.extra_device_opts = FEMU_ONFI_GEO
             "luns_per_ch=2,onfi_mode=26,onfi_sca=1"
+    });
+    qos_add_test("query-media-kvssd-m26-cache", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"kvssd-m26-cache",
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=5,kv_timing=model,onfi_mode=26,"
+            "onfi_cache_read=1"
+    });
+    qos_add_test("query-media-m26-cache-2lun", "femu", femu_test_query_media,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"m26-cache-2lun",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=2,onfi_mode=26,onfi_cache_read=1,trcbsy=4000"
     });
     qos_add_test("query-media-m26-1lun", "femu", femu_test_query_media,
                  &(QOSGraphTestOptions) {

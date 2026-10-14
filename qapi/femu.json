@@ -498,6 +498,19 @@
 #     plane-select members are the column select on that bus plus the
 #     tCCS wait, which holds no bus.
 #
+# @cache-read: the pages of one read command that land on one LUN form
+#     a read cache sequence (onfi_cache_read)
+#
+# @read-cache-busy-ns: tRCBSY, the busy time of each copy in a read
+#     cache sequence; 0 without @cache-read
+#
+# @cache-step-ns: the 31h or 3Fh command of a read cache sequence; 0
+#     without @cache-read
+#
+# @cache-select-ns: the status that selects the LUN before each 31h or
+#     3Fh when several LUNs share a channel; 0 with one LUN, or without
+#     @cache-read
+#
 # @onfi-order: a read reads its status before its data out, and a
 #     program or erase ends at its status
 #
@@ -524,6 +537,8 @@
             'plane-program-busy-ns': 'uint64',
             'plane-erase-busy-ns': 'uint64', 'data-in-gap-ns': 'uint64',
             'data-out-edges-ns': 'uint64', 'sca': 'bool',
+            'cache-read': 'bool', 'read-cache-busy-ns': 'uint64',
+            'cache-step-ns': 'uint64', 'cache-select-ns': 'uint64',
             'onfi-order': 'bool',
             'page-register-hold': 'bool', 'status-per-plane': 'bool' } }
 
@@ -720,6 +735,8 @@
 #                         "plane-program-busy-ns": 0,
 #                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
 #                         "data-out-edges-ns": 0, "sca": false,
+#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
@@ -756,6 +773,8 @@
 #                         "plane-program-busy-ns": 0,
 #                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
 #                         "data-out-edges-ns": 0, "sca": false,
+#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
@@ -799,6 +818,8 @@
 #                         "plane-program-busy-ns": 0,
 #                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
 #                         "data-out-edges-ns": 0, "sca": false,
+#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
 #                         "status-per-plane": false },
@@ -863,6 +884,8 @@
 #                         "plane-program-busy-ns": 500,
 #                         "plane-erase-busy-ns": 500, "data-in-gap-ns": 0,
 #                         "data-out-edges-ns": 0, "sca": false,
+#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": true,
 #                         "page-register-hold": true,
 #                         "status-per-plane": true },

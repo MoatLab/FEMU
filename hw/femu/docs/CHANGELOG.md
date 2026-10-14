@@ -135,6 +135,7 @@ listed one by one.
 - With the ONFI profile, an op with an older start time can use an idle bus gap before the latest start time on its channel. The channel keeps about 1024 past bus windows for this. An op older than those starts no earlier than the end of the newest dropped window.
 - `onfi_param_page` loads an ONFI 6.0 parameter page image. It turns the ONFI profile on and gives the mode, the spare bytes and the address cycles. Realize refuses a page with a bad CRC or one that does not match the device geometry and features. `query-femu` reports the address cycles.
 - `onfi_sca=1` selects the ONFI SCA protocol. Commands, addresses and status use a separate CA bus per channel, and the channel bus carries only the data bursts. A burst owns the channel bus from its SCE packet to the hold after its SCT packet. `query-femu` reports `sca` and the burst times.
+- `onfi_cache_read=1` reads the pages of one read command that land on one LUN as an ONFI read cache sequence. It sends 31h for the next page of a block, 00h-addr-31h for any other page, and 3Fh after the last. `trcbsy`, which had no effect, now sets the busy time of each copy. The array reads the next page while the bus moves the current one.
 - Opt-in program disturb terms for the ECC read time (`pd_edge_wls`, `pd_edge_tiers`, `pd_open_tiers`, `pd_open_age`) in bbssd, CSD, FDP and KV. Reads of bottom wordlines and of part-programmed blocks pay extra tiers, and open data can age from its first program. The tier counts are chosen values for sensitivity studies.
 - Opt-in program disturb actions in bbssd, CSD and FDP: `pd_open_read_limit` rewrites a line or reclaim unit whose part-programmed block takes too many reads, and takes it out of its write frontier first, and `pd_open_close_sec` pads and closes one left open too long. Log page C0h counts both at offsets 256 to 279, and pad pages count in the write amplification. Under FDP the pad gives the handle a fresh unit and logs event 1h.
 - Opt-in thermal model (`thermal_tau_ms`, `thermal_r`, `idle_mw`, `thermal_step_ms`): the SMART composite temperature follows the NAND energy and idle power through a first-order model, and crossing a threshold raises the SMART temperature warning and event (eda6b6ffe).
@@ -210,7 +211,7 @@ was not doing anything.
 
 #### Accepted with a warning (still no effect)
 
-- `serial`, `ms`, `ms_max`, `dlfeat`, `trcbsy`, and the CSD `nr_thread`, `time_slice` and `context_switch_time` are still accepted, but nothing reads them, so a value other than the default now prints one warning at realize naming the property; for `ms` it points to `meta` (03da6e9d2). `tplpbsy` and `tplrbsy` were on this list; they now set the multi-plane program and read busy times, and warn only when set without `mp_program` or `mp_read`.
+- `serial`, `ms`, `ms_max`, `dlfeat`, and the CSD `nr_thread`, `time_slice` and `context_switch_time` are still accepted, but nothing reads them, so a value other than the default now prints one warning at realize naming the property; for `ms` it points to `meta` (03da6e9d2). `tplpbsy` and `tplrbsy` were on this list; they now set the multi-plane program and read busy times, and warn only when set without `mp_program` or `mp_read`. `trcbsy` was on it too; it now sets tRCBSY and warns only without `onfi_cache_read`.
 
 #### Behaviour changes (still boots, numbers move)
 

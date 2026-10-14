@@ -680,6 +680,36 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     return maxlat;
 }
 
+/*
+ * Charge the media reads of one command that onfi_cache_read held back:
+ * the pages of each LUN, in LPN order, as one read cache sequence. Their
+ * counts and wear checks already ran in LPN order.
+ */
+static uint64_t ssd_read_seq_charge(struct ssd *ssd, const NandLoc *pend,
+                                    uint32_t n, uint64_t stime)
+{
+    g_autofree NandLoc *grp = g_new(NandLoc, n);
+    g_autofree bool *done = g_new0(bool, n);
+    uint64_t lat, maxlat = 0;
+    uint32_t i, j, k;
+
+    for (i = 0; i < n; i++) {
+        if (done[i]) {
+            continue;
+        }
+        for (k = 0, j = i; j < n; j++) {
+            if (!done[j] && pend[j].ch == pend[i].ch &&
+                pend[j].lun == pend[i].lun) {
+                grp[k++] = pend[j];
+                done[j] = true;
+            }
+        }
+        lat = ssd_advance_status_seq(ssd, grp, k, stime);
+        maxlat = MAX(maxlat, lat);
+    }
+    return maxlat;
+}
+
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -687,6 +717,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t start_lpn, end_lpn;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
+    g_autofree NandLoc *pend = NULL;
+    uint32_t npend = 0;
+    uint64_t seq_stime = 0;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -699,6 +732,12 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     ssd->sp.read_cnt += end_lpn - start_lpn + 1;
+    if (spp->onfi_cache_read) {
+        pend = g_new(NandLoc, end_lpn - start_lpn + 1);
+        /* as ssd_advance_status(): no start time means now */
+        seq_stime = req->stime ? req->stime :
+                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
          * A page the write buffer is still holding is served from there: it
@@ -747,6 +786,12 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             continue;
         }
+        /* the media times the pages of each LUN after the loop */
+        if (pend) {
+            pend[npend++] = ssd_read_hold(ssd, &ppa, seq_stime);
+            ssd_read_check_wear(ssd, &ppa, req->stime);
+            continue;
+        }
 
         struct nand_cmd srd;
         srd.type = USER_IO;
@@ -758,6 +803,10 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     }
     sublat = ssd_mp_flush(ssd, NAND_READ);
     maxlat = (sublat > maxlat) ? sublat : maxlat;
+    if (npend) {
+        sublat = ssd_read_seq_charge(ssd, pend, npend, seq_stime);
+        maxlat = (sublat > maxlat) ? sublat : maxlat;
+    }
 
     return maxlat;
 }

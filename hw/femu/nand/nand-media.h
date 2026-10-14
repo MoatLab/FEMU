@@ -131,6 +131,14 @@ typedef struct NandMediaTiming {
     int64_t ccs_ns;          /* column select end to the read burst */
     int64_t sca_packet_ns;   /* the SCE and SCT packets on the CA bus */
     int64_t sca_tail_ns;     /* SCT start to the end of its burst */
+    /*
+     * Read cache sequence (policy.cache_read): the busy time of each 31h
+     * or 3Fh copy, the 31h or 3Fh cycle with tWB, and the 78h status that
+     * selects the LUN before it when several LUNs share the channel.
+     */
+    int64_t trcbsy_ns;
+    int64_t rc_step_ns;
+    int64_t rc_sel_ns;
     /* multi-plane inter-plane busy */
     int64_t tplpbsy_ns;
     int64_t tplrbsy_ns;
@@ -174,6 +182,11 @@ typedef struct NandMediaPolicy {
      * only data bursts. Init grows the window lists.
      */
     bool            ca_separate;
+    /*
+     * Read cache (staged bus, with the ONFI bits): nand_media_read_seq()
+     * times the reads of one LUN as one cache sequence.
+     */
+    bool            cache_read;
 } NandMediaPolicy;
 
 /*
@@ -306,6 +319,22 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
 NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime);
 
+/**
+ * nand_media_read_seq - time reads of one LUN as a read cache sequence
+ * @m: the media
+ * @locs: @n pages of one LUN, in the order the host asked for them
+ * @n: number of pages, at least 1
+ * @stime: start time of every page
+ * @out: @n completions, one per page; may be NULL
+ *
+ * With policy.cache_read and more than one page: 00h-30h for the first
+ * page, then 31h for the next page of a block, 00h-addr-31h for any other
+ * page, and 3Fh after the last (ONFI 6.0 Section 6.15). Otherwise each
+ * page is a nand_media_op() read, in order. Returns the last completion.
+ */
+NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
+                                     uint64_t stime, NandOpCompletion *out);
+
 /* the extra correction time a read of @loc takes; 0 when the model is off */
 uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc);
 
@@ -320,6 +349,7 @@ typedef struct NandMediaPhases {
     bool     page_reg_hold;
     bool     mp_status_per_plane;
     bool     sca;                 /* commands and status use the CA bus */
+    bool     cache_read;          /* reads of one LUN form cache sequences */
     uint64_t page_xfer_ns;
     uint64_t rd_cmd_ns;
     uint64_t wr_cmd_ns;
@@ -334,6 +364,9 @@ typedef struct NandMediaPhases {
     uint64_t wr_post_ns;
     uint64_t din_gap_ns;          /* SCA: program command end to its burst */
     uint64_t dout_edge_ns;        /* SCA: read burst without the page */
+    uint64_t trcbsy_ns;           /* the next three are 0 without cache_read */
+    uint64_t rc_step_ns;
+    uint64_t rc_sel_ns;
     uint64_t tplrbsy_ns;
     uint64_t tplpbsy_ns;
     uint64_t tplebsy_ns;

@@ -56,6 +56,13 @@ typedef struct OnfiTiming {
     int64_t ccs_ns;        /* tCCSR from the column select to the burst */
     int64_t sca_packet_ns; /* one CA input packet: SCE, SCT */
     int64_t sca_tail_ns;   /* SCT and the hold after it */
+    /*
+     * Read cache (Section 6.15): 31h or 3Fh with tWB, the 78h select
+     * before it with several LUNs (else 0), and tRCBSY typical.
+     */
+    int64_t rc_step_ns;
+    int64_t rc_sel_ns;
+    int64_t trcbsy_ns;
 } OnfiTiming;
 
 /* tDSC of @mode in ps (Table 4-36), or -1 for a mode outside 0 to 26 */
@@ -137,6 +144,7 @@ typedef struct OnfiGeometry {
     bool     mp_read;
     bool     copyback;
     bool     sca;
+    bool     cache_read;
 } OnfiGeometry;
 
 /*

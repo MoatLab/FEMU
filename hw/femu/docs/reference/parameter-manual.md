@@ -321,6 +321,8 @@ Reference: [NAND timing](properties.md#nand-timing-bbssd-csd-kv). Design:
 | `onfi_spare_bytes` | bytes | >= 0; the page on the bus must be even | with `onfi_mode`, spare bytes moved with each page |
 | `onfi_tccs_ns` | ns | >= 0 | with `onfi_mode`, tCCS before a data out on a shared channel; 0 charges nothing |
 | `onfi_sca` | 0 or 1 | 0 (default) | with the ONFI profile, 1 selects the SCA protocol: commands, addresses and status use a separate CA bus |
+| `onfi_cache_read` | 0 or 1 | 0 (default) | with the ONFI profile, 1 reads the pages of one read command on one LUN as a read cache sequence; refused with `mp_read`, `mapping=dftl` and `read_cache_mb` |
+| `trcbsy` | ns | >= 0 | with `onfi_cache_read`, tRCBSY of each copy; 0 takes 3000 (Table 4-30 typical); without it, a value warns |
 | `onfi_param_page` | path | an ONFI 6.0 parameter page image | turns the profile on; gives the mode when `onfi_mode` is -1, and the spare bytes and address cycles; refused when the page does not match the device |
 | `tplebsy` | ns | >= 0 | busy time between the planes of a multi-plane erase (GC with `pls_per_lun` > 1) |
 | `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0 | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns` |
@@ -609,7 +611,7 @@ to anything but its default prints a warning at realize.
 
 | Device | Properties |
 | --- | --- |
-| `femu` | `serial`, `ms`, `ms_max`, `dlfeat`, `trcbsy`, `nr_thread`, `time_slice`, `context_switch_time` |
+| `femu` | `serial`, `ms`, `ms_max`, `dlfeat`, `nr_thread`, `time_slice`, `context_switch_time` |
 
 `nr_thread` is still refused at 0 by CSD. Identify Controller reports a
 serial number FEMU generates, whatever `serial` says.

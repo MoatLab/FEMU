@@ -2125,13 +2125,14 @@ typedef struct BbCtrlParams {
     int tplpbsy;      /* multi-plane program inter-plane busy (ns); 0 = off */
     int tplrbsy;      /* multi-plane read inter-plane busy (ns); 0 = off */
     int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
-    int trcbsy;       /* accepted for compatibility; nothing reads it */
+    int trcbsy;       /* tRCBSY (ns) of onfi_cache_read; 0 = typical */
     int onfi_mode;    /* ONFI 6.0 timing mode 0 to 26; -1 = off */
     int onfi_mts;     /* payload rate (MT/s) instead of the mode's; 0 = mode */
     int onfi_spare_bytes; /* spare bytes moved with each page */
     int onfi_tccs_ns; /* tCCS from a datasheet (ns); 0 charges nothing */
     char *onfi_param_page; /* parameter page image file; NULL = none */
     int onfi_sca;           /* SCA protocol: CA bus for commands; 0 = off */
+    int onfi_cache_read;    /* read cache sequences per command; 0 = off */
     /* from a good onfi_param_page, set at realize; unused unless loaded */
     bool onfi_page_loaded;
     int onfi_page_mode;     /* the highest mode the page lists */

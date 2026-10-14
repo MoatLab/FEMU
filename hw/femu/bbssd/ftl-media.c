@@ -229,6 +229,10 @@ void bb_nand_media_init(struct ssd *ssd)
             cfg.timing.ccs_ns = ot.ccs_ns;
             cfg.timing.sca_packet_ns = ot.sca_packet_ns;
             cfg.timing.sca_tail_ns = ot.sca_tail_ns;
+            cfg.timing.trcbsy_ns = spp->trcbsy ? spp->trcbsy : ot.trcbsy_ns;
+            cfg.timing.rc_step_ns = ot.rc_step_ns;
+            cfg.timing.rc_sel_ns = ot.rc_sel_ns;
+            cfg.policy.cache_read = spp->onfi_cache_read;
             if (!cfg.timing.tplpbsy_ns) {
                 cfg.timing.tplpbsy_ns = ot.plbusy_ns;
             }
@@ -403,6 +407,48 @@ bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
     loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
                         true);
     return nand_media_read_ecc_ns(&ssd->media, &loc) == 0;
+}
+
+/**
+ * ssd_read_hold - count and decode a host read held for a sequence
+ * @ssd: the device
+ * @ppa: the page
+ * @stime: start time of the command
+ *
+ * Does for one page what ssd_advance_status() does before it charges the
+ * media, at the same point in LPN order, so read counts and the wear and
+ * disturb tiers each page sees stay as without the sequence.
+ */
+NandLoc ssd_read_hold(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
+{
+    get_blk(ssd, ppa)->read_cnt++;
+    ssd->media_ops[NAND_MEDIA_READ]++;
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_READ],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) + 1);
+    return bb_decode_loc(ssd, ppa, stime, true);
+}
+
+/**
+ * ssd_advance_status_seq - time held reads of one LUN as one sequence
+ * @ssd: the device
+ * @locs: @n pages of one LUN from ssd_read_hold(), in LPN order
+ * @n: number of pages
+ * @stime: start time of the command
+ *
+ * Returns the longest latency.
+ */
+uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
+                                uint64_t stime)
+{
+    g_autofree NandOpCompletion *out = g_new(NandOpCompletion, n);
+    uint64_t lat = 0;
+    int i;
+
+    nand_media_read_seq(&ssd->media, locs, n, stime, out);
+    for (i = 0; i < n; i++) {
+        lat = MAX(lat, out[i].latency_ns);
+    }
+    return lat;
 }
 
 /**

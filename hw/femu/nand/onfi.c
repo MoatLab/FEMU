@@ -31,6 +31,7 @@ enum {
     ONFI_TWPST2_PS = 6500,     /* write postamble */
     ONFI_TWPSTH2_PS = 25000,   /* write postamble hold */
     ONFI_TPLBSY_PS = 500000,   /* multi-plane short busy, typical (Table 4-30) */
+    ONFI_TRCBSY_PS = 3000000,  /* read cache busy, typical (Table 4-30) */
 };
 
 /* SCA protocol timing, ps (Table 5-9; Section 5.7) */
@@ -174,9 +175,14 @@ int onfi_derive(const OnfiInput *in, OnfiTiming *out)
     out->dout_mp_pre_ns = ps_to_ns((2 + addr) * c + tccs + ONFI_TRPRE2_PS);
     out->dout_post_ns = ps_to_ns(ONFI_TRPSTH_PS + ONFI_TRHW_PS);
     out->plbusy_ns = ps_to_ns(ONFI_TPLBSY_PS);
+    out->rc_step_ns = ps_to_ns(c + ONFI_TWB_PS);
     if (in->sca) {
         onfi_derive_sca(in, tdsc, out);
+        out->rc_step_ns = ps_to_ns(SCA_PACKET_PS + ONFI_TWB_PS);
     }
+    /* 78h selects the LUN before 31h or 3Fh with several LUNs (6.15) */
+    out->rc_sel_ns = in->multi_lun ? out->status_ns : 0;
+    out->trcbsy_ns = ps_to_ns(ONFI_TRCBSY_PS);
     return 0;
 }
 
@@ -425,6 +431,10 @@ int onfi_param_check(const OnfiParamPage *p, const OnfiGeometry *g,
     if (g->sca && p->luns > 16) {
         ONFI_REFUSE("LUNs per target (byte 100) %u: an SCA packet addresses "
                     "16 LUNs", p->luns);
+    }
+    if (g->cache_read && !(p->opt_cmds & ONFI_OPT_READ_CACHE)) {
+        ONFI_REFUSE("optional commands (bytes 8-9) 0x%04x: onfi_cache_read "
+                    "needs the Read Cache commands (bit 1)", p->opt_cmds);
     }
     if (g->copyback && !(p->opt_cmds & ONFI_OPT_COPYBACK)) {
         ONFI_REFUSE("optional commands (bytes 8-9) 0x%04x: gc_copyback needs "

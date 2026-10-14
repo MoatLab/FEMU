@@ -1631,6 +1631,11 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             g_free(ns_modes);
             return 1;
         }
+        if (femu_onfi_on(n) && n->bb_params.onfi_cache_read &&
+            ns_modes[i] == FEMU_KVSSD_MODE) {
+            warn_report("femu: onfi_cache_read has no effect on namespace "
+                        "%u; only bbssd and CSD namespaces use it", i + 1);
+        }
         if (n->bb_params.plane_first && (BBSSD(n) || CSD(n)) &&
             ns_modes[i] != FEMU_BBSSD_MODE && ns_modes[i] != FEMU_CSD_MODE) {
             warn_report("femu: plane_first has no effect on namespace %u; "
@@ -2438,7 +2443,6 @@ static const struct {
     { "ms", "meta sets the metadata size" },
     { "ms_max", NULL },
     { "dlfeat", NULL },
-    { "trcbsy", NULL },
     { "nr_thread", NULL },
     { "time_slice", NULL },
     { "context_switch_time", NULL },
@@ -2693,6 +2697,7 @@ static bool femu_load_onfi_page(FemuCtrl *n, Error **errp)
         .mp_read = bp->mp_read && bp->pls_per_lun > 1,
         .copyback = bp->gc_copyback,
         .sca = bp->onfi_sca != 0,
+        .cache_read = bp->onfi_cache_read != 0,
     };
     const char *why;
     char msg[256];
@@ -2721,6 +2726,36 @@ static bool femu_load_onfi_page(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * A read cache sequence starts every page at the command's start time.
+ * Each refused setting can make a page ready later than that, or serves a
+ * page the media is still reading: a DFTL mapping miss, a DRAM read cache
+ * hit, or a multi-plane read, whose cache form FEMU does not model.
+ */
+static bool femu_check_cache_read(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *map = bp->mapping_scheme;
+    const char *why = NULL;
+
+    if (bp->trcbsy < 0) {
+        error_setg(errp, "femu: trcbsy must not be negative");
+        return false;
+    }
+    if (bp->mp_read && bp->pls_per_lun > 1) {
+        why = "mp_read";
+    } else if (map && !strcmp(map, "dftl")) {
+        why = "mapping=dftl";
+    } else if (n->read_cache_mb) {
+        why = "read_cache_mb";
+    }
+    if (why) {
+        error_setg(errp, "femu: onfi_cache_read is refused with %s", why);
+        return false;
+    }
+    return true;
+}
+
 static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
 {
     BbCtrlParams *bp = &n->bb_params;
@@ -2728,11 +2763,17 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
     const char *knob = NULL;
 
     bp->onfi_page_loaded = false;
+    /* tRCBSY is read only inside a read cache sequence */
+    if (bp->trcbsy && (!femu_onfi_on(n) || !bp->onfi_cache_read)) {
+        warn_report("femu: trcbsy has no effect unless onfi_cache_read is "
+                    "set with the ONFI profile");
+    }
     if (!femu_onfi_on(n)) {
         if (bp->onfi_mts || bp->onfi_spare_bytes || bp->onfi_tccs_ns ||
-            bp->onfi_sca) {
-            warn_report("femu: onfi_mts, onfi_spare_bytes, onfi_tccs_ns and "
-                        "onfi_sca have no effect without onfi_mode");
+            bp->onfi_sca || bp->onfi_cache_read) {
+            warn_report("femu: onfi_mts, onfi_spare_bytes, onfi_tccs_ns, "
+                        "onfi_sca and onfi_cache_read have no effect without "
+                        "onfi_mode");
         }
         return true;
     }
@@ -2778,6 +2819,9 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
     /* ONFI 6.0 has no suspend, and a held page register has no suspend rule */
     if (bp->pe_suspend) {
         error_setg(errp, "femu: pe_suspend is refused with onfi_mode");
+        return false;
+    }
+    if (bp->onfi_cache_read && !femu_check_cache_read(n, errp)) {
         return false;
     }
     if (n->cxl_dev) {
@@ -3529,6 +3573,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("onfi_tccs_ns", FemuCtrl, bb_params.onfi_tccs_ns, 0),
     DEFINE_PROP_STRING("onfi_param_page", FemuCtrl, bb_params.onfi_param_page),
     DEFINE_PROP_INT32("onfi_sca", FemuCtrl, bb_params.onfi_sca, 0),
+    DEFINE_PROP_INT32("onfi_cache_read", FemuCtrl, bb_params.onfi_cache_read,
+                      0),
     DEFINE_PROP_INT32("mp_program", FemuCtrl, bb_params.mp_program, 0),
     DEFINE_PROP_INT32("plane_first", FemuCtrl, bb_params.plane_first, 0),
     DEFINE_PROP_INT32("mp_read", FemuCtrl, bb_params.mp_read, 0),

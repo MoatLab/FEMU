@@ -512,6 +512,66 @@ With a parameter page, SCA needs two things:
 - at most 16 LUNs per target (byte 100), because SCE and SCT carry 4 LUN
   bits.
 
+#### Read cache sequence (`onfi_cache_read`)
+
+`onfi_cache_read=1` reads the pages of one read command that land on one
+LUN as a read cache sequence (Section 6.15). The array reads the next page
+while the bus moves the current one.
+
+```text
+ 00h addr 30h   read page 0 into the data register (tR)
+ 31h            copy page i to the page register, start page i + 1
+                (the next page of the same block and plane)
+ 00h addr 31h   the same, for any other page of the LUN
+ 3Fh            copy the last page, start nothing
+ each copy keeps SR[6] busy for tRCBSY after the array read ends
+
+ array |== tR 0 ==|cp|== tR 1 ==|cp|== tR 2 ==|cp|
+ bus     st 31h --^   |st out 0|31h |st out 1|3Fh  |st out 2|
+```
+
+- A sequence sends the command of the next page before the data out of
+  the current page. So the media layer needs every page of the sequence
+  at once. The
+  bbssd read path holds the media reads of one command, groups them by
+  LUN in LPN order, and gives each group to `nand_media_read_seq()`.
+- A group of one page is a plain read. Reads of two commands never join
+  one sequence. With 8 channels of 8 LUNs, a command needs more than 64
+  pages before a LUN gets two of them.
+- Each copy ends at `max(trigger, array end) + tRCBSY`. The next array
+  read starts there. `trcbsy` sets tRCBSY; 0 takes 3000 ns (Table 4-30
+  typical).
+- With several LUNs, a 78h status selects the LUN before each 31h or 3Fh.
+  Each page reads its status, then its data out, after its copy.
+- The LUN is held from the 30h command to the last data out.
+- Garbage collection reads, mapping reads and copyback stay plain reads.
+- A KV namespace reads a value one page at a time, so it keeps plain
+  reads. Realize warns, and `query-femu` reports `cache-read` false for it.
+- The read counts and the wear checks of the held pages run in LPN order,
+  as without the sequence.
+
+The period per page on one LUN, with no other traffic:
+
+```text
+ plain read   = cmd + tR + status + data out
+ in sequence  = max(tR, data out + status + 31h + select) + tRCBSY
+```
+
+A sequence is faster only when the bus part of a plain read is longer than
+tRCBSY. With mode 0 and 4 KiB pages, 8 pages take 560590 ns instead of
+817240 ns. With mode 26 and 4 KiB pages they take 345912 ns instead of
+332328 ns. tRCBSY as a copy time after the array read is a model choice.
+ONFI gives it only as a typical busy time.
+
+Realize refuses `onfi_cache_read` with these settings:
+
+- `mp_read`: FEMU does not model the multi-plane cache read;
+- `mapping=dftl`: a mapping read can make a page ready after the command
+  start;
+- `read_cache_mb`: a DRAM hit can come before the NAND read of the page
+  ends;
+- a negative `trcbsy`.
+
 #### Parameter page (`onfi_param_page`)
 
 `onfi_param_page` names a file with an ONFI parameter page image (Section
@@ -609,9 +669,10 @@ parallelism, except for the batched operations below.
 | ZNS zone reset | no batching needed: each plane has its own rule, so per-plane erases overlap | `zns_zone_reset()` |
 | Copyback (`nand_media_copyback()`) | no: one read and one program on one die, no data phase, no ECC adder (it skips the controller's ECC) | BBSSD line GC and FDP GC with `gc_copyback` (`bbssd/ftl-line-gc.c`, `bbssd/ftl-fdp.c`) |
 
-`trcbsy` is accepted for compatibility and has no effect; setting it warns
-at realize. With the defaults (no bus, no `tplebsy`) a two-plane erase
-takes exactly one erase time.
+`trcbsy` applies only to the read cache sequence of `onfi_cache_read`
+(see the ONFI 6.0 profile). Without it, a value warns at realize. With the
+defaults (no bus, no `tplebsy`) a two-plane erase takes exactly one erase
+time.
 
 ### Multi-plane program and read (BBSSD, CSD)
 
@@ -1104,7 +1165,7 @@ properties and states how they interact.
 | [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. `pg_rd_lat / 16` is also the cost of a write buffer hit. |
 | [Cell type](../reference/properties.md#nand-timing-bbssd-csd-kv) | `nand_cell_type`, `cell_pages`, `pgtype_lat` | `pgtype_lat` applies only with `nand_cell_type=0`. `nand_cell_type` limits `pgs_per_blk` to 512. |
 | [Bus phases](../reference/properties.md#nand-timing-bbssd-csd-kv) | `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat`, `status_lat` | Any non-zero value turns the bus on. `pg_xfer_lat` takes precedence over `ch_xfer_lat`. |
-| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy`, `plane_first` (`trcbsy` has no effect) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |
+| [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy`, `plane_first` (`trcbsy` applies only with `onfi_cache_read`) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |
 | [Suspend](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pe_suspend`, `tsusp_ns` | `tsusp_ns` matters only with `pe_suspend`. |
 | [ECC](../reference/properties.md#reliability-and-wear) | `ecc_step_ns`, `ecc_retention_sec` | `ecc_retention_sec` matters only with `ecc_step_ns`. |
 | [Program disturb](../reference/properties.md#reliability-and-wear) | `pd_edge_wls`, `pd_edge_tiers`, `pd_open_tiers`, `pd_open_age` | All need `ecc_step_ns`; `pd_open_age` also needs `ecc_retention_sec`. |

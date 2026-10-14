@@ -393,6 +393,13 @@ static void test_param_page(void)
                                                   &g, "Copyback"),
           (uint64_t)-1);
     g = page_geometry();
+    g.cache_read = true;
+    make_page(p);
+    put16(p + 8, ONFI_OPT_COPYBACK);
+    seal_page(p);
+    check("onfi_cache_read without Read Cache",
+          page_ok(p, ONFI_PARAM_PAGE_BYTES, &g, "Read Cache"), (uint64_t)-1);
+    g = page_geometry();
     g.planes_per_lun = 2;
     g.blocks_per_lun = 24;
     make_page(p);
@@ -1431,6 +1438,193 @@ static void test_sca(void)
     }
 }
 
+/* order_config() or sca_config() with the read cache sequence on */
+static void cache_config(NandMediaConfig *cfg, const OnfiTiming *t,
+                         bool multi_lun, bool sca)
+{
+    if (sca) {
+        sca_config(cfg, t, 2, multi_lun);
+    } else {
+        order_config(cfg, t, 2, multi_lun);
+    }
+    cfg->timing.trcbsy_ns = t->trcbsy_ns;
+    cfg->timing.rc_step_ns = t->rc_step_ns;
+    cfg->timing.rc_sel_ns = t->rc_sel_ns;
+    cfg->policy.cache_read = true;
+}
+
+/* the completion of the last page of a sequence of @n pages from @first */
+static uint64_t seq_done(NandMediaConfig *cfg, const NandLoc *locs, int n,
+                         NandOpCompletion *out)
+{
+    NandMedia m;
+    uint64_t done;
+
+    nand_media_init(&m, cfg);
+    done = nand_media_read_seq(&m, locs, n, 0, out).done_ns;
+    nand_media_destroy(&m);
+    return done;
+}
+
+/*
+ * Read cache sequences (Section 6.15). Mode 26, 16 KiB, one LUN: read
+ * command 275, tR 40000, status 246, data out 50 + 3417 + 115 = 3582,
+ * 31h or 3Fh 125, tRCBSY 3000. Page 0: 30h at 275, tR to 40275, status
+ * and 31h to 40646, copy to 43646, status and data out to 47474. Then
+ * each copy waits for the array: one page per tR + tRCBSY = 43000.
+ */
+static void test_cache_read(void)
+{
+    NandMediaConfig cfg;
+    NandLoc seq[8];
+    NandOpCompletion out[8];
+    OnfiTiming t;
+    int rc;
+
+    printf("# read cache sequence fields\n");
+    t = derive(26, 0, 16384, false, 0, &rc);
+    check("31h or 3Fh: one cycle + tWB", t.rc_step_ns, 125);
+    check("no 78h select with one LUN", t.rc_sel_ns, 0);
+    check("tRCBSY typical (Table 4-30)", t.trcbsy_ns, 3000);
+    t = derive(26, 0, 16384, true, 0, &rc);
+    check("78h select with several LUNs", t.rc_sel_ns, 321);
+    t = derive_sca(26, 16384, false, 0);
+    check("SCA 31h: one packet + tWB", t.rc_step_ns, 112);
+
+    printf("# read cache sequence timing\n");
+    t = derive(26, 0, 16384, false, 0, &rc);
+    for (int i = 0; i < 8; i++) {
+        seq[i] = (NandLoc){ .ch = 0, .lun = 0, .blk = 3, .pg = i };
+    }
+    cache_config(&cfg, &t, false, false);
+    seq_done(&cfg, seq, 8, out);
+    check("page 0 leaves after its copy", out[0].done_ns, 47474);
+    check("page 1 one tR + tRCBSY later", out[1].done_ns, 47474 + 43000);
+    check("8 sequential pages: period tR + tRCBSY", out[7].done_ns,
+          43646 + 7 * 43000 + 246 + 3582);
+    cache_config(&cfg, &t, false, false);
+    cfg.policy.cache_read = false;
+    check("without cache read: 8 plain reads, one after another",
+          seq_done(&cfg, seq, 8, out), 8 * 44103);
+    cache_config(&cfg, &t, false, false);
+    check("one page is a plain read", seq_done(&cfg, seq, 1, out), 44103);
+    cache_config(&cfg, &t, false, false);
+    check("two sequential pages: 31h, then 3Fh", seq_done(&cfg, seq, 2, out),
+          90474);
+    {
+        NandLoc r[2] = { seq[0], seq[5] };
+
+        /* 00h, address, 31h: 275 in place of 125 */
+        cache_config(&cfg, &t, false, false);
+        check("a random next page: 00h-addr-31h", seq_done(&cfg, r, 2, out),
+              90474 + 150);
+        r[0].pg = 31;
+        r[1].blk = 4;
+        r[1].pg = 0;
+        cache_config(&cfg, &t, false, false);
+        check("no 31h across a block end", seq_done(&cfg, r, 2, out),
+              90474 + 150);
+        r[0] = seq[0];
+        r[1] = seq[1];
+        r[1].pl = 1;
+        cache_config(&cfg, &t, false, false);
+        check("no 31h to another plane", seq_done(&cfg, r, 2, out),
+              90474 + 150);
+        r[1] = seq[1];
+        r[1].pe_cycles = 750;
+        cache_config(&cfg, &t, false, false);
+        cfg.timing.ecc_step_ns = 5000;
+        cfg.timing.ecc_pe_per_tier = 750;
+        cfg.timing.ecc_max_tiers = 4;
+        cfg.policy.ecc_on_read = true;
+        check("each page's tR has its own ECC time",
+              seq_done(&cfg, r, 2, out), 90474 + 5000);
+    }
+    t = derive(26, 0, 16384, true, 0, &rc);
+    cache_config(&cfg, &t, true, false);
+    /* 78h status 321 before each 31h or 3Fh, lead 200 */
+    check("several LUNs: 78h before 3Fh", seq_done(&cfg, seq, 2, out),
+          43721 + 40000 + 3000 + 321 + 200 + 3417 + 115);
+    /*
+     * Mode 0, 4 KiB, several LUNs: the bus paces the sequence, so the 78h
+     * select (status 350) before the 3Fh shows in the end time. Page 0
+     * leaves at 105855; 78h and 3Fh to 106330; copy to 109330; status,
+     * lead 200, page 61440 and tail 115.
+     */
+    t = derive(0, 0, 4096, true, 0, &rc);
+    cache_config(&cfg, &t, true, false);
+    check("several LUNs, bus bound: 78h before 3Fh",
+          seq_done(&cfg, seq, 2, out), 109330 + 350 + 200 + 61440 + 115);
+    /* SCA: 78h 277 and 3Fh 112 on the CA bus; select 84, burst 182 */
+    t = derive_sca(0, 4096, true, 0);
+    cache_config(&cfg, &t, true, true);
+    check("SCA several LUNs, bus bound: 78h before 3Fh",
+          seq_done(&cfg, seq, 2, out),
+          105556 + 277 + 112 + 3000 + 277 + 84 + 182 + 61440);
+    t = derive_sca(26, 16384, false, 0);
+    cache_config(&cfg, &t, false, true);
+    check("SCA: two pages", seq_done(&cfg, seq, 2, out),
+          43537 + 43000 + 241 + 84 + 168 + 3417);
+
+    /*
+     * A random stream of sequences and single ops with older start times,
+     * every mode, both protocols: no two phases overlap.
+     */
+    {
+        uint64_t bad = 0;
+
+        for (int mode = 0; mode < ONFI_NUM_MODES; mode++) {
+            for (int v = 0; v < 2; v++) {
+                OnfiTiming tv = v ? derive_sca(mode, 16384, true, 0) :
+                                    derive(mode, 0, 16384, true, 0, &rc);
+                NandMedia m;
+                uint64_t now = 0;
+
+                cache_config(&cfg, &tv, true, v);
+                cfg.timeline = v ? &sca_timeline : &logged_timeline;
+                nand_media_init(&m, &cfg);
+                for (int ch = 0; ch < T_CHS; ch++) {
+                    m.bus_res[ch].hist_cap = 8;
+                    if (m.ca_res) {
+                        m.ca_res[ch].hist_cap = 8;
+                    }
+                }
+                rng_state = 9000 + mode * 3 + v;
+                for (int i = 0; i < 1000; i++) {
+                    NandLoc l = { .ch = rng() % T_CHS, .lun = rng() % T_LUNS,
+                                  .pl = rng() % 2, .blk = rng() % 4,
+                                  .pg = rng() % 32 };
+                    NandLoc g[6];
+                    uint64_t back = rng() % 300000;
+                    uint64_t st = now > back ? now - back : 0;
+                    uint32_t k = rng() % 6;
+
+                    now += rng() % 30000;
+                    if (k < 3) {
+                        int n = 1 + rng() % 6;
+
+                        for (int j = 0; j < n; j++) {
+                            g[j] = l;
+                            g[j].pg = (l.pg + j * (1 + rng() % 2)) % 32;
+                        }
+                        nand_media_read_seq(&m, g, n, st, NULL);
+                    } else if (k == 3) {
+                        nand_media_op(&m, &l, NAND_MEDIA_PROGRAM, st);
+                    } else if (k == 4) {
+                        nand_media_op(&m, &l, NAND_MEDIA_ERASE, st);
+                    } else {
+                        nand_media_op(&m, &l, NAND_MEDIA_READ, st);
+                    }
+                }
+                bad += v ? sca_violations(tv.sca_packet_ns, tv.sca_tail_ns) :
+                           phase_overlaps();
+                nand_media_destroy(&m);
+            }
+        }
+        check("sequences: no overlap, every mode, both protocols", bad, 0);
+    }
+}
+
 /*
  * A fixed mixed sequence with every profile field at 0. After each op the
  * hash takes the completion, every channel, LUN and plane time and the
@@ -1608,6 +1802,7 @@ int main(void)
     test_onfi_order();
     test_bus_history();
     test_sca();
+    test_cache_read();
     test_legacy_hash();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;

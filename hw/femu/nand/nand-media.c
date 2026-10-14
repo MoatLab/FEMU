@@ -1294,6 +1294,115 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
     return c;
 }
 
+/* a page that 31h reads: the next page of the same block and plane */
+static bool read_seq_next(const NandLoc *a, const NandLoc *b)
+{
+    return a->blk == b->blk && a->pl == b->pl && b->pg == a->pg + 1;
+}
+
+/*
+ * One read cache sequence on one LUN (Section 6.15). The trigger of page
+ * i + 1 (31h, or 00h-addr-31h, or 3Fh after the last page) copies page i
+ * to the page register once its array read ends, and starts the next
+ * array read. Page i leaves the bus after the copy:
+ *
+ *   array  |== tR 0 ==|cp|== tR 1 ==|cp|== tR 2 ==|cp|
+ *   bus      st+T1 --^    |st out0|T2  |st out1|T3   |st out2|
+ *
+ *   cp(i)   = max(T(i+1), d(i)) + tRCBSY
+ *   d(i+1)  = cp(i) + tR(i+1)
+ *   T(i+1)  = after out(i-1); a 78h select first with several LUNs
+ */
+static uint64_t seq_cmd(NandMedia *m, uint32_t ch, uint64_t stime,
+                        uint64_t pnow, uint64_t a, uint64_t len)
+{
+    return m->ca_res ? ca_book(m, ch, a, len) :
+                       bus_at(m, ch, stime, pnow, a, len);
+}
+
+static uint64_t seq_later(NandMedia *m, uint32_t ch, uint64_t pnow,
+                          uint64_t e, uint64_t len)
+{
+    return m->ca_res ? ca_book(m, ch, e, len) :
+                       bus_later(m, ch, pnow, e, len);
+}
+
+static uint64_t seq_dout(NandMedia *m, const NandLoc *loc, uint64_t pnow,
+                         uint64_t e)
+{
+    if (m->ca_res) {
+        return sca_dout(m, loc->ch, e, m->cfg.timing.dout_pre_ns,
+                        bus_xfer_ns(m, loc));
+    }
+    return bus_later(m, loc->ch, pnow, e, dout_ns(m, loc));
+}
+
+NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
+                                     uint64_t stime, NandOpCompletion *out)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    uint32_t ch = locs[0].ch;
+    uint64_t pnow, a, d, prev = 0, held = 0;
+    NandOpCompletion c = { 0, 0 };
+    int i;
+
+    if (n < 2 || !m->cfg.policy.cache_read ||
+        m->cfg.policy.channel_mode != NAND_CH_STAGED || !onfi_path(m)) {
+        for (i = 0; i < n; i++) {
+            c = nand_media_op(m, &locs[i], NAND_MEDIA_READ, stime);
+            if (out) {
+                out[i] = c;
+            }
+        }
+        return c;
+    }
+    if (m->cfg.timeline->lock_lun) {
+        m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, &locs[0]);
+    }
+    if (m->ca_res) {
+        sca_prune(m, ch, stime);
+        pnow = stime;
+    } else {
+        pnow = onfi_prune_now(m, ch, stime);
+    }
+    a = m->cfg.policy.page_reg_hold ?
+        array_contend_start(m, &locs[0], stime) : stime;
+    if (!m->ca_res) {
+        a = onfi_earliest(m, ch, a);
+    }
+    d = array_contend_start(m, &locs[0],
+                            seq_cmd(m, ch, stime, pnow, a, tm->rd_cmd_ns)) +
+        array_lat(m, &locs[0], NAND_MEDIA_READ);
+    for (i = 0; i < n; i++) {
+        uint64_t trig = i + 1 < n && !read_seq_next(&locs[i], &locs[i + 1]) ?
+                        (uint64_t)tm->rd_cmd_ns : (uint64_t)tm->rc_step_ns;
+        uint64_t t, cp;
+
+        /* the first trigger follows the 30h read's status poll */
+        t = i ? seq_later(m, ch, pnow, prev, tm->rc_sel_ns + trig) :
+                seq_later(m, ch, pnow, d, tm->status_ns + trig);
+        cp = mx(t, d) + tm->trcbsy_ns;
+        if (i + 1 < n) {
+            d = cp + array_lat(m, &locs[i + 1], NAND_MEDIA_READ);
+        }
+        held = cp;
+        prev = seq_dout(m, &locs[i], pnow,
+                        seq_later(m, ch, pnow, cp, tm->status_ns));
+        c.done_ns = prev;
+        c.latency_ns = prev - stime;
+        if (out) {
+            out[i] = c;
+        }
+    }
+    held = m->cfg.policy.page_reg_hold ? prev : held;
+    array_commit(m, &locs[0], held);
+    suspend_note(m, &locs[0], NAND_MEDIA_READ, held);
+    if (m->cfg.timeline->unlock_lun) {
+        m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, &locs[0]);
+    }
+    return c;
+}
+
 uint64_t nand_media_read_ecc_ns(NandMedia *m, const NandLoc *loc)
 {
     return ecc_extra_ns(m, loc);
@@ -1334,4 +1443,10 @@ void nand_media_phases(const NandMedia *m, NandMediaPhases *out)
     out->wr_post_ns = t->wr_post_ns;
     out->din_gap_ns = t->din_gap_ns;
     out->dout_edge_ns = t->dout_edge_ns;
+    out->cache_read = p->cache_read;
+    if (p->cache_read) {
+        out->trcbsy_ns = t->trcbsy_ns;
+        out->rc_step_ns = t->rc_step_ns;
+        out->rc_sel_ns = t->rc_sel_ns;
+    }
 }

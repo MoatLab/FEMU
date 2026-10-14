@@ -318,6 +318,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "protocol (ONFI 6.0 Section 5): commands, addresses and status use a "
       "separate CA bus, and the channel bus carries only the data bursts; "
       "0 (default) is the conventional protocol" },
+    { "onfi_cache_read",
+      "bbssd, CSD: with the ONFI profile, non-zero reads the pages of one "
+      "read command that land on one LUN as a read cache sequence "
+      "(31h, 00h-addr-31h, 3Fh; ONFI 6.0 Section 6.15). Refused with "
+      "mp_read, mapping=dftl and read_cache_mb; 0 (default) is off" },
     { "onfi_param_page",
       "bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes "
       "per copy, CRC checked, redundant copies tried). It turns the ONFI "
@@ -350,8 +355,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "multi-plane erase, which garbage collection issues when "
       "pls_per_lun > 1" },
     { "trcbsy",
-      "No effect, kept for compatibility; no mode enables the cache read "
-      "model. A value other than the default warns at realize" },
+      "bbssd, CSD: tRCBSY in ns, the busy time of each copy in a read "
+      "cache sequence; only with onfi_cache_read, and a value without it "
+      "warns at realize. 0 (default) takes 3000, the ONFI 6.0 typical "
+      "value. Negative is refused with onfi_cache_read" },
     { "trim_lat_ns",
       "bbssd, CSD: time in ns charged per Dataset Management deallocate "
       "range, with or without FDP" },

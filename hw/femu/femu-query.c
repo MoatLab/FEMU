@@ -479,6 +479,10 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
     mt->data_in_gap_ns = ph->din_gap_ns;
     mt->data_out_edges_ns = ph->dout_edge_ns;
     mt->sca = ph->sca;
+    mt->cache_read = ph->cache_read;
+    mt->read_cache_busy_ns = ph->trcbsy_ns;
+    mt->cache_step_ns = ph->rc_step_ns;
+    mt->cache_select_ns = ph->rc_sel_ns;
     mt->onfi_order = ph->onfi_order;
     mt->page_register_hold = ph->page_reg_hold;
     mt->status_per_plane = ph->mp_status_per_plane;

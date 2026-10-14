@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 190 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 191 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -132,13 +132,14 @@ Devices:
 | `onfi_tccs_ns` | `int32` | `0` | bbssd, CSD, KV: with onfi_mode, tCCS in ns from a datasheet, paid before a data out when several LUNs share a channel and per plane of a multi-plane read; ONFI 6.0 gives no value, so 0 (default) pays nothing |
 | `onfi_param_page` | `str` | unset | bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes per copy, CRC checked, redundant copies tried). It turns the ONFI profile on, gives the mode when onfi_mode is -1, and sets the spare bytes and address cycles. Realize refuses a page whose geometry, features or modes do not match the device; unset (default) uses none |
 | `onfi_sca` | `int32` | `0` | bbssd, CSD, KV: with the ONFI profile, non-zero selects the SCA protocol (ONFI 6.0 Section 5): commands, addresses and status use a separate CA bus, and the channel bus carries only the data bursts; 0 (default) is the conventional protocol |
+| `onfi_cache_read` | `int32` | `0` | bbssd, CSD: with the ONFI profile, non-zero reads the pages of one read command that land on one LUN as a read cache sequence (31h, 00h-addr-31h, 3Fh; ONFI 6.0 Section 6.15). Refused with mp_read, mapping=dftl and read_cache_mb; 0 (default) is off |
 | `tplpbsy` | `int32` | `0` | bbssd, CSD: busy time in ns between the planes of a multi-plane program; only with mp_program, and a value without it warns at realize. Negative is refused |
 | `tplrbsy` | `int32` | `0` | bbssd, CSD: busy time in ns between the planes of a multi-plane read; only with mp_read, and a value without it warns at realize. Negative is refused |
 | `tplebsy` | `int32` | `0` | bbssd, CSD, KV: busy time in ns between the planes of a multi-plane erase, which garbage collection issues when pls_per_lun > 1 |
 | `mp_program` | `int32` | `0` | bbssd, CSD: non-zero charges programs of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `mp_read` | `int32` | `0` | bbssd, CSD: non-zero charges host reads of the same page on several planes of a LUN as one multi-plane command (one array time); needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
-| `trcbsy` | `int32` | `0` | No effect, kept for compatibility; no mode enables the cache read model. A value other than the default warns at realize |
+| `trcbsy` | `int32` | `0` | bbssd, CSD: tRCBSY in ns, the busy time of each copy in a read cache sequence; only with onfi_cache_read, and a value without it warns at realize. 0 (default) takes 3000, the ONFI 6.0 typical value. Negative is refused with onfi_cache_read |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range, with or without FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
 | `tsusp_ns` | `int32` | `0` | bbssd, CSD, KV: overhead in ns added to a read that suspends a program or erase, 0 or more |

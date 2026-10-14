@@ -94,6 +94,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
      */
     if (!NS_BBSSD(ns) && !NS_CSD(ns)) {
         spp->plane_first = false;
+        /* KV reads a value one page at a time, never as one command */
+        spp->onfi_cache_read = false;
     }
 
     /* initialize ssd internal layout architecture */

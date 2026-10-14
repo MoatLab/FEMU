@@ -177,6 +177,8 @@ struct ssdparams {
     int onfi_row_cycles; /* row address cycles of the profile */
     bool onfi_cb_parity; /* copyback only between pages of one parity */
     bool onfi_sca;       /* SCA protocol: commands on a CA bus */
+    bool onfi_cache_read; /* reads of one command and LUN form a sequence */
+    int trcbsy;          /* tRCBSY (ns); 0 = the typical value */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
@@ -704,6 +706,9 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);
 uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
                                        int nppas, struct nand_cmd *ncmd);
+NandLoc ssd_read_hold(struct ssd *ssd, struct ppa *ppa, uint64_t stime);
+uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
+                                uint64_t stime);
 bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst);
 uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
                               struct ppa *dst);

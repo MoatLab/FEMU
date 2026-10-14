@@ -167,7 +167,6 @@ default prints one warning at realize, for example
 | `ms` | the metadata size comes from `meta` (the warning says so) |
 | `dlfeat` | Identify Namespace always reports 0x9 |
 | `ms_max` | OCSSD 2.0 reports a single LBA format (NLBAF 0), and no other mode reads it |
-| `trcbsy` | no mode enables the cache read model |
 | `nr_thread`, `time_slice`, `context_switch_time` (CSD) | accepted for CEMU configurations; CSD still refuses `nr_thread=0` |
 
 The [property reference](../reference/properties.md) says this in each

@@ -201,6 +201,7 @@ fallbacks. Times are in ns.
 | `page-register-hold` | an op sends its command only when its LUN is ready, and holds the LUN until its last bus phase ends |
 | `status-per-plane` | a multi-plane program or erase reads one status per plane |
 | `sca` | `onfi_sca` is on: the command, status and confirm members are times on the separate CA bus, and the channel bus carries only data bursts. The lead and plane select are the CA column select plus the tCCS wait, which holds no bus |
+| `cache-read`, `read-cache-busy-ns`, `cache-step-ns`, `cache-select-ns` | `onfi_cache_read` is on for this namespace (never for `kvssd`); then tRCBSY, the 31h or 3Fh command, and the 78h status before it with several LUNs (0 with one LUN); every time is 0 when `cache-read` is false |
 | `data-in-gap-ns`, `data-out-edges-ns` | with `sca`, the wait from a program command to its data burst (tCDL - SCE - tSCD - tWPRE2, as tCDL ends with the write preamble), and the burst time of a read without the page; 0 otherwise |
 
 With `onfi_mode=26`, 4 KiB pages and two LUNs on a channel, `media` holds
@@ -216,7 +217,8 @@ the values of the [ONFI 6.0 profile table](../design/nand-timing.md#onfi-60-prof
           "program-confirm-ns": 125, "plane-read-busy-ns": 500,
           "plane-program-busy-ns": 500, "plane-erase-busy-ns": 500,
           "data-in-gap-ns": 0, "data-out-edges-ns": 0, "sca": false,
-          "onfi-order": true, "page-register-hold": true,
+          "cache-read": false, "read-cache-busy-ns": 0, "cache-step-ns": 0,
+          "cache-select-ns": 0, "onfi-order": true, "page-register-hold": true,
           "status-per-plane": true}
 ```
 
@@ -262,7 +264,9 @@ command takes comes from the model instead.
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
             "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
-            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
+            "data-out-edges-ns": 0, "sca": false,
+            "cache-read": false, "read-cache-busy-ns": 0, "cache-step-ns": 0,
+            "cache-select-ns": 0, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "line-counts": {"free": 254, "victim": 0, "full": 1, "retired": 0, "spare": 0,
                   "total": 256},
@@ -297,7 +301,9 @@ Each handle has one unit open:
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
             "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
-            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
+            "data-out-edges-ns": 0, "sca": false,
+            "cache-read": false, "read-cache-busy-ns": 0, "cache-step-ns": 0,
+            "cache-select-ns": 0, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "fdp": {"reclaim-groups": 1, "units-per-group": 25, "pages-per-unit": 16,
           "handles": [{"id": 0, "type": "persistently-isolated",
@@ -337,7 +343,9 @@ A zoned namespace with one zone written and one zone finished:
             "plane-select-ns": 0, "data-in-edges-ns": 0, "program-confirm-ns": 0,
             "plane-read-busy-ns": 0, "plane-program-busy-ns": 0,
             "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
-            "data-out-edges-ns": 0, "sca": false, "onfi-order": false,
+            "data-out-edges-ns": 0, "sca": false,
+            "cache-read": false, "read-cache-busy-ns": 0, "cache-step-ns": 0,
+            "cache-select-ns": 0, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "zones": [{"index": 0, "type": "sequential", "state": "full",
              "start-lba": 0, "capacity": 131072, "zrwa": false},

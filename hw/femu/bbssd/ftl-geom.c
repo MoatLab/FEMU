@@ -300,6 +300,9 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->onfi_mts = n->bb_params.onfi_mts;
     spp->onfi_tccs_ns = n->bb_params.onfi_tccs_ns;
     spp->onfi_sca = n->bb_params.onfi_sca != 0;
+    spp->onfi_cache_read = n->bb_params.onfi_cache_read != 0 &&
+                           spp->onfi_mode >= 0;
+    spp->trcbsy = n->bb_params.trcbsy;
     spp->pe_suspend = n->bb_params.pe_suspend;
     spp->tsusp_ns = n->bb_params.tsusp_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
