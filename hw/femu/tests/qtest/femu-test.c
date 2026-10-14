@@ -21121,6 +21121,631 @@ static void femu_test_namespace_failed_identity(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * kv_index=lsm tests. Keys are 8 bytes whose byte order is the order of
+ * the number, so List order can be checked as numbers.
+ */
+#define FEMU_LSM_KNOBS \
+    "kv_index=lsm,kv_lsm_memtable_keys=16,kv_lsm_size_ratio=2,"
+
+static uint64_t femu_lsm_key(uint64_t i)
+{
+    return bswap64(i);
+}
+
+/* value byte of key @i at version @ver */
+static uint8_t femu_lsm_byte(uint64_t i, int ver)
+{
+    return (uint8_t)(i * 13 + ver * 101 + 1);
+}
+
+static uint16_t femu_lsm_cmd(FemuCtrlState *c, uint8_t opcode, uint64_t i,
+                             uint64_t buf, uint32_t len, uint8_t opt)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.res1 = cpu_to_le64(femu_lsm_key(i));
+    cmd.cdw10 = cpu_to_le32(len);
+    cmd.cdw11 = cpu_to_le32(8 | (uint32_t)opt << 8);
+    return femu_io(c, &cmd);
+}
+
+static uint16_t femu_lsm_store(FemuCtrlState *c, uint64_t i, uint64_t buf,
+                               uint32_t len, int ver)
+{
+    qtest_memset(c->pdev->bus->qts, buf, femu_lsm_byte(i, ver), len);
+    return femu_lsm_cmd(c, FEMU_KV_CMD_STORE, i, buf, len, 0);
+}
+
+/* Retrieve @i and check every byte; return the status */
+static uint16_t femu_lsm_check(FemuCtrlState *c, uint64_t i, uint64_t buf,
+                               uint32_t len, int ver)
+{
+    uint8_t got[4096];
+    uint16_t status;
+
+    g_assert_cmpuint(len, <=, sizeof(got));
+    qtest_memset(c->pdev->bus->qts, buf, 0, len);
+    status = femu_lsm_cmd(c, FEMU_KV_CMD_RETRIEVE, i, buf, len, 0);
+    if (status == NVME_SUCCESS) {
+        qtest_memread(c->pdev->bus->qts, buf, got, len);
+        for (uint32_t k = 0; k < len; k++) {
+            if (got[k] != femu_lsm_byte(i, ver)) {
+                g_test_message("key %" PRIu64 " byte %u: %#x, want %#x", i, k,
+                               got[k], femu_lsm_byte(i, ver));
+                g_assert_not_reached();
+            }
+        }
+    }
+    return status;
+}
+
+/* the lsm member of namespace 1; the reply is handed back to unref */
+static QDict *femu_lsm_info(QTestState *qts, QDict **rsp)
+{
+    QDict *lsm = qdict_get_qdict(femu_query_ns(qts, "", rsp), "lsm");
+
+    g_assert_nonnull(lsm);
+    return lsm;
+}
+
+static int64_t femu_lsm_stat(QTestState *qts, const char *name)
+{
+    QDict *rsp;
+    int64_t v = qdict_get_int(femu_lsm_info(qts, &rsp), name);
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * Walk the namespace with List pages of @hbs bytes, as a host does: each
+ * page starts at the last key of the one before, which comes back first.
+ * Return the keys in walk order in @out, stopping at the wrap.
+ */
+static int femu_lsm_walk(FemuCtrlState *c, uint64_t buf, uint32_t hbs,
+                         uint64_t *out, int max)
+{
+    g_autofree uint8_t *page = g_malloc(hbs);
+    uint8_t start[16];
+    uint8_t start_len = 0;
+    int n = 0;
+
+    for (;;) {
+        uint32_t nrk = femu_kv_list_page(c, buf, hbs, start, start_len, page);
+        uint32_t pos = 4;
+        int added = 0;
+
+        for (uint32_t e = 0; e < nrk; e++) {
+            uint16_t kl = lduw_le_p(page + pos);
+            uint64_t v;
+
+            g_assert_cmpuint(kl, ==, 8);
+            v = bswap64(ldq_le_p(page + pos + 2));
+            pos = (pos + 2 + kl + 3) & ~3u;
+            if (start_len && e == 0 && v == out[n - 1]) {
+                continue;               /* the start key comes back first */
+            }
+            if (n && v <= out[n - 1]) {
+                return n;               /* the wrap */
+            }
+            g_assert_cmpint(n, <, max);
+            out[n++] = v;
+            added++;
+        }
+        if (!added) {
+            return n;
+        }
+        stq_le_p(start, femu_lsm_key(out[n - 1]));
+        memset(start + 8, 0, 8);
+        start_len = 8;
+    }
+}
+
+/*
+ * 3000 keys over seven levels: stores in a mixed order, overwrites of a
+ * third, deletes of a fifth, and stores again of half of those. Every
+ * Retrieve returns the newest value or Key Does Not Exist, and a List walk
+ * returns each live key once, in order.
+ */
+#define FEMU_LSM_MANY 3000
+
+static int femu_lsm_ver(int i)
+{
+    return i % 10 == 0 ? 2 : i % 3 == 0 ? 1 : 0;
+}
+
+static bool femu_lsm_live(int i)
+{
+    return i % 5 != 0 || i % 10 == 0;
+}
+
+static void femu_test_kv_lsm_many_keys(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    g_autofree uint64_t *walk = g_new(uint64_t, FEMU_LSM_MANY);
+    int live = 0;
+    int n, i;
+    QDict *rsp;
+    QDict *lsm;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    for (i = 0; i < FEMU_LSM_MANY; i++) {
+        int k = (i * 1237) % FEMU_LSM_MANY;
+
+        g_assert_cmphex(femu_lsm_store(&c, k, buf, 64, 0), ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < FEMU_LSM_MANY; i += 3) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 64, 1), ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < FEMU_LSM_MANY; i += 5) {
+        g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, i, buf, 0, 0),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < FEMU_LSM_MANY; i += 10) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 64, 2), ==, NVME_SUCCESS);
+    }
+
+    for (i = 0; i < FEMU_LSM_MANY; i++) {
+        uint16_t want = femu_lsm_live(i) ? NVME_SUCCESS : 0x87;
+
+        live += femu_lsm_live(i);
+        g_assert_cmphex(femu_lsm_check(&c, i, buf, 64, femu_lsm_ver(i)), ==,
+                        want);
+        if (i % 3 == 1) {
+            g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_EXIST, i, buf, 0, 0),
+                            ==, want);
+        }
+    }
+
+    n = femu_lsm_walk(&c, buf, 4096, walk, FEMU_LSM_MANY);
+    g_assert_cmpint(n, ==, live);
+    for (i = 0; i < n; i++) {
+        g_assert_true(walk[i] < FEMU_LSM_MANY && femu_lsm_live(walk[i]));
+    }
+
+    /* the keys reached unpinned levels, and merges dropped old versions */
+    lsm = femu_lsm_info(qts, &rsp);
+    g_test_message("levels %zu, compactions %" PRId64 ", dropped %" PRId64
+                   ", probe reads %" PRId64,
+                   qlist_size(qdict_get_qlist(lsm, "levels")),
+                   qdict_get_int(lsm, "compactions"),
+                   qdict_get_int(lsm, "dropped-records"),
+                   qdict_get_int(lsm, "probe-read-pages"));
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(lsm, "levels")), >=, 6);
+    g_assert_cmpint(qdict_get_int(lsm, "compactions"), >, 0);
+    g_assert_cmpint(qdict_get_int(lsm, "dropped-records"), >, 0);
+    g_assert_cmpint(qdict_get_int(lsm, "probe-read-pages"), >, 0);
+    g_assert_cmpint(qdict_get_int(lsm, "scan-read-pages"), >, 0);
+    qobject_unref(rsp);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * List returns the keys in byte order from the start key, then wraps; a
+ * start key that is gone gives the next key, one past the last the
+ * smallest. Merges between two Lists keep the order.
+ */
+static void femu_test_kv_lsm_list_order(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    g_autofree uint8_t *page = g_malloc(4096);
+    uint64_t walk[256];
+    uint8_t start[16] = { 0 };
+    uint32_t nrk;
+    int i, n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 200; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, (i * 37) % 200, buf, 16, 0), ==,
+                        NVME_SUCCESS);
+    }
+
+    stq_le_p(start, femu_lsm_key(100));
+    nrk = femu_kv_list_page(&c, buf, 4096, start, 8, page);
+    g_assert_cmpuint(nrk, ==, 200);
+    for (i = 0; i < 200; i++) {
+        uint64_t v = bswap64(ldq_le_p(page + 4 + 12 * i + 2));
+
+        g_assert_cmpuint(v, ==, (uint64_t)(100 + i) % 200);
+    }
+
+    /* more merges, then the deleted key 150 and the absent key 1000 */
+    for (i = 200; i < 240; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 16, 0), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 150, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    n = femu_lsm_walk(&c, buf, 256, walk, 256);
+    g_assert_cmpint(n, ==, 239);
+    for (i = 0; i < n; i++) {
+        g_assert_cmpuint(walk[i], ==, (uint64_t)(i < 150 ? i : i + 1));
+    }
+    stq_le_p(start, femu_lsm_key(150));
+    femu_kv_list_page(&c, buf, 4096, start, 8, page);
+    g_assert_cmpuint(bswap64(ldq_le_p(page + 6)), ==, 151);
+    stq_le_p(start, femu_lsm_key(1000));
+    femu_kv_list_page(&c, buf, 4096, start, 8, page);
+    g_assert_cmpuint(bswap64(ldq_le_p(page + 6)), ==, 0);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/* wall time in microseconds of one KV command that must return @want */
+static int64_t femu_lsm_timed(FemuCtrlState *c, uint8_t opcode, uint64_t i,
+                              uint64_t buf, uint32_t len, uint16_t want)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmphex(femu_lsm_cmd(c, opcode, i, buf, len, 0), ==, want);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * A lookup reads the meta page of each unpinned level whose key range
+ * holds the key, one after the other, and then the value. With 25 ms
+ * reads, a key found after k meta pages takes (k + 1) reads; a key in the
+ * memtable takes one, the value read beside the base read.
+ */
+#define FEMU_LSM_READ_US 25000
+
+static void femu_test_kv_lsm_probe_time(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t us, reads = 0;
+    int i, found = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 136; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, (i * 53) % 136, buf, 16, 0), ==,
+                        NVME_SUCCESS);
+    }
+    /* the merges run in the background; let the LUNs drain */
+    g_usleep(500000);
+
+    /* a key stored last is in the memtable: no meta page read */
+    reads = femu_lsm_stat(qts, "probe-read-pages");
+    us = femu_lsm_timed(&c, FEMU_KV_CMD_RETRIEVE, (135 * 53) % 136, buf, 16,
+                        NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+    g_test_message("memtable key: %" PRId64 " us", us);
+
+    /* a key below an overlapping level reads two meta pages */
+    for (i = 0; i < 136 && found < 0; i++) {
+        int64_t k;
+
+        g_usleep(3 * FEMU_LSM_READ_US);
+        reads = femu_lsm_stat(qts, "probe-read-pages");
+        us = femu_lsm_timed(&c, FEMU_KV_CMD_RETRIEVE, i, buf, 16,
+                            NVME_SUCCESS);
+        k = femu_lsm_stat(qts, "probe-read-pages") - reads;
+        if (k >= 2) {
+            found = i;
+            g_test_message("key %d: %" PRId64 " meta reads, %" PRId64 " us",
+                           i, k, us);
+            /* host delays only add time, so only the floor is checked */
+            g_assert_cmpint(us, >=, (k + 1) * FEMU_LSM_READ_US - 2000);
+        }
+    }
+    g_assert_cmpint(found, >=, 0);
+
+    /* a miss past every level reads no meta page */
+    g_usleep(3 * FEMU_LSM_READ_US);
+    reads = femu_lsm_stat(qts, "probe-read-pages");
+    femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, 5000, buf, 0, 0x87);
+    g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * One LUN, 200 ms programs. The 17th Store finds the memtable full and
+ * flushes it to an unpinned level 1: one meta page program. It runs in
+ * the background, so that Store takes one program time. An Exist sent
+ * right behind it waits for that program on the LUN: two program times.
+ * A merge in the foreground would make the Store take two as well. The
+ * ceiling on the Store sits 120 ms above one program and 80 ms below
+ * two, as wide as the other KV timing tests leave for host delays.
+ */
+#define FEMU_LSM_PROG_US 200000
+
+static void femu_test_kv_lsm_background(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t t0, store, exist;
+    NvmeCmd cmd[2];
+    uint16_t cid;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 16, 0), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_lsm_stat(qts, "flushes"), ==, 0);
+
+    qtest_memset(qts, buf, femu_lsm_byte(16, 0), 16);
+    memset(cmd, 0, sizeof(cmd));
+    for (i = 0; i < 2; i++) {
+        cmd[i].opcode = i ? FEMU_KV_CMD_EXIST : FEMU_KV_CMD_STORE;
+        cmd[i].nsid = cpu_to_le32(1);
+        cmd[i].dptr.prp1 = cpu_to_le64(buf);
+        cmd[i].res1 = cpu_to_le64(femu_lsm_key(i ? 3 : 16));
+        cmd[i].cdw10 = cpu_to_le32(i ? 0 : 16);
+        cmd[i].cdw11 = cpu_to_le32(8);
+    }
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd[0]);
+    femu_submit(&c, &c.io, &cmd[1]);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    store = g_get_monotonic_time() - t0;
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    exist = g_get_monotonic_time() - t0;
+    g_test_message("flushing Store done at %" PRId64 " us, Exist at %" PRId64
+                   " us", store, exist);
+    g_assert_cmpint(femu_lsm_stat(qts, "flushes"), ==, 1);
+    g_assert_cmpint(femu_lsm_stat(qts, "compaction-program-pages"), ==, 1);
+    g_assert_cmpint(store, >=, FEMU_LSM_PROG_US - 2000);
+    g_assert_cmpint(store, <, FEMU_LSM_PROG_US * 8 / 5);
+    g_assert_cmpint(exist, >=, 2 * FEMU_LSM_PROG_US - 2000);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * query-femu reports the tree, also before the controller is enabled:
+ * every record is in a level or the memtable, the levels are numbered from
+ * 1 with level 1 pinned, and the DRAM figure follows its definition. A
+ * hash device reports no lsm member.
+ */
+static void femu_test_kv_lsm_query(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw, buf;
+    int64_t records, dram = 0, flash = 0;
+    QListEntry *e;
+    QDict *rsp, *lsm, *ns;
+    int level = 0;
+    int i;
+
+    if (!data) {
+        ns = femu_query_ns(qts, "", &rsp);
+        g_assert_false(qdict_haskey(ns, "lsm"));
+        g_assert_cmpuint(qdict_size(ns), ==, 3);
+        qobject_unref(rsp);
+        return;
+    }
+
+    lsm = femu_lsm_info(qts, &rsp);
+    g_assert_cmpint(qdict_get_int(lsm, "memtable-capacity"), ==, 16);
+    g_assert_cmpint(qdict_get_int(lsm, "size-ratio"), ==, 2);
+    g_assert_cmpint(qdict_get_int(lsm, "pinned-levels"), ==, 1);
+    g_assert_cmpint(qdict_get_int(lsm, "records-per-page"), ==, 128);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(lsm, "levels")), ==, 0);
+    qobject_unref(rsp);
+
+    raw = guest_alloc(alloc, 3 * 4096);
+    buf = (raw + 4095) & ~4095ULL;
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 300; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, (i * 7) % 300, buf, 16, 0), ==,
+                        NVME_SUCCESS);
+    }
+
+    lsm = femu_lsm_info(qts, &rsp);
+    records = qdict_get_int(lsm, "memtable-keys");
+    dram = records * 32;
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(lsm, "levels"), e) {
+        QDict *lv = qobject_to(QDict, qlist_entry_obj(e));
+        int64_t nr = qdict_get_int(lv, "records");
+        int64_t pages = qdict_get_int(lv, "pages");
+
+        g_assert_cmpint(qdict_get_int(lv, "level"), ==, ++level);
+        g_assert_cmpint(qdict_get_bool(lv, "pinned"), ==, level == 1);
+        g_assert_cmpint(pages, >=, (nr + 127) / 128);
+        if (level == 1) {
+            dram += nr * 32;
+        } else {
+            dram += pages * 24;
+            flash += pages * 4096;
+        }
+        records += nr;
+    }
+    /* distinct keys, no delete: one record each */
+    g_assert_cmpint(records, ==, 300);
+    g_assert_cmpint(level, >=, 4);
+    g_assert_cmpint(qdict_get_int(lsm, "device-dram-bytes"), ==, dram);
+    g_assert_cmpint(qdict_get_int(lsm, "meta-flash-bytes"), ==, flash);
+    g_assert_cmpint(qdict_get_int(lsm, "flushes"), ==, 18);
+    g_assert_cmpint(qdict_get_int(lsm, "compaction-program-pages"), >, 0);
+    g_assert_cmpint(qdict_get_int(lsm, "compaction-read-pages"), >, 0);
+    qobject_unref(rsp);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/* each kv_index refusal, with a hint of its message */
+static void femu_test_kv_lsm_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    static const struct {
+        int mode;
+        const char *opts;
+        const char *want;
+    } bad[] = {
+        { 5, "'kv_index':'btree'", "is not hash or lsm" },
+        { 1, "'kv_index':'btree'", "is not hash or lsm" },
+        { 5, "'kv_lsm_size_ratio':4", "need kv_index=lsm" },
+        { 5, "'kv_index':'hash','kv_lsm_pinned_levels':0",
+          "need kv_index=lsm" },
+        { 5, "'kv_index':'lsm','kv_lsm_size_ratio':1", "is not 2 to 64" },
+        { 5, "'kv_index':'lsm','kv_lsm_size_ratio':65", "is not 2 to 64" },
+        { 5, "'kv_index':'lsm','kv_lsm_memtable_keys':15",
+          "is not 16 to 65536" },
+        { 5, "'kv_index':'lsm','kv_lsm_memtable_keys':65537",
+          "is not 16 to 65536" },
+        { 5, "'kv_index':'lsm','kv_lsm_pinned_levels':25", "is not 0 to 24" },
+        { 1, "'kv_index':'lsm'", "need a key-value namespace" },
+        { 1, "'kv_index':'lsm','namespaces':2,"
+          "'namespace_modes':'bbssd,nossd'", "need a key-value namespace" },
+        { 5, "'kv_index':'lsm','secsz':16,'secs_per_pg':1",
+          "needs a page of at least 32 bytes" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'lsmbad','addr':'5','devsz_mb':64,"
+            "'femu_mode':%d,%s}", bad[i].mode, bad[i].opts);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(femu->dev.bus->qts,
+                               "{'execute':'device_add','arguments':%p}",
+                               args);
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", bad[i].opts, desc);
+        g_assert_nonnull(strstr(desc, bad[i].want));
+        qobject_unref(rsp);
+    }
+}
+
+/*
+ * Value GC with keys in unpinned levels. As in PinK, it reads the meta
+ * page of each such key to check the value, and puts the key back in the
+ * memtable. The values survive the move.
+ */
+static void femu_test_kv_lsm_gc(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 40; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 0), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), ==, 0);
+    /* a hot key fills the 1 MiB value space; its old values are dead */
+    for (i = 0; i < 300; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, 1000, buf, 4096, i & 1), ==,
+                        NVME_SUCCESS);
+    }
+    g_test_message("gc reads %" PRId64 ", reinserted %" PRId64,
+                   femu_lsm_stat(qts, "gc-read-pages"),
+                   femu_lsm_stat(qts, "reinserted-keys"));
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), >, 0);
+    g_assert_cmpint(femu_lsm_stat(qts, "reinserted-keys"), >, 0);
+    for (i = 0; i < 40; i++) {
+        g_assert_cmphex(femu_lsm_check(&c, i, buf, 4096, 0), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_lsm_check(&c, 1000, buf, 4096, 1), ==, NVME_SUCCESS);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * Delete goes in blind with EDNEK clear. With EDNEK set its status depends
+ * on the key, so it looks the key up first: a meta page read for a key in
+ * an unpinned level, and a miss reports Key Does Not Exist.
+ */
+static void femu_test_kv_lsm_delete_ednek(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t reads;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 40; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 16, 0), ==, NVME_SUCCESS);
+    }
+
+    reads = femu_lsm_stat(qts, "probe-read-pages");
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 1, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+
+    g_assert_cmphex(femu_set_feature(&c, 0x20, false, 1, 1, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 2, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), >, reads);
+    /* the tombstone of key 2 is in the memtable: DRAM answers */
+    reads = femu_lsm_stat(qts, "probe-read-pages");
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 2, buf, 0, 0), ==,
+                    0x87);
+    g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+    g_assert_cmphex(femu_lsm_check(&c, 1, buf, 16, 0), ==, 0x87);
+    g_assert_cmphex(femu_lsm_check(&c, 3, buf, 16, 0), ==, NVME_SUCCESS);
+
+    /* with EDNEK clear, a Delete of an absent key puts a blind tombstone */
+    g_assert_cmphex(femu_set_feature(&c, 0x20, false, 1, 0, NULL), ==,
+                    NVME_SUCCESS);
+    reads = femu_lsm_stat(qts, "memtable-keys");
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 777, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "memtable-keys"), ==, reads + 1);
+    g_assert_cmphex(femu_lsm_check(&c, 777, buf, 16, 0), ==, 0x87);
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
 static void femu_test_namespace_kv_byte_capacity(void *obj, void *data,
                                                  QGuestAllocator *alloc)
 {
@@ -37101,6 +37726,67 @@ static void femu_register_nodes(void)
     });
     qos_add_test("kv-model-refused", "femu", femu_test_kv_model_refused,
                  NULL);
+    qos_add_test("kv-lsm-many-keys", "femu", femu_test_kv_lsm_many_keys,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=1"
+    });
+    qos_add_test("kv-lsm-list-order", "femu", femu_test_kv_lsm_list_order,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-probe-time", "femu", femu_test_kv_lsm_probe_time,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8,pg_rd_lat=25000000,pg_wr_lat=100000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-background", "femu", femu_test_kv_lsm_background,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=200000000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-query", "femu", femu_test_kv_lsm_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=1",
+        .arg = (void *)1,
+    });
+    qos_add_test("kv-lsm-query-hash", "femu", femu_test_kv_lsm_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8,kv_index=hash"
+    });
+    qos_add_test("kv-lsm-refused", "femu", femu_test_kv_lsm_refused, NULL);
+    qos_add_test("kv-lsm-gc", "femu", femu_test_kv_lsm_gc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-delete-ednek", "femu", femu_test_kv_lsm_delete_ednek,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
     qos_add_test("oc20-page-types-on", "femu", femu_test_oc20_page_types,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
