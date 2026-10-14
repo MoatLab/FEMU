@@ -33805,6 +33805,16 @@ static void femu_test_fdp_ns_replace(void *obj, void *data,
 }
 
 
+/* HBMW and MBMW, the low 64 bits of each, from the FDP Statistics log */
+static void femu_fdp_bytes(FemuCtrlState *c, uint64_t log, uint64_t *hbmw,
+                           uint64_t *mbmw)
+{
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, log, 64), ==,
+                    NVME_SUCCESS);
+    *hbmw = qtest_readq(c->pdev->bus->qts, log);
+    *mbmw = qtest_readq(c->pdev->bus->qts, log + 16);
+}
+
 /*
  * A handle whose units ran out shows the host a stand-in unit with no room,
  * which the FTL owns. With collection held off, handle updates through
@@ -33843,10 +33853,19 @@ static void femu_test_fdp_replace_full(void *obj, void *data,
     g_assert_cmphex(status, ==, NVME_CAP_EXCEEDED);
     /*
      * The unit fills with nothing to follow it: the handle has no unit, and
-     * the rest of the write finds no room.
+     * the rest of the write finds no room. HBMW counts only the pages the
+     * write reached, as MBMW does.
      */
-    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 100, 16, buf, list,
-                                  0), ==, NVME_CAP_EXCEEDED);
+    {
+        uint64_t h0, m0, h1, m1;
+
+        femu_fdp_bytes(&c, log, &h0, &m0);
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 100, 16, buf,
+                                      list, 0), ==, NVME_CAP_EXCEEDED);
+        femu_fdp_bytes(&c, log, &h1, &m1);
+        g_assert_cmpuint(h1 - h0, ==, m1 - m0);
+        g_assert_cmpuint(h1 - h0, <, 16 * 4096);
+    }
     femu_fdpns_ruhs(&c, 1, log, ruhid, ruamw);
     g_assert_cmpuint(ruamw[0], ==, 0);
     femu_disable(&c);
@@ -33874,6 +33893,87 @@ static void femu_test_fdp_replace_full(void *obj, void *data,
     guest_free(alloc, log);
     guest_free(alloc, list);
     guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+
+/*
+ * HBMW counts the bytes of user data the host wrote (Base 2.3, Figure 293),
+ * MBMW what reached the media. One 512-byte block through placement 1 adds
+ * 512 to HBMW and to handle 1's host bytes, and a 4 KiB page to MBMW when
+ * it is programmed: at once, or with @data "buffer" when a Flush writes it
+ * back. A run of whole pages adds the same to both.
+ */
+static void femu_test_fdp_hbmw_blocks(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool buffer = !strcmp(data, "buffer");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t h0, m0, h1, m1, host, vpc;
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x7e, 20 * 4096);
+    femu_fdp_bytes(&c, log, &h0, &m0);
+
+    g_assert_cmphex(femu_write_block_placed(&c, 9, buf, 1), ==, NVME_SUCCESS);
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    g_assert_cmpuint(h1 - h0, ==, 512);
+    g_assert_cmpuint(m1 - m0, ==, buffer ? 0 : 4096);
+    femu_fdpns_handle(qts, 1, &host, &vpc);
+    g_assert_cmpuint(host, ==, 512);
+
+    if (buffer) {
+        cmd.opcode = NVME_CMD_FLUSH;
+        cmd.nsid = cpu_to_le32(1);
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        femu_fdp_bytes(&c, log, &h1, &m1);
+        g_assert_cmpuint(h1 - h0, ==, 512);
+        g_assert_cmpuint(m1 - m0, ==, 4096);
+    }
+
+    /* two blocks across a page boundary: 1 KiB, on two pages */
+    {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(15);
+        rw.nlb = cpu_to_le16(1);
+        rw.control = cpu_to_le16(2 << 4);
+        rw.dspec = cpu_to_le16(1);
+        g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    }
+    if (buffer) {
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    g_assert_cmpuint(h0 - h1, ==, 1024);
+    g_assert_cmpuint(m0 - m1, ==, 2 * 4096);
+    h1 = h0;
+    m1 = m0;
+
+    /* eight whole pages: the same bytes on both sides */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 16, 8, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    if (buffer) {
+        g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    g_assert_cmpuint(h0 - h1, ==, 8 * 4096);
+    g_assert_cmpuint(m0 - m1, ==, 8 * 4096);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
     qos_invalidate_command_line();
 }
 
@@ -36239,6 +36339,22 @@ static void femu_register_nodes(void)
             "namespace_phls=0:1,,2",
     });
     qos_add_test("fdp-ns-refused", "femu", femu_test_fdp_ns_refused, NULL);
+    qos_add_test("fdp-hbmw-blocks", "femu", femu_test_fdp_hbmw_blocks,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"direct",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("fdp-hbmw-blocks-buffer", "femu", femu_test_fdp_hbmw_blocks,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,buffer_size=16,vwc=1",
+    });
     qos_add_test("fdp-replace-full", "femu", femu_test_fdp_replace_full,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

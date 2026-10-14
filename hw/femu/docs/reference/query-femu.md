@@ -126,9 +126,10 @@ has these members:
 | `ftl-nsid` | the namespace whose FTL holds the units |
 | `reclaim-units` | with `kind` `reclaim-units`: `group`, `unit`, `handle`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each unit, by group and then by unit |
 
-`host-bytes` counts the NAND pages that the host wrote through the
-handle, in bytes, so a 512-byte write on a 4 KiB page adds 4096.
-`media-bytes` adds the data that garbage collection moved out of the
+`host-bytes` counts the bytes of the logical blocks that the host wrote
+through the handle, so a 512-byte write on a 4 KiB page adds 512.
+`media-bytes` counts the whole page, 4096, when the page is programmed.
+`media-bytes` also adds the data that garbage collection moved out of the
 handle's units, and the pad pages that closed its units
 (`pd_open_close_sec`). Both keep their values when a controller replaces another
 on the same subsystem.
@@ -137,7 +138,10 @@ the handles. Its fields are Host Bytes with Metadata Written (HBMW) and
 Media Bytes with Metadata Written (MBMW). The counters stop at the largest 64-bit value.
 
 ```
- host write via handle h  --> host-bytes[h] += n   media-bytes[h] += n
+ host write of n bytes via handle h, on p pages
+                          --> host-bytes[h] += n
+ the p pages programmed   -->                      media-bytes[h] += p * page
+     (at once, or when the write buffer writes them back)
  GC moves m bytes out of
  a unit that h wrote      -->                      media-bytes[h] += m
  p pad bytes close a unit

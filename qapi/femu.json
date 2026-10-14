@@ -335,7 +335,8 @@
 #
 # @type: isolation of the handle
 #
-# @host-bytes: bytes of the NAND pages the host wrote through the handle
+# @host-bytes: bytes of the logical blocks the host wrote through the
+#     handle
 #
 # @media-bytes: bytes programmed for the handle: host writes, data that
 #     garbage collection moved out of its units, and pad pages that

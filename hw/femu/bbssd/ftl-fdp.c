@@ -1861,6 +1861,22 @@ uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
 }
 
 /*
+ * The bytes of blocks [@slba, @slba + @nlb) of @req that lie in the first
+ * @pages pages the write reached: what the host wrote, for HBMW. A write
+ * that covers part of a page counts its own blocks, not the whole page.
+ */
+static uint64_t fdp_host_bytes(struct ssd *ssd, NvmeRequest *req,
+                               uint64_t slba, uint64_t nlb, uint64_t pages)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t beg = ssd_lba_byte_offset(ssd, req, slba);
+    uint64_t end = MIN(beg + (nlb << lbads), (beg / pg + pages) * pg);
+
+    return end > beg ? end - beg : 0;
+}
+
+/*
  * Accept a placed write into the write buffer. Each page keeps the handle
  * and group of this write, and the pieces it covers; the page goes to that
  * handle's unit when it is written back. Pages past the watermark first
@@ -1875,6 +1891,7 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t start_lpn, end_lpn, lpn;
     uint64_t curlat, maxlat = 0;
     uint64_t passes, accepted = 0;
+    uint64_t host;
     uint16_t rgid, ruhid;
     bool full = false;
     int batch = ssd_buffer_batch(ssd);
@@ -1934,9 +1951,10 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     ssd->host_write_pages += accepted;
     spp->write_cnt += accepted;
     req->xfer_bytes = accepted * pg;
-    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.hbmw, req->xfer_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, req->xfer_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, req->xfer_bytes);
+    host = fdp_host_bytes(ssd, req, req->slba, req->nlb, accepted);
+    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.hbmw, host);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, host);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, host);
     ssd->buffer_full_destages += full;
 
     /* accepting into DRAM is not free, even though it is not a program */
@@ -2031,28 +2049,32 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
 }
 
 /*
- * Charge what a placed write actually programmed to the endurance group and
- * to the handle its placement identifier selects.
+ * Charge what a placed write of blocks [@slba, @slba + @nlb) actually
+ * programmed to the endurance group and to the handle its placement
+ * identifier selects: the host's blocks to HBMW, the pages to MBMW.
  */
 static void fdp_count_write(NvmeNamespace *ns, struct ssd *ssd,
-                            NvmeRequest *req)
+                            NvmeRequest *req, uint64_t slba, uint64_t nlb)
 {
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     uint64_t data_bytes = req->xfer_bytes;
+    uint64_t host_bytes;
     uint16_t ph, rg, ruhid;
 
     if (!data_bytes) {
         return;
     }
+    host_bytes = fdp_host_bytes(ssd, req, slba, nlb, data_bytes / pg);
     if (req->fdp_dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
         !nvme_parse_pid(ns, req->fdp_dspec, &ph, &rg)) {
         ph = 0;
     }
     ruhid = ns->fdp.phs[ph];
 
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, host_bytes);
     nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, data_bytes);
-    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, host_bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, host_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->mbmw, data_bytes);
 }
@@ -2067,9 +2089,6 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     struct ssd *ssd = ns->ssd;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t lat;
-
-    (void)slba;
-    (void)nlb;
 
     /* Write and Copy; Force Unit Access goes to the media at once */
     if (ssd_buffer_enabled(ssd) && !(le16_to_cpu(rw->control) & NVME_RW_FUA)) {
@@ -2088,7 +2107,7 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
      * write the device had no room for must not add its length to either
      * total, or the reported amplification falls below one.
      */
-    fdp_count_write(ns, ssd, req);
+    fdp_count_write(ns, ssd, req, slba, nlb);
 
     return lat;
 }
@@ -2529,7 +2548,8 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
                                     le16_to_cpu(rw->nlb) + 1, start_lpn,
                                     end_lpn);
 
-        fdp_count_write(req->ns, ssd, req);
+        fdp_count_write(req->ns, ssd, req, le64_to_cpu(rw->slba),
+                        le16_to_cpu(rw->nlb) + 1);
         return lat;
     }
 

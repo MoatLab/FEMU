@@ -50,6 +50,7 @@ listed one by one.
 - New `namespace_phls` property: a placement handle list for each FDP namespace. Placement handle `i` selects entry `i`. A handle no list names is reported unused in log 21h. Unset, every namespace gets every handle, as before.
 - FDP takes more than one namespace. Every bbssd namespace of the controller places into one FTL, as the reclaim units of an endurance group are shared; NoSSD namespaces report their lists only. Namespaces that share a handle keep one format, and events from collection name the namespace of the data they moved.
 - query-femu reports the placement handle list of each FDP namespace (`placement-handles`) and the namespace whose FTL holds the units (`ftl-nsid`). `femu-stat.py` and `femu-config-check.py` show both, and the latter counts over-provisioning over the namespaces that share one FTL.
+- FDP HBMW and the host bytes of each handle count the logical blocks the host wrote, as Base 2.3 Figure 293 defines HBMW. A 512-byte write on a 4 KiB page now adds 512, not 4096; MBMW still counts the programmed page.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).

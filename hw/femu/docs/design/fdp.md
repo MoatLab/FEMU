@@ -444,11 +444,13 @@ in 22h.
 
 | Counter | Grows by | Where |
 | --- | --- | --- |
-| HBMW (host bytes with metadata written) | bytes a Write, Copy or Write Zeroes without Deallocate actually programmed | `fdp_count_write()` |
-| MBMW (media bytes with metadata written) | the same host bytes, plus bytes relocated by GC, plus pad bytes (`pd_open_close_sec`) | `fdp_count_write()`, `do_gc_fdp_style()`, `fdp_pd_leave_ru()` |
+| HBMW (host bytes with metadata written) | bytes of the logical blocks a Write, Copy or Write Zeroes without Deallocate wrote, in the pages it actually programmed or the buffer took (`fdp_host_bytes()`) | `fdp_count_write()`, `fdp_buffered_write()` |
+| MBMW (media bytes with metadata written) | the bytes of the pages programmed for the host, plus bytes relocated by GC, plus pad bytes (`pd_open_close_sec`) | `fdp_count_write()`, `do_gc_fdp_style()`, `fdp_pd_leave_ru()` |
 | MBE (media bytes erased) | bytes of every block erased by GC | `do_gc_fdp_style()` |
 
 The ratio MBMW / HBMW is the write amplification of the endurance group.
+A write smaller than a page programs the whole page, so it raises the
+ratio above 1, as it does on a real device.
 The counters are charged after the write, from the pages it placed, so a
 write that ran out of space adds only what it wrote. They are reset by a
 deallocate with `fdp_trim_erase_all` set.
@@ -588,7 +590,7 @@ only the pages of its handle.
          --> write back the oldest (buffer_size - watermark) pages
          --> still at the watermark: Capacity Exceeded
    --> entry {lpn, handle, group, written 512-byte pieces} := this write
-   --> HBMW += pages x page size; C0h host pages, 72 and 80 count
+   --> HBMW += bytes of the blocks written; C0h host pages, 72 and 80 count
  write-back of entry e
    --> collect for e.handle; e.handle has no unit and none is free: stop
    --> program into e.handle's active unit, RUAMW of that unit drops
@@ -608,8 +610,8 @@ different blocks of it. The other commands:
 | I/O Management Send, RUH Update | writes every held page back first, so the pages land in the units the handles named before the update; if one finds no room, no handle moves and the command returns Capacity Exceeded |
 | Read | a held page is served from the buffer |
 
-HBMW counts pages a write accepts, and MBMW pages that reach the media,
-so MBMW can be below HBMW when the buffer absorbs rewrites. RUAMW drops
+HBMW counts the blocks a write accepts, and MBMW pages that reach the
+media, so MBMW can be below HBMW when the buffer absorbs rewrites. RUAMW drops
 when a page reaches its unit, for written back and direct pages alike
 (see RUAMW above). The
 admin commands above charge no modelled time for their write-back.
