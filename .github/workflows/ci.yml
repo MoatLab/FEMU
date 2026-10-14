@@ -76,7 +76,7 @@ jobs:
         # flags and headers, so a test that only passes against the stub
         # osdep.h is caught here.
         ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
-          --print-errorlogs
+          test-femu-kv-lsm --print-errorlogs
 
     - name: Verify FEMU device registration
       run: |
@@ -237,7 +237,7 @@ jobs:
       run: |
         cd build-debug
         ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
-          --print-errorlogs
+          test-femu-kv-lsm --print-errorlogs
 
     - name: Instantiate every mode with the checks armed
       if: matrix.part == 'main'
