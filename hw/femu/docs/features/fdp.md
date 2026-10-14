@@ -131,8 +131,8 @@ go to the same reclaim unit.
   entry has 1 to `MIN(fdp.nruh, 128)` IDs, each below `fdp.nruh`, none twice.
   Unset, every namespace gets every handle in order.
 - Every namespace is BlackBox, or every one is NoSSD. BlackBox namespaces
-  share one FTL, each in its own slice of the logical pages, so a namespace
-  size must be a whole number of NAND pages. The sum of the sizes must fit
+  share one FTL, each in its own slice of the logical pages. Thus a
+  namespace size must be a whole number of NAND pages. The sum of the sizes must fit
   in the reclaim units, as one namespace must.
 - `nvme fdp status /dev/nvme0n2` lists the placement identifiers of
   namespace 2 with the handle each selects. `nvme fdp usage` reports a
@@ -143,8 +143,8 @@ go to the same reclaim unit.
   to another LBA format fails with Invalid Format; format them together
   with NSID FFFFFFFFh. Namespaces with no shared handle may differ, and
   RUAMW counts the blocks of each handle's namespaces.
-- Event 80h names the namespace of the blocks it counts, with that
-  namespace's placement identifier; a collection that moves blocks of two
+- Event 80h names the namespace of the blocks it counts. It carries the
+  placement identifier of that namespace; a collection that moves blocks of two
   namespaces logs one 80h for each run of them. Events without moved data
   (01h, and 81h of a refresh) name the first namespace that lists the handle.
 - The write buffer (`buffer_size`) belongs to the shared FTL. A Flush of

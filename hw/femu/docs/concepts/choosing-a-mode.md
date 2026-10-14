@@ -56,8 +56,8 @@ BBSSD has an FDP write path; other modes accept a subsystem with FDP, but
 placement then has no effect on where data goes. FDP requires a single
 controller in the subsystem, `fdp.nrg=1` and `fdp.nruh` from 1 to `fdp.nru`.
 More than one namespace needs every namespace in BBSSD mode, in whole NAND
-pages, or every one in NoSSD mode; `namespace_phls` gives each its placement
-handle list. It cannot be combined with a KV namespace,
+pages, or every one in NoSSD mode. `namespace_phls` gives each namespace its
+placement handle list. It cannot be combined with a KV namespace,
 `meta`, Streams or a subsystem with `ns_mgmt=on`. A BBSSD controller under FDP
 also refuses `hot_cold_sep` and the `hybrid` and `fast` mappings.
 
