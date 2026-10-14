@@ -57,6 +57,7 @@ listed one by one.
 - Key-value SSD mode (`femu_mode=5`) with store, retrieve, list, delete and exist commands (e72465909).
 - Every KV namespace has its own command set and key space, the KV command set is advertised to the host, and the KV Configuration feature is served (39664d242, e62db84f2, e4949509c).
 - Opt-in KV workload-mix timing (`kv_timing=model`): Store and Retrieve take their time from the Samsung KVSSD emulator fit over the last 16 of them, or from coefficients in `kv_model_coeffs`. A device with no KV namespace refuses both.
+- Opt-in LSM-tree key index for KV namespaces (`kv_index=lsm`), after PinK (ATC '20): a DRAM memtable, levels by `kv_lsm_size_ratio`, `kv_lsm_pinned_levels` held in DRAM. Lookups read a meta page per unpinned level, merges load the NAND in the background, value GC puts moved keys back in the memtable, and List returns keys in byte order. The default hash index is unchanged. LSM knobs without `kv_index=lsm`, and `kv_index=lsm` with no KV namespace, are refused.
 
 #### Namespaces
 

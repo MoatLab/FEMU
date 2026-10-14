@@ -201,6 +201,11 @@ With `kv_timing=model`, Store and Retrieve take their time from a fitted
 workload-mix model instead
 ([KV mode](../modes/kvssd.md#workload-mix-timing-kv_timingmodel)).
 
+With `kv_index=lsm`, the index is an LSM tree. A lookup also reads one meta
+page per unpinned level, in sequence, before the value. Merges load the
+LUNs in the background
+([LSM-tree key index](../features/kv-lsm-index.md#what-each-command-costs)).
+
 CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time
 multiplied by the program's own scale, or by `csf_runtime_scale` when it

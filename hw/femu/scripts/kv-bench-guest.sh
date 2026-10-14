@@ -20,6 +20,9 @@
 # model of the keys, Exist and Retrieve of deleted keys, and that List
 # returns exactly the live keys. It needs an empty namespace.
 #
+# The checks are the same for both key indexes of the device. Start it with
+# KV_INDEX=lsm for run-kvssd.sh to test the LSM-tree index.
+#
 # Environment:
 #   KVBENCH_KEYS     keys of the small-value run (default 20000)
 #   KVBENCH_OPS      mixed commands per thread (default 25000)

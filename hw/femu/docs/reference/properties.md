@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 192 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 196 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -285,6 +285,10 @@ Devices:
 | --- | --- | --- | --- |
 | `kv_timing` | `str` | unset | KV: media (default) times every command on the NAND model; model times Store and Retrieve from the workload mix of the last 16 of them, with the Samsung KVSSD emulator fit |
 | `kv_model_coeffs` | `str` | unset | KV with kv_timing=model: 36 comma-separated numbers, the intercept then the 35 polynomial coefficients; unset uses the Samsung fit |
+| `kv_index` | `str` | unset | KV: the key index; hash (default) is an open-addressed hash in device DRAM, lsm a PinK-style LSM tree whose unpinned levels cost flash reads on lookup and flash reads and programs on compaction |
+| `kv_lsm_memtable_keys` | `uint32` | `1024` | KV with kv_index=lsm: keys the DRAM memtable holds before it flushes to level 1, 16 to 65536 |
+| `kv_lsm_size_ratio` | `uint32` | `10` | KV with kv_index=lsm: how many times more entries a level holds than the one above, 2 to 64; level i holds memtable keys times ratio^i entries |
+| `kv_lsm_pinned_levels` | `uint32` | `1` | KV with kv_index=lsm: top levels held whole in DRAM, with no flash I/O, 0 to 24 |
 
 ### Generic PCI device properties
 

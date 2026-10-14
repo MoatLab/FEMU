@@ -582,8 +582,8 @@ static void print_latency(struct worker *ws)
  * Walk the namespace with List and compare the keys to the live keys of
  * the model. Each page starts at the last key of the page before; a live
  * start key must come back first, and is then skipped. FEMU returns keys
- * in table order and wraps, so the walk ends on the page where the first
- * key of the walk comes back. Every entry of every page is checked: a key
+ * in table order (kv_index=hash) or byte order (kv_index=lsm) and wraps,
+ * so the walk ends on the page where the first key of the walk comes back. Every entry of every page is checked: a key
  * this run never stored, a deleted key, or a key twice in one page is a
  * problem. Return the number of problems, or -1 when a List failed.
  */

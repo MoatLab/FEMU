@@ -1474,6 +1474,51 @@ static bool femu_kv_timing_set(FemuCtrl *n)
            n->kv_model_coeffs;
 }
 
+/* the LSM index, or one of its knobs other than the default, is set */
+static bool femu_kv_index_set(FemuCtrl *n)
+{
+    return (n->kv_index && strcmp(n->kv_index, "hash")) ||
+           n->kv_lsm_memtable_keys != FEMU_KV_LSM_MEMTABLE_DEF ||
+           n->kv_lsm_size_ratio != FEMU_KV_LSM_RATIO_DEF ||
+           n->kv_lsm_pinned_levels != FEMU_KV_LSM_PINNED_DEF;
+}
+
+/* kv_index and its knobs, checked in every mode */
+static int femu_kv_index_check(FemuCtrl *n, Error **errp)
+{
+    bool lsm = n->kv_index && !strcmp(n->kv_index, "lsm");
+
+    if (n->kv_index && !lsm && strcmp(n->kv_index, "hash")) {
+        error_setg(errp, "kv_index=%s is not hash or lsm", n->kv_index);
+        return -1;
+    }
+    if (!lsm && femu_kv_index_set(n)) {
+        error_setg(errp, "kv_lsm_memtable_keys, kv_lsm_size_ratio and "
+                   "kv_lsm_pinned_levels need kv_index=lsm");
+        return -1;
+    }
+    if (n->kv_lsm_memtable_keys < FEMU_KV_LSM_MEMTABLE_MIN ||
+        n->kv_lsm_memtable_keys > FEMU_KV_LSM_MEMTABLE_MAX) {
+        error_setg(errp, "kv_lsm_memtable_keys=%u is not %d to %d",
+                   n->kv_lsm_memtable_keys, FEMU_KV_LSM_MEMTABLE_MIN,
+                   FEMU_KV_LSM_MEMTABLE_MAX);
+        return -1;
+    }
+    if (n->kv_lsm_size_ratio < FEMU_KV_LSM_RATIO_MIN ||
+        n->kv_lsm_size_ratio > FEMU_KV_LSM_RATIO_MAX) {
+        error_setg(errp, "kv_lsm_size_ratio=%u is not %d to %d",
+                   n->kv_lsm_size_ratio, FEMU_KV_LSM_RATIO_MIN,
+                   FEMU_KV_LSM_RATIO_MAX);
+        return -1;
+    }
+    if (n->kv_lsm_pinned_levels > FEMU_KV_LSM_PINNED_MAX) {
+        error_setg(errp, "kv_lsm_pinned_levels=%u is not 0 to %d",
+                   n->kv_lsm_pinned_levels, FEMU_KV_LSM_PINNED_MAX);
+        return -1;
+    }
+    return 0;
+}
+
 static int nvme_resolve_ns_modes(FemuCtrl *n, uint8_t *out_modes, Error **errp)
 {
     char *dup, *saveptr = NULL, *tok;
@@ -1887,6 +1932,28 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         }
         if (n_csd > 1) {
             error_setg(errp, "csd supports at most one namespace per controller");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
+    if (femu_kv_index_check(n, errp)) {
+        g_free(ns_sizes);
+        g_free(ns_modes);
+        return 1;
+    }
+    /* the LSM index serves KV namespaces only; elsewhere it does nothing */
+    if (femu_kv_index_set(n)) {
+        bool any_kv = false;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            any_kv |= ns_modes[i] == FEMU_KVSSD_MODE;
+        }
+        if (!any_kv) {
+            error_setg(errp, "kv_index=lsm and the kv_lsm_* knobs need a "
+                       "key-value namespace (femu_mode=5 or kvssd in "
+                       "namespace_modes)");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -3055,6 +3122,16 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "bbssd without Streams or default protection");
             return;
         }
+        /* shared namespaces are never KV, so the KV index knobs do nothing */
+        if (femu_kv_index_check(n, errp)) {
+            return;
+        }
+        if (femu_kv_index_set(n)) {
+            error_setg(errp, "kv_index=lsm and the kv_lsm_* knobs need a "
+                       "key-value namespace; shared namespaces are NoSSD or "
+                       "bbssd");
+            return;
+        }
         /* shared namespaces are never KV, so the KV timing knobs do nothing */
         if (femu_kv_timing_set(n)) {
             error_setg(errp, "kv_timing=model and kv_model_coeffs need a "
@@ -3653,6 +3730,13 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
     DEFINE_PROP_STRING("kv_timing", FemuCtrl, kv_timing),
     DEFINE_PROP_STRING("kv_model_coeffs", FemuCtrl, kv_model_coeffs),
+    DEFINE_PROP_STRING("kv_index", FemuCtrl, kv_index),
+    DEFINE_PROP_UINT32("kv_lsm_memtable_keys", FemuCtrl, kv_lsm_memtable_keys,
+                       FEMU_KV_LSM_MEMTABLE_DEF),
+    DEFINE_PROP_UINT32("kv_lsm_size_ratio", FemuCtrl, kv_lsm_size_ratio,
+                       FEMU_KV_LSM_RATIO_DEF),
+    DEFINE_PROP_UINT32("kv_lsm_pinned_levels", FemuCtrl, kv_lsm_pinned_levels,
+                       FEMU_KV_LSM_PINNED_DEF),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),

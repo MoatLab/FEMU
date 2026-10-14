@@ -743,6 +743,20 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "kv_model_coeffs",
       "KV with kv_timing=model: 36 comma-separated numbers, the intercept "
       "then the 35 polynomial coefficients; unset uses the Samsung fit" },
+    { "kv_index",
+      "KV: the key index; hash (default) is an open-addressed hash in "
+      "device DRAM, lsm a PinK-style LSM tree whose unpinned levels cost "
+      "flash reads on lookup and flash reads and programs on compaction" },
+    { "kv_lsm_memtable_keys",
+      "KV with kv_index=lsm: keys the DRAM memtable holds before it "
+      "flushes to level 1, 16 to 65536" },
+    { "kv_lsm_size_ratio",
+      "KV with kv_index=lsm: how many times more entries a level holds "
+      "than the one above, 2 to 64; level i holds memtable keys times "
+      "ratio^i entries" },
+    { "kv_lsm_pinned_levels",
+      "KV with kv_index=lsm: top levels held whole in DRAM, with no flash "
+      "I/O, 0 to 24" },
     { NULL, NULL }
 };
 

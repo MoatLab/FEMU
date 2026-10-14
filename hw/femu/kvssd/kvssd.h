@@ -3,6 +3,7 @@
 
 #include "qemu/thread.h"
 #include "kv-model.h"
+#include "kv-lsm.h"
 
 typedef struct FemuCtrl FemuCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -31,9 +32,8 @@ typedef struct FemuKvssdMappingEntry {
 struct FemuKvssdState;
 
 /*
- * Pluggable KV index strategy. The default is an open-addressed hash; the vtable
- * lets an LSM-tree (PinK-style) or learned index (LeaFTL-style) be added later
- * without touching the controller layer. Hooks operate under kvssd->lock.
+ * Pluggable KV index strategy: the open-addressed hash (default) or the
+ * LSM tree (kv_index=lsm). Hooks operate under kvssd->lock.
  */
 typedef struct FemuKvIndexOps {
     const char *name;
@@ -42,9 +42,14 @@ typedef struct FemuKvIndexOps {
     uint16_t (*upsert)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl,
                        uint64_t off, uint64_t len, struct ppa *ppas,
                        uint32_t nr_ppas);
-    bool (*remove)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl);
-    /* index-probe latency in flash reads (e.g. unpinned LSM levels); 0 = DRAM */
-    int  (*probe_reads)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl);
+    /* 1 removed, 0 absent, -1 the index could not record the delete */
+    int  (*remove)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl);
+    /*
+     * Flash reads of a lookup, one after the other from @stime; return the
+     * time they take. NULL for an index in DRAM.
+     */
+    uint64_t (*probe)(struct FemuKvssdState *s, const uint8_t *key,
+                      uint8_t kl, int64_t stime);
 } FemuKvIndexOps;
 
 typedef struct FemuKvssdState {
@@ -88,6 +93,27 @@ typedef struct FemuKvssdState {
     FemuKvWindow window;
     uint64_t model_floored;            /* commands raised to the kIOPS floor */
 
+    /*
+     * kv_index=lsm: the tree, and the table entries it has not handed out.
+     * Merge I/O waits in lsm_pend until the command that caused it has
+     * charged its own work. lsm_probe, lsm_gc and lsm_level[] are offsets
+     * from lsm_stime; lsm_ready, lsm_mstart and lsm_mend are absolute ns.
+     */
+    KvLsm *lsm;
+    uint32_t *free_slots;
+    uint32_t nr_free;
+    struct FemuKvLsmIo *lsm_pend;
+    uint32_t lsm_npend;
+    uint32_t lsm_pend_cap;
+    int64_t lsm_stime;
+    int64_t lsm_ready;                 /* merges start no earlier (ns) */
+    int64_t lsm_mstart;                /* the run of merge I/O now issued */
+    int64_t lsm_mend;                  /* the end of all merge I/O so far */
+    int lsm_mkind;                     /* that run: 1 programs, 0 reads */
+    uint64_t lsm_probe;
+    uint64_t lsm_gc;
+    uint64_t lsm_level[KV_LSM_MAX_LEVELS + 1];
+
     /* stats */
     uint64_t nand_rd_pages;
     uint64_t nand_wr_pages;
@@ -117,8 +143,8 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                             const uint8_t *key, uint8_t kl, uint32_t hbs,
                             uint32_t *full_len);
-bool kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
-                      const uint8_t *key, uint8_t kl);
+uint16_t kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
+                          const uint8_t *key, uint8_t kl, bool *deleted);
 uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                         const uint8_t *start_key, uint8_t start_len,
                         uint32_t hbs);

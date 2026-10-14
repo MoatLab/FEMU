@@ -82,6 +82,20 @@ command pays one page read for the index lookup, overlapped with the NAND
 reads or programs of its value; reclaiming space charges erases to the command that
 triggers it ([timing model](../concepts/timing-model.md#kv-and-csd)).
 
+### Key index (kv_index)
+
+The device index from key to value is an open-addressed hash in DRAM by
+default. `kv_index=lsm` makes it an LSM tree after PinK. Lookups then
+read meta pages of the unpinned levels, merges load the NAND in the
+background, and List returns keys in byte order. See
+[LSM-tree key index](../features/kv-lsm-index.md) for the knobs and the
+cost model.
+
+<!-- femu-example: kvssd-lsm -->
+```
+-device femu,femu_mode=5,devsz_mb=64,kv_index=lsm,kv_lsm_pinned_levels=2
+```
+
 ### Workload-mix timing (kv_timing=model)
 
 With `kv_timing=model`, Store and Retrieve take their time from a fitted
@@ -310,6 +324,11 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 | `FEMU kvssd: kv_model_coeffs: ...; give the intercept and 35 coefficients` | Give 36 finite numbers, separated by commas. |
 | `kv_timing=model and kv_model_coeffs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)` | The device has no KV namespace, so the knobs would do nothing. |
 | `kv_timing=model and kv_model_coeffs need a key-value namespace; shared namespaces are NoSSD or bbssd` | A controller on shared namespaces (`ns_mgmt=on` subsystem) has no KV namespace. |
+| `kv_index=X is not hash or lsm` | Use `hash` or `lsm`. |
+| `kv_lsm_memtable_keys, kv_lsm_size_ratio and kv_lsm_pinned_levels need kv_index=lsm` | An LSM knob other than its default with the hash index. |
+| `kv_lsm_size_ratio=N is not 2 to 64` (and the other knob ranges) | See the [LSM index properties](../features/kv-lsm-index.md#properties). |
+| `kv_index=lsm and the kv_lsm_* knobs need a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
+| `FEMU kvssd: kv_index=lsm needs a page of at least 32 bytes; the page is N` | A meta page must hold one 32-byte record. |
 
 ## Verify
 
@@ -342,3 +361,4 @@ Related issues: #68.
 - [Timing model: KV and CSD](../concepts/timing-model.md#kv-and-csd)
 - [Architecture: other FTLs](../concepts/architecture.md#other-ftls)
 - [Multiple namespaces](../features/multi-namespace.md)
+- [LSM-tree key index](../features/kv-lsm-index.md)

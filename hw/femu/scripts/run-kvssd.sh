@@ -30,6 +30,11 @@ blk_er_lat=2000000 # block erase latency
 # Share of the NAND usable for values (1-100)
 gc_thres_pcent=75
 
+# Key index: hash (default) or lsm, the PinK-style LSM tree. KV_LSM_OPTS
+# adds its knobs, such as kv_lsm_memtable_keys=1024,kv_lsm_size_ratio=10
+kv_index=${KV_INDEX:-hash}
+kv_lsm_opts=${KV_LSM_OPTS:-}
+
 #-----------------------------------------------------------------------
 
 # Compose the entire FEMU KV command line options
@@ -48,6 +53,10 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",pg_rd_lat=${pg_rd_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",pg_wr_lat=${pg_wr_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",blk_er_lat=${blk_er_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",gc_thres_pcent=${gc_thres_pcent}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",kv_index=${kv_index}"
+if [[ -n $kv_lsm_opts ]]; then
+    FEMU_OPTIONS=${FEMU_OPTIONS}",${kv_lsm_opts}"
+fi
 
 echo ${FEMU_OPTIONS}
 

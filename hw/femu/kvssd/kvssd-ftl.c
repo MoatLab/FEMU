@@ -116,13 +116,13 @@ static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl
     return NVME_CAP_EXCEEDED | NVME_DNR;  /* table full */
 }
 
-static bool kv_hash_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
+static int kv_hash_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
 {
     int slot = kv_hash_find(s, key, kl, NULL);
     uint32_t hole, next;
 
     if (slot < 0) {
-        return false;
+        return 0;
     }
     /* backshift deletion: pull up following entries whose home position is at or
      * before the hole, so no probe sequence is broken by the cleared slot. */
@@ -143,7 +143,7 @@ static bool kv_hash_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
         next = (next + 1) % s->hash_slots;
     }
     s->nr_entries--;
-    return true;
+    return 1;
 }
 
 static const FemuKvIndexOps kv_index_hash = {
@@ -151,8 +151,269 @@ static const FemuKvIndexOps kv_index_hash = {
     .find   = kv_hash_find,
     .upsert = kv_hash_upsert,
     .remove = kv_hash_remove,
-    .probe_reads = NULL,               /* DRAM-resident hash: 0 flash reads */
+    .probe  = NULL,                    /* DRAM-resident hash: 0 flash reads */
 };
+
+/*
+ * kv_index=lsm. The LSM tree (kv-lsm.c) maps a key to a slot of s->table,
+ * which holds the value pointer as it does for the hash; a free stack hands
+ * out the slots. Its meta pages are timing placeholders, like the pages of
+ * the cached mapping table: each costs LUN and channel time as MAP_IO, but
+ * takes no line and no value space.
+ */
+
+/* a merge read or program, issued once the command's own work is charged */
+struct FemuKvLsmIo {
+    uint64_t id;
+    bool program;
+};
+
+/* a bounded address for meta page @id; consecutive ids stripe the LUNs */
+static struct ppa kv_tree_ppa(FemuKvssdState *s, uint64_t id)
+{
+    struct ssdparams *spp = &s->ssd->sp;
+    uint64_t luns = (uint64_t)spp->nchs * spp->luns_per_ch;
+    uint64_t lun = id % luns;
+    struct ppa ppa = { .ppa = 0 };
+
+    ppa.g.ch = lun % spp->nchs;
+    ppa.g.lun = lun / spp->nchs;
+    ppa.g.pl = (id / luns) % spp->pls_per_lun;
+    ppa.g.pg = (id / (luns * spp->pls_per_lun)) % spp->pgs_per_blk;
+    return ppa;
+}
+
+static uint64_t kv_tree_nand(FemuKvssdState *s, uint64_t id, int cmd,
+                             int64_t stime)
+{
+    struct nand_cmd c = { .type = MAP_IO, .cmd = cmd, .stime = stime };
+    struct ppa ppa = kv_tree_ppa(s, id);
+
+    return ssd_advance_status(s->ssd, &ppa, &c);
+}
+
+/*
+ * The tree reports each page it reads or programs. A lookup reads one
+ * level after another, and a List reads the pages of one level one after
+ * another, so each read starts when the one before it ends. Merge I/O is
+ * queued: issued now, it would make this command's own later reads wait
+ * behind it.
+ */
+static void kv_tree_issue(FemuKvssdState *s);
+static void kv_tree_issue_one(FemuKvssdState *s, uint64_t id, bool program);
+
+static void kv_tree_io(void *opaque, uint64_t id, KvLsmIo io, int level)
+{
+    FemuKvssdState *s = opaque;
+    struct FemuKvLsmIo *p;
+
+    switch (io) {
+    case KV_LSM_IO_PROBE:
+        s->lsm_probe += kv_tree_nand(s, id, NAND_READ,
+                                     s->lsm_stime + s->lsm_probe);
+        return;
+    case KV_LSM_IO_SCAN:
+        if (level >= 0 && level <= KV_LSM_MAX_LEVELS) {
+            s->lsm_level[level] += kv_tree_nand(s, id, NAND_READ,
+                                                s->lsm_stime +
+                                                s->lsm_level[level]);
+        }
+        return;
+    case KV_LSM_IO_GC_READ:
+        s->lsm_gc = MAX(s->lsm_gc, kv_tree_nand(s, id, NAND_READ,
+                                                s->lsm_stime));
+        return;
+    default:
+        break;
+    }
+    if (s->lsm_npend == s->lsm_pend_cap) {
+        uint32_t cap = s->lsm_pend_cap ? 2 * s->lsm_pend_cap : 256;
+
+        p = g_try_renew(struct FemuKvLsmIo, s->lsm_pend, cap);
+        if (!p) {
+            /*
+             * With no room to queue it, issue what is queued now, in
+             * order, and start a new queue with this I/O. Only the
+             * deferral behind the command's own work is lost.
+             */
+            kv_tree_issue(s);
+        }
+        if (p) {
+            s->lsm_pend = p;
+            s->lsm_pend_cap = cap;
+        }
+    }
+    if (s->lsm_npend == s->lsm_pend_cap) {
+        kv_tree_issue_one(s, id, io == KV_LSM_IO_COMPACT_PROGRAM);
+        return;
+    }
+    s->lsm_pend[s->lsm_npend].id = id;
+    s->lsm_pend[s->lsm_npend].program = io == KV_LSM_IO_COMPACT_PROGRAM;
+    s->lsm_npend++;
+}
+
+/*
+ * The merge schedule of one command, in absolute ns. It starts at the
+ * command's arrival, or at lsm_ready when that is later: records that
+ * value GC put back point to moved values, which exist only once their
+ * programs end, also when a later command flushes them.
+ */
+static void kv_tree_begin(FemuKvssdState *s, int64_t stime)
+{
+    s->lsm_stime = stime;
+    s->lsm_mstart = MAX(stime, s->lsm_ready);
+    s->lsm_mend = s->lsm_mstart;
+    s->lsm_mkind = -1;
+}
+
+/*
+ * A merge programs its output only after it has read its input, and the
+ * next merge of a cascade reads what the one before wrote: each run of
+ * reads or of programs starts when the run before it ends. The time is
+ * not the command's; later commands on the same LUNs wait behind it.
+ */
+static void kv_tree_issue_one(FemuKvssdState *s, uint64_t id, bool program)
+{
+    uint64_t lat;
+
+    if (s->lsm_mkind >= 0 && program != s->lsm_mkind) {
+        s->lsm_mstart = s->lsm_mend;
+    }
+    if (s->lsm_ready > s->lsm_mstart) {
+        s->lsm_mstart = s->lsm_ready;
+        s->lsm_mend = MAX(s->lsm_mend, s->lsm_ready);
+    }
+    lat = kv_tree_nand(s, id, program ? NAND_WRITE : NAND_READ,
+                       s->lsm_mstart);
+    s->lsm_mend = MAX(s->lsm_mend, s->lsm_mstart + (int64_t)lat);
+    s->lsm_mkind = program;
+}
+
+static void kv_tree_issue(FemuKvssdState *s)
+{
+    for (uint32_t i = 0; i < s->lsm_npend; i++) {
+        kv_tree_issue_one(s, s->lsm_pend[i].id, s->lsm_pend[i].program);
+    }
+    s->lsm_npend = 0;
+}
+
+static int kv_tree_find(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
+                        int *prev_slot)
+{
+    uint32_t slot;
+
+    if (prev_slot) {
+        *prev_slot = -1;
+    }
+    return kv_lsm_get(s->lsm, key, kl, &slot, false) ? (int)slot : -1;
+}
+
+/*
+ * An overwrite keeps the slot of the key and puts a new record in the
+ * memtable, as an LSM tree writes out of place. The entry changes only
+ * once the record is in, so a failed put leaves the key as it was.
+ */
+static uint16_t kv_tree_upsert(FemuKvssdState *s, const uint8_t *key,
+                               uint8_t kl, uint64_t off, uint64_t len,
+                               struct ppa *ppas, uint32_t nr_ppas)
+{
+    FemuKvssdMappingEntry *e;
+    uint32_t slot;
+
+    if (kv_lsm_get(s->lsm, key, kl, &slot, false)) {
+        if (kv_lsm_put(s->lsm, key, kl, slot)) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+        e = &s->table[slot];
+    } else {
+        if ((s->kv_max_keys && s->nr_entries >= s->kv_max_keys) ||
+            !s->nr_free) {
+            return NVME_CAP_EXCEEDED | NVME_DNR;
+        }
+        slot = s->free_slots[s->nr_free - 1];
+        if (kv_lsm_put(s->lsm, key, kl, slot)) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+        s->nr_free--;
+        s->nr_entries++;
+        e = &s->table[slot];
+        memcpy(e->key, key, kl);
+        e->key_len = kl;
+    }
+    e->value_off = off;
+    e->length = len;
+    e->ppas = ppas;
+    e->nr_ppas = nr_ppas;
+    return NVME_SUCCESS;
+}
+
+/*
+ * The tombstone goes in first. The slot is free only after that: an older
+ * record of the key may still name it, but the tombstone hides that record.
+ */
+static int kv_tree_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
+{
+    uint32_t slot;
+
+    if (!kv_lsm_get(s->lsm, key, kl, &slot, false)) {
+        /*
+         * A blind Delete cannot know the key is absent, so its tombstone
+         * goes in all the same. With EDNEK the lookup found it absent.
+         */
+        if (!s->ednek && kv_lsm_put(s->lsm, key, kl, KV_LSM_NO_SLOT)) {
+            return -1;
+        }
+        return 0;
+    }
+    if (kv_lsm_put(s->lsm, key, kl, KV_LSM_NO_SLOT)) {
+        return -1;
+    }
+    kv_entry_clear(&s->table[slot]);
+    s->free_slots[s->nr_free++] = slot;
+    s->nr_entries--;
+    return 1;
+}
+
+static uint64_t kv_tree_probe(FemuKvssdState *s, const uint8_t *key,
+                              uint8_t kl, int64_t stime)
+{
+    s->lsm_stime = stime;
+    s->lsm_probe = 0;
+    kv_lsm_get(s->lsm, key, kl, NULL, true);
+    return s->lsm_probe;
+}
+
+static const FemuKvIndexOps kv_index_lsm = {
+    .name   = "lsm",
+    .find   = kv_tree_find,
+    .upsert = kv_tree_upsert,
+    .remove = kv_tree_remove,
+    .probe  = kv_tree_probe,
+};
+
+/* every table entry free again, as after realize */
+static void kv_tree_reset(FemuKvssdState *s)
+{
+    if (!s->lsm) {
+        return;
+    }
+    kv_lsm_clear(s->lsm);
+    for (uint32_t i = 0; i < s->hash_slots; i++) {
+        s->free_slots[i] = s->hash_slots - 1 - i;
+    }
+    s->nr_free = s->hash_slots;
+    s->lsm_npend = 0;
+    s->lsm_ready = 0;
+}
+
+/* release the lock, issuing the merge I/O the command queued first */
+static void kv_unlock(FemuKvssdState *s)
+{
+    if (s->lsm_npend) {
+        kv_tree_issue(s);
+    }
+    qemu_mutex_unlock(&s->lock);
+}
 
 /* --- value-space placement + NAND timing --- */
 
@@ -304,17 +565,22 @@ static void kv_discard_value_ppas(FemuKvssdState *s, FemuKvssdMappingEntry *e)
     kv_entry_drop_ppas(e);
 }
 
+/*
+ * Program the pages of a value from @stime, at or after the request start;
+ * the latency in *@lat counts from the request start.
+ */
 static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
                                 uint64_t bytes, int io_type, struct ppa **out,
-                                uint32_t *out_nr, uint64_t *lat)
+                                uint32_t *out_nr, uint64_t *lat, int64_t stime)
 {
     struct ssd *ssd = s->ssd;
     uint32_t pages = kv_value_pages(s, bytes);
     struct ppa *ppas = NULL;
+    uint64_t wait = stime > req->stime ? stime - req->stime : 0;
     struct nand_cmd c = {
         .type = io_type,
         .cmd = NAND_WRITE,
-        .stime = req->stime,
+        .stime = stime,
     };
 
     *out = NULL;
@@ -343,7 +609,7 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
 
         ppa = get_new_page(ssd);
         mark_page_valid(ssd, &ppa);
-        sub = ssd_advance_status(ssd, &ppa, &c);
+        sub = wait + ssd_advance_status(ssd, &ppa, &c);
         *lat = sub > *lat ? sub : *lat;
         ppas[i] = ppa;
         /*
@@ -375,15 +641,17 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
     return NVME_SUCCESS;
 }
 
+/* as kv_program_ppas: reads from @stime, latency from the request start */
 static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
                              const FemuKvssdMappingEntry *e, uint64_t bytes,
-                             uint64_t *lat)
+                             uint64_t *lat, int64_t stime)
 {
     uint32_t pages = kv_value_pages(s, bytes);
+    uint64_t wait = stime > req->stime ? stime - req->stime : 0;
     struct nand_cmd c = {
         .type = USER_IO,
         .cmd = NAND_READ,
-        .stime = req->stime,
+        .stime = stime,
     };
 
     if (pages > e->nr_ppas) {
@@ -396,7 +664,7 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
         if (!valid_ppa(s->ssd, &ppa) || get_pg(s->ssd, &ppa)->status != PG_VALID) {
             return NVME_KV_UNRECOVERED_ERROR | NVME_DNR;
         }
-        sub = ssd_advance_status(s->ssd, &ppa, &c);
+        sub = wait + ssd_advance_status(s->ssd, &ppa, &c);
         *lat = sub > *lat ? sub : *lat;
         s->nand_rd_pages++;
     }
@@ -439,26 +707,15 @@ static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req,
 }
 
 /*
- * Index-probe cost: a flash-resident index (probe_reads > 0) pays N page
- * reads on the LUN that holds the key's part of the index; a DRAM-resident
- * index (hash) pays nothing extra.
+ * Index-probe cost: a flash-resident index (the LSM tree) reads its meta
+ * pages one after another from the request start; a DRAM-resident index
+ * (hash) pays nothing extra.
  */
 static uint64_t kv_charge_index(FemuKvssdState *s, NvmeRequest *req,
                                 const uint8_t *key, uint8_t kl)
 {
-    int reads = (s->index->probe_reads && key) ?
-                s->index->probe_reads(s, key, kl) : 0;
-    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
-                          .stime = req->stime };
-    uint64_t maxlat = 0;
-
-    for (int i = 0; i < reads; i++) {
-        struct ppa ppa = kv_index_ppa(s, key, kl);
-        uint64_t sub = ssd_advance_status(s->ssd, &ppa, &c);
-
-        maxlat = MAX(maxlat, sub);
-    }
-    return maxlat;
+    return (s->index->probe && key) ?
+           s->index->probe(s, key, kl, req->stime) : 0;
 }
 
 /*
@@ -528,11 +785,24 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
     uint64_t live_bytes = 0;
     uint64_t live_pages = 0;
     uint32_t live_nr = 0;
+    uint32_t back_nr = 0;
+    int64_t stime = req->stime;
     FemuKvssdMappingEntry **live;
+    FemuKvssdMappingEntry **back = NULL;
 
     live = g_try_new(FemuKvssdMappingEntry *, s->nr_entries);
     if (!live && s->nr_entries) {
         return false;
+    }
+    /* the LSM bookkeeping is taken before anything moves */
+    if (s->lsm) {
+        back = g_try_new(FemuKvssdMappingEntry *,
+                         s->nr_entries ? s->nr_entries : 1);
+        if (!back || kv_lsm_gc_begin(s->lsm)) {
+            g_free(back);
+            g_free(live);
+            return false;
+        }
     }
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         FemuKvssdMappingEntry *e = &s->table[i];
@@ -544,10 +814,33 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
         live_pages += kv_value_pages(s, e->length);
     }
     if (kv_physical_pages_available(s, req, lat) < live_pages) {
+        if (s->lsm) {
+            kv_lsm_gc_check_done(s->lsm);
+        }
+        g_free(back);
         g_free(live);
         return false;
     }
     qsort(live, live_nr, sizeof(*live), kv_entry_value_off_cmp);
+
+    /*
+     * The LSM tree, as PinK does, first checks each value against the meta
+     * page that points to it, a read when that page is not in DRAM. The
+     * moves start once the checks are done. Such a page keeps the old
+     * pointer, so the key goes back into the memtable after the move.
+     */
+    if (s->lsm) {
+        for (uint32_t i = 0; i < live_nr; i++) {
+            if (kv_lsm_gc_check(s->lsm, live[i]->key, live[i]->key_len)) {
+                back[back_nr++] = live[i];
+            }
+        }
+        s->lsm_stime = req->stime;
+        s->lsm_gc = 0;
+        kv_lsm_gc_check_done(s->lsm);
+        *lat = MAX(*lat, s->lsm_gc);
+        stime = req->stime + s->lsm_gc;
+    }
 
     for (uint32_t i = 0; i < live_nr; i++) {
         FemuKvssdMappingEntry *e = live[i];
@@ -558,8 +851,9 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
 
         old = *e;
         status = kv_program_ppas(s, req, e->length, GC_IO, &new_ppas,
-                                 &new_nr_ppas, lat);
+                                 &new_nr_ppas, lat, stime);
         if (status) {
+            g_free(back);
             g_free(live);
             return false;
         }
@@ -573,6 +867,17 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
         frontier += e->length;
     }
     g_free(live);
+    /*
+     * Merges of the keys that go back read the meta pages and program new
+     * ones that point to the moved values, so they wait for the moves. A
+     * key that does not go back only skips a cost: its slot is current.
+     */
+    s->lsm_ready = MAX(s->lsm_ready, req->stime + (int64_t)*lat);
+    for (uint32_t i = 0; i < back_nr; i++) {
+        kv_lsm_reinsert(s->lsm, back[i]->key, back[i]->key_len,
+                        (uint32_t)(back[i] - s->table));
+    }
+    g_free(back);
 
     s->value_next = frontier;
     s->value_reclaimable = 0;
@@ -661,6 +966,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 {
     uint64_t off;
     uint64_t lat = 0;
+    uint64_t probe = 0;
     uint16_t status;
     int existing;
     FemuKvssdMappingEntry old = {};
@@ -669,24 +975,25 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     (void)n;
 
     qemu_mutex_lock(&s->lock);
+    kv_tree_begin(s, req->stime);   /* for merge I/O the index queues */
 
     existing = s->index->find(s, key, kl, NULL);
     if (sike && existing < 0) {
         lat = kv_charge_stages(s, req, key, kl);
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_KV_KEY_NOT_EXIST | NVME_DNR;
     }
     if (sinke && existing >= 0) {
         lat = kv_charge_stages(s, req, key, kl);
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_KV_KEY_EXISTS | NVME_DNR;
     }
     if (existing < 0 && ((s->kv_max_keys && s->nr_entries >= s->kv_max_keys) ||
                          s->nr_entries >= s->hash_slots)) {
         lat = kv_charge_stages(s, req, key, kl);
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
@@ -695,13 +1002,22 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
     if (!kv_logical_capacity_ok(s, existing >= 0 ? &old : NULL, kl, vsize)) {
         lat = kv_charge_stages(s, req, key, kl);
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
+    /*
+     * The LSM tree looks a key up only for a conditional Store; a plain one
+     * goes blind into the memtable. The lookup runs before the insert, and
+     * beside the value programs.
+     */
+    if (s->lsm && (sike || sinke)) {
+        probe = kv_charge_index(s, req, key, kl);
+        lat = probe;
+    }
 
     if (!kv_value_alloc(s, req, vsize, &off, &lat)) {
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
@@ -713,17 +1029,17 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         status = dma_write_cmd(n, &req->cmd, s->values + off, vsize);
         if (status) {
             s->value_next = off;            /* roll back the append */
-            qemu_mutex_unlock(&s->lock);
+            kv_unlock(s);
             kv_apply_lat(req, lat);         /* any compaction still ran */
             return status;
         }
     }
 
     status = kv_program_ppas(s, req, vsize, USER_IO, &new_ppas, &new_nr_ppas,
-                             &lat);
+                             &lat, req->stime);
     if (status) {
         s->value_next = off;
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return status;
     }
@@ -737,7 +1053,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         kv_invalidate_ppa_array(s, new_ppas, new_nr_ppas);
         g_free(new_ppas);
         s->value_next = off;
-        qemu_mutex_unlock(&s->lock);
+        kv_unlock(s);
         kv_apply_lat(req, lat);
         return status;
     }
@@ -756,10 +1072,11 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
     /* command/index base cost + value-page program timing through the NAND model */
     lat = MAX(lat, kv_charge_stages(s, req, key, kl));
+    lat = MAX(lat, probe);
     lat = kv_model_lat(s, existing >= 0 ? KV_OP_UPDATE : KV_OP_INSERT, vsize,
                        lat);
 
-    qemu_mutex_unlock(&s->lock);
+    kv_unlock(s);
     kv_apply_lat(req, lat);
     return NVME_SUCCESS;
 }
@@ -796,17 +1113,34 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
     /* base + read of the value pages actually touched (the transferred span) */
     lat = MAX(lat, kv_charge_base(s, req, key, kl));
-    status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat);
+    if (s->lsm) {
+        /* the value pointer is in the meta page: the value read waits for it */
+        uint64_t probe = kv_charge_index(s, req, key, kl);
+
+        lat = MAX(lat, probe);
+        status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat,
+                              req->stime + probe);
+    } else {
+        status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat,
+                              req->stime);
+    }
     if (status) {
         qemu_mutex_unlock(&s->lock);
+        /* the LSM reads ran; the hash keeps its error path */
+        if (s->lsm) {
+            kv_apply_lat(req, lat);
+        }
         return status;
     }
-    lat = MAX(lat, kv_charge_index(s, req, key, kl));
+    lat = MAX(lat, s->lsm ? 0 : kv_charge_index(s, req, key, kl));
     if (xfer) {
         status = dma_read_cmd_buf(n, &req->cmd, s->values + off,
                                   (uint32_t)xfer, hbs);
         if (status) {
             qemu_mutex_unlock(&s->lock);
+            if (s->lsm) {
+                kv_apply_lat(req, lat);
+            }
             return status;
         }
     }
@@ -818,22 +1152,31 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     return NVME_SUCCESS;
 }
 
-bool kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
-                      const uint8_t *key, uint8_t kl)
+uint16_t kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
+                          const uint8_t *key, uint8_t kl, bool *deleted)
 {
     int slot;
-    bool removed;
+    int removed;
     uint64_t lat;
+    uint64_t probe = 0;
     FemuKvssdMappingEntry old = {};
     (void)n;
 
     qemu_mutex_lock(&s->lock);
+    kv_tree_begin(s, req->stime);   /* for merge I/O the index queues */
     slot = s->index->find(s, key, kl, NULL);
     if (slot >= 0) {
         old = s->table[slot];
     }
+    /*
+     * The LSM tree looks the key up only when EDNEK makes the status depend
+     * on it; otherwise the tombstone goes in blind.
+     */
+    if (s->lsm && s->ednek) {
+        probe = kv_charge_index(s, req, key, kl);
+    }
     removed = s->index->remove(s, key, kl);
-    if (removed) {
+    if (removed > 0) {
         kv_discard_value_ppas(s, &old);
         s->value_reclaimable += old.length;
         if (s->value_used >= old.length) {
@@ -843,11 +1186,62 @@ bool kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
             s->key_used -= old.key_len;
         }
     }
-    lat = kv_charge_stages(s, req, key, kl);
-    qemu_mutex_unlock(&s->lock);
+    if (s->lsm) {
+        lat = MAX(kv_charge_base(s, req, key, kl), probe);
+    } else {
+        lat = kv_charge_stages(s, req, key, kl);
+    }
+    kv_unlock(s);
 
     kv_apply_lat(req, lat);
-    return removed;
+    *deleted = removed > 0;
+    return removed < 0 ? NVME_INTERNAL_DEV_ERROR | NVME_DNR : NVME_SUCCESS;
+}
+
+/* the List return structure as it grows */
+typedef struct KvListBuf {
+    uint8_t *buf;
+    uint32_t cap;
+    uint32_t pos;
+    uint32_t hbs;
+    uint32_t nrk;
+} KvListBuf;
+
+/*
+ * Add one key; false when it does not fit. Figure 16: a key data structure
+ * is padded to end on a 4 byte boundary, so the next entry begins at the
+ * padded offset rather than immediately after the key. Advancing by the
+ * unpadded length would misalign every following entry and desynchronize a
+ * host walking the list. Only whole keys that fit in the host buffer are
+ * returned.
+ */
+static bool kv_list_add(KvListBuf *lb, const uint8_t *key, uint8_t kl)
+{
+    uint32_t need = 2 + kl;
+    uint32_t padded = (lb->pos + need + 3) & ~3u;
+
+    if (padded > lb->hbs) {
+        return false;
+    }
+    if (padded > lb->cap) {
+        uint32_t grown = MAX(padded, (uint32_t)MIN(lb->hbs, 2ULL * lb->cap));
+
+        lb->buf = g_realloc(lb->buf, grown);
+        memset(lb->buf + lb->cap, 0, grown - lb->cap);
+        lb->cap = grown;
+    }
+    stw_le_p(lb->buf + lb->pos, kl);
+    memcpy(lb->buf + lb->pos + 2, key, kl);
+    lb->pos = padded;                  /* buf is zeroed, so the pad is zero */
+    lb->nrk++;
+    return true;
+}
+
+static bool kv_list_add_scan(void *opaque, const uint8_t *key, uint8_t kl,
+                             uint32_t slot)
+{
+    (void)slot;
+    return kv_list_add(opaque, key, kl);
 }
 
 static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key,
@@ -855,10 +1249,7 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
                                      uint8_t **out, uint32_t *out_len,
                                      uint32_t *out_nrk)
 {
-    uint8_t *buf;
-    uint32_t cap;
-    uint32_t pos = 4;                  /* leave room for the NRK header */
-    uint32_t nrk = 0;
+    KvListBuf lb = { .pos = 4, .hbs = hbs };   /* room for the NRK header */
     uint32_t start_slot = 0;
     int slot;
 
@@ -869,8 +1260,22 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
      * Without MDTS the host buffer can be 4 GiB; grow ours with the keys
      * found rather than allocate what the host asked for.
      */
-    cap = MIN(hbs, 4096);
-    buf = g_malloc0(cap);
+    lb.cap = MIN(hbs, 4096);
+    lb.buf = g_malloc0(lb.cap);
+
+    if (s->lsm) {
+        /*
+         * The LSM tree returns the keys in byte order from the first key at
+         * or after the start key, then wraps: every key once, as the table
+         * walk below does, in an order no merge changes.
+         */
+        if (kv_lsm_scan(s->lsm, start_key, start_len, kv_list_add_scan,
+                        &lb)) {
+            g_free(lb.buf);
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+        goto done;
+    }
 
     if (start_len) {
         slot = s->index->find(s, start_key, start_len, NULL);
@@ -888,40 +1293,19 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
     for (uint32_t scanned = 0; scanned < s->hash_slots; scanned++) {
         uint32_t i = (start_slot + scanned) % s->hash_slots;
         FemuKvssdMappingEntry *e = &s->table[i];
-        uint32_t need;
-        uint32_t padded;
 
         if (kv_entry_empty(e)) {
             continue;
         }
-        need = 2 + e->key_len;
-        /*
-         * Figure 16: a key data structure is padded to end on a 4 byte boundary,
-         * so the next entry begins at the padded offset rather than immediately
-         * after the key. Advancing by the unpadded length would misalign every
-         * following entry and desynchronize a host walking the list. Only whole
-         * keys that fit in the host buffer are returned.
-         */
-        padded = (pos + need + 3) & ~3u;
-        if (padded > hbs) {
+        if (!kv_list_add(&lb, e->key, e->key_len)) {
             break;
         }
-        if (padded > cap) {
-            uint32_t grown = MAX(padded, (uint32_t)MIN(hbs, 2ULL * cap));
-
-            buf = g_realloc(buf, grown);
-            memset(buf + cap, 0, grown - cap);
-            cap = grown;
-        }
-        stw_le_p(buf + pos, e->key_len);
-        memcpy(buf + pos + 2, e->key, e->key_len);
-        pos = padded;                  /* buf is zeroed, so the pad is zero */
-        nrk++;
     }
-    stl_le_p(buf, nrk);                /* Number of Returned Keys header */
-    *out = buf;
-    *out_len = pos;                    /* already 4 byte aligned by the pad */
-    *out_nrk = nrk;
+done:
+    stl_le_p(lb.buf, lb.nrk);          /* Number of Returned Keys header */
+    *out = lb.buf;
+    *out_len = lb.pos;                 /* already 4 byte aligned by the pad */
+    *out_nrk = lb.nrk;
     return NVME_SUCCESS;
 }
 
@@ -947,17 +1331,33 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
 
     qemu_mutex_lock(&s->lock);
+    if (s->lsm) {
+        /* the scan reads each level in sequence, the levels side by side */
+        s->lsm_stime = req->stime;
+        memset(s->lsm_level, 0, sizeof(s->lsm_level));
+    }
     status = kv_build_list_locked(s, start_key, start_len, hbs, &buf, &len, &nrk);
     if (status) {
         qemu_mutex_unlock(&s->lock);
         return status;
     }
-    lat = kv_charge_stages(s, req, start_key, start_len);
+    if (s->lsm) {
+        lat = kv_charge_base(s, req, start_key, start_len);
+        for (int i = 0; i <= KV_LSM_MAX_LEVELS; i++) {
+            lat = MAX(lat, s->lsm_level[i]);
+        }
+    } else {
+        lat = kv_charge_stages(s, req, start_key, start_len);
+    }
     qemu_mutex_unlock(&s->lock);
 
     status = dma_read_cmd_buf(n, &req->cmd, buf, len, hbs);
     g_free(buf);
     if (status) {
+        /* the LSM scan reads ran; the hash keeps its error path */
+        if (s->lsm) {
+            kv_apply_lat(req, lat);
+        }
         return status;
     }
     kv_apply_lat(req, lat);
@@ -977,6 +1377,7 @@ static void kvssd_reset_table(FemuKvssdState *s)
     s->value_used = 0;
     s->key_used = 0;
     s->value_reclaimable = 0;
+    kv_tree_reset(s);
 }
 
 
@@ -1040,6 +1441,19 @@ static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
         s->pgsz = 4096;
     }
     return true;
+}
+
+static void kv_tree_free(FemuKvssdState *s)
+{
+    if (s->lsm) {
+        kv_lsm_destroy(s->lsm);
+    }
+    g_free(s->lsm);
+    g_free(s->free_slots);
+    g_free(s->lsm_pend);
+    s->lsm = NULL;
+    s->free_slots = NULL;
+    s->lsm_pend = NULL;
 }
 
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
@@ -1145,13 +1559,29 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     s->table = g_try_new0(FemuKvssdMappingEntry, s->hash_slots);
     s->values = g_try_malloc0(s->value_capacity);
+    if (s->table && s->values && n->kv_index && !strcmp(n->kv_index, "lsm")) {
+        /* a meta page record: 16 key bytes, 8 pointer, 8 length and flags */
+        if (s->pgsz < KV_LSM_REC_BYTES) {
+            error_setg(errp, "FEMU kvssd: kv_index=lsm needs a page of at "
+                       "least %d bytes; the page is %d", KV_LSM_REC_BYTES,
+                       s->pgsz);
+            goto fail;
+        }
+        s->lsm = g_try_new0(KvLsm, 1);
+        s->free_slots = g_try_new(uint32_t, s->hash_slots);
+        if (!s->lsm || !s->free_slots ||
+            kv_lsm_init(s->lsm, n->kv_lsm_memtable_keys,
+                        n->kv_lsm_size_ratio, n->kv_lsm_pinned_levels,
+                        s->pgsz / KV_LSM_REC_BYTES, kv_tree_io, s)) {
+            error_setg(errp, "KVSSD LSM index allocation failed");
+            goto fail;
+        }
+        s->index = &kv_index_lsm;
+        kv_tree_reset(s);
+    }
     if (!s->table || !s->values) {
         error_setg(errp, "KVSSD DRAM allocation failed");
-        g_free(s->values);
-        g_free(s->table);
-        kvssd_free_ssd(s);
-        g_free(s);
-        return NULL;
+        goto fail;
     }
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         kv_entry_clear(&s->table[i]);
@@ -1170,6 +1600,14 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         kvssd_ftl_selftest(s);
     }
     return s;
+
+fail:
+    kv_tree_free(s);
+    g_free(s->values);
+    g_free(s->table);
+    kvssd_free_ssd(s);
+    g_free(s);
+    return NULL;
 }
 
 static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
@@ -1201,7 +1639,7 @@ static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
         memcpy(s->values + off, data, len);
     }
     status = kv_program_ppas(s, req, len, USER_IO, &new_ppas, &new_nr_ppas,
-                             &lat);
+                             &lat, req->stime);
     if (status) {
         s->value_next = off;
         return status;
@@ -1244,7 +1682,7 @@ static bool kv_selftest_delete_locked(FemuKvssdState *s, const void *key,
         return false;
     }
     old = s->table[slot];
-    if (!s->index->remove(s, key, kl)) {
+    if (s->index->remove(s, key, kl) <= 0) {
         return false;
     }
     kv_discard_value_ppas(s, &old);
@@ -1414,7 +1852,8 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
         for (int i = 0; ok && i < 128; i++) {
             ok = kv_read_ppas(s, &req, &s->table[slot],
                               MIN((uint64_t)s->table[slot].length,
-                                  (uint64_t)s->pgsz), &lat) == NVME_SUCCESS;
+                                  (uint64_t)s->pgsz), &lat,
+                              req.stime) == NVME_SUCCESS;
         }
         KVT(ok && s->nand_wr_pages == wr_before, "retrieve-no-page-allocation");
     }
@@ -1509,6 +1948,7 @@ void kvssd_ftl_free(FemuKvssdState *s)
     }
     qemu_mutex_destroy(&s->lock);
     kvssd_reset_table(s);
+    kv_tree_free(s);
     g_free(s->values);
     g_free(s->table);
     kvssd_free_ssd(s);

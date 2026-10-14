@@ -106,6 +106,54 @@ namespace. A controller can mix KV namespaces with block namespaces
 The two views are kept in step: the arena decides where the bytes are, and
 the NAND model decides what storing and reading them costs.
 
+## Key index
+
+`FemuKvIndexOps` (`kvssd.h`) is the index of a namespace: `find`,
+`upsert`, `remove` and `probe`. The `kv_index` property picks one of two
+tables in `kvssd_ftl_alloc()`:
+
+| `kv_index` | Index | `probe` |
+| --- | --- | --- |
+| `hash` (default) | the open-addressing table above, in DRAM | none: no flash read |
+| `lsm` | an LSM tree after PinK (`kv-lsm.c`) | one meta page read per unpinned level, in sequence |
+
+With `lsm`, `table[]` becomes a slot pool. A free stack hands a slot to
+a new key, and the tree maps the key to its slot:
+
+```text
+  memtable (sorted, DRAM) ---flush---> L1 ---merge---> L2 ---> ... L24
+  record { key, key_len, tombstone, slot } --------+
+                                                    v
+  table[slot] { key, value_off, length, ppas }     value pointer
+```
+
+- `kv-lsm.c` holds the tree and needs nothing from QEMU. It reports each
+  meta page it reads or programs through a callback, with the page id,
+  the kind of I/O and the level. The unit test
+  `tests/unit/test-kv-lsm.c` builds it alone.
+- `kvssd-ftl.c` turns a page id into a placeholder address. The LUN is
+  `id % luns`, then the plane and the page follow, all inside the geometry.
+  It charges the I/O as `MAP_IO` through `ssd_advance_status()`.
+- An overwrite keeps the slot and adds a new record. A Delete adds a
+  tombstone first and frees the slot after. A lookup takes the newest
+  record, so an older record that names a reused slot is never read.
+- The timing rules, from the request arrival time `t0`:
+
+```text
+  lookup (probe)   each meta read starts when the one before ends
+  Retrieve         value reads start at t0 + probe
+  List             per level: serial reads; levels side by side
+  merge I/O        queued during the command, issued at unlock:
+                   reads from t0, programs after the last read,
+                   the next merge after the last program; not in the latency
+  value GC         check reads from t0, value moves after them,
+                   reinserted keys' merges after the moves
+```
+
+The hash table leaves `probe` NULL and takes none of these paths, so its
+call order and times are unchanged. The user view is in
+[LSM-tree key index](../features/kv-lsm-index.md).
+
 ## Capacity
 
 `kvssd_ftl_alloc()` sizes the store from two limits and takes the smaller:
@@ -242,6 +290,7 @@ error paths after the index lookup, are charged nothing.
 | Retrieve | the reads of the value pages that are transferred, and the base cost; the longest of them |
 | Exist | the base cost |
 | Delete, List | the longer of the base cost and the index cost, which is 0 for the hash index |
+| any command with `kv_index=lsm` | also the meta page reads of the [key index](#key-index) |
 | a missing key, a conditional Store that does not apply, a full index or a full value space | the base cost |
 
 All costs are measured from the command's arrival time on the LUN
@@ -306,6 +355,9 @@ bytes actually moved.
   (timing), `namespace-kv-byte-capacity`, `kv-mdts` and
   `kv-list-mdts0` (transfer limits), `kv-identify-reserved` (Identify
   layout), `sgl-kv`, and `kv-fuzz`, a fuzzer over the command fields.
+- The `kv-lsm-*` qtests cover `kv_index=lsm`: data, List order, probe
+  time, background merges, query output, refusals, value GC and Delete.
+  The unit test `test-femu-kv-lsm` checks the tree against a reference.
 - The documentation check stores and retrieves one value in each example
   whose namespace 1 is a KV namespace.
 - `FEMU_KV_SELFTEST`, set in the environment, runs a self-test of the FTL at
@@ -327,7 +379,8 @@ bytes actually moved.
   first.
 - The base cost of a key always falls on the same LUN, so a workload that
   hammers one key queues on that LUN.
-- List order follows the hash table, not key order.
+- With the hash index, List order follows the hash table, not key order.
+  The LSM index returns byte order.
 - Not with FDP or `meta`. A controller with a KV namespace offers no
   namespace management: it needs a NoSSD or black-box controller whose
   namespaces all share its mode.
@@ -338,12 +391,10 @@ Refusal messages are listed in the
 ## Extending the mode
 
 - **Another index.** `FemuKvIndexOps` in `kvssd.h` is a small table of
-  `find`, `upsert`, `remove` and `probe_reads`. An index kept on flash, such
-  as an LSM tree, returns the number of page reads one lookup costs from
-  `probe_reads`, and `kv_charge_index()` charges them as mapping reads on the
-  key's index LUN, like the base cost; an index with real page addresses
-  should charge those instead. Set `s->index` to the
-  new table in `kvssd_ftl_alloc()`.
+  `find`, `upsert`, `remove` and `probe`. An index kept on flash returns
+  from `probe` the time of its lookup reads, as the LSM tree does. Add a
+  `kv_index` value and set `s->index` to the new table in
+  `kvssd_ftl_alloc()`.
 - **Background reclaim.** Valid-page relocation from partly valid lines would
   replace whole-arena compaction; the black-box GC in `hw/femu/bbssd/` shows
   the line and victim bookkeeping it would reuse.
@@ -357,6 +408,7 @@ Refusal messages are listed in the
 | --- | --- |
 | [`hw/femu/kvssd/kvssd.c`](../../kvssd/kvssd.c) | command parsing, registration, init and exit |
 | [`hw/femu/kvssd/kvssd-ftl.c`](../../kvssd/kvssd-ftl.c) | index, value arena, NAND placement, reclaim, compaction, timing, self-test |
+| [`hw/femu/kvssd/kv-lsm.c`](../../kvssd/kv-lsm.c) | the LSM tree of `kv_index=lsm`: memtable, levels, merges, scan |
 | [`hw/femu/kvssd/kvssd-admin.c`](../../kvssd/kvssd-admin.c) | Identify structures, Key Value Configuration feature |
 | [`hw/femu/kvssd/kvssd.h`](../../kvssd/kvssd.h) | `FemuKvssdState`, `FemuKvssdMappingEntry`, `FemuKvIndexOps` |
 | [`hw/femu/bbssd/ftl-media.c`](../../bbssd/ftl-media.c) | `ssd_advance_status()`, the media model KV charges through |

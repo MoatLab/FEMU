@@ -166,7 +166,9 @@ DEVICES = [
                 "title": "KV timing",
                 "kind": "static",
                 "props": [
-                    "kv_timing", "kv_model_coeffs",
+                    "kv_timing", "kv_model_coeffs", "kv_index",
+                    "kv_lsm_memtable_keys", "kv_lsm_size_ratio",
+                    "kv_lsm_pinned_levels",
                 ],
             },
             {

@@ -560,6 +560,23 @@ value is still refused. The GC
 capacity check of bbssd is not made: a namespace larger than the NAND
 starts, with its value space clamped. Design: [KV](../design/kvssd.md).
 
+| Parameter | Unit | Valid values | Meaning |
+| --- | --- | --- | --- |
+| `kv_timing` | name | `media`, `model` | NAND time for every command, or the workload-mix model for Store and Retrieve |
+| `kv_model_coeffs` | 36 numbers | finite | the model fit, intercept first |
+| `kv_index` | name | `hash`, `lsm` | the key index: a DRAM hash, or an LSM tree with flash meta pages |
+| `kv_lsm_memtable_keys` | records | 16 to 65536, `kv_index=lsm` | memtable size before a flush |
+| `kv_lsm_size_ratio` | ratio | 2 to 64, `kv_index=lsm` | capacity of a level over the one above |
+| `kv_lsm_pinned_levels` | levels | 0 to 24, `kv_index=lsm` | top levels held in DRAM, with no flash I/O |
+
+Interactions:
+
+- An LSM knob other than its default needs `kv_index=lsm`, and `kv_index=lsm`
+  needs a KV namespace.
+- With `kv_timing=model`, the tree still loads the NAND; only the Store and
+  Retrieve times come from the model
+  ([LSM-tree key index](../features/kv-lsm-index.md#with-kv_timingmodel)).
+
 ## 14. CXL SSD
 
 `femu-cxl-ssd` is a separate device below a CXL root port. Reference:

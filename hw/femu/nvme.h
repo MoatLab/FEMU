@@ -2256,6 +2256,16 @@ typedef struct FemuPollerCtr {
     int64_t nr_cq_full;
 } QEMU_ALIGNED(64) FemuPollerCtr;
 
+/* defaults and ranges of the kv_index=lsm knobs; KV_LSM_MAX_LEVELS is 24 */
+#define FEMU_KV_LSM_MEMTABLE_DEF    1024
+#define FEMU_KV_LSM_MEMTABLE_MIN    16
+#define FEMU_KV_LSM_MEMTABLE_MAX    65536
+#define FEMU_KV_LSM_RATIO_DEF       10
+#define FEMU_KV_LSM_RATIO_MIN       2
+#define FEMU_KV_LSM_RATIO_MAX       64
+#define FEMU_KV_LSM_PINNED_DEF      1
+#define FEMU_KV_LSM_PINNED_MAX      24
+
 typedef struct FemuCtrl {
     PCIDevice       parent_obj;
     MemoryRegion    iomem;
@@ -2503,6 +2513,11 @@ typedef struct FemuCtrl {
     CsdCtrlParams   csd_params;
     char            *kv_timing;       /* KV: "media" (NULL) or "model" */
     char            *kv_model_coeffs; /* KV: model coefficients; NULL = default */
+    char            *kv_index;        /* KV: "hash" (NULL) or "lsm" */
+    /* kv_index=lsm: memtable keys, level size ratio, levels pinned in DRAM */
+    uint32_t        kv_lsm_memtable_keys;
+    uint32_t        kv_lsm_size_ratio;
+    uint32_t        kv_lsm_pinned_levels;
 
     Oc12Ctrl  *oc12_ctrl;
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];

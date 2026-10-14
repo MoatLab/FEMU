@@ -192,7 +192,10 @@ static uint16_t kvssd_delete(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
 
-    deleted = kvssd_ftl_delete(n, kvssd, req, key, key_len);
+    status = kvssd_ftl_delete(n, kvssd, req, key, key_len, &deleted);
+    if (status) {
+        return status;
+    }
     if (!deleted) {
         bool ednek;
 
