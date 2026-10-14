@@ -84,9 +84,14 @@ check-docs:
 	python3 ../scripts/check-doc-examples.py --qemu $(QEMU) \
 	    --qos-test $(QOS_TEST)
 
+# The host tools start QEMU under qtest and plant their own faults, so a
+# check that stopped catching them fails here.
+check-tools:
+	python3 ../scripts/femu-stat.py --self-test --qemu $(QEMU)
+
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
 	      test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
 	      nand-media.o onfi.o
 
-.PHONY: check check-docs clean
+.PHONY: check check-docs check-tools clean

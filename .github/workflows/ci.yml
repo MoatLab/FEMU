@@ -154,6 +154,14 @@ jobs:
         QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
           -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
 
+    - name: Check the host monitoring tools
+      run: |
+        # Each self-test starts QEMU under qtest and plants faults that its
+        # checks must catch. femu-stat writes pages through the qtest protocol
+        # and checks the counters it shows. A few seconds each.
+        python3 -I hw/femu/scripts/femu-stat.py --self-test \
+          --qemu build-femu/qemu-system-x86_64
+
     - name: Validate the config-file interface
       run: |
         chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh

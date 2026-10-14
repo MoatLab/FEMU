@@ -29,6 +29,10 @@ guest has not enabled it.
 
 ## Start a device with a QMP socket
 
+To watch the counters change, run
+[`femu-stat.py`](../guides/measuring.md#live-counters-on-the-host-femu-stat)
+on the QMP socket. It polls this command and `query-femu-stages`.
+
 <!-- femu-example: query-femu-qmp -->
 ```
 -device femu,id=femu0,devsz_mb=1024,femu_mode=1 -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off

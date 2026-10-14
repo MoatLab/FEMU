@@ -190,6 +190,15 @@ Run this one on the host:
 | --- | --- | --- |
 | `guest-conformance.sh` | Boots a guest for each suite with a fresh overlay of the guest image, runs the suite's guest script in it over SSH, stops the guest and prints `RESULT SUITE PASS`, `FAIL` or `SETUP-ERROR`. An SMBIOS string checks that the SSH port reaches this guest. It refuses an overlay or PID file that an earlier run left in the result directory. CI does not run it. See [conformance suites](../guides/testing.md#conformance-suites). | Suites `blktests-block`, `blktests-zbd`, `nvme-cli`, `zenfs-crash`, `kv-bench` or `all`. Options `--qemu PATH` (default `./qemu-system-x86_64`), `--image FILE`, `--key FILE`, `--port N` (default 8090), `--outdir DIR`, `--timeout SEC` (default 7200 for `zenfs-crash`, else 3600), `--boot-timeout SEC` (default 300), `--device PROPS` (the FEMU properties for a control run), `--smp N` and `--mem SIZE` (default 16 and `16G` for `zenfs-crash`, else 4 and `4G`), `--sudo`, `--keep`. Reads `QEMU`, `IMGDIR`, `OSIMGF`, `SSH_KEY` and `SSH_PORT`, and passes the `BLKTESTS_*`, `NVMECLI_*`, `ROCKSDB_*`, `ZENFS_*` and `KVBENCH_*` variables that `--help` lists to the guest. Exits 0 when every suite passed, 1 when a suite failed, and 2 when a suite could not run and no suite failed. |
 
+## Host monitoring tools
+
+Run these on the host, against a running or a dry-run QEMU. They need
+Python 3 and no other package.
+
+| Script | What it does | Arguments |
+| --- | --- | --- |
+| `femu-stat.py` | Shows the FTL counters of each `femu` device of a running VM, like `top`: pages, WAF since start and over the interval, rates, line, reclaim unit and zone counts, and I/O stage times. It polls QMP `query-femu` and `query-femu-stages` and never resets the counts. See [live counters](../guides/measuring.md#live-counters-on-the-host-femu-stat). | `SOCKET` (a Unix socket path or `HOST:PORT`), `--interval SEC`, `--count N`, `--once`, `--json`, `--ns LIST`, `--path QOMPATH`; `--self-test --qemu BINARY` checks the tool under qtest. Exits 2 on a connection error. |
+
 ## Host tuning helpers
 
 | Script | What it does |

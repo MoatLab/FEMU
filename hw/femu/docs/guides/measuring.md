@@ -18,6 +18,7 @@ from a FEMU thread that did not get a core.
 | Vendor log page C0h | `nvme get-log --log-id=0xc0` | BlackBox (with or without FDP), CSD, KV | WAF, host, GC and NAND page counts, write buffer hits, read reclaim, log-block merges |
 | SMART log | `nvme smart-log` | every NVMe mode | data read and written, command counts, Percentage Used, Available Spare, media errors |
 | FDP statistics | `nvme fdp stats` | BlackBox with FDP | host and media bytes written |
+| `query-femu`, `query-femu-stages` | QMP on the host, or [`femu-stat.py`](#live-counters-on-the-host-femu-stat) | BlackBox (with or without FDP), ZNS; NAND timing for CSD, KV, OCSSD | host, NAND, GC and pad pages, WAF, line, reclaim unit and zone counts, I/O stage times |
 | QOM counters | QMP `qom-get` on the host | `femu-cxl-ssd` | cache hits and misses, media reads, programs and time, direct mapping |
 | fio | in the guest | every block mode | latency and throughput as the guest sees them |
 
@@ -97,6 +98,101 @@ subsystem:
 ```sh
 sudo nvme fdp stats /dev/nvme0 -e 1
 ```
+
+## Live counters on the host: femu-stat
+
+`hw/femu/scripts/femu-stat.py` shows the FTL counters of a running VM from
+the host, like `top`. It needs no guest tools. It polls the QMP commands
+[`query-femu`](../reference/query-femu.md) and
+[`query-femu-stages`](../reference/query-femu.md#io-stage-times-query-femu-stages)
+on the QMP socket of QEMU. It never resets the counts.
+
+```
+ femu-stat.py --connect--> QMP socket of QEMU
+      every --interval s:  query-femu          per namespace state
+                           query-femu-stages   I/O stage histograms
+      this sample - last sample --> view (or one JSON line)
+```
+
+Start QEMU with a QMP socket. `io_stages=on` adds the stage times:
+
+<!-- femu-example: femu-stat-qmp -->
+```
+-device femu,id=femu0,devsz_mb=1024,femu_mode=1,io_stages=on -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off
+```
+
+Then, on the host:
+
+```sh
+python3 hw/femu/scripts/femu-stat.py /tmp/femu-qmp.sock
+python3 hw/femu/scripts/femu-stat.py /tmp/femu-qmp.sock --once
+python3 hw/femu/scripts/femu-stat.py localhost:4444 --json --count 60 > stat.jsonl
+```
+
+This is a BlackBox namespace after the guest wrote 200 pages in one second:
+
+```
+femu-stat  2026-10-14T05:40:20  interval 1.00 s  /tmp/femu-qmp.sock
+/machine/peripheral/femu0  bbssd
+  ns 1 bbssd
+    total:    host 264  nand 264  gc 0  pad 0  erases 0
+    interval: host +200  nand +200  gc +0  pad +0  erases +0  (host 200.0/s, gc 0.0/s, erases 0.0/s)
+    WAF: 1.000 since start, 1.000 interval
+    lines: free 255 of 256, victim 0, full 0, retired 0, spare 0
+    media: bus phases not charged
+  stages (interval):
+    stage          count      mean         p50         p99      max*
+    submit           200     2.4us     <=2.0us     <=8.2us    41.0us
+    ftl              200     829ns     <=1.0us     <=2.0us    94.9ms
+    hold             200   196.8us   <=197.8us   <=197.8us   197.8us
+    post-delay       200     235ns     <=255ns     <=1.0us   274.1us
+    total            200   200.2us   <=262.1us   <=262.1us    94.9ms
+    past-due         200     235ns     <=255ns     <=1.0us    94.7ms
+    * max since the counts were reset; p50 and p99 are bucket bounds
+```
+
+What each namespace shows depends on what `query-femu` returns for it:
+
+| Mode | Shown |
+| --- | --- |
+| `bbssd` | host, NAND, GC and pad pages and block erases, with the change over the interval; host, GC and erase rates; WAF since start and over the interval; line counts |
+| `bbssd` with FDP | the same counters, reclaim unit counts, and host and media bytes per handle with the WAF of each handle over the interval |
+| `znssd` | zone counts by state, and the open and active zone limits |
+| `csd`, `kvssd`, `ocssd` | the NAND bus timing only |
+| `nossd`, or a namespace on a `femu-cxl-ssd` medium | the error that `query-femu` gives; the other namespaces still show |
+| a mode or counter that the tool does not know | its members by their QMP names |
+
+Read the figures as follows:
+
+- The interval WAF is (NAND + GC + pad pages) / host pages over the
+  interval. It is `-` when the host wrote no page in the interval.
+- Host pages count NAND pages. A 512-byte write to one page counts as one
+  page, so the page rate is not a byte rate.
+- p50 and p99 are the bounds of the histogram bucket that holds them. A
+  bucket spans a factor of two. The tool caps the upper bound at the
+  largest time counted, so a bound can be narrower than its bucket. The
+  last bucket has no upper bound of its own; without the cap it shows as
+  `>=`.
+- `max*` is the largest time since the stage counts were last reset. The
+  histograms do not give the largest time of one interval.
+- The first sample has no interval. Its figures are totals since the device
+  started, or since the last reset of the stage counts.
+- A counter that goes down starts a new baseline for its group: the
+  namespace counters, the stages, or one FDP handle. This detection is best
+  effort. A namespace that is deleted and created again between two samples
+  can show a wrong interval.
+- Each namespace and each command is a separate copy, so two namespaces can
+  show slightly different times. The stage counts of a busy device can
+  differ by the commands in flight.
+- A `bbssd` namespace reports nothing until the guest enables the
+  controller.
+
+Options: `--interval SEC` (default 1), `--count N`, `--once`, `--json`
+(one object per sample on one line), `--ns 1,2` (namespaces to show) and
+`--path QOMPATH` (one device, repeatable). With `--json`, the keys are the
+QMP member names. The tool exits with status 2 when it cannot connect, finds
+no `femu` device, or loses the connection. On a terminal it redraws the
+screen; in a pipe it prints one block per sample.
 
 ## CXL SSD counters
 
