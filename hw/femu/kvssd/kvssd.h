@@ -130,6 +130,29 @@ typedef struct FemuKvssdState {
  */
 FemuKvssdState *kvssd_ns_state(FemuCtrl *n, NvmeNamespace *ns);
 
+/* A copy of the LSM index state, for query-femu */
+typedef struct FemuKvLsmSnap {
+    uint32_t memtable_keys;
+    uint32_t memtable_cap;
+    uint32_t ratio;
+    uint32_t pinned;
+    uint32_t per_page;
+    uint64_t dram_bytes;
+    uint64_t meta_flash_bytes;
+    int depth;
+    uint64_t records[KV_LSM_MAX_LEVELS];
+    uint64_t capacity[KV_LSM_MAX_LEVELS];
+    uint64_t pages[KV_LSM_MAX_LEVELS];
+    uint64_t flushes;
+    uint64_t compactions;
+    uint64_t dropped;
+    uint64_t reinserted;
+    uint64_t io[KV_LSM_IO_NR];
+} FemuKvLsmSnap;
+
+/* fill @snap and return true when @s runs the LSM index */
+bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap);
+
 /* --- KV-FTL firmware (kvssd-ftl.c) --- */
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 void kvssd_ftl_free(FemuKvssdState *s);

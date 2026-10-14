@@ -1941,6 +1941,41 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
 #undef KVT
 }
 
+bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap)
+{
+    KvLsm *l;
+
+    memset(snap, 0, sizeof(*snap));
+    qemu_mutex_lock(&s->lock);
+    l = s->lsm;
+    if (!l) {
+        qemu_mutex_unlock(&s->lock);
+        return false;
+    }
+    snap->memtable_keys = l->mem.nr;
+    snap->memtable_cap = l->mem_cap;
+    snap->ratio = l->ratio;
+    snap->pinned = l->pinned;
+    snap->per_page = l->per_page;
+    snap->dram_bytes = kv_lsm_dram_bytes(l);
+    snap->depth = kv_lsm_depth(l);
+    for (int i = 1; i <= snap->depth; i++) {
+        snap->records[i - 1] = l->lvl[i - 1].nr;
+        snap->capacity[i - 1] = kv_lsm_level_cap(l, i);
+        snap->pages[i - 1] = l->lvl[i - 1].npg;
+        if (!kv_lsm_level_pinned(l, i)) {
+            snap->meta_flash_bytes += (uint64_t)l->lvl[i - 1].npg * s->pgsz;
+        }
+    }
+    snap->flushes = l->flushes;
+    snap->compactions = l->compactions;
+    snap->dropped = l->dropped;
+    snap->reinserted = l->reinserted;
+    memcpy(snap->io, l->pages, sizeof(snap->io));
+    qemu_mutex_unlock(&s->lock);
+    return true;
+}
+
 void kvssd_ftl_free(FemuKvssdState *s)
 {
     if (!s) {

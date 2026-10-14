@@ -403,6 +403,15 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
                         namespaces[0]["fdp"]["placement-handles"]
             if "media" in ns:
                 entry["media"] = stat.media_summary(ns["media"])
+            if "lsm" in ns:
+                lsm = ns["lsm"]
+                entry["kv-index"] = {
+                    "kind": "lsm",
+                    "memtable-capacity": lsm.get("memtable-capacity"),
+                    "size-ratio": lsm.get("size-ratio"),
+                    "pinned-levels": lsm.get("pinned-levels"),
+                    "records-per-page": lsm.get("records-per-page"),
+                    "levels": len(lsm.get("levels", []))}
             entry.update(derive(ns, ident))
             namespaces.append(entry)
         shared_op(namespaces)
@@ -493,6 +502,14 @@ def report_text(code: int, r: Dict[str, Any]) -> str:
                     f"{size(ns.get('zone-bytes'))}, capacity "
                     f"{size(ns.get('zone-capacity-bytes'))}, max open "
                     f"{ns.get('max-open')}, max active {ns.get('max-active')}")
+            ki = ns.get("kv-index")
+            if ki:
+                lines.append(
+                    pad + f"KV index: {ki['kind']}, memtable "
+                    f"{ki['memtable-capacity']} keys, size ratio "
+                    f"{ki['size-ratio']}, {ki['pinned-levels']} pinned "
+                    f"levels, {ki['records-per-page']} records a meta page, "
+                    f"{ki['levels']} levels now")
             if ns.get("media"):
                 lines.append(pad + "media: " + stat.media_text(ns["media"]))
             for key in ("query-error", "identify-error"):
@@ -601,8 +618,16 @@ def self_test(qemu: str) -> int:
     ns = ns1(r)
     t.check("kvssd: key-value capacity and media timing",
             code == 0 and ns.get("command-set") == "key-value"
-            and ns.get("capacity-bytes", 0) > 0 and "media" in ns,
-            json.dumps(r)[:600])
+            and ns.get("capacity-bytes", 0) > 0 and "media" in ns
+            and "kv-index" not in ns, json.dumps(r)[:600])
+
+    code, r = check(qemu, ["-device", "femu,femu_mode=5,devsz_mb=64,"
+                           "kv_index=lsm,kv_lsm_size_ratio=4"])
+    ns = ns1(r)
+    t.check("kvssd with kv_index=lsm: the index and its knobs",
+            code == 0 and ns.get("kv-index", {}).get("size-ratio") == 4
+            and ns["kv-index"].get("memtable-capacity") == 1024
+            and "KV index: lsm" in report_text(code, r), json.dumps(r)[:600])
 
     def refused_ok() -> bool:
         code, r = check(qemu, ["-device", "femu,femu_mode=9"])

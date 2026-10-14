@@ -151,7 +151,7 @@ the NAND time, can wait behind it. The model time does not change.
 ## Counters
 
 The `lsm` member of the namespace in `query-femu` shows the tree
-([query-femu](../reference/query-femu.md)). It has the
+([query-femu](../reference/query-femu.md#kv-lsm-index)). It has the
 memtable, each level, and counters of each kind of meta page I/O.
 `femu-stat.py` prints them with their change over each interval.
 

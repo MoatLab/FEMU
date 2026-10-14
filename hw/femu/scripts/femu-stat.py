@@ -388,6 +388,8 @@ def namespace_report(ns: Dict[str, Any], prev: Optional[Dict[str, Any]],
         out["fdp"] = fdp_report(ns["fdp"], prev.get("fdp") if prev else None)
     if isinstance(ns.get("media"), dict):
         out["media"] = media_summary(ns["media"])
+    if isinstance(ns.get("lsm"), dict):
+        out["lsm"] = lsm_report(ns["lsm"], prev.get("lsm") if prev else None)
     other = {k: v for k, v in ns.items()
              if k not in ("nsid", "mode", "counters", "geometry",
                           "line-counts", "zone-counts", "fdp", "media",
@@ -426,6 +428,50 @@ def fdp_report(fdp: Dict[str, Any],
         handles.append(entry)
     out["handles"] = handles
     return out
+
+
+LSM_COUNTERS = ("flushes", "compactions", "dropped-records",
+                "reinserted-keys", "probe-read-pages", "scan-read-pages",
+                "compaction-read-pages", "compaction-program-pages",
+                "gc-read-pages")
+
+
+def lsm_report(lsm: Dict[str, Any],
+               prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The LSM index of a kv_index=lsm namespace: its shape, and each
+    counter with its change since the sample before."""
+    out = {k: v for k, v in lsm.items()
+           if k not in LSM_COUNTERS and k != "levels"}
+    out["levels"] = [dict(lv) for lv in lsm.get("levels", [])]
+    counters = {}
+    for k in LSM_COUNTERS:
+        if k not in lsm:
+            continue
+        old = prev.get(k) if prev and FAULT != "lsm-no-prev" else None
+        d = lsm[k] - old if old is not None and lsm[k] >= old else None
+        counters[k] = {"total": lsm[k], "interval": d}
+    out["counters"] = counters
+    return out
+
+
+def lsm_text(lsm: Dict[str, Any], pad: str) -> List[str]:
+    lines = [pad + f"lsm: memtable {lsm.get('memtable-keys')}/"
+             f"{lsm.get('memtable-capacity')}, ratio {lsm.get('size-ratio')}, "
+             f"pinned {lsm.get('pinned-levels')}, device DRAM "
+             f"{fmt_bytes(lsm.get('device-dram-bytes'))}, meta flash "
+             f"{fmt_bytes(lsm.get('meta-flash-bytes'))}"]
+    levels = lsm.get("levels", [])
+    if levels:
+        lines.append(pad + "levels: " + ", ".join(
+            f"L{lv['level']} {lv['records']} rec {lv['pages']} pg"
+            + (" pinned" if lv.get("pinned") else "") for lv in levels))
+    cs = lsm.get("counters", {})
+    if cs:
+        lines.append(pad + "lsm counters: " + "  ".join(
+            f"{k} {c['total']}"
+            + (f" (+{c['interval']})" if c.get("interval") is not None
+               else "") for k, c in cs.items()))
+    return lines
 
 
 def media_summary(m: Dict[str, Any]) -> Dict[str, Any]:
@@ -575,6 +621,8 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
     if ns.get("other"):
         lines.append(pad + "other: " + ", ".join(
             f"{k} {v}" for k, v in ns["other"].items()))
+    if ns.get("lsm"):
+        lines += lsm_text(ns["lsm"], pad)
     if ns.get("media"):
         lines.append(pad + "media: " + media_text(ns["media"]))
     return lines
@@ -1218,6 +1266,8 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
         ("mixed", ["-device", f"femu,id=femu0,{SMALL_BB},namespaces=2,"
                    "namespace_modes=nossd,,bbssd"]),
         ("kvssd", ["-device", "femu,id=femu0,femu_mode=5,devsz_mb=256"]),
+        ("kvssd-lsm", ["-device", "femu,id=femu0,femu_mode=5,devsz_mb=64,"
+                       "kv_index=lsm,kv_lsm_memtable_keys=16"]),
         ("not-enabled", ["-device", f"femu,id=femu0,{SMALL_BB},namespaces=2,"
                          "namespace_modes=bbssd,,znssd"]),
     ]
@@ -1245,7 +1295,7 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
             sampler = Sampler(q.qmp, find_devices(q.qmp))
             s0 = sampler.sample()
             nsid = 2 if name in ("mixed", "fdp2") else 1
-            if name != "kvssd":
+            if not name.startswith("kvssd"):
                 t.check(f"{name}: 16 pages written",
                         write_pages(ctrl, nsid, 0, 16))
             s1 = sampler.sample()
@@ -1293,6 +1343,11 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
             elif name == "kvssd":
                 t.check("kvssd: media timing only",
                         "media" in ns and "counters" not in ns
+                        and "lsm" not in ns and "media: bus" in text, text)
+            elif name == "kvssd-lsm":
+                t.check("kvssd with kv_index=lsm: the index line",
+                        ns.get("lsm", {}).get("memtable-capacity") == 16
+                        and "lsm: memtable 0/16" in text
                         and "media: bus" in text, text)
         finally:
             q.close()
@@ -1324,6 +1379,28 @@ def selftest_synthetic(t: SelfTest) -> None:
             and "read-reclaim-pages +2" in text
             and "read-reclaim-pages 1.0/s" in text
             and abs(ns["interval-waf"] - 1.6) < 1e-9, text)
+    lsm0 = {"nsid": 1, "mode": "kvssd",
+            "lsm": {"memtable-keys": 3, "memtable-capacity": 16,
+                    "size-ratio": 2, "pinned-levels": 1,
+                    "device-dram-bytes": 2048, "meta-flash-bytes": 8192,
+                    "levels": [{"level": 1, "records": 32, "pages": 1,
+                                "capacity": 32, "pinned": True},
+                               {"level": 2, "records": 64, "pages": 2,
+                                "capacity": 64, "pinned": False}],
+                    "flushes": 6, "probe-read-pages": 10}}
+    lsm1 = json.loads(json.dumps(lsm0))
+    lsm1["lsm"].update({"flushes": 8, "probe-read-pages": 15})
+    def lsm_ok() -> bool:
+        lrep = one_ns(build_report(dev(lsm1, mono=2.0), dev(lsm0)))
+        ltext = report_text(build_report(dev(lsm1, mono=2.0), dev(lsm0)),
+                            "synthetic")
+        return (lrep["lsm"]["counters"]["flushes"]["interval"] == 2
+                and lrep["lsm"]["counters"]["probe-read-pages"]["interval"]
+                == 5 and "L2 64 rec 2 pg" in ltext
+                and "flushes 8 (+2)" in ltext
+                and "lsm: memtable 3/16" in ltext)
+    t.check("kv_index=lsm: levels and counter intervals shown", lsm_ok())
+    t.control("lsm counter interval", "lsm-no-prev", lsm_ok)
     reset = build_report(dev(ns0, mono=4.0), dev(ns1, mono=2.0))
     t.check("counters that go down start a new baseline",
             one_ns(reset).get("baseline") == "reset"

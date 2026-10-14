@@ -556,8 +556,7 @@
 # @FemuMediaInfo:
 #
 # A namespace that @query-femu reports only the NAND bus timing of:
-# a computational storage (csd), key-value (kvssd) or OpenChannel
-# (ocssd) namespace.
+# a computational storage (csd) or OpenChannel (ocssd) namespace.
 #
 # @media: NAND bus timing
 #
@@ -565,6 +564,102 @@
 ##
 { 'struct': 'FemuMediaInfo',
   'data': { 'media': 'FemuMediaTiming' } }
+
+##
+# @FemuKvLsmLevel:
+#
+# One level of the LSM-tree key index of a key-value namespace.
+#
+# @level: level number, 1 for the level below the memtable
+#
+# @records: records in the level, with tombstones and older versions
+#
+# @capacity: records the level holds before it merges into the next
+#     one.  Level 24, the last one, reports 18446744073709551615 (no
+#     limit).
+#
+# @pages: meta pages of the level
+#
+# @pinned: the level is held whole in device DRAM, with no flash I/O
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuKvLsmLevel',
+  'data': { 'level': 'uint32', 'records': 'uint64', 'capacity': 'uint64',
+            'pages': 'uint64', 'pinned': 'bool' } }
+
+##
+# @FemuKvLsmInfo:
+#
+# State of the LSM-tree key index (kv_index=lsm) of a key-value
+# namespace.  Page counts are flash meta pages of the index, which
+# take channel and LUN time but no value space.
+#
+# @memtable-keys: records in the memtable
+#
+# @memtable-capacity: records the memtable holds before it flushes
+#
+# @size-ratio: capacity ratio of a level to the one above it
+#
+# @pinned-levels: top levels held in device DRAM
+#
+# @records-per-page: records of one meta page
+#
+# @device-dram-bytes: modelled controller DRAM of the index: the
+#     memtable and pinned records, and a level list entry for each
+#     unpinned meta page
+#
+# @meta-flash-bytes: flash the meta pages of the unpinned levels take
+#
+# @levels: each level from 1 to the deepest one that holds a record
+#
+# @flushes: memtable merges into level 1
+#
+# @compactions: merges of a level into the one below
+#
+# @dropped-records: older versions and tombstones that merges dropped
+#
+# @reinserted-keys: keys that value garbage collection put back into
+#     the memtable
+#
+# @probe-read-pages: meta page reads of lookups
+#
+# @scan-read-pages: meta page reads of List commands
+#
+# @compaction-read-pages: meta page reads of merges
+#
+# @compaction-program-pages: meta page programs of merges
+#
+# @gc-read-pages: meta page reads that check values before value
+#     garbage collection moves them
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuKvLsmInfo',
+  'data': { 'memtable-keys': 'uint32', 'memtable-capacity': 'uint32',
+            'size-ratio': 'uint32', 'pinned-levels': 'uint32',
+            'records-per-page': 'uint32', 'device-dram-bytes': 'uint64',
+            'meta-flash-bytes': 'uint64', 'levels': [ 'FemuKvLsmLevel' ],
+            'flushes': 'uint64', 'compactions': 'uint64',
+            'dropped-records': 'uint64', 'reinserted-keys': 'uint64',
+            'probe-read-pages': 'uint64', 'scan-read-pages': 'uint64',
+            'compaction-read-pages': 'uint64',
+            'compaction-program-pages': 'uint64',
+            'gc-read-pages': 'uint64' } }
+
+##
+# @FemuKvssdInfo:
+#
+# A key-value (kvssd) namespace.
+#
+# @media: NAND bus timing
+#
+# @lsm: the LSM-tree key index.  Present only with kv_index=lsm.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuKvssdInfo',
+  'data': { 'media': 'FemuMediaTiming', '*lsm': 'FemuKvLsmInfo' } }
 
 ##
 # @FemuBbssdInfo:
@@ -658,7 +753,7 @@
   'base': { 'nsid': 'uint32', 'mode': 'FemuMode' },
   'discriminator': 'mode',
   'data': { 'bbssd': 'FemuBbssdInfo', 'znssd': 'FemuZonedInfo',
-            'csd': 'FemuMediaInfo', 'kvssd': 'FemuMediaInfo',
+            'csd': 'FemuMediaInfo', 'kvssd': 'FemuKvssdInfo',
             'ocssd': 'FemuMediaInfo' } }
 
 ##
@@ -685,8 +780,10 @@
 # Blackbox (bbssd) namespaces, also with flexible data placement, and
 # zoned (znssd) namespaces are supported.  For a computational storage
 # (csd), key-value (kvssd) or OpenChannel (ocssd) namespace, the reply
-# has the NAND bus timing only.  A selected no-SSD (nossd) namespace,
-# or one backed by a CXL SSD medium, makes the command fail.  The
+# has the NAND bus timing, and for a key-value namespace with
+# kv_index=lsm also the state of its LSM-tree index.  A selected
+# no-SSD (nossd) namespace, or one backed by a CXL SSD medium, makes
+# the command fail.  The
 # controller must be enabled when a blackbox namespace is selected.
 # Each namespace is one copy, but two namespaces, and two calls, can
 # show different points in time.

@@ -21,6 +21,7 @@
 #include "qom/object.h"
 #include "nvme.h"
 #include "bbssd/ftl.h"
+#include "kvssd/kvssd.h"
 #include "femu-query.h"
 
 /* How long the FTL thread may take to pick a request up. */
@@ -134,6 +135,8 @@ typedef struct FemuQuerySel {
     int onfi_col;               /* address cycles of the profile */
     int onfi_row;
     NandMediaPhases media;
+    bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
+    FemuKvLsmSnap lsm;
 } FemuQuerySel;
 
 /*
@@ -189,6 +192,9 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
             return false;
         }
         sel->media_only = true;
+        if (NS_KVSSD(ns) && ns->ext_ops.state) {
+            sel->has_lsm = kvssd_ftl_lsm_snap(ns->ext_ops.state, &sel->lsm);
+        }
         return true;
     }
 
@@ -501,6 +507,40 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
     return mt;
 }
 
+static FemuKvLsmInfo *femu_query_lsm_info(const FemuKvLsmSnap *l)
+{
+    FemuKvLsmInfo *info = g_new0(FemuKvLsmInfo, 1);
+    FemuKvLsmLevelList **tail = &info->levels;
+
+    info->memtable_keys = l->memtable_keys;
+    info->memtable_capacity = l->memtable_cap;
+    info->size_ratio = l->ratio;
+    info->pinned_levels = l->pinned;
+    info->records_per_page = l->per_page;
+    info->device_dram_bytes = l->dram_bytes;
+    info->meta_flash_bytes = l->meta_flash_bytes;
+    for (int i = 1; i <= l->depth; i++) {
+        FemuKvLsmLevel *lv = g_new0(FemuKvLsmLevel, 1);
+
+        lv->level = i;
+        lv->records = l->records[i - 1];
+        lv->capacity = l->capacity[i - 1];
+        lv->pages = l->pages[i - 1];
+        lv->pinned = (uint32_t)i <= l->pinned;
+        QAPI_LIST_APPEND(tail, lv);
+    }
+    info->flushes = l->flushes;
+    info->compactions = l->compactions;
+    info->dropped_records = l->dropped;
+    info->reinserted_keys = l->reinserted;
+    info->probe_read_pages = l->io[KV_LSM_IO_PROBE];
+    info->scan_read_pages = l->io[KV_LSM_IO_SCAN];
+    info->compaction_read_pages = l->io[KV_LSM_IO_COMPACT_READ];
+    info->compaction_program_pages = l->io[KV_LSM_IO_COMPACT_PROGRAM];
+    info->gc_read_pages = l->io[KV_LSM_IO_GC_READ];
+    return info;
+}
+
 static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
 {
     FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
@@ -514,6 +554,9 @@ static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
         break;
     case FEMU_MODE_KVSSD:
         ns_info->u.kvssd.media = mt;
+        if (sel->has_lsm) {
+            ns_info->u.kvssd.lsm = femu_query_lsm_info(&sel->lsm);
+        }
         break;
     case FEMU_MODE_OCSSD:
         ns_info->u.ocssd.media = mt;

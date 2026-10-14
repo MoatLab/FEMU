@@ -6,7 +6,8 @@ controller to the host. It needs no guest tools. The schema is in
 
 This release supports BlackBox (`bbssd`) namespaces, also with flexible
 data placement (FDP), and zoned (`znssd`) namespaces. For a `csd`,
-`kvssd` or `ocssd` namespace the reply has the NAND bus timing only. A
+`kvssd` or `ocssd` namespace the reply has the NAND bus timing. A `kvssd`
+namespace with `kv_index=lsm` also reports its LSM-tree index. A
 selected `nossd` namespace, or one backed by a `femu-cxl-ssd` medium,
 returns an error that names the mode.
 A controller in an unsupported mode returns that error even when the
@@ -58,7 +59,7 @@ listing kind fits one namespace type:
 
 ```
  kind            bbssd   bbssd + FDP   znssd   csd, kvssd, ocssd
- summary         yes     yes           yes     yes (media only)
+ summary         yes     yes           yes     yes (media, KV index)
  lines           yes     error         error   error
  reclaim-units   error   yes           error   error
  zones           error   error         yes     error
@@ -261,6 +262,42 @@ reports only `media` needs no enabled controller.
 With `kv_timing=model`, a KV namespace still charges its NAND ops, so
 `media` is correct for the media timelines. The time a Store or Retrieve
 command takes comes from the model instead.
+
+### KV LSM index
+
+A `kvssd` entry has an `lsm` member when the device runs `kv_index=lsm`
+([LSM-tree key index](../features/kv-lsm-index.md)). With the hash index
+the entry keeps its three members: `nsid`, `mode` and `media`.
+
+| Member | Meaning |
+| --- | --- |
+| `memtable-keys`, `memtable-capacity` | records in the memtable, and the records it holds before a flush |
+| `size-ratio`, `pinned-levels` | the `kv_lsm_size_ratio` and `kv_lsm_pinned_levels` knobs |
+| `records-per-page` | records of one meta page: the page size / 32 |
+| `device-dram-bytes` | modelled controller DRAM: 32 bytes per memtable or pinned record, 24 per meta page of an unpinned level; a pinned level needs no level list |
+| `meta-flash-bytes` | the meta pages of the unpinned levels, in bytes |
+| `levels` | levels 1 to the deepest one that holds a record: `level`, `records` (tombstones and older versions too), `capacity` (18446744073709551615 for level 24), `pages`, `pinned` |
+| `flushes`, `compactions` | memtable merges into level 1; level merges into the next one |
+| `dropped-records`, `reinserted-keys` | records merges dropped; keys that value GC put back in the memtable |
+| `probe-read-pages`, `scan-read-pages` | meta page reads of lookups and of List |
+| `compaction-read-pages`, `compaction-program-pages` | meta page reads and programs of merges |
+| `gc-read-pages` | meta page reads that check values before value GC moves them |
+
+The command copies these under the lock of the namespace, so they agree
+with each other. It needs no enabled controller.
+
+```json
+"lsm": {"memtable-keys": 12, "memtable-capacity": 16, "size-ratio": 2,
+        "pinned-levels": 1, "records-per-page": 128,
+        "device-dram-bytes": 1456, "meta-flash-bytes": 8192,
+        "levels": [{"level": 1, "records": 32, "capacity": 32, "pages": 1, "pinned": true},
+                   {"level": 2, "records": 48, "capacity": 64, "pages": 1, "pinned": false},
+                   {"level": 3, "records": 96, "capacity": 128, "pages": 1, "pinned": false}],
+        "flushes": 11, "compactions": 4, "dropped-records": 0,
+        "reinserted-keys": 0, "probe-read-pages": 37, "scan-read-pages": 2,
+        "compaction-read-pages": 6, "compaction-program-pages": 5,
+        "gc-read-pages": 0}
+```
 
 ## Example
 
