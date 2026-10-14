@@ -14,6 +14,7 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
                                 FemuReclaimUnit *ru);
 static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa);
 static void ssd_reset_maptbl(struct ssd *ssd);
+static void fdp_ru_sync_ruamw(struct ssd *ssd, FemuReclaimUnit *ru);
 
 /* FDP: victim RU priority queue callbacks (greedy by vpc) */
 static inline int victim_ru_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
@@ -128,6 +129,8 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
     new_ru->ruh = eruh;
     new_ru->last_invalidated_time = 0;
     new_ru->my_cb = 0.0f;
+    /* RUAMW counts in the blocks of the handle the unit now serves */
+    fdp_ru_sync_ruamw(ssd, new_ru);
 
     fdp_set_ru_write_pointer(ssd, new_ru);
     eruh->ru_in_use_cnt++;
@@ -842,17 +845,23 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
 };
 
 /*
- * Set the RUAMW of @ru from the bytes programmed into it. The remaining
- * bytes round down to whole logical blocks, so a page smaller than a block
- * and a page of any program path count the same way.
+ * The RUAMW of @ru from the bytes programmed into it, in the blocks of the
+ * namespaces that use its handle. The remaining bytes round down to whole
+ * logical blocks, so a page smaller than a block and a page of any program
+ * path count the same way.
  */
-static void fdp_ru_sync_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
+static uint64_t fdp_ru_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
 
-    if (ru->nvme_ru && ssd->ns) {
-        ru->nvme_ru->ruamw = (runs - MIN(runs, ru->prog_bytes)) >>
-                             ssd->ns->lbaf.lbads;
+    return (runs - MIN(runs, ru->prog_bytes)) >> ru->ruh->ruh->lbads;
+}
+
+/* A unit that never served a handle has no block size to count in. */
+static void fdp_ru_sync_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    if (ru->nvme_ru && ru->ruh && ru->ruh->ruh) {
+        ru->nvme_ru->ruamw = fdp_ru_ruamw(ssd, ru);
     }
 }
 
@@ -1155,11 +1164,11 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
 
     fdp_set_ru_write_pointer(ssd, ru);
 
-    /* restore ruamw to initial value */
+    /* erased: a full unit again */
     ftl_assert(ru->nvme_ru != NULL);
     ftl_assert(ru->ruh != NULL);
     ftl_assert(ru->ruh->ruh != NULL);
-    ru->nvme_ru->ruamw = ru->ruh->ruh->ruamw;
+    fdp_ru_sync_ruamw(ssd, ru);
 
     QTAILQ_INSERT_TAIL(&rm->free_ru_list, ru, entry);
     rm->free_ru_cnt++;
@@ -2207,7 +2216,10 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 }
 
 /*
- * femu_fdp_ssd_init_ru_handles - init FemuRuHandle for each namespace PH
+ * femu_fdp_ssd_init_ru_handles - init a FemuRuHandle for every reclaim unit
+ * handle of the endurance group, in ID order. The handles belong to the
+ * group, not to a namespace: a namespace's list may name any subset of them,
+ * and a handle no list names still holds its units.
  */
 void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
 {
@@ -2216,11 +2228,9 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
     NvmeSubsystem *subsys = n->subsys;
     NvmeEnduranceGroup *endgrp = &subsys->endgrp;
     uint16_t nruh = subsys->params.fdp.nruh;
-    uint16_t ph, *ruhid;
 
     ssd->ruhs = g_malloc0(nruh * sizeof(FemuRuHandle));
     ssd->nruhs = nruh;
-    ruhid = ns->fdp.phs;
     /*
      * The bitmap covers the FTL space up to the end of the namespace, which no
      * write passes. A piece must not straddle two pages, or unmapping one page
@@ -2235,8 +2245,7 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         ssd->fdp_written = bitmap_new(bits);
     }
 
-    for (ph = 0; ph < ns->fdp.nphs; ph++, ruhid++) {
-        uint16_t i = *ruhid;
+    for (uint16_t i = 0; i < nruh; i++) {
         NvmeRuHandle *nvme_ruh = &endgrp->fdp.ruhs[i];
 
         ssd->ruhs[i].ruh = nvme_ruh;
@@ -2646,16 +2655,15 @@ static void fdp_check_heap(struct ssd *ssd, pqueue_t *pq, bool ruh_heap,
 static int fdp_check_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
-    uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
 
-    if (!ru->nvme_ru || !ssd->ns) {
-        return 0;
-    }
     if (ru->prog_bytes != ((uint64_t)ru->vpc + (uint64_t)ru->ipc) * pg) {
         return 1;
     }
-    return ru->nvme_ru->ruamw != (runs - MIN(runs, ru->prog_bytes)) >>
-                                 ssd->ns->lbaf.lbads;
+    /* a unit no handle has taken yet holds nothing the host is shown */
+    if (!ru->nvme_ru || !ru->ruh || !ru->ruh->ruh) {
+        return 0;
+    }
+    return ru->nvme_ru->ruamw != fdp_ru_ruamw(ssd, ru);
 }
 
 /*

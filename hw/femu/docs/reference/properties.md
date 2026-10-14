@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 191 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 192 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -33,6 +33,7 @@ Devices:
 | `namespaces` | `uint32` | `1` | Number of namespaces created at boot, 1 to 256; OCSSD and FDP support only 1 |
 | `namespace_sizes` | `str` | unset | Comma-separated size in bytes of each namespace (QEMU size syntax such as 4G,2G), one non-empty entry per namespace, summing to at most the backend; unset splits the backend evenly |
 | `namespace_modes` | `str` | unset | Comma-separated mode of each namespace from nossd, bbssd, znssd, ocssd, csd and kvssd, one entry per namespace; unset gives every namespace femu_mode |
+| `namespace_phls` | `str` | unset | FDP placement handle list of each namespace: comma-separated entries, one per namespace, each a ':'-separated list of reclaim unit handle IDs such as 0:1,,2 (placement handle i selects entry i); needs fdp=on, and unset gives every namespace every handle |
 | `op_pcent` | `uint32` | `0` | Over-provisioning in percent for bbssd: back the device with the full NAND capacity and expose capacity/(1 + op_pcent/100); 0 keeps devsz_mb sizing, not with cxl_ssd |
 | `subsys` | `link<femu-subsys>` | unset | ID of a femu-subsys device to join, created before this controller; needed for FDP, shared namespaces and the Endurance Group log |
 | `cxl_ssd` | `link<femu-cxl-ssd>` | unset | ID of a femu-cxl-ssd, listed before this controller, whose memory and FTL this bbssd controller serves as its one namespace |

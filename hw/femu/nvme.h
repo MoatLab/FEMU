@@ -42,6 +42,8 @@ typedef struct NvmeBus {
 
 #define NVME_FDP_MAX_EVENTS 63
 #define NVME_FDP_MAXPIDS    128
+/* entries in one placement handle list (NVM Command Set 1.2, Figure 125) */
+#define NVME_FDP_MAX_PHS    128
 #define FDP_EVT_MAX         0xff
 #define NVME_FDP_MAX_NS_RUHS 32u
 #define FDPVSS              0
@@ -216,6 +218,11 @@ typedef struct NvmeRuHandle {
     uint8_t  ruha;
     uint64_t event_filter;
     uint8_t  lbafi;
+    /*
+     * Block size of the namespaces that use the handle, which RUAMW counts
+     * in. Namespaces that share a handle share the format (NVM 1.2, 5.2.21).
+     */
+    uint8_t  lbads;
     uint64_t ruamw;
     /* reclaim units indexed by reclaim group */
     NvmeReclaimUnit **rus;
@@ -2488,6 +2495,7 @@ typedef struct FemuCtrl {
     pthread_spinlock_t fw_cpu_lock;
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
+    char            *namespace_phls; /* per-NS FDP handle lists "0:1,2"; NULL = all */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
     char            *kv_timing;       /* KV: "media" (NULL) or "model" */

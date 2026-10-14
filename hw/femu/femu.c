@@ -179,6 +179,7 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
         endgrp->fdp.ruhs[ruhid] = (NvmeRuHandle) {
             .ruht = ruht,
             .ruha = NVME_RUHA_UNUSED,
+            .lbads = BDRV_SECTOR_BITS,
             /* enable all FDP event types by default */
             .event_filter = UINT64_MAX,
         };
@@ -325,21 +326,116 @@ void nvme_ns_refresh_fdp(NvmeNamespace *ns)
         return;
     }
 
+    /* the handles of this namespace's list, not the first nphs handles */
     for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
-        ruh = &endgrp->fdp.ruhs[i];
+        ruh = &endgrp->fdp.ruhs[ns->fdp.phs[i]];
         if (ruh->ruha != NVME_RUHA_HOST) {
             continue;
         }
 
         ruh->lbafi = lbafi;
+        ruh->lbads = ns->lbaf.lbads;
         ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
 
+        /*
+         * Only the units the handle references: another namespace's handles
+         * keep theirs. An FTL sets each unit from its pages again after this,
+         * and its stand-in for a handle with no unit stays at no room.
+         */
         for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
-            for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
-                endgrp->fdp.rus[rg][j].ruamw = ruh->ruamw;
+            NvmeReclaimUnit *ru = ruh->rus[rg];
+
+            if (ru >= endgrp->fdp.rus[rg] &&
+                ru < endgrp->fdp.rus[rg] + endgrp->fdp.nru) {
+                ru->ruamw = ruh->ruamw;
             }
         }
     }
+}
+
+/*
+ * The placement handle list of namespace @nsid from namespace_phls: entry
+ * nsid - 1 of the comma-separated entries, each a ':'-separated list of
+ * reclaim unit handle IDs. Unset gives every handle in order. Returns the
+ * count, or 0 with @errp set when the entry breaks a rule of NVM Command
+ * Set 1.2, 5.2.21 (Invalid Placement Handle List).
+ */
+static uint16_t nvme_ns_phl(FemuCtrl *n, uint32_t nsid, uint16_t *phs,
+                            Error **errp)
+{
+    uint16_t nruh = n->subsys->endgrp.fdp.nruh;
+    uint16_t max = MIN(nruh, NVME_FDP_MAX_PHS);
+    g_auto(GStrv) entries = NULL;
+    g_auto(GStrv) ids = NULL;
+    uint16_t count = 0;
+
+    if (!n->namespace_phls || !n->namespace_phls[0]) {
+        for (count = 0; count < nruh; count++) {
+            phs[count] = count;
+        }
+        return count;
+    }
+
+    entries = g_strsplit(n->namespace_phls, ",", -1);
+    if (g_strv_length(entries) < nsid) {
+        error_setg(errp, "namespace_phls has no entry for namespace %u", nsid);
+        return 0;
+    }
+    ids = g_strsplit(entries[nsid - 1], ":", -1);
+    for (int i = 0; ids[i]; i++) {
+        uint64_t id;
+
+        if (count == max) {
+            error_setg(errp, "namespace_phls: namespace %u lists more than "
+                       "%u handles", nsid, max);
+            return 0;
+        }
+        if (qemu_strtou64(ids[i], NULL, 10, &id) < 0 || id >= nruh) {
+            error_setg(errp, "namespace_phls: namespace %u names handle "
+                       "'%s'; handles are 0 to %u", nsid, ids[i], nruh - 1);
+            return 0;
+        }
+        for (uint16_t j = 0; j < count; j++) {
+            if (phs[j] == id) {
+                error_setg(errp, "namespace_phls: namespace %u lists handle "
+                           "%" PRIu64 " twice", nsid, id);
+                return 0;
+            }
+        }
+        phs[count++] = id;
+    }
+    if (!count) {
+        error_setg(errp, "namespace_phls: namespace %u lists no handle", nsid);
+    }
+    return count;
+}
+
+/* namespace_phls needs FDP and one entry per namespace; each entry is valid */
+static bool nvme_check_phls(FemuCtrl *n, Error **errp)
+{
+    g_auto(GStrv) entries = NULL;
+    g_autofree uint16_t *phs = NULL;
+
+    if (!n->namespace_phls || !n->namespace_phls[0]) {
+        return true;
+    }
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+        error_setg(errp, "namespace_phls needs fdp=on on the subsystem");
+        return false;
+    }
+    entries = g_strsplit(n->namespace_phls, ",", -1);
+    if (g_strv_length(entries) != n->num_namespaces) {
+        error_setg(errp, "namespace_phls count must equal namespaces=%u",
+                   n->num_namespaces);
+        return false;
+    }
+    phs = g_new(uint16_t, n->subsys->endgrp.fdp.nruh);
+    for (uint32_t i = 1; i <= n->num_namespaces; i++) {
+        if (!nvme_ns_phl(n, i, phs, errp)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
@@ -347,26 +443,25 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
     NvmeEnduranceGroup *endgrp = ns->endgrp;
     NvmeRuHandle *ruh;
     uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    uint16_t *ph;
 
     if (!endgrp || !endgrp->fdp.enabled) {
         return true;
     }
 
-    /*
-     * Auto-assign all RUHs to this namespace sequentially.
-     * Each RUH gets a placement handle index.
-     */
     ns->id_ns.endgid = cpu_to_le16(1);
-    ns->fdp.nphs = endgrp->fdp.nruh;
-    ph = ns->fdp.phs = g_new(uint16_t, ns->fdp.nphs);
+    ns->fdp.phs = g_new(uint16_t, endgrp->fdp.nruh);
+    ns->fdp.nphs = nvme_ns_phl(ns->ctrl, ns->id, ns->fdp.phs, errp);
+    if (!ns->fdp.nphs) {
+        return false;
+    }
 
-    for (uint16_t i = 0; i < ns->fdp.nphs; i++, ph++) {
-        ruh = &endgrp->fdp.ruhs[i];
+    for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
+        ruh = &endgrp->fdp.ruhs[ns->fdp.phs[i]];
 
         if (ruh->ruha == NVME_RUHA_UNUSED) {
             ruh->ruha = NVME_RUHA_HOST;
             ruh->lbafi = lbafi;
+            ruh->lbads = ns->lbaf.lbads;
             ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
             ruh->hbmw = 0;
             ruh->mbmw = 0;
@@ -377,14 +472,17 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
                     endgrp->fdp.rus[rg][j].ruamw = ruh->ruamw;
                 }
             }
+        } else if (ruh->lbafi != lbafi) {
+            /* namespaces that share a handle share the format (NVM 5.2.21) */
+            error_setg(errp, "namespace %u shares handle %u with a namespace "
+                       "of another LBA format", ns->id, ns->fdp.phs[i]);
+            return false;
         }
-
-        *ph = i;
     }
 
     femu_log("FDP ns init: nphs=%u, ruamw=%lu\n",
              ns->fdp.nphs,
-             endgrp->fdp.ruhs[0].ruamw);
+             endgrp->fdp.ruhs[ns->fdp.phs[0]].ruamw);
     return true;
 }
 
@@ -1559,6 +1657,10 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     uint8_t *ns_modes;
     uint64_t running_offset = 0;
     int i;
+
+    if (!nvme_check_phls(n, errp)) {
+        return 1;
+    }
 
     /*
      * FDP keeps its reclaim groups and unit handles on the controller and places
@@ -3606,6 +3708,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("fw_cores", FemuCtrl, fw_cores, 1),
     DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
     DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
+    DEFINE_PROP_STRING("namespace_phls", FemuCtrl, namespace_phls),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("cxl_ssd", FemuCtrl, cxl_dev, TYPE_FEMU_CXL_SSD,

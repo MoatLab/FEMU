@@ -47,6 +47,7 @@ listed one by one.
 - FDP accepts `mapping=dftl`. A placed write charges the translation page of each page it programs, as a write without FDP does.
 - FDP accepts `buffer_size`. Each held page keeps the placement handle of its last write and goes to that handle's reclaim unit when it is written back. RUH Update, Flush and disabling the volatile write cache write the buffer back first, and fail with Capacity Exceeded if a page finds no room.
 - FDP still refuses `hot_cold_sep` and the `hybrid` and `fast` mappings, and the message now says why: they write host data through pointers of their own, past the unit the placement handle names.
+- New `namespace_phls` property: a placement handle list for each FDP namespace. Placement handle `i` selects entry `i`. A handle no list names is reported unused in log 21h. Unset, every namespace gets every handle, as before.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).

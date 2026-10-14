@@ -80,6 +80,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Comma-separated mode of each namespace from nossd, bbssd, znssd, "
       "ocssd, csd and kvssd, one entry per namespace; unset gives every "
       "namespace femu_mode" },
+    { "namespace_phls",
+      "FDP placement handle list of each namespace: comma-separated entries, "
+      "one per namespace, each a ':'-separated list of reclaim unit handle "
+      "IDs such as 0:1,,2 (placement handle i selects entry i); needs fdp=on, "
+      "and unset gives every namespace every handle" },
     { "op_pcent",
       "Over-provisioning in percent for bbssd: back the device with the "
       "full NAND capacity and expose capacity/(1 + op_pcent/100); 0 keeps "
