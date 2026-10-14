@@ -320,7 +320,7 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime);
 
 /**
- * nand_media_read_seq - time reads of one LUN as a read cache sequence
+ * nand_media_read_cache_seq - time reads of one LUN as a read cache sequence
  * @m: the media
  * @locs: @n pages of one LUN, in the order the host asked for them
  * @n: number of pages, at least 1
@@ -331,6 +331,43 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
  * page, then 31h for the next page of a block, 00h-addr-31h for any other
  * page, and 3Fh after the last (ONFI 6.0 Section 6.15). Otherwise each
  * page is a nand_media_op() read, in order. Returns the last completion.
+ * The sequence runs even when plain reads would end first; callers other
+ * than tests use nand_media_read_seq().
+ */
+NandOpCompletion nand_media_read_cache_seq(NandMedia *m, const NandLoc *locs,
+                                           int n, uint64_t stime,
+                                           NandOpCompletion *out);
+
+/**
+ * nand_media_read_seq_cost - idle durations of a group of reads
+ * @m: the media
+ * @locs: @n pages of one LUN, as for nand_media_read_seq()
+ * @n: number of pages, at least 1
+ * @plain: the time @n plain reads take, one after another
+ * @seq: the time one read cache sequence takes
+ *
+ * Both start on an idle LUN and idle buses. They use the phase lengths
+ * that the two engines book. With at least two pages, policy.cache_read,
+ * the ONFI order, the page register hold and LUN contention (the checks
+ * nand_media_read_seq() makes), they equal the engines' end times on a
+ * fresh media. Outside those conditions they are estimates only.
+ */
+void nand_media_read_seq_cost(NandMedia *m, const NandLoc *locs, int n,
+                              uint64_t *plain, uint64_t *seq);
+
+/**
+ * nand_media_read_seq - time reads of one LUN, as a sequence if it is faster
+ * @m: the media
+ * @locs: @n pages of one LUN, in the order the host asked for them
+ * @n: number of pages, at least 1
+ * @stime: start time of every page
+ * @out: @n completions, one per page; may be NULL
+ *
+ * As nand_media_read_cache_seq(), but when the idle sequence of
+ * nand_media_read_seq_cost() would end after the plain reads, each page is
+ * a nand_media_op() read, in order. The choice uses only timing fields and
+ * the page list, so it does not change with bus traffic. Returns the last
+ * completion.
  */
 NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
                                      uint64_t stime, NandOpCompletion *out);

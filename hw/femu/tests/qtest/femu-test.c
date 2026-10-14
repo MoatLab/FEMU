@@ -6955,12 +6955,16 @@ static void femu_test_onfi_page(void *obj, void *data, QGuestAllocator *alloc)
  * register makes 8 of them 817240. As a cache sequence the bus paces it:
  * page 0 ends at 105555, then one page per 3Fh/31h 125 + tRCBSY 3000 +
  * status 275 + data out 61605 = 65005, so page 7 ends at 560590.
+ * Mode 26 ("m26"): a plain read is 41541, and a sequence would take
+ * 345912 for the 8 pages, so the FTL reads them plain, 332328, with the
+ * cache read on or off.
  */
 static void femu_test_onfi_cache(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    bool on = !strcmp(data, "on");
+    bool on = g_str_has_prefix(data, "on");
+    bool m26 = g_str_has_suffix(data, "m26");
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t list = guest_alloc(alloc, 4096);
@@ -6978,7 +6982,7 @@ static void femu_test_onfi_cache(void *obj, void *data, QGuestAllocator *alloc)
     rd = femu_ftl_trace_field(qts, 1) - before;
     g_test_message("onfi cache %s: 8-page read %" PRIu64 " ns",
                    (const char *)data, rd);
-    g_assert_cmpuint(rd, ==, on ? 560590 : 817240);
+    g_assert_cmpuint(rd, ==, m26 ? 332328 : on ? 560590 : 817240);
 
     guest_free(alloc, list);
     guest_free(alloc, buf);
@@ -32355,7 +32359,8 @@ static void femu_test_pd2_fdp(void *obj, void *data, QGuestAllocator *alloc)
 /*
  * RUAMW counts every program into a unit, also a relocation into the active
  * unit of the initially isolated handle. fdpsub-ii, one LUN, 16-page units,
- * buffer_size=32, pd_open_read_limit=4, ONFI read cache sequences. An FUA
+ * buffer_size=32, pd_open_read_limit=4, onfi_cache_read at mode 26 (which
+ * reads these 2-page groups plain). An FUA
  * write puts 2 pages in handle 3's unit: 14 pages of room. Two reads of
  * both pages queue the open unit. A buffered write through placement 1
  * moves handle 3 to a fresh unit and refreshes the old one into it, so the
@@ -32569,7 +32574,8 @@ static void femu_test_combo_fdp_hold(void *obj, void *data,
  * 2 pages from the media and 2 from the buffer, so the block has 2 reads
  * and the next write refreshes nothing. A second read of the 4 pages
  * reaches 4, and the next write refreshes the line. @data "m0" (mode 0)
- * reads the 2 media pages as one sequence: 105555 + 65005 = 170560 ns.
+ * reads the 2 media pages as one sequence: 105555 + 65005 = 170560 ns;
+ * "m26" reads them plain, which ends first.
  */
 static void femu_test_combo_read_limit(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -32600,9 +32606,8 @@ static void femu_test_combo_read_limit(void *obj, void *data,
     g_test_message("combo read limit %s: 4-page read %" PRIu64 " ns",
                    (const char *)data, rd);
     g_assert_cmpuint(femu_c0h_field(&c, log, 64) - hits0, ==, 2);
-    if (!strcmp(data, "m0")) {
-        g_assert_cmpuint(rd, ==, 170560);
-    }
+    /* mode 26: two plain reads of 41541 ns end before a sequence would */
+    g_assert_cmpuint(rd, ==, !strcmp(data, "m0") ? 170560 : 2 * 41541);
     g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
                     NVME_SUCCESS);
     g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 0);
@@ -34259,6 +34264,17 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)"off",
         .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=0"
+    });
+    qos_add_test("onfi-cache-on-m26", "femu", femu_test_onfi_cache,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on-m26",
+        .edge.extra_device_opts = FEMU_ONFI_GEO
+            "luns_per_ch=1,onfi_mode=26,onfi_cache_read=1"
+    });
+    qos_add_test("onfi-cache-off-m26", "femu", femu_test_onfi_cache,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off-m26",
+        .edge.extra_device_opts = FEMU_ONFI_GEO "luns_per_ch=1,onfi_mode=26"
     });
     qos_add_test("onfi-cache-refused", "femu", femu_test_onfi_cache_refused,
                  NULL);

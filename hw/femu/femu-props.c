@@ -321,7 +321,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "onfi_cache_read",
       "bbssd, CSD: with the ONFI profile, non-zero reads the pages of one "
       "read command that land on one LUN as a read cache sequence "
-      "(31h, 00h-addr-31h, 3Fh; ONFI 6.0 Section 6.15). Refused with "
+      "(31h, 00h-addr-31h, 3Fh; ONFI 6.0 Section 6.15), or as plain reads "
+      "when the sequence would end later on an idle LUN. Refused with "
       "mp_read, mapping=dftl and read_cache_mb; 0 (default) is off" },
     { "onfi_param_page",
       "bbssd, CSD, KV: path of an ONFI 6.0 parameter page image (256 bytes "

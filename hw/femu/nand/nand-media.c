@@ -1337,8 +1337,9 @@ static uint64_t seq_dout(NandMedia *m, const NandLoc *loc, uint64_t pnow,
     return bus_later(m, loc->ch, pnow, e, dout_ns(m, loc));
 }
 
-NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
-                                     uint64_t stime, NandOpCompletion *out)
+NandOpCompletion nand_media_read_cache_seq(NandMedia *m, const NandLoc *locs,
+                                           int n, uint64_t stime,
+                                           NandOpCompletion *out)
 {
     const NandMediaTiming *tm = &m->cfg.timing;
     uint32_t ch = locs[0].ch;
@@ -1399,6 +1400,90 @@ NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
     suspend_note(m, &locs[0], NAND_MEDIA_READ, held);
     if (m->cfg.timeline->unlock_lun) {
         m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, &locs[0]);
+    }
+    return c;
+}
+
+/* the data out of a read of @loc on an idle bus, as each engine books it */
+static uint64_t dout_idle_ns(const NandMedia *m, const NandLoc *loc)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+
+    if (m->ca_res) {
+        return tm->dout_pre_ns + tm->ccs_ns + tm->dout_edge_ns +
+               bus_xfer_ns(m, loc);
+    }
+    return dout_ns(m, loc);
+}
+
+/*
+ * The recurrences of onfi_op() or sca_op() and of
+ * nand_media_read_cache_seq() with every bus phase at its earliest time:
+ *
+ *   plain = sum of (cmd + tR(i) + status + dout(i))
+ *   seq:  d = cmd + tR(0)
+ *         T(i+1) = i ? out(i-1) + sel + trig : d + status + trig
+ *         cp(i)  = max(T(i+1), d) + tRCBSY;  d = cp(i) + tR(i+1)
+ *         out(i) = cp(i) + status + dout(i);  seq = out(n-1)
+ */
+void nand_media_read_seq_cost(NandMedia *m, const NandLoc *locs, int n,
+                              uint64_t *plain, uint64_t *seq)
+{
+    const NandMediaTiming *tm = &m->cfg.timing;
+    /* a plain read without SCA takes cmd_addr_ns for an unset command */
+    uint64_t pcmd = m->ca_res ? (uint64_t)tm->rd_cmd_ns :
+                                cmd_phase_ns(m, NAND_MEDIA_READ);
+    uint64_t p = 0, d, prev = 0;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        p += pcmd + array_lat(m, &locs[i], NAND_MEDIA_READ) + tm->status_ns +
+             dout_idle_ns(m, &locs[i]);
+    }
+    d = tm->rd_cmd_ns + array_lat(m, &locs[0], NAND_MEDIA_READ);
+    for (i = 0; i < n; i++) {
+        uint64_t trig = i + 1 < n && !read_seq_next(&locs[i], &locs[i + 1]) ?
+                        (uint64_t)tm->rd_cmd_ns : (uint64_t)tm->rc_step_ns;
+        uint64_t t = i ? prev + tm->rc_sel_ns + trig : d + tm->status_ns + trig;
+        uint64_t cp = mx(t, d) + tm->trcbsy_ns;
+
+        if (i + 1 < n) {
+            d = cp + array_lat(m, &locs[i + 1], NAND_MEDIA_READ);
+        }
+        prev = cp + tm->status_ns + dout_idle_ns(m, &locs[i]);
+    }
+    *plain = p;
+    *seq = prev;
+}
+
+/*
+ * A controller that knows the timing parameters picks the faster of the
+ * two for a group. The plain sum holds only when each read holds the LUN
+ * to its data out with status first (the ONFI profile sets both) and the
+ * LUN orders the reads; otherwise the sequence runs as before.
+ */
+NandOpCompletion nand_media_read_seq(NandMedia *m, const NandLoc *locs, int n,
+                                     uint64_t stime, NandOpCompletion *out)
+{
+    const NandMediaPolicy *p = &m->cfg.policy;
+    uint64_t plain, seq;
+    NandOpCompletion c = { 0, 0 };
+
+    if (n < 2 || !p->cache_read || p->channel_mode != NAND_CH_STAGED ||
+        !p->onfi_order || !p->page_reg_hold ||
+        (p->array_contend != NAND_CONTEND_LUN_ONLY &&
+         p->array_contend != NAND_CONTEND_LUN_AND_PLANE)) {
+        return nand_media_read_cache_seq(m, locs, n, stime, out);
+    }
+    nand_media_read_seq_cost(m, locs, n, &plain, &seq);
+    if (seq <= plain) {
+        return nand_media_read_cache_seq(m, locs, n, stime, out);
+    }
+    for (int i = 0; i < n; i++) {
+        c = nand_media_op(m, &locs[i], NAND_MEDIA_READ, stime);
+        if (out) {
+            out[i] = c;
+        }
     }
     return c;
 }

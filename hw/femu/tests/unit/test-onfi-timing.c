@@ -1453,7 +1453,7 @@ static void cache_config(NandMediaConfig *cfg, const OnfiTiming *t,
     cfg->policy.cache_read = true;
 }
 
-/* the completion of the last page of a sequence of @n pages from @first */
+/* the completion of the last page of a forced sequence of @n pages */
 static uint64_t seq_done(NandMediaConfig *cfg, const NandLoc *locs, int n,
                          NandOpCompletion *out)
 {
@@ -1461,7 +1461,7 @@ static uint64_t seq_done(NandMediaConfig *cfg, const NandLoc *locs, int n,
     uint64_t done;
 
     nand_media_init(&m, cfg);
-    done = nand_media_read_seq(&m, locs, n, 0, out).done_ns;
+    done = nand_media_read_cache_seq(&m, locs, n, 0, out).done_ns;
     nand_media_destroy(&m);
     return done;
 }
@@ -1573,8 +1573,11 @@ static void test_cache_read(void)
     {
         uint64_t bad = 0;
 
-        for (int mode = 0; mode < ONFI_NUM_MODES; mode++) {
-            for (int v = 0; v < 2; v++) {
+        for (int run = 0; run < 2 * ONFI_NUM_MODES * 2; run++) {
+            int mode = run / 4 % ONFI_NUM_MODES;
+            int v = run / 2 % 2;
+            bool forced = run % 2;
+            {
                 OnfiTiming tv = v ? derive_sca(mode, 16384, true, 0) :
                                     derive(mode, 0, 16384, true, 0, &rc);
                 NandMedia m;
@@ -1589,7 +1592,7 @@ static void test_cache_read(void)
                         m.ca_res[ch].hist_cap = 8;
                     }
                 }
-                rng_state = 9000 + mode * 3 + v;
+                rng_state = 9000 + mode * 3 + v + 100 * forced;
                 for (int i = 0; i < 1000; i++) {
                     NandLoc l = { .ch = rng() % T_CHS, .lun = rng() % T_LUNS,
                                   .pl = rng() % 2, .blk = rng() % 4,
@@ -1607,7 +1610,11 @@ static void test_cache_read(void)
                             g[j] = l;
                             g[j].pg = (l.pg + j * (1 + rng() % 2)) % 32;
                         }
-                        nand_media_read_seq(&m, g, n, st, NULL);
+                        if (forced) {
+                            nand_media_read_cache_seq(&m, g, n, st, NULL);
+                        } else {
+                            nand_media_read_seq(&m, g, n, st, NULL);
+                        }
                     } else if (k == 3) {
                         nand_media_op(&m, &l, NAND_MEDIA_PROGRAM, st);
                     } else if (k == 4) {
@@ -1621,8 +1628,158 @@ static void test_cache_read(void)
                 nand_media_destroy(&m);
             }
         }
-        check("sequences: no overlap, every mode, both protocols", bad, 0);
+        check("sequences, forced and chosen: no overlap, every mode, both "
+              "protocols", bad, 0);
     }
+}
+
+/* a fresh media of @cfg, @n pages of @locs read by @how; the last end */
+enum { READ_PLAIN, READ_FORCED, READ_CHOSEN };
+
+static uint64_t seq_run(NandMediaConfig *cfg, const NandLoc *locs, int n,
+                        int how, NandOpCompletion *out)
+{
+    NandMedia m;
+    NandOpCompletion c = { 0, 0 };
+
+    reset_timelines();
+    nand_media_init(&m, cfg);
+    if (how == READ_PLAIN) {
+        for (int i = 0; i < n; i++) {
+            c = nand_media_op(&m, &locs[i], NAND_MEDIA_READ, 0);
+            out[i] = c;
+        }
+    } else if (how == READ_FORCED) {
+        c = nand_media_read_cache_seq(&m, locs, n, 0, out);
+    } else {
+        c = nand_media_read_seq(&m, locs, n, 0, out);
+    }
+    nand_media_destroy(&m);
+    return c.done_ns;
+}
+
+/*
+ * The cache sequence is used only when it ends no later than plain reads
+ * on an idle LUN. Mode 26, 4 KiB, one LUN, 8 pages: a plain read is 275 +
+ * 40000 + 246 + (50 + 855 + 115) = 41541, while the sequence takes
+ * tR + tRCBSY = 43000 a page, so plain reads win, 332328 to 345912. Mode 0,
+ * 4 KiB: the 61 us data out hides tR, and the sequence wins, 560590 to
+ * 817240.
+ */
+static void test_cache_fallback(void)
+{
+    NandMediaConfig cfg;
+    NandOpCompletion o1[8], o2[8];
+    NandLoc seq[8];
+    OnfiTiming t;
+    uint64_t plain, cost_seq, forced, chosen, bad;
+    uint64_t picked[2] = { 0, 0 };
+    int rc;
+
+    printf("# read cache sequence or plain reads\n");
+    for (int i = 0; i < 8; i++) {
+        seq[i] = (NandLoc){ .ch = 0, .lun = 0, .blk = 3, .pg = i };
+    }
+    t = derive(26, 0, 4096, false, 0, &rc);
+    cache_config(&cfg, &t, false, false);
+    {
+        NandMedia m;
+
+        nand_media_init(&m, &cfg);
+        nand_media_read_seq_cost(&m, seq, 8, &plain, &cost_seq);
+        nand_media_destroy(&m);
+    }
+    forced = seq_run(&cfg, seq, 8, READ_FORCED, o1);
+    chosen = seq_run(&cfg, seq, 8, READ_CHOSEN, o2);
+    printf("# mode 26, 4 KiB: plain %llu, sequence %llu\n",
+           (unsigned long long)plain, (unsigned long long)cost_seq);
+    check("mode 26, 4 KiB: 8 plain reads", plain, 8 * 41541);
+    check("mode 26, 4 KiB: the sequence is slower", cost_seq, 345912);
+    check("mode 26, 4 KiB: the forced sequence ends as the cost says",
+          forced, cost_seq);
+    check("mode 26, 4 KiB: plain reads are chosen", chosen, plain);
+    check("mode 26, 4 KiB: page 0 ends as one plain read", o2[0].done_ns,
+          41541);
+
+    t = derive(0, 0, 4096, false, 0, &rc);
+    cache_config(&cfg, &t, false, false);
+    {
+        NandMedia m;
+
+        nand_media_init(&m, &cfg);
+        nand_media_read_seq_cost(&m, seq, 8, &plain, &cost_seq);
+        nand_media_destroy(&m);
+    }
+    forced = seq_run(&cfg, seq, 8, READ_FORCED, o1);
+    chosen = seq_run(&cfg, seq, 8, READ_CHOSEN, o2);
+    printf("# mode 0, 4 KiB: plain %llu, sequence %llu\n",
+           (unsigned long long)plain, (unsigned long long)cost_seq);
+    check("mode 0, 4 KiB: 8 plain reads", plain, 817240);
+    check("mode 0, 4 KiB: the sequence", cost_seq, 560590);
+    check("mode 0, 4 KiB: the sequence is chosen", chosen, forced);
+    check("mode 0, 4 KiB: and ends as the cost says", chosen, cost_seq);
+
+    /*
+     * The closed form against both engines on a fresh media: random groups
+     * of 2 to 6 pages with sequential and random steps, ECC tiers, partial
+     * transfers, nonzero tCCS, every mode, both protocols, one and several
+     * LUNs. The chosen read must match the chosen engine page by page.
+     */
+    bad = 0;
+    for (int mode = 0; mode < ONFI_NUM_MODES; mode++) {
+        for (int v = 0; v < 4; v++) {
+            bool sca = v & 1;
+            bool multi = v & 2;
+
+            t = sca ? derive_sca(mode, 16384, multi, 40) :
+                      derive(mode, 0, 16384, multi, 40, &rc);
+            rng_state = 7000 + mode * 4 + v;
+            for (int k = 0; k < 20; k++) {
+                NandLoc g[6];
+                int n = 2 + rng() % 5;
+                uint64_t p_end, f_end, c_end, want;
+                NandOpCompletion op[6], of[6], oc[6];
+                NandMedia m;
+
+                cache_config(&cfg, &t, multi, sca);
+                cfg.secs_per_page = 32;
+                cfg.timing.ecc_step_ns = 5000;
+                cfg.timing.ecc_max_tiers = 4;
+                cfg.policy.ecc_on_read = true;
+                cfg.timing.trcbsy_ns = rng() % 2 ? t.trcbsy_ns : 500;
+                for (int j = 0; j < n; j++) {
+                    g[j] = (NandLoc){ .ch = 0, .lun = 0, .blk = 2, .pg = 4 };
+                    if (j) {
+                        g[j] = g[j - 1];
+                        g[j].pg += 1 + (rng() % 4 == 0);
+                        g[j].pl = rng() % 5 == 0;
+                    }
+                    g[j].extra_tiers = rng() % 3;
+                    g[j].xfer_secs = rng() % 3 ? 0 : 1 + rng() % 32;
+                }
+                nand_media_init(&m, &cfg);
+                nand_media_read_seq_cost(&m, g, n, &plain, &cost_seq);
+                nand_media_destroy(&m);
+                p_end = seq_run(&cfg, g, n, READ_PLAIN, op);
+                f_end = seq_run(&cfg, g, n, READ_FORCED, of);
+                c_end = seq_run(&cfg, g, n, READ_CHOSEN, oc);
+                want = cost_seq <= plain ? f_end : p_end;
+                picked[cost_seq <= plain]++;
+                bad += p_end != plain;
+                bad += f_end != cost_seq;
+                bad += c_end != want;
+                for (int j = 0; j < n; j++) {
+                    bad += oc[j].done_ns !=
+                           (cost_seq <= plain ? of[j] : op[j]).done_ns;
+                }
+            }
+        }
+    }
+    printf("# %llu groups read plain, %llu as a sequence\n",
+           (unsigned long long)picked[0], (unsigned long long)picked[1]);
+    check("closed form equals both engines, chosen read page by page", bad,
+          0);
+    check("random groups take both choices", picked[0] && picked[1], 1);
 }
 
 /*
@@ -1803,6 +1960,7 @@ int main(void)
     test_bus_history();
     test_sca();
     test_cache_read();
+    test_cache_fallback();
     test_legacy_hash();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;

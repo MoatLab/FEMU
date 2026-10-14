@@ -558,10 +558,41 @@ The period per page on one LUN, with no other traffic:
 ```
 
 A sequence is faster only when the bus part of a plain read is longer than
-tRCBSY. With mode 0 and 4 KiB pages, 8 pages take 560590 ns instead of
-817240 ns. With mode 26 and 4 KiB pages they take 345912 ns instead of
-332328 ns. tRCBSY as a copy time after the array read is a model choice.
+tRCBSY. tRCBSY as a copy time after the array read is a model choice.
 ONFI gives it only as a typical busy time.
+
+FEMU reads a group as plain reads when the sequence would end later, as a
+controller that knows the timing parameters would choose:
+
+```text
+ nand_media_read_seq(group of one LUN)
+   |
+   +-- one page, or no cache read --> plain read
+   +-- cost on an idle LUN and idle buses (closed form, no booking):
+   |     PLAIN = sum (cmd + tR(i) + status + data out(i))
+   |     SEQ   = the sequence recurrence above, with every phase at its
+   |             earliest time
+   +-- SEQ <= PLAIN --> one read cache sequence
+   +-- SEQ >  PLAIN --> plain reads of the group, in LPN order
+```
+
+| Mode, page | 8 pages, one LUN, plain | as a sequence | FEMU uses |
+| --- | --- | --- | --- |
+| 0, 4 KiB | 817240 ns | 560590 ns | the sequence |
+| 26, 4 KiB | 332328 ns | 345912 ns | plain reads |
+
+- The choice uses only the timing fields and the pages of the group.
+  These give tR with the ECC time of each page, the data out with its
+  partial transfer, and the 31h or full read command of each step.
+- The choice does not look at the bus, so the same group always gets the
+  same choice.
+- With other traffic both forms can end later than their idle cost. The
+  choice does not change then.
+- The plain reads stay inside the LUN group. With several LUNs the FTL
+  still books group by group, so the order differs from a device with
+  `onfi_cache_read` off.
+- The choice needs the ONFI order and the page register hold (the
+  profile sets both) and LUN contention, as bbssd uses.
 
 Realize refuses `onfi_cache_read` with these settings:
 
