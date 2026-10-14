@@ -368,6 +368,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     ru->vpc = 0;
+    ru->close_seq = ++ssd->ru_close_seq;
     for (int i = 0; i < ru->n_lines; i++) {
         /* the data age of ecc_retention_sec counts from here */
         ru->lines[i]->close_time = now;
@@ -625,6 +626,9 @@ static bool fdp_bg_worth_collecting(FemuReclaimUnit *ru)
     return ru->vpc == 0 || ru->npages - ru->vpc >= ru->npages / 8;
 }
 
+/* units the d-choice policy samples, as FEMU_DCHOICE_D does for lines */
+#define FDP_DCHOICE_D 4
+
 /*
  * select_victim_ru - pick best victim RU based on configured GC strategy
  */
@@ -693,6 +697,62 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         size_t n = pqueue_size(rm->victim_ru_pq);
 
         victim_ru = n ? rm->victim_ru_pq->d[r % n + 1] : NULL;
+        break;
+    }
+
+    case GC_GLOBAL_FIFO: {
+        /*
+         * The unit retired first. An empty unit goes before it: it needs no
+         * destination, so a full device can always collect it, while the
+         * oldest unit may have pages that no free unit can take. A
+         * background pass takes the oldest unit it would accept, so an old
+         * unit with little to free does not hold back the younger ones.
+         */
+        pqueue_t *pq = rm->victim_ru_pq;
+        FemuReclaimUnit *bg_ru = NULL;
+
+        for (size_t i = 1; i < pq->size; i++) {
+            FemuReclaimUnit *ru = pq->d[i];
+
+            if (!ru->vpc) {
+                victim_ru = ru;
+                break;
+            }
+            if (!victim_ru || ru->close_seq < victim_ru->close_seq) {
+                victim_ru = ru;
+            }
+            if (fdp_bg_worth_collecting(ru) &&
+                (!bg_ru || ru->close_seq < bg_ru->close_seq)) {
+                bg_ru = ru;
+            }
+        }
+        if (!force && victim_ru && victim_ru->vpc && bg_ru) {
+            victim_ru = bg_ru;
+        }
+        break;
+    }
+
+    case GC_GLOBAL_DCHOICE: {
+        /*
+         * The fewest valid pages among FDP_DCHOICE_D draws, with replacement;
+         * the first of equal counts wins. An empty heap draws nothing, as in
+         * line mode, and an empty unit goes first, as for fifo.
+         */
+        pqueue_t *pq = rm->victim_ru_pq;
+        size_t n = pqueue_size(pq);
+        FemuReclaimUnit *top = pqueue_peek(pq);
+
+        if (top && !top->vpc) {
+            victim_ru = top;
+            break;
+        }
+        for (int s = 0; n && s < FDP_DCHOICE_D; s++) {
+            FemuReclaimUnit *ru = pq->d[ftl_gc_rand(ssd) % n + 1];
+
+            if (!victim_ru || ru->vpc < victim_ru->vpc) {
+                victim_ru = ru;
+            }
+        }
         break;
     }
 
@@ -1044,6 +1104,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ru->ruh_pos = 0;
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
+    ru->close_seq = 0;
     ru->reclaiming = false;
 
     /* a refresh queued for this unit has nothing left to move */
@@ -1731,6 +1792,31 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
 /*
  * femu_fdp_ssd_init_reclaim_group - init all RGs and their RU pools
  */
+/*
+ * The reclaim unit strategy under FDP. gc_policy names the line policies;
+ * each has a unit version, and realize refuses it together with a
+ * gc_strategy other than 0. Unset or greedy leaves gc_strategy in charge.
+ */
+static int femu_fdp_gc_strategy(const BbCtrlParams *p)
+{
+    static const struct {
+        const char *name;
+        int strategy;
+    } map[] = {
+        { "cost-benefit", GC_GLOBAL_CB },
+        { "random", GC_GLOBAL_RAND },
+        { "fifo", GC_GLOBAL_FIFO },
+        { "d-choice", GC_GLOBAL_DCHOICE },
+    };
+
+    for (size_t i = 0; p->gc_policy && i < ARRAY_SIZE(map); i++) {
+        if (!strcmp(p->gc_policy, map[i].name)) {
+            return map[i].strategy;
+        }
+    }
+    return p->gc_strategy;
+}
+
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeSubsystem *subsys = n->subsys;
@@ -1787,7 +1873,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                     rg->ru_mgmt->gc_thres_rus_high, rg->tt_nru);
 
             /* apply configured GC strategy */
-            rg->ru_mgmt->mgmt_type = n->bb_params.gc_strategy;
+            rg->ru_mgmt->mgmt_type = femu_fdp_gc_strategy(&n->bb_params);
             ftl_log("rg[%d] gc strategy=%d\n", i,
                     rg->ru_mgmt->mgmt_type);
         }
@@ -1860,7 +1946,8 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         /* PI type RUHs get their own ru_mgmt for per-RUH victim queues */
         if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
             ssd->ruhs[i].ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
-            ssd->ruhs[i].ru_mgmt->mgmt_type = n->bb_params.gc_strategy;
+            ssd->ruhs[i].ru_mgmt->mgmt_type =
+                femu_fdp_gc_strategy(&n->bb_params);
             ssd->ruhs[i].ru_mgmt->custom_gc_threshold = 0;
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->free_ru_list);
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->full_ru_list);

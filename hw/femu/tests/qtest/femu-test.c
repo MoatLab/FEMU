@@ -7504,6 +7504,141 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
 }
 
 /*
+ * Which of two victims the first collection takes, for the policy that
+ * gc_policy or gc_strategy selects. @data is "fifo", "cb" or "greedy" and
+ * the pages that collection must move. Placement 0 fills unit A and
+ * placement 1 fills unit B, in that order; placement 2 overwrites part of
+ * each, and placement 3 then fills the device until the first erase.
+ *   "fifo":   2 pages of A, 12 of B. Greedy takes B (4 valid); fifo takes
+ *             A, retired first (14 valid).
+ *   "cb":     8 pages of A, then a second later 10 of B. Greedy takes B
+ *             (6 valid); cost-benefit takes A, whose age outweighs its
+ *             share of valid pages: (1 - 1/2) * age_A / (1/2) is above
+ *             (1 - 3/8) * age_B / (3/8) while age_B < 0.6 * age_A.
+ *   "empty":  2 pages of A, all 16 of B. fifo takes the empty B first,
+ *             which needs no destination unit.
+ */
+static void femu_test_fdp_policy_pick(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_auto(GStrv) arg = g_strsplit(data, " ", 0);
+    bool cb = g_str_equal(arg[0], "cb");
+    bool empty = g_str_equal(arg[0], "empty");
+    uint64_t want = g_ascii_strtoull(arg[1], NULL, 10);
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, cb ? 8 : 2, buf,
+                                                    list, 2)), ==,
+                    NVME_SUCCESS);
+    if (cb) {
+        g_usleep(1000 * 1000);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16,
+                                                    cb ? 10 : empty ? 16 : 12,
+                                                    buf, list, 2)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
+
+    femu_fdp_cb_fill(&c, qts, buf, list, true);
+    g_test_message("%s: %" PRIu64 " pages moved", (const char *)data,
+                   femu_ftl_trace_field(qts, 4));
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, want);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * gc_policy and gc_strategy both pick the reclaim unit strategy under FDP,
+ * so a controller may set one of them, on black box and CSD alike.
+ */
+static void femu_test_fdp_policy_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    int modes[] = { 1, 4 };
+    QDict *rsp;
+
+    for (int m = 0; m < ARRAY_SIZE(modes); m++) {
+        g_autofree char *want = g_strdup_printf(
+            "FEMU %s: set gc_policy or gc_strategy under FDP, not both",
+            modes[m] == 1 ? "bbssd" : "csd");
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'fdp-knob','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
+                        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                        "'blks_per_pl':80,'pls_per_lun':1,"
+                        "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
+                        "'gc_policy':'fifo','gc_strategy':1}}", modes[m]);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_assert_nonnull(strstr(desc, want));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * fifo in a background pass: unit A, retired first, has one invalid page
+ * and unit B two. A background pass refuses A, which frees too little, and
+ * used to stop there on every pass; it now takes B, the oldest unit it
+ * accepts: 14 pages moved, 4 blocks erased.
+ */
+static void femu_test_fdp_fifo_background(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    /* past the background watermark, with no victim yet */
+    femu_fdp_cb_fill(&c, qts, buf, list, false);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 2, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 4);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 14);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Cost-benefit can rank a unit that background collection refuses above
  * one it would take. Here a unit with 15 valid pages of 16 outscores one
  * with 14 valid pages while the second's age is under 7 / 15 of the
@@ -19401,15 +19536,15 @@ static void femu_test_fdp_csd_knobs(void *obj, void *data,
 
     for (int m = 0; m < ARRAY_SIZE(modes); m++) {
         for (int k = 0; k < 2; k++) {
-            /* buffer_size=16, then gc_policy=fifo */
+            /* buffer_size=16, then mapping=dftl */
             rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                             "'driver':'femu','id':'fdp-knob','addr':'5',"
                             "'devsz_mb':64,'femu_mode':%d,'fdm_size':16,"
                             "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
                             "'blks_per_pl':80,'pls_per_lun':1,"
                             "'luns_per_ch':4,'nchs':4,'subsys':'fdpsub',"
-                            "'buffer_size':%d,'gc_policy':%s}}", modes[m],
-                            k ? 0 : 16, k ? "fifo" : "greedy");
+                            "'buffer_size':%d,'mapping':%s}}", modes[m],
+                            k ? 0 : 16, k ? "dftl" : "page");
             g_assert_true(qdict_haskey(rsp, "error"));
             g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
                                                                   "error"),
@@ -32669,6 +32804,39 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub,gc_strategy=2,gc_seed=1",
     });
+    /*
+     * gc_policy picks the reclaim unit strategy under FDP. random is the
+     * strategy gc_strategy=2 runs, so the trace is that one exactly. fifo
+     * relocates more pages than greedy (4416) on this workload, d-choice
+     * fewer; the victim digests differ from greedy's too.
+     */
+    qos_add_test("ftl-trace-fdp-policy-random", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740 "
+                       "9224531952056629341",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_policy=random,gc_seed=1",
+    });
+    qos_add_test("ftl-trace-fdp-fifo", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 2785793018 10306 10306 8495 4636 8623 18801 4636 "
+                       "8979856547963124758",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_policy=fifo",
+    });
+    qos_add_test("ftl-trace-fdp-d-choice", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 2222208636 10306 10306 5487 3884 5615 15793 3884 "
+                       "5908913319105439259",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_policy=d-choice,gc_seed=7",
+    });
     qos_add_test("ftl-trace-fdp-noisy", "femu", femu_test_ftl_trace_var,
                  &(QOSGraphTestOptions) {
         .arg = (void *)&ftl_trace_fdp_noisy,
@@ -33058,6 +33226,71 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-fifo", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fifo 14",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=fifo,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-fifo-greedy", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fifo 4",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=greedy,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-cb", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cb 8",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=cost-benefit,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-cb-strategy", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cb 8",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_strategy=1,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-cb-greedy", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cb 6",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_strategy=0,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-fifo-empty", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"empty 0",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,gc_policy=fifo,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-fifo-csd", "femu", femu_test_fdp_policy_pick,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fifo 14",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=4,fdm_size=1,gc_policy=fifo,subsys=fdpsub",
+    });
+    qos_add_test("fdp-policy-refused", "femu", femu_test_fdp_policy_refused,
+                 NULL);
+    qos_add_test("fdp-policy-fifo-background", "femu",
+                 femu_test_fdp_fifo_background, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_policy=fifo,subsys=fdpsub",
     });
     qos_add_test("fdp-cb-background", "femu", femu_test_fdp_cb_background,
                  &(QOSGraphTestOptions) {

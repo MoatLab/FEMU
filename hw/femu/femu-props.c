@@ -482,15 +482,17 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "forced, from gc_thres_pcent to 100; under FDP it keeps at least one "
       "reclaim unit free unless it is 100" },
     { "gc_policy",
-      "bbssd, CSD without FDP: line victim policy, one of greedy, random, "
-      "cost-benefit, fifo or d-choice; unset is greedy" },
+      "bbssd, CSD: victim policy, one of greedy, random, cost-benefit, fifo "
+      "or d-choice; unset is greedy. Under FDP it picks the reclaim unit "
+      "strategy, and a name other than greedy needs gc_strategy=0" },
     { "gc_seed",
       "bbssd, CSD: seed for the victims the random and d-choice gc_policy "
       "and the FDP random gc_strategy pick; the same seed and workload pick "
       "the same victims, so vary it to vary runs" },
     { "gc_strategy",
       "bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 "
-      "cost-benefit, 2 random or 4 per-handle" },
+      "cost-benefit, 2 random or 4 per-handle; a gc_policy other than "
+      "greedy picks it instead" },
     { "mapping",
       "bbssd, CSD: logical-to-physical mapping scheme, one of page, dftl, "
       "hybrid or fast; unset is page, and FDP supports only page" },

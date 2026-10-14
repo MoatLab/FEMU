@@ -693,7 +693,7 @@ forced pass or the budget had to finish at 240.
 With Flexible Data Placement the FTL places data in reclaim units, one line
 each, through per-handle write pointers, and collects reclaim units instead
 of lines (`do_gc_fdp_style()` in `hw/femu/bbssd/ftl-fdp.c`). `gc_strategy`
-picks that victim policy; `gc_policy` and the other FTL knobs listed under
+picks that victim policy, or `gc_policy` by name; the FTL knobs listed under
 [Interactions](#interactions-and-refusals) are refused. The [FDP chapter](fdp.md)
 and the [FDP guide](../features/fdp.md) describe
 it.
@@ -1047,10 +1047,10 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `gc_thres_pcent` | background GC watermark | must not exceed `gc_thres_pcent_high` |
 | `gc_thres_pcent_high` | forced GC watermark; sizes the reserve | lower values cost exposed capacity |
-| `gc_policy` | line victim selection | refused with FDP |
+| `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
 | `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is |
-| `gc_strategy` | reclaim unit victim selection | FDP only |
+| `gc_strategy` | reclaim unit victim selection | FDP only; a `gc_policy` other than `greedy` replaces it |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams; FDP needs `page` |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
 | `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `pg_rd_lat` / 16 at realize; 0xEF does not change it |
@@ -1098,8 +1098,9 @@ layer.
 
 ### Interactions and refusals
 
-- **FDP** refuses `buffer_size`, `mapping=dftl` and a `gc_policy` other
-  than `greedy`, with `FEMU bbssd: <name> has no effect under FDP`. It
+- **FDP** refuses `buffer_size` and `mapping=dftl`, with
+  `FEMU bbssd: <name> has no effect under FDP`, and a `gc_policy` other
+  than `greedy` together with a `gc_strategy` other than 0. It
   refuses `hot_cold_sep` and the `hybrid` and `fast` mappings with a
   message that says why: they write through pointers of their own, past
   the unit the placement handle names.

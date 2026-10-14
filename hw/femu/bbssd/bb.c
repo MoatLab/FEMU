@@ -180,12 +180,18 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
         return -1;
     }
 
+    /* gc_policy picks the unit strategy that gc_strategy also picks */
+    if (p->gc_policy && *p->gc_policy && strcmp(p->gc_policy, "greedy") &&
+        p->gc_strategy != GC_GLOBAL_GREEDY) {
+        error_setg(errp, "FEMU %s: set gc_policy or gc_strategy under FDP, "
+                   "not both", mode);
+        return -1;
+    }
+
     if (p->buffer_size) {
         knob = "buffer_size";
     } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
         knob = "mapping";
-    } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
-        knob = "gc_policy";
     }
     if (knob) {
         error_setg(errp, "FEMU %s: %s has no effect under FDP", mode, knob);

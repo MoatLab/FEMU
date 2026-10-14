@@ -373,7 +373,7 @@ Design: [garbage collection](../design/ftl.md#garbage-collection).
 | --- | --- | --- | --- |
 | `gc_thres_pcent` | percent of lines in use | 1 to 100 | background GC starts; KV: share of the NAND usable for values |
 | `gc_thres_pcent_high` | percent of lines in use | `gc_thres_pcent` to 100 | forced GC inside writes; also sizes the reserve |
-| `gc_policy` | name | `greedy`, `random`, `cost-benefit`, `fifo`, `d-choice`; without FDP | victim line policy |
+| `gc_policy` | name | `greedy`, `random`, `cost-benefit`, `fifo`, `d-choice`; under FDP a name other than `greedy` needs `gc_strategy=0` | victim line policy; under FDP the reclaim unit policy |
 | `gc_strategy` | number | 0 greedy, 1 cost-benefit, 2 random, 4 per-handle; FDP only | victim reclaim unit policy |
 | `fdp_trim_erase_all` | flag | FDP only | a deallocate resets every reclaim unit instead of the given ranges |
 
@@ -502,11 +502,12 @@ Interactions:
 
 - The subsystem takes one controller with one namespace, and must come
   first on the command line.
-- The controller's `gc_strategy` and `fdp_trim_erase_all` apply;
-  `gc_policy` other than `greedy`, `mapping` other than `page`,
-  `buffer_size`, `hot_cold_sep`, `read_reclaim_limit`,
-  `retention_limit_sec`, `ecc_retention_sec`, `trim_lat_ns`, `meta`,
-  `streams` and `ns_mgmt` are refused.
+- The controller's `gc_strategy`, `gc_policy`, `fdp_trim_erase_all`,
+  `read_reclaim_limit`, `retention_limit_sec`, `ecc_retention_sec` and
+  `trim_lat_ns` apply. A `gc_policy` other than `greedy` together with a
+  `gc_strategy` other than 0, a `mapping` other than `page`,
+  `buffer_size`, `hot_cold_sep`, `meta`, `streams` and `ns_mgmt` are
+  refused.
 - KV is refused under FDP; NoSSD, ZNS and OCSSD report FDP but ignore it
   for placement.
 

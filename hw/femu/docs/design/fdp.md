@@ -246,15 +246,18 @@ because its last unit filled with no free unit to follow it.
 
 ### Victim selection
 
-`gc_strategy` selects the policy. The BlackBox `gc_policy` property does
-not apply under FDP and only `greedy` is accepted with it.
+`gc_strategy` selects the policy, or `gc_policy` by name. A `gc_policy`
+other than `greedy` needs `gc_strategy=0`; unset or `greedy`, it leaves
+the choice to `gc_strategy`.
 
-| `gc_strategy` | Policy |
-| --- | --- |
-| 0 (default) | greedy: the unit with the fewest valid pages |
-| 1 | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid pages over all the unit's pages (pages a part-written unit never wrote count as freed) and `age` the time since a page in the unit was last invalidated, computed at selection time; a unit retired with no page invalidated is aged from its retirement |
-| 2 | random among the victims |
-| 4 | per handle: the unit with the fewest valid pages among the per-handle queues of Persistently Isolated handles, falling back to greedy |
+| `gc_strategy` | `gc_policy` | Policy |
+| --- | --- | --- |
+| 0 (default) | `greedy` | greedy: the unit with the fewest valid pages |
+| 1 | `cost-benefit` | cost-benefit: an empty unit first, otherwise the largest `(1 - u) * age / u`, with `u` the valid pages over all the unit's pages (pages a part-written unit never wrote count as freed) and `age` the time since a page in the unit was last invalidated, computed at selection time; a unit retired with no page invalidated is aged from its retirement |
+| 2 | `random` | random among the victims |
+| - | `fifo` | the unit retired first; an empty unit goes before it, and a background pass takes the oldest unit it accepts |
+| - | `d-choice` | the fewest valid pages among 4 random draws from the victims, with replacement; the first of equal counts wins; an empty unit goes first |
+| 4 | - | per handle: the unit with the fewest valid pages among the per-handle queues of Persistently Isolated handles, falling back to greedy |
 
 ### Where relocated data goes
 
@@ -452,7 +455,8 @@ Refused under FDP on a bbssd controller:
   hot write pointer writes past it;
 - `mapping=dftl`; `hybrid` and `fast`, whose log and data lines are not
   FDP-aware;
-- a `gc_policy` other than `greedy`.
+- a `gc_policy` other than `greedy` together with a `gc_strategy` other
+  than 0.
 
 The FTL applies `trim_lat_ns` and `ecc_retention_sec` as without FDP. A unit's lines
 take their close time when the unit retires, and lose it when collection
@@ -502,8 +506,8 @@ last:
 
 | Check | What it covers |
 | --- | --- |
-| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
-| Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
+| qtest cases in `hw/femu/tests/qtest/femu-test.c` | `fdp-events`, `fdp-features`, `fdp-report-length`, `fdp-ruh-usage`, `fdp-write-zeroes`, `fdp-write-zeroes-placed`, `fdp-ruh-update`, `fdp-ruh-update-full`, `fdp-background-gc`, `fdp-cb-unwritten-age`, `fdp-cb-utilization`, `fdp-cb-background`, `wide-lba-fdp`, `io-fuzz-fdp`, `copy-fdp`, `log-contents-fdp`, `ns-mgmt-unavailable-fdp`, `fdp-csd-knobs`, `fdp-knobs-refused`, `fdp-policy-fifo`, `fdp-policy-fifo-greedy`, `fdp-policy-fifo-empty`, `fdp-policy-fifo-csd`, `fdp-policy-fifo-background`, `fdp-policy-cb`, `fdp-policy-cb-strategy`, `fdp-policy-cb-greedy`, `fdp-policy-refused`, `fdp-csd-runs`, `fdp-gc-strategy-refused`, `fdp-events-gc-pi`, `fdp-events-gc-ii`, `fdp-events-gc-ii-cb`, `fdp-events-gc-ii-4k`, `fdp-events-gc-ii-part`, `fdp-events-gc-ii-rot`, `fdp-events-gc-ii-mask`, `fdp-events-gc-ii-no80`, `fdp-events-gc-ii-no81`, `fdp-events-gc-ii-other`, `fdp-events-gc-ii-empty`, `fdp-events-rf-pi`, `fdp-events-rf-ii`, `fdp-events-rf-ii-part` |
+| Exact traces and victim-order digests (qtest-only `x-ftl-trace`) | `ftl-trace-fdp` and `ftl-trace-fdp-reread` (greedy), `ftl-trace-fdp-random` (`gc_strategy=2`), `ftl-trace-fdp-policy-random` (`gc_policy=random`, the same trace), `ftl-trace-fdp-fifo` and `ftl-trace-fdp-d-choice` (`gc_policy`), `ftl-trace-fdp-noisy` and `ftl-trace-fdp-noisy-ii` (`gc_strategy=4` on two handles, the second one Initially Isolated in `-ii`), `ftl-trace-fdp-trim-erase-all` (`fdp_trim_erase_all=1` while both kinds of heap hold victims; afterwards the mapping holds exactly the pages written since) |
 | Documentation examples | each tagged FDP example starts under qtest and moves one block |
 | `hw/femu/scripts/fdp-test-nvme-admin.sh` | in-guest nvme-cli checks against the `run-blackbox-fdp.sh` configuration; manual |
 | `hw/femu/tests/unit/test-pqueue.c` | the priority queue the victim queues are built on |

@@ -312,6 +312,9 @@ enum {
     GC_GLOBAL_CB                  = 1,
     GC_GLOBAL_RAND                = 2,
     GC_NOISY_RUH_CUSTOM           = 4,
+    /* reached through gc_policy only; gc_strategy keeps the four above */
+    GC_GLOBAL_FIFO                = 5,
+    GC_GLOBAL_DCHOICE             = 6,
 };
 
 typedef struct ru_mgmt {
@@ -347,6 +350,9 @@ struct FemuReclaimUnit {
     int npages;
     float utilization;
 
+    /* retirement order for the fifo policy; 0 while the unit is free */
+    uint64_t close_seq;
+
     /* cost-benefit GC attributes */
     uint64_t last_invalidated_time;
     float my_cb;
@@ -381,8 +387,8 @@ struct FemuReclaimGroup {
 /*
  * Pluggable GC victim-selection policy (vtable). Alternative policies coexist
  * without forking the GC path; the default ("greedy") is the original behavior
- * verbatim. Selected by the gc_policy device property; the FDP RU GC path
- * (do_gc_fdp_style) is separate and unaffected.
+ * verbatim. Selected by the gc_policy device property. Under FDP the same
+ * names select a reclaim unit strategy instead (femu_fdp_gc_strategy()).
  */
 struct femu_ftl_policy_ops {
     const char *name;
@@ -545,6 +551,8 @@ struct ssd {
     const struct femu_ftl_policy_ops *policy;
     /* sampling state for the random GC policies, seeded from gc_seed */
     uint64_t gc_rng;
+    /* the last close_seq given to a retired reclaim unit */
+    uint64_t ru_close_seq;
 
     uint32_t bad_blocks; /* factory bad-block count, reported via SMART; 0 = none */
 
