@@ -197,6 +197,7 @@ Python 3 and no other package.
 
 | Script | What it does | Arguments |
 | --- | --- | --- |
+| `femu-config-check.py` | Starts QEMU under qtest with the given options and no guest, then reports either FEMU's refusal or the configuration it builds: capacity, geometry, over-provisioning, line or reclaim unit size, zones, mode and NAND timing per namespace, and QEMU's warnings. See [check a configuration](../guides/debugging.md#check-a-configuration-without-a-guest). | `[--json] [--qemu BINARY] [--timeout SEC] [--] QEMU-OPTIONS`, or the value of one `-device` option; `--self-test` checks the tool. Exits 0 accepted, 1 refused, 2 when the check failed. It loads `femu-stat.py` from its own directory. |
 | `femu-stat.py` | Shows the FTL counters of each `femu` device of a running VM, like `top`: pages, WAF since start and over the interval, rates, line, reclaim unit and zone counts, and I/O stage times. It polls QMP `query-femu` and `query-femu-stages` and never resets the counts. See [live counters](../guides/measuring.md#live-counters-on-the-host-femu-stat). | `SOCKET` (a Unix socket path or `HOST:PORT`), `--interval SEC`, `--count N`, `--once`, `--json`, `--ns LIST`, `--path QOMPATH`; `--self-test --qemu BINARY` checks the tool under qtest. Exits 2 on a connection error. |
 
 ## Host tuning helpers

@@ -88,6 +88,7 @@ check-docs:
 # check that stopped catching them fails here.
 check-tools:
 	python3 ../scripts/femu-stat.py --self-test --qemu $(QEMU)
+	python3 ../scripts/femu-config-check.py --self-test --qemu $(QEMU)
 
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \

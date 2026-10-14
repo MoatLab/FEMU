@@ -17,6 +17,8 @@ by the HTML comment on the line before it, or else by its info string:
                             is then one example
         io: rw|kv|identify|none   override what the I/O test does
         allow-warning: TEXT       a warning the example may print
+        exit: N                   with femu-config-check.py, the exit
+                                  status it must give (default 0)
   <!-- femu-untested: REASON -->
       Not tested; REASON says why (at least three words).
   ```sh
@@ -53,6 +55,10 @@ then run in two stages:
      controller, sends Identify, and does one write and read back (or a
      key-value store and retrieve) on namespace 1.
 
+A femu-config-check.py example is run as written, with --qemu added, and
+must exit with the status its exit option names; its QEMU options are not
+realized a second time.
+
 A run-*.sh example is run with stand-ins for sudo and QEMU that record the
 command line the launcher builds, so it is the launcher's real options that
 are tested.
@@ -86,6 +92,8 @@ FENCE_RE = re.compile(r"^(\s{0,3})(`{3,}|~{3,})\s*([^`\s]*)")
 TAG_RE = re.compile(r"^\s*<!--\s*femu-(example|untested)\s*:\s*(.*?)\s*-->\s*$")
 TAGGED_LANGS = {"bash", "shell", "console", "zsh"}
 LAUNCHER_RE = re.compile(r"\brun-(?!guest-ssh)[\w-]+\.sh\b")
+CONFIG_CHECK = "femu-config-check.py"
+CONFIG_CHECK_RE = re.compile(r"\bfemu-config-check\.py\b")
 DEVICE_FEMU_RE = re.compile(r"(^|\s)-device\s+femu")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 PROP_RE = re.compile(r"^[A-Za-z_][\w.-]*=\S*$")
@@ -144,6 +152,8 @@ class Example:
         self.script_args = script_args or []
         self.io = io
         self.allow = allow or []
+        self.tool = None        # femu-config-check.py arguments
+        self.tool_exit = 0
 
 
 def doc_files():
@@ -195,10 +205,12 @@ def strip_comments(text):
 
 def starts_femu(text):
     """What in a block starts FEMU, or None: a QEMU binary as the command of
-    a shell segment, a -device femu option, or a run-*.sh launcher."""
+    a shell segment, a -device femu option, a run-*.sh launcher, or
+    femu-config-check.py."""
     text = re.sub(r"\\\n", " ", strip_comments(text))
     for line in text.split("\n"):
-        m = DEVICE_FEMU_RE.search(line) or LAUNCHER_RE.search(line)
+        m = (DEVICE_FEMU_RE.search(line) or LAUNCHER_RE.search(line)
+             or CONFIG_CHECK_RE.search(line))
         if m:
             return m.group(0).strip()
         for seg in re.split(r"\|\|?|;|&&|\$\(|`", line):
@@ -262,6 +274,10 @@ def parse_options(rest, where):
             opts["io"] = val
         elif key == "allow-warning":
             opts["allow"].append(val)
+        elif key == "exit":
+            if val not in ("0", "1"):
+                raise ValueError(f"{where}: exit must be 0 or 1")
+            opts["exit"] = int(val)
         else:
             raise ValueError(f"{where}: unknown option {key!r}")
     return parts[0], opts
@@ -314,7 +330,22 @@ def examples_from_block(b):
             if not toks:
                 raise ValueError(f"{b.where()}: {line!r} sets variables and "
                                  "runs nothing")
+            if toks[0] in ("python3", "python"):
+                toks = [t for t in toks[1:] if t != "-I"] or toks
             base = os.path.basename(toks[0])
+            if base == CONFIG_CHECK:
+                if ex.tool is not None or ex.argv or ex.script:
+                    raise ValueError(f"{b.where()}: a {CONFIG_CHECK} example "
+                                     "runs that command alone")
+                if "--qemu" in toks:
+                    raise ValueError(f"{b.where()}: documentation must not "
+                                     f"give {CONFIG_CHECK} a --qemu path")
+                ex.tool = toks[1:]
+                ex.tool_exit = opts.get("exit", 0)
+                continue
+            if ex.tool is not None:
+                raise ValueError(f"{b.where()}: a {CONFIG_CHECK} example "
+                                 "runs that command alone")
             if base == "run-guest-ssh.sh":
                 continue    # acts on the booted guest, not on the command line
             if base.startswith("qemu-system-"):
@@ -335,6 +366,9 @@ def examples_from_block(b):
                                  "command line, QEMU options, a run-*.sh "
                                  "launcher" + (" or key=value properties"
                                                if "device" in opts else ""))
+        if "exit" in opts and ex.tool is None:
+            raise ValueError(f"{b.where()}: the exit option needs a "
+                             f"{CONFIG_CHECK} command")
         if props:
             ex.argv += ["-device", ",".join([opts["device"]] + props)]
         elif "device" in opts:
@@ -585,6 +619,31 @@ def run_io(qos_test, qemu, name, ios, args, timeout):
     return [f"I/O test failed (exit {proc.returncode}): {out.strip()[-1500:]}"]
 
 
+def run_config_check(ex, args):
+    """Run a documented femu-config-check.py command. Returns a list of
+    problems."""
+    argv = [sys.executable, "-I", os.path.join(SCRIPTS, CONFIG_CHECK),
+            "--json", "--qemu", args.qemu, "--timeout", str(args.timeout)]
+    argv += [a for a in ex.tool if a != "--json"]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=args.timeout * 2)
+    except subprocess.TimeoutExpired:
+        return [f"{CONFIG_CHECK} did not finish within {args.timeout * 2} s"]
+    out = (proc.stdout + proc.stderr).strip()[-1500:]
+    if proc.returncode != ex.tool_exit:
+        return [f"{CONFIG_CHECK} exited with {proc.returncode}, expected "
+                f"{ex.tool_exit}: {out}"]
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError:
+        return [f"{CONFIG_CHECK} printed no JSON report: {out}"]
+    # the same rule as a realized example: no warning it does not allow
+    bad = [w for w in report.get("warnings", [])
+           if not any(a in w for a in ex.allow)]
+    return ["stderr: " + " | ".join(bad)] if bad else []
+
+
 def collect(files, with_modes, only):
     """Parse the files; return (blocks, examples, tagging errors)."""
     blocks = [b for p in files for b in blocks_in(p)]
@@ -613,6 +672,17 @@ def run_examples(examples, args, quiet=False):
     cases = []
     with tempfile.TemporaryDirectory(prefix="femu-doc-") as tmp:
         for ex in examples:
+            if ex.tool is not None:
+                if args.list:
+                    print(f"{ex.name} ({ex.where}): {CONFIG_CHECK} "
+                          f"{shlex.join(ex.tool)}, exit {ex.tool_exit}")
+                    continue
+                problems = run_config_check(ex, args)
+                if problems:
+                    failures.append((ex, problems))
+                elif not quiet:
+                    print(f"ok   {ex.name}: {CONFIG_CHECK} exit {ex.tool_exit}")
+                continue
             try:
                 argv = ex.argv
                 if ex.script:
@@ -654,6 +724,9 @@ SELF_TEST = [
     ("untagged-launch", "```\n-device femu,femu_mode=1\n```\n",
      "block starts FEMU"),
     ("sh-runs-qemu", "```sh\nsudo ./qemu-system-x86_64 -M q35\n```\n",
+     "block starts FEMU"),
+    ("untagged-config-check",
+     "```sh\npython3 femu-config-check.py femu,femu_mode=9\n```\n",
      "block starts FEMU"),
     ("short-reason", "<!-- femu-untested: later -->\n```bash\nls\n```\n",
      "at least three words"),
@@ -697,6 +770,23 @@ SELF_TEST = [
      "-device femu,femu_mode=1,devsz_mb=1024 "
      "-device virtio-blk-pci,drive=nothere\n```\n",
      "nothere"),
+    ("config-check-refused",
+     "<!-- femu-example: st-config-check -->\n```sh\n"
+     "femu-config-check.py -device femu,femu_mode=1,gc_thres_pcnt=75\n```\n",
+     "femu-config-check.py exited with 1, expected 0"),
+    ("config-check-exit",
+     "<!-- femu-example: st-config-exit; exit: 1 -->\n```sh\n"
+     "python3 femu-config-check.py femu,femu_mode=1,devsz_mb=64\n```\n",
+     "femu-config-check.py exited with 0, expected 1"),
+    ("config-check-warning",
+     "<!-- femu-example: st-config-warn -->\n```sh\n"
+     "femu-config-check.py -device femu,femu_mode=2,devsz_mb=64,serial=x\n"
+     "```\n",
+     "serial has no effect"),
+    ("config-check-passes",
+     "<!-- femu-example: st-config-good -->\n```sh\n"
+     "femu-config-check.py -device femu,femu_mode=3,devsz_mb=64\n```\n",
+     None),
     ("passes",
      "<!-- femu-example: st-good -->\n```sh\n"
      "-device femu,femu_mode=1,devsz_mb=1024\n```\n",

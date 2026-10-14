@@ -53,7 +53,7 @@ these classes:
 
 | Block | Meaning | Checked |
 | --- | --- | --- |
-| preceded by `<!-- femu-example: NAME -->` | a QEMU command line, `-device` options or a `run-*.sh` launcher | run under qtest |
+| preceded by `<!-- femu-example: NAME -->` | a QEMU command line, `-device` options, a `run-*.sh` launcher or a `femu-config-check.py` command | run under qtest |
 | preceded by `<!-- femu-untested: REASON -->` | a command that cannot run in CI | the reason must have at least three words |
 | ```` ```sh ```` | shell commands that do not start FEMU: git, apt, configure, commands inside the guest | must not start FEMU |
 | ```` ```bash ````, ```` ```shell ````, ```` ```console ````, ```` ```zsh ```` | not allowed untagged | fails |
@@ -89,6 +89,10 @@ the fence. GitHub does not show it and still highlights the block.
 - `allow-warning: TEXT` allows one expected warning, for example
   `allow-warning: FEMU CXL DER unavailable` for `der=cylon`, which falls back
   to MMIO without a Cylon host.
+- A `femu-config-check.py` command is run as written, with `--qemu` added.
+  It must exit with status 0, or with the status that `exit: 1` names for
+  a configuration the documentation shows as refused. A warning in its
+  report fails the example unless `allow-warning` allows it.
 
 ### What the example check does
 

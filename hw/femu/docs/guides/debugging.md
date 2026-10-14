@@ -151,6 +151,113 @@ On a running BlackBox controller, the vendor admin command 0xEF switches
 GC time and NAND time on and off and prints poller counts
 ([timing model](../concepts/timing-model.md#changing-timing-at-run-time)).
 
+## Check a configuration without a guest
+
+`hw/femu/scripts/femu-config-check.py` tells you, in about a second, whether
+FEMU accepts a set of device options, and what it builds from them. It
+needs no guest image and no KVM.
+
+```
+ options --> qemu-system-x86_64 -accel qtest (no guest)
+               realize fails? --> FEMU's message                exit 1
+               realize works  --> enable each controller (qtest)
+                                  Identify, query-femu
+                                  --> derived configuration     exit 0
+```
+
+Give the options as on the QEMU command line, or the value of one
+`-device` option. From `build-femu/`:
+
+<!-- femu-example: config-check-bbssd -->
+```sh
+../femu-scripts/femu-config-check.py -device femu,femu_mode=1,devsz_mb=4096
+```
+
+```
+femu-config-check: accepted
+device /machine/peripheral-anon/device[0]  bbssd  PCI 00:02.0
+  controller: FEMU BlackBox-SSD Controller, enabled with CC 0x460061 (4096 B memory page, command sets all), admin queues of 64 entries
+  ns 1 bbssd, NVM command set: 4.0GiB (8388608 blocks of 512 B)
+    NAND: 8 channels x 8 LUNs x 1 planes x 256 blocks x 256 pages x 4096 B = 16.0GiB
+    over-provisioning: 300.0% (NAND / capacity - 1)
+    lines: 256 of 64.0MiB, free 255, spare 0
+    media: bus phases not charged
+```
+
+A configuration that FEMU refuses gives FEMU's message and exit status 1:
+
+<!-- femu-example: config-check-refused; exit: 1 -->
+```sh
+../femu-scripts/femu-config-check.py -device femu,femu_mode=1,devsz_mb=20000
+```
+
+<!-- femu-untested: output of the refused example above -->
+```
+femu-config-check: REFUSED
+  qemu-system-x86_64: -device femu,femu_mode=1,devsz_mb=20000: FEMU bbssd: namespace 1 exposes 20000 MiB of the 16384 MiB this geometry has, leaving garbage collection no room; expose at most 15552 MiB per namespace (lower devsz_mb, or set op_pcent)
+```
+
+FDP needs its `femu-subsys`, and ZNS takes the bare `-device` value:
+
+<!-- femu-example: config-check-fdp -->
+```sh
+../femu-scripts/femu-config-check.py -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4 -device femu,femu_mode=1,devsz_mb=4096,subsys=fdp0
+```
+
+<!-- femu-example: config-check-zns -->
+```sh
+../femu-scripts/femu-config-check.py femu,femu_mode=3,devsz_mb=4096
+```
+
+```
+femu-config-check: accepted
+device /machine/peripheral-anon/device[0]  znssd  PCI 00:02.0
+  controller: FEMU ZMS-SSD Controller [by Misao], enabled with CC 0x460061 (4096 B memory page, command sets all), admin queues of 64 entries
+  ns 1 znssd, zoned command set: 4.0GiB (8388608 blocks of 512 B)
+    zones: 16 of 256.0MiB, capacity 256.0MiB, max open 0, max active 0
+    media: bus phases not charged
+```
+
+The report shows, for each namespace:
+
+| Item | Source | Modes |
+| --- | --- | --- |
+| mode, command set, capacity, block size | Identify | all |
+| NAND geometry, NAND size, over-provisioning, line size, line counts | `query-femu` and Identify | `bbssd` |
+| reclaim groups, units, unit size, handles | `query-femu` | `bbssd` with FDP |
+| zone count, zone size and capacity, open and active limits | `query-femu` | `znssd` |
+| NAND bus timing | `query-femu` | all except `nossd` |
+| warnings that QEMU printed | stderr | all |
+
+Over-provisioning is NAND size / capacity - 1, per namespace. Each `bbssd`
+namespace has its own FTL and NAND.
+
+How the check runs:
+
+1. It drops the options that need a host resource or a monitor, for
+   example KVM, `-cpu`, `-qmp`, `-serial` and `-kernel`.
+2. It replaces each `-drive` by a null block device and each `-netdev` by
+   user networking. The report lists each change.
+3. It keeps `-machine`, `-m`, `-smp`, `-numa`, `-object` and `-global`.
+   Without `-machine`, it uses `pc`.
+4. It enables each controller as a guest driver does. It uses the smallest
+   memory page the controller takes, and all command sets.
+
+The configuration it reports is the one after the enable. A controller
+behind a PCI bridge (a root port, a CXL port) is not enabled. Then the check
+reports what it can and exits with status 2.
+
+The exit status is one of these:
+
+- 0: QEMU accepts the configuration and the controllers come ready.
+- 1: QEMU or a controller refuses the configuration.
+- 2: the check itself fails. A QEMU that dies of a signal is a check failure.
+
+Options: `--json` prints one JSON object, `--qemu BINARY` names QEMU
+(default `./qemu-system-x86_64`, then `build-femu/` in the source tree), and
+`--timeout SEC` (default 60). Put `--` before QEMU options when you give
+tool options.
+
 ## Inspect a running device
 
 QEMU's monitor shows what QEMU built. With the QMP socket the launchers

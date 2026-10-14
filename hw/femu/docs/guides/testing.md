@@ -8,7 +8,7 @@ CI; the last runs inside a booted guest.
 | Unit tests | `hw/femu/tests/unit/` | the NAND timing math, the completion priority queue, the hybrid mapping, the CXL cache, page table entries and caching API ring | `make -C hw/femu/tests check` and `meson test` in a build; each runs a different subset |
 | Device tests (qtest) | `hw/femu/tests/qtest/femu-test.c` | about 400 cases that drive the controller through its registers with no guest: every mode, admin and I/O commands, error paths, fuzzers, the CXL SSD | `qos-test` |
 | Documentation checks | `hw/femu/scripts/` | the property reference, mode tables, links and every example in the docs | `make -C hw/femu/tests check-docs` |
-| Host tool checks | `hw/femu/scripts/femu-stat.py` | the host monitoring tool against QEMU under qtest, with planted faults | `make -C hw/femu/tests check-tools` |
+| Host tool checks | `hw/femu/scripts/femu-stat.py`, `femu-config-check.py` | the host tools against QEMU under qtest, with planted faults | `make -C hw/femu/tests check-tools` |
 | Configuration files | `hw/femu/scripts/ssd-config-test.sh` | every file in `scripts/configs/` starts QEMU | `ssd-config-test.sh BINARY` |
 | Guest-side tests | `hw/femu/scripts/`, `hw/femu/tests/csd/`, `hw/femu/tools/cca/` | the device as Linux sees it, with blktests and the nvme-cli suite among them | inside the guest, or `guest-conformance.sh` from the host |
 
@@ -119,6 +119,9 @@ The host tools check themselves under qtest, with QEMU and no guest:
 
 - `femu-stat.py` writes pages through the qtest protocol and checks the
   counters, WAF and stage times it shows.
+- `femu-config-check.py` enables the controllers and checks the
+  configuration it derives. It also checks its exit status on refused
+  configurations.
 
 Each self-test also plants faults in its tool and requires each fault to
 fail its check:

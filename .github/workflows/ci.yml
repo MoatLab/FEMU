@@ -158,8 +158,12 @@ jobs:
       run: |
         # Each self-test starts QEMU under qtest and plants faults that its
         # checks must catch. femu-stat writes pages through the qtest protocol
-        # and checks the counters it shows. A few seconds each.
+        # and checks the counters it shows; femu-config-check enables the
+        # controllers, checks the configuration it derives, and checks its
+        # exit status on refused configurations. A few seconds each.
         python3 -I hw/femu/scripts/femu-stat.py --self-test \
+          --qemu build-femu/qemu-system-x86_64
+        python3 -I hw/femu/scripts/femu-config-check.py --self-test \
           --qemu build-femu/qemu-system-x86_64
 
     - name: Validate the config-file interface
