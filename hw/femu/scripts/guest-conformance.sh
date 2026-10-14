@@ -12,7 +12,8 @@
 #                   optional NVM commands and a volatile write cache on
 #   zenfs-crash     RocksDB with ZenFS, killed and checked again and again,
 #                   on a ZNS SSD with 64 zones
-#   all             the four above
+#   kv-bench        kv-probe and kv-bench on a key-value SSD
+#   all             the five above
 #
 # The guest is the one make-guest-image.sh builds: user femu, an SSH key,
 # and passwordless sudo. The suites fetch their sources and packages, so
@@ -45,6 +46,8 @@ cli_dev="$bb_dev,oncs=415,vwc=1"
 # 64 zones of 64 MiB: ZenFS needs at least 32 zones.
 zenfs_dev="devsz_mb=4096,namespaces=1,femu_mode=3,zns_num_ch=4"
 zenfs_dev+=",zns_num_lun=4,zns_num_plane=1,zns_num_blk=64"
+kv_dev="devsz_mb=1024,namespaces=1,femu_mode=5,secsz=512,secs_per_pg=8"
+kv_dev+=",pgs_per_blk=256,blks_per_pl=64,pls_per_lun=1,luns_per_ch=4,nchs=4"
 dev_override=""
 smp_override=""
 mem_override=""
@@ -54,7 +57,8 @@ usage() {
 Usage: $(basename "$0") [options] SUITE...
 
 Run conformance suites in a FEMU guest.
-SUITE is blktests-block, blktests-zbd, nvme-cli, zenfs-crash or all.
+SUITE is blktests-block, blktests-zbd, nvme-cli, zenfs-crash, kv-bench
+or all.
 
 Options:
   --qemu PATH       qemu-system-x86_64 to run (default: \$QEMU or
@@ -79,7 +83,8 @@ Options:
 These variables are passed on to the guest scripts when set:
 BLKTESTS_REPO, BLKTESTS_REF, NVMECLI_REPO, NVMECLI_REF, ROCKSDB_REPO,
 ROCKSDB_REF, ZENFS_REPO, ZENFS_REF, ZENFS_ROUNDS, ZENFS_INTERVAL,
-ZENFS_THREADS, ZENFS_KEYS and ZENFS_CONTROL.
+ZENFS_THREADS, ZENFS_KEYS, ZENFS_CONTROL, KVBENCH_KEYS, KVBENCH_OPS,
+KVBENCH_THREADS, KVBENCH_SEED and KVBENCH_CONTROL.
 Exit status: 0 if every suite passed, 1 if a suite failed, 2 on a usage
 or setup error and no suite failed.
 EOF
@@ -106,8 +111,8 @@ while [[ $# -gt 0 ]]; do
 	--keep) keep=1; shift ;;
 	-h | --help) usage; exit 0 ;;
 	-*) usage >&2; die "unknown option $1" ;;
-	all) suites+=(blktests-block blktests-zbd nvme-cli zenfs-crash); shift ;;
-	blktests-block | blktests-zbd | nvme-cli | zenfs-crash)
+	all) suites+=(blktests-block blktests-zbd nvme-cli zenfs-crash kv-bench); shift ;;
+	blktests-block | blktests-zbd | nvme-cli | zenfs-crash | kv-bench)
 		suites+=("$1"); shift ;;
 	*) usage >&2; die "unknown suite $1" ;;
 	esac
@@ -127,7 +132,8 @@ done
 for tool in qemu-img ssh scp timeout; do
 	command -v "$tool" >/dev/null || die "$tool is not installed"
 done
-for f in blktests-guest.sh nvme-cli-e2e-guest.sh zenfs-crash-guest.sh; do
+for f in blktests-guest.sh nvme-cli-e2e-guest.sh zenfs-crash-guest.sh \
+	kv-bench-guest.sh kv-probe.c kv-bench.c; do
 	[[ -r $SCRIPT_DIR/$f ]] || die "missing $SCRIPT_DIR/$f"
 done
 
@@ -260,6 +266,7 @@ run_suite() {
 	nvme-cli) dev=$cli_dev; script=nvme-cli-e2e-guest.sh ;;
 	zenfs-crash)
 		dev=$zenfs_dev; script=zenfs-crash-guest.sh; smp=16; mem=16G; tmo=7200 ;;
+	kv-bench) dev=$kv_dev; script=kv-bench-guest.sh; extra=(kv-probe.c kv-bench.c) ;;
 	esac
 	dev=${dev_override:-$dev}
 	smp=${smp_override:-$smp}
@@ -267,7 +274,9 @@ run_suite() {
 	tmo=${suite_timeout:-$tmo}
 	for v in BLKTESTS_REPO BLKTESTS_REF NVMECLI_REPO NVMECLI_REF \
 		ROCKSDB_REPO ROCKSDB_REF ZENFS_REPO ZENFS_REF ZENFS_ROUNDS \
-		ZENFS_INTERVAL ZENFS_THREADS ZENFS_KEYS ZENFS_CONTROL; do
+		ZENFS_INTERVAL ZENFS_THREADS ZENFS_KEYS ZENFS_CONTROL \
+		KVBENCH_KEYS KVBENCH_OPS KVBENCH_THREADS KVBENCH_SEED \
+		KVBENCH_CONTROL; do
 		[[ -n ${!v:-} ]] && envs+=("$v=${!v}")
 	done
 
@@ -296,7 +305,7 @@ run_suite() {
 	stop_guest
 	((keep)) || rm -f "$overlay"
 
-	grep -E '^(BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP|BLKTESTS_ABNORMAL|E2E_ABNORMAL|ROCKSDB_COMMIT|ZENFS_)' \
+	grep -E '^(BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP|BLKTESTS_ABNORMAL|E2E_ABNORMAL|ROCKSDB_COMMIT|ZENFS_|KVPROBE_|KVBENCH_STEP|KVBENCH_SETUP|KVBENCH_DONE|\[[a-z]+\] KVBENCH_(CHECK|ERRORS|MISMATCHES|RESULT|PHASE))' \
 		"$log" || true
 	case $rc in
 	0 | 1 | 2) ;;

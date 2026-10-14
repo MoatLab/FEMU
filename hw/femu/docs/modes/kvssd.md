@@ -254,6 +254,23 @@ scp -P 8080 -i ~/images/femu-guest-key ../femu-scripts/kv-probe.c femu@localhost
 ./run-guest-ssh.sh sudo ./kv-probe /dev/nvme0
 ```
 
+### With kv-bench
+
+`hw/femu/scripts/kv-bench.c` is a key-value workload with the knobs of
+Samsung's kvbench. It checks each Retrieve, Exist and List answer against
+a model of the keys, and prints the rate and latency of each command. It
+needs the generic node and an empty namespace:
+
+```sh
+scp -P 8080 -i ~/images/femu-guest-key ../femu-scripts/kv-bench.c femu@localhost:
+./run-guest-ssh.sh gcc -O2 -pthread -o kv-bench kv-bench.c
+./run-guest-ssh.sh sudo ./kv-bench --keys 20000 /dev/ng0n1
+```
+
+The `kv-bench` suite of `guest-conformance.sh` runs `kv-probe` and two
+`kv-bench` runs in a fresh guest. See
+[KV benchmark](../guides/testing.md#kv-benchmark).
+
 ### Status codes
 
 | Status | Meaning |
@@ -300,6 +317,7 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 2. The store, retrieve and `cmp` above succeed, and Exist after Delete
    returns 0x87.
 3. `kv-probe` prints no failures.
+4. `kv-bench` prints `KVBENCH_RESULT=PASS`.
 
 ## Troubleshooting
 

@@ -160,6 +160,7 @@ Smaller probes, built in the guest with `gcc -O2 -o NAME NAME.c`:
 | Probe | Run | Checks |
 | --- | --- | --- |
 | `kv-probe.c` | `sudo ./kv-probe /dev/nvme0` | key-value Store, Exist, Retrieve and Delete |
+| `kv-bench.c` | `sudo ./kv-bench /dev/ng0n1` (build with `-pthread`) | a key-value workload, with each answer checked against a model of the keys ([KV benchmark](#kv-benchmark)) |
 | `aer-probe.c` | `sudo ./aer-probe /dev/nvme0` | a temperature event completes an Asynchronous Event Request |
 | `zone-aen-probe.c` | `sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1` | Zone Descriptor Changed notices, on a ZNS device with `err_write_fail_ppm` set |
 
@@ -179,9 +180,10 @@ All of them are listed in the [scripts reference](../reference/scripts.md#guest-
 Two external suites check FEMU as Linux sees it:
 [blktests](https://github.com/linux-blktests/blktests) and the
 end-to-end tests of [nvme-cli](https://github.com/linux-nvme/nvme-cli).
-A third suite checks FEMU under a real workload. `zenfs-crash` runs a
+Two more suites check FEMU under real workloads. `zenfs-crash` runs a
 RocksDB crash test on [ZenFS](https://github.com/westerndigitalcorporation/zenfs)
-on a ZNS namespace. `guest-conformance.sh` runs the
+on a ZNS namespace. `kv-bench` drives a key-value namespace with the
+NVMe-KV commands and checks every answer. `guest-conformance.sh` runs the
 suites on the host. For each suite it boots a fresh guest with one FEMU
 device, runs the suite inside, and stops the guest:
 
@@ -206,6 +208,7 @@ device, runs the suite inside, and stops the guest:
 | `blktests-zbd` | ZNS SSD, 1 GiB | blktests `zbd` group |
 | `nvme-cli` | BlackBox SSD with `oncs=415,vwc=1` (Compare, Write Uncorrectable, Dataset Management, Write Zeroes, Verify, Copy and Flush) | nvme-cli `tests/nvme-cli-e2e`, tag `v3.1` by default |
 | `zenfs-crash` | ZNS SSD, 4 GiB in 64 zones of 64 MiB; the guest gets 16 vCPUs and 16 GiB | `zenfs-crash-guest.sh`: RocksDB `v9.10.0` with ZenFS `919c2eb`, a blackbox crash test |
+| `kv-bench` | KV SSD, 1 GiB | `kv-bench-guest.sh`: `kv-probe`, then two `kv-bench` runs |
 
 The guest is the image that `make-guest-image.sh` builds. The suites fetch
 packages and sources, so the guest needs network access; QEMU's user
@@ -216,7 +219,7 @@ minutes, and `zenfs-crash` builds RocksDB first:
 ```bash
 ../femu-scripts/guest-conformance.sh all
 ../femu-scripts/guest-conformance.sh --outdir /tmp/conf nvme-cli
-../femu-scripts/guest-conformance.sh --keep zenfs-crash
+../femu-scripts/guest-conformance.sh --keep zenfs-crash kv-bench
 ```
 
 `--help` lists the options. They set the QEMU binary, the image, the SSH
@@ -290,6 +293,50 @@ Two control runs show that the test can fail:
 - `--device` with BlackBox SSD properties gives a conventional namespace.
   `zenfs mkfs` must then refuse it.
 
+#### KV benchmark
+
+`kv-bench.c` sends the NVMe-KV commands through the passthrough ioctl of
+`/dev/ngXnY`: Store (01h), Retrieve (02h), List (06h), Delete (10h) and
+Exist (14h). It keeps a model of every key and checks each answer against
+it:
+
+```text
+ load          store every key
+   |
+ mixed         Store, Retrieve, Delete and Exist by the --mix shares
+   |
+ verify        Exist and Retrieve of every key
+   |
+ List          the keys == the live keys of the model
+   |
+ delete half   Delete; then Exist and Retrieve give 0x87
+   |
+ verify, List
+   |
+ cleanup       Delete the rest; List returns no key
+```
+
+Each Retrieve compares the value bytes and the size in the completion.
+Each command on a deleted key must return Key Does Not Exist (0x87). The
+List walk must return each live key once and no other key. The
+namespace must hold no key at the start. The workload options follow
+Samsung's kvbench: key count, key length, value sizes and their shares,
+and the operation shares. The program also prints the rate of each phase
+and the latency of each command.
+
+`kv-bench-guest.sh` runs `kv-probe`, then `kv-bench` with 20000 keys of
+4 to 16 bytes and values of 512, 2048 and 4096 bytes. A second run uses
+256 keys with values of 4 KiB to 256 KiB. The suite passes when `kv-probe`
+reports no failure and each `kv-bench` run reports no error and no
+mismatch.
+
+Two control runs show that the checks can fail:
+
+- `KVBENCH_CONTROL=legacy-opcodes` sends Samsung's driver opcodes (81h,
+  90h, A1h, B3h, B2h). FEMU rejects them, so the run must fail.
+- `KVBENCH_CONTROL=corrupt-model` changes one byte of the expected value
+  of one key. The checks must report that key as a mismatch.
+
 #### Guest scripts on their own
 
 The guest scripts also run on their own in any guest:
@@ -298,10 +345,12 @@ The guest scripts also run on their own in any guest:
 sudo bash blktests-guest.sh block /dev/nvme0n1
 sudo bash nvme-cli-e2e-guest.sh /dev/nvme0 /dev/nvme0n1
 sudo bash zenfs-crash-guest.sh nvme0n1
+sudo bash kv-bench-guest.sh /dev/ng0n1
 ```
 
 All of them write to the namespace. The nvme-cli suite can format it, and
-`zenfs-crash-guest.sh` formats it with ZenFS.
+`zenfs-crash-guest.sh` formats it with ZenFS. `kv-bench-guest.sh` needs
+`kv-probe.c` and `kv-bench.c` in its own directory.
 
 ## Adding a test
 
