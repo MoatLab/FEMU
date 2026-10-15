@@ -452,6 +452,7 @@ uint64_t ssd_buffer_hit_lat(struct ssd *ssd);
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req);
+void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa, uint64_t stime);
 
 /* optional DRAM read cache (hw/femu/bbssd/ftl-cache.c) */
 void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy);

@@ -95,12 +95,13 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
 }
 
 /*
- * Translation-page traffic that takes no media effects: no read stress, no
- * program disturb term, age from the close time only.
+ * Translation-page traffic at a placeholder address (FDP, KV) takes no
+ * media effects: no read stress, no program disturb term, age from the
+ * close time only. A TP at its real address (TP_IO) takes them as data.
  */
 static inline bool bb_io_meta(int type)
 {
-    return type == MAP_IO || type == TP_IO;
+    return type == MAP_IO;
 }
 
 /* timeline-vtable thunks: return pointers into bbssd's own per-resource state */

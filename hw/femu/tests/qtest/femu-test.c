@@ -6466,8 +6466,9 @@ static void femu_test_pd_kv(void *obj, void *data, QGuestAllocator *alloc)
  * 0.1 ms. The CMT holds one TP, and a TP holds 512 pages.
  *   - Pages 0 to 2 load TP 0. A write of page 600 loads TP 1 and evicts
  *     TP 0 to page 0 of an open TP line: an edge wordline of an open block.
- *   - 50 ms later a write of page 3 reads TP 0 back. A TP read takes no
- *     program disturb term and no open-line age: less than one tier.
+ *   - 50 ms later a write of page 3 reads TP 0 back. A TP is a real page:
+ *     the edge, open and open-age terms reach the cap of 4 tiers. A
+ *     placeholder read, as under FDP, would pay none.
  */
 static void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -6487,7 +6488,7 @@ static void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
     t = femu_pd_write_ns(&c, qts, 3, 1, buf, list);
     g_test_message("pd map: a TP read from an open TP line %" PRIu64 " ns",
                    t);
-    g_assert_cmpuint(t, <, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(t, >=, 4 * FEMU_PD_STEP_NS);
 
     guest_free(alloc, list);
     guest_free(alloc, buf);
@@ -40382,6 +40383,205 @@ static void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+/* log page C0h counters the media test reads */
+#define FEMU_C0H_READ_RECLAIMS  40
+#define FEMU_C0H_RETENTION      48
+#define FEMU_C0H_WL_LINES       136
+#define FEMU_C0H_PD_RECLAIMS    256
+#define FEMU_C0H_PAD_PAGES      264
+#define FEMU_C0H_PAD_CLOSES     272
+
+/*
+ * Translation pages (TPs) are real pages: read stress, data age and an open
+ * block act on a TP line as on a data line, and the TP pointer joins the
+ * open-line actions. 2048 pages are 4 TPs; the CMT holds one. A line is 32
+ * pages on 4 dies. @data selects the case:
+ *   "reads": read_reclaim_limit=20. Reads of pages in TPs 0 and 1 in turn
+ *            read the TP copies 40 times, and the data blocks at most 10
+ *            times each. The open TP line is queued, sealed and rewritten
+ *            on the next write: TPs move, and no data page does.
+ *   "open":  pd_open_read_limit=20 instead: the same, as an open-block
+ *            refresh.
+ *   "publish": read_reclaim_limit=4, and deallocates of one page in TPs
+ *            0 and 1 in turn instead of reads. Each publication reads and
+ *            rewrites its TP, with no CMT access, and those reads queue
+ *            the TP line as host reads do. The deallocates also leave data
+ *            lines for collection, so data pages may move too.
+ *   "age":   retention_limit_sec=1. TPs 2 and 3, then 0 and 1 in turn,
+ *            fill the first TP line; 1.5 s later a read of a page of TP 2
+ *            reads it from that closed line, and the next write refreshes
+ *            the line.
+ *   "pad":   pd_open_close_sec=1. A fill programs 3 TPs into a TP line;
+ *            1.5 s later the next request pads its 29 free pages and
+ *            closes it. No TP program counts the pads; only TP moves
+ *            follow, if collection takes the padded line.
+ */
+static void femu_test_dftl_media(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[6], moves, gc, map;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 64 * 4096);
+
+    if (g_str_equal(mode, "age")) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1024, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1536, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (i & 1) * 512 + i, 1,
+                                                     buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+    } else {
+        for (i = 0; i < 2048; i += 64) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    femu_tp_check(qts, id, v);
+    moves = v[5];
+    gc = femu_c0h_field(&c, log, 16);
+    map = femu_c0h_field(&c, log, 280);
+
+    if (g_str_equal(mode, "pad")) {
+        g_usleep(1500 * 1000);
+        g_assert_cmphex(femu_read_pages(&c, 1600, 1, buf, list), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_PAD_PAGES), ==, 29);
+        g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_PAD_CLOSES), ==, 1);
+        femu_tp_check(qts, id, v);
+        g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+        /* collection may take the padded line: only its moves program TPs */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 280) - map, ==,
+                         v[5] - moves);
+        goto out;
+    }
+    if (g_str_equal(mode, "age")) {
+        g_usleep(1500 * 1000);
+        g_assert_cmphex(femu_read_pages(&c, 1025, 1, buf, list), ==,
+                        NVME_SUCCESS);
+    } else if (g_str_equal(mode, "publish")) {
+        for (i = 0; i < 16; i++) {
+            g_assert_cmphex(femu_dealloc_pages(&c, (i & 1) * 512 + i, 1, log),
+                            ==, NVME_SUCCESS);
+        }
+    } else {
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(femu_read_pages(&c, (i & 1) * 512 + i, 1, buf,
+                                            list), ==, NVME_SUCCESS);
+        }
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1700, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_tp_check(qts, id, v);
+    g_test_message("%s: %" PRIu64 " TPs moved, read %" PRIu64 ", age %" PRIu64
+                   ", open %" PRIu64, mode, v[5] - moves,
+                   femu_c0h_field(&c, log, FEMU_C0H_READ_RECLAIMS),
+                   femu_c0h_field(&c, log, FEMU_C0H_RETENTION),
+                   femu_c0h_field(&c, log, FEMU_C0H_PD_RECLAIMS));
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, moves);
+    if (!g_str_equal(mode, "publish")) {
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, gc);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log,
+                                    g_str_equal(mode, "reads") ||
+                                    g_str_equal(mode, "publish") ?
+                                    FEMU_C0H_READ_RECLAIMS :
+                                    g_str_equal(mode, "age") ?
+                                    FEMU_C0H_RETENTION :
+                                    FEMU_C0H_PD_RECLAIMS), ==, 1);
+
+out:
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Static wear levelling moves a cold, full TP line through the TP pointer.
+ * A line is 4 pages on one die. Writes of pages 512, 1024, 1536, 0 and 513
+ * leave TPs 1, 2, 3 and 0 on flash, each in its only copy: the first TP
+ * line is full. The CMT then holds TP 1, and random writes inside TP 1
+ * (pages 512 to 1023) program no TP and wear the data lines. Wear
+ * levelling then moves the TP line, the coldest full line: TPs move and
+ * collection has no reason to (a full line is no victim).
+ */
+static void femu_test_dftl_wl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    static const uint32_t first[] = { 512, 1024, 1536, 0, 513 };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[6];
+    uint32_t seed = 9;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3e, 4096);
+    for (i = 0; i < ARRAY_SIZE(first); i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, first[i], 1, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, 4);
+    for (i = 0; i < 20000 && !v[5]; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512 + (seed >> 8) % 512,
+                                                 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        if (i % 500 == 499) {
+            femu_tp_check(qts, id, v);
+        }
+    }
+    femu_tp_check(qts, id, v);
+    g_test_message("wl: %" PRIu64 " lines moved, %" PRIu64 " TPs moved "
+                   "after %u writes", femu_c0h_field(&c, log,
+                                                     FEMU_C0H_WL_LINES),
+                   v[5], i);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(v[5], ==, 4);
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_WL_LINES), >=, 1);
+    /* the free count must match the free list, after the move and later */
+    femu_query_check_lines(qts, id, v[0]);
+    for (i = 0; i < 2000; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512 + (seed >> 8) % 512,
+                                                 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, id, v);
+    femu_query_check_lines(qts, id, v[0]);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -43315,6 +43515,38 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,mapping=dftl,x-cmt-slots=1,buffer_size=16,vwc=1,"
             "power_loss=on"
+    });
+    {
+        /* translation pages under each media action */
+        static const char *const media[][2] = {
+            { "reads", "read_reclaim_limit=20" },
+            { "open", "pd_open_read_limit=20" },
+            { "publish", "read_reclaim_limit=4" },
+            { "age", "retention_limit_sec=1" },
+            { "pad", "pd_open_close_sec=1" },
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(media); i++) {
+            g_autofree char *name = g_strdup_printf("dftl-media-%s",
+                                                    media[i][0]);
+
+            qos_add_test(name, "femu", femu_test_dftl_media,
+                         &(QOSGraphTestOptions) {
+                .arg = (void *)media[i][0],
+                .edge.extra_device_opts = g_strdup_printf(
+                    "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+                    "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+                    "femu_mode=1,mapping=dftl,x-cmt-slots=1,%s",
+                    media[i][1]),
+            });
+        }
+    }
+    qos_add_test("dftl-wl", "femu", femu_test_dftl_wl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=560,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1,wl_spread=4"
     });
     qos_add_test("dftl-capacity", "femu", femu_test_dftl_capacity, NULL);
     qos_add_test("dftl-tp-min", "femu", femu_test_dftl_tp_min,

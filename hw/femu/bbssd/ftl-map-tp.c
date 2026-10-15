@@ -193,7 +193,10 @@ uint64_t tp_read(struct ssd *ssd, uint64_t tp, uint64_t stime, bool timed)
     }
     t = MAX(t, ssd->tp_done[tp]);
     r.stime = t;
-    return t + ssd_advance_status(ssd, &ppa, &r);
+    t += ssd_advance_status(ssd, &ppa, &r);
+    /* a TP read stresses its block as a data read does, whoever issues it */
+    ssd_read_check_wear(ssd, &ppa, r.stime);
+    return t;
 }
 
 /* the pending set: a bit per TP, and a ring of the TPs in arrival order */

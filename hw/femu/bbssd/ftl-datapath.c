@@ -347,8 +347,7 @@ void bbssd_power_loss(NvmeNamespace *ns)
  * Queue the line holding a page that has just been read for a rewrite if
  * read stress or retention age calls for one.
  */
-static void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa,
-                                uint64_t stime)
+void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = get_blk(ssd, ppa);

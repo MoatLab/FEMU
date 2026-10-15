@@ -353,6 +353,9 @@ static struct write_pointer *ssd_line_pointer(struct ssd *ssd,
     if (ssd->stream_gc_wp.curline == line) {
         return &ssd->stream_gc_wp;
     }
+    if (ssd->tp_wp.curline == line) {
+        return &ssd->tp_wp;
+    }
     for (int i = 0; i < (int)ARRAY_SIZE(ssd->stream_wp); i++) {
         if (ssd->stream_wp[i].curline == line) {
             return &ssd->stream_wp[i];
@@ -388,7 +391,7 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
 {
     uint64_t limit = (uint64_t)ssd->sp.pd_open_close_sec *
                      NANOSECONDS_PER_SECOND;
-    struct write_pointer *wps[4 + ARRAY_SIZE(ssd->stream_wp)];
+    struct write_pointer *wps[5 + ARRAY_SIZE(ssd->stream_wp)];
     int n = 0;
 
     /* read-only media keeps its erased pages for the writes in flight */
@@ -398,6 +401,7 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
     wps[n++] = &ssd->wp;
     wps[n++] = &ssd->hot_wp;
     wps[n++] = &ssd->stream_gc_wp;
+    wps[n++] = &ssd->tp_wp;
     for (int i = 0; i < (int)ARRAY_SIZE(ssd->stream_wp); i++) {
         wps[n++] = &ssd->stream_wp[i];
     }
@@ -1696,8 +1700,10 @@ int do_read_reclaim(struct ssd *ssd)
      * Reads of an open block usually hit the line a write pointer still
      * fills. Seal its free pages, as a stream release does, so the line can
      * be rewritten now: they would only take new data into a stressed block.
+     * A TP line is sealed for any reason: few TPs can leave it open for
+     * good, and the refresh would wait on it for ever.
      */
-    if (why == RECLAIM_OPEN && !line->pos &&
+    if ((why == RECLAIM_OPEN || line->kind == LINE_TP) && !line->pos &&
         (wpp = ssd_line_pointer(ssd, line))) {
         ssd_pd_close_pointer(ssd, wpp, false, 0);
     }
@@ -1773,6 +1779,12 @@ static bool ssd_frontier_fresh(struct ssd *ssd)
  * rollover after its last page takes the young line back from the head of
  * the free list. No pointer is added.
  *
+ * A translation page (TP) line moves the same way through the TP pointer,
+ * which takes no line after a rollover until it writes: with no line or a
+ * fresh one, the worn line becomes its line. Each kind of source needs its
+ * own pointer fresh, so a cold TP line moves even while the data pointer
+ * is part way through a line.
+ *
  * It spends host pages: one credit per page the host programs, capped at four
  * lines, and a move costs four lines of credit, so it copies at most a
  * quarter of what the host writes. It starts when the wear gap between lines
@@ -1786,9 +1798,13 @@ int do_wear_level(struct ssd *ssd)
     uint64_t cost = 4ull * spp->pgs_per_line;
     struct line *src = NULL, *worn = NULL, *young, *line;
     uint32_t lo = UINT32_MAX, hi = 0, src_wear = 0, worn_wear = 0;
+    struct write_pointer *tw = &ssd->tp_wp;
+    bool data_ok = ssd_frontier_fresh(ssd);
+    bool tp_ok = ssd->tp_on &&
+                 (!tw->curline || (!tw->curline->vpc && !tw->curline->ipc));
     uint64_t copied;
 
-    if (!spp->wl_spread || ssd->wl_credit < cost || !ssd_frontier_fresh(ssd) ||
+    if (!spp->wl_spread || ssd->wl_credit < cost || !(data_ok || tp_ok) ||
         should_gc_high(ssd) || lm->free_line_cnt < 2 || ssd->media_ro) {
         return -1;
     }
@@ -1816,8 +1832,8 @@ int do_wear_level(struct ssd *ssd)
     QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
         uint32_t w = line_wear(ssd, line);
 
-        /* a TP line moves through the TP pointer, not the swapped line */
-        if (line->kind == LINE_TP) {
+        /* a line moves only when the pointer of its kind is fresh */
+        if (line->kind == LINE_TP ? !tp_ok : !data_ok) {
             continue;
         }
         if (!src || w < src_wear ||
@@ -1840,21 +1856,34 @@ int do_wear_level(struct ssd *ssd)
     }
 
     ssd->wl_credit -= cost;
-    young = ssd->wp.curline;
     QTAILQ_REMOVE(&lm->free_line_list, worn, entry);
-    QTAILQ_INSERT_HEAD(&lm->free_line_list, young, entry);
-    ssd_wp_reset(&ssd->wp, worn);
+    if (src->kind == LINE_TP) {
+        /* the pointer may hold no line: then nothing goes back for it */
+        young = tw->curline;
+        lm->free_line_cnt--;
+        if (young) {
+            young->kind = LINE_DATA;
+            QTAILQ_INSERT_HEAD(&lm->free_line_list, young, entry);
+            lm->free_line_cnt++;
+        }
+        worn->kind = LINE_TP;
+        ssd_wp_reset(tw, worn);
+    } else {
+        young = ssd->wp.curline;
+        QTAILQ_INSERT_HEAD(&lm->free_line_list, young, entry);
+        ssd_wp_reset(&ssd->wp, worn);
+    }
 
     QTAILQ_REMOVE(&lm->full_line_list, src, entry);
     lm->full_line_cnt--;
-    copied = ssd->gc_write_pages;
+    copied = ssd->gc_write_pages + ssd->tp_moves;
     src->reclaiming = true;
     if (!reclaim_line(ssd, src, ssd->sp.gc_copyback)) {
         src->reclaiming = false;
         return -1;
     }
     src->reclaiming = false;
-    ssd->wl_pages += ssd->gc_write_pages - copied;
+    ssd->wl_pages += ssd->gc_write_pages + ssd->tp_moves - copied;
     ssd->wl_relocations++;
     return 0;
 }
