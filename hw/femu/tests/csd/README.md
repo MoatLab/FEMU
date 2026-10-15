@@ -26,6 +26,15 @@ original CEMU-style admin lifecycle commands through `NVME_IOCTL_ADMIN_CMD`:
 - deactivate and unload the phantom CSF
 - deallocate AFDM
 
+The helper sends the vendor specific admin opcodes `0xc5`, `0xc8`, `0xc9`
+and `0xcd`. For a device started with `csd_legacy_opcodes=on`, set
+`CSD_LEGACY_OPCODES=1` to send the old CEMU admin opcodes `0x21`, `0x22`,
+`0x23` and `0x25`:
+
+```bash
+sudo CSD_LEGACY_OPCODES=1 ./csd-passthru /dev/nvme0n1 smoke
+```
+
 Build also produces `csd-vadd.so`, a minimal shared-library CSF used by the
 shared-library smoke path. The program load payload follows the original CEMU
 descriptor format: a PRP data buffer containing `path\0symbol\0`.
@@ -69,7 +78,8 @@ sudo ./csd-passthru /dev/nvme0n1 smoke-so-all csd-original-kernels.so
 ```
 
 FDMFS-free MRS is available through the original CEMU memory range set
-management command layout (`0x21`). The passthrough helper creates an MRS from
+management command layout, at admin opcode `0xc9`. The passthrough helper
+creates an MRS from
 AFDM-backed memory range descriptors and executes a CSF by `rsid`:
 
 ```bash
@@ -129,7 +139,7 @@ read, and NVM-to-AFDM copy. It is intended as a regression check for the CSD
 command path, not a final paper-level benchmark harness.
 
 FEMU CSD also accepts the original CEMU program lifecycle admin command
-layouts for load/unload (`0x22`) and activate/deactivate (`0x23`). The
+layouts for load/unload (`0xc5`) and activate/deactivate (`0xc8`). The
 lightweight passthrough helper sends those commands to the controller device
 without the CEMU kernel driver:
 

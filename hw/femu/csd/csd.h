@@ -3,6 +3,12 @@
 
 #include "../nvme.h"
 
+/*
+ * CEMU commands sit in the vendor specific ranges: I/O 80h to FFh (NVM 1.2,
+ * Figure 14) and admin C0h to FFh (Base 2.3, Figure 142). Bits 1:0 of an
+ * opcode give its data direction; a command may also move no data (Base 2.3,
+ * Figure 91), as the group commands do.
+ */
 enum FemuCsdIoCommands {
     NVME_CMD_CSD_ALLOC_FDM      = 0xb0,
     NVME_CMD_CSD_DEALLOC_AFDM   = 0xc0,
@@ -15,11 +21,24 @@ enum FemuCsdIoCommands {
     NVME_CMD_CSD_DELETE_GROUP   = 0xf8,
 };
 
+/* C5h, C8h and C9h: the CP 1.2 opcode of the same command plus 40h */
 enum FemuCsdAdminCommands {
-    NVME_ADM_CMD_CSD_MRS_MGMT         = 0x21,
-    NVME_ADM_CMD_CSD_COMPUTE_LOAD     = 0x22,
-    NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE = 0x23,
-    NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA = 0x25,
+    NVME_ADM_CMD_CSD_COMPUTE_LOAD      = 0xc5,
+    NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE  = 0xc8,
+    NVME_ADM_CMD_CSD_MRS_MGMT          = 0xc9,
+    NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA = 0xcd,
+};
+
+/*
+ * The CEMU admin opcodes that csd_legacy_opcodes keeps. Base 2.3 gives 21h,
+ * 22h and 25h to fabrics commands and reserves 23h, and 22h declares the
+ * wrong data direction.
+ */
+enum FemuCsdLegacyAdminCommands {
+    NVME_ADM_CMD_CSD_LEGACY_MRS_MGMT  = 0x21,
+    NVME_ADM_CMD_CSD_LEGACY_LOAD      = 0x22,
+    NVME_ADM_CMD_CSD_LEGACY_ACTIVATE  = 0x23,
+    NVME_ADM_CMD_CSD_LEGACY_LOAD_DATA = 0x25,
 };
 
 /* Subsystem Local Memory 1.2, Figure 5, on a memory namespace */

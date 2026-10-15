@@ -1475,6 +1475,34 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+/*
+ * Map an admin opcode of the legacy CEMU layout to the current one; -1
+ * refuses an opcode that the active layout does not have. Each layout
+ * answers only its own opcodes, as one firmware would.
+ */
+static int csd_admin_opcode(FemuCtrl *n, uint8_t opc)
+{
+    bool legacy = n->csd_params.legacy_opcodes;
+
+    switch (opc) {
+    case NVME_ADM_CMD_CSD_MRS_MGMT:
+    case NVME_ADM_CMD_CSD_COMPUTE_LOAD:
+    case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
+    case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
+        return legacy ? -1 : opc;
+    case NVME_ADM_CMD_CSD_LEGACY_MRS_MGMT:
+        return legacy ? NVME_ADM_CMD_CSD_MRS_MGMT : -1;
+    case NVME_ADM_CMD_CSD_LEGACY_LOAD:
+        return legacy ? NVME_ADM_CMD_CSD_COMPUTE_LOAD : -1;
+    case NVME_ADM_CMD_CSD_LEGACY_ACTIVATE:
+        return legacy ? NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE : -1;
+    case NVME_ADM_CMD_CSD_LEGACY_LOAD_DATA:
+        return legacy ? NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA : -1;
+    default:
+        return opc;
+    }
+}
+
 static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
@@ -1513,7 +1541,7 @@ static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
-    switch (cmd->opcode) {
+    switch (csd_admin_opcode(n, cmd->opcode)) {
     case NVME_ADM_CMD_CSD_MRS_MGMT:
         return csd_mrs_mgmt(n, cmd, cqe);
     case NVME_ADM_CMD_CSD_COMPUTE_LOAD:

@@ -15,10 +15,6 @@
 #include <unistd.h>
 
 enum {
-    CSD_ADM_MRS_MGMT         = 0x21,
-    CSD_ADM_COMPUTE_LOAD     = 0x22,
-    CSD_ADM_COMPUTE_LOAD_DATA = 0x25,
-    CSD_ADM_COMPUTE_ACTIVATE = 0x23,
     CSD_CMD_ALLOC_FDM    = 0xb0,
     CSD_CMD_DEALLOC_AFDM = 0xc0,
     CSD_CMD_NVM_TO_AFDM  = 0xd0,
@@ -29,6 +25,29 @@ enum {
     CSD_CMD_SET_QOS      = 0xf7,
     CSD_CMD_DELETE_GROUP = 0xf8,
 };
+
+/*
+ * The vendor specific admin opcodes, whose low two bits give the data
+ * direction. CSD_LEGACY_OPCODES=1 selects the old CEMU opcodes, for a device
+ * started with csd_legacy_opcodes=on.
+ */
+static uint8_t CSD_ADM_MRS_MGMT = 0xc9;
+static uint8_t CSD_ADM_COMPUTE_LOAD = 0xc5;
+static uint8_t CSD_ADM_COMPUTE_LOAD_DATA = 0xcd;
+static uint8_t CSD_ADM_COMPUTE_ACTIVATE = 0xc8;
+
+static void csd_use_legacy_opcodes(void)
+{
+    const char *v = getenv("CSD_LEGACY_OPCODES");
+
+    if (!v || strcmp(v, "1")) {
+        return;
+    }
+    CSD_ADM_MRS_MGMT = 0x21;
+    CSD_ADM_COMPUTE_LOAD = 0x22;
+    CSD_ADM_COMPUTE_LOAD_DATA = 0x25;
+    CSD_ADM_COMPUTE_ACTIVATE = 0x23;
+}
 
 enum {
     CSD_CSF_TYPE_PHANTOM = 0,
@@ -88,7 +107,7 @@ struct csd_mrs_mgmt_cmd {
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage:\n"
+            "Usage (CSD_LEGACY_OPCODES=1 sends the old CEMU opcodes):\n"
             "  %s /dev/nvmeXnY smoke\n"
             "  %s /dev/nvmeXnY alloc <bytes>\n"
             "  %s /dev/nvmeXnY dealloc <id>\n"
@@ -1242,6 +1261,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    csd_use_legacy_opcodes();
     dev = argv[1];
     op = argv[2];
     fd = open(dev, O_RDWR);

@@ -252,6 +252,7 @@ was not doing anything.
 - FDP RUAMW counts down in LBAs, so it drains at the documented rate and
   reaches zero; cost-benefit victim selection now orders by age and utilisation
   rather than insertion (9a66fe52d).
+- The CEMU admin commands of CSD mode moved to vendor specific opcodes: 0x21 to 0xc9, 0x22 to 0xc5, 0x23 to 0xc8 and 0x25 to 0xcd. NVMe Base 2.3 gives 0x21, 0x22 and 0x25 to fabrics commands and reserves 0x23, and 0x22 declared the wrong data direction. The old opcodes now fail with Invalid Command Opcode; `csd_legacy_opcodes=on` restores them for old tools.
 - The data plane starts when the host enables the controller rather than on Doorbell Buffer Config, so hosts that never send that command (SPDK, FreeBSD, Windows, older Linux) now work (04f04b86e).
 - Failure to lock the backend memory is a warning instead of a fatal error (847864637).
 - The media counters moved from the SMART log's temperature fields to vendor log page C0h (4cb1f9ba7).

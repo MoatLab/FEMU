@@ -149,22 +149,57 @@ and admin commands go on as usual; only that compute unit is busy.
 
 ### Commands
 
-I/O commands on the namespace:
+I/O commands on the namespace. The opcodes are in the vendor specific
+range 80h to FFh. Bits 1:0 give the data direction (Base 2.3 Figure 91), and
+a command that moves no data may carry any value there:
 
-| Opcode | Command |
-| --- | --- |
-| 0xb0 | Allocate device memory |
-| 0xc0 | Free device memory |
-| 0xd0 | Copy namespace data into device memory |
-| 0xe1 | Execute a program |
-| 0xf2 | Read device memory |
-| 0xf5 | Write device memory |
-| 0xf6, 0xf7, 0xf8 | Create a group, set its QoS, delete it |
+| Opcode | Command | Data |
+| --- | --- | --- |
+| 0xb0 | Allocate device memory | none |
+| 0xc0 | Free device memory | none |
+| 0xd0 | Copy namespace data into device memory | none |
+| 0xe1 | Execute a program | host to device |
+| 0xf2 | Read device memory | device to host |
+| 0xf5 | Write device memory | host to device |
+| 0xf6, 0xf7, 0xf8 | Create a group, set its QoS, delete it | none |
 
-Admin commands: 0x21 memory range set management, 0x22 program load and
-unload, 0x23 program activate and deactivate, 0x25 load program data. The
-command layouts follow CEMU; `hw/femu/tests/csd/csd-passthru.c` builds each
-one.
+Admin commands, in the vendor specific range C0h to FFh. As a mnemonic,
+0xc5, 0xc8 and 0xc9 are the CP 1.2 opcodes 0x85, 0x88 and 0x89 of the
+matching commands plus 40h. CP has no Load Data command, so 0xcd has no CP
+pair:
+
+| Opcode | Command | Data |
+| --- | --- | --- |
+| 0xc5 | Program load and unload | host to device |
+| 0xc8 | Program activate and deactivate | none |
+| 0xc9 | Memory range set management | host to device |
+| 0xcd | Load more program data | host to device |
+
+The command layouts follow CEMU; `hw/femu/tests/csd/csd-passthru.c` builds
+each one.
+
+#### Migration from the CEMU opcodes
+
+CEMU and FEMU before this change used admin opcodes 0x21, 0x22, 0x23 and
+0x25. NVMe Base 2.3 gives 0x21, 0x22 and 0x25 to fabrics commands, which a
+PCIe controller must not support, and reserves 0x23. 0x22 also declares
+data to the host, but it sends program bytes to the device. The Linux
+driver reads that bit to map the data buffer. The I/O opcodes do not
+change.
+
+```
+ old    new    command
+ 0x21   0xc9   memory range set management
+ 0x22   0xc5   program load and unload
+ 0x23   0xc8   program activate and deactivate
+ 0x25   0xcd   load more program data
+```
+
+The device now answers the old opcodes with Invalid Command Opcode. To run
+an old tool unchanged, set `csd_legacy_opcodes=on`. The device then takes
+the old opcodes and refuses the new ones. The Commands Supported and
+Effects log (05h) lists the layout in use. The passthrough helper takes
+`CSD_LEGACY_OPCODES=1` in its environment to send the old opcodes.
 
 ### NVMe CP and SLM command sets
 
@@ -175,7 +210,7 @@ above. The CEMU commands stay on, on the CSD namespace. See
 [CP and SLM](../features/cp-slm.md).
 
 ```
- CSD namespace (CSI 00h)   NVM commands + CEMU b0h..f8h, admin 21h..25h
+ CSD namespace (CSI 00h)   NVM commands + CEMU b0h..f8h, admin c5h..cdh
  memory ns     (CSI 03h)   Memory Copy 01h, Read 02h, Fill 04h, Write 05h
  compute ns    (CSI 04h)   Execute Program 01h, admin 85h, 88h, 89h
 ```

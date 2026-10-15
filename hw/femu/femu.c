@@ -3741,6 +3741,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
     DEFINE_PROP_UINT32("csd_slm_size", FemuCtrl, csd_params.slm_size_mb, 0),
     DEFINE_PROP_BOOL("csd_cp", FemuCtrl, csd_params.cp, false),
+    DEFINE_PROP_BOOL("csd_legacy_opcodes", FemuCtrl,
+                     csd_params.legacy_opcodes, false),
     DEFINE_PROP_STRING("kv_timing", FemuCtrl, kv_timing),
     DEFINE_PROP_STRING("kv_model_coeffs", FemuCtrl, kv_model_coeffs),
     DEFINE_PROP_STRING("kv_index", FemuCtrl, kv_index),

@@ -136,7 +136,12 @@ static uint32_t nvme_mode_admin_effects(FemuCtrl *n, uint8_t opc)
         case NVME_ADM_CMD_CSD_COMPUTE_LOAD:
         case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
         case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
-            return NVME_CMD_EFF_CSUPP;
+            return n->csd_params.legacy_opcodes ? 0 : NVME_CMD_EFF_CSUPP;
+        case NVME_ADM_CMD_CSD_LEGACY_MRS_MGMT:
+        case NVME_ADM_CMD_CSD_LEGACY_LOAD:
+        case NVME_ADM_CMD_CSD_LEGACY_ACTIVATE:
+        case NVME_ADM_CMD_CSD_LEGACY_LOAD_DATA:
+            return n->csd_params.legacy_opcodes ? NVME_CMD_EFF_CSUPP : 0;
         case NVME_ADM_CMD_CP_LOAD_PROGRAM:
         case NVME_ADM_CMD_CP_PROGRAM_ACT:
         case NVME_ADM_CMD_CP_MRS_MGMT:

@@ -551,6 +551,7 @@ bbssd FTL, so sections 5 to 9 apply.
 | `csd_program_dir` | host directory | | where shared-object and uBPF programs load from; unset allows only the built-in program type |
 | `csd_slm_size` | MiB | 0 to 1024; 0 adds none | adds a memory namespace (SLM 1.2) of this size |
 | `csd_cp` | bool | needs `csd_slm_size` | adds a compute namespace (CP 1.2) |
+| `csd_legacy_opcodes` | bool | needs a CSD namespace | old CEMU admin opcodes 21h to 25h instead of C5h to CDh |
 
 `csd_slm_size` and `csd_cp` refuse `ns_mgmt`, `subsys`, `power_loss` and a
 CXL link. Guide: [CP and SLM](../features/cp-slm.md).

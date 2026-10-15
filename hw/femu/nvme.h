@@ -2241,6 +2241,7 @@ typedef struct CsdCtrlParams {
     char     *program_dir;       /* where a loadable program may come from */
     uint32_t slm_size_mb;        /* memory namespace size; 0 adds none */
     bool     cp;                 /* add a compute namespace */
+    bool     legacy_opcodes;     /* the CEMU opcodes before Base 2.3 */
 } CsdCtrlParams;
 
 typedef struct OcCtrlParams {

@@ -742,6 +742,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "csd_cp",
       "CSD: add a compute namespace (NVMe CP 1.2, CSI 04h) after the memory "
       "namespace; needs csd_slm_size" },
+    { "csd_legacy_opcodes",
+      "CSD: take the old CEMU admin opcodes 21h, 22h, 23h and 25h instead "
+      "of the vendor specific C5h, C8h, C9h and CDh; needs a CSD namespace" },
     { "kv_timing",
       "KV: media (default) times every command on the NAND model; model "
       "times Store and Retrieve from the workload mix of the last 16 of "

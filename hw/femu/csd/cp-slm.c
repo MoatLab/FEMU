@@ -39,6 +39,10 @@ int femu_csd_check_namespaces(FemuCtrl *n, int n_csd, Error **errp)
 {
     CsdCtrlParams *p = &n->csd_params;
 
+    if (p->legacy_opcodes && !n_csd) {
+        error_setg(errp, "csd_legacy_opcodes needs a CSD namespace");
+        return 1;
+    }
     if (!p->slm_size_mb && !p->cp) {
         return 0;
     }

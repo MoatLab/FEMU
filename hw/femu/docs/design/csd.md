@@ -40,9 +40,9 @@ collection.
    | poller thread               |    | vCPU thread               |
    | nvme_io_cmd() -> csd_io_cmd |    | nvme_admin_cmd()          |
    +----+-------------+----------+    |  -> csd_admin_cmd()       |
-        |             |               |  memory range sets 0x21   |
-   Read, Write   CSD commands         |  program load 0x22, 0x25  |
-        |        0xb0 .. 0xf8         |  activate 0x23            |
+        |             |               |  memory range sets 0xc9   |
+   Read, Write   CSD commands         |  program load 0xc5, 0xcd  |
+        |        0xb0 .. 0xf8         |  activate 0xc8            |
         |             |               +-------------+-------------+
    nvme_rw()     +----v-----------------------------v----+
    copy data     | FemuCsdState (one per controller)     |
@@ -70,7 +70,7 @@ collection.
 black-box FTL for the namespace (`ns->ssd`), and allocates `FemuCsdState`.
 The state is controller-wide (`n->csd_ctrl_state`), which is why a controller
 may have only one CSD namespace. Its other namespaces may run other modes,
-but the CSD admin commands (0x21, 0x22, 0x23, 0x25) reach `csd_admin_cmd()`
+but the CSD admin commands (0xc5, 0xc8, 0xc9, 0xcd) reach `csd_admin_cmd()`
 only through the controller's own handler table. On a controller whose
 `femu_mode` is not 4, for example `femu_mode=2` with
 `namespace_modes=nossd,,csd`, those commands fail with Invalid Opcode, so
@@ -147,9 +147,21 @@ Admin commands (`csd_admin_cmd()`):
 
 | Opcode | Command |
 | --- | --- |
-| 0x21 | Memory range set management: `sel` 0 creates a set from `numr` ranges in the data buffer (Dword 0 = `rsid`), `sel` 1 deletes one |
-| 0x22, 0x25 | Load program, or load more of its bytes; `sel` 1 unloads |
-| 0x23 | Activate (`sel` 1) or deactivate (`sel` 0) a program |
+| 0xc9 | Memory range set management: `sel` 0 creates a set from `numr` ranges in the data buffer (Dword 0 = `rsid`), `sel` 1 deletes one |
+| 0xc5, 0xcd | Load program, or load more of its bytes; `sel` 1 unloads |
+| 0xc8 | Activate (`sel` 1) or deactivate (`sel` 0) a program |
+
+Every opcode is vendor specific, and bits 1:0 give the data direction of a
+command that moves data (Base 2.3 Figure 91). `csd_admin_opcode()` maps the
+old CEMU admin opcodes onto these handlers when `csd_legacy_opcodes=on`,
+and refuses the layout that is not in use:
+
+```text
+ legacy off:  admin c5h c8h c9h cdh  --> handlers
+              admin 21h 22h 23h 25h  --> Invalid Command Opcode
+ legacy on:   the reverse
+ both layouts refuse 24h
+```
 
 `hw/femu/tests/csd/csd-passthru.c` builds every one of these commands and is
 the reference for their layouts; `hw/femu/csd/csd.h` declares them.

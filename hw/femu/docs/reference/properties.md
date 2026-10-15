@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 198 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 199 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -280,6 +280,7 @@ Devices:
 | `csd_program_dir` | `str` | unset | CSD: host directory that shared-object and uBPF programs are loaded from, named by a file name with no slash that must resolve inside it; unset allows only the built-in phantom program type |
 | `csd_slm_size` | `uint32` | `0` | CSD: MiB of a memory namespace (NVMe SLM 1.2, CSI 03h) added after the configured namespaces, 1 to 1024; 0 adds none |
 | `csd_cp` | `bool` | `off` | CSD: add a compute namespace (NVMe CP 1.2, CSI 04h) after the memory namespace; needs csd_slm_size |
+| `csd_legacy_opcodes` | `bool` | `off` | CSD: take the old CEMU admin opcodes 21h, 22h, 23h and 25h instead of the vendor specific C5h, C8h, C9h and CDh; needs a CSD namespace |
 
 ### KV timing
 

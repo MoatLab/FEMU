@@ -9298,6 +9298,10 @@ static const struct {
     { "'femu_mode':4,'fdm_size':16,'csd_slm_size':2048", "csd_slm_size" },
     { "'femu_mode':4,'fdm_size':16,'namespaces':2,"
       "'namespace_modes':'nossd,nossd','csd_slm_size':4", "csd_slm_size" },
+    { "'csd_legacy_opcodes':true", "csd_legacy_opcodes" },
+    { "'femu_mode':4,'fdm_size':16,'namespaces':2,"
+      "'namespace_modes':'nossd,nossd','csd_legacy_opcodes':true",
+      "csd_legacy_opcodes" },
 };
 
 static void femu_test_config_refused(void *obj, void *data,
@@ -17997,7 +18001,7 @@ static void femu_test_oc20_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
-#define FEMU_CSD_COMPUTE_LOAD   0x22
+#define FEMU_CSD_COMPUTE_LOAD   0xc5
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
 /* where the csd-program-dir test keeps its programs; one per test process */
@@ -18065,7 +18069,7 @@ static void femu_test_csd_program_dir(void *obj, void *data,
     rmdir(femu_csd_dir);
 }
 
-#define FEMU_CSD_ACTIVATE       0x23
+#define FEMU_CSD_ACTIVATE       0xc8
 #define FEMU_CSD_SLOW_MS        1000
 
 /* where the csd-exec-concurrency test builds its program */
@@ -18292,6 +18296,215 @@ static void femu_test_csd_runtime_floor(void *obj, void *data,
     femu_disable(&c);
     femu_csd_remove_slow();
     unlink(femu_csd_warn_log);
+}
+
+/* the CEMU admin opcodes of csd_legacy_opcodes=on */
+#define FEMU_CSD_OLD_MRS        0x21
+#define FEMU_CSD_OLD_LOAD       0x22
+#define FEMU_CSD_OLD_ACTIVATE   0x23
+#define FEMU_CSD_OLD_LOAD_DATA  0x25
+#define FEMU_CSD_MRS            0xc9
+#define FEMU_CSD_LOAD_DATA      0xcd
+
+typedef struct FemuCsdLayout {
+    uint8_t mrs, load, activate, load_data;
+} FemuCsdLayout;
+
+static const FemuCsdLayout femu_csd_layout_new = {
+    FEMU_CSD_MRS, FEMU_CSD_COMPUTE_LOAD, FEMU_CSD_ACTIVATE, FEMU_CSD_LOAD_DATA,
+};
+
+static const FemuCsdLayout femu_csd_layout_old = {
+    FEMU_CSD_OLD_MRS, FEMU_CSD_OLD_LOAD, FEMU_CSD_OLD_ACTIVATE,
+    FEMU_CSD_OLD_LOAD_DATA,
+};
+
+/*
+ * The data each vendor specific CEMU command moves: 1 host to controller,
+ * 2 controller to host, 0 none. A command that moves no data may carry any
+ * direction bits (Base 2.3 Figure 91); -1 is a command this table misses.
+ */
+static int femu_csd_data_dir(uint8_t opc)
+{
+    switch (opc) {
+    case FEMU_CSD_ALLOC_FDM:
+    case FEMU_CSD_DEALLOC:
+    case FEMU_CSD_NVM_TO_AFDM:
+    case FEMU_CSD_NEW_GROUP:
+    case FEMU_CSD_SET_QOS:
+    case FEMU_CSD_DEL_GROUP:
+    case FEMU_CSD_ACTIVATE:
+        return 0;
+    case FEMU_CSD_EXEC:
+    case FEMU_CSD_WRITE_AFDM:
+    case FEMU_CSD_COMPUTE_LOAD:
+    case FEMU_CSD_MRS:
+    case FEMU_CSD_LOAD_DATA:
+        return 1;
+    case FEMU_CSD_READ_AFDM:
+        return 2;
+    default:
+        return -1;
+    }
+}
+
+static uint32_t femu_csd_io_result(FemuCtrlState *c, NvmeCmd *cmd,
+                                   uint16_t want)
+{
+    uint32_t result = 0;
+
+    femu_submit(c, &c->io, cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, &result)), ==,
+                    want);
+    return result;
+}
+
+/*
+ * One admin opcode layout answers, and FEMU refuses the other with Invalid
+ * Command Opcode. Base 2.3 prohibits 21h, 22h and 25h on a PCIe I/O
+ * controller and reserves 23h. FEMU has no Lockdown, so it also refuses
+ * 24h. Log 05h lists only the layout in use. In the default layout
+ * every vendor specific command that moves data declares its direction.
+ */
+static void femu_test_csd_opcodes(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool legacy = data != NULL;
+    const FemuCsdLayout *on = legacy ? &femu_csd_layout_old :
+                                       &femu_csd_layout_new;
+    const FemuCsdLayout *off = legacy ? &femu_csd_layout_new :
+                                        &femu_csd_layout_old;
+    const uint8_t on_ops[] = { on->mrs, on->load, on->activate,
+                               on->load_data };
+    const uint8_t off_ops[] = { off->mrs, off->load, off->activate,
+                                off->load_data, 0x24 };
+    FemuCtrlState c = { 0 };
+    uint32_t mr[8] = { 0 };
+    uint32_t eff[1024];
+    uint32_t dw[16];
+    NvmeCmd cmd;
+    uint32_t afdm, rsid, group;
+    uint64_t buf;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    /* the other layout, and Lockdown (24h), which FEMU does not offer */
+    for (i = 0; i < ARRAY_SIZE(off_ops); i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = off_ops[i];
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_OPCODE);
+    }
+
+    /* a phantom program: load, activate, and run it on a range set */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = on->load;
+    cmd.cdw10 = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = on->activate;
+    cmd.cdw10 = cpu_to_le32(1 | (1 << 16));
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    /*
+     * Program 2 comes in two pieces of 4 bytes: Load, then Load Data. It
+     * cannot be activated until the second piece is in.
+     */
+    qtest_memset(qts, buf, 0x3c, 8);
+    for (i = 0; i < 2; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = i ? on->load_data : on->load;
+        cmd.dptr.prp1 = cpu_to_le64(buf + 4 * i);
+        cmd.cdw10 = cpu_to_le32(2);             /* pind 2, phantom */
+        cmd.cdw11 = cpu_to_le32(8);             /* psize */
+        cmd.cdw14 = cpu_to_le32(4);             /* numb */
+        cmd.cdw15 = cpu_to_le32(4 * i);         /* loff */
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = on->activate;
+        cmd.cdw10 = cpu_to_le32(2 | (1 << 16));
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        i ? NVME_SUCCESS : NVME_INVALID_FIELD);
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_ALLOC_FDM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(4096);
+    afdm = femu_csd_io_result(&c, &cmd, NVME_SUCCESS);
+    mr[2] = cpu_to_le32(afdm);
+    qtest_memwrite(qts, buf, mr, sizeof(mr));
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = on->mrs;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(1);                 /* numr */
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &rsid)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(rsid, !=, 0);
+
+    for (i = 1; i <= 2; i++) {
+        memset(dw, 0, sizeof(dw));
+        dw[0] = FEMU_CSD_EXEC;
+        dw[1] = cpu_to_le32(1);
+        dw[2] = cpu_to_le32(i | (rsid << 16));  /* program i on the set */
+        femu_csd_io_result(&c, (NvmeCmd *)dw, NVME_SUCCESS);
+    }
+
+    /* the group commands */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_NEW_GROUP;
+    cmd.nsid = cpu_to_le32(1);
+    group = femu_csd_io_result(&c, &cmd, NVME_SUCCESS);
+    g_assert_cmpuint(group, !=, 0);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_SET_QOS;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw13 = cpu_to_le32(group);
+    femu_csd_io_result(&c, &cmd, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CSD_DEL_GROUP;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(group);
+    femu_csd_io_result(&c, &cmd, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = on->mrs;
+    cmd.cdw10 = cpu_to_le32(1 | (rsid << 16));  /* sel 1: delete */
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+
+    /* log 05h: this layout, not the other */
+    g_assert_cmphex(femu_get_log(&c, FEMU_LOG_CMD_EFFECTS, buf, 4096, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, eff, sizeof(eff));
+    for (i = 0; i < ARRAY_SIZE(on_ops); i++) {
+        g_assert_cmphex(le32_to_cpu(eff[on_ops[i]]) & 1, ==, 1);
+        g_assert_cmphex(le32_to_cpu(eff[off_ops[i]]) & 1, ==, 0);
+    }
+    g_assert_cmphex(le32_to_cpu(eff[0x24]) & 1, ==, 0);
+
+    for (i = 0; !legacy && i < 256; i++) {
+        bool adm = i >= 0xc0 && (le32_to_cpu(eff[i]) & 1);
+        bool io = i >= 0x80 && (le32_to_cpu(eff[256 + i]) & 1);
+
+        if (adm || io) {
+            int dir = femu_csd_data_dir(i);
+
+            g_assert_cmpint(dir, >=, 0);
+            if (dir) {
+                g_assert_cmpint(i & 3, ==, dir);
+            }
+        }
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
 }
 
 static void femu_test_csd_exec_concurrency(void *obj, void *data,
@@ -32353,6 +32566,8 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
     { "caps-csd", "femu_mode=4,fdm_size=16", FEMU_ONCS_DEFAULT, true },
     { "caps-csd-cpslm", "femu_mode=4,fdm_size=16,csd_slm_size=4,csd_cp=on",
       FEMU_ONCS_DEFAULT, true },
+    { "caps-csd-legacy", "femu_mode=4,fdm_size=16,csd_legacy_opcodes=on,"
+      "csd_slm_size=4,csd_cp=on", FEMU_ONCS_DEFAULT, true },
     { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_OCSSD, true },
     { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_OCSSD, true },
     { "caps-mixed", "femu_mode=1,namespaces=3,"
@@ -40061,6 +40276,16 @@ static void femu_register_nodes(void)
             "femu_mode=4,fdm_size=16,nr_cu=1,csd_program_dir=%s",
             femu_csd_slow_dir),
         .before = femu_csd_warn_before,
+    });
+    qos_add_test("csd-opcodes", "femu", femu_test_csd_opcodes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=4,fdm_size=16",
+    });
+    qos_add_test("csd-opcodes-legacy", "femu", femu_test_csd_opcodes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=4,fdm_size=16,csd_legacy_opcodes=on",
+        .arg = (void *)1,
     });
     qos_add_test("csd-exec-concurrency", "femu",
                  femu_test_csd_exec_concurrency,
