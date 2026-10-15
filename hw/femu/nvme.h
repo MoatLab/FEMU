@@ -2693,6 +2693,13 @@ typedef struct FemuCtrl {
     uint32_t        test_zone_write_hold_ms;
     /* qtest only: Zone Management Send commands waiting for writes */
     uint32_t        test_zone_draining;
+    /*
+     * qtest only: a Changed Zone List read releases a held write after its
+     * snapshot, then waits up to this many ms for a new change
+     */
+    uint32_t        test_zone_log_hold_ms;
+    /* qtest only: such reads that saw the change */
+    uint32_t        test_zone_log_changes;
     /* qtest only: ms a zone report waits before its transfer */
     uint32_t        test_zone_report_hold_ms;
     /* qtest only: threads asleep in a zone hold, for a test to wait on */
@@ -3139,7 +3146,7 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type);
 void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                            uint8_t log_page, uint32_t nsid);
 void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
-                          uint32_t nsid);
+                          uint32_t nsid, bool drop);
 void nvme_post_cqes_io(void *opaque);
 void *nvme_poller(void *arg);
 

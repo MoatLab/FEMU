@@ -4399,6 +4399,12 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-zone-write-hold-ms",
                                        &FEMU(obj)->test_zone_write_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-zone-log-hold-ms",
+                                       &FEMU(obj)->test_zone_log_hold_ms,
+                                       OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-zone-log-changes",
+                                       &FEMU(obj)->test_zone_log_changes,
+                                       OBJ_PROP_FLAG_READ);
         object_property_add_uint32_ptr(obj, "x-zone-report-hold-ms",
                                        &FEMU(obj)->test_zone_report_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);

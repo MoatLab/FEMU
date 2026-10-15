@@ -195,6 +195,14 @@ struct zns_ssd {
     uint32_t zone_states[16];
 
     uint64_t changed_zones[511];
+    /*
+     * change_seq counts recorded changes; each entry keeps the count of its
+     * last change, and notice_seq the count when a notice was last raised.
+     * A read acknowledges only what its snapshot held.
+     */
+    uint64_t changed_seqs[511];
+    uint64_t change_seq;
+    uint64_t notice_seq;
     uint32_t nr_changed_zones;
     bool     changed_zone_overflow;
     uint32_t err_write_fail_period;   /* fail one write in N; 0 = off */

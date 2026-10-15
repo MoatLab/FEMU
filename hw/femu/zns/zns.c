@@ -481,8 +481,10 @@ static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
         return;
     }
 
+    zns->change_seq++;
     for (i = 0; i < zns->nr_changed_zones; i++) {
         if (zns->changed_zones[i] == zslba) {
+            zns->changed_seqs[i] = zns->change_seq;
             break;
         }
     }
@@ -491,6 +493,7 @@ static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
         if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
             zns->changed_zone_overflow = true;
         } else {
+            zns->changed_seqs[zns->nr_changed_zones] = zns->change_seq;
             zns->changed_zones[zns->nr_changed_zones++] = zslba;
         }
     }
@@ -500,6 +503,7 @@ static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
         nvme_enqueue_ns_event(ns->ctrl, NVME_AER_TYPE_NOTICE,
                               NVME_AER_INFO_NOTICE_ZONE_DESCR_CHANGED,
                               NVME_LOG_CHANGED_ZONE_LIST, ns->id);
+        zns->notice_seq = zns->change_seq;
     }
 }
 
@@ -2540,27 +2544,15 @@ static void zns_exit(FemuCtrl *n)
 #define ZNS_CHANGED_ZONE_LOG_SIZE 4096   /* 8 byte header + 511 x 8 byte ZSLBA */
 
 /*
- * Build the Changed Zone List page for one namespace. The header holds the
- * number of entries, or FFFFh when more zones changed than the page can carry.
- * The list is clear-on-read: unless the host sets Retain Asynchronous Event,
- * reading it consumes the entries, so the next read reports only what changed
- * since.
- */
-/*
- * Build the Changed Zone List page (BFh).
+ * Send the Changed Zone List page (BFh) of one namespace: a count, or FFFFh
+ * when more zones changed than the page holds, then the ZSLBAs. It carries
+ * only changes the host did not cause (ZNS 1.4, 4.1.4.1).
  *
- * The list carries only zone descriptor changes the host did not cause. The
- * specification excludes every change that follows from a Zone Management Send
- * command, from a write that opens or fills a zone, and from the controller
- * closing a zone to free a resource -- which between them are every transition
- * this device makes. A zone going read only or offline after a media failure,
- * or a change of capacity or of the reset-recommended attribute, is the kind of
- * change that belongs here; none of those happen yet, so the count is zero and
- * the header is returned on its own.
- *
- * The count is what the host reads to decide whether to walk the descriptors,
- * so answering with a well-formed empty page is the correct response rather
- * than refusing the log.
+ * A read without Retain Asynchronous Event acknowledges the list and its
+ * event, but only once the page reached the host: a failed transfer
+ * acknowledges nothing, as for SMART. The page is a snapshot. A zone that
+ * changes again during the transfer keeps its entry, and a notice raised
+ * meanwhile stays queued.
  */
 static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
                                       NvmeCmd *cmd, uint32_t len, uint64_t off,
@@ -2569,6 +2561,7 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     struct zns_ssd *zns = ns->zns;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint64_t snap_seq;
     uint32_t trans_len;
     uint16_t status;
     uint8_t *log;
@@ -2578,48 +2571,70 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    /*
-     * The count is taken once and bounded here. It is written on a poller and
-     * read on this thread, so re-reading it as the loop condition lets the
-     * emitter run past the end of a page that holds exactly as many entries as
-     * the array does.
-     */
-    QEMU_LOCK_GUARD(&zns->zone_lock);
-
-    nr = zns->nr_changed_zones;
-    if (nr > ARRAY_SIZE(zns->changed_zones)) {
-        nr = ARRAY_SIZE(zns->changed_zones);
-    }
-
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
-    /* when full, the list says so and lists nothing (ZNS 1.4, 4.1.4.1) */
-    if (zns->changed_zone_overflow) {
-        stq_le_p(log, 0xffff);
-    } else {
-        stq_le_p(log, nr);
-        for (i = 0; i < nr; i++) {
-            stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+    WITH_QEMU_LOCK_GUARD(&zns->zone_lock) {
+        nr = MIN(zns->nr_changed_zones, ARRAY_SIZE(zns->changed_zones));
+        /* when full, the list says so and lists nothing (ZNS 1.4, 4.1.4.1) */
+        if (zns->changed_zone_overflow) {
+            stq_le_p(log, 0xffff);
+        } else {
+            stq_le_p(log, nr);
+            for (i = 0; i < nr; i++) {
+                stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+            }
         }
+        snap_seq = zns->change_seq;
     }
+
     /*
-     * Reading without Retain Asynchronous Event is what clears the event: the
-     * host has now seen the zones it was pointing at.
+     * qtest: let a held write go, then wait up to this long for a change
+     * after the snapshot, so the change lands between snapshot and ack.
      */
-    if (!rae) {
-        zns->nr_changed_zones = 0;
-        zns->changed_zone_overflow = false;
-        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE,
-                             NVME_LOG_CHANGED_ZONE_LIST, ns->id);
+    if (unlikely(qatomic_read(&n->test_zone_log_hold_ms))) {
+        uint32_t ms = qatomic_read(&n->test_zone_log_hold_ms);
+        bool changed = false;
+
+        qatomic_set(&n->test_zone_write_hold_ms, 0);
+        for (i = 0; i < ms && !changed; i++) {
+            g_usleep(1000);
+            WITH_QEMU_LOCK_GUARD(&zns->zone_lock) {
+                changed = zns->change_seq != snap_seq;
+            }
+        }
+        /* a test checks this, so a missed change fails it */
+        if (changed) {
+            qatomic_inc(&n->test_zone_log_changes);
+        }
     }
 
     trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
     status = dma_read_prp(n, log + off, trans_len, prp1, prp2);
     g_free(log);
-    if (!rae) {
-        nvme_process_aers(n);
+    if (status || rae) {
+        return status;
     }
 
-    return status;
+    WITH_QEMU_LOCK_GUARD(&zns->zone_lock) {
+        uint32_t kept = 0;
+
+        for (i = 0; i < zns->nr_changed_zones; i++) {
+            if (zns->changed_seqs[i] > snap_seq) {
+                zns->changed_zones[kept] = zns->changed_zones[i];
+                zns->changed_seqs[kept++] = zns->changed_seqs[i];
+            }
+        }
+        zns->nr_changed_zones = kept;
+        /* an overflow since the snapshot still needs a rescan */
+        if (zns->change_seq == snap_seq) {
+            zns->changed_zone_overflow = false;
+        }
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE,
+                             NVME_LOG_CHANGED_ZONE_LIST, ns->id,
+                             zns->notice_seq <= snap_seq);
+    }
+    nvme_process_aers(n);
+
+    return NVME_SUCCESS;
 }
 
 /*

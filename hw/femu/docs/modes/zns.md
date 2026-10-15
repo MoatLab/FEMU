@@ -325,7 +325,9 @@ followed by up to 511 zone start LBAs, and lists only zone changes the host
 did not cause. As the ZNS specification requires, it leaves out changes
 that follow a Zone Management Send command, writes that open or fill a
 zone, and the controller closing a zone to free a resource. Reading it
-without `--rae` clears both the list and the event behind it. A notice
+without `--rae` clears both the list and the event behind it, once the
+page reached the host. A read whose transfer fails clears nothing, and a
+zone that changes during a read keeps its entry for the next one. A notice
 names its namespace in dword 1 of the completion. Notice events stay
 masked until the host reads the list of that namespace; a read of another
 namespace's list leaves them masked.

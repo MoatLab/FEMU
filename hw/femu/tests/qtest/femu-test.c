@@ -12318,6 +12318,157 @@ static void femu_test_zone_notice_other_ns(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * A Changed Zone List read without RAE whose transfer fails (its buffer is
+ * the BIOS ROM) acknowledges nothing: the list keeps its entry and Notice
+ * events stay masked. It used to clear both first, so a retry found an
+ * empty list. A read that succeeds acknowledges what it carried.
+ */
+static void femu_test_zone_list_ack_fail(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, page, zsze;
+    uint8_t report[192];
+    uint16_t want, got;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    femu_zone_report(&c, page, report);
+    zsze = ldq_le_p(report + 128 + 16);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_ZDCN, NULL)),
+                    ==, NVME_SUCCESS);
+
+    want = femu_aer(&c);
+    femu_zone_fault(&c, 1, 0, buf);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, 0xfffc0000,
+                                 4096), ==, NVME_DATA_TRAS_ERROR);
+    want = femu_aer(&c);
+    femu_zone_fault(&c, 1, zsze, buf);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, page, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, page), ==, 2);
+    g_assert_cmpuint(qtest_readq(qts, page + 8), ==, 0);
+    g_assert_cmpuint(qtest_readq(qts, page + 16), ==, zsze);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, page, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, page), ==, 0);
+
+    femu_zone_fault(&c, 1, 2 * zsze, buf);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A zone changes while a Changed Zone List read without RAE is between its
+ * snapshot and its transfer: the faulting write is held after admission,
+ * and the read lets it go after its snapshot and waits for its fault. The
+ * read acknowledges the reported notice, so the new change's notice goes
+ * out at once, and the change keeps its entry for the next read.
+ */
+static void femu_test_zone_list_ack_race(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, page, zsze;
+    uint8_t report[192];
+    uint32_t result;
+    uint16_t want, got, log_cid, wr_cid;
+    NvmeRwCmd rw = { 0 };
+    NvmeCmd cmd;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    femu_zone_report(&c, page, report);
+    zsze = ldq_le_p(report + 128 + 16);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_ZDCN, NULL)),
+                    ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_zone_fault(&c, 1, 0, buf);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    want = femu_aer(&c);
+
+    femu_zone_write_hold(qts, 20000);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(zsze);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    wr_cid = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    femu_zone_held_wait(qts, 1);
+
+    femu_qz_set(qts, "x-zone-log-hold-ms", 5000);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(page);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_CHANGED_ZONES | ((512 / 4 - 1) << 16));
+    cmd.cdw14 = cpu_to_le32((uint32_t)FEMU_CSI_ZONED << 24);
+    log_cid = c.cid;
+    femu_submit(&c, &c.admin, &cmd);
+
+    /* the snapshot held zone 0 only; the write's fault came after it */
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_WRITE_FAULT);
+    g_assert_cmpint(got, ==, wr_cid);
+    /* the log read and the notice, in either order */
+    for (int k = 0; k < 2; k++) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)),
+                        ==, NVME_SUCCESS);
+        if (got == log_cid) {
+            g_assert_cmpuint(qtest_readw(qts, page), ==, 1);
+            g_assert_cmpuint(qtest_readq(qts, page + 8), ==, 0);
+        } else {
+            g_assert_cmpint(got, ==, want);
+            g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+        }
+    }
+    femu_qz_set(qts, "x-zone-log-hold-ms", 0);
+    /* the change came between the snapshot and the acknowledgment */
+    g_assert_cmpuint(femu_qz_get(qts, "x-zone-log-changes"), ==, 1);
+
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, page, 512),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, page), ==, 1);
+    g_assert_cmpuint(qtest_readq(qts, page + 8), ==, zsze);
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_RW_PRACT       (1u << 29)      /* CDW12 */
 
 static uint16_t femu_read_prps(FemuCtrlState *c, uint64_t prp1, uint64_t prp2,
@@ -44134,6 +44285,19 @@ static void femu_register_nodes(void)
                  femu_test_zone_notice_other_ns, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "devsz_mb=64,femu_mode=3,namespaces=2,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zone-list-ack-fail", "femu", femu_test_zone_list_ack_fail,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zone-list-ack-race", "femu", femu_test_zone_list_ack_race,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
             "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
             "err_write_fail_ppm=1000000"
     });

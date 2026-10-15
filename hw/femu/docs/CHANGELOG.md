@@ -413,6 +413,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A memory backend that the host cannot allocate now refuses the device with a message that names its size. Before, QEMU aborted in the allocator.
 - An asynchronous event identical to one already queued (type, information, log page, namespace) is not queued again. Copies used to fill the 16-entry queue and push out other namespaces' events.
 - Reading one zoned namespace's Changed Zone List no longer unmasks Notice events while another namespace's reported notice is unread. That read used to send the other namespace's queued notice before its log was read (Base 2.3, 5.2.2).
+- A Changed Zone List read without RAE clears the list and its event only after a successful transfer, as SMART and Error Information already did. A failed transfer used to lose the changes. A zone that changes during the read keeps its entry.
 
 ### Documentation and tooling
 

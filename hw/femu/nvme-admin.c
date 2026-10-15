@@ -4465,14 +4465,15 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
 
 /*
  * The host has read, without Retain Asynchronous Event, the log page
- * @log_page of namespace @nsid. Queued events of the type for that log are
- * dropped: the host has seen the state they describe. The type stays masked
- * until the host reads the log of the event reported last (Base 2.3, 5.2.2),
- * so a read of another namespace's log leaves it masked. The caller posts
- * what this frees with nvme_process_aers(), outside its own locks.
+ * @log_page of namespace @nsid. With @drop, queued events of the type for
+ * that log go: the host has seen the state they describe. Without it they
+ * stay, for a change the read did not include. The type stays masked until
+ * the host reads the log of the event reported last (Base 2.3, 5.2.2), so a
+ * read of another namespace's log leaves it masked. The caller posts what
+ * this frees with nvme_process_aers(), outside its own locks.
  */
 void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
-                          uint32_t nsid)
+                          uint32_t nsid, bool drop)
 {
     NvmeAsyncEvent *event, *next;
 
@@ -4481,6 +4482,9 @@ void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
         n->aer_mask &= ~(1 << event_type);
     }
 
+    if (!drop) {
+        return;
+    }
     qemu_mutex_lock(&n->aer_lock);
     QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
         if (event->result.event_type == event_type &&
