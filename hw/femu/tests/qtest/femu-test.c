@@ -12232,6 +12232,92 @@ static void femu_test_zone_change_notice(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* NSID, dword 1, of the admin completion taken last */
+static uint32_t femu_admin_last_nsid(FemuCtrlState *c)
+{
+    return qtest_readl(c->pdev->bus->qts, c->admin.cq_addr +
+                       ((c->admin.cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
+                       sizeof(NvmeCqe) + 4);
+}
+
+/* a write to namespace @nsid, which err_write_fail_ppm=1000000 fails */
+static void femu_zone_fault(FemuCtrlState *c, uint32_t nsid, uint64_t slba,
+                            uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.slba = cpu_to_le64(slba);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmphex(FEMU_SC(femu_io(c, (NvmeCmd *)&rw)), ==,
+                    NVME_WRITE_FAULT);
+}
+
+/*
+ * Two zoned namespaces. Namespace 1's Zone Descriptor Changed notice is
+ * reported, which masks Notice events, and a second change of namespace 1
+ * queues another. Reading namespace 2's Changed Zone List acknowledges
+ * nothing that was reported (Base 2.3, 5.2.2): it used to unmask the type
+ * and send namespace 1's queued notice. Only a read of namespace 1's list
+ * unmasks it; the next change of namespace 1 is then reported.
+ */
+static void femu_test_zone_notice_other_ns(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, page, zsze;
+    uint8_t report[192];
+    uint32_t result;
+    uint16_t want, got;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    femu_zone_report(&c, page, report);
+    zsze = ldq_le_p(report + 128 + 16);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_ZDCN, NULL)),
+                    ==, NVME_SUCCESS);
+
+    want = femu_aer(&c);
+    femu_zone_fault(&c, 1, 0, buf);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+    g_assert_cmpuint(femu_admin_last_nsid(&c), ==, 1);
+    femu_zone_fault(&c, 1, zsze, buf);
+
+    want = femu_aer(&c);
+    g_assert_cmpint(femu_log_cmd(&c, 2, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, page, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(c.pdev->bus->qts, page), ==, 0);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+
+    /* namespace 1's own read acknowledges it; both changes were in it */
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, page, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(c.pdev->bus->qts, page), ==, 2);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_zone_fault(&c, 1, 2 * zsze, buf);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmpuint(femu_admin_last_nsid(&c), ==, 1);
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_RW_PRACT       (1u << 29)      /* CDW12 */
 
 static uint16_t femu_read_prps(FemuCtrlState *c, uint64_t prp1, uint64_t prp2,
@@ -44043,6 +44129,13 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zone-notice-other-ns", "femu",
+                 femu_test_zone_notice_other_ns, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=64,femu_mode=3,namespaces=2,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "err_write_fail_ppm=1000000"
     });
     qos_add_test("zone-active-limit", "femu", femu_test_zone_active_limit,
                  &(QOSGraphTestOptions) {

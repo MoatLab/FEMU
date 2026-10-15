@@ -2608,12 +2608,16 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     if (!rae) {
         zns->nr_changed_zones = 0;
         zns->changed_zone_overflow = false;
-        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, ns->id);
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE,
+                             NVME_LOG_CHANGED_ZONE_LIST, ns->id);
     }
 
     trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
     status = dma_read_prp(n, log + off, trans_len, prp1, prp2);
     g_free(log);
+    if (!rae) {
+        nvme_process_aers(n);
+    }
 
     return status;
 }

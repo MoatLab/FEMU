@@ -325,7 +325,10 @@ followed by up to 511 zone start LBAs, and lists only zone changes the host
 did not cause. As the ZNS specification requires, it leaves out changes
 that follow a Zone Management Send command, writes that open or fill a
 zone, and the controller closing a zone to free a resource. Reading it
-without `--rae` clears both the list and the event behind it.
+without `--rae` clears both the list and the event behind it. A notice
+names its namespace in dword 1 of the completion. Notice events stay
+masked until the host reads the list of that namespace; a read of another
+namespace's list leaves them masked.
 
 With `err_write_fail_ppm` and `zns_fzr_sec` unset nothing adds to the
 list, and it stays empty. With it set, one write in every 1,000,000 / `err_write_fail_ppm`

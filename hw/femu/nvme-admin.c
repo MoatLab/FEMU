@@ -4398,6 +4398,9 @@ void nvme_process_aers(FemuCtrl *n)
             n->ns_notice_masked = true;
         } else {
             n->aer_mask |= 1 << event->result.event_type;
+            n->aer_shown[event->result.event_type].log_page =
+                event->result.log_page;
+            n->aer_shown[event->result.event_type].nsid = event->nsid;
         }
         n->outstanding_aers--;
 
@@ -4461,31 +4464,33 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
 }
 
 /*
- * The host has read the log page an event pointed at, so that type may be
- * reported again. Drop any still-queued events of the type as well: the host
- * has just seen the state they describe.
+ * The host has read, without Retain Asynchronous Event, the log page
+ * @log_page of namespace @nsid. Queued events of the type for that log are
+ * dropped: the host has seen the state they describe. The type stays masked
+ * until the host reads the log of the event reported last (Base 2.3, 5.2.2),
+ * so a read of another namespace's log leaves it masked. The caller posts
+ * what this frees with nvme_process_aers(), outside its own locks.
  */
-/*
- * The host has read the log behind one namespace's event: that type may be
- * reported again, and events for the other namespaces still queued go out.
- */
-void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint32_t nsid)
+void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
+                          uint32_t nsid)
 {
     NvmeAsyncEvent *event, *next;
 
-    n->aer_mask &= ~(1 << event_type);
+    if (n->aer_shown[event_type].log_page == log_page &&
+        n->aer_shown[event_type].nsid == nsid) {
+        n->aer_mask &= ~(1 << event_type);
+    }
 
     qemu_mutex_lock(&n->aer_lock);
     QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
-        if (event->result.event_type == event_type && event->nsid == nsid) {
+        if (event->result.event_type == event_type &&
+            event->result.log_page == log_page && event->nsid == nsid) {
             QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
             n->aer_queued--;
             g_free(event);
         }
     }
     qemu_mutex_unlock(&n->aer_lock);
-
-    nvme_process_aers(n);
 }
 
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type)

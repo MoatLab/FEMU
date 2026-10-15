@@ -2522,6 +2522,14 @@ typedef struct FemuCtrl {
     QEMUBH          *aer_bh;
     QEMUTimer       *aer_timer;
     uint8_t         aer_mask;
+    /*
+     * The event reported last of each type, which only a read of its own
+     * log acknowledges. Under the BQL, as aer_mask.
+     */
+    struct {
+        uint8_t     log_page;
+        uint32_t    nsid;
+    } aer_shown[8];
 
 	uint64_t		dbs_addr;
 	uint64_t		eis_addr;
@@ -3130,7 +3138,8 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type);
 void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                            uint8_t log_page, uint32_t nsid);
-void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint32_t nsid);
+void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
+                          uint32_t nsid);
 void nvme_post_cqes_io(void *opaque);
 void *nvme_poller(void *arg);
 

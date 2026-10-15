@@ -412,6 +412,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - The spare critical warning in the SMART and Endurance Group logs is set when the available spare falls below the threshold, not when it equals it (4faaff90a).
 - A memory backend that the host cannot allocate now refuses the device with a message that names its size. Before, QEMU aborted in the allocator.
 - An asynchronous event identical to one already queued (type, information, log page, namespace) is not queued again. Copies used to fill the 16-entry queue and push out other namespaces' events.
+- Reading one zoned namespace's Changed Zone List no longer unmasks Notice events while another namespace's reported notice is unread. That read used to send the other namespace's queued notice before its log was read (Base 2.3, 5.2.2).
 
 ### Documentation and tooling
 
