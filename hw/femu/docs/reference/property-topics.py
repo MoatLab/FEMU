@@ -19,8 +19,9 @@ DEVICES = [
                       "x-fdp-ns-mapped", "x-ftl-check", "x-ftl-hold",
                       "x-ftl-trace", "x-ns-test", "x-oc12-clock",
                       "x-oc12-trace", "x-query-delay-ms", "x-range-waits",
-                      "x-stream-test", "x-zone-held",
-                      "x-zone-lock-hold-ms", "x-zone-report-hold-ms"],
+                      "x-stream-test", "x-zone-draining", "x-zone-held",
+                      "x-zone-lock-hold-ms", "x-zone-report-hold-ms",
+                      "x-zone-write-hold-ms"],
         "topics": [
             {
                 "title": "Mode, capacity and namespaces",

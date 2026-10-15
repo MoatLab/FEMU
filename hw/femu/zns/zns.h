@@ -179,6 +179,14 @@ struct zns_ssd {
      * Nothing orders those against each other, so they take this.
      */
     QemuMutex zone_lock;
+    /*
+     * Zone Management Send waits on this, with zone_lock, until the writes
+     * it can touch are finalized; new writes wait while draining is set.
+     * inflight_total sums every zone's inflight count.
+     */
+    QemuCond zone_cond;
+    uint32_t draining;
+    uint32_t inflight_total;
 
     /*
      * Zones in each state, indexed by the state code. Kept with every state

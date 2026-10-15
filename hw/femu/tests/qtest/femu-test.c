@@ -12030,6 +12030,97 @@ static void femu_test_zone_report_unlocked(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_zone_write_hold(QTestState *qts, uint32_t ms)
+{
+    femu_qz_set(qts, "x-zone-write-hold-ms", ms);
+}
+
+/*
+ * A Reset of zone 0, alone or with Select All (@data), from a second poller
+ * while a one-block write to it is admitted but not yet copied. The write
+ * holds after admission until the test lets it go, and the Reset is sent
+ * once it holds. Run in the gap, the Reset completed at once and left an
+ * Empty zone whose write pointer the late write then moved to 1, with the
+ * old data back in it. The Reset must wait for the write (x-zone-draining
+ * shows it waiting), then leave pointer 0 and zeroes.
+ */
+static void femu_test_zone_reset_inflight(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool all = data != NULL;
+    uint8_t got[512];
+    uint8_t zero[512] = { 0 };
+    uint8_t zd[64];
+    FemuQueue q1, q2;
+    uint64_t buf, page;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 4096);
+
+    femu_zone_write_hold(qts, 20000);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    femu_zap_queue(&c, &q1, &cmd);
+    femu_zap_ring(&c, &q1);
+    femu_zone_held_wait(qts, 1);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw13 = cpu_to_le32(NVME_ZONE_ACTION_RESET | (all ? 0x100 : 0));
+    femu_zap_queue(&c, &q2, &cmd);
+    femu_zap_ring(&c, &q2);
+    /* the Reset waits for the write; it must not complete first */
+    for (int k = 0; k < FEMU_POLL_LIMIT_MS &&
+                    !femu_qz_get(qts, "x-zone-draining") &&
+                    !femu_cq_ready(&c, &q2); k++) {
+        g_usleep(1000);
+    }
+    g_assert_false(femu_cq_ready(&c, &q2));
+    g_assert_cmpuint(femu_qz_get(qts, "x-zone-draining"), ==, 1);
+    femu_zone_write_hold(qts, 0);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(page);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    femu_zap_queue(&c, &q1, &cmd);
+    femu_zap_ring(&c, &q1);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    qtest_memread(qts, page + 64, zd, sizeof(zd));
+    g_assert_cmpint(zd[1] >> 4, ==, NVME_ZONE_STATE_EMPTY);
+    g_assert_cmphex(ldq_le_p(zd + 24), ==, ldq_le_p(zd + 16));
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(page);
+    femu_zap_queue(&c, &q1, &cmd);
+    femu_zap_ring(&c, &q1);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    qtest_memread(qts, page, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), zero, sizeof(zero));
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
 #define FEMU_ZONE_BOUNDARY_ERROR    0x1b8   /* command specific */
 
 /* Compare reads a zone, so it may not run across a zone boundary either */
@@ -41946,6 +42037,21 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
             "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
+    });
+    qos_add_test("zone-reset-inflight", "femu", femu_test_zone_reset_inflight,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("zone-reset-all-inflight", "femu",
+                 femu_test_zone_reset_inflight, &(QOSGraphTestOptions) {
+        .arg = (void *)"all",
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "multipoller_enabled=1,poller_ratio=1"
     });
     qos_add_test("query-zns-busy-unplug", "femu",
                  femu_test_query_zns_busy_unplug, &(QOSGraphTestOptions) {

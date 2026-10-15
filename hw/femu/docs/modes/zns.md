@@ -374,6 +374,17 @@ On a zoned namespace, Dataset Management (deallocate), Write Zeroes, Write
 Uncorrectable and Copy fail with Invalid Opcode: they would change blocks
 without going through the zone state machine. Reset the zone instead.
 
+A Zone Management Send command waits until every write to its zones that
+the controller already accepted has its data copied. So a Reset sent while
+a write to the zone is in flight on another queue acts after that write:
+the data and the zone descriptor are correct. The FTL timing model takes
+each queue's requests in that queue's order, and it can still see the two
+commands in the other order. An older write can then refill the write
+cache after the Reset, or a newer write can lose its cache entries to it.
+That changes later mappings, media counters and read latencies, not data.
+To keep the model exact, wait for every write to a zone to complete before
+you reset it, and for the Reset to complete before you write it again.
+
 ## Verify
 
 1. `cat /sys/block/nvme0n1/queue/zoned` prints `host-managed`.

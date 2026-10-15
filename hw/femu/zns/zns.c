@@ -388,6 +388,7 @@ static void zns_free_params(NvmeNamespace *ns)
         timer_free(zns->fzr_timer);
         zns->fzr_timer = NULL;
     }
+    qemu_cond_destroy(&zns->zone_cond);
     qemu_mutex_destroy(&zns->zone_lock);
 
     if (zns->ch) {
@@ -812,6 +813,10 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     nlb = le16_to_cpu(rw->nlb) + 1;
     zone = zns_get_zone_by_slba(ns, slba);
     zone->inflight--;
+    ns->zns->inflight_total--;
+    if (ns->zns->draining) {
+        qemu_cond_broadcast(&ns->zns->zone_cond);
+    }
 
     /* conventional zones have no write pointer and no sequential state machine */
     if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
@@ -1471,6 +1476,10 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * placed on top of each other.
          */
         WITH_QEMU_LOCK_GUARD(&ns->zns->zone_lock) {
+            /* a management command waiting for admitted writes goes first */
+            while (ns->zns->draining) {
+                qemu_cond_wait(&ns->zns->zone_cond, &ns->zns->zone_lock);
+            }
             zone = zns_get_zone_by_slba(ns, slba);
             status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
             /*
@@ -1496,6 +1505,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 }
                 /* finalize, on success or failure, takes it back */
                 zone->inflight++;
+                ns->zns->inflight_total++;
                 wp = zns_advance_zone_wp(ns, zone, nlb);
             }
         }
@@ -1508,6 +1518,8 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (append) {
             res->slba = cpu_to_le64(wp);
         }
+        /* qtest: hold an admitted write before its data copy */
+        zns_test_hold(n, &n->test_zone_write_hold_ms);
     }
     else
     {
@@ -1624,6 +1636,37 @@ err:
     return status | NVME_DNR;
 }
 
+/*
+ * Wait, with zone_lock held, until the writes admitted to @zone, or to every
+ * zone when @zone is NULL, are finalized. Admission moves the write pointer
+ * and finalization moves the descriptor's, with the lock released between
+ * them for the data copy; a Reset or Finish in that gap left the two apart
+ * and let a reset zone take the old data back. Waiting puts the command after
+ * those writes, one order the host could have seen. The writer copies on its
+ * own poller and needs nothing this one holds, so the wait ends.
+ */
+static void zns_drain_writes(NvmeNamespace *ns, NvmeZone *zone)
+{
+    struct zns_ssd *zns = ns->zns;
+    bool waited = false;
+
+    zns->draining++;
+    while (zone ? zone->inflight : zns->inflight_total) {
+        if (!waited) {
+            /* qtest: a test waits on this to see the drain begin */
+            qatomic_inc(&ns->ctrl->test_zone_draining);
+            waited = true;
+        }
+        qemu_cond_wait(&zns->zone_cond, &zns->zone_lock);
+    }
+    if (waited) {
+        qatomic_dec(&ns->ctrl->test_zone_draining);
+    }
+    if (!--zns->draining) {
+        qemu_cond_broadcast(&zns->zone_cond);
+    }
+}
+
 static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
@@ -1656,6 +1699,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     }
 
     zone = &ns->zone_array[zone_idx];
+    zns_drain_writes(ns, all ? NULL : zone);
     /*
      * An explicit ZRWA flush names a boundary inside the zone; every other
      * action addresses its zone by the zone's start LBA.
@@ -2263,6 +2307,7 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
 
     ns->zns = id_zns;
     qemu_mutex_init(&id_zns->zone_lock);
+    qemu_cond_init(&id_zns->zone_cond);
 }
 
 static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
