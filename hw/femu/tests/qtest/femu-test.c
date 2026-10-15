@@ -32609,6 +32609,11 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
       "csd_slm_size=4,csd_cp=on", FEMU_ONCS_DEFAULT, true },
     { "caps-csd-no-csd-ns", "femu_mode=4,fdm_size=16,namespace_modes=nossd",
       FEMU_ONCS_DEFAULT, true },
+    { "caps-csd-cpslm-fdp", "femu_mode=4,fdm_size=16,csd_slm_size=4,"
+      "csd_cp=on,subsys=fdpsub," FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true },
+    { "caps-csd-slm-endgrp", "femu_mode=4,fdm_size=16,csd_slm_size=4,"
+      "subsys=nssub," FEMU_CAPS_GEO, FEMU_ONCS_DEFAULT, true,
+      femu_ns_subsys_before },
     { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_OCSSD, true },
     { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_OCSSD, true },
     { "caps-mixed", "femu_mode=1,namespaces=3,"
@@ -35190,6 +35195,118 @@ static void femu_test_cps_default(void *obj, void *data,
 
     guest_free(alloc, buf);
     femu_cps_disable(&c);
+}
+
+/*
+ * The memory and compute namespaces belong to no endurance group (SLM 1.2
+ * 2.1.2, CP 1.2 2.1.1). In a subsystem they report ENDGID 0, and the
+ * block namespace reports group 1. The Reachability Group stays 1. With
+ * FDP on (data set), a Write placed through handle 1 uses that handle.
+ */
+static void femu_test_cps_subsys(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool fdp = data != NULL;
+    FemuCtrlState c = { 0 };
+    uint64_t ruamw0 = 0, ruamw1 = 0;
+    uint64_t buf, page, list;
+    uint8_t r[8];
+
+    femu_cps_enable(&c, femu, alloc);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    list = guest_alloc(alloc, 4096);
+
+    for (uint32_t nsid = 1; nsid <= 3; nsid++) {
+        g_assert_cmphex(femu_identify(&c, nsid, 0x08, 0, buf), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readw(qts, buf + 12), ==, nsid == 1);
+        g_assert_cmpuint(qtest_readw(qts, buf + 16), ==, 0);   /* NVMSETID */
+        g_assert_cmpuint(qtest_readl(qts, buf + 20), ==, 1);   /* RGRPID */
+    }
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 134), ==, 0x3);      /* CRCAP */
+    g_assert_cmpuint(qtest_readw(qts, buf + 340), ==, 1);      /* ENDGIDMAX */
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & (1 << 19), ==,
+                    fdp ? 1 << 19 : 0);                         /* FDPS */
+
+    /*
+     * A placed Write lands in its own handle: handle 1 loses one page of
+     * writable space and handle 0 keeps its own. The page reads back.
+     */
+    qtest_memset(qts, page, 0x5c, 4096);
+    if (fdp) {
+        ruamw0 = femu_ruh_ruamw(&c, buf, 0);
+        ruamw1 = femu_ruh_ruamw(&c, buf, 1);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 3, 1, page, list,
+                                                    fdp ? 1 : -1)), ==,
+                    NVME_SUCCESS);
+    if (fdp) {
+        g_assert_cmpuint(femu_ruh_ruamw(&c, buf, 0), ==, ruamw0);
+        g_assert_cmpuint(femu_ruh_ruamw(&c, buf, 1), ==, ruamw1 - 8);
+    }
+    qtest_memset(qts, page, 0, 4096);
+    g_assert_cmphex(femu_read_pages(&c, 3, 1, page, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, page + 4095), ==, 0x5c);
+
+    /* the memory namespace still works next to the endurance group */
+    femu_cps_put(&c, 0x40, (const uint8_t *)"subsys!", 8, buf);
+    femu_cps_get(&c, 0x40, r, 8, buf);
+    g_assert_cmpmem(r, 8, "subsys!", 8);
+
+    guest_free(alloc, list);
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_cps_disable(&c);
+}
+
+#define FEMU_CPS_SUB_GEO \
+    "'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25," \
+    "'pls_per_lun':1,'luns_per_ch':2,'nchs':2"
+
+/*
+ * Reachability Reporting on one controller of a subsystem needs it on every
+ * controller (Base 2.3 8.1.21). Only a CSD controller with a memory
+ * namespace has it. nssub has FDP and Streams off, so only that rule can
+ * refuse here. data set: the CSD controller is already in nssub.
+ */
+static void femu_test_cps_subsys_single(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+
+    if (data) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'cps-second','addr':'5',"
+                        "'devsz_mb':1,'femu_mode':1," FEMU_CPS_SUB_GEO ","
+                        "'subsys':'nssub'}}");
+    } else {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'cps-second','addr':'5',"
+                        "'devsz_mb':1,'femu_mode':4,'fdm_size':16,"
+                        "'csd_slm_size':4," FEMU_CPS_SUB_GEO ","
+                        "'subsys':'nssub'}}");
+    }
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"), "csd_slm_size"));
+    qobject_unref(rsp);
+
+    /* the refused controller left no slot behind */
+    if (!data) {
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'cps-third','addr':'6',"
+                        "'devsz_mb':1,'femu_mode':1," FEMU_CPS_SUB_GEO ","
+                        "'subsys':'nssub'}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
 }
 
 /* Identify, the reachability logs and the per-set logs */
@@ -40301,6 +40418,29 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = g_strdup_printf(
             FEMU_CPS_OPTS ",csf_runtime_scale=100,csd_program_dir=%s",
             femu_cps_dir),
+    });
+    qos_add_test("csd-cp-subsys-fdp", "femu", femu_test_cps_subsys,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_CPS_OPTS ",subsys=fdpsub",
+        .arg = (void *)1,
+    });
+    qos_add_test("csd-cp-subsys-endgrp", "femu", femu_test_cps_subsys,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_CPS_OPTS ",subsys=nssub",
+        .before = femu_ns_subsys_before,
+    });
+    qos_add_test("csd-slm-subsys-single", "femu",
+                 femu_test_cps_subsys_single,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=4,fdm_size=16,csd_slm_size=4,subsys=nssub",
+        .before = femu_ns_subsys_before,
+        .arg = (void *)1,
+    });
+    qos_add_test("csd-slm-subsys-joins", "femu", femu_test_cps_subsys_single,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=nssub," FEMU_CAPS_GEO,
+        .before = femu_ns_subsys_before,
     });
     qos_add_test("csd-cp-mdts", "femu", femu_test_cps_mdts,
                  &(QOSGraphTestOptions) {

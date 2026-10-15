@@ -553,8 +553,8 @@ bbssd FTL, so sections 5 to 9 apply.
 | `csd_cp` | bool | needs `csd_slm_size` | adds a compute namespace (CP 1.2) |
 | `csd_legacy_opcodes` | bool | needs a CSD namespace | old CEMU admin opcodes 21h to 25h instead of C5h to CDh |
 
-`csd_slm_size` and `csd_cp` refuse `ns_mgmt`, `subsys`, `power_loss` and a
-CXL link. Guide: [CP and SLM](../features/cp-slm.md).
+`csd_slm_size` and `csd_cp` refuse `ns_mgmt`, `power_loss` and a CXL link.
+With `subsys`, the controller must be the only one in its subsystem. Guide: [CP and SLM](../features/cp-slm.md).
 
 ### KV
 

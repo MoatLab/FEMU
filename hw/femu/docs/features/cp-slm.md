@@ -20,6 +20,10 @@ The CEMU commands stay on and keep their opcodes when the new sets are on.
   when the controller reports more than one command set.
 - Linux and nvme-cli have no CP or SLM support. Send the commands through
   NVMe passthrough (`nvme io-passthru`, `nvme admin-passthru`).
+- A `femu-subsys`, with or without FDP, works when the controller is its
+  only controller. The block namespace is in endurance group 1. The memory
+  and compute namespaces report ENDGID 0, because SLM 1.2 2.1.2 and CP 1.2
+  2.1.1 keep them out of every endurance group.
 - Downloaded programs need `csd_program_dir`, as in
   [CSD mode](../modes/csd.md#security-programs-run-inside-qemu-on-the-host).
 
@@ -161,7 +165,8 @@ Log pages: [log pages and counters](../reference/log-pages-and-counters.md#compu
 | `csd_slm_size and csd_cp need a CSD namespace` | No namespace runs CSD. |
 | `csd_cp needs a memory namespace: set csd_slm_size` | `csd_cp=on` alone. |
 | `csd_slm_size must be at most 1024 MiB` | Too large. |
-| `csd_slm_size and csd_cp cannot be used with ns_mgmt, subsys, power_loss or a CXL link` | Reachability is reported for one controller only. FDP needs a subsystem, so FDP is refused too. |
+| `csd_slm_size and csd_cp cannot be used with ns_mgmt, power_loss or a CXL link` | The added namespaces have no place in a managed or shared namespace table. |
+| `a subsystem with csd_slm_size takes a single controller` | A second controller joins the subsystem of a controller with a memory namespace, or the reverse. Base 2.3 8.1.21 needs Reachability Reporting on every controller of the subsystem, and only this controller has it. |
 | `CSD: cannot allocate csd_slm_size` | The host has no memory for it. |
 
 Where FEMU differs from the specifications:

@@ -64,13 +64,14 @@ int femu_csd_check_namespaces(FemuCtrl *n, int n_csd, Error **errp)
         return 1;
     }
     /*
-     * Reachability is reported for this controller alone, and the added
-     * namespaces have no place in a namespace table that is managed or
-     * shared, so neither a subsystem nor namespace management is offered.
+     * The added namespaces have no place in a namespace table that is
+     * managed or shared. A subsystem is fine. They belong to no endurance
+     * group (SLM 1.2 2.1.2, CP 1.2 2.1.1). nvme_init_subsys() keeps the
+     * controller alone in it, as Reachability Reporting needs.
      */
-    if (n->ns_mgmt || n->subsys || n->power_loss || n->cxl_dev) {
+    if (n->ns_mgmt || n->power_loss || n->cxl_dev) {
         error_setg(errp, "csd_slm_size and csd_cp cannot be used with "
-                   "ns_mgmt, subsys, power_loss or a CXL link");
+                   "ns_mgmt, power_loss or a CXL link");
         return 1;
     }
     if (n->num_namespaces + 1 + p->cp > NVME_MAX_NUM_NAMESPACES) {

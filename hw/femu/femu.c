@@ -509,6 +509,21 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
         }
     }
 
+    /*
+     * When one controller of a subsystem reports reachability, every one
+     * must (Base 2.3 8.1.21). Only a CSD controller with a memory namespace
+     * does, so it takes the subsystem alone.
+     */
+    for (cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+        FemuCtrl *other = n->subsys->ctrls[cntlid];
+
+        if (other && (CSD_SLM(n) || CSD_SLM(other))) {
+            error_setg(errp, "a subsystem with csd_slm_size takes a single "
+                       "controller");
+            return -1;
+        }
+    }
+
     /* Streams resources and frontiers belong to one controller. */
     for (cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
         FemuCtrl *other = n->subsys->ctrls[cntlid];
