@@ -694,6 +694,56 @@
             'valid-value-pages': 'uint64', 'versions': 'uint64' } }
 
 ##
+# @FemuKvPackInfo:
+#
+# Value packing of a key-value namespace: values whose record fits a
+# NAND page share pages through an open page in controller DRAM.
+#
+# @record-header-bytes: bytes a record takes beside its value
+#
+# @open-bytes: bytes the open page holds, dead records too
+#
+# @open-values: live values in the open page
+#
+# @packed-pages: packed pages that Stores and Flushes programmed
+#
+# @packed-values: values that Stores placed in a packed page
+#
+# @flash-pages: packed pages on flash that hold a live value
+#
+# @flash-live-bytes: live record bytes in those pages
+#
+# @pad-bytes: free bytes of the packed pages programmed, also by
+#     garbage collection
+#
+# @early-programs: open pages that durability programmed before they
+#     were full: Flush, a cleared volatile write cache, shutdown
+#
+# @dropped-pages: open pages dropped with no live value, with no
+#     program
+#
+# @buffer-reads: Retrieves the open page answered with no NAND read
+#
+# @gc-moved-values: packed values that garbage collection moved
+#
+# @gc-stale-values: packed values that garbage collection found
+#     stale (the LSM tree held a newer record) and released
+#
+# @host-bytes: value bytes of the Stores.  Programmed pages times the
+#     page size over this is the exact write amplification.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuKvPackInfo',
+  'data': { 'record-header-bytes': 'uint32', 'open-bytes': 'uint32',
+            'open-values': 'uint32', 'packed-pages': 'uint64',
+            'packed-values': 'uint64', 'flash-pages': 'uint64',
+            'flash-live-bytes': 'uint64', 'pad-bytes': 'uint64',
+            'early-programs': 'uint64', 'dropped-pages': 'uint64',
+            'buffer-reads': 'uint64', 'gc-moved-values': 'uint64',
+            'gc-stale-values': 'uint64', 'host-bytes': 'uint64' } }
+
+##
 # @FemuKvssdInfo:
 #
 # A key-value (kvssd) namespace.
@@ -702,10 +752,13 @@
 #
 # @lsm: the LSM-tree key index.  Present only with kv_index=lsm.
 #
+# @pack: value packing.  Present only with kv_pack=on, the default.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuKvssdInfo',
-  'data': { 'media': 'FemuMediaTiming', '*lsm': 'FemuKvLsmInfo' } }
+  'data': { 'media': 'FemuMediaTiming', '*lsm': 'FemuKvLsmInfo',
+            '*pack': 'FemuKvPackInfo' } }
 
 ##
 # @FemuBbssdInfo:
@@ -826,8 +879,9 @@
 # Blackbox (bbssd) namespaces, also with flexible data placement, and
 # zoned (znssd) namespaces are supported.  For a computational storage
 # (csd), key-value (kvssd) or OpenChannel (ocssd) namespace, the reply
-# has the NAND bus timing, and for a key-value namespace with
-# kv_index=lsm also the state of its LSM-tree index.  A selected
+# has the NAND bus timing.  A key-value namespace also has its value
+# packing (kv_pack=on), and with kv_index=lsm the state of its LSM-tree
+# index.  A selected
 # no-SSD (nossd) namespace, or one backed by a CXL SSD medium, makes
 # the command fail.  The
 # controller must be enabled when a blackbox namespace is selected.

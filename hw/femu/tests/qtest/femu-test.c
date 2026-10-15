@@ -4611,9 +4611,15 @@ static void femu_media_check(QDict *ns, const FemuMediaWant *w)
     g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, w->mode);
     md = qdict_get_qdict(ns, "media");
     g_assert_nonnull(md);
-    /* a media-only entry has nothing but its identity and the timing */
+    /*
+     * A media-only entry has nothing but its identity and the timing; a
+     * kvssd one also has its value packing, on by default.
+     */
     if (femu_media_only(w->mode)) {
-        g_assert_cmpuint(qdict_size(ns), ==, 3);
+        bool pack = !strcmp(w->mode, "kvssd");
+
+        g_assert_cmpint(qdict_haskey(ns, "pack"), ==, pack);
+        g_assert_cmpuint(qdict_size(ns), ==, 3 + pack);
     }
     g_assert_cmpint(qdict_get_bool(md, "staged-bus"), ==, w->staged);
     g_assert_cmpint(qdict_get_bool(md, "onfi-profile"), ==, w->onfi >= 0);
@@ -22349,7 +22355,9 @@ static void femu_test_kv_lsm_query(void *obj, void *data,
     if (!data) {
         ns = femu_query_ns(qts, "", &rsp);
         g_assert_false(qdict_haskey(ns, "lsm"));
-        g_assert_cmpuint(qdict_size(ns), ==, 3);
+        /* nsid, mode, media and the value packing */
+        g_assert_true(qdict_haskey(ns, "pack"));
+        g_assert_cmpuint(qdict_size(ns), ==, 4);
         qobject_unref(rsp);
         return;
     }
@@ -22645,6 +22653,82 @@ static void femu_test_kv_pack_flush_wait(void *obj, void *data,
     guest_free(alloc, raw);
 }
 
+/* the value packing member of namespace 1, or NULL with kv_pack=off */
+static int64_t femu_pack_stat(QTestState *qts, const char *name)
+{
+    QDict *rsp;
+    QDict *pack = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "pack");
+    int64_t v;
+
+    g_assert_nonnull(pack);
+    v = qdict_get_int(pack, name);
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * query-femu reports value packing. 40 values of 100 bytes: 31 records of
+ * 132 bytes fill the first page, which goes to flash with the 31st Store,
+ * and 9 wait in the open page. A Retrieve of
+ * an open value reads no NAND, and a Flush (vwc=1) programs the open page
+ * before it is full. With kv_pack=off the member is absent.
+ */
+static void femu_test_kv_pack_query(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw;
+    uint64_t buf;
+    QDict *rsp;
+    NvmeCmd flush;
+
+    if (!data) {
+        g_assert_false(qdict_haskey(femu_query_ns(qts, "", &rsp), "pack"));
+        qobject_unref(rsp);
+        return;
+    }
+    raw = guest_alloc(alloc, 4 * 4096);
+    buf = (raw + 4095) & ~4095ULL;
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_pack_stat(qts, "record-header-bytes"), ==, 32);
+    for (int i = 0; i < 40; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 100, 0), ==, NVME_SUCCESS);
+        /* the 31st record fills the page: it goes to flash at once */
+        if (i == 30) {
+            g_assert_cmpint(femu_pack_stat(qts, "packed-pages"), ==, 1);
+            g_assert_cmpint(femu_pack_stat(qts, "open-values"), ==, 0);
+            g_assert_cmpint(femu_pack_stat(qts, "early-programs"), ==, 0);
+        }
+    }
+    g_assert_cmpint(femu_pack_stat(qts, "packed-pages"), ==, 1);
+    g_assert_cmpint(femu_pack_stat(qts, "packed-values"), ==, 40);
+    g_assert_cmpint(femu_pack_stat(qts, "open-values"), ==, 9);
+    g_assert_cmpint(femu_pack_stat(qts, "open-bytes"), ==, 9 * 132);
+    g_assert_cmpint(femu_pack_stat(qts, "flash-pages"), ==, 1);
+    g_assert_cmpint(femu_pack_stat(qts, "flash-live-bytes"), ==, 31 * 132);
+    g_assert_cmpint(femu_pack_stat(qts, "pad-bytes"), ==, 4096 - 31 * 132);
+    g_assert_cmpint(femu_pack_stat(qts, "host-bytes"), ==, 4000);
+    g_assert_cmphex(femu_lsm_check(&c, 39, buf, 100, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pack_stat(qts, "buffer-reads"), ==, 1);
+
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+                                             false, 0, 1, NULL)), ==,
+                    NVME_SUCCESS);
+    memset(&flush, 0, sizeof(flush));
+    flush.opcode = NVME_CMD_FLUSH;
+    flush.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &flush)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pack_stat(qts, "packed-pages"), ==, 2);
+    g_assert_cmpint(femu_pack_stat(qts, "early-programs"), ==, 1);
+    g_assert_cmpint(femu_pack_stat(qts, "open-values"), ==, 0);
+    g_assert_cmpint(femu_pack_stat(qts, "flash-pages"), ==, 2);
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
 /* the time of one Retrieve of @i, in us */
 static int64_t femu_kv_pack_read_us(FemuCtrlState *c, uint64_t i,
                                     uint64_t buf)
@@ -22736,6 +22820,18 @@ static void femu_test_kv_pack_gc(void *obj, void *data,
     nand = femu_c0h_field(&c, log, FEMU_C0H_NAND);
     host = femu_c0h_field(&c, log, FEMU_C0H_HOST);
     if (data) {
+        QDict *rsp;
+        QDict *pack = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "pack");
+
+        g_test_message("GC: %" PRId64 " values moved, %" PRId64
+                       " stale released; %" PRId64 " keys reinserted",
+                       qdict_get_int(pack, "gc-moved-values"),
+                       qdict_get_int(pack, "gc-stale-values"),
+                       femu_lsm_stat(qts, "reinserted-keys"));
+        /* moved packed values whose records are on flash go back */
+        g_assert_cmpint(qdict_get_int(pack, "gc-moved-values"), >, 0);
+        g_assert_cmpint(femu_lsm_stat(qts, "reinserted-keys"), >, 0);
+        qobject_unref(rsp);
         nand -= femu_lsm_stat(qts, "compaction-program-pages");
     }
     g_test_message("%" PRIu64 " stores: host %" PRIu64 " value %" PRIu64
@@ -22755,6 +22851,50 @@ static void femu_test_kv_pack_gc(void *obj, void *data,
     }
     femu_disable(&c);
     guest_free(alloc, log);
+    guest_free(alloc, raw);
+}
+
+/*
+ * Stale packed versions with the LSM tree. 1400 keys of 990 bytes take
+ * 350 pages, then two rewrites of every key need more than the 1024
+ * pages of the device. The index of this namespace takes 1537 keys. A rewrite leaves the old version on flash until a
+ * merge drops its record, so GC checks each packed value against the
+ * tree (PinK, section 4.5) and releases the stale ones in place, with no
+ * move. Every key reads back as its last version.
+ */
+#define FEMU_KV_PACK_KEYS   1400
+
+static void femu_test_kv_pack_lsm_stale(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 4 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t stale;
+    int64_t moved;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int v = 0; v < 3; v++) {
+        for (int k = 0; k < FEMU_KV_PACK_KEYS; k++) {
+            g_assert_cmphex(femu_lsm_store(&c, k, buf, FEMU_KV_PACK_LEN, v),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    stale = femu_pack_stat(qts, "gc-stale-values");
+    moved = femu_pack_stat(qts, "gc-moved-values");
+    g_test_message("GC: %" PRId64 " values moved, %" PRId64 " stale "
+                   "released, %" PRId64 " keys reinserted", moved, stale,
+                   femu_lsm_stat(qts, "reinserted-keys"));
+    g_assert_cmpint(stale, >, 0);
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), >, 0);
+    for (int k = 0; k < FEMU_KV_PACK_KEYS; k++) {
+        g_assert_cmphex(femu_lsm_check(&c, k, buf, FEMU_KV_PACK_LEN, 2), ==,
+                        NVME_SUCCESS);
+    }
+    femu_disable(&c);
     guest_free(alloc, raw);
 }
 
@@ -42021,6 +42161,26 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=2,pg_wr_lat=200000000,pg_rd_lat=1000,blk_er_lat=1000,"
             "vwc=1"
+    });
+    qos_add_test("kv-pack-query", "femu", femu_test_kv_pack_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,vwc=1",
+        .arg = (void *)1,
+    });
+    qos_add_test("kv-pack-query-off", "femu", femu_test_kv_pack_query,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=16,femu_mode=5,kv_pack=off"
+    });
+    qos_add_test("kv-pack-lsm-stale", "femu", femu_test_kv_pack_lsm_stale,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=4,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
     });
     qos_add_test("kv-pack-read-time", "femu", femu_test_kv_pack_read_time,
                  &(QOSGraphTestOptions) {

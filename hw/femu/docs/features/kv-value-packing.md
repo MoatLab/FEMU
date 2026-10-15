@@ -150,7 +150,11 @@ changes only the NAND load, the space and the counters.
 | C0h WAF | programmed pages over host pages |
 
 The host page count rounds down. Thus the WAF is exact only after many
-pages.
+pages. The `pack` member of
+[`query-femu`](../reference/query-femu.md#kv-value-packing) gives the
+host bytes for an exact ratio, and the open page, pad bytes and GC
+moves. `femu-stat.py` prints them with their change since the sample
+before.
 
 ## Properties
 

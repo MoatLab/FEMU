@@ -207,6 +207,27 @@ typedef struct FemuKvLsmSnap {
 /* fill @snap and return true when @s runs the LSM index */
 bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap);
 
+/* A copy of the value packing state, for query-femu */
+typedef struct FemuKvPackSnap {
+    uint32_t header_bytes;
+    uint32_t open_bytes;
+    uint32_t open_values;
+    uint64_t pages;
+    uint64_t values;
+    uint64_t flash_pages;              /* packed pages that hold a live value */
+    uint64_t flash_live_bytes;         /* their live records */
+    uint64_t pad_bytes;
+    uint64_t early;
+    uint64_t dropped;
+    uint64_t buf_reads;
+    uint64_t gc_moved;
+    uint64_t gc_stale;
+    uint64_t host_bytes;
+} FemuKvPackSnap;
+
+/* fill @snap and return true when @s packs values */
+bool kvssd_ftl_pack_snap(FemuKvssdState *s, FemuKvPackSnap *snap);
+
 /* --- durability of the open page --- */
 uint16_t kvssd_ftl_flush(FemuKvssdState *s, NvmeRequest *req);
 /* Flush on a KV namespace with the volatile write cache enabled */

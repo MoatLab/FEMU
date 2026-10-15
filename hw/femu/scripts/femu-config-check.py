@@ -418,6 +418,12 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
                     "pinned-levels": lsm.get("pinned-levels"),
                     "records-per-page": lsm.get("records-per-page"),
                     "levels": len(lsm.get("levels", []))}
+            if "media" in ns and ns.get("mode") == "kvssd":
+                # kv_pack=off leaves the member out
+                entry["kv-pack"] = {
+                    "on": "pack" in ns,
+                    "record-header-bytes":
+                        ns.get("pack", {}).get("record-header-bytes")}
             entry.update(derive(ns, ident))
             namespaces.append(entry)
         shared_op(namespaces)
@@ -524,6 +530,12 @@ def report_text(code: int, r: Dict[str, Any]) -> str:
                     f"{ki['size-ratio']}, {ki['pinned-levels']} pinned "
                     f"levels, {ki['records-per-page']} records a meta page, "
                     f"{ki['levels']} levels now")
+            kp = ns.get("kv-pack")
+            if kp:
+                lines.append(
+                    pad + "KV value packing: " + (
+                        f"on, {kp['record-header-bytes']} byte record header"
+                        if kp["on"] else "off, whole pages for each value"))
             if ns.get("media"):
                 lines.append(pad + "media: " + stat.media_text(ns["media"]))
             for key in ("query-error", "identify-error"):
@@ -664,6 +676,18 @@ def self_test(qemu: str) -> int:
             code == 0 and ns.get("command-set") == "key-value"
             and ns.get("capacity-bytes", 0) > 0 and "media" in ns
             and "kv-index" not in ns, json.dumps(r)[:600])
+    t.check("kvssd: value packing on by default",
+            ns.get("kv-pack", {}).get("on") is True
+            and "KV value packing: on, 32 byte" in report_text(code, r),
+            json.dumps(r)[:600])
+
+    code, r = check(qemu, ["-device", "femu,femu_mode=5,devsz_mb=64,"
+                           "kv_pack=off"])
+    ns = ns1(r)
+    t.check("kvssd with kv_pack=off: whole pages",
+            code == 0 and ns.get("kv-pack", {}).get("on") is False
+            and "KV value packing: off" in report_text(code, r),
+            json.dumps(r)[:600])
 
     code, r = check(qemu, ["-device", "femu,femu_mode=5,devsz_mb=64,"
                            "kv_index=lsm,kv_lsm_size_ratio=4"])

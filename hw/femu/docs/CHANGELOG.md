@@ -63,6 +63,7 @@ listed one by one.
 - Opt-in KV workload-mix timing (`kv_timing=model`): Store and Retrieve take their time from the Samsung KVSSD emulator fit over the last 16 of them, or from coefficients in `kv_model_coeffs`. A device with no KV namespace refuses both.
 - Opt-in LSM-tree key index for KV namespaces (`kv_index=lsm`), after PinK (ATC '20): a DRAM memtable, levels by `kv_lsm_size_ratio`, `kv_lsm_pinned_levels` held in DRAM. Lookups read a meta page per unpinned level, and merges load the NAND in the background. Value GC puts moved keys back in the memtable, and List returns keys in byte order. The default hash index is unchanged. LSM knobs without `kv_index=lsm`, and `kv_index=lsm` with no KV namespace, are refused.
 - `query-femu` reports the LSM-tree key index of a KV namespace with `kv_index=lsm` in an `lsm` member: the memtable, each level, merges and meta page I/O. `femu-stat.py` and `femu-config-check.py` show it.
+- `query-femu` reports KV value packing in a `pack` member: the open page, packed pages, pad bytes, GC moves of values and the host bytes. `femu-stat.py` prints it, and `femu-config-check.py` shows whether packing is on.
 
 #### Namespaces
 

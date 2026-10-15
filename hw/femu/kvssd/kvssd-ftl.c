@@ -3556,6 +3556,40 @@ bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap)
     return true;
 }
 
+bool kvssd_ftl_pack_snap(FemuKvssdState *s, FemuKvPackSnap *snap)
+{
+    GHashTableIter it;
+    gpointer k, v;
+
+    memset(snap, 0, sizeof(*snap));
+    qemu_mutex_lock(&s->lock);
+    if (!s->pack) {
+        qemu_mutex_unlock(&s->lock);
+        return false;
+    }
+    snap->header_bytes = KV_PACK_HDR;
+    if (s->open) {
+        snap->open_bytes = s->open->fill;
+        snap->open_values = s->open->live;
+    }
+    snap->pages = s->pack_pages;
+    snap->values = s->pack_values;
+    g_hash_table_iter_init(&it, s->packed);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        snap->flash_pages++;
+        snap->flash_live_bytes += ((KvPackPage *)v)->live_bytes;
+    }
+    snap->pad_bytes = s->pack_pad_bytes;
+    snap->early = s->pack_early;
+    snap->dropped = s->pack_dropped;
+    snap->buf_reads = s->pack_buf_reads;
+    snap->gc_moved = s->gc_moved_values;
+    snap->gc_stale = s->gc_stale_values;
+    snap->host_bytes = s->host_bytes;
+    qemu_mutex_unlock(&s->lock);
+    return true;
+}
+
 void kvssd_ftl_free(FemuKvssdState *s)
 {
     if (!s) {

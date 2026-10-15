@@ -390,6 +390,9 @@ def namespace_report(ns: Dict[str, Any], prev: Optional[Dict[str, Any]],
         out["media"] = media_summary(ns["media"])
     if isinstance(ns.get("lsm"), dict):
         out["lsm"] = lsm_report(ns["lsm"], prev.get("lsm") if prev else None)
+    if isinstance(ns.get("pack"), dict):
+        out["pack"] = pack_report(ns["pack"],
+                                  prev.get("pack") if prev else None)
     other = {k: v for k, v in ns.items()
              if k not in ("nsid", "mode", "counters", "geometry",
                           "line-counts", "zone-counts", "fdp", "media",
@@ -470,6 +473,43 @@ def lsm_text(lsm: Dict[str, Any], pad: str) -> List[str]:
     cs = lsm.get("counters", {})
     if cs:
         lines.append(pad + "lsm counters: " + "  ".join(
+            f"{k} {c['total']}"
+            + (f" (+{c['interval']})" if c.get("interval") is not None
+               else "") for k, c in cs.items()))
+    return lines
+
+
+PACK_COUNTERS = ("packed-pages", "packed-values", "pad-bytes",
+                 "early-programs", "dropped-pages", "buffer-reads",
+                 "gc-moved-values", "gc-stale-values", "host-bytes")
+
+
+def pack_report(pack: Dict[str, Any],
+                prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The value packing of a kvssd namespace: the open page and the
+    packed pages now, and each counter with its change since the sample
+    before."""
+    out = {k: v for k, v in pack.items() if k not in PACK_COUNTERS}
+    counters = {}
+    for k in PACK_COUNTERS:
+        if k not in pack:
+            continue
+        old = prev.get(k) if prev and FAULT != "pack-no-prev" else None
+        d = pack[k] - old if old is not None and pack[k] >= old else None
+        counters[k] = {"total": pack[k], "interval": d}
+    out["counters"] = counters
+    return out
+
+
+def pack_text(pack: Dict[str, Any], pad: str) -> List[str]:
+    lines = [pad + f"pack: open page {pack.get('open-values')} values "
+             f"{fmt_bytes(pack.get('open-bytes'))}, flash "
+             f"{pack.get('flash-pages')} pages "
+             f"{fmt_bytes(pack.get('flash-live-bytes'))} live, header "
+             f"{pack.get('record-header-bytes')} B"]
+    cs = pack.get("counters", {})
+    if cs:
+        lines.append(pad + "pack counters: " + "  ".join(
             f"{k} {c['total']}"
             + (f" (+{c['interval']})" if c.get("interval") is not None
                else "") for k, c in cs.items()))
@@ -634,6 +674,8 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
             f"{k} {v}" for k, v in ns["other"].items()))
     if ns.get("lsm"):
         lines += lsm_text(ns["lsm"], pad)
+    if ns.get("pack"):
+        lines += pack_text(ns["pack"], pad)
     if ns.get("media"):
         lines.append(pad + "media: " + media_text(ns["media"]))
     return lines
@@ -1370,9 +1412,11 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
                               sampler.sample(), s1), 2),
                               "host-write-pages", "total") == 16)
             elif name == "kvssd":
-                t.check("kvssd: media timing only",
+                t.check("kvssd: media timing and value packing",
                         "media" in ns and "counters" not in ns
-                        and "lsm" not in ns and "media: bus" in text, text)
+                        and "lsm" not in ns and "media: bus" in text
+                        and ns.get("pack", {}).get("record-header-bytes")
+                        == 32 and "pack: open page 0 values" in text, text)
             elif name == "kvssd-lsm":
                 t.check("kvssd with kv_index=lsm: the index line",
                         ns.get("lsm", {}).get("memtable-capacity") == 16
@@ -1430,6 +1474,23 @@ def selftest_synthetic(t: SelfTest) -> None:
                 and "lsm: memtable 3/16" in ltext)
     t.check("kv_index=lsm: levels and counter intervals shown", lsm_ok())
     t.control("lsm counter interval", "lsm-no-prev", lsm_ok)
+    pk0 = {"nsid": 1, "mode": "kvssd",
+           "pack": {"record-header-bytes": 32, "open-bytes": 264,
+                    "open-values": 2, "flash-pages": 3,
+                    "flash-live-bytes": 9000, "packed-pages": 3,
+                    "host-bytes": 9500}}
+    pk1 = json.loads(json.dumps(pk0))
+    pk1["pack"].update({"packed-pages": 5, "host-bytes": 16000})
+    def pack_ok() -> bool:
+        prep = build_report(dev(pk1, mono=2.0), dev(pk0))
+        ptext = report_text(prep, "synthetic")
+        pc = one_ns(prep)["pack"]["counters"]
+        return (pc["packed-pages"]["interval"] == 2
+                and pc["host-bytes"]["interval"] == 6500
+                and "pack: open page 2 values" in ptext
+                and "packed-pages 5 (+2)" in ptext)
+    t.check("kv_pack: open page and counter intervals shown", pack_ok())
+    t.control("pack counter interval", "pack-no-prev", pack_ok)
     reset = build_report(dev(ns0, mono=4.0), dev(ns1, mono=2.0))
     t.check("counters that go down start a new baseline",
             one_ns(reset).get("baseline") == "reset"

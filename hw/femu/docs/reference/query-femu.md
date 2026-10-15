@@ -269,7 +269,8 @@ command takes comes from the model instead.
 
 A `kvssd` entry has an `lsm` member when the device runs `kv_index=lsm`
 ([LSM-tree key index](../features/kv-lsm-index.md)). With the hash index
-the entry keeps its three members: `nsid`, `mode` and `media`.
+the entry has no `lsm` member. Its other members are `nsid`, `mode`,
+`media` and, with value packing on, `pack`.
 
 | Member | Meaning |
 | --- | --- |
@@ -304,6 +305,37 @@ with each other. It needs no enabled controller.
         "compaction-read-pages": 6, "compaction-program-pages": 5,
         "gc-read-pages": 0, "gc-meta-pages": 0, "gc-stale-value-pages": 0,
         "valid-value-pages": 180, "versions": 180}
+```
+
+### KV value packing
+
+A `kvssd` entry has a `pack` member with `kv_pack=on`, the default
+([KV value packing](../features/kv-value-packing.md)). With
+`kv_pack=off` the member is absent.
+
+| Member | Meaning |
+| --- | --- |
+| `record-header-bytes` | bytes a record takes beside its value (32) |
+| `open-bytes`, `open-values` | bytes the open page holds, dead records too, and its live values |
+| `packed-pages`, `packed-values` | packed pages that Stores and Flushes programmed; values Stores placed in a packed page |
+| `flash-pages`, `flash-live-bytes` | packed pages on flash that hold a live value, and their live record bytes |
+| `pad-bytes` | free bytes of the packed pages programmed, also by GC |
+| `early-programs` | open pages that Flush, a cleared WCE or shutdown programmed before they were full |
+| `dropped-pages` | open pages dropped with no live value and no program |
+| `buffer-reads` | Retrieves that the open page answered with no NAND read |
+| `gc-moved-values`, `gc-stale-values` | packed values that value GC moved, and the stale ones it released with no move (LSM index) |
+| `host-bytes` | value bytes of the Stores |
+
+For the exact write amplification, take the programmed bytes over
+`host-bytes`. Log C0h rounds the host side down to whole pages. The command copies the members under the lock of the
+namespace. It needs no enabled controller.
+
+```json
+"pack": {"record-header-bytes": 32, "open-bytes": 1188, "open-values": 9,
+         "packed-pages": 1, "packed-values": 40, "flash-pages": 1,
+         "flash-live-bytes": 4092, "pad-bytes": 4, "early-programs": 0,
+         "dropped-pages": 0, "buffer-reads": 1, "gc-moved-values": 0,
+         "gc-stale-values": 0, "host-bytes": 4000}
 ```
 
 ## Example

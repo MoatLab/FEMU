@@ -137,6 +137,8 @@ typedef struct FemuQuerySel {
     NandMediaPhases media;
     bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
     FemuKvLsmSnap lsm;
+    bool has_pack;              /* a kvssd namespace with kv_pack=on */
+    FemuKvPackSnap pack;
 } FemuQuerySel;
 
 /*
@@ -194,6 +196,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
         sel->media_only = true;
         if (NS_KVSSD(ns) && ns->ext_ops.state) {
             sel->has_lsm = kvssd_ftl_lsm_snap(ns->ext_ops.state, &sel->lsm);
+            sel->has_pack = kvssd_ftl_pack_snap(ns->ext_ops.state,
+                                                &sel->pack);
         }
         return true;
     }
@@ -561,6 +565,27 @@ static FemuKvLsmInfo *femu_query_lsm_info(const FemuKvLsmSnap *l)
     return info;
 }
 
+static FemuKvPackInfo *femu_query_pack_info(const FemuKvPackSnap *p)
+{
+    FemuKvPackInfo *info = g_new0(FemuKvPackInfo, 1);
+
+    info->record_header_bytes = p->header_bytes;
+    info->open_bytes = p->open_bytes;
+    info->open_values = p->open_values;
+    info->packed_pages = p->pages;
+    info->packed_values = p->values;
+    info->flash_pages = p->flash_pages;
+    info->flash_live_bytes = p->flash_live_bytes;
+    info->pad_bytes = p->pad_bytes;
+    info->early_programs = p->early;
+    info->dropped_pages = p->dropped;
+    info->buffer_reads = p->buf_reads;
+    info->gc_moved_values = p->gc_moved;
+    info->gc_stale_values = p->gc_stale;
+    info->host_bytes = p->host_bytes;
+    return info;
+}
+
 static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
 {
     FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
@@ -576,6 +601,9 @@ static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
         ns_info->u.kvssd.media = mt;
         if (sel->has_lsm) {
             ns_info->u.kvssd.lsm = femu_query_lsm_info(&sel->lsm);
+        }
+        if (sel->has_pack) {
+            ns_info->u.kvssd.pack = femu_query_pack_info(&sel->pack);
         }
         break;
     case FEMU_MODE_OCSSD:
