@@ -22,6 +22,11 @@ For a guest you do not trust:
   which is a warning, not a failure.
 - Do not use CSD mode with `csd_program_dir`.
 - Keep `lsa-control` off on `femu-cxl-ssd`.
+- Do not put a FEMU controller behind a virtual IOMMU. Its pollers copy
+  guest memory without the BQL, but an IOMMU walk can take it: to report
+  a translation fault by MSI (AMD-Vi), or to read page tables the guest
+  put in device memory. If a controller reset holds the BQL meanwhile, the
+  VM hangs.
 
 ### CSD programs
 

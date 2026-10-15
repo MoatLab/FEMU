@@ -322,6 +322,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A QEMU NVMe read into `femu-cxl-ssd` memory no longer stops the QEMU main loop for the media time of the CXL pages it fills. The block layer completes such a read on the main loop, outside any re-entrancy guard, so the copy took the waiting path and slept up to the whole NAND backlog. Accesses from the main-loop thread now queue their media time as guarded device DMA does; an IOThread's copies, and those of other threads such as RCU's, which also hold the BQL, keep the full model.
 - An Open-Channel SSD no longer runs or advertises Dataset Management, Write Zeroes, Compare, Verify, Copy or Write Uncorrectable. Their common handlers used the sparse Open-Channel address as a flat LBA. The default `oncs` allowed Dataset Management, and a deallocate of a high address zeroed memory past the backing store and stopped QEMU. Flush is still accepted.
 - Many `femu-cxl-ssd` lifecycle, decoder and mapping fixes, including teardown while callers wait on invalidation, little-endian forwarding, and keeping stores when NAND has no page for write-back (9e0223c19, bb7e28722, 51c420143, d31c48d92, ec8b1ac7d, 02a872661, 4505cd9a7, 86ba15078, 842d4ff72, b322efb8f, 2d0c1404e).
+- Device threads copy guest memory through the translation they checked. A guest that mapped a ROM over a buffer between the check and the copy could make a poller wait for the BQL while a pause held it.
 
 #### Data correctness
 

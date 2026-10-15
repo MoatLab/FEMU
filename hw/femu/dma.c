@@ -25,32 +25,97 @@ bool nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len)
 /*
  * Pollers and the FTL thread copy guest data without the BQL, and an access
  * served by a device's handlers takes it. A pause holds the BQL while it waits
- * for those threads, so neither side would progress. Only memory the host can
- * reach directly qualifies: ROM refuses writes and a RAM device is served as
- * I/O, so both are refused along with registers, as a master abort would be.
+ * for those threads, so neither side would progress. Only RAM the host can
+ * reach directly qualifies: ROM refuses writes, and a ROM device or a RAM
+ * device is served as I/O, so they are refused along with registers, as a
+ * master abort would be.
+ *
+ * Each span is translated and checked once, before any is copied, and the
+ * copy uses those translations. So a refused transfer changes nothing, and a
+ * ROM the guest maps over the buffer in between is never dispatched to, as
+ * a second lookup by pci_dma_rw() could do.
  */
-static bool femu_dma_direct(FemuCtrl *n, dma_addr_t addr, dma_addr_t len,
-                            bool to_host)
+typedef struct FemuDmaSpan {
+    MemoryRegion *mr;
+    hwaddr xlat;
+    hwaddr len;
+} FemuDmaSpan;
+
+static MemTxResult femu_dma_direct(FemuCtrl *n, dma_addr_t addr, uint8_t *buf,
+                                   uint8_t c, dma_addr_t len, bool to_host)
 {
     AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    FemuDmaSpan local[4];
+    FemuDmaSpan *span = local;
+    size_t nr = 0;
+    size_t cap = ARRAY_SIZE(local);
+    MemTxResult ret = MEMTX_OK;
+    FlatView *fv;
+    size_t i;
 
     if (len && addr > UINT64_MAX - (len - 1)) {
-        return false;
+        return MEMTX_ACCESS_ERROR;
     }
+    /* as dma_memory_rw() does, order the copy after earlier accesses */
+    smp_mb();
     RCU_READ_LOCK_GUARD();
+    fv = address_space_to_flatview(as);
     while (len) {
         hwaddr xlat;
         hwaddr l = len;
-        MemoryRegion *mr = address_space_translate(as, addr, &xlat, &l,
-                                                   to_host, FEMU_DMA_ATTRS);
+        MemoryRegion *mr = flatview_translate(fv, addr, &xlat, &l, to_host,
+                                              FEMU_DMA_ATTRS);
 
-        if (!l || !memory_access_is_direct(mr, to_host, FEMU_DMA_ATTRS)) {
-            return false;
+        /* RAM only: a translation is clamped to its section only for RAM */
+        if (!l || !memory_region_is_ram(mr) ||
+            !memory_access_is_direct(mr, to_host, FEMU_DMA_ATTRS)) {
+            ret = MEMTX_ACCESS_ERROR;
+            goto out;
         }
+        if (nr == cap) {
+            FemuDmaSpan *more = g_new(FemuDmaSpan, cap * 2);
+
+            memcpy(more, span, nr * sizeof(*span));
+            if (span != local) {
+                g_free(span);
+            }
+            span = more;
+            cap *= 2;
+        }
+        span[nr++] = (FemuDmaSpan) { .mr = mr, .xlat = xlat, .len = l };
         addr += l;
         len -= l;
     }
-    return true;
+
+    for (i = 0; i < nr; i++) {
+        uint8_t *ram = qemu_map_ram_ptr(span[i].mr->ram_block, span[i].xlat);
+        hwaddr l = span[i].len;
+
+        if (!to_host) {
+            memcpy(buf, ram, l);
+        } else {
+            MemoryRegionCache dirty = {
+                .ptr = ram, .xlat = span[i].xlat, .is_write = true,
+                .mrs.mr = span[i].mr,
+            };
+
+            if (buf) {
+                memcpy(ram, buf, l);
+            } else {
+                memset(ram, c, l);
+            }
+            /* dirty logging and stale translated code, as a store does */
+            address_space_cache_invalidate(&dirty, 0, l);
+        }
+        if (buf) {
+            buf += l;
+        }
+    }
+out:
+    if (span != local) {
+        g_free(span);
+    }
+    return ret;
 }
 
 /* The CMB belongs to this device, so it is copied without dispatch. */
@@ -63,12 +128,7 @@ MemTxResult femu_dma_rw(FemuCtrl *n, dma_addr_t addr, void *buf,
         memcpy(to_host ? cmb : buf, to_host ? buf : cmb, len);
         return MEMTX_OK;
     }
-    if (!femu_dma_direct(n, addr, len, to_host)) {
-        return MEMTX_ACCESS_ERROR;
-    }
-    return pci_dma_rw(&n->parent_obj, addr, buf, len,
-                      to_host ? DMA_DIRECTION_FROM_DEVICE :
-                                DMA_DIRECTION_TO_DEVICE, FEMU_DMA_ATTRS);
+    return femu_dma_direct(n, addr, buf, 0, len, to_host);
 }
 
 MemTxResult femu_dma_set(FemuCtrl *n, dma_addr_t addr, uint8_t c,
@@ -78,11 +138,7 @@ MemTxResult femu_dma_set(FemuCtrl *n, dma_addr_t addr, uint8_t c,
         memset(&n->cmbuf[addr - n->ctrl_mem.addr], c, len);
         return MEMTX_OK;
     }
-    if (!femu_dma_direct(n, addr, len, true)) {
-        return MEMTX_ACCESS_ERROR;
-    }
-    return dma_memory_set(pci_get_address_space(&n->parent_obj), addr, c, len,
-                          FEMU_DMA_ATTRS);
+    return femu_dma_direct(n, addr, NULL, c, len, true);
 }
 
 MemTxResult nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
