@@ -16,7 +16,7 @@ DEVICES = [
         "title": "NVMe controller",
         "parent": "pci-device",
         "test_only": ["x-copy-held", "x-copy-hold", "x-fdp-check",
-                      "x-fdp-ns-mapped", "x-ftl-check",
+                      "x-fdp-ns-mapped", "x-ftl-check", "x-ftl-hold",
                       "x-ftl-trace", "x-ns-test", "x-oc12-clock",
                       "x-oc12-trace", "x-query-delay-ms", "x-range-waits",
                       "x-stream-test", "x-zone-lock-hold-ms"],

@@ -110,6 +110,7 @@ of these happens:
 | SMART temperature warning | the host has enabled it with Async Event Configuration and the reported temperature (`temperature`, in Kelvin, default 323, which is 50 C) is at or above the over threshold (default 343 K, the warning temperature WCTEMP) or at or below the under threshold (default 0); with the thermal model on, also when the modelled temperature crosses one | SMART / Health (02h) |
 | Error | the host writes a doorbell that does not exist, or a value past the end of its queue | Error Information (01h) |
 | Namespace Attribute Changed | with `ns_mgmt=on`, a namespace is attached, detached, deleted or formatted, and the host enabled the notice | Changed Namespace List (04h) |
+| SMART spare below threshold (02h), reliability (00h) | with `blk_pe_limit`: the spare falls below 20, the first block stays in service past its limit, or the media goes read-only; bit 0, 2 or 3 of Async Event Configuration enables each | SMART / Health (02h) |
 | Zone Descriptor Changed | an injected write fault (`err_write_fail_ppm`) made a ZNS zone read only, and the host enabled Zone Descriptor Changed notices (bit 27) | Changed Zone List (BFh) |
 
 An event of a given type is reported once and then held back until the
@@ -122,6 +123,27 @@ checks the temperature path from inside the guest:
 gcc -O2 -o aer-probe femu-scripts/aer-probe.c   # inside the guest
 sudo ./aer-probe /dev/nvme0
 ```
+
+## End of life
+
+With `blk_pe_limit` and `eol_read_only` (on by default), the media goes
+read-only when a worn-out block has no replacement. These fields then show
+it:
+
+| Where | Field | Value |
+| --- | --- | --- |
+| SMART / Health (02h) | Critical Warning bit 3 (All Media Read-Only) | 1 |
+| SMART / Health (02h) | Available Spare | 0 |
+| SMART / Health (02h) | Endurance Group Critical Warning Summary (byte 6) | bits 0, 2 and 3 of the endurance group's warning; needs a `femu-subsys` |
+| Endurance Group Information (09h) | Critical Warning bit 3 (Endurance Group Read-Only) | 1 |
+| Identify Namespace, CNS 00h byte 99 and CNS 08h byte 8 | NSATTR bit 0 (Currently Write Protected) | 1 |
+| Asynchronous event | SMART, information 00h (reliability), log page 02h | once, if bit 3 of Async Event Configuration is set |
+
+Writes fail with Attempted Write to Read Only Range (status 182h, DNR). The
+same holds for Write Zeroes, Write Uncorrectable, Copy and a deallocating
+Dataset Management. The NVM Identify Controller (CNS 06h, CSI 00h) reports
+WZSL in byte 1, equal to MDTS. ONCS bit 3 is clear, so WZSL is a hard
+limit.
 
 ## Thermal model
 

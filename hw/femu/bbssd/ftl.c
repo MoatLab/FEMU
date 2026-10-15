@@ -567,6 +567,12 @@ uint32_t ssd_eol_cost(struct ssd *ssd, uint64_t bytes)
     return MIN(DIV_ROUND_UP(bytes, page) + 1, ssd->eol_cap);
 }
 
+/* the media is read-only: the end of life (eol_read_only) */
+bool ssd_media_read_only(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->eol_word) & SSD_EOL_RO;
+}
+
 /* admitted write-class requests the FTL has not finished */
 uint32_t ssd_eol_requests(struct ssd *ssd)
 {
@@ -718,6 +724,10 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
     int left = start - lm->retired_line_cnt;
     int fewest = ssd->spare_lines;
 
+    /* the media went read-only because nothing could replace a block */
+    if (ssd->media_ro) {
+        return 0;
+    }
     if (ssd->spare_lines) {
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {

@@ -1179,7 +1179,8 @@ typedef struct NvmeSmartLog {
     uint8_t     available_spare;
     uint8_t     available_spare_threshold;
     uint8_t     percentage_used;
-    uint8_t     reserved1[26];
+    uint8_t     egcws;      /* Endurance Group Critical Warning Summary */
+    uint8_t     reserved1[25];
     uint64_t    data_units_read[2];
     uint64_t    data_units_written[2];
     uint64_t    host_read_commands[2];
@@ -1608,7 +1609,8 @@ typedef struct NvmeIdNs {
     uint16_t    mssrl;          /* Copy: blocks in one source range */
     uint32_t    mcl;            /* Copy: blocks in one command */
     uint8_t     msrc;           /* Copy: source ranges, 0's based */
-    uint8_t     rsvd81[19];
+    uint8_t     rsvd81[18];
+    uint8_t     nsattr;         /* bit 0: Currently Write Protected */
     uint16_t    nvmsetid;
     uint16_t    endgid;
     uint8_t     nguid[16];
@@ -2675,6 +2677,8 @@ typedef struct FemuCtrl {
     struct FemuQueryReq *query_req;
     /* qtest only: ms query-femu waits after the copy before it replies */
     uint32_t        test_query_delay_ms;
+    /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
+    uint32_t        test_ftl_hold;
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /*
@@ -3177,6 +3181,8 @@ int nvme_register_kvssd(FemuCtrl *n);
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
 uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
+#define NVME_NSATTR_CWP 0x01
+
 /* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
 uint8_t ssd_available_spare(struct ssd *ssd);
 uint8_t ssd_percentage_used(struct ssd *ssd);
@@ -3213,6 +3219,7 @@ int ssd_eol_admit(struct ssd *ssd, uint32_t pages);
 void ssd_eol_release(struct ssd *ssd, uint32_t pages);
 uint32_t ssd_eol_cost(struct ssd *ssd, uint64_t bytes);
 uint32_t ssd_eol_requests(struct ssd *ssd);
+bool ssd_media_read_only(struct ssd *ssd);
 uint64_t femu_eol_max_bytes(FemuCtrl *n);
 uint32_t femu_copy_mcl(FemuCtrl *n);
 uint16_t femu_copy_mssrl(FemuCtrl *n);

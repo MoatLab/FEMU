@@ -362,6 +362,10 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
     struct write_pointer *wps[4 + ARRAY_SIZE(ssd->stream_wp)];
     int n = 0;
 
+    /* read-only media keeps its erased pages for the writes in flight */
+    if (ssd->media_ro) {
+        return;
+    }
     wps[n++] = &ssd->wp;
     wps[n++] = &ssd->hot_wp;
     wps[n++] = &ssd->stream_gc_wp;
@@ -1044,9 +1048,11 @@ bool femu_ftl_policy_known(const char *name)
  * block, pages and counts, so addresses do not change: the line keeps its id
  * and the worn-out block sits in the spare line, which never holds data. When
  * one plane has no spare left, no spare is spent on the others.
- * Returns true when the line was retired.
+ * Returns true when the line was retired, and sets *read_only when the
+ * media must go read-only (eol_read_only).
  */
-static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
+static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
+                              bool *read_only)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
@@ -1099,8 +1105,23 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
         }
         return false;
     }
-    retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&
-             lm->free_line_cnt >= 1;
+    if (ssd->eol_ro_mode) {
+        /*
+         * Read-only end of life: a block past its limit is never written
+         * again. With spare pools, a pool that cannot replace it means the
+         * spare is used up; without them, the over-provisioned lines are
+         * the spare, and a retirement that would cut into the namespace's
+         * lines means the same. Either way the media goes read-only and the
+         * line retires: it holds no data. Retiring with no free line at hand
+         * is safe here, since a write that then finds no line also ends the
+         * life of the media and finishes from the reserve.
+         */
+        *read_only = ssd->spare_lines || usable - 1 < ssd->wear_floor_lines;
+        retire = true;
+    } else {
+        retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&
+                 lm->free_line_cnt >= 1;
+    }
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -1145,6 +1166,62 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
     line->retired = true;
     lm->retired_line_cnt++;
     return true;
+}
+
+/*
+ * The end of life (eol_read_only): set the read-only bit in the admission
+ * word, after which no write is admitted, and give the reserve lines to the
+ * allocator. The writes admitted before hold no more pages than the reserve
+ * has, and collection, refresh, levelling, pacing and padding all stop, so
+ * they finish without another erase. Reads go on as before.
+ */
+void ssd_enter_read_only(struct ssd *ssd)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    uint8_t spare;
+    uint32_t bits = NVME_SMART_MEDIA_READ_ONLY;
+
+    if (!ssd->eol_ro_mode || ssd->media_ro) {
+        return;
+    }
+    spare = ssd_available_spare(ssd);
+    qatomic_or(&ssd->eol_word, 1ULL << 63);
+
+    qemu_mutex_lock(&ssd->wear_lock);
+    ssd->media_ro = true;
+    for (int i = 0; i < lm->tt_lines; i++) {
+        struct line *line = &lm->lines[i];
+
+        if (line->reserve) {
+            line->reserve = false;
+            QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
+            lm->free_line_cnt++;
+        }
+    }
+    qemu_mutex_unlock(&ssd->wear_lock);
+    /* the frontier may have run dry: take a reserve line */
+    ssd_out_of_lines(ssd);
+
+    /* read-only media reports no spare left */
+    if (spare >= NVME_SPARE_THRESHOLD) {
+        bits |= NVME_SMART_SPARE;
+    }
+    qatomic_or(&ssd->n->health_pending, bits);
+    qemu_bh_schedule(ssd->n->aer_bh);
+}
+
+/*
+ * The host write paths' test for a page to program. When collection cannot
+ * free a line for a write that has already changed data, the media cannot
+ * take more writes: with eol_read_only that is the end of life too, and the
+ * write finishes from the reserve rather than failing.
+ */
+bool ssd_host_out_of_lines(struct ssd *ssd)
+{
+    if (ssd_out_of_lines(ssd) && ssd->eol_ro_mode && !ssd->media_ro) {
+        ssd_enter_read_only(ssd);
+    }
+    return ssd_out_of_lines(ssd);
 }
 
 /*
@@ -1375,13 +1452,17 @@ static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
     if (ssd->wear_on) {
         uint8_t spare = ssd_available_spare(ssd);
         uint64_t overworn = ssd->overworn_blocks;
+        bool read_only = false;
         bool retired;
 
         qemu_mutex_lock(&ssd->wear_lock);
-        retired = ssd_wear_out_line(ssd, victim_line);
+        retired = ssd_wear_out_line(ssd, victim_line, &read_only);
         qemu_mutex_unlock(&ssd->wear_lock);
 
         ssd_wear_events(ssd, spare, overworn);
+        if (read_only) {
+            ssd_enter_read_only(ssd);
+        }
         if (retired) {
             return;
         }
@@ -1414,6 +1495,11 @@ int do_gc(struct ssd *ssd, bool force)
 {
     int free_lines = ssd->lm.free_line_cnt;
     struct line *victim_line;
+
+    /* read-only media erases nothing more: no progress, callers stop */
+    if (ssd->media_ro) {
+        return -1;
+    }
 
     /* a forced pass first finishes the line paced collection holds */
     if (ssd->pace_line) {
@@ -1486,7 +1572,7 @@ int do_read_reclaim(struct ssd *ssd)
     enum ssd_reclaim_why why;
     struct write_pointer *wpp;
 
-    if (!line) {
+    if (!line || ssd->media_ro) {
         return -1;
     }
 
@@ -1600,7 +1686,7 @@ int do_wear_level(struct ssd *ssd)
     uint64_t copied;
 
     if (!spp->wl_spread || ssd->wl_credit < cost || !ssd_frontier_fresh(ssd) ||
-        should_gc_high(ssd) || lm->free_line_cnt < 2) {
+        should_gc_high(ssd) || lm->free_line_cnt < 2 || ssd->media_ro) {
         return -1;
     }
 
@@ -1841,7 +1927,7 @@ void ssd_pace_program(struct ssd *ssd)
 {
     uint64_t r;
 
-    if (!ssd->pace_line || pace_blocked(ssd)) {
+    if (!ssd->pace_line || pace_blocked(ssd) || ssd->media_ro) {
         return;
     }
     r = ssd->sp.pgs_per_line - ssd->pace_v0;
@@ -1868,6 +1954,11 @@ void ssd_pace_program(struct ssd *ssd)
 void ssd_pace_tick(struct ssd *ssd)
 {
     struct line *victim;
+
+    /* a paced line stays as it is: its valid pages keep their mappings */
+    if (ssd->media_ro) {
+        return;
+    }
 
     if (!ssd->pace_line && should_gc(ssd) && !pace_blocked(ssd)) {
         victim = ssd->policy->select_victim_line(ssd, false);

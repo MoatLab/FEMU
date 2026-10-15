@@ -438,8 +438,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "count, which lowers SMART Available Spare" },
     { "blk_pe_limit",
       "bbssd, CSD: mean program/erase cycles a block survives before it "
-      "wears out; 0 (default) turns wear-out off. A worn-out block stays in "
-      "service and sets the SMART reliability warning" },
+      "wears out; 0 (default) turns wear-out off. When no block can replace "
+      "a worn-out one, the media goes read-only (eol_read_only)" },
     { "blk_pe_spread",
       "bbssd, CSD: how far each block's limit varies from blk_pe_limit, in "
       "percent, 0 to 90" },
@@ -473,11 +473,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "replace worn-out blocks of the same plane, and SMART Available Spare "
       "is the spare blocks the emptiest plane has left, in percent" },
     { "eol_read_only",
-      "bbssd, CSD, with blk_pe_limit: on (default) holds erased reserve "
-      "lines for the writes in flight at the end of life and admits each "
-      "write by the pages it may program; needs mdts 1 or more and limits "
-      "Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps the old wear "
-      "model" },
+      "bbssd, CSD, with blk_pe_limit: on (default) puts the media in "
+      "read-only mode when no block can replace a worn-out one, with "
+      "reserve lines for the writes in flight; needs mdts 1 or more and "
+      "limits Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps a "
+      "worn-out block in service with the SMART reliability warning" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },

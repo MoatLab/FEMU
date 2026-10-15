@@ -2733,6 +2733,17 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (NS_KVSSD(ns) && NVME_CC_CSS(n->bar.cc) != NVME_CC_CSS_CSI) {
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
+    /*
+     * The media went read-only at its end of life before this write-class
+     * command was admitted: it fails with nothing changed. Status 82h is the
+     * one for media that is read-only; Namespace Is Write Protected is only
+     * for the namespace write protection state (Base 2.3, Figure 102).
+     */
+    if (unlikely(req->eol_ro) &&
+        (cmd->opcode == NVME_CMD_WRITE ||
+         nvme_ns_io_effects(n, ns, cmd->opcode))) {
+        return NVME_WRITE_TO_RO | NVME_DNR;
+    }
 
     switch (cmd->opcode) {
     case NVME_CMD_FLUSH:

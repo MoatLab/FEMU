@@ -162,11 +162,11 @@ Devices:
 | `pd_open_close_sec` | `int32` | `0` | bbssd, CSD, FDP: program disturb, seconds of device time (age_scale) a frontier line or reclaim unit may stay open after its first program; the next request pads its free pages and closes it; under FDP the handle gets a fresh unit and event 1h; 0 (default) turns it off |
 | `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type (ZNS: zns_flash_type), or reports none |
 | `nand_bad_blocks` | `uint32` | `0` | bbssd, CSD, KV: blocks marked bad at start, capped at the block count, which lowers SMART Available Spare |
-| `blk_pe_limit` | `uint32` | `0` | bbssd, CSD: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. A worn-out block stays in service and sets the SMART reliability warning |
+| `blk_pe_limit` | `uint32` | `0` | bbssd, CSD: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. When no block can replace a worn-out one, the media goes read-only (eol_read_only) |
 | `blk_pe_spread` | `uint32` | `0` | bbssd, CSD: how far each block's limit varies from blk_pe_limit, in percent, 0 to 90 |
 | `blk_pe_seed` | `uint64` | `0` | bbssd, CSD: seed of the per-block erase limits; one seed gives the same limits on every run |
 | `spare_lines` | `uint32` | `0` | bbssd, CSD: lines held back, needs blk_pe_limit; their blocks replace worn-out blocks of the same plane, and SMART Available Spare is the spare blocks the emptiest plane has left, in percent |
-| `eol_read_only` | `bool` | `on` | bbssd, CSD, with blk_pe_limit: on (default) holds erased reserve lines for the writes in flight at the end of life and admits each write by the pages it may program; needs mdts 1 or more and limits Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps the old wear model |
+| `eol_read_only` | `bool` | `on` | bbssd, CSD, with blk_pe_limit: on (default) puts the media in read-only mode when no block can replace a worn-out one, with reserve lines for the writes in flight; needs mdts 1 or more and limits Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps a worn-out block in service with the SMART reliability warning |
 | `energy_read_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane read in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_prog_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane program in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_erase_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
@@ -402,7 +402,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-copy-held`, `x-copy-hold`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-zone-lock-hold-ms`
+- `femu`: `x-copy-held`, `x-copy-hold`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-zone-lock-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

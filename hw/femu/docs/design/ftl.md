@@ -852,6 +852,50 @@ With `ecc_step_ns` set, a block's erase count (one tier per 750 erases) and
 the age of its line add time to each read. That model belongs to the NAND
 timing chapter.
 
+### Read-only end of life (`eol_read_only`)
+
+With `blk_pe_limit`, a block wears out on the erase that takes it to its
+limit. The check runs after the erase of a collected line, when the line
+holds no data:
+
+```text
+ erase of line L takes a block to its limit
+   spare in every plane that needs one   --> swap blocks, L stays
+   eol_read_only=off                     --> retire L, or keep the block
+                                             (overworn, warning bit 2)
+   spare_lines > 0, a pool is empty      --> READ-ONLY, L retires
+   no pools, U - 1 >= floor              --> retire L
+   no pools, U - 1 <  floor              --> READ-ONLY, L retires
+ a host write finds no line to program   --> READ-ONLY (write goes on)
+
+ U     = lines - spare - reserve - retired
+ floor = namespace lines + forced collection lines + 2
+```
+
+Pollers change the backing store before the FTL sees a write, so a write
+that got past admission must be able to finish. Realize holds back reserve
+lines: enough pages for the largest command, which MDTS, WZSL and MCL
+bound. One 64-bit word holds the read-only bit, the admitted requests and
+the pages they may still program.
+
+```text
+ poller, before a write-class command changes data
+   cost = pages it may program (DSM, DEAC Write Zeroes, Write Uncorrectable: 0)
+   CAS on the word: read-only bit set     --> fail 182h, nothing changed
+                    pages + cost > reserve --> leave it in the queue
+                    else add 1 request and cost pages
+ FTL thread
+   after the request, or nvme_free_sq() for a dropped one: subtract them
+   at the end of life: atomic OR of the read-only bit, then the reserve
+                    lines join the free list
+```
+
+After the OR no admission succeeds, so the admitted writes hold no more
+pages than the reserve has. Collection, read reclaim, wear levelling,
+pacing and padding stop for good, so the drain needs no erase. Format NVM
+fails with Command Sequence Error while admitted requests wait for the
+FTL, since their cost was set in the old LBA format.
+
 ### Read reclaim and retention refresh
 
 ```text
@@ -1012,7 +1056,8 @@ ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 | Field | Source |
 | --- | --- |
 | Percentage Used | `ssd_percentage_used()`, and `zns_percentage_used()` for a zoned namespace; the most worn namespace |
-| Available Spare | `ssd_available_spare()`, lowest namespace; below 20 sets the spare critical warning |
+| Available Spare | `ssd_available_spare()`, lowest namespace; below 20 sets the spare critical warning; 0 once the media is read-only |
+| Critical Warning | bit 0 spare below 20, bit 1 temperature, bit 2 an overworn block, bit 3 media read-only; byte 6 (EGCWS) and the Endurance Group log repeat bits 0, 2 and 3 |
 | Media and Data Integrity Errors | injected read and write faults (and ZNS write faults) |
 | Data units, host commands | the pollers' host I/O counters, not the FTL |
 | Endurance Group Media Units Written | (NAND + GC + pad write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
@@ -1071,9 +1116,10 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `pe_cycles_rated` | Percentage Used denominator | overrides the `nand_cell_type` rating |
 | `nand_bad_blocks` | Available Spare | placement ignores it |
-| wear events | the FTL thread sets a pending SMART warning bit when the spare crosses below 20 or the first block is overworn; the controller's event bottom half raises it if Asynchronous Event Configuration enables it | once each; a controller reset drops a pending bit |
+| wear events | the FTL thread sets a pending SMART warning bit when the spare crosses below 20, the first block is overworn, or the media goes read-only; the controller's event bottom half raises it if Asynchronous Event Configuration enables it | once each; a controller reset drops a pending bit |
 | `spare_lines` | per-plane pool of replacement blocks: a worn-out block swaps its whole state with a spare block of its plane, so addresses do not change; Available Spare follows the emptiest plane | needs `blk_pe_limit`; the namespace must fit without the spare lines |
-| `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2 and an open line and a free line remain; otherwise the block stays in service (overworn) and sets SMART critical warning bit 2 | refused with the settings the parameter manual lists |
+| `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2; otherwise the media goes read-only ([end of life](#read-only-end-of-life-eol_read_only)) | refused with the settings the parameter manual lists |
+| `eol_read_only` | on (default): read-only end of life, reserve lines and page-credit admission; off: retirement also needs an open line and a free line, and a block that cannot retire stays in service (overworn) and sets SMART critical warning bit 2 | has an effect only with `blk_pe_limit`; on needs `mdts` 1 or more |
 | `ecc_step_ns`, `ecc_retention_sec` | read time grows with erase count and line age | under FDP, a line's age counts from the retirement of its reclaim unit |
 | `pd_edge_wls`, `pd_edge_tiers`, `pd_open_tiers`, `pd_open_age` | program disturb: extra ECC tiers for bottom wordlines and part-programmed blocks; age from the first program | chosen tier values; `nand_block.wp` counts programs since the erase; refused with ZNS, OCSSD, NoSSD, `cxl_ssd` and shared namespaces ([NAND timing](nand-timing.md#program-disturb-terms)) |
 | `pd_open_read_limit`, `pd_open_close_sec` | program disturb actions: a lower read limit for part-programmed blocks, which takes the line out of its write frontier and rewrites it; pad and close a frontier left open too long | bbssd and CSD, also FDP units; checked at each request, served on the next Write; pads count in WAF and media bytes; refused with KV, `mapping=fast` or `hybrid` and the phase 1 refusals ([NAND timing](nand-timing.md#program-disturb-actions)) |

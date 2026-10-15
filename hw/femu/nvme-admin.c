@@ -741,6 +741,19 @@ static uint16_t nvme_reach_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
+/*
+ * The namespace's media is read-only at its end of life: Currently Write
+ * Protected (NSATTR bit 0, CNS 00h byte 99 and CNS 08h byte 8), since every
+ * write to it fails.
+ */
+QEMU_BUILD_BUG_ON(offsetof(NvmeIdNs, nsattr) != 99);
+
+static bool nvme_ns_media_ro(NvmeNamespace *ns)
+{
+    return ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns)) &&
+           ssd_media_read_only(ns->ssd);
+}
+
 static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
                                   bool present)
 {
@@ -773,6 +786,12 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
      */
     if (ns->csi != NVME_CSI_NVM && ns->csi != NVME_CSI_ZONED) {
         return NVME_INVALID_CMD_SET | NVME_DNR;
+    }
+    if (nvme_ns_media_ro(ns)) {
+        NvmeIdNs id = ns->id_ns;
+
+        id.nsattr |= NVME_NSATTR_CWP;
+        return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
     }
     return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
 }
@@ -1058,6 +1077,9 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
         id[1] = ns->id_ns.nmic;
         id[2] = ns->id_ns.rescap;
         id[3] = ns->id_ns.fpi;
+        if (nvme_ns_media_ro(ns)) {
+            id[8] = NVME_NSATTR_CWP;        /* NSATTR */
+        }
         stw_le_p(&id[12], le16_to_cpu(ns->id_ns.endgid));
         id[14] = 0x1;                       /* NSTAT.NRDY */
         /* one Reachability Group holds every namespace (Base 8.1.21) */
@@ -2155,6 +2177,7 @@ typedef struct FemuMediaStats {
     uint64_t overworn_blocks;
     uint64_t grown_bad_blocks;
     uint64_t retired_lines;
+    bool media_ro;              /* some namespace's media is read-only */
     uint64_t wl_relocations;
     uint64_t wl_pages;
     uint64_t gc_copyback_pages;
@@ -2204,6 +2227,8 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             continue;
         }
         st->media_errors += ssd_media_errors(ns->ssd);
+        /* before the spare: read-only media always reads 0 spare after */
+        st->media_ro |= ssd_media_read_only(ns->ssd);
         spare = ssd_available_spare(ns->ssd);
         if (spare < st->available_spare) {
             st->available_spare = spare;
@@ -2461,6 +2486,19 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     if (st.overworn_blocks) {
         smart.critical_warning |= NVME_SMART_RELIABILITY;
     }
+    /* the end of life: no block left to replace a worn-out one */
+    if (st.media_ro) {
+        smart.critical_warning |= NVME_SMART_MEDIA_READ_ONLY;
+    }
+    /*
+     * The one endurance group holds all the media, so its warnings (bits 0,
+     * 2 and 3, Figure 222) are the summary (EGCWS, Figure 210).
+     */
+    if (n->subsys) {
+        smart.egcws = smart.critical_warning &
+                      (NVME_SMART_SPARE | NVME_SMART_RELIABILITY |
+                       NVME_SMART_MEDIA_READ_ONLY);
+    }
     if (femu_temp_condition(n)) {
         smart.critical_warning |= NVME_SMART_TEMPERATURE;
     }
@@ -2556,6 +2594,9 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     }
     if (st.overworn_blocks) {
         info.critical_warning |= NVME_SMART_RELIABILITY;
+    }
+    if (st.media_ro) {
+        info.critical_warning |= NVME_SMART_MEDIA_READ_ONLY;
     }
     /*
      * This log counts bytes in billions, rounded up -- not the thousands of
@@ -3658,6 +3699,20 @@ static unsigned long **nvme_format_prepare(FemuCtrl *n, uint8_t lba_idx)
     return prep;
 }
 
+/* an end-of-life admitted write the FTL has not finished, on any namespace */
+static bool nvme_eol_busy(FemuCtrl *n)
+{
+    for (int i = 0; n->eol_admit && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns)) &&
+            ssd_eol_requests(ns->ssd)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
@@ -3732,18 +3787,33 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
-    /* validated, and nothing changed yet: Format NVM Start (Figure 245) */
-    stl_le_p(ev, nsid);
-    ev[4] = n->id_ctrl.fna;
-    stl_le_p(ev + 8, dw10);
-    femu_pel_log(n, NVME_PEL_FORMAT_START, 1, ev, 12);
-
     /*
      * The bitmaps about to be replaced are indexed by every read and write, so
      * no poller may be inside a sweep while they are swapped and the backing
      * store is cleared.
      */
     resume = nvme_pause_pollers(n);
+
+    /*
+     * A write admitted against the end-of-life reserve was costed in the LBA
+     * format it came in, and a Write Zeroes or deallocation still queued for
+     * the FTL would run in the new one. Base 2.3 lets a Format abort with
+     * Command Sequence Error while I/O is processed for the namespace.
+     */
+    if (nvme_eol_busy(n)) {
+        nvme_resume_pollers(n, resume);
+        for (uint32_t i = 0; prep && i < 2 * n->namespace_limit; i++) {
+            g_free(prep[i]);
+        }
+        g_free(prep);
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
+    }
+
+    /* validated, and nothing changed yet: Format NVM Start (Figure 245) */
+    stl_le_p(ev, nsid);
+    ev[4] = n->id_ctrl.fna;
+    stl_le_p(ev + 8, dw10);
+    femu_pel_log(n, NVME_PEL_FORMAT_START, 1, ev, 12);
 
     if (nsid == 0xffffffff) {
         for (uint32_t i = 0; i < n->namespace_limit; ++i) {

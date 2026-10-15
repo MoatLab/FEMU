@@ -954,7 +954,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             target = ssd_stream_page(ssd, stream,
                                      ssd->n->stream_slots[stream].tag);
         }
-        if (stream >= 0 ? !mapped_ppa(&target) : ssd_out_of_lines(ssd)) {
+        if (stream >= 0 ? !mapped_ppa(&target) : ssd_host_out_of_lines(ssd)) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             break;
         }
@@ -1133,7 +1133,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             /* per page, for the reason ssd_write() gives */
             curlat = ssd_gc_until_clear(ssd);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
-            if (ssd_out_of_lines(ssd)) {
+            if (ssd_host_out_of_lines(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }

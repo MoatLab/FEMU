@@ -2330,6 +2330,12 @@ static void *femu_ftl_thread(void *arg)
             n->ftl_in_sweep = false;
         }
 
+        /* a test holds the requests where they are; queries still run */
+        if (unlikely(qatomic_read(&n->test_ftl_hold))) {
+            usleep(100);
+            continue;
+        }
+
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
@@ -3652,6 +3658,12 @@ static void femu_aer_bh(void *opaque)
                            NVME_AER_INFO_SMART_RELIABILITY,
                            NVME_LOG_SMART_INFO);
     }
+    /* media placed in read only mode is a reliability event too (Fig. 153) */
+    if (bits & aec & NVME_SMART_MEDIA_READ_ONLY) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
+                           NVME_AER_INFO_SMART_RELIABILITY,
+                           NVME_LOG_SMART_INFO);
+    }
     nvme_process_aers(n);
 }
 
@@ -4374,6 +4386,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,
+                                       OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-ftl-hold",
+                                       &FEMU(obj)->test_ftl_hold,
                                        OBJ_PROP_FLAG_READWRITE);
         object_property_add_uint32_ptr(obj, "x-zone-lock-hold-ms",
                                        &FEMU(obj)->test_zone_lock_hold_ms,

@@ -38662,6 +38662,34 @@ static bool femu_eol_state(QTestState *qts, bool *ro, uint64_t *cap,
     return eol != NULL;
 }
 
+/* hold the FTL thread off its rings (x-ftl-hold), or let it go */
+static void femu_eol_hold(QTestState *qts, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-ftl-hold','value':%d}}", hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* wait until @want write-class requests hold credits */
+static void femu_eol_wait_held(QTestState *qts, uint64_t want)
+{
+    bool ro;
+    uint64_t cap, pages, reqs = 0;
+    int waited;
+
+    for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        if (reqs == want) {
+            return;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(reqs, ==, want);
+}
+
 /* Write Zeroes of @nlb blocks from @slba, with the Deallocate bit if @deac */
 static uint16_t femu_wz(FemuCtrlState *c, uint64_t slba, uint32_t nlb,
                         bool deac)
@@ -38842,6 +38870,8 @@ static void femu_test_eol_sq_delete(void *obj, void *data,
         NvmeCmd cmd;
 
         femu_create_io_queues(&c);
+        /* every other round, the FTL leaves the admitted writes queued */
+        femu_eol_hold(qts, round % 2 == 0);
         for (i = 0; i < FEMU_QSIZE - 1; i++) {
             NvmeRwCmd rw;
 
@@ -38853,8 +38883,13 @@ static void femu_test_eol_sq_delete(void *obj, void *data,
             rw.nlb = cpu_to_le16(7);
             femu_submit(&c, &c.io, (NvmeCmd *)&rw);
         }
+        if (round % 2 == 0) {
+            /* 2 pages each, for 4 KiB anywhere: 16 pages of credits */
+            femu_eol_wait_held(qts, 8);
+        }
         g_assert_cmpint(FEMU_SC(femu_delete_sq(&c, c.io.qid)), ==,
                         NVME_SUCCESS);
+        femu_eol_hold(qts, false);
         memset(&cmd, 0, sizeof(cmd));
         cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
         cmd.cdw10 = cpu_to_le32(c.io.qid);
@@ -38875,6 +38910,311 @@ static void femu_test_eol_sq_delete(void *obj, void *data,
     femu_queue_free(&c, &c.io);
     guest_free(alloc, buf);
     femu_disable(&c);
+}
+
+/* the raw status bits: DNR is bit 14 of what femu_complete() returns */
+#define FEMU_DNR                0x4000
+#define FEMU_EOL_SLOTS          (FEMU_QSIZE - 1)
+
+/* a command of @opcode on namespace 1 that names @nlb blocks from @slba */
+static uint16_t femu_eol_cmd(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                             uint32_t nlb, uint64_t buf, uint32_t cdw11)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32(cdw11 ? cdw11 : (uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(nlb - 1);
+    femu_submit(c, &c->io, &cmd);
+    return femu_complete(c, &c->io, NULL, NULL);
+}
+
+/* block-erases from query-femu */
+static uint64_t femu_eol_erases(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    uint64_t v = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                               "block-erases");
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/* NSATTR bit 0, Currently Write Protected, of CNS 00h and of CNS 08h */
+static void femu_eol_cwp(FemuCtrlState *c, uint64_t buf, uint8_t want)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_identify(c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 99) & 1, ==, want);
+    g_assert_cmphex(femu_identify(c, 1, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 8) & 1, ==, want);
+}
+
+/*
+ * A write admitted against the end-of-life reserve was costed in the LBA
+ * format it came in, so Format NVM fails with Command Sequence Error while
+ * such a write waits for the FTL. With the FTL held, three 16 KiB writes
+ * of the fifteen queued take the 16 pages of credits (5 each) and the rest
+ * wait in the queue. Released, every write completes and Format runs.
+ */
+static void femu_test_eol_format_busy(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    femu_eol_hold(qts, true);
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64(32 * i);
+        rw.nlb = cpu_to_le16(31);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_eol_wait_held(qts, 3);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==,
+                    NVME_CMD_SEQ_ERROR);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_eol_wait_held(qts, 0);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Read-only end of life. Writes of one or two pages, fifteen in the queue
+ * at a time and each in its own 16-page region, wear the media out. The
+ * media goes read-only when a worn-out block finds no spare in its plane
+ * (@data "pool"), or, with no spare lines, when retiring its line would
+ * cut into the namespace's lines ("nopool", and "csd" for computational
+ * storage). Writes in flight then still finish: every write completes with
+ * success or Attempted Write to Read Only Range (82h, DNR), never Capacity
+ * Exceeded. Then:
+ * - SMART critical warning bit 3 is set and Available Spare reads 0; an
+ *   AER enabled for bit 3 alone completes with information 00h;
+ * - Write, Write Zeroes, Copy and a deallocating Dataset Management fail
+ *   with 82h and change nothing; Dataset Management without deallocate,
+ *   Flush, Verify and Read succeed, and every page holds the data of its
+ *   last write that succeeded;
+ * - nothing is erased any more, and the FTL map is consistent.
+ */
+static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t bufs = guest_alloc(alloc, FEMU_EOL_SLOTS * 4096);
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    const uint64_t slba[1] = { 0 };
+    const uint16_t nlb[1] = { 8 };
+    uint8_t seed_of[256];
+    uint8_t page[512];
+    uint16_t slot_page[FEMU_EOL_SLOTS], slot_np[FEMU_EOL_SLOTS];
+    uint8_t slot_seed[FEMU_EOL_SLOTS];
+    uint32_t rnd = 7;
+    uint32_t result;
+    uint64_t mapped, lost, orphans, erases = 0;
+    uint64_t cap, pages, reqs;
+    bool csd = !strcmp(data, "csd");
+    bool ro = false;
+    int batch, k, i, ok = 0, refused = 0;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_eol_cwp(&c, log, 0);
+    g_assert_cmpint(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, false,
+                                     0, NVME_SMART_MEDIA_READ_ONLY, NULL), ==,
+                    NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    femu_submit(&c, &c.admin, &cmd);
+
+    /* fill every page, four at a time (MDTS is 16 KiB) */
+    qtest_memset(qts, buf, 0xf0, 4096);
+    for (i = 0; i < 256; i += 4) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    memset(seed_of, 0xf0, sizeof(seed_of));
+
+    for (batch = 0; batch < 1000 && !ro; batch++) {
+        uint16_t first = c.cid;
+
+        for (k = 0; k < FEMU_EOL_SLOTS; k++) {
+            NvmeRwCmd rw;
+            uint64_t b = bufs + k * 4096;
+
+            rnd = rnd * 1103515245 + 12345;
+            slot_np[k] = 1 + (rnd >> 20) % 2;
+            slot_page[k] = k * 16 + (rnd >> 8) % 15;
+            slot_seed[k] = 1 + (batch * FEMU_EOL_SLOTS + k) % 239;
+            qtest_memset(qts, b, slot_seed[k], 4096);
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(b);
+            rw.dptr.prp2 = cpu_to_le64(slot_np[k] == 2 ? b : 0);
+            rw.slba = cpu_to_le64(slot_page[k] * 8);
+            rw.nlb = cpu_to_le16(slot_np[k] * 8 - 1);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        for (i = 0; i < FEMU_EOL_SLOTS; i++) {
+            uint16_t got;
+            uint16_t st = femu_complete(&c, &c.io, &got, NULL);
+
+            k = (uint16_t)(got - first);
+            g_assert_cmpint(k, <, FEMU_EOL_SLOTS);
+            if (FEMU_SC(st) == NVME_SUCCESS) {
+                memset(seed_of + slot_page[k], slot_seed[k], slot_np[k]);
+                ok++;
+                continue;
+            }
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+            g_assert_cmphex(st & FEMU_DNR, ==, FEMU_DNR);
+            refused++;
+            ro = true;
+        }
+    }
+    g_test_message("read-only after %d batches: %d writes done, %d refused",
+                   batch, ok, refused);
+    g_assert_true(ro);
+
+    /* the event comes first on the admin queue */
+    g_assert_cmpint(femu_complete(&c, &c.admin, NULL, &result), ==,
+                    NVME_SUCCESS);
+    g_test_message("AER result 0x%x", result);
+    g_assert_cmphex(result & 0x7, ==, NVME_AER_TYPE_SMART);
+    g_assert_cmphex((result >> 8) & 0xff, ==, NVME_AER_INFO_SMART_RELIABILITY);
+    g_assert_cmphex((result >> 16) & 0xff, ==, NVME_LOG_SMART_INFO);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("critical warning 0x%x spare %u used %u", page[0], page[3],
+                   page[5]);
+    g_assert_cmphex(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==,
+                    NVME_SMART_MEDIA_READ_ONLY);
+    g_assert_cmphex(page[0] & NVME_SMART_SPARE, ==, NVME_SMART_SPARE);
+    g_assert_cmpuint(page[3], ==, 0);
+    femu_eol_cwp(&c, log, 1);
+
+    /* query-femu does not serve computational storage */
+    if (!csd) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_assert_true(ro);
+        g_assert_cmpuint(pages, ==, 0);
+        g_assert_cmpuint(reqs, ==, 0);
+        erases = femu_eol_erases(qts);
+    }
+
+    /* every write-class command fails and changes nothing */
+    qtest_memset(qts, buf, 0x55, 4 * 4096);
+    i = femu_write_pages(&c, 0, 1, buf, list);
+    g_assert_cmphex(FEMU_SC(i), ==, NVME_WRITE_TO_RO);
+    g_assert_cmphex(i & FEMU_DNR, ==, FEMU_DNR);
+    g_assert_cmphex(FEMU_SC(femu_eol_cmd(&c, NVME_CMD_WRITE_ZEROES, 8, 8, 0,
+                                         0)), ==, NVME_WRITE_TO_RO);
+    g_assert_cmphex(femu_wz(&c, 16, 8, true), ==, NVME_WRITE_TO_RO);
+    g_assert_cmphex(femu_copy(&c, list, 24, slba, nlb, 1, 1, 0), ==,
+                    NVME_WRITE_TO_RO);
+    g_assert_cmphex(femu_dealloc_pages(&c, 4, 1, list), ==, NVME_WRITE_TO_RO);
+    /* a hint changes nothing on the media */
+    g_assert_cmphex(FEMU_SC(femu_eol_cmd(&c, NVME_CMD_DSM, 0, 1, list, 1)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_eol_cmd(&c, NVME_CMD_FLUSH, 0, 1, 0, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_eol_cmd(&c, NVME_CMD_VERIFY, 0, 8, 0, 0)),
+                    ==, NVME_SUCCESS);
+
+    for (i = 0; i < 256; i++) {
+        uint8_t got[2];
+
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, i, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, got, 1);
+        qtest_memread(qts, buf + 4095, got + 1, 1);
+        if (got[0] != seed_of[i] || got[1] != seed_of[i]) {
+            g_test_message("page %d holds 0x%x, wrote 0x%x", i, got[0],
+                           seed_of[i]);
+        }
+        g_assert_cmphex(got[0], ==, seed_of[i]);
+        g_assert_cmphex(got[1], ==, seed_of[i]);
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(mapped, ==, 256);
+    if (!csd) {
+        g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
+        femu_query_check_lines(qts, "/machine/peripheral/gc-test", mapped);
+    }
+
+    /*
+     * Format and Sanitize deallocate the namespace (Sanitize must run
+     * whatever the critical warnings say, Base 2.3, 8.1.26). They erase
+     * nothing, and the media stays read-only.
+     */
+    if (!strcmp(data, "format") || !strcmp(data, "sanitize")) {
+        g_assert_cmphex(!strcmp(data, "format") ?
+                        FEMU_SC(femu_format(&c, 1, 0, 0)) :
+                        femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                        NVME_WRITE_TO_RO);
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                             sizeof(page), 0)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, log) & NVME_SMART_MEDIA_READ_ONLY,
+                        ==, NVME_SMART_MEDIA_READ_ONLY);
+        femu_eol_cwp(&c, log, 1);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 0);
+        g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
+        femu_query_check_lines(qts, "/machine/peripheral/gc-test", 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    guest_free(alloc, bufs);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
 }
 
 static void femu_register_nodes(void)
@@ -40111,6 +40451,55 @@ static void femu_register_nodes(void)
             "blk_pe_limit=1000,mdts=2,eol_read_only=off"
     });
     qos_add_test("eol-refused", "femu", femu_test_eol_refused, NULL);
+    /* 40 lines, 8 spare lines, one reserve line: the pools run out first */
+    qos_add_test("eol-ro-pool", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pool",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,spare_lines=8,mdts=2"
+    });
+    /* no spare lines: lines retire down to the floor first */
+    qos_add_test("eol-ro-nopool", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"nopool",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=2"
+    });
+    qos_add_test("eol-ro-format", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"format",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=2"
+    });
+    qos_add_test("eol-ro-sanitize", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"sanitize",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=2"
+    });
+    qos_add_test("eol-format-busy", "femu", femu_test_eol_format_busy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2"
+    });
+    qos_add_test("eol-ro-csd", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"csd",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,"
+            "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,"
+            "luns_per_ch=2,nchs=2,blk_pe_limit=8,mdts=2"
+    });
     qos_add_test("eol-sq-delete", "femu", femu_test_eol_sq_delete,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

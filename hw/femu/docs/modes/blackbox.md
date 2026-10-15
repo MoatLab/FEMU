@@ -201,25 +201,47 @@ All of these are off by default.
 - `blk_pe_limit` gives each block an erase limit (`blk_pe_spread` varies it
   per block, from `blk_pe_seed`). When a line's erase takes a block to its
   limit, the line leaves service if enough lines remain: the namespace's
-  lines, the free lines forced collection keeps, an open line to write into
-  and one free line. Otherwise the block stays in service and sets the SMART
-  reliability warning (critical warning bit 2). Writes never fail because of
-  wear.
+  lines, the free lines forced collection keeps, and two more.
+- With `eol_read_only` (on by default), the media goes read-only when no
+  block can replace a worn-out one. A real SSD does the same at the end of
+  its life. Reads go on. The writes in flight at that point finish from the
+  reserve lines. The SMART log shows critical warning bit 3 and Available
+  Spare 0; see [end of life](../reference/log-pages-and-counters.md#end-of-life).
+- In read-only state, Write, Write Zeroes, Write Uncorrectable, Copy and a
+  deallocating Dataset Management change nothing. They fail with Attempted
+  Write to Read Only Range (182h). Flush and Dataset Management without
+  deallocation succeed. Format NVM and Sanitize deallocate the data, and the
+  media stays read-only.
+- With `eol_read_only=off`, a worn-out block that cannot leave service stays
+  in service and sets the SMART reliability warning (critical warning bit
+  2). Retirement also needs an open line and a free line then, and wear
+  makes no write fail.
 - `spare_lines` holds lines back as spare blocks. A worn-out block is first
   replaced by a spare of its plane, when every plane with a worn-out block in
-  the line has one. SMART Available Spare is then the spare blocks the
+  the line has one. With `eol_read_only`, a pool that cannot replace it is
+  the end of life; with it off, the line retires as without spare lines. SMART Available Spare is then the spare blocks the
   emptiest plane has left; without spare lines, it is the lines retirement can
   still take.
 - With `blk_pe_limit`, `eol_read_only` (on by default) keeps reserve lines
   erased for the writes in flight at the end of life. Before a write-class
   command changes data, it takes credits for the NAND pages it may program.
   It waits in its queue while the reserve cannot take them. So one command
-  needs a bound: `mdts` must be 1 or more, Write Zeroes is limited to MDTS
+  needs a bound: `mdts` must be 1 or more. Write Zeroes is limited to MDTS
   (WZSL, with ONCS bit 3 clear), and Copy to MDTS (MCL).
-- When the spare falls below its threshold, or the first block stays in
-  service past its limit, the controller raises a SMART asynchronous event
-  (information 02h or 00h) if the host enabled bit 0 or bit 2 of
-  Asynchronous Event Configuration. Each is raised once.
+- The controller raises a SMART asynchronous event once for each of these,
+  if the host enabled its bit of Asynchronous Event Configuration:
+
+  | Condition | AEC bit | Information |
+  | --- | --- | --- |
+  | the spare falls below its threshold | 0 | 02h |
+  | the first block stays in service past its limit | 2 | 00h |
+  | the media goes read-only | 3 | 00h |
+
+- Version 2 covers bbssd and CSD (the NVM namespace). FDP keeps refusing
+  `blk_pe_limit`: a handle update leaves a unit part written for each command,
+  and units are padded and erased outside the reserve. ZNS ends the life of
+  a zone with the Read Only and Offline zone states. This model does not
+  drive them. KV has no NVM write path. Both refuse `blk_pe_limit`.
 - With `blk_pe_limit`, SMART Percentage Used counts erases against the sum
   of the blocks' limits. `query-femu` shows retired and spare lines with
   their own states.
