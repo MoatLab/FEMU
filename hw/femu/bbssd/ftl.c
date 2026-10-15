@@ -321,6 +321,12 @@ uint64_t ssd_tp_moves(struct ssd *ssd)
     return ssd->tp_moves;
 }
 
+/* translation pages with changes that are neither on flash nor cached */
+uint64_t ssd_tp_pending_count(struct ssd *ssd)
+{
+    return ssd->tp_on ? bitmap_count_one(ssd->tp_pending, ssd->n_tps) : 0;
+}
+
 /*
  * Check the mapping against the media. @lost counts logical pages whose
  * mapping names a page that does not hold them: one not valid, or one the

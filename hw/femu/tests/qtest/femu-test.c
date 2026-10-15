@@ -7876,9 +7876,10 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
 
 /*
  * x-ftl-check of the device with id @id: mapped, lost and orphan pages,
- * valid translation pages, broken TP rules and TPs moved by collection.
+ * valid translation pages, broken TP rules, TPs moved by collection and
+ * pending TPs.
  */
-static void femu_tp_check(QTestState *qts, const char *id, uint64_t v[6])
+static void femu_tp_check(QTestState *qts, const char *id, uint64_t v[7])
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
                            "'path':%s,'property':'x-ftl-check'}}", id);
@@ -7886,8 +7887,8 @@ static void femu_tp_check(QTestState *qts, const char *id, uint64_t v[6])
     g_assert_true(qdict_haskey(rsp, "return"));
     g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
                            "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
-                           " %" SCNu64 " %" SCNu64, &v[0], &v[1], &v[2],
-                           &v[3], &v[4], &v[5]), ==, 6);
+                           " %" SCNu64 " %" SCNu64 " %" SCNu64, &v[0], &v[1],
+                           &v[2], &v[3], &v[4], &v[5], &v[6]), ==, 7);
     g_test_message("x-ftl-check %s", qdict_get_str(rsp, "return"));
     qobject_unref(rsp);
 }
@@ -7920,7 +7921,7 @@ static void femu_test_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 4096);
-    uint64_t host, nand, gc, map, pad, v[6];
+    uint64_t host, nand, gc, map, pad, v[7];
     uint32_t seed = 5;
     uint32_t i;
 
@@ -8038,7 +8039,7 @@ static void femu_test_dftl_tp_min(void *obj, void *data,
     const uint32_t pages = 9 * 256;
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
-    uint64_t v[6];
+    uint64_t v[7];
     uint32_t seed = 11;
     uint32_t i;
 
@@ -40269,7 +40270,7 @@ static void femu_test_dftl_batch(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 4096);
-    uint64_t w, r, v[6];
+    uint64_t w, r, v[7];
     uint32_t i;
 
     femu_enable(&c, &femu->dev, alloc);
@@ -40342,9 +40343,12 @@ out:
  * A power cut with dftl: the mapping DRAM is power-loss protected, so the
  * GTD and the CMT stay. Writes the buffer held are undone and never
  * reached the mapping. FUA writes to TPs 0 to 3 leave TPs 0 to 2 on flash
- * and TP 3 in the CMT. After the cut the mappings and the TP pages are as
- * before, a read in TP 3 hits the CMT and reads no TP, and each FUA page
- * reads back.
+ * and TP 3 in the CMT. A deallocate of a page of TP 1 while x-tp-hold
+ * keeps publication back leaves TP 1 pending, as the forced reserve would;
+ * the deallocate writes the buffer back first, which may evict TP 3 too.
+ * After the cut the mappings, the TP pages and the pending TP are as
+ * before. Once released, the next request publishes TP 1, and each FUA
+ * page reads back.
  */
 static void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -40353,7 +40357,7 @@ static void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 4096);
-    uint64_t v[6], before[6], reads;
+    uint64_t v[7], before[7], reads, writes;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -40362,16 +40366,31 @@ static void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
         femu_power_write(&c, buf, 1, (uint64_t)i * 512 * 8 + 8, 8, 0x40 + i,
                          false);
     }
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/power',"
+                             "'property':'x-tp-hold','value':true}}");
+    g_assert_cmphex(femu_dealloc_pages(&c, 513, 1, log), ==, NVME_SUCCESS);
     femu_tp_check(qts, "/machine/peripheral/power", before);
-    g_assert_cmpuint(before[3], ==, 3);
+    g_assert_cmpuint(before[3], >=, 3);
+    g_assert_cmpuint(before[6], ==, 1);
     reads = femu_c0h_field(&c, log, 288);
     femu_power_cut(&c);
     femu_tp_check(qts, "/machine/peripheral/power", v);
     g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
     g_assert_cmpuint(v[0], ==, before[0]);
     g_assert_cmpuint(v[3], ==, before[3]);
-    femu_power_read(&c, buf, 1, 3 * 512 * 8, 0x33);
+    g_assert_cmpuint(v[6], ==, 1);
     g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, reads);
+
+    /* released, a Flush, which touches no TP, publishes TP 1 */
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/power',"
+                             "'property':'x-tp-hold','value':false}}");
+    writes = femu_c0h_field(&c, log, 280);
+    femu_hybrid_flush(&c);
+    femu_tp_check(qts, "/machine/peripheral/power", v);
+    g_assert_cmpuint(v[4] + v[6], ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, writes + 1);
     for (uint32_t i = 0; i < 4; i++) {
         femu_power_read(&c, buf, 1, (uint64_t)i * 512 * 8, 0x30 + i);
     }
@@ -40426,7 +40445,7 @@ static void femu_test_dftl_media(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 64 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 4096);
-    uint64_t v[6], moves, gc, map;
+    uint64_t v[7], moves, gc, map;
     uint32_t i;
 
     femu_enable(&c, &femu->dev, alloc);
@@ -40531,7 +40550,7 @@ static void femu_test_dftl_wl(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 4096);
-    uint64_t v[6];
+    uint64_t v[7];
     uint32_t seed = 9;
     uint32_t i;
 

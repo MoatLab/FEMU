@@ -278,6 +278,11 @@ uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
 {
     uint64_t end = tp_now(stime);
 
+    /* a test holds them, as the forced reserve would */
+    if (ssd->n && ssd->n->test_tp_hold) {
+        return end;
+    }
+
     for (uint64_t n = ssd->tp_fifo_cnt; n; n--) {
         uint64_t tp = tp_queue_pop(ssd);
         uint64_t rd;

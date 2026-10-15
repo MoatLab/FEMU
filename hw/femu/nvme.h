@@ -2690,6 +2690,7 @@ typedef struct FemuCtrl {
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
+    bool            test_tp_hold;   /* qtest: publish no pending TP */
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */
@@ -3227,6 +3228,7 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd);
 uint64_t ssd_map_write_pages(struct ssd *ssd);
 uint64_t ssd_map_read_pages(struct ssd *ssd);
 uint64_t ssd_tp_moves(struct ssd *ssd);
+uint64_t ssd_tp_pending_count(struct ssd *ssd);
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
                        uint64_t *orphans, uint64_t *tp_pages, uint64_t *tp_bad);
 /* reclaim units not held by exactly one list, heap or frontier; 0 is right */

@@ -4149,8 +4149,8 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 
 /*
  * The FTL's mapping of namespace 1 against its media: mapped, lost and
- * orphan pages, then valid translation pages, broken TP rules and TP moves
- * by collection. See ssd_check_mapping.
+ * orphan pages, then valid translation pages, broken TP rules, TP moves by
+ * collection and pending TPs. See ssd_check_mapping.
  */
 static char *femu_test_ftl_check(Object *obj, Error **errp)
 {
@@ -4162,6 +4162,7 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
     uint64_t tp_pages;
     uint64_t tp_bad;
     uint64_t moves;
+    uint64_t pending;
     bool resume;
 
     if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
@@ -4171,10 +4172,11 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
     resume = nvme_pause_pollers(n);
     ssd_check_mapping(ns->ssd, &mapped, &lost, &orphans, &tp_pages, &tp_bad);
     moves = ssd_tp_moves(ns->ssd);
+    pending = ssd_tp_pending_count(ns->ssd);
     nvme_resume_pollers(n, resume);
     return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                           " %" PRIu64 " %" PRIu64, mapped, lost, orphans,
-                           tp_pages, tp_bad, moves);
+                           " %" PRIu64 " %" PRIu64 " %" PRIu64, mapped, lost,
+                           orphans, tp_pages, tp_bad, moves, pending);
 }
 
 /* FDP reclaim units of namespace 1 that sit in no place or in two */
@@ -4407,6 +4409,21 @@ static void femu_test_range_waits_get(Object *obj, Visitor *v,
     visit_type_uint64(v, name, &value, errp);
 }
 
+/* x-tp-hold: keep pending translation pages pending, as at the reserve */
+static bool femu_test_tp_hold_get(Object *obj, Error **errp)
+{
+    return FEMU(obj)->test_tp_hold;
+}
+
+static void femu_test_tp_hold_set(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    bool resume = nvme_pause_pollers(n);
+
+    n->test_tp_hold = value;
+    nvme_resume_pollers(n, resume);
+}
+
 static void femu_instance_init(Object *obj)
 {
     object_property_add_bool(obj, "simulate-power-loss", NULL,
@@ -4422,6 +4439,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_bool(obj, "x-tp-hold", femu_test_tp_hold_get,
+                                 femu_test_tp_hold_set);
         object_property_add_uint32_ptr(obj, "x-cmt-slots",
                                        &FEMU(obj)->test_cmt_slots,
                                        OBJ_PROP_FLAG_READWRITE);
