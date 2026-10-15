@@ -1,5 +1,6 @@
 #include "./nvme.h"
 #include "nvme-pi.h"
+#include "csd/csd.h"
 
 static int64_t nvme_io_clock(FemuCtrl *n)
 {
@@ -290,6 +291,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->fdp_dspec = 0;
         req->cxl_seq = 0;
         req->defer = NULL;
+        /* every path that frees a request slot released this first */
+        assert(!req->csd_use);
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
         req->t_handoff = 0;
@@ -329,7 +332,9 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * commands that moved host data count, and only when they succeeded.
          * Zone Append is a write that names no LBA, so it is counted as one.
          */
-        if (!n->power_loss && status == NVME_SUCCESS && req->ns) {
+        /* memory and program commands move no logical blocks */
+        if (!n->power_loss && status == NVME_SUCCESS && req->ns &&
+            !NS_SLM(req->ns) && !NS_CP(req->ns)) {
             FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
             uint64_t bytes;
 
@@ -472,7 +477,16 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
 
-    nvme_write_cqe(n, cq, cqe);
+    /*
+     * An Execute keeps its program and range set in use until it completes.
+     * The completion is written with the CSD lock held and the use released
+     * under it, so an admin command sees either both or neither.
+     */
+    if (unlikely(req->csd_use)) {
+        femu_csd_post_cqe(n, cq, req);
+    } else {
+        nvme_write_cqe(n, cq, cqe);
+    }
     nvme_inc_cq_tail(cq);
 
     /*
@@ -656,7 +670,8 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
          * already in expire_time and before the completion is posted.
          */
         if (unlikely(n->pcie_enabled) && req->ns &&
-            (req->cmd_opcode == NVME_CMD_READ ||
+            (NS_SLM(req->ns) || NS_CP(req->ns) ? req->xfer_bytes != 0 :
+             req->cmd_opcode == NVME_CMD_READ ||
              req->cmd_opcode == NVME_CMD_WRITE)) {
             uint8_t lbads = req->ns->id_ns.lbaf[
                 NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
@@ -665,7 +680,8 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
              * block count, so the link was charged for whatever the previous
              * command in this request slot moved, in its direction.
              */
-            uint64_t data_size = NS_KVSSD(req->ns) ? req->xfer_bytes :
+            uint64_t data_size = NS_KVSSD(req->ns) || NS_SLM(req->ns) ||
+                                 NS_CP(req->ns) ? req->xfer_bytes :
                                  (uint64_t)req->nlb << lbads;
             uint64_t trans_ns = n->pcie_bandwidth_mbps ?
                 data_size * 1000 / n->pcie_bandwidth_mbps : 0;
@@ -745,6 +761,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         nvme_req_release_ranges(req);
         if (!cq->is_active) {
             /* CQ inactive: return request to SQ free list to avoid leak */
+            if (req->csd_use) {
+                femu_csd_req_done(n, req);
+            }
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
             continue;
         }
@@ -1457,6 +1476,91 @@ static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
     return NVME_SUCCESS;
 }
 
+/*
+ * The source of a Copy with descriptor format 4h: byte ranges of the memory
+ * namespace, staged into one buffer of whole destination blocks (NVM 1.2,
+ * 3.3.2). The SNSID rules are the NVM ones, which differ from Memory Copy.
+ * The memory has no media, so the FTL charges only the write.
+ */
+static uint16_t nvme_copy_slm_source(FemuCtrl *n, NvmeNamespace *ns,
+                                     NvmeCmd *cmd, uint32_t nr, uint64_t sdlba,
+                                     uint8_t **out, uint64_t *blocks)
+{
+    uint8_t lbads = ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].lbads;
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    g_autofree NvmeSlmCopyRange *ranges = NULL;
+    g_autofree uint8_t *data = NULL;
+    uint64_t total = 0;
+    uint64_t done = 0;
+    uint16_t status;
+    uint32_t i;
+
+    if (nr > FEMU_COPY_MSRC + 1) {
+        return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+    }
+    /* format 4h carries no protection information (NVM Figure 38) */
+    if (femu_pi_type(ns)) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    ranges = g_new(NvmeSlmCopyRange, nr);
+    status = dma_write_cmd(n, cmd, (uint8_t *)ranges, nr * sizeof(*ranges));
+    if (status) {
+        return status;
+    }
+    for (i = 0; i < nr; i++) {
+        uint32_t snsid = le32_to_cpu(ranges[i].snsid);
+        uint64_t saddr = le64_to_cpu(ranges[i].saddr);
+        uint32_t nbyte = le32_to_cpu(ranges[i].nbyte);
+        NvmeNamespace *s;
+
+        if (le16_to_cpu(ranges[i].sopt) & (1 << 15)) {
+            return NVME_SLM_FAST_COPY_NOT_POSSIBLE | NVME_DNR;
+        }
+        if (!snsid || snsid == NVME_NSID_BROADCAST ||
+            !nvme_nsid_valid(n, snsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        s = nvme_ns(n, snsid);
+        if (!s) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (!NS_SLM(s)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if ((saddr | nbyte) & 3) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (nbyte > (uint64_t)FEMU_COPY_MSSRL << lbads) {
+            return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+        }
+        total += nbyte;
+    }
+    if (total & ((1ULL << lbads) - 1)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (total >> lbads > FEMU_COPY_MCL) {
+        return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+    }
+    if (sdlba >= nsze || total >> lbads > nsze - sdlba) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+    data = g_malloc(total);
+    for (i = 0; i < nr; i++) {
+        uint32_t nbyte = le32_to_cpu(ranges[i].nbyte);
+
+        status = femu_csd_slm_read(n, le32_to_cpu(ranges[i].snsid),
+                                   le64_to_cpu(ranges[i].saddr), nbyte,
+                                   data + done);
+        if (status) {
+            return status;
+        }
+        done += nbyte;
+    }
+    *out = g_steal_pointer(&data);
+    *blocks = total >> lbads;
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           NvmeRequest *req)
 {
@@ -1487,6 +1591,26 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (nvme_dp_dtype_invalid(ns, (dw12 >> 20) & 0xf)) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    base = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
+    ms = nvme_ns_ms(ns);
+    /* format 4h reads the memory namespace, once the host enabled it */
+    if (fmt == 4 && CSD_SLM(n) && (n->features.host_behavior[4] & (1 << 4))) {
+        status = nvme_copy_slm_source(n, ns, cmd, nr, sdlba, &data, &total);
+        if (status) {
+            return status;
+        }
+        if (ns->mdata) {
+            mstage = g_malloc0(total * ms);
+        }
+        nr = 0;
+        /* no bytes: nothing to write, and the FTL gets no block either */
+        if (!total) {
+            req->slba = sdlba;
+            req->nlb = 0;
+            return NVME_SUCCESS;
+        }
+        goto write;
     }
     /* format 2 works only once the host has enabled it (Figure 426) */
     if ((fmt != 0 && fmt != 2) ||
@@ -1555,10 +1679,8 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     }
 
-    base = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
     data = g_malloc(total << lbads);
     /* the blocks' metadata moves with them, staged the same way */
-    ms = nvme_ns_ms(ns);
     if (ns->mdata) {
         mstage = g_malloc(total * ms);
     }
@@ -1620,6 +1742,7 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         src[i].slba = cpu_to_le64(slba);
         src[i].nlb = cpu_to_le32(nlb);
     }
+write:
     status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
     if (status) {
         return status;
@@ -2386,6 +2509,15 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    /*
+     * The memory and compute command sets reuse NVM opcodes (Memory Fill is
+     * 04h, Memory Write 05h), so their namespaces are served before the NVM
+     * commands below are matched.
+     */
+    if (NS_SLM(ns) || NS_CP(ns)) {
+        return ns->ext_ops.io_cmd(n, ns, cmd, req);
     }
 
     switch (cmd->opcode) {

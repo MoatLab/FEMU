@@ -744,6 +744,9 @@ void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
     /* commands dropped in flight still hold what the mode had not freed */
     for (int i = 0; sq->io_req && i < sq->size; i++) {
         nvme_req_release_ranges(&sq->io_req[i]);
+        if (sq->io_req[i].csd_use) {
+            femu_csd_req_done(n, &sq->io_req[i]);
+        }
     }
     g_free(sq->io_req);
     g_free(sq->abort_cid);

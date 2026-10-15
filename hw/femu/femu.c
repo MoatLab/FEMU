@@ -1936,6 +1936,11 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             g_free(ns_modes);
             return 1;
         }
+        if (femu_csd_check_namespaces(n, n_csd, errp)) {
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
     }
 
     if (femu_kv_index_check(n, errp)) {
@@ -2031,6 +2036,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
     g_free(ns_sizes);
     g_free(ns_modes);
+    femu_csd_add_namespaces(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
         n->namespace_pool_size += n->namespaces[i].extent_size;
@@ -2209,6 +2215,11 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
         lat = req->reqlat;
     }
 
+    /* a Memory Copy from block namespaces charges their reads */
+    if (NS_SLM(ns)) {
+        return req->status == NVME_SUCCESS && req->dsm_ranges ?
+               bb_ftl_read_ranges(n, req) : 0;
+    }
     if (NS_ZNSSD(ns)) {
         return zns_ftl_process_req(ns, req);
     }
@@ -3728,6 +3739,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT16("csf_runtime_scale", FemuCtrl,
                        csd_params.csf_runtime_scale, 3),
     DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
+    DEFINE_PROP_UINT32("csd_slm_size", FemuCtrl, csd_params.slm_size_mb, 0),
+    DEFINE_PROP_BOOL("csd_cp", FemuCtrl, csd_params.cp, false),
     DEFINE_PROP_STRING("kv_timing", FemuCtrl, kv_timing),
     DEFINE_PROP_STRING("kv_model_coeffs", FemuCtrl, kv_model_coeffs),
     DEFINE_PROP_STRING("kv_index", FemuCtrl, kv_index),

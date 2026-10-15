@@ -736,6 +736,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "CSD: host directory that shared-object and uBPF programs are "
       "loaded from, named by a file name with no slash that must resolve "
       "inside it; unset allows only the built-in phantom program type" },
+    { "csd_slm_size",
+      "CSD: MiB of a memory namespace (NVMe SLM 1.2, CSI 03h) added after "
+      "the configured namespaces, 1 to 1024; 0 adds none" },
+    { "csd_cp",
+      "CSD: add a compute namespace (NVMe CP 1.2, CSI 04h) after the memory "
+      "namespace; needs csd_slm_size" },
     { "kv_timing",
       "KV: media (default) times every command on the NAND model; model "
       "times Store and Retrieve from the workload mix of the last 16 of "

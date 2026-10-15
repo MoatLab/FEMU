@@ -22,6 +22,50 @@ enum FemuCsdAdminCommands {
     NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA = 0x25,
 };
 
+/* Subsystem Local Memory 1.2, Figure 5, on a memory namespace */
+enum FemuSlmIoCommands {
+    NVME_SLM_CMD_COPY           = 0x01,
+    NVME_SLM_CMD_READ           = 0x02,
+    NVME_SLM_CMD_FILL           = 0x04,
+    NVME_SLM_CMD_WRITE          = 0x05,
+};
+
+/* Computational Programs 1.2, Figure 15 and Base 2.3, Figure 142 */
+enum FemuCpCommands {
+    NVME_CP_CMD_EXECUTE             = 0x01,
+    NVME_ADM_CMD_CP_LOAD_PROGRAM    = 0x85,
+    NVME_ADM_CMD_CP_PROGRAM_ACT     = 0x88,
+    NVME_ADM_CMD_CP_MRS_MGMT        = 0x89,
+};
+
+/* command specific status values (SCT 1), SLM Figure 14 and CP Figure 14 */
+enum FemuCpSlmStatus {
+    NVME_SLM_FAST_COPY_NOT_POSSIBLE = 0x0186,
+    NVME_SLM_NS_NOT_REACHABLE       = 0x0188,
+    NVME_CP_INSUFFICIENT_RESOURCES  = 0x018a,
+    NVME_CP_INVALID_MEMORY_NS       = 0x018b,
+    NVME_CP_INVALID_MRS             = 0x018c,
+    NVME_CP_INVALID_RSID            = 0x018d,
+    NVME_CP_INVALID_PROGRAM_DATA    = 0x018e,
+    NVME_CP_INVALID_PIND            = 0x018f,
+    NVME_CP_INVALID_PROGRAM_TYPE    = 0x0190,
+    NVME_CP_MAX_MEMORY_RANGES       = 0x0191,
+    NVME_CP_MAX_MRS                 = 0x0192,
+    NVME_CP_MAX_ACTIVATED           = 0x0193,
+    NVME_CP_MAX_PROGRAM_BYTES       = 0x0194,
+    NVME_CP_MRS_IN_USE              = 0x0195,
+    NVME_CP_NO_PROGRAM              = 0x0196,
+    NVME_CP_OVERLAPPING_RANGES      = 0x0197,
+    NVME_CP_NOT_ACTIVATED           = 0x0198,
+    NVME_CP_PROGRAM_IN_USE          = 0x0199,
+    NVME_CP_NOT_DOWNLOADABLE        = 0x019a,
+    NVME_CP_PROGRAM_TOO_BIG         = 0x019b,
+};
+
+/* the vendor-specific downloadable program types FEMU offers (CP Fig 29) */
+#define NVME_CP_PTYPE_FEMU_EBPF     0xc1
+#define NVME_CP_PTYPE_FEMU_SHLIB    0xc3
+
 #define NVME_CSD_MR_AFDM_NSID 0
 
 enum FemuCsdFdmType {

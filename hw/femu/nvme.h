@@ -528,6 +528,8 @@ enum NvmeCsi {
     NVME_CSI_NVM                = 0x00,
     NVME_CSI_KV                 = 0x01,
     NVME_CSI_ZONED              = 0x02,
+    NVME_CSI_SLM                = 0x03,     /* Subsystem Local Memory */
+    NVME_CSI_CP                 = 0x04,     /* Computational Programs */
     /* not a CSI: CC.CSS enables no I/O command set (nvme_log_csi()) */
     NVME_CSI_NONE               = 0xff,
 };
@@ -931,6 +933,17 @@ typedef struct QEMU_PACKED NvmeCopyRange {
     uint16_t    elbatm;
 } NvmeCopyRange;
 
+/* a Copy source range of descriptor format 4h (SLM 1.2, Figure 11) */
+typedef struct QEMU_PACKED NvmeSlmCopyRange {
+    uint32_t    snsid;
+    uint8_t     rsvd4[4];
+    uint64_t    saddr;
+    uint32_t    nbyte;
+    uint8_t     rsvd20[2];
+    uint16_t    sopt;           /* bit 15: Fast Copy Only */
+    uint8_t     rsvd24[8];
+} NvmeSlmCopyRange;
+
 /* the Copy limits every block namespace reports */
 #define FEMU_COPY_MSSRL     128
 #define FEMU_COPY_MCL       1024
@@ -1178,12 +1191,17 @@ enum NvmeLogIdentifier {
     NVME_LOG_FID_EFFECTS    = 0x12,
     NVME_LOG_MI_EFFECTS     = 0x13,
     NVME_LOG_ENDGRP         = 0x09,
+    NVME_LOG_REACH_GROUPS   = 0x1a,
+    NVME_LOG_REACH_ASSOCS   = 0x1b,
     NVME_LOG_FDP_CONFS      = 0x20,
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
     NVME_LOG_SANITIZE           = 0x81,
+    NVME_LOG_CP_PROGRAM_LIST    = 0x82,     /* CP 1.2, 4.1.4 */
+    NVME_LOG_CP_PROGRAM_TYPES   = 0x83,
+    NVME_LOG_CP_MRS_LIST        = 0x84,
     NVME_LOG_FEMU_STATS         = 0xc0,
 };
 
@@ -1321,7 +1339,9 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     rsvd103[8];
     uint8_t     cntrltype;
     uint8_t     fguid[16];
-    uint8_t     rsvd128[128];
+    uint8_t     rsvd128[6];
+    uint8_t     crcap;          /* Controller Reachability Capabilities */
+    uint8_t     rsvd135[121];
     uint16_t    oacs;
     uint8_t     acl;
     uint8_t     aerl;
@@ -1639,6 +1659,7 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_SMART(aec) ((aec) & 0xff)
 #define NVME_AEC_NS_ATTR    (1u << 8)
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
+#define NVME_AEC_RGCNS      (1u << 17)  /* Reachability Group Change Notices */
 
 /*
  * An Async Event Request the controller is holding. The admin path builds its
@@ -1765,6 +1786,13 @@ typedef struct NvmeRequest {
      * puts it on that poller's completion ring when it is done.
      */
     void            (*defer)(FemuCtrl *n, struct NvmeRequest *req, int poller);
+
+    /*
+     * The program and Memory Range Set an Execute on a compute namespace
+     * holds until its completion is posted or the command is dropped; zero
+     * when it holds none. See femu_csd_req_done().
+     */
+    uint64_t        csd_use;
 } NvmeRequest;
 
 /*
@@ -2211,6 +2239,8 @@ typedef struct CsdCtrlParams {
     uint64_t context_switch_time;
     uint16_t csf_runtime_scale;
     char     *program_dir;       /* where a loadable program may come from */
+    uint32_t slm_size_mb;        /* memory namespace size; 0 adds none */
+    bool     cp;                 /* add a compute namespace */
 } CsdCtrlParams;
 
 typedef struct OcCtrlParams {
@@ -2756,9 +2786,23 @@ static inline bool NS_KVSSD(NvmeNamespace *ns)
     return (ns->femu_mode == FEMU_KVSSD_MODE);
 }
 
+/*
+ * The block namespace of a CSD controller. Its memory and compute namespaces
+ * run the CSD handlers too, but they have no FTL and no backend slice.
+ */
 static inline bool NS_CSD(NvmeNamespace *ns)
 {
-    return (ns->femu_mode == FEMU_CSD_MODE);
+    return ns->femu_mode == FEMU_CSD_MODE && ns->csi == NVME_CSI_NVM;
+}
+
+static inline bool NS_SLM(NvmeNamespace *ns)
+{
+    return ns->csi == NVME_CSI_SLM;
+}
+
+static inline bool NS_CP(NvmeNamespace *ns)
+{
+    return ns->csi == NVME_CSI_CP;
 }
 
 static inline bool BBSSD(FemuCtrl *n)
@@ -2784,6 +2828,18 @@ static inline bool KVSSD(FemuCtrl *n)
 static inline bool CSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_CSD_MODE);
+}
+
+/* a CSD controller with a memory namespace (SLM 1.2) */
+static inline bool CSD_SLM(FemuCtrl *n)
+{
+    return CSD(n) && n->csd_params.slm_size_mb;
+}
+
+/* a CSD controller with a compute namespace (CP 1.2) */
+static inline bool CSD_CP(FemuCtrl *n)
+{
+    return CSD(n) && n->csd_params.cp;
 }
 
 /* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
@@ -3038,6 +3094,16 @@ int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 int nvme_register_csd(FemuCtrl *n);
 void femu_csd_drain_sq(FemuCtrl *n, struct NvmeSQueue *sq);
+void femu_csd_req_done(FemuCtrl *n, NvmeRequest *req);
+void femu_csd_post_cqe(FemuCtrl *n, struct NvmeCQueue *cq, NvmeRequest *req);
+int femu_csd_check_namespaces(FemuCtrl *n, int n_csd, Error **errp);
+void femu_csd_add_namespaces(FemuCtrl *n);
+void femu_csd_slm_clear(FemuCtrl *n);
+uint16_t femu_csd_identify_ns(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
+uint16_t femu_csd_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_csd_slm_read(FemuCtrl *n, uint32_t nsid, uint64_t off,
+                           uint64_t len, uint8_t *dst);
+uint64_t bb_ftl_read_ranges(FemuCtrl *n, NvmeRequest *req);
 int nvme_register_kvssd(FemuCtrl *n);
 
 /* per-namespace FTL entry points, dispatched by the controller's FTL thread */

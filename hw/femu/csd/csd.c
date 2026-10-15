@@ -58,6 +58,7 @@ static void csd_program_unload(FemuCsdProgram *program)
 static void csd_program_destroy(FemuCsdProgram *program)
 {
     csd_program_unload(program);
+    g_free(program->loaded);
     g_free(program->data);
     g_free(program);
 }
@@ -66,7 +67,7 @@ static void csd_program_destroy(FemuCsdProgram *program)
  * Closing a library runs its destructors, which may take any time, so the
  * last reference only queues the program; a worker closes it unlocked.
  */
-static void csd_program_unref(gpointer opaque)
+void csd_program_unref(gpointer opaque)
 {
     FemuCsdProgram *program = opaque;
     FemuCsdState *csd;
@@ -76,7 +77,11 @@ static void csd_program_unref(gpointer opaque)
     }
 
     csd = program->csd;
-    csd->prog_used -= program->size;
+    if (program->cp) {
+        csd->cp_prog_used -= program->size;
+    } else {
+        csd->prog_used -= program->size;
+    }
     QSLIST_INSERT_HEAD(&csd->dead, program, dead);
     qemu_cond_signal(&csd->job_cond);
 }
@@ -107,6 +112,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     FemuCsdState *csd;
     struct ssd *ssd;
+    uint8_t *slm = NULL;
     uint32_t i;
 
     csd_check_size();
@@ -158,6 +164,14 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    if (CSD_SLM(n)) {
+        slm = g_try_malloc0((uint64_t)n->csd_params.slm_size_mb * MiB);
+        if (!slm) {
+            error_setg(errp, "CSD: cannot allocate csd_slm_size");
+            return;
+        }
+    }
+
     if (!n->ns_mgmt) {
         csd_init_ctrl_str(n, ns);
     }
@@ -191,6 +205,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     QTAILQ_INIT(&csd->pending);
     QTAILQ_INIT(&csd->running);
     QSLIST_INIT(&csd->dead);
+    csd_cp_slm_init(n, csd, ns, slm);
     csd->workers = g_new0(QemuThread, csd->params.nr_cu);
     for (i = 0; i < csd->params.nr_cu; i++) {
         qemu_thread_create(&csd->workers[i], "femu-csd-cu", csd_worker, csd,
@@ -254,6 +269,7 @@ static void csd_exit(FemuCtrl *n)
     g_hash_table_destroy(csd->programs);
     g_hash_table_destroy(csd->groups);
     g_hash_table_destroy(csd->mrs);
+    csd_cp_slm_exit(csd);
     while (!QSLIST_EMPTY(&csd->dead)) {
         FemuCsdProgram *program = QSLIST_FIRST(&csd->dead);
 
@@ -528,8 +544,7 @@ static uint16_t csd_load_ubpf(FemuCtrl *n, FemuCsdProgram *program, bool jit)
 #endif
 }
 
-static uint16_t csd_load_program_data(FemuCtrl *n, FemuCsdProgram *program,
-                                      bool jit)
+uint16_t csd_load_program_data(FemuCtrl *n, FemuCsdProgram *program, bool jit)
 {
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
@@ -821,6 +836,9 @@ static void csd_job_free_locked(FemuCsdJob *job)
         csd_afdm_unref(job->afdms[i]);
     }
     csd_program_unref(job->program);
+    g_free(job->cp_sb);
+    g_free(job->cp_len);
+    g_free(job->cp_scratch);
     g_free(job->afdms);
     g_free(job->args.mr_addr);
     g_free(job->args.mr_len);
@@ -867,6 +885,9 @@ static uint16_t csd_run_program(FemuCsdProgram *program, FemuCsdArgs *args,
 #else
         return NVME_INVALID_FIELD | NVME_DNR;
 #endif
+    case CSD_KIND_CP_COPY:
+    case CSD_KIND_CP_FNV64:
+        return csd_cp_run_builtin(program, args, result);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -902,7 +923,10 @@ static void csd_finish_locked(FemuCsdState *csd, FemuCsdJob *job,
     uint64_t runtime = job->runtime;
 
     req->status = status;
-    if (!status) {
+    /* CP returns the whole 64-bit value (CP Figure 23); CEMU saturates it */
+    if (!status && job->cp) {
+        req->cqe.res64 = cpu_to_le64(result);
+    } else if (!status) {
         req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
     }
 
@@ -995,10 +1019,16 @@ static void *csd_worker(void *opaque)
 
         result = 0;
         host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        status = csd_run_program(job->program, &job->args, &result);
+        status = job->cp ? csd_cp_job_prepare(csd, job) : NVME_SUCCESS;
+        if (!status) {
+            status = csd_run_program(job->program, &job->args, &result);
+        }
         host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
 
         qemu_mutex_lock(&csd->lock);
+        if (job->cp && !status) {
+            csd_cp_job_commit_locked(csd, job);
+        }
         job->program->busy = false;
         /* the next run of this program may be waiting for this one */
         qemu_cond_broadcast(&csd->job_cond);
@@ -1028,7 +1058,7 @@ static void *csd_worker(void *opaque)
 }
 
 /* called by the poller once it has finished with the request */
-static void csd_exec_defer(FemuCtrl *n, NvmeRequest *req, int poller)
+void csd_exec_defer(FemuCtrl *n, NvmeRequest *req, int poller)
 {
     FemuCsdState *csd = csd_state(n);
     FemuCsdJob *job = req->opaque;
@@ -1448,6 +1478,12 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
+    if (NS_SLM(ns)) {
+        return csd_slm_io_cmd(n, ns, cmd, req);
+    }
+    if (NS_CP(ns)) {
+        return csd_cp_io_cmd(n, ns, cmd, req);
+    }
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
@@ -1485,6 +1521,13 @@ static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return csd_compute_load(n, cmd);
     case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
         return csd_compute_activate(n, cmd);
+    case NVME_ADM_CMD_CP_LOAD_PROGRAM:
+    case NVME_ADM_CMD_CP_PROGRAM_ACT:
+    case NVME_ADM_CMD_CP_MRS_MGMT:
+        if (CSD_CP(n)) {
+            return csd_cp_admin_cmd(n, cmd, cqe);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -1502,7 +1545,7 @@ int nvme_register_csd(FemuCtrl *n)
         .admin_cmd        = NULL,
         .admin_cmd_cqe    = csd_admin_cmd,
         .io_cmd           = csd_io_cmd,
-        .get_log          = NULL,
+        .get_log          = csd_cp_get_log,
     };
 
     return 0;

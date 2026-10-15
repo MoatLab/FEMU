@@ -20,6 +20,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'kvssd/kvssd-admin.c', 'kvssd/kv-model.c',
                              'kvssd/kv-lsm.c',
                              'csd/csd.c',
+                             'csd/cp-slm.c',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'),
               if_false: files('femu-query-stub.c'))

@@ -73,6 +73,21 @@ never holds data, because the controller does not capture on its own.
 controller answers, four bytes per identifier with bit 0 set for the ones it
 supports, so this page can be discovered rather than assumed.
 
+## Computational programs and reachability
+
+A CSD controller with `csd_slm_size` or `csd_cp` answers these pages
+([CP and SLM](../features/cp-slm.md)):
+
+| LID | Page | CSI | NSID | Content |
+| --- | --- | --- | --- | --- |
+| 1Ah | Reachability Groups | any | any | one group, RGID 1, with every namespace; LSP bit 0 (RGO) leaves out the NSIDs |
+| 1Bh | Reachability Associations | any | any | one association, RASID 1, RAC 01h, holding RGID 1; LSP bit 0 (RAO) leaves out the RGIDs |
+| 82h | Program List | 04h | the compute namespace | 16 descriptors, one per PIND |
+| 83h | Downloadable Program Types List | 04h | the compute namespace | C3h with `csd_program_dir`; C1h also with uBPF |
+| 84h | Memory Range Set List | 04h | the compute namespace | RSID 0h, then every set by RSID; LSP bit 0 (RIO) leaves out the ranges |
+
+Both change counts of 1Ah and 1Bh stay 0h, because the groups never change.
+
 ## Asynchronous events
 
 The controller completes an outstanding Asynchronous Event Request when one

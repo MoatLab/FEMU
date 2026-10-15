@@ -25,6 +25,26 @@ typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 #define CSD_PROGRAM_MAX (16U << 20)
 #define CSD_PROGRAM_TOTAL_MAX (64U << 20)
 
+/*
+ * Computational Programs (CP 1.2) and Subsystem Local Memory (SLM 1.2) limits.
+ * Program indexes 0 and 1 hold the device-defined programs; the rest take
+ * downloads. A Memory Range Set holds at most 128 ranges (CP 4.2.2).
+ */
+#define CSD_CP_NPIND        16
+#define CSD_CP_NBUILTIN     2
+#define CSD_CP_MAXMEMRS     64
+#define CSD_CP_MAXMEMR      128
+#define CSD_CP_ALL          0xffff
+#define CSD_SLM_MAX_MB      1024
+#define CSD_SLM_COPY_MAX    (1U << 20)
+#define CSD_SLM_COPY_MSRC   127
+
+/* what a program runs; the CEMU kinds use the CEMU program type values */
+enum {
+    CSD_KIND_CP_COPY    = 0x80,
+    CSD_KIND_CP_FNV64   = 0x81,
+};
+
 typedef struct FemuCsdState FemuCsdState;
 
 /*
@@ -64,6 +84,14 @@ typedef struct FemuCsdProgram {
     struct ubpf_vm *ubpf_vm;
     ubpf_jit_fn ubpf_jit_fn;
 #endif
+    /* a program of the compute namespace rather than a CEMU one */
+    bool cp;
+    bool builtin;
+    uint8_t ptype;              /* the PTYPE the host loaded it as */
+    uint8_t pit;
+    uint32_t use;               /* Executes not yet completed to the host */
+    unsigned long *loaded;      /* dwords received while loading */
+    uint64_t nloaded;
 } FemuCsdProgram;
 
 typedef struct FemuCsdGroup {
@@ -80,6 +108,14 @@ typedef struct FemuCsdMrs {
     NvmeCsdMemoryRange *ranges;
 } FemuCsdMrs;
 
+/* a Memory Range Set of the compute namespace (CP 2.1.2.1) */
+typedef struct FemuCsdCpMrs {
+    uint16_t rsid;
+    uint32_t numr;
+    NvmeCsdMemoryRange *ranges;
+    uint32_t use;               /* Executes not yet completed to the host */
+} FemuCsdCpMrs;
+
 /* an Execute handed from the poller to a compute unit thread */
 typedef struct FemuCsdJob {
     NvmeRequest *req;           /* NULL once its submission queue is gone */
@@ -92,6 +128,17 @@ typedef struct FemuCsdJob {
     FemuCsdArgs args;
     uint8_t *data;
     QTAILQ_ENTRY(FemuCsdJob) entry;
+    /*
+     * An Execute on the compute namespace. The program runs on scratch copies
+     * of its memory ranges, which are written back to the memory namespace
+     * only if the command is still outstanding when the program returns.
+     */
+    bool cp;
+    uint32_t cp_numr;
+    uint64_t *cp_sb;
+    uint32_t *cp_len;
+    uint8_t *cp_scratch;        /* the ranges, then a snapshot of them */
+    uint64_t cp_total;
 } FemuCsdJob;
 
 struct FemuCsdState {
@@ -117,11 +164,46 @@ struct FemuCsdState {
     QSLIST_HEAD(, FemuCsdProgram) dead;
     bool stopping;
     bool overrun_warned;
+
+    /*
+     * The memory and compute namespaces. slm_lock serializes every access to
+     * the memory, so each SLM command is atomic as a whole; it nests inside
+     * lock.
+     */
+    uint8_t *slm;
+    uint64_t slm_size;
+    uint32_t slm_nsid;
+    uint32_t cp_nsid;
+    QemuMutex slm_lock;
+    FemuCsdProgram *cp_prog[CSD_CP_NPIND];
+    GHashTable *cp_mrs;
+    uint16_t cp_next_rsid;
+    uint64_t cp_prog_used;      /* bytes held by downloaded CP programs */
 };
 
 static inline FemuCsdState *csd_state(FemuCtrl *n)
 {
     return n->csd_ctrl_state;
 }
+
+/* csd.c */
+void csd_program_unref(gpointer opaque);
+uint16_t csd_load_program_data(FemuCtrl *n, FemuCsdProgram *program, bool jit);
+void csd_exec_defer(FemuCtrl *n, NvmeRequest *req, int poller);
+
+/* cp-slm.c */
+void csd_cp_slm_init(FemuCtrl *n, FemuCsdState *csd, NvmeNamespace *ns,
+                     uint8_t *slm);
+void csd_cp_slm_exit(FemuCsdState *csd);
+uint16_t csd_slm_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                        NvmeRequest *req);
+uint16_t csd_cp_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                       NvmeRequest *req);
+uint16_t csd_cp_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t csd_cp_get_log(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t csd_cp_job_prepare(FemuCsdState *csd, FemuCsdJob *job);
+void csd_cp_job_commit_locked(FemuCsdState *csd, FemuCsdJob *job);
+uint16_t csd_cp_run_builtin(FemuCsdProgram *program, FemuCsdArgs *args,
+                            int64_t *result);
 
 #endif

@@ -166,6 +166,20 @@ unload, 0x23 program activate and deactivate, 0x25 load program data. The
 command layouts follow CEMU; `hw/femu/tests/csd/csd-passthru.c` builds each
 one.
 
+### NVMe CP and SLM command sets
+
+`csd_slm_size` adds a memory namespace (SLM 1.2) and `csd_cp=on` a compute
+namespace (CP 1.2) after the CSD namespace. They take the ratified opcodes,
+and their programs, range sets and memory are separate from the CEMU ones
+above. The CEMU commands stay on, on the CSD namespace. See
+[CP and SLM](../features/cp-slm.md).
+
+```
+ CSD namespace (CSI 00h)   NVM commands + CEMU b0h..f8h, admin 21h..25h
+ memory ns     (CSI 03h)   Memory Copy 01h, Read 02h, Fill 04h, Write 05h
+ compute ns    (CSI 04h)   Execute Program 01h, admin 85h, 88h, 89h
+```
+
 ## Use it from the guest
 
 Check the device:

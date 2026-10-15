@@ -685,6 +685,62 @@ static uint16_t nvme_changed_ns_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     return status;
 }
 
+/* the I/O command sets this controller can have namespaces of */
+static bool nvme_csi_supported(FemuCtrl *n, uint8_t csi)
+{
+    switch (csi) {
+    case NVME_CSI_NVM:
+    case NVME_CSI_ZONED:
+    case NVME_CSI_KV:
+        return true;
+    case NVME_CSI_SLM:
+        return CSD_SLM(n);
+    case NVME_CSI_CP:
+        return CSD_CP(n);
+    default:
+        return false;
+    }
+}
+
+/*
+ * Reachability Groups (1Ah) and Reachability Associations (1Bh), Base 2.3
+ * 5.2.12.1.25-26. Every attached namespace is in group 1, and association 1
+ * holds that group with no performance characteristic (RAC 01h), so every
+ * namespace reaches every other one. Neither changes after realize, so both
+ * change counts stay 0h. @only is RGO or RAO: list no identifiers.
+ */
+static uint16_t nvme_reach_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
+                               bool only, uint32_t len, uint64_t off)
+{
+    uint8_t log[16 + 32 + 4 * NVME_MAX_NUM_NAMESPACES] = { 0 };
+    uint32_t count = 0;
+    uint32_t size;
+
+    stw_le_p(&log[8], 1);                   /* NRGD or NRAD */
+    stl_le_p(&log[16], 1);                  /* RGID or RASID */
+    if (lid == NVME_LOG_REACH_GROUPS) {
+        for (uint32_t i = 1; !only && i <= n->namespace_limit; i++) {
+            if (nvme_ns(n, i)) {
+                stl_le_p(&log[48 + 4 * count++], i);
+            }
+        }
+    } else {
+        log[32] = 0x01;                     /* RAC */
+        if (!only) {
+            stl_le_p(&log[48], 1);
+            count = 1;
+        }
+    }
+    stl_le_p(&log[20], count);              /* NNID or NRID */
+    size = 48 + 4 * count;
+    if (off > size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    return dma_read_prp(n, log + off, MIN(len, size - off),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
                                   bool present)
 {
@@ -760,6 +816,9 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
                             NVME_IDENTIFY_DATA_SIZE, prp1, prp2);
     } else if (c->csi == NVME_CSI_KV && ns->csi == NVME_CSI_KV) {
         return kvssd_identify_ns_csi(n, ns, cmd);
+    } else if ((c->csi == NVME_CSI_SLM || c->csi == NVME_CSI_CP) &&
+               ns->csi == c->csi) {
+        return femu_csd_identify_ns(n, ns, cmd);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -834,6 +893,9 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
         return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
     } else if (c->csi == NVME_CSI_KV) {
         return kvssd_identify_ctrl_csi(n, cmd);
+    } else if ((c->csi == NVME_CSI_SLM && CSD_SLM(n)) ||
+               (c->csi == NVME_CSI_CP && CSD_CP(n))) {
+        return femu_csd_identify_ctrl(n, cmd);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -902,8 +964,7 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd,
      * combination FEMU offers enables every set when CC.CSS selects by CSI,
      * and only NVM under CC.CSS 000b.
      */
-    if (c->csi != NVME_CSI_NVM && c->csi != NVME_CSI_ZONED &&
-        c->csi != NVME_CSI_KV) {
+    if (!nvme_csi_supported(n, c->csi)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!present && NVME_CC_CSS(n->bar.cc) != NVME_CC_CSS_CSI &&
@@ -992,6 +1053,10 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
         id[3] = ns->id_ns.fpi;
         stw_le_p(&id[12], le16_to_cpu(ns->id_ns.endgid));
         id[14] = 0x1;                       /* NSTAT.NRDY */
+        /* one Reachability Group holds every namespace (Base 8.1.21) */
+        if (CSD_SLM(n)) {
+            stl_le_p(&id[20], 1);           /* RGRPID */
+        }
     }
 
     return dma_read_prp(n, id, sizeof(id), le64_to_cpu(cmd->dptr.prp1),
@@ -1051,6 +1116,12 @@ static uint16_t nvme_identify_cmd_set(FemuCtrl *n, NvmeCmd *cmd)
     NVME_SET_CSI(*list, NVME_CSI_NVM);
     NVME_SET_CSI(*list, NVME_CSI_ZONED);
     NVME_SET_CSI(*list, NVME_CSI_KV);
+    if (CSD_SLM(n)) {
+        NVME_SET_CSI(*list, NVME_CSI_SLM);
+    }
+    if (CSD_CP(n)) {
+        NVME_SET_CSI(*list, NVME_CSI_CP);
+    }
 
     return dma_read_prp(n, list, data_len, prp1, prp2);
 }
@@ -3106,7 +3177,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     if ((lid == NVME_LOG_SUPPORTED || lid == NVME_LOG_CMD_EFFECTS ||
          lid == NVME_LOG_FID_EFFECTS || lid == NVME_LOG_CHANGED_ZONE_LIST) &&
         NVME_CC_CSS(n->bar.cc) == NVME_CC_CSS_CSI &&
-        csi != NVME_CSI_NVM && csi != NVME_CSI_KV && csi != NVME_CSI_ZONED) {
+        !nvme_csi_supported(n, csi)) {
         return NVME_IOCS_NOT_SUPPORTED | NVME_DNR;
     }
 
@@ -3158,6 +3229,9 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fdp_stats(n, lspi, len, off, cmd);
     case NVME_LOG_FDP_EVENTS:
         return nvme_fdp_events(n, lspi, len, off, cmd);
+    case NVME_LOG_REACH_GROUPS:
+    case NVME_LOG_REACH_ASSOCS:
+        return nvme_reach_log(n, cmd, lid, (dw10 >> 8) & 0x1, len, off);
     default: {
         /*
          * A namespace-specific log page belongs to the mode that namespace
@@ -3399,6 +3473,26 @@ static bool nvme_fdp_format_conflict(FemuCtrl *n, NvmeNamespace *ns,
     return false;
 }
 
+/*
+ * A compute namespace has no format: a Format naming it is refused, and a
+ * broadcast one passes it by (CP 4.1.2). A memory namespace has one format,
+ * index 0, with no metadata or protection information (SLM 4.1.3).
+ */
+static uint16_t nvme_format_check_ns(FemuCtrl *n, NvmeNamespace *ns,
+                                     bool broadcast, uint8_t lba_idx,
+                                     uint8_t meta_loc, uint8_t pil, uint8_t pi)
+{
+    if (NS_CP(ns)) {
+        return broadcast ? NVME_SUCCESS : NVME_INVALID_NSID | NVME_DNR;
+    }
+    if (NS_SLM(ns)) {
+        return lba_idx || meta_loc || pil || pi ?
+               NVME_INVALID_FORMAT | NVME_DNR : NVME_SUCCESS;
+    }
+    return nvme_format_check(n, &ns->id_ns, ns->femu_mode, lba_idx, meta_loc,
+                             pil, pi);
+}
+
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
                                       uint8_t meta_loc, uint8_t pil, uint8_t pi,
                                       uint8_t sec_erase, unsigned long **prep)
@@ -3409,6 +3503,12 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     uint64_t mlen;
     uint8_t *mdata = NULL;
     uint16_t status;
+
+    /* the memory of a memory namespace is cleared to zero (SLM 4.1.3) */
+    if (NS_SLM(ns)) {
+        femu_csd_slm_clear(n);
+        return NVME_SUCCESS;
+    }
 
     blks = ns->size / (1 << id_ns->lbaf[lba_idx].lbads);
     /*
@@ -3553,17 +3653,15 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
             if (!nvme_ns(n, i + 1)) {
                 continue;
             }
-            status = nvme_format_check(n, &n->namespaces[i].id_ns,
-                                       n->namespaces[i].femu_mode, lba_idx,
-                                       meta_loc, pil, pi);
+            status = nvme_format_check_ns(n, &n->namespaces[i], true,
+                                          lba_idx, meta_loc, pil, pi);
             if (status != NVME_SUCCESS) {
                 return status;
             }
         }
     } else {
-        status = nvme_format_check(n, &n->namespaces[nsid - 1].id_ns,
-                                   n->namespaces[nsid - 1].femu_mode, lba_idx,
-                                   meta_loc, pil, pi);
+        status = nvme_format_check_ns(n, &n->namespaces[nsid - 1], false,
+                                      lba_idx, meta_loc, pil, pi);
         if (status != NVME_SUCCESS) {
             return status;
         }
@@ -3596,7 +3694,8 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     if (nsid == 0xffffffff) {
         for (uint32_t i = 0; i < n->namespace_limit; ++i) {
             ns = nvme_ns(n, i + 1);
-            if (!ns) {
+            /* a format has no effect on a compute namespace (CP 4.1.2) */
+            if (!ns || NS_CP(ns)) {
                 continue;
             }
             status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,

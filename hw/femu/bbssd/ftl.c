@@ -348,31 +348,28 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
  * The write cannot start before its data has been read, so it is issued when
  * the slowest read ends, and the latency is that read plus the write.
  */
-static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
+/*
+ * Read every source range of a Copy or Memory Copy and return when the slowest
+ * read ends. Each range names its namespace in cattr. A range from another
+ * namespace is read from that one's media, at that one's place in the backing
+ * store, which is what the request's namespace stands for while the read is
+ * charged. A namespace without media (NoSSD, memory) costs nothing to read.
+ */
+static uint64_t ssd_read_ranges(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
 {
-    uint64_t dslba = req->slba;
-    uint32_t dnlb = req->nlb;
-    uint64_t stime = req->stime;
-    uint64_t rlat = 0;
-    uint64_t wlat;
-
     NvmeNamespace *dns = req->ns;
+    uint64_t rlat = 0;
 
     for (int i = 0; i < req->dsm_nr_ranges; i++) {
         uint32_t snsid = le32_to_cpu(req->dsm_ranges[i].cattr);
         struct ssd *from = ssd;
         uint64_t lat;
 
-        /*
-         * A range from another namespace is read from that one's media, at
-         * that one's place in the backing store, which is what the request's
-         * namespace stands for while the read is charged.
-         */
-        if (snsid && snsid != dns->id) {
+        if (!ssd || (snsid && snsid != dns->id)) {
             NvmeNamespace *source = nvme_ns(n, snsid);
 
-            /* a namespace without media (no-SSD) costs nothing to read */
-            if (!source || !source->ssd) {
+            if (!source || !source->ssd ||
+                !(NS_BBSSD(source) || NS_CSD(source))) {
                 continue;
             }
             from = source->ssd;
@@ -383,6 +380,28 @@ static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
         lat = ssd_read(from, req);
         req->ns = dns;
         rlat = MAX(rlat, lat);
+    }
+    return rlat;
+}
+
+/* a Memory Copy into the memory namespace: only its reads touch media */
+uint64_t bb_ftl_read_ranges(FemuCtrl *n, NvmeRequest *req)
+{
+    return ssd_read_ranges(n, NULL, req);
+}
+
+static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
+{
+    uint64_t dslba = req->slba;
+    uint32_t dnlb = req->nlb;
+    uint64_t stime = req->stime;
+    uint64_t rlat;
+    uint64_t wlat;
+
+    rlat = ssd_read_ranges(n, ssd, req);
+    /* a Copy of format 4h may move no bytes at all */
+    if (!dnlb) {
+        return rlat;
     }
     req->slba = dslba;
     req->nlb = dnlb;

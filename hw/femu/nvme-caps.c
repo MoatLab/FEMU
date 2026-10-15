@@ -87,6 +87,24 @@ static const uint32_t nvme_mode_io_csd[256] = {
     [NVME_CMD_CSD_DELETE_GROUP]     = NVME_CMD_EFF_CSUPP,
 };
 
+/*
+ * Subsystem Local Memory (SLM 1.2, Figure 5) and Computational Programs (CP
+ * 1.2, Figure 15). Memory is not a logical block, and Flush has no effect on
+ * either namespace.
+ */
+static const uint32_t nvme_csi_io_slm[256] = {
+    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP,
+    [NVME_SLM_CMD_COPY]             = NVME_CMD_EFF_CSUPP,
+    [NVME_SLM_CMD_READ]             = NVME_CMD_EFF_CSUPP,
+    [NVME_SLM_CMD_FILL]             = NVME_CMD_EFF_CSUPP,
+    [NVME_SLM_CMD_WRITE]            = NVME_CMD_EFF_CSUPP,
+};
+
+static const uint32_t nvme_csi_io_cp[256] = {
+    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP,
+    [NVME_CP_CMD_EXECUTE]           = NVME_CMD_EFF_CSUPP,
+};
+
 static const uint32_t *nvme_mode_io(FemuCtrl *n, uint8_t mode)
 {
     switch (mode) {
@@ -119,6 +137,10 @@ static uint32_t nvme_mode_admin_effects(FemuCtrl *n, uint8_t opc)
         case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
         case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
             return NVME_CMD_EFF_CSUPP;
+        case NVME_ADM_CMD_CP_LOAD_PROGRAM:
+        case NVME_ADM_CMD_CP_PROGRAM_ACT:
+        case NVME_ADM_CMD_CP_MRS_MGMT:
+            return CSD_CP(n) ? NVME_CMD_EFF_CSUPP : 0;
         }
         return 0;
     case FEMU_OCSSD_MODE:
@@ -218,7 +240,16 @@ static uint32_t nvme_mode_io_effects(FemuCtrl *n, uint8_t csi, uint8_t mode,
 {
     const uint32_t *tbl;
     bool optional;
-    uint32_t eff = nvme_optional_effects(n, csi, opc, &optional);
+    uint32_t eff;
+
+    /* their opcodes overlap the NVM ones, so they are looked up first */
+    if (csi == NVME_CSI_SLM) {
+        return nvme_csi_io_slm[opc];
+    }
+    if (csi == NVME_CSI_CP) {
+        return nvme_csi_io_cp[opc];
+    }
+    eff = nvme_optional_effects(n, csi, opc, &optional);
 
     /*
      * An Open-Channel address is a sparse vector address. The common handlers
@@ -336,6 +367,14 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
          */
         return n->subsys && n->subsys->endgrp.fdp.enabled ?
                NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_REACH_GROUPS:
+    case NVME_LOG_REACH_ASSOCS:
+        /* Reachability Reporting comes with the memory namespace */
+        return CSD_SLM(n) ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_CP_PROGRAM_LIST:
+    case NVME_LOG_CP_PROGRAM_TYPES:
+    case NVME_LOG_CP_MRS_LIST:
+        return csi == NVME_CSI_CP && CSD_CP(n) ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_CHANGED_ZONE_LIST:
         return csi == NVME_CSI_ZONED && nvme_has_zoned_ns(n) ?
                NVME_LIDS_LSUPP : 0;
@@ -430,6 +469,13 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
     id->oncs = cpu_to_le16(o);
     /* descriptor formats 0 and 2 (the latter names a source namespace) */
     id->ocfs = cpu_to_le16(o & NVME_ONCS_COPY ? 0x5 : 0);
+    /*
+     * Memory Copy takes formats 2h and 4h whatever ONCS says, and with it a
+     * Copy may read the memory namespace through format 4h.
+     */
+    if (CSD_SLM(n)) {
+        id->ocfs |= cpu_to_le16(1 << 2 | 1 << 4);
+    }
     id->lpa = lpa;
     /* block erase only */
     id->sanicap = cpu_to_le32(nvme_admin_effects(n, NVME_ADM_CMD_SANITIZE) ?

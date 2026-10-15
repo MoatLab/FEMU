@@ -432,11 +432,85 @@ Refusal messages are listed in the
   slice, which CEMU's `time_slice` and `context_switch_time` describe, would
   need programs that yield.
 
+## CP and SLM command sets
+
+`csd_slm_size` and `csd_cp` add the ratified NVMe Subsystem Local Memory
+(SLM 1.2) and Computational Programs (CP 1.2) command sets. The guide is
+[CP and SLM](../features/cp-slm.md).
+
+### Namespaces
+
+`femu_csd_add_namespaces()` appends the memory namespace, then the compute
+namespace, after the configured ones. They keep `femu_mode` 4, so they share
+the CSD handler table, and their CSI tells them apart. They have no backend
+slice and no FTL. `NS_CSD()` is true only for the block namespace, so no FTL
+code sees them. `csd_init()` copies its handler table to them.
+
+```
+ nvme_io_cmd(): NS_SLM / NS_CP --> csd_io_cmd() before the NVM opcodes
+ csd_io_cmd():  NS_SLM --> csd_slm_io_cmd()   NS_CP --> csd_cp_io_cmd()
+                else   --> the CEMU switch (unchanged)
+ csd_admin_cmd(): 85h 88h 89h --> csd_cp_admin_cmd() with csd_cp only
+```
+
+The early hook is necessary. SLM uses 04h and 05h, which the NVM switch
+takes as Write Uncorrectable and Compare.
+
+### State
+
+```
+ FemuCsdState
+   slm, slm_size, slm_lock     the memory; slm_lock nests inside lock
+   cp_prog[16]                 PIND 0, 1 device-defined; 2..15 downloaded
+   cp_mrs                      RSID -> FemuCsdCpMrs
+   lock, workers, job queue    shared with the CEMU commands
+```
+
+### Execute and its lifetime
+
+Three counts keep a program and its range set alive and in use:
+
+```
+ fetch      csd_cp_exec():   program->refs++, program->use++, mrs->use++,
+                             req->csd_use = {PIND, RSID}
+ run        csd_worker():    copy ranges to scratch (slm_lock), run unlocked,
+                             write back changed bytes if job->req is set
+ job freed  worker:          program->refs--   (the job's own reference)
+ CQE posted nvme_post_cqe(): femu_csd_post_cqe(): under lock, write the
+                             CQE, then program->use--, mrs->use--
+ dropped    nvme_free_sq():  femu_csd_req_done()
+```
+
+- `use` is the protocol state: Program In Use and Memory Range Set In Use
+  while a command is outstanding.
+- `refs` is the object lifetime: a program dropped while it runs stays alive
+  until the worker frees its job.
+- `femu_csd_drain_sq()` clears `job->req` under `lock`, and the write-back
+  checks it under the same lock. A command dropped while its program runs
+  therefore writes nothing. A command dropped later, while it waits for its
+  modeled time or for room in its completion queue, keeps what it wrote.
+
+### Memory access
+
+Every access to the memory takes the lock `slm_lock`. Host transfers go
+through a buffer. Thus no DMA runs under the lock, and a failed DMA changes
+nothing. Programs never see an address in the memory. They work on scratch
+copies.
+
+### Timing
+
+Memory Copy, format 2h, puts its block ranges in `req->dsm_ranges` for the
+FTL thread. There, `femu_ftl_process_req()` sends such a request to
+`bb_ftl_read_ranges()`, the read loop that `ssd_copy()` also uses. Copy,
+format 4h, gives the FTL no source range, so only the write is charged.
+
 ## Source map
 
 | File | Contents |
 | --- | --- |
 | [`hw/femu/csd/csd.c`](../../csd/csd.c) | state, every CSD command, program loading, compute unit threads, execution |
+| [`hw/femu/csd/csd-int.h`](../../csd/csd-int.h) | state shared by the CEMU and the CP and SLM code |
+| [`hw/femu/csd/cp-slm.c`](../../csd/cp-slm.c) | the SLM and CP command sets, their namespaces, Identify and logs |
 | [`hw/femu/csd/csd.h`](../../csd/csd.h) | command layouts, opcodes, program types |
 | [`hw/femu/tests/csd/`](../../tests/csd/README.md) | guest tool, example programs, program ABI |
 | [`hw/femu/bbssd/`](../../bbssd/ftl.c) | the black-box FTL under the namespace |

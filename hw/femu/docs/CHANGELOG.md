@@ -78,6 +78,9 @@ listed one by one.
 
 #### NVMe commands, features and log pages
 
+- With `csd_slm_size`, CSD mode adds an NVMe Subsystem Local Memory 1.2 namespace. It takes Memory Read, Write, Fill and Copy. With `csd_cp=on`, CSD mode also adds an NVMe Computational Programs 1.2 namespace. It takes Load Program, Program Activation Management, Memory Range Set Management and Execute Program. Two device-defined programs (copy and a 64-bit FNV-1a hash) and the CEMU shared-library and eBPF programs run on it.
+- A Copy with descriptor format 4h moves memory namespace bytes to a block namespace. The CEMU commands stay on ([guide](features/cp-slm.md)).
+- With those namespaces the controller reports Reachability Reporting: the Reachability Groups (1Ah) and Reachability Associations (1Bh) log pages, CRCAP and RGRPID ([log pages](reference/log-pages-and-counters.md#computational-programs-and-reachability)).
 - SGL data transfers (`sgl`), now honoured on every I/O command that carries data (1fa43530d, d24705851).
 - DULBE and Write Zeroes with Deallocate report deallocated blocks (98247b96f).
 - TRIM (Dataset Management deallocate) on bbssd (d749928e9).

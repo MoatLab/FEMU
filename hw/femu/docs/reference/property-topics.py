@@ -159,7 +159,7 @@ DEVICES = [
                 "props": [
                     "fdm_size", "nr_cu", "nr_thread", "time_slice",
                     "context_switch_time", "csf_runtime_scale",
-                    "csd_program_dir",
+                    "csd_program_dir", "csd_slm_size", "csd_cp",
                 ],
             },
             {
