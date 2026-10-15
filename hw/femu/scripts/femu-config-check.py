@@ -712,6 +712,20 @@ def self_test(qemu: str) -> int:
     code, r = check(qemu, ["-machine", "nonesuch", "-device", "femu"])
     t.check("refused: an unknown machine exits 1", code == 1,
             json.dumps(r)[:400])
+    tmp = tempfile.mkdtemp(prefix="femu-config-check-mem-")
+    try:
+        capped = os.path.join(tmp, "qemu-system-x86_64")
+        with open(capped, "w") as f:
+            f.write("#!/bin/sh\nulimit -v 3145728\nexec %s \"$@\"\n"
+                    % shlex.quote(os.path.abspath(qemu)))
+        os.chmod(capped, 0o755)
+        code, r = check(capped, ["-device", "femu,femu_mode=2,devsz_mb=8192"])
+        t.check("refused: a backend the host cannot allocate exits 1",
+                code == 1 and any("cannot allocate the 8192 MiB" in e
+                                  for e in r.get("errors", [])),
+                json.dumps(r)[:400])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     tmp = tempfile.mkdtemp(prefix="femu-config-check-crash-")
     try:
         crash = os.path.join(tmp, "qemu-system-x86_64")

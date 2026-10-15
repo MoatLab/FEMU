@@ -52,12 +52,22 @@ static void mbe_numa_bind(void *addr, int64_t len)
     }
 }
 
+/*
+ * Returns -1, with *mbe NULL, when the host cannot give the backend its
+ * memory, so realize can refuse the device instead of aborting QEMU.
+ */
 int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
 {
-    SsdDramBackend *b = *mbe = g_malloc0(sizeof(SsdDramBackend));
+    SsdDramBackend *b = g_malloc0(sizeof(SsdDramBackend));
 
     b->size = nbytes;
-    b->logical_space = g_malloc0(nbytes);
+    b->logical_space = g_try_malloc0(nbytes);
+    if (!b->logical_space) {
+        g_free(b);
+        *mbe = NULL;
+        return -1;
+    }
+    *mbe = b;
 
     /* bind to the requested NUMA node before mlock faults the pages in */
     mbe_numa_bind(b->logical_space, nbytes);

@@ -3250,7 +3250,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         /* prepare() lent the medium's backend; the pollers bring its locks */
         backend_init_range_locks(n->mbe);
     } else {
-        init_dram_backend(&n->mbe, bs_size);
+        if (init_dram_backend(&n->mbe, bs_size)) {
+            error_setg(errp, "femu: cannot allocate the %" PRId64 " MiB "
+                       "memory backend; lower devsz_mb", bs_size / MiB);
+            return;
+        }
         n->mbe->femu_mode = n->femu_mode;
     }
 

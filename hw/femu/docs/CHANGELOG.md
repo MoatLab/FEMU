@@ -397,6 +397,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - CAP.AMS no longer claims weighted round robin, which nothing arbitrated by, and enabling with another CC.AMS fails (409db7bb3).
 - A controller in a subsystem reports its endurance group (CTRATT bit 4, ENDGIDMAX, each namespace's ENDGID, the Key Value Identify structure included) whether or not FDP is on, as log 09h already did (409db7bb3).
 - The spare critical warning in the SMART and Endurance Group logs is set when the available spare falls below the threshold, not when it equals it (4faaff90a).
+- A memory backend that the host cannot allocate now refuses the device with a message that names its size. Before, QEMU aborted in the allocator.
 
 ### Documentation and tooling
 
