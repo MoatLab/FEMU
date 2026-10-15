@@ -1541,6 +1541,15 @@ static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
+    /*
+     * csd_init() of the CSD namespace builds the program and range set
+     * tables. A controller with no CSD namespace has none, and csd_cp
+     * already needs one.
+     */
+    if (!csd_state(n)) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+
     switch (csd_admin_opcode(n, cmd->opcode)) {
     case NVME_ADM_CMD_CSD_MRS_MGMT:
         return csd_mrs_mgmt(n, cmd, cqe);

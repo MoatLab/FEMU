@@ -75,7 +75,9 @@ only through the controller's own handler table. On a controller whose
 `femu_mode` is not 4, for example `femu_mode=2` with
 `namespace_modes=nossd,,csd`, those commands fail with Invalid Opcode, so
 programs cannot be loaded. Set `femu_mode=4` on a controller that should run
-programs. A CSD namespace makes the controller start its FTL thread.
+programs. A `femu_mode=4` controller with no CSD namespace has no
+`FemuCsdState` either, so it refuses them the same way, and log 05h does
+not list them. A CSD namespace makes the controller start its FTL thread.
 
 ## Data structures
 

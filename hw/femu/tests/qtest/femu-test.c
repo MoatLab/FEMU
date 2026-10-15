@@ -18507,6 +18507,45 @@ static void femu_test_csd_opcodes(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * A CSD controller whose namespaces all run other modes has no CSD state.
+ * Its CEMU admin commands are not supported, even with valid fields, and
+ * log 05h does not list them.
+ */
+static void femu_test_csd_no_namespace(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const uint8_t ops[] = { FEMU_CSD_MRS, FEMU_CSD_COMPUTE_LOAD,
+                            FEMU_CSD_ACTIVATE, FEMU_CSD_LOAD_DATA };
+    FemuCtrlState c = { 0 };
+    uint32_t eff[256];
+    NvmeCmd cmd;
+    uint64_t buf;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    for (i = 0; i < ARRAY_SIZE(ops); i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = ops[i];
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        /* activate pind 1, or delete range set 1: past every field check */
+        cmd.cdw10 = cpu_to_le32(1 | (1 << 16));
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_OPCODE);
+    }
+    g_assert_cmphex(femu_get_log(&c, FEMU_LOG_CMD_EFFECTS, buf, 1024, 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, eff, sizeof(eff));
+    for (i = 0; i < ARRAY_SIZE(ops); i++) {
+        g_assert_cmphex(le32_to_cpu(eff[ops[i]]), ==, 0);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_csd_exec_concurrency(void *obj, void *data,
                                            QGuestAllocator *alloc)
 {
@@ -32568,6 +32607,8 @@ static const FemuCapsCfg femu_caps_cfgs[] = {
       FEMU_ONCS_DEFAULT, true },
     { "caps-csd-legacy", "femu_mode=4,fdm_size=16,csd_legacy_opcodes=on,"
       "csd_slm_size=4,csd_cp=on", FEMU_ONCS_DEFAULT, true },
+    { "caps-csd-no-csd-ns", "femu_mode=4,fdm_size=16,namespace_modes=nossd",
+      FEMU_ONCS_DEFAULT, true },
     { "caps-oc12", "femu_mode=0,lver=1", FEMU_ONCS_OCSSD, true },
     { "caps-oc20", "femu_mode=0,lver=2,sgl=on", FEMU_ONCS_OCSSD, true },
     { "caps-mixed", "femu_mode=1,namespaces=3,"
@@ -40286,6 +40327,11 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=4,fdm_size=16,csd_legacy_opcodes=on",
         .arg = (void *)1,
+    });
+    qos_add_test("csd-no-namespace", "femu", femu_test_csd_no_namespace,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=4,fdm_size=16,namespace_modes=nossd",
     });
     qos_add_test("csd-exec-concurrency", "femu",
                  femu_test_csd_exec_concurrency,

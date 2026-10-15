@@ -286,6 +286,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Controller DMA from device threads is restricted to directly reachable memory, which avoids a VM hang on data pointers into device registers (fbfe674c2, 60e4b2d5d).
 - Report and log buffers are bounded and their lengths checked before transfer (608749b8d, 40656e5a1, 062bcdb02, 0ddcc33bd, 3106c1205).
 - CSD program loads are bounded and confined to `csd_program_dir` (f1d5f3736).
+- A CSD controller with no CSD namespace (`femu_mode=4,namespace_modes=nossd`) no longer crashes QEMU on a CEMU admin command with valid fields. It has no program tables, so it now refuses the commands with Invalid Command Opcode and log 05h does not list them.
 - CSD programs run on `nr_cu` compute unit threads (`femu-csd-cu`) instead of the poller, so a long program no longer stalls I/O on every queue or the vCPU that sends a CSD admin command; a loaded program can no longer be reloaded in place while it runs, and deleting a queue or resetting the controller under a running program drops its result safely (4596ba498).
 - Running out of lines refuses the write instead of aborting, and FDP reports device full instead of asserting or following a null reclaim unit (49ada8834, e1c4e9174, 59128ab66, e7913d89c, c0ae29cb4, cbda78bf6, 37b9b84f9, f05f128a9).
 - Zone state is locked, reset zones are erased on the media thread, and asynchronous events are raised from the main loop (fe8e931e3, 5001ae15c, 89e1c4b04).
