@@ -4328,6 +4328,7 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                            uint8_t log_page, uint32_t nsid)
 {
     NvmeAsyncEvent *event;
+    NvmeAsyncEvent *dup;
 
     event = g_new0(NvmeAsyncEvent, 1);
     event->result.event_type = event_type;
@@ -4336,6 +4337,19 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
     event->nsid = nsid;
 
     qemu_mutex_lock(&n->aer_lock);
+    /*
+     * One queued copy of an event says all a second would, and copies would
+     * fill the queue and push out other namespaces' events.
+     */
+    QSIMPLEQ_FOREACH(dup, &n->aer_queue, entry) {
+        if (dup->result.event_type == event_type &&
+            dup->result.event_info == event_info &&
+            dup->result.log_page == log_page && dup->nsid == nsid) {
+            qemu_mutex_unlock(&n->aer_lock);
+            g_free(event);
+            return;
+        }
+    }
     if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
         qemu_mutex_unlock(&n->aer_lock);
         g_free(event);
