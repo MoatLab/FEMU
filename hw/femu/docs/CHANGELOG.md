@@ -236,6 +236,7 @@ was not doing anything.
 - A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
 - Log 20h reports MAXPIDS as MIN(128, NRG x NRUH) - 1, below NRG x NRUH as Base 2.3 Figure 287 asks. It was 127 for every configuration; four handles in one group now report 3, and RUH Update still takes that many identifiers.
 - A RUH Update of a handle whose reclaim unit is empty keeps the unit and logs no event 00h. It used to log one, which says that the handle moved.
+- The FDP Statistics log keeps 128-bit sums, which stop at the 128-bit maximum, instead of 64-bit ones.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
   its first I/O and the kernel disabled the controller (50b65ca91).

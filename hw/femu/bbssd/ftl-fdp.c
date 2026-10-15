@@ -1151,7 +1151,8 @@ static void fdp_count_gc_writes(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     struct ssdparams *spp = &ssd->sp;
     uint64_t gc_bytes = (uint64_t)mv->pages * spp->secsz * spp->secs_per_pg;
 
-    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, gc_bytes);
+    nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                    ssd->n->subsys->endgrp.fdp.mbmw, gc_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->mbmw, gc_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbmw, gc_bytes);
     fdp_report_moves(ssd, mv);
@@ -1330,7 +1331,8 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
               "blocks_erased=%d mbmw_delta=%lu mbe_delta=%lu\n",
               victim_ru->ruidx, mv.pages, blk_cnt, gc_bytes, erase_bytes);
     fdp_count_gc_writes(ssd, victim_ru, &mv);
-    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbe, erase_bytes);
+    nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                    ssd->n->subsys->endgrp.fdp.mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->mbe, erase_bytes);
     nvme_fdp_stat_inc(&victim_ru->ruh->ruh->mbe, erase_bytes);
 
@@ -1439,7 +1441,8 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
         }
         /* pads are media writes: MBMW counts them, HBMW does not */
         bytes = pads * ssd->sp.secsz * ssd->sp.secs_per_pg;
-        nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, bytes);
+        nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                        ssd->n->subsys->endgrp.fdp.mbmw, bytes);
         nvme_fdp_stat_inc(&ru->ruh->mbmw, bytes);
         nvme_fdp_stat_inc(&ru->ruh->ruh->mbmw, bytes);
     }
@@ -1838,7 +1841,8 @@ uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         curlat = fdp_program_page(ssd, &ssd->rg[e->rgid], ruh, e->lpn, stime,
                                   NULL, 0, 0, e->written);
         maxlat = MAX(maxlat, curlat);
-        nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.mbmw, pg);
+        nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                        ssd->n->subsys->endgrp.fdp.mbmw, pg);
         nvme_fdp_stat_inc(&ruh->mbmw, pg);
         nvme_fdp_stat_inc(&ruh->ruh->mbmw, pg);
         ssd_buffer_discard(ssd, e->lpn);
@@ -1939,7 +1943,8 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     spp->write_cnt += accepted;
     req->xfer_bytes = accepted * pg;
     host = fdp_host_bytes(ssd, req, req->slba, req->nlb, accepted);
-    nvme_fdp_stat_inc(&ssd->n->subsys->endgrp.fdp.hbmw, host);
+    nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                    ssd->n->subsys->endgrp.fdp.hbmw, host);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, host);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, host);
     ssd->buffer_full_destages += full;
@@ -2058,8 +2063,8 @@ static void fdp_count_write(NvmeNamespace *ns, struct ssd *ssd,
     }
     ruhid = ns->fdp.phs[ph];
 
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, host_bytes);
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
+    nvme_fdp_eg_add(ns->endgrp, ns->endgrp->fdp.hbmw, host_bytes);
+    nvme_fdp_eg_add(ns->endgrp, ns->endgrp->fdp.mbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, host_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, host_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, data_bytes);
@@ -2634,9 +2639,11 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 
     ssd_reset_maptbl(ssd);
 
-    endgrp->fdp.hbmw = 0;
-    endgrp->fdp.mbmw = 0;
-    endgrp->fdp.mbe = 0;
+    qemu_mutex_lock(&endgrp->fdp.stats_lock);
+    memset(endgrp->fdp.hbmw, 0, sizeof(endgrp->fdp.hbmw));
+    memset(endgrp->fdp.mbmw, 0, sizeof(endgrp->fdp.mbmw));
+    memset(endgrp->fdp.mbe, 0, sizeof(endgrp->fdp.mbe));
+    qemu_mutex_unlock(&endgrp->fdp.stats_lock);
 
     ftl_log("FDP TRIM: all RUs reset\n");
 }

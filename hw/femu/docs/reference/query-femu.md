@@ -136,7 +136,8 @@ handle's units, and the pad pages that closed its units
 on the same subsystem.
 The FDP Statistics log (log page 22h) reports the sum of each counter over
 the handles. Its fields are Host Bytes with Metadata Written (HBMW) and
-Media Bytes with Metadata Written (MBMW). The counters stop at the largest 64-bit value.
+Media Bytes with Metadata Written (MBMW). The log keeps 128-bit sums. The
+handle counters stop at the largest 64-bit value.
 
 ```
  host write of n bytes via handle h, on p pages

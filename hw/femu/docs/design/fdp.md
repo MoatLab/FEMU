@@ -419,7 +419,7 @@ list them.
 | --- | --- | --- |
 | 20h FDP Configurations | header with NUMFDPC 0 (one configuration), then one descriptor: FDPA (valid, RGIF), NRG, NRUH, MAXPIDS, NNSS 256, RUNS, and NRUH handle descriptors with the RUHT of each handle | `nvme_fdp_confs()` |
 | 21h Reclaim Unit Handle Usage | header with NRUH, then one descriptor per handle with its RUHA (1 = host-specified for a handle some namespace lists, 0 for one no list names) | `nvme_fdp_ruh_usage()` |
-| 22h FDP Statistics | HBMW, MBMW and MBE as 128-bit counters; FEMU fills the low 64 bits | `nvme_fdp_stats()` |
+| 22h FDP Statistics | HBMW, MBMW and MBE as 128-bit counters, which stop at the 128-bit maximum | `nvme_fdp_stats()` |
 | 23h FDP Events | number of events, then the events of the ring selected by LSP bit 0 (1 = host events, 0 = controller events) | `nvme_fdp_events()` |
 
 ### The 21h layout

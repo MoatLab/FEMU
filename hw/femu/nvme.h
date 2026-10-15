@@ -241,6 +241,11 @@ typedef struct NvmeEnduranceGroup {
          * poller, the FTL thread and the admin path all reach them.
          */
         QemuMutex events_lock;
+        /*
+         * Held while the byte counters below change and while they are
+         * read: the FTL thread and the admin path reach them.
+         */
+        QemuMutex stats_lock;
 
         uint16_t nruh;
         uint16_t nrg;
@@ -248,9 +253,10 @@ typedef struct NvmeEnduranceGroup {
         uint64_t runs;
         uint64_t nru;
 
-        uint64_t hbmw;
-        uint64_t mbmw;
-        uint64_t mbe;
+        /* 128-bit, low half first, as log 22h reports them (Figure 293) */
+        uint64_t hbmw[2];
+        uint64_t mbmw[2];
+        uint64_t mbe[2];
 
         bool enabled;
 
@@ -378,6 +384,33 @@ static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
 {
     uint64_t ret = *a + b;
     *a = ret < *a ? UINT64_MAX : ret;
+}
+
+/* add @b to the 128-bit count @a; it stays at the 128-bit maximum (Fig 293) */
+static inline void nvme_fdp_stat_add128(uint64_t a[2], uint64_t b)
+{
+    uint64_t lo = a[0] + b;
+
+    if (lo < a[0]) {
+        if (a[1] == UINT64_MAX) {
+            a[0] = UINT64_MAX;
+            return;
+        }
+        a[1]++;
+    }
+    a[0] = lo;
+}
+
+/*
+ * Add @b to counter @a of endurance group @eg. The two halves change
+ * together under the lock that the readers take.
+ */
+static inline void nvme_fdp_eg_add(NvmeEnduranceGroup *eg, uint64_t a[2],
+                                   uint64_t b)
+{
+    qemu_mutex_lock(&eg->fdp.stats_lock);
+    nvme_fdp_stat_add128(a, b);
+    qemu_mutex_unlock(&eg->fdp.stats_lock);
 }
 
 /* ========== Subsystem helpers ========== */

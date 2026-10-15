@@ -192,6 +192,7 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     }
 
     qemu_mutex_init(&endgrp->fdp.events_lock);
+    qemu_mutex_init(&endgrp->fdp.stats_lock);
     endgrp->fdp.enabled = true;
     femu_log("FDP enabled: nruh=%u, nrg=%u, runs=%lu, nru=%lu\n",
              endgrp->fdp.nruh, endgrp->fdp.nrg,

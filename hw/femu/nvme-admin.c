@@ -2702,10 +2702,13 @@ static uint16_t nvme_fdp_stats(FemuCtrl *n, uint32_t endgrpid,
     endgrp = &n->subsys->endgrp;
     trans_len = MIN(sizeof(log) - off, buf_len);
 
-    /* spec value is 128 bit, we only use low 64 bit */
-    log.hbmw[0] = cpu_to_le64(endgrp->fdp.hbmw);
-    log.mbmw[0] = cpu_to_le64(endgrp->fdp.mbmw);
-    log.mbe[0] = cpu_to_le64(endgrp->fdp.mbe);
+    qemu_mutex_lock(&endgrp->fdp.stats_lock);
+    for (int i = 0; i < 2; i++) {
+        log.hbmw[i] = cpu_to_le64(endgrp->fdp.hbmw[i]);
+        log.mbmw[i] = cpu_to_le64(endgrp->fdp.mbmw[i]);
+        log.mbe[i] = cpu_to_le64(endgrp->fdp.mbe[i]);
+    }
+    qemu_mutex_unlock(&endgrp->fdp.stats_lock);
 
     return dma_read_prp(n, (uint8_t *)&log + off, trans_len, prp1, prp2);
 }
