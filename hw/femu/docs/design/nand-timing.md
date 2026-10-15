@@ -1309,10 +1309,12 @@ make -C hw/femu/tests check
 - Read-retry as repeated array reads, soft-decision decoding, and read
   disturb errors. The ECC adder is a fixed time per tier, and data is never
   corrupted.
-- Multi-plane reads and programs: host pages are issued one plane at a time.
-  Only line erases are batched.
-- Cache read pipelining: the code path exists but no mode enables it. There
-  is no cache program model.
+- Multi-plane reads and programs outside BBSSD and CSD. `mp_read` and
+  `mp_program` batch host pages there; they are off by default and refused
+  with FDP. Line erases are always batched.
+- Cache read outside the ONFI profile, and cache program. `onfi_cache_read`
+  models the read cache sequence of one command
+  ([Read cache sequence](#read-cache-sequence-onfi_cache_read)).
 - Copyback outside BBSSD line GC and FDP GC. Paced collection, read
   reclaim and retention refresh move pages off-chip.
 - Bit errors of a copyback. A real copyback skips ECC, so its bit errors
@@ -1320,7 +1322,9 @@ make -C hw/femu/tests check
   copyback changes only timing.
 - Program suspend for programs, or erase suspend by another erase. Only reads
   suspend.
-- Per-die power or thermal limits, and temperature-dependent timing.
+- Per-die power or thermal limits, and temperature-dependent timing. The
+  package thermal model (`thermal_tau_ms`, `thermal_r`) reports a
+  temperature but does not slow the NAND.
 - Plane-level parallelism for BBSSD, CSD and KV reads and programs (the rule
   is per LUN), and the channel bus for OCSSD 2.0.
 - PLC outside ZNS. ZNS accepts PLC with times you supply; BBSSD resets
