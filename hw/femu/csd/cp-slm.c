@@ -211,6 +211,10 @@ uint16_t femu_csd_slm_read(FemuCtrl *n, uint32_t nsid, uint64_t off,
         !csd_slm_in(csd, off, len)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* NBYTE may be 0, and then the caller's buffer may be NULL */
+    if (!len) {
+        return NVME_SUCCESS;
+    }
     qemu_mutex_lock(&csd->slm_lock);
     memcpy(dst, csd->slm + off, len);
     qemu_mutex_unlock(&csd->slm_lock);
@@ -1354,7 +1358,11 @@ uint16_t csd_cp_job_prepare(FemuCsdState *csd, FemuCsdJob *job)
 
     qemu_mutex_lock(&csd->slm_lock);
     for (i = 0; i < job->cp_numr; i++) {
-        memcpy(job->cp_scratch + o, csd->slm + job->cp_sb[i], job->cp_len[i]);
+        /* with no bytes in any range there is no scratch buffer */
+        if (job->cp_len[i]) {
+            memcpy(job->cp_scratch + o, csd->slm + job->cp_sb[i],
+                   job->cp_len[i]);
+        }
         job->args.mr_addr[i] = job->cp_scratch + o;
         job->args.mr_len[i] = job->cp_len[i];
         o += job->cp_len[i];
