@@ -3797,6 +3797,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("zns_pe_suspend", FemuCtrl, zns_params.zns_pe_suspend, 0),
     DEFINE_PROP_INT32("zns_lun_contention", FemuCtrl, zns_params.zns_lun_contention, 0),
     DEFINE_PROP_INT32("zns_reset_by_fill", FemuCtrl, zns_params.zns_reset_by_fill, 0),
+    DEFINE_PROP_UINT32("zns_fzr_sec", FemuCtrl, zns_params.zns_fzr_sec, 0),
+    DEFINE_PROP_UINT32("zns_frl_sec", FemuCtrl, zns_params.zns_frl_sec, 0),
     DEFINE_PROP_INT32("zns_page_types", FemuCtrl, zns_params.zns_page_types, 0),
     DEFINE_PROP_INT64("zns_ecc_step_ns", FemuCtrl, zns_params.zns_ecc_step_ns, 0),
     DEFINE_PROP_INT64("zns_tsusp_ns", FemuCtrl, zns_params.zns_tsusp_ns, 0),

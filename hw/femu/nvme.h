@@ -2252,6 +2252,10 @@ typedef struct ZNSCtrlParams {
     int32_t zns_lun_contention;
     /* zone reset erases only programmed blocks (0 = off: every block) */
     int32_t zns_reset_by_fill;
+    /* seconds a written zone may stay unfinished before FZR (0 = off) */
+    uint32_t zns_fzr_sec;
+    /* FRL: seconds from FZR to a Zone Active Excursion (0 = none) */
+    uint32_t zns_frl_sec;
     /* reads take the latency of their page type (0 = off: one latency) */
     int32_t zns_page_types;
     /* ECC read time per wear step, ns (0 = off) */

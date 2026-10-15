@@ -181,6 +181,7 @@ listed one by one.
 - Poller threads decoupled from queues (`poller_ratio`), and I/O counters kept per poller (0b192893b, 6b1592746).
 - The backend memory can be bound to or interleaved across NUMA nodes with `FEMU_MBE_INTERLEAVE` (3594d27c6).
 - Under FDP a NoSSD namespace counts its writes: HBMW, MBMW and the RUAMW of its reclaim units, per handle and per endurance group. It logs event 03h for an invalid placement identifier. Write Zeroes with Deallocate and Write Uncorrectable count in HBMW only. A unit fills by the blocks written, and RUH Update logs event 00h only for a part-written unit. A logical block larger than `fdp.runs` is refused.
+- ZNS Finish Zone Recommended and Zone Active Excursions (`zns_fzr_sec`, `zns_frl_sec`, off by default). A zone written but not finished gets FZR after `zns_fzr_sec` seconds of guest time. FRL seconds later the controller finishes it and sets ZFC. Both changes enter the Changed Zone List.
 
 ### Configuration changes and new refusals
 

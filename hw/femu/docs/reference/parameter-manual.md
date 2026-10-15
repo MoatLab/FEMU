@@ -462,6 +462,8 @@ Reference: [ZNS](properties.md#zns). Design: [ZNS](../design/zns.md).
 | `zns_pe_suspend`, `zns_tsusp_ns` | flag, ns | | reads suspend a program or erase on their plane |
 | `zns_lun_contention` | flag | 0 = off, non-zero = on | the planes of one LUN take turns |
 | `zns_reset_by_fill` | flag | 0 = off, non-zero = on | a zone reset erases only programmed blocks |
+| `zns_fzr_sec` | seconds | 0 = off | a written zone not finished this long gets Finish Zone Recommended |
+| `zns_frl_sec` | seconds | 0 = no excursion; needs `zns_fzr_sec` | FRL: after it the controller finishes an FZR zone (Zone Active Excursion, ZFC) |
 | `zns_max_open`, `zns_max_active` | zones | <= zone count, open <= active; 0 = no limit | Maximum Open and Active Resources |
 | `zns_num_wc` | write caches | <= zone count; 0 picks from `zns_max_open` | zone write caches |
 | `zns_zasl_bs` | bytes | power-of-two multiple of 4 KiB; 0 follows `mdts` | Zone Append size limit |

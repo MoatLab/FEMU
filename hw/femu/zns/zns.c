@@ -259,7 +259,9 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     /* MAR/MOR are zeroes-based, 0xffffffff means no limit */
     id_ns_z->mar = cpu_to_le32(ns->max_active_zones - 1);
     id_ns_z->mor = cpu_to_le32(ns->max_open_zones - 1);
-    id_ns_z->zoc = 0;
+    id_ns_z->zoc = ns->zns->frl_sec ? cpu_to_le16(NVME_ID_NS_ZONED_ZOC_ZAE) : 0;
+    /* FZRTL is always 00b, so FRL is the limit a host reads */
+    id_ns_z->frl = cpu_to_le32(ns->zns->frl_sec);
     id_ns_z->ozcs = ns->cross_zone_read ? NVME_ID_NS_ZONED_OZCS_RAZB : 0x00;
 
     /* advertise ZRWA and its parameters when the namespace is configured for it */
@@ -382,6 +384,10 @@ static void zns_free_params(NvmeNamespace *ns)
         return;
     }
 
+    if (zns->fzr_timer) {
+        timer_free(zns->fzr_timer);
+        zns->fzr_timer = NULL;
+    }
     qemu_mutex_destroy(&zns->zone_lock);
 
     if (zns->ch) {
@@ -476,13 +482,16 @@ static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
 
     for (i = 0; i < zns->nr_changed_zones; i++) {
         if (zns->changed_zones[i] == zslba) {
-            return;
+            break;
         }
     }
-    if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
-        zns->changed_zone_overflow = true;
-    } else {
-        zns->changed_zones[zns->nr_changed_zones++] = zslba;
+    /* a zone is listed once, but a later change still earns its notice */
+    if (i == zns->nr_changed_zones) {
+        if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
+            zns->changed_zone_overflow = true;
+        } else {
+            zns->changed_zones[zns->nr_changed_zones++] = zslba;
+        }
     }
 
     /* the list is kept either way; the notice only when the host asked */
@@ -532,6 +541,23 @@ static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneSta
         break;
     default:
         zone->d.za = 0;
+    }
+
+    /*
+     * A zone that is no longer open or closed has nothing left to finish
+     * (ZNS 1.4, 5.5). Read Only clears both recommendations and ZFC
+     * (5.4 to 5.6).
+     */
+    if (state == NVME_ZONE_STATE_FULL ||
+        state == NVME_ZONE_STATE_READ_ONLY ||
+        state == NVME_ZONE_STATE_EMPTY ||
+        state == NVME_ZONE_STATE_OFFLINE) {
+        zone->d.za &= ~NVME_ZA_FINISH_RECOMMENDED;
+        zone->act_ns = 0;
+        zone->fzr_ns = 0;
+    }
+    if (state == NVME_ZONE_STATE_READ_ONLY) {
+        zone->d.za &= ~(NVME_ZA_RESET_RECOMMENDED | NVME_ZA_FINISHED_BY_CTLR);
     }
 }
 
@@ -785,6 +811,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     slba = le64_to_cpu(rw->slba);
     nlb = le16_to_cpu(rw->nlb) + 1;
     zone = zns_get_zone_by_slba(ns, slba);
+    zone->inflight--;
 
     /* conventional zones have no write pointer and no sequential state machine */
     if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
@@ -1113,6 +1140,65 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
     }
 }
 
+/*
+ * Once a second: a zone written but not finished for fzr_sec gets Finish
+ * Zone Recommended, with FZRTL 00b, so FRL is its limit (ZNS 1.4, 5.5). If
+ * the host has not finished or filled it frl_sec later, the controller
+ * finishes it itself, a Zone Active Excursion (5.6), and sets ZFC. Both
+ * changes are the controller's own, so both enter the Changed Zone List.
+ */
+static void zns_fzr_tick(void *opaque)
+{
+    NvmeNamespace *ns = opaque;
+    struct zns_ssd *zns = ns->zns;
+    uint64_t lim = (uint64_t)zns->fzr_sec * NANOSECONDS_PER_SECOND;
+    uint64_t frl = (uint64_t)zns->frl_sec * NANOSECONDS_PER_SECOND;
+    uint64_t now;
+
+    /*
+     * The timer runs under the BQL, and a Report Zones transfer can need the
+     * BQL while it holds zone_lock. So never wait for the lock: try again on
+     * the next tick, as query-femu does.
+     */
+    if (qemu_mutex_trylock(&zns->zone_lock)) {
+        goto rearm;
+    }
+    /* sampled under the lock, so no write can be newer than now */
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    for (uint32_t i = 0; i < ns->num_zones; i++) {
+        NvmeZone *zone = &ns->zone_array[i];
+        NvmeZoneState st = zns_get_zone_state(zone);
+
+        if ((st != NVME_ZONE_STATE_IMPLICITLY_OPEN &&
+             st != NVME_ZONE_STATE_EXPLICITLY_OPEN &&
+             st != NVME_ZONE_STATE_CLOSED) || !zone->act_ns) {
+            continue;
+        }
+        if (!(zone->d.za & NVME_ZA_FINISH_RECOMMENDED)) {
+            if (now >= zone->act_ns && now - zone->act_ns >= lim) {
+                zone->d.za |= NVME_ZA_FINISH_RECOMMENDED;
+                zone->d.rsvd3[0] &= ~0x3;       /* ZAI.FZRTL = 00b: FRL */
+                zone->fzr_ns = now;
+                zns->fzr_set++;
+                zns_record_changed_zone(ns, zone->d.zslba);
+            }
+        } else if (frl && now >= zone->fzr_ns &&
+                   now - zone->fzr_ns >= frl && !zone->inflight) {
+            /*
+             * A write admitted but not finalized (also a ZRWA write, which
+             * moves no pointer at admission) would race the finish: wait.
+             */
+            zns_finish_zone(ns, zone, st, NULL);
+            zone->d.za |= NVME_ZA_FINISHED_BY_CTLR;
+            zns->zae_done++;
+            zns_record_changed_zone(ns, zone->d.zslba);
+        }
+    }
+    qemu_mutex_unlock(&zns->zone_lock);
+rearm:
+    timer_mod(zns->fzr_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+}
+
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
@@ -1381,6 +1467,17 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 if (append) {
                     slba = zone->w_ptr;
                 }
+                /*
+                 * Before the advance, which may fill and finish the zone.
+                 * The guest clock starts at 0, and 0 means "not written".
+                 */
+                if (!zone->act_ns &&
+                    zone->d.zt != NVME_ZONE_TYPE_CONVENTIONAL) {
+                    zone->act_ns =
+                        MAX(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 1);
+                }
+                /* finalize, on success or failure, takes it back */
+                zone->inflight++;
                 wp = zns_advance_zone_wp(ns, zone, nlb);
             }
         }
@@ -2297,6 +2394,14 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     zns_set_ctrl(n);
     zns_init_params(n, ns);
 
+    if (n->zns_params.zns_frl_sec && !n->zns_params.zns_fzr_sec) {
+        error_setg(errp, "zns_frl_sec needs zns_fzr_sec: an excursion "
+                   "follows Finish Zone Recommended");
+        return;
+    }
+    ns->zns->fzr_sec = n->zns_params.zns_fzr_sec;
+    ns->zns->frl_sec = n->zns_params.zns_frl_sec;
+
     /* only SLC, TLC and QLC have built-in figures; the rest need all three knobs */
     if (!ns->zns->timing.pg_rd_lat[ns->zns->flash_type] ||
         !ns->zns->timing.pg_wr_lat[ns->zns->flash_type] ||
@@ -2320,6 +2425,14 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * namespace outright.
      */
     zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
+
+    if (ns->zns->fzr_sec) {
+        /* guest time, as the thermal model: a paused VM does not age zones */
+        ns->zns->fzr_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                          zns_fzr_tick, ns);
+        timer_mod(ns->zns->fzr_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+    }
 }
 
 /*

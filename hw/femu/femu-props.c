@@ -624,6 +624,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "zns_reset_by_fill",
       "ZNS: non-zero makes a zone reset erase only the blocks that hold "
       "programmed pages, so its time and wear follow the zone's fill" },
+    { "zns_fzr_sec",
+      "ZNS: seconds a zone may stay written but not finished before the "
+      "controller sets Finish Zone Recommended and reports the zone as "
+      "changed; 0 disables" },
+    { "zns_frl_sec",
+      "ZNS: Finish Recommended Limit in seconds: after it, the controller "
+      "finishes a zone with Finish Zone Recommended itself (a Zone Active "
+      "Excursion); 0 means no excursion; needs zns_fzr_sec" },
     { "zns_page_types",
       "ZNS: non-zero gives each read the latency of its page type (lower "
       "to upper page), spread around the read latency of the flash type; "

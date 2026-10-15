@@ -193,6 +193,16 @@ struct zns_ssd {
     uint64_t err_write_counter;
     uint64_t err_write_injected;
     /*
+     * Finish Zone Recommended (ZNS 1.4, 5.5) and Zone Active Excursions
+     * (5.6): a zone written but not finished for fzr_sec gets FZR, and
+     * frl_sec later the controller finishes it. Checked once a second.
+     */
+    uint32_t fzr_sec;
+    uint32_t frl_sec;
+    QEMUTimer *fzr_timer;
+    uint64_t fzr_set;
+    uint64_t zae_done;
+    /*
      * Wear: block erases by Zone Reset, summed for SMART Percentage Used.
      * The FTL thread adds to it and the log thread reads it, so it is atomic.
      */
@@ -319,6 +329,7 @@ typedef struct QEMU_PACKED NvmeLBAFE {
 
 enum NvmeIdNsZonedFlags {
     NVME_ID_NS_ZONED_OZCS_RAZB      = 1 << 0, /* read across zone boundaries */
+    NVME_ID_NS_ZONED_ZOC_ZAE             = 1 << 1, /* zone active excursions */
     NVME_ID_NS_ZONED_OZCS_ZRWASUP        = 1 << 1, /* ZRWA supported */
     NVME_ID_NS_ZONED_ZRWACAP_EXPFLUSHSUP = 1 << 0, /* explicit ZRWA flush */
 };
@@ -356,6 +367,12 @@ QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsZoned, lbafe) != 2816);
 typedef struct NvmeZone {
     NvmeZoneDescr   d;
     uint64_t        w_ptr;
+    /* first write since the zone was empty, ns; 0 = nothing written */
+    uint64_t        act_ns;
+    /* when Finish Zone Recommended was set, ns; 0 = not set */
+    uint64_t        fzr_ns;
+    /* writes admitted and not yet finalized, under zone_lock */
+    uint32_t        inflight;
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
 
