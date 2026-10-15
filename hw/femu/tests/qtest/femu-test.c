@@ -8067,6 +8067,49 @@ static void femu_test_dftl_tp_min(void *obj, void *data,
 }
 
 /*
+ * A read waits for its translation. Pages 0 to 63 are in TP 0 and pages
+ * 512 to 575 in TP 1; the CMT holds one TP, so writing TP 1 evicts TP 0
+ * to page 0 of a TP line, on channel 0 LUN 0. Once the media is idle, a
+ * read of page 2 (channel 0 LUN 1) misses: it reads TP 0 (40 us), then
+ * the page (40 us) on the other LUN. The eviction of TP 1 that the miss
+ * makes goes to channel 1 LUN 0 and adds nothing. A read of page 3 then
+ * hits the CMT and pays the page read alone.
+ */
+static void femu_test_dftl_ready(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t miss, hit;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 64 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 64, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512, 64, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(100 * 1000);
+    miss = femu_pd_read_ns(&c, qts, 2, buf);
+    g_usleep(100 * 1000);
+    hit = femu_pd_read_ns(&c, qts, 3, buf);
+    g_test_message("read with a TP miss %" PRIu64 " ns, with a hit %" PRIu64
+                   " ns", miss, hit);
+    g_assert_cmpuint(miss, >=, 80000);
+    g_assert_cmpuint(miss, <, 120000);
+    g_assert_cmpuint(hit, >=, 40000);
+    g_assert_cmpuint(hit, <, 60000);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * mapping=dftl under FDP: a placed write charges the translation page of
  * each page it programs, as a line-mode write does. A translation page holds
  * 512 mappings of 4 KiB pages. Four writes, each to a page of a translation
@@ -43089,6 +43132,13 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=4,fdm_size=1,gc_policy=fifo,subsys=fdpsub",
+    });
+    qos_add_test("dftl-ready", "femu", femu_test_dftl_ready,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1"
     });
     qos_add_test("dftl-capacity", "femu", femu_test_dftl_capacity, NULL);
     qos_add_test("dftl-tp-min", "femu", femu_test_dftl_tp_min,

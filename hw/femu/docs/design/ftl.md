@@ -280,6 +280,25 @@ still answers every lookup. Without FDP the TPs also live on flash, in
   A power loss keeps the GTD, the CMT and the pending TPs. Flush and FUA
   need no extra metadata barrier; ordinary evictions still run.
 
+Timing. Each translation has a ready time: the end of the TP read, or the
+start of the access when the TP needs no read.
+
+```text
+ read of lpn:   |-- TP read (tp's LUN) --|-- data read (lpn's LUN) --|
+ write of lpn:  |-- TP read --|
+                |------------ data program -------------|   ends at the later
+ hot/cold on:   |-- TP read --|------------ data program -------------|
+```
+
+- A read starts its media read when the translation is ready, on any LUN.
+  Translations of different TPs in one command run in parallel.
+- A write programs at once, since placement does not need the old mapping;
+  it ends when both are done. With `hot_cold_sep`, placement reads the old
+  mapping, so the program waits for the translation.
+- A CMT hit is ready when the fill of its slot ends. A dirty eviction
+  starts after the fill of the victim, and runs in parallel with the read.
+- A TP read waits for a program of the same TP that is still running.
+
 Under FDP, TPs stay timing only. A miss reads a placeholder page on LUN
 `tp_id % tt_luns`, and a dirty eviction programs one. That traffic counts
 in no counter, and collection and deallocate cost no TP access.

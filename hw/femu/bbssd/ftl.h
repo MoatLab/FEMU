@@ -135,6 +135,8 @@ struct ssd_mp_batch {
     struct ppa ppa[1 << PL_BITS];
     int n;
     uint64_t stime;
+    /* the request start: a batch that waited for a translation starts later */
+    uint64_t base;
 };
 
 struct nand_lun {

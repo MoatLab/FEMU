@@ -447,7 +447,8 @@ static uint64_t ssd_mp_charge(struct ssd *ssd, struct ssd_mp_batch *b,
     ncmd.type = USER_IO;
     ncmd.cmd = cmd;
     ncmd.stime = b->stime;
-    lat = ssd_advance_status_multiplane(ssd, b->ppa, b->n, &ncmd);
+    lat = ssd_advance_status_multiplane(ssd, b->ppa, b->n, &ncmd) +
+          (b->stime - b->base);
     if (cmd == NAND_READ) {
         for (i = 0; i < b->n; i++) {
             ssd_read_check_wear(ssd, &b->ppa[i], b->stime);
@@ -457,9 +458,12 @@ static uint64_t ssd_mp_charge(struct ssd *ssd, struct ssd_mp_batch *b,
     return lat;
 }
 
-/* hold one page for a multi-plane command; returns what any charge cost */
+/*
+ * Hold one page for a multi-plane command that starts at @stime, for a
+ * request that started at @base; returns what any charge cost from @base.
+ */
 static uint64_t ssd_mp_add(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
-                           int cmd)
+                           uint64_t base, int cmd)
 {
     struct nand_lun *lun = get_lun(ssd, ppa);
     struct ssd_mp_batch *b = cmd == NAND_READ ? &lun->mp_rd : &lun->mp_prog;
@@ -470,6 +474,7 @@ static uint64_t ssd_mp_add(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
     }
     if (!b->n) {
         b->stime = stime;
+        b->base = base;
     }
     b->ppa[b->n++] = *ppa;
     if (b->n == ssd->sp.pls_per_lun) {
@@ -521,12 +526,35 @@ static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 }
 
 /*
- * Program one logical page: choose placement through the mapping scheme,
- * commit it, and charge the media. Shared by the ordinary write path and by
- * the eviction of a buffered page, so both cost the same.
+ * Translate and program @lpn for a host write or a write-back that starts
+ * at @stime. Placement waits for the translation only when it depends on
+ * the old mapping (hot/cold separation, with translation pages on flash);
+ * otherwise the two run in parallel and the later one ends the page.
  */
 static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
-                               int stream)
+                                uint64_t base, int stream);
+
+static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
+                                    uint64_t stime, int stream)
+{
+    uint64_t map = ssd_map_lat(ssd, lpn, stime, true);
+    uint64_t t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    if (ssd->tp_on && ssd->sp.hot_cold_sep && map) {
+        return ssd_program_lpn(ssd, lpn, t + map, t, stream);
+    }
+    return MAX(map, ssd_program_lpn(ssd, lpn, stime, stime, stream));
+}
+
+/*
+ * Program one logical page: choose placement through the mapping scheme,
+ * commit it, and charge the media. Shared by the ordinary write path and by
+ * the eviction of a buffered page, so both cost the same. The program starts
+ * at @stime, which is later than the request start @base when placement had
+ * to wait for the translation; the latency counts from @base.
+ */
+static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
+                                uint64_t base, int stream)
 {
     struct map_write_plan plan;
     struct nand_cmd swr;
@@ -575,12 +603,12 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     }
 
     if (ssd->sp.mp_program) {
-        lat = ssd_mp_add(ssd, &ppa, stime, NAND_WRITE);
+        lat = ssd_mp_add(ssd, &ppa, stime, base, NAND_WRITE);
     } else {
         swr.type = USER_IO;
         swr.cmd = NAND_WRITE;
         swr.stime = stime;
-        lat = ssd_advance_status(ssd, &ppa, &swr);
+        lat = ssd_advance_status(ssd, &ppa, &swr) + (stime - base);
     }
     /* A full logical log cannot accept another program in this command. */
     if (ssd->mapping->reclaim_per_page &&
@@ -673,11 +701,8 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
             break;
         }
 
-        /* dftl: demand-cache translation cost (no-op when disabled) */
-        curlat = ssd_map_lat(ssd, lpn, stime, true);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
-
-        curlat = ssd_program_lpn(ssd, lpn, stime, -1);
+        /* with dftl, the translation goes with the program */
+        curlat = ssd_map_and_program(ssd, lpn, stime, -1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         done++;
     }
@@ -736,6 +761,13 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t start_lpn, end_lpn;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
+    /*
+     * The request start the media latencies count from. A start of 0 means
+     * now; only a translation that delays the page needs that time at once.
+     */
+    uint64_t base = req->stime || !ssd->tp_on ? req->stime :
+                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t map, dstart, wait;
     g_autofree NandLoc *pend = NULL;
     uint32_t npend = 0;
     uint64_t seq_stime = 0;
@@ -775,9 +807,15 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         if (exp_dump_lpn_set && lpn == exp_dump_lpn)
             femu_dbg_dump_lpn(ssd, lpn);
 
-        /* dftl: charge the demand-cache translation cost (no-op when disabled) */
-        sublat = ssd_map_lat(ssd, lpn, req->stime, false);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
+        /*
+         * dftl: the translation of the page. With translation pages on
+         * flash the media read of the page waits for it; under FDP the
+         * placeholder cost runs in parallel, as it always has.
+         */
+        map = ssd_map_lat(ssd, lpn, base, false);
+        maxlat = (map > maxlat) ? map : maxlat;
+        dstart = ssd->tp_on ? base + map : base;
+        wait = ssd->tp_on ? map : 0;
 
         ppa = ssd->mapping->translate(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
@@ -799,7 +837,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         }
 
         if (ssd_mp_reads(ssd)) {
-            sublat = ssd_mp_add(ssd, &ppa, req->stime, NAND_READ);
+            sublat = ssd_mp_add(ssd, &ppa, dstart, base, NAND_READ);
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             continue;
         }
@@ -813,8 +851,8 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         struct nand_cmd srd;
         srd.type = USER_IO;
         srd.cmd = NAND_READ;
-        srd.stime = req->stime;
-        sublat = ssd_advance_status(ssd, &ppa, &srd);
+        srd.stime = dstart;
+        sublat = ssd_advance_status(ssd, &ppa, &srd) + wait;
         maxlat = (sublat > maxlat) ? sublat : maxlat;
         ssd_read_check_wear(ssd, &ppa, req->stime);
     }
@@ -976,15 +1014,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
         }
 
-        /* dftl: charge the demand-cache translation cost (no-op when disabled) */
-        curlat = ssd_map_lat(ssd, lpn, req->stime, true);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
-
         if (ssd->n->power_loss) {
             ssd_buffer_discard(ssd, lpn);
         }
         buffer_write_data(ssd, req, lpn, false);
-        curlat = ssd_program_lpn(ssd, lpn, req->stime, stream);
+        /* with dftl, the translation goes with the program */
+        curlat = ssd_map_and_program(ssd, lpn, req->stime, stream);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         /*
@@ -1152,7 +1187,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }
-            curlat = ssd_program_lpn(ssd, lpn, req->stime, -1);
+            curlat = ssd_program_lpn(ssd, lpn, req->stime, req->stime, -1);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
             /* the pages are programmed, so wear levelling sees them too */
             if (spp->wl_spread) {
