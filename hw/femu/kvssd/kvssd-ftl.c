@@ -297,6 +297,21 @@ static void kv_tree_issue(FemuKvssdState *s)
     s->lsm_npend = 0;
 }
 
+/* a new placeholder page id for each program */
+static bool kv_tree_alloc(void *opaque, int level, uint64_t *id)
+{
+    FemuKvssdState *s = opaque;
+
+    (void)level;
+    *id = s->lsm_next_id++;
+    return true;
+}
+
+static const KvLsmOps kv_tree_ops = {
+    .io    = kv_tree_io,
+    .alloc = kv_tree_alloc,
+};
+
 static int kv_tree_find(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
                         int *prev_slot)
 {
@@ -398,6 +413,7 @@ static void kv_tree_reset(FemuKvssdState *s)
         return;
     }
     kv_lsm_clear(s->lsm);
+    s->lsm_next_id = 0;
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         s->free_slots[i] = s->hash_slots - 1 - i;
     }
@@ -831,7 +847,10 @@ static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
      */
     if (s->lsm) {
         for (uint32_t i = 0; i < live_nr; i++) {
-            if (kv_lsm_gc_check(s->lsm, live[i]->key, live[i]->key_len)) {
+            uint32_t newest;
+
+            if (kv_lsm_gc_check(s->lsm, live[i]->key, live[i]->key_len,
+                                &newest)) {
                 back[back_nr++] = live[i];
             }
         }
@@ -1572,7 +1591,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         if (!s->lsm || !s->free_slots ||
             kv_lsm_init(s->lsm, n->kv_lsm_memtable_keys,
                         n->kv_lsm_size_ratio, n->kv_lsm_pinned_levels,
-                        s->pgsz / KV_LSM_REC_BYTES, kv_tree_io, s)) {
+                        s->pgsz / KV_LSM_REC_BYTES, &kv_tree_ops, s)) {
             error_setg(errp, "KVSSD LSM index allocation failed");
             goto fail;
         }

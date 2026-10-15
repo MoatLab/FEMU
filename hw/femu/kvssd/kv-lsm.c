@@ -54,8 +54,8 @@ static uint32_t kv_lsm_lower(const KvLsmRec *rec, uint32_t lo, uint32_t hi,
 static void kv_lsm_emit(KvLsm *l, uint64_t id, KvLsmIo io, int level)
 {
     l->pages[io]++;
-    if (l->io) {
-        l->io(l->opaque, id, io, level);
+    if (l->ops.io) {
+        l->ops.io(l->opaque, id, io, level);
     }
 }
 
@@ -171,8 +171,18 @@ uint64_t kv_lsm_dram_bytes(const KvLsm *l)
     return b;
 }
 
+uint64_t kv_lsm_records(const KvLsm *l)
+{
+    uint64_t n = l->mem.nr;
+
+    for (int i = 0; i < KV_LSM_MAX_LEVELS; i++) {
+        n += l->lvl[i].nr;
+    }
+    return n;
+}
+
 int kv_lsm_init(KvLsm *l, uint32_t mem_cap, uint32_t ratio, uint32_t pinned,
-                uint32_t per_page, KvLsmIoFn io, void *opaque)
+                uint32_t per_page, const KvLsmOps *ops, void *opaque)
 {
     memset(l, 0, sizeof(*l));
     if (!mem_cap || ratio < 2 || pinned > KV_LSM_MAX_LEVELS || !per_page) {
@@ -187,7 +197,9 @@ int kv_lsm_init(KvLsm *l, uint32_t mem_cap, uint32_t ratio, uint32_t pinned,
     l->ratio = ratio;
     l->pinned = pinned;
     l->per_page = per_page;
-    l->io = io;
+    if (ops) {
+        l->ops = *ops;
+    }
     l->opaque = opaque;
     return 0;
 }
@@ -210,7 +222,6 @@ void kv_lsm_clear(KvLsm *l)
     l->compactions = 0;
     l->dropped = 0;
     l->reinserted = 0;
-    l->next_id = 0;
     memset(l->pages, 0, sizeof(l->pages));
 }
 
@@ -225,12 +236,21 @@ static bool kv_lsm_deepest(const KvLsm *l, int level)
     return true;
 }
 
+static void kv_lsm_free_page(KvLsm *l, uint64_t id)
+{
+    if (id != KV_LSM_NO_PAGE && l->ops.free_page) {
+        l->ops.free_page(l->opaque, id);
+    }
+}
+
 /*
  * Merge run @up (the memtable when @up_level is 0) into level @level.
  * Only the pages of the lower level that the key range of @up overlaps are
- * read and rewritten; the others keep their records and ids. On equal keys
- * the upper record wins. The new arrays are built before anything changes,
- * so a short allocation leaves both runs as they were.
+ * read and rewritten; the others keep their records and pages. On equal
+ * keys the upper record wins. The new arrays and pages are taken before
+ * anything changes, so a short allocation leaves both runs as they were.
+ * Once the merge commits, the pages it replaced and the records it dropped
+ * go back to the caller.
  */
 static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
 {
@@ -240,10 +260,12 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
     bool drop = kv_lsm_deepest(l, level);
     uint32_t a = 0, b = 0, ra = 0, rb = 0;
     uint32_t i, j, m = 0, midp, new_nr, new_npg, k;
+    uint32_t ngone = 0;
     uint64_t total;
     uint64_t dropped = 0;
     KvLsmRec *mid, *rec;
     KvLsmPage *pg;
+    uint32_t *gone;
 
     if (!up->nr) {
         return 0;
@@ -262,7 +284,10 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
         return -1;
     }
     mid = malloc(((size_t)up->nr + (rb - ra)) * sizeof(KvLsmRec));
-    if (!mid) {
+    gone = malloc(((size_t)(rb - ra) + 1) * sizeof(uint32_t));
+    if (!mid || !gone) {
+        free(mid);
+        free(gone);
         return -1;
     }
     i = 0;
@@ -281,7 +306,11 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
         if (c <= 0) {
             r = &up->rec[i++];
             if (c == 0) {
-                j++;                    /* the older record is shadowed */
+                /* the older record is shadowed */
+                if (!lo->rec[j].dead) {
+                    gone[ngone++] = lo->rec[j].slot;
+                }
+                j++;
                 dropped++;
             }
         } else {
@@ -300,10 +329,21 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
     rec = malloc(((size_t)new_nr ? new_nr : 1) * sizeof(KvLsmRec));
     pg = malloc(((size_t)new_npg ? new_npg : 1) * sizeof(KvLsmPage));
     if (!rec || !pg) {
-        free(rec);
-        free(pg);
-        free(mid);
-        return -1;
+        goto fail;
+    }
+    if (lo_flash && l->ops.room && !l->ops.room(l->opaque, midp)) {
+        goto fail;
+    }
+    for (k = 0; k < midp; k++) {
+        pg[a + k].first = ra + k * l->per_page;
+        pg[a + k].id = KV_LSM_NO_PAGE;
+        if (lo_flash && l->ops.alloc &&
+            !l->ops.alloc(l->opaque, level, &pg[a + k].id)) {
+            while (k--) {
+                kv_lsm_free_page(l, pg[a + k].id);
+            }
+            goto fail;
+        }
     }
     if (ra) {
         memcpy(rec, lo->rec, (size_t)ra * sizeof(KvLsmRec));
@@ -328,18 +368,23 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
             kv_lsm_emit(l, lo->pg[k].id, KV_LSM_IO_COMPACT_READ, level);
         }
     }
-    if (lo->nr) {
-        memcpy(pg, lo->pg, (size_t)a * sizeof(KvLsmPage));
+    if (lo_flash) {
+        for (k = 0; k < midp; k++) {
+            kv_lsm_emit(l, pg[a + k].id, KV_LSM_IO_COMPACT_PROGRAM, level);
+        }
     }
-    for (k = 0; k < midp; k++) {
-        pg[a + k].first = ra + k * l->per_page;
-        pg[a + k].id = l->next_id++;
-        if (lo_flash) {
-            kv_lsm_emit(l, pg[a + k].id, KV_LSM_IO_COMPACT_PROGRAM,
-                        level);
+    if (up_flash) {
+        for (k = 0; k < up->npg; k++) {
+            kv_lsm_free_page(l, up->pg[k].id);
         }
     }
     if (lo->nr) {
+        if (lo_flash) {
+            for (k = a; k <= b; k++) {
+                kv_lsm_free_page(l, lo->pg[k].id);
+            }
+        }
+        memcpy(pg, lo->pg, (size_t)a * sizeof(KvLsmPage));
         for (k = b + 1; k < lo->npg; k++) {
             pg[a + midp + (k - b - 1)].first = lo->pg[k].first - rb + ra + m;
             pg[a + midp + (k - b - 1)].id = lo->pg[k].id;
@@ -359,7 +404,20 @@ static int kv_lsm_merge(KvLsm *l, KvLsmRun *up, int up_level, int level)
         up->nr = 0;
     }
     l->dropped += dropped;
+    for (k = 0; k < ngone; k++) {
+        if (l->ops.drop) {
+            l->ops.drop(l->opaque, gone[k]);
+        }
+    }
+    free(gone);
     return 0;
+
+fail:
+    free(rec);
+    free(pg);
+    free(mid);
+    free(gone);
+    return -1;
 }
 
 /*
@@ -381,6 +439,138 @@ static int kv_lsm_flush(KvLsm *l)
         }
     }
     return 0;
+}
+
+/* a record and the run it came from, 0 the memtable: lower is newer */
+typedef struct KvLsmAged {
+    KvLsmRec rec;
+    int run;
+} KvLsmAged;
+
+static int kv_lsm_aged_cmp(const void *pa, const void *pb)
+{
+    const KvLsmAged *a = pa;
+    const KvLsmAged *b = pb;
+    int c = kv_lsm_rcmp(&a->rec, &b->rec);
+
+    return c ? c : a->run - b->run;
+}
+
+/*
+ * One merge of every run into the deepest level, in one pass: the output
+ * holds only the newest live record of each key, so it needs no more
+ * pages than the live keys take, and the inputs free after it.
+ */
+int kv_lsm_compact_all(KvLsm *l)
+{
+    int depth = kv_lsm_depth(l);
+    int to = depth ? depth : 1;
+    bool to_flash = !kv_lsm_level_pinned(l, to);
+    uint64_t total = kv_lsm_records(l);
+    KvLsmAged *all;
+    KvLsmRec *rec;
+    KvLsmPage *pg;
+    uint32_t *gone;
+    uint32_t n = 0, m = 0, ngone = 0, npg, k;
+
+    if (!total) {
+        return 0;
+    }
+    if (total > UINT32_MAX) {
+        return -1;
+    }
+    all = malloc((size_t)total * sizeof(*all));
+    rec = malloc((size_t)total * sizeof(*rec));
+    gone = malloc((size_t)total * sizeof(*gone));
+    pg = malloc(((size_t)total / l->per_page + 1) * sizeof(*pg));
+    if (!all || !rec || !gone || !pg) {
+        goto fail;
+    }
+    for (int i = 0; i <= KV_LSM_MAX_LEVELS; i++) {
+        const KvLsmRun *r = i ? &l->lvl[i - 1] : &l->mem;
+
+        for (uint32_t j = 0; j < r->nr; j++) {
+            all[n].rec = r->rec[j];
+            all[n].run = i;
+            n++;
+        }
+    }
+    qsort(all, n, sizeof(*all), kv_lsm_aged_cmp);
+    for (uint32_t i = 0; i < n; i++) {
+        if (i && !kv_lsm_rcmp(&all[i].rec, &all[i - 1].rec)) {
+            if (!all[i].rec.dead) {
+                gone[ngone++] = all[i].rec.slot;
+            }
+            continue;
+        }
+        if (!all[i].rec.dead) {
+            rec[m++] = all[i].rec;
+        }
+    }
+    npg = (uint32_t)(((uint64_t)m + l->per_page - 1) / l->per_page);
+    if (to_flash && npg && l->ops.room && !l->ops.room(l->opaque, npg)) {
+        goto fail;
+    }
+    for (k = 0; k < npg; k++) {
+        pg[k].first = k * l->per_page;
+        pg[k].id = KV_LSM_NO_PAGE;
+        if (to_flash && l->ops.alloc &&
+            !l->ops.alloc(l->opaque, to, &pg[k].id)) {
+            while (k--) {
+                kv_lsm_free_page(l, pg[k].id);
+            }
+            goto fail;
+        }
+    }
+
+    /* read every unpinned input page, program the output, free the inputs */
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        KvLsmRun *r = &l->lvl[i - 1];
+
+        if (kv_lsm_level_pinned(l, i)) {
+            continue;
+        }
+        for (uint32_t p = 0; p < r->npg; p++) {
+            kv_lsm_emit(l, r->pg[p].id, KV_LSM_IO_COMPACT_READ, i);
+        }
+    }
+    for (k = 0; to_flash && k < npg; k++) {
+        kv_lsm_emit(l, pg[k].id, KV_LSM_IO_COMPACT_PROGRAM, to);
+    }
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        KvLsmRun *r = &l->lvl[i - 1];
+
+        if (!kv_lsm_level_pinned(l, i)) {
+            for (uint32_t p = 0; p < r->npg; p++) {
+                kv_lsm_free_page(l, r->pg[p].id);
+            }
+        }
+        kv_lsm_run_free(r);
+    }
+    l->mem.nr = 0;
+    l->lvl[to - 1].rec = rec;
+    l->lvl[to - 1].nr = m;
+    l->lvl[to - 1].cap = m;
+    l->lvl[to - 1].pg = pg;
+    l->lvl[to - 1].npg = npg;
+    l->lvl[to - 1].pgcap = npg;
+    l->dropped += n - m;
+    l->compactions++;
+    for (k = 0; k < ngone; k++) {
+        if (l->ops.drop) {
+            l->ops.drop(l->opaque, gone[k]);
+        }
+    }
+    free(gone);
+    free(all);
+    return 0;
+
+fail:
+    free(all);
+    free(rec);
+    free(gone);
+    free(pg);
+    return -1;
 }
 
 static bool kv_lsm_eq(const KvLsmRec *r, const uint8_t *key, uint8_t kl)
@@ -439,7 +629,8 @@ bool kv_lsm_get(KvLsm *l, const uint8_t *key, uint8_t kl, uint32_t *slot,
     return true;
 }
 
-int kv_lsm_put(KvLsm *l, const uint8_t *key, uint8_t kl, uint32_t slot)
+static int kv_lsm_put_mem(KvLsm *l, const uint8_t *key, uint8_t kl,
+                          uint32_t slot, bool over)
 {
     KvLsmRun *m = &l->mem;
     uint32_t pos;
@@ -449,22 +640,46 @@ int kv_lsm_put(KvLsm *l, const uint8_t *key, uint8_t kl, uint32_t slot)
     }
     pos = kv_lsm_lower(m->rec, 0, m->nr, key, kl);
     if (pos == m->nr || !kv_lsm_eq(&m->rec[pos], key, kl)) {
-        if (m->nr >= l->mem_cap) {
-            if (kv_lsm_flush(l)) {
+        if (m->nr >= l->mem_cap && kv_lsm_flush(l) && !over) {
+            return -1;
+        }
+        /* only a tombstone that no flush could make room for grows it */
+        if (m->nr == m->cap) {
+            KvLsmRec *r = realloc(m->rec, (size_t)m->cap * 2 *
+                                  sizeof(KvLsmRec));
+
+            if (!r) {
                 return -1;
             }
-            pos = 0;
+            m->rec = r;
+            m->cap *= 2;
         }
+        pos = kv_lsm_lower(m->rec, 0, m->nr, key, kl);
         memmove(&m->rec[pos + 1], &m->rec[pos],
                 (size_t)(m->nr - pos) * sizeof(KvLsmRec));
         m->nr++;
         memset(&m->rec[pos], 0, sizeof(KvLsmRec));
         memcpy(m->rec[pos].key, key, kl);
         m->rec[pos].kl = kl;
+        m->rec[pos].dead = 1;
+    }
+    /* the record it replaces leaves the tree */
+    if (!m->rec[pos].dead && m->rec[pos].slot != slot && l->ops.drop) {
+        l->ops.drop(l->opaque, m->rec[pos].slot);
     }
     m->rec[pos].dead = slot == KV_LSM_NO_SLOT;
     m->rec[pos].slot = slot;
     return 0;
+}
+
+int kv_lsm_put(KvLsm *l, const uint8_t *key, uint8_t kl, uint32_t slot)
+{
+    return kv_lsm_put_mem(l, key, kl, slot, false);
+}
+
+int kv_lsm_put_tombstone(KvLsm *l, const uint8_t *key, uint8_t kl)
+{
+    return kv_lsm_put_mem(l, key, kl, KV_LSM_NO_SLOT, true);
 }
 
 /* a position in one run during a scan */
@@ -639,21 +854,29 @@ int kv_lsm_gc_begin(KvLsm *l)
     return 0;
 }
 
-bool kv_lsm_gc_check(KvLsm *l, const uint8_t *key, uint8_t kl)
+/* mark the page of each unpinned level the lookup of @key reads */
+static void kv_lsm_gc_mark(KvLsm *l, const uint8_t *key, uint8_t kl,
+                           int upto)
+{
+    for (int i = 1; i <= upto; i++) {
+        KvLsmRun *r = &l->lvl[i - 1];
+
+        if (r->dirty && kv_lsm_in_range(r, key, kl)) {
+            r->dirty[kv_lsm_page_of(r, key, kl)] = 1;
+        }
+    }
+}
+
+bool kv_lsm_gc_check(KvLsm *l, const uint8_t *key, uint8_t kl,
+                     uint32_t *slot)
 {
     int level = 0;
     uint32_t page = 0;
-    KvLsmRun *r;
+    const KvLsmRec *r = kv_lsm_find(l, key, kl, false, &level, &page);
 
-    if (!kv_lsm_find(l, key, kl, false, &level, &page) || !level ||
-        kv_lsm_level_pinned(l, level)) {
-        return false;
-    }
-    r = &l->lvl[level - 1];
-    if (r->dirty) {
-        r->dirty[page] = 1;
-    }
-    return true;
+    *slot = r && !r->dead ? r->slot : KV_LSM_NO_SLOT;
+    kv_lsm_gc_mark(l, key, kl, r ? level : KV_LSM_MAX_LEVELS);
+    return r && level && !kv_lsm_level_pinned(l, level);
 }
 
 void kv_lsm_gc_check_done(KvLsm *l)
@@ -681,4 +904,19 @@ int kv_lsm_reinsert(KvLsm *l, const uint8_t *key, uint8_t kl, uint32_t slot)
     }
     l->reinserted++;
     return 0;
+}
+
+bool kv_lsm_relocate(KvLsm *l, uint64_t old_id, uint64_t new_id)
+{
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        KvLsmRun *r = &l->lvl[i - 1];
+
+        for (uint32_t p = 0; p < r->npg; p++) {
+            if (r->pg[p].id == old_id) {
+                r->pg[p].id = new_id;
+                return true;
+            }
+        }
+    }
+    return false;
 }

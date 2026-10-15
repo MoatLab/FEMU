@@ -102,6 +102,7 @@ typedef struct FemuKvssdState {
     KvLsm *lsm;
     uint32_t *free_slots;
     uint32_t nr_free;
+    uint64_t lsm_next_id;              /* placeholder page ids */
     struct FemuKvLsmIo *lsm_pend;
     uint32_t lsm_npend;
     uint32_t lsm_pend_cap;

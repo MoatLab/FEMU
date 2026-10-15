@@ -231,6 +231,119 @@ static void reset_sort(void)
     qsort(sort_idx, NKEYS, sizeof(int), idx_cmp);
 }
 
+#define NOPS 80000
+#define NPAGES (1u << 22)
+
+/*
+ * The flash and slot owner the tree reports to. Each put has its own slot
+ * (its op number), so a slot leaves the tree once, and never while it is
+ * the newest record of its key. Each page is freed once, after it was
+ * programmed.
+ */
+static uint32_t key_of[NOPS];
+static uint8_t in_tree[NOPS];
+static uint8_t *page_live;
+static uint64_t next_page;
+static uint64_t pages_live;
+static uint64_t drops;
+static uint64_t bad_drops;
+static uint64_t bad_frees;
+static int fail_alloc;
+
+static bool own_alloc(void *opaque, int level, uint64_t *id)
+{
+    (void)opaque;
+    (void)level;
+    if (fail_alloc && --fail_alloc == 0) {
+        return false;
+    }
+    if (next_page >= NPAGES) {
+        return false;
+    }
+    page_live[next_page] = 1;
+    pages_live++;
+    *id = next_page++;
+    return true;
+}
+
+static void own_free(void *opaque, uint64_t id)
+{
+    (void)opaque;
+    if (id >= NPAGES || !page_live[id]) {
+        bad_frees++;
+        return;
+    }
+    page_live[id] = 0;
+    pages_live--;
+}
+
+static void own_drop(void *opaque, uint32_t slot)
+{
+    (void)opaque;
+    drops++;
+    if (slot >= NOPS || !in_tree[slot] || ref[key_of[slot]] == slot) {
+        bad_drops++;
+        return;
+    }
+    in_tree[slot] = 0;
+}
+
+static const KvLsmOps own_ops = {
+    .alloc = own_alloc,
+    .free_page = own_free,
+    .drop = own_drop,
+};
+
+static void own_reset(void)
+{
+    if (!page_live) {
+        page_live = calloc(NPAGES, 1);
+    }
+    memset(page_live, 0, NPAGES);
+    memset(in_tree, 0, sizeof(in_tree));
+    next_page = 0;
+    pages_live = 0;
+    drops = 0;
+    bad_drops = 0;
+    bad_frees = 0;
+    fail_alloc = 0;
+}
+
+/* the pages the levels name are the live ones; the live slots are in a run */
+static bool owners_ok(const KvLsm *l)
+{
+    uint64_t pages = 0;
+    uint64_t recs = 0;
+    uint64_t slots = 0;
+
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        const KvLsmRun *r = &l->lvl[i - 1];
+
+        for (uint32_t p = 0; p < r->npg; p++) {
+            if (kv_lsm_level_pinned(l, i)) {
+                if (r->pg[p].id != KV_LSM_NO_PAGE) {
+                    return false;
+                }
+                continue;
+            }
+            if (r->pg[p].id >= NPAGES || !page_live[r->pg[p].id]) {
+                return false;
+            }
+            pages++;
+        }
+        for (uint32_t k = 0; k < r->nr; k++) {
+            recs += !r->rec[k].dead;
+        }
+    }
+    for (uint32_t k = 0; k < l->mem.nr; k++) {
+        recs += !l->mem.rec[k].dead;
+    }
+    for (uint32_t s = 0; s < NOPS; s++) {
+        slots += in_tree[s];
+    }
+    return pages == pages_live && recs == slots && !bad_drops && !bad_frees;
+}
+
 /* random puts, overwrites and deletes against the reference */
 static void test_random(void)
 {
@@ -238,33 +351,43 @@ static void test_random(void)
     bool ok = true;
     bool clean = true;
     bool sorted = true;
+    bool owned = true;
     uint8_t k[17];
     uint8_t kl;
 
-    CHECK(kv_lsm_init(&l, 64, 4, 1, 8, NULL, NULL) == 0);
+    own_reset();
+    CHECK(kv_lsm_init(&l, 64, 4, 1, 8, &own_ops, NULL) == 0);
     for (int i = 0; i < NKEYS; i++) {
         ref[i] = KV_LSM_NO_SLOT;
     }
-    for (int op = 0; op < 80000; op++) {
+    for (int op = 0; op < NOPS; op++) {
         uint32_t i = next_rand() % NKEYS;
-        uint32_t slot = (next_rand() % 3 == 0) ? KV_LSM_NO_SLOT :
-                        next_rand() % 1000000;
+        uint32_t slot = (next_rand() % 3 == 0) ? KV_LSM_NO_SLOT : (uint32_t)op;
+        uint32_t old = ref[i];
 
         kl = make_key(i, k);
+        if (slot != KV_LSM_NO_SLOT) {
+            key_of[slot] = i;
+            in_tree[slot] = 1;
+        }
+        /* the reference changes first: the old record is no longer newest */
+        ref[i] = slot;
         if (kv_lsm_put(&l, k, kl, slot)) {
+            ref[i] = old;
             ok = false;
             break;
         }
-        ref[i] = slot;
         if (op % 4000 == 0) {
             ok = ok && get_ok(&l, NKEYS);
             clean = clean && deepest_clean(&l);
             sorted = sorted && runs_ok(&l);
+            owned = owned && owners_ok(&l);
         }
     }
     CHECK(ok && get_ok(&l, NKEYS));
     CHECK(clean && deepest_clean(&l));
     CHECK(sorted && runs_ok(&l));
+    CHECK(owned && owners_ok(&l) && drops > 0 && pages_live > 0);
     CHECK(kv_lsm_depth(&l) >= 3);
     CHECK(l.flushes > 0 && l.compactions > 0 && l.dropped > 0);
 
@@ -284,6 +407,26 @@ static void test_random(void)
     scan.count = 0;
     scan.limit = 10;
     CHECK(kv_lsm_scan(&l, NULL, 0, scan_fn, &scan) == 0 && scan.count == 10);
+
+    /*
+     * A full compaction leaves one level with the newest live record of
+     * each key: no tombstone, no old record, each dropped slot reported.
+     */
+    {
+        int runs = 0;
+        uint64_t live = 0;
+
+        CHECK(kv_lsm_compact_all(&l) == 0);
+        for (int i = 0; i < KV_LSM_MAX_LEVELS; i++) {
+            runs += l.lvl[i].nr != 0;
+        }
+        for (int i = 0; i < NKEYS; i++) {
+            live += ref[i] != KV_LSM_NO_SLOT;
+        }
+        CHECK(runs == 1 && l.mem.nr == 0 && kv_lsm_records(&l) == live);
+        CHECK(get_ok(&l, NKEYS) && deepest_clean(&l) && runs_ok(&l) &&
+              owners_ok(&l));
+    }
 
     kv_lsm_clear(&l);
     for (int i = 0; i < NKEYS; i++) {
@@ -305,6 +448,12 @@ static void count_io(void *opaque, uint64_t id, KvLsmIo io, int level)
     last_id = id;
     last_level = level;
 }
+
+static const KvLsmOps count_ops = {
+    .io = count_io,
+    .alloc = own_alloc,
+    .free_page = own_free,
+};
 
 static void put_u(KvLsm *l, uint32_t i, uint32_t slot)
 {
@@ -339,7 +488,8 @@ static void test_counts(void)
     uint32_t slot = 0;
 
     memset(ios, 0, sizeof(ios));
-    CHECK(kv_lsm_init(&l, 4, 2, 0, 2, count_io, NULL) == 0);
+    own_reset();
+    CHECK(kv_lsm_init(&l, 4, 2, 0, 2, &count_ops, NULL) == 0);
     for (uint32_t i = 1; i <= 5; i++) {
         put_u(&l, i, i);
     }
@@ -361,6 +511,8 @@ static void test_counts(void)
     CHECK(l.flushes == 3 && l.compactions == 1);
     CHECK(l.lvl[0].nr == 0 && l.lvl[1].nr == 12 && l.lvl[1].npg == 6);
     CHECK(l.pages[KV_LSM_IO_COMPACT_READ] == 8);
+    /* 14 programmed, 8 replaced: the 6 pages of L2 stay */
+    CHECK(pages_live == 6 && !bad_frees);
 
     /* key 13 is in the memtable, key 3 in L2, key 99 past every level */
     CHECK(probes(&l, 13) == 0);
@@ -419,11 +571,11 @@ static void test_counts(void)
     memset(ios, 0, sizeof(ios));
     CHECK(kv_lsm_gc_begin(&l) == 0);
     k[3] = 3;
-    CHECK(kv_lsm_gc_check(&l, k, 4));
+    CHECK(kv_lsm_gc_check(&l, k, 4, &slot) && slot == 3);
     k[3] = 4;
-    CHECK(kv_lsm_gc_check(&l, k, 4));
+    CHECK(kv_lsm_gc_check(&l, k, 4, &slot) && slot == 4);
     k[3] = 13;
-    CHECK(!kv_lsm_gc_check(&l, k, 4));
+    CHECK(!kv_lsm_gc_check(&l, k, 4, &slot) && slot == 13);
     kv_lsm_gc_check_done(&l);
     CHECK(ios[KV_LSM_IO_GC_READ] == 1 && last_id == l.lvl[1].pg[1].id &&
           last_level == 2);
@@ -436,7 +588,27 @@ static void test_counts(void)
     CHECK(l.reinserted == 2 && l.mem.nr == 3);
     k[3] = 3;
     CHECK(kv_lsm_get(&l, k, 4, &slot, true) && slot == 33);
-    CHECK(!kv_lsm_gc_check(&l, k, 4));
+    CHECK(!kv_lsm_gc_check(&l, k, 4, &slot) && slot == 33);
+
+    /* an absent key: the check reads the page its range names, no slot */
+    CHECK(kv_lsm_gc_begin(&l) == 0);
+    {
+        uint8_t mid[5] = { 0, 0, 0, 6, 0 };
+
+        memset(ios, 0, sizeof(ios));
+        CHECK(!kv_lsm_gc_check(&l, mid, 5, &slot) &&
+              slot == KV_LSM_NO_SLOT);
+        kv_lsm_gc_check_done(&l);
+        CHECK(ios[KV_LSM_IO_GC_READ] == 1);
+    }
+
+    /* meta page GC moves page 0 of L2; the level list follows it */
+    {
+        uint64_t old = l.lvl[1].pg[0].id;
+
+        CHECK(kv_lsm_relocate(&l, old, 777) && l.lvl[1].pg[0].id == 777);
+        CHECK(!kv_lsm_relocate(&l, old, 778));
+    }
     kv_lsm_destroy(&l);
 }
 
@@ -449,7 +621,8 @@ static void test_depth(void)
 {
     KvLsm l;
 
-    CHECK(kv_lsm_init(&l, 16, 2, 1, 4, count_io, NULL) == 0);
+    own_reset();
+    CHECK(kv_lsm_init(&l, 16, 2, 1, 4, &count_ops, NULL) == 0);
     for (uint32_t i = 0; i < 33; i++) {
         put_u(&l, i, i);
     }
@@ -471,7 +644,8 @@ static void test_depth(void)
     kv_lsm_destroy(&l);
 
     /* no pinned level: a key below an overlapping level 1 costs two */
-    CHECK(kv_lsm_init(&l, 16, 2, 0, 4, count_io, NULL) == 0);
+    own_reset();
+    CHECK(kv_lsm_init(&l, 16, 2, 0, 4, &count_ops, NULL) == 0);
     for (uint32_t i = 0; i < 49; i++) {
         put_u(&l, i * 2, i);
     }
@@ -526,7 +700,7 @@ static void test_shadow(void)
  * level over its capacity; the next flush merges it, even when the level
  * above is within its own. memtable 4, ratio 2: cap(1) 8, cap(2) 16. The
  * 25th put is the sixth flush: L1 reaches 12 and merges into L2, which
- * reaches 24 and merges into L3 with the 7th allocation (3 per merge).
+ * reaches 24 and merges into L3 with the 11th allocation (4 per merge).
  */
 static void test_alloc_fail(void)
 {
@@ -551,7 +725,7 @@ static void test_alloc_fail(void)
         put_u(&l, i, i);
     }
     CHECK(l.lvl[0].nr == 8 && l.lvl[1].nr == 12);
-    fail_nth = 7;
+    fail_nth = 11;
     put_u(&l, 25, 25);
     fail_nth = 0;
     CHECK(l.lvl[0].nr == 0 && l.lvl[1].nr == 24 && l.lvl[2].nr == 0);
@@ -577,6 +751,103 @@ static void test_alloc_fail(void)
     kv_lsm_destroy(&l);
 }
 
+/*
+ * No free flash page: the merge releases the pages it took and changes
+ * nothing, so the put fails and every key reads as before. memtable 4,
+ * ratio 2, 2 records a page: the fifth put flushes 4 records into 2 pages.
+ */
+static void test_no_page(void)
+{
+    KvLsm l;
+    uint32_t slot = 0;
+    uint8_t k[4] = { 0, 0, 0, 0 };
+
+    own_reset();
+    CHECK(kv_lsm_init(&l, 4, 2, 0, 2, &own_ops, NULL) == 0);
+    for (uint32_t i = 1; i <= 4; i++) {
+        key_of[i] = i;
+        in_tree[i] = 1;
+        ref[i] = i;
+        put_u(&l, i, i);
+    }
+    fail_alloc = 2;
+    k[3] = 5;
+    CHECK(kv_lsm_put(&l, k, 4, 5) == -1);
+    CHECK(l.mem.nr == 4 && l.lvl[0].nr == 0 && l.flushes == 0);
+    CHECK(pages_live == 0 && next_page == 1 && !bad_frees);
+    fail_alloc = 0;
+    k[3] = 2;
+    CHECK(kv_lsm_get(&l, k, 4, &slot, false) && slot == 2);
+
+    /* a put over a memtable record drops the old one at once */
+    ref[2] = 6;
+    key_of[6] = 2;
+    in_tree[6] = 1;
+    CHECK(kv_lsm_put(&l, k, 4, 6) == 0 && drops == 1 && !in_tree[2]);
+    k[3] = 5;
+    key_of[5] = 5;
+    in_tree[5] = 1;
+    ref[5] = 5;
+    CHECK(kv_lsm_put(&l, k, 4, 5) == 0 && pages_live == 2);
+    CHECK(owners_ok(&l));
+    kv_lsm_destroy(&l);
+}
+
+static bool no_room;
+
+static bool own_room(void *opaque, uint64_t pages)
+{
+    (void)opaque;
+    (void)pages;
+    return !no_room;
+}
+
+static const KvLsmOps room_ops = {
+    .room = own_room,
+    .alloc = own_alloc,
+    .free_page = own_free,
+    .drop = own_drop,
+};
+
+/*
+ * With no room for a flush, a put fails before it takes a page, and a
+ * tombstone goes into the memtable over its capacity. Once there is room,
+ * the next put flushes all of it into the empty level 1, which drops the
+ * two tombstones. memtable 4, 2 records a page.
+ */
+static void test_tombstone_over(void)
+{
+    KvLsm l;
+    uint32_t slot = 0;
+    uint8_t k[4] = { 0, 0, 0, 0 };
+
+    own_reset();
+    CHECK(kv_lsm_init(&l, 4, 2, 0, 2, &room_ops, NULL) == 0);
+    for (uint32_t i = 1; i <= 4; i++) {
+        key_of[i] = i;
+        in_tree[i] = 1;
+        ref[i] = i;
+        put_u(&l, i, i);
+    }
+    no_room = true;
+    k[3] = 9;
+    CHECK(kv_lsm_put(&l, k, 4, 9) == -1 && next_page == 0);
+    CHECK(kv_lsm_put_tombstone(&l, k, 4) == 0 && l.mem.nr == 5);
+    k[3] = 2;
+    ref[2] = KV_LSM_NO_SLOT;
+    CHECK(kv_lsm_put_tombstone(&l, k, 4) == 0 && l.mem.nr == 5);
+    CHECK(drops == 1 && !kv_lsm_get(&l, k, 4, &slot, false));
+    no_room = false;
+    k[3] = 10;
+    key_of[10] = 10;
+    in_tree[10] = 1;
+    ref[10] = 10;
+    CHECK(kv_lsm_put(&l, k, 4, 10) == 0 && l.mem.nr == 1 &&
+          l.lvl[0].nr == 3 && l.flushes == 1);
+    CHECK(owners_ok(&l));
+    kv_lsm_destroy(&l);
+}
+
 int main(void)
 {
     test_random();
@@ -584,6 +855,8 @@ int main(void)
     test_depth();
     test_shadow();
     test_alloc_fail();
+    test_no_page();
+    test_tombstone_over();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }
