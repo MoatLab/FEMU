@@ -2098,6 +2098,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 /* ========== FDP IO Command Helpers ========== */
 
+/* PHNDL is bits (15 - RGIF):0 of a placement identifier (Base 2.3, Fig 290) */
 uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid)
 {
     uint16_t rgif = ns->endgrp->fdp.rgif;
@@ -2106,7 +2107,7 @@ uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid)
         return pid;
     }
 
-    return pid & ((1 << (15 - rgif)) - 1);
+    return pid & ((1 << (16 - rgif)) - 1);
 }
 
 uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid)

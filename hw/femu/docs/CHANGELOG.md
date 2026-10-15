@@ -51,6 +51,9 @@ listed one by one.
 - FDP takes more than one namespace. The reclaim units of an endurance group are shared, so every bbssd namespace of the controller places into one FTL; NoSSD namespaces report their lists only. Namespaces that share a handle keep one format, and events from collection name the namespace of the data they moved.
 - query-femu reports the placement handle list of each FDP namespace (`placement-handles`). It also reports the namespace whose FTL holds the units (`ftl-nsid`). `femu-stat.py` and `femu-config-check.py` show both, and the latter counts over-provisioning over the namespaces that share one FTL.
 - FDP HBMW and the host bytes of each handle count the logical blocks the host wrote, as Base 2.3 Figure 293 defines HBMW. A 512-byte write on a 4 KiB page now adds 512, not 4096; MBMW still counts the programmed page.
+- FDP takes more than one reclaim group (`fdp.nrg` up to 128). On bbssd and CSD a group is a set of dies: whole channels, or LUNs of one channel. A reclaim unit is one block of each plane of each die of its group, so RUNS is a line divided by the group count. Each handle has an active unit and a collection unit in every group. Collection, pads and refreshes stay in their group.
+- With more than one reclaim group, a write without placement goes to the group with the most free units. Each group must hold the whole namespace, since a host may place all of its data in one. A logical block must be whole NAND pages.
+- Under FDP, a buffered write that finds the write buffer full of pages with no room programs its page at once when its own handle has room, instead of failing with Capacity Exceeded. RUH Update writes back only the held pages of the handles it names.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).
@@ -214,6 +217,7 @@ was not doing anything.
 - A CSD controller with more than one namespace (b425007c2).
 - FDP with more than one reclaim group, and other placement configurations the device cannot serve (f08762450, 8ed17a495).
 - ZNS and OCSSD namespaces in an FDP subsystem, and the memory and compute namespaces of CSD. An FDP endurance group holds NVM command set namespaces only (Base 2.3, 8.1.10). They were accepted, and placement had no effect.
+- `fdp.nrg` above 128, and `fdp.nruh` above 16366, whose configuration descriptor would not fit the 16-bit size field of log 20h.
 - An FDP namespace larger than what is left once each handle has a reclaim unit open, each Persistently Isolated handle one to collect into, and forced GC its free units. Such a namespace was accepted and then failed most random writes. A partly exposed last page now counts as a whole one in this check, with or without placement (89f34939f).
 - Open-Channel namespaces on a controller in another mode, and OCSSD geometries the timing model cannot index (8cd92eec5, 598498e93, f4e85634a, 707d8c8c1).
 - Controller memory buffer settings that do not fit, including any CMB BAR other than 2 (1c3a5a2a2, 9d6e13cd3).
@@ -240,6 +244,7 @@ was not doing anything.
 - A RUH Update of a handle whose reclaim unit is empty keeps the unit and logs no event 00h. It used to log one, which says that the handle moved.
 - The FDP Statistics log keeps 128-bit sums, which stop at the 128-bit maximum, instead of 64-bit ones.
 - FDP HBMW also counts Write Zeroes with the Deallocate bit and Write Uncorrectable (NVM Command Set 1.2, 4.1.4.6). MBMW does not, since no page is programmed.
+- The default placement handle list of an FDP namespace holds the first 128 handles when `fdp.nruh` is larger: a list holds at most 128 (NVM Command Set 1.2, Figure 125).
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
   its first I/O and the kernel disabled the controller (50b65ca91).
@@ -348,6 +353,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - A KV namespace runs its I/O commands only when the host enables the controller with CC.CSS 110b. Under 000b, which selects only the NVM command set, they fail with Invalid Command Opcode (Base 2.3, Figure 41). Linux selects 110b. Set Features I/O Command Set Profile (19h) now succeeds with no effect when CC.CSS is not 110b (Base 2.3, 5.2.26.1.17).
 - Write Zeroes reads its directive type from CDW12 bits 22:20 (NVM Command Set 1.2, Figure 82). Bit 23 is NSZ: with it set, a Write Zeroes failed with Invalid Field once the Data Placement Directive was enabled, or lost its placement.
 - FDP event 03h sets LV, with the reclaim group and handle that the controller selected for the write (Base 2.3, Figure 296).
+- The placement handle of a placement identifier is bits 15 - RGIF to 0 (Base 2.3, Figure 290). FEMU read one bit less, which did not matter with one group. RGIF is now the fewest bits that hold `fdp.nrg` - 1.
 - A Copy descriptor format 2 range that names the command's own namespace is accepted in every mode that accepts Copy. A CSD namespace refused it with Invalid Namespace, although the controller advertised format 2.
 - Identify CNS 19h (Endurance Group List) lists endurance group 1 on a controller in a subsystem, from a starting identifier of 0 or 1, as `nvme list-endgrp` asks. Without a subsystem it is refused.
 - Commands complete on the completion queue they were bound to, and submission queues that share a completion queue are served (7a3f1d9fa, dc4289f91).

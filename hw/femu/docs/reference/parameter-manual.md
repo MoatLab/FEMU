@@ -499,10 +499,10 @@ Design: [FDP](../design/fdp.md).
 | Parameter | Unit | Valid values | Meaning |
 | --- | --- | --- | --- |
 | `fdp` | bool | | FDP in endurance group 1 for the joining controller |
-| `fdp.nruh` | handles | 1 to `fdp.nru`; required with `fdp=on` | reclaim unit handles, the placement identifiers the host can name |
-| `fdp.nru` | reclaim units | `fdp.nruh` to 65536 | reclaim units per group; bbssd uses at most one per line and needs `2 x fdp.nruh + 1` |
-| `fdp.nrg` | groups | 1 only | reclaim groups |
-| `fdp.runs` | bytes | 0, or one line's size with bbssd | reclaim unit size; 0 lets FEMU choose |
+| `fdp.nruh` | handles | 1 to `fdp.nru`, at most 16366; required with `fdp=on` | reclaim unit handles, the placement identifiers the host can name |
+| `fdp.nru` | reclaim units | `fdp.nruh` to 65536 | reclaim units per group; bbssd uses at most one per block index and needs `2 x fdp.nruh + 1` in each group |
+| `fdp.nrg` | groups | 1 to 128; with bbssd, a divisor of `nchs`, or a multiple of `nchs` that divides `nchs x luns_per_ch` | reclaim groups; with bbssd each group is a set of dies ([reclaim groups](../features/fdp.md#reclaim-groups)) |
+| `fdp.runs` | bytes | 0, or with bbssd one line's size divided by `fdp.nrg` | reclaim unit size; 0 lets FEMU choose |
 | `fdp.isolation_mode` | number | 0, or any other value | 0: every handle Persistently Isolated; otherwise the last one Initially Isolated |
 
 Interactions:

@@ -269,11 +269,14 @@ uint64_t ssd_pad_line(struct ssd *ssd, struct line *line, uint64_t stime)
     };
     struct ppa ppa = { .ppa = 0 };
     uint64_t pads = 0;
+    int ch0, ch1, lun0, lun1;
 
+    /* a reclaim group's line pads only the dies of its group */
+    ssd_line_dies(ssd, line, &ch0, &ch1, &lun0, &lun1);
     ppa.g.blk = line->id;
-    for (int ch = 0; ch < sp->nchs; ch++) {
+    for (int ch = ch0; ch < ch1; ch++) {
         ppa.g.ch = ch;
-        for (int lun = 0; lun < sp->luns_per_ch; lun++) {
+        for (int lun = lun0; lun < lun1; lun++) {
             ppa.g.lun = lun;
             for (int pl = 0; pl < sp->pls_per_lun; pl++) {
                 ppa.g.pl = pl;

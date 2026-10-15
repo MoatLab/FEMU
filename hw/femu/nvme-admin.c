@@ -3487,7 +3487,11 @@ static bool nvme_fdp_format_conflict(FemuCtrl *n, NvmeNamespace *ns,
  */
 /*
  * Under FDP, the blocks of LBA format @lba_idx that @ns cannot take: a
- * reclaim unit holds at least one block, so RUAMW is never 0.
+ * reclaim unit holds at least one block, so RUAMW is never 0. With more
+ * than one reclaim group, a block of an FTL namespace is whole NAND pages,
+ * or a write of part of a page would move the rest of it into another
+ * group (see bb_check_fdp_block()). The namespace's own mode decides, not
+ * the controller's.
  */
 static bool nvme_fdp_format_block_bad(FemuCtrl *n, NvmeNamespace *ns,
                                       uint8_t lba_idx)
@@ -3499,7 +3503,11 @@ static bool nvme_fdp_format_block_bad(FemuCtrl *n, NvmeNamespace *ns,
         return false;
     }
     bs = 1ULL << ns->id_ns.lbaf[lba_idx].lbads;
-    return bs > eg->fdp.runs;
+    if (bs > eg->fdp.runs) {
+        return true;
+    }
+    return eg->fdp.nrg > 1 && (NS_BBSSD(ns) || NS_CSD(ns)) &&
+           bs % ((uint64_t)n->bb_params.secs_per_pg * n->bb_params.secsz);
 }
 
 static uint16_t nvme_format_check_ns(FemuCtrl *n, NvmeNamespace *ns,

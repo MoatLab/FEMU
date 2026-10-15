@@ -6,6 +6,7 @@
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
+#include "ftl-internal.h"
 #include "../femu-query.h"
 
 static void ssd_query_mark_wp(uint8_t *state, struct write_pointer *wp)
@@ -57,14 +58,20 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
     }
 }
 
-/* A line takes block index @id in every plane of every LUN. */
-static void ssd_query_block_wear(struct ssd *ssd, int id, uint32_t *lo,
-                                 uint32_t *hi)
+/*
+ * A line takes its block index in every plane of every LUN it spans: the
+ * whole device, or the dies of its reclaim group.
+ */
+static void ssd_query_block_wear(struct ssd *ssd, struct line *line,
+                                 uint32_t *lo, uint32_t *hi)
 {
     struct ssdparams *spp = &ssd->sp;
+    int id = line->id;
+    int ch0, ch1, lun0, lun1;
 
-    for (int ch = 0; ch < spp->nchs; ch++) {
-        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+    ssd_line_dies(ssd, line, &ch0, &ch1, &lun0, &lun1);
+    for (int ch = ch0; ch < ch1; ch++) {
+        for (int lun = lun0; lun < lun1; lun++) {
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 uint32_t e = ssd->ch[ch].lun[lun].pl[pl].blk[id].erase_cnt;
 
@@ -80,7 +87,7 @@ static void ssd_query_line_wear(struct ssd *ssd, int id, FemuQueryLine *out)
     uint32_t lo = UINT32_MAX;
     uint32_t hi = 0;
 
-    ssd_query_block_wear(ssd, id, &lo, &hi);
+    ssd_query_block_wear(ssd, &ssd->lm.lines[id], &lo, &hi);
     out->erase_min = lo;
     out->erase_max = hi;
 }
@@ -190,7 +197,7 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
         out->vpc = ru->vpc;
         out->ipc = ru->ipc;
         for (int l = 0; l < ru->n_lines; l++) {
-            ssd_query_block_wear(ssd, ru->lines[l]->id, &lo, &hi);
+            ssd_query_block_wear(ssd, ru->lines[l], &lo, &hi);
         }
         out->erase_min = lo;
         out->erase_max = hi;

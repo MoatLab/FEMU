@@ -52,9 +52,11 @@ The checks below are made at realize; a combination they refuse stops QEMU
 with an error naming the rule.
 
 **Flexible Data Placement.** `fdp=on` is a property of `femu-subsys`. Only
-BBSSD has an FDP write path; other modes accept a subsystem with FDP, but
-placement then has no effect on where data goes. FDP requires a single
-controller in the subsystem, `fdp.nrg=1` and `fdp.nruh` from 1 to `fdp.nru`.
+BBSSD has an FDP write path. NoSSD counts the host bytes of FDP but has no
+media to place on. ZNS, OCSSD and KV namespaces are refused: an FDP
+endurance group holds NVM command set namespaces only. FDP requires a single
+controller in the subsystem. It also requires `fdp.nruh` from 1 to
+`fdp.nru`. With BBSSD, `fdp.nrg` above 1 makes each group a set of dies.
 More than one namespace needs every namespace in BBSSD mode, in whole NAND
 pages, or every one in NoSSD mode. `namespace_phls` gives each namespace its
 placement handle list. It cannot be combined with a KV namespace,

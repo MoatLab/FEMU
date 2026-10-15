@@ -46,6 +46,10 @@ typedef struct NvmeBus {
 #define NVME_FDP_MAX_PHS    128
 #define FDP_EVT_MAX         0xff
 #define NVME_FDP_MAX_NS_RUHS 32u
+/* reclaim groups: at most the dies of a device, and 7 bits of a PID */
+#define NVME_FDP_MAX_NRG    128u
+/* handles whose descriptors fit the 16-bit size of a log 20h descriptor */
+#define NVME_FDP_MAX_NRUH   16366u
 #define FDPVSS              0
 #define NVME_DEFAULT_RU_SIZE (96 * MiB)
 

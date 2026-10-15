@@ -35114,6 +35114,18 @@ static void femu_test_fdp_ns_refused(void *obj, void *data,
         /* a 1 KiB unit holds no 4 KiB block */
         { "'devsz_mb':1,'femu_mode':2,'lba_index':3,'subsys':'fdpsub-tiny'",
           "smaller than a logical block" },
+        /* reclaim groups: whole channels or LUNs of one channel */
+        { "'devsz_mb':1,'femu_mode':1,'lba_index':3,'subsys':'fdpsub-rg3'",
+          "must divide nchs (2)" },
+        { "'devsz_mb':1,'femu_mode':1,'subsys':'fdpsub-rg2'",
+          "needs a logical block of whole NAND pages" },
+        { "'devsz_mb':1,'femu_mode':1,'lba_index':3,'subsys':'fdpsub-rg2'",
+          "a reclaim group must hold every namespace" },
+        { "'devsz_mb':1,'femu_mode':4,'fdm_size':1,'subsys':'fdpsub-rg2'",
+          "needs a logical block of whole NAND pages" },
+        /* four groups of one die: 16 KiB units hold no 32 KiB block */
+        { "'devsz_mb':1,'femu_mode':1,'nlbaf':7,'lba_index':6,"
+          "'subsys':'fdpsub-rg4'", "must hold a logical block" },
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -35726,6 +35738,393 @@ static void femu_test_fdp_confs(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
 
     guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* what a test with reclaim groups needs to know of its device */
+typedef struct FemuRgWant {
+    uint32_t nrg;
+    uint8_t rgif;
+    /* the geometry, for the dies of each group */
+    uint32_t nchs;
+    uint32_t luns;
+    /* gc test: the handle to overwrite through, and pages per write */
+    int ph;
+    uint32_t burst;
+} FemuRgWant;
+
+#define FEMU_RG_MAX 4
+
+/*
+ * The RUH Status of namespace 1: the count, then the PID, RUH ID and RUAMW
+ * of each descriptor, at most 16.
+ */
+static uint16_t femu_rg_ruhs(FemuCtrlState *c, uint64_t buf, uint16_t *pid,
+                             uint16_t *ruhid, uint64_t *ruamw)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t st[16 + 16 * 32];
+    uint16_t n;
+
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(st) / 4 - 1);
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, st, sizeof(st));
+    n = lduw_le_p(st + 14);
+    for (uint16_t i = 0; i < MIN(n, 16); i++) {
+        pid[i] = lduw_le_p(st + 16 + 32 * i);
+        ruhid[i] = lduw_le_p(st + 16 + 32 * i + 2);
+        ruamw[i] = ldq_le_p(st + 16 + 32 * i + 8);
+    }
+    return n;
+}
+
+/*
+ * From query-femu: the valid pages of each (group, handle), and the most
+ * erases of a block in each group.
+ */
+static void femu_rg_units(QTestState *qts, uint64_t vpc[FEMU_RG_MAX][4],
+                          uint64_t *erases)
+{
+    QDict *rsp;
+    QDict *ns = femu_fdpns_query(qts, 1, "'kind':'reclaim-units','limit':4096",
+                                 &rsp);
+    QDict *fdp = qdict_get_qdict(ns, "fdp");
+    QListEntry *e;
+
+    memset(vpc, 0, sizeof(uint64_t) * FEMU_RG_MAX * 4);
+    memset(erases, 0, sizeof(uint64_t) * FEMU_RG_MAX);
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+        int g = qdict_get_int(u, "group");
+
+        g_assert_cmpint(g, <, FEMU_RG_MAX);
+        erases[g] = MAX(erases[g], qdict_get_int(u, "erase-max"));
+        if (qdict_haskey(u, "handle")) {
+            vpc[g][qdict_get_int(u, "handle")] += qdict_get_int(u, "vpc");
+        }
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * Placement into reclaim groups (Base 2.3, 8.1.11; Figures 289 and 290).
+ * RUH Status has a descriptor per placement handle and group, by handle and
+ * then by group, and each PID carries the group in its RGIF top bits. A
+ * write through (group g, handle 1) goes to a unit of handle 1 in group g
+ * only, and RUAMW of that pair alone goes down. Writes with no directive
+ * take placement handle 0 in the group with the most free units, in turn
+ * on a tie, so they spread over the groups. A PID with bit 15 - RGIF set
+ * names no placement handle: event 03h, with the group and handle the
+ * controller took. RUH Update of one pair moves that pair only (00h).
+ * The test device has 4 KiB blocks and 4 KiB pages.
+ */
+static void femu_test_fdp_rg_place(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuRgWant *want = data;
+    uint32_t nrg = want->nrg;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t vpc[FEMU_RG_MAX][4], erases[FEMU_RG_MAX];
+    uint16_t pid[16], ruhid[16];
+    uint64_t ruamw[16], full;
+    uint8_t hev[64 + 8 * 64];
+    uint16_t bad_pid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    c.lba_size = 4096;              /* lba_index=3 */
+
+    g_assert_cmpuint(femu_rg_ruhs(&c, log, pid, ruhid, ruamw), ==, 4 * nrg);
+    full = ruamw[0];
+    for (uint32_t i = 0; i < 4 * nrg; i++) {
+        uint16_t ph = i / nrg, rg = i % nrg;
+
+        g_assert_cmphex(pid[i], ==, (rg << (16 - want->rgif)) | ph);
+        g_assert_cmpuint(ruhid[i], ==, ph);
+        g_assert_cmpuint(ruamw[i], ==, full);
+    }
+
+    /* two pages through placement handle 1 of each group */
+    for (uint32_t g = 0; g < nrg; g++) {
+        femu_fdpns_fill(qts, buf, 1, 8 * g, 1);
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 8 * g, 1, buf,
+                                      list, (g << (16 - want->rgif)) | 1),
+                        ==, NVME_SUCCESS);
+        femu_fdpns_fill(qts, buf, 1, 8 * g + 1, 1);
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 8 * g + 1, 1,
+                                      buf, list,
+                                      (g << (16 - want->rgif)) | 1),
+                        ==, NVME_SUCCESS);
+        /* the pages are in group g alone: groups after it are still empty */
+        femu_rg_units(qts, vpc, erases);
+        for (uint32_t o = 0; o < nrg; o++) {
+            g_assert_cmpuint(vpc[o][1], ==, o <= g ? 2 : 0);
+        }
+    }
+    femu_rg_units(qts, vpc, erases);
+    femu_rg_ruhs(&c, log, pid, ruhid, ruamw);
+    for (uint32_t g = 0; g < nrg; g++) {
+        for (int h = 0; h < 4; h++) {
+            g_assert_cmpuint(vpc[g][h], ==, h == 1 ? 2 : 0);
+        }
+        g_assert_cmpuint(ruamw[1 * nrg + g], ==, full - 2);
+        g_assert_cmpuint(ruamw[0 * nrg + g], ==, full);
+    }
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    for (uint32_t g = 0; g < nrg; g++) {
+        femu_fdpns_verify(&c, buf, list, 1, 8 * g, 1);
+        femu_fdpns_verify(&c, buf, list, 1, 8 * g + 1, 1);
+    }
+
+    /* no directive: handle 0, one page in each group in turn */
+    for (uint32_t i = 0; i < 2 * nrg; i++) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 64 + i, 1, buf,
+                                      list, -1), ==, NVME_SUCCESS);
+    }
+    femu_rg_units(qts, vpc, erases);
+    for (uint32_t g = 0; g < nrg; g++) {
+        g_assert_cmpuint(vpc[g][0], ==, 2);
+    }
+
+    /*
+     * Bit 15 - RGIF is the top bit of the placement handle (Figure 290):
+     * placement handle 2^(15 - RGIF), which the namespace does not have.
+     * With nrg 3 the group field also holds 3, which is no group.
+     */
+    bad_pid = 1 << (15 - want->rgif);
+    if (nrg == 3) {
+        bad_pid = 3 << (16 - want->rgif);
+    }
+    g_assert_cmpuint(femu_fdp_host_events(&c, log, NULL), ==, 0);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 80, 1, buf, list,
+                                  bad_pid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fdp_host_events(&c, log, NULL), ==, 1);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmphex(hev[64], ==, 0x03);
+    g_assert_cmphex(hev[64 + 1], ==, 0x7);
+    g_assert_cmphex(lduw_le_p(hev + 64 + 2), ==, bad_pid);
+    g_assert_cmpuint(lduw_le_p(hev + 64 + 32), <, nrg);
+    g_assert_cmpuint(lduw_le_p(hev + 64 + 34), ==, 0);
+
+    /* RUH Update of (group nrg - 1, handle 1) moves that pair alone */
+    qtest_writew(qts, buf, ((nrg - 1) << (16 - want->rgif)) | 1);
+    g_assert_cmpint(femu_ruh_update(&c, buf, 1), ==, NVME_SUCCESS);
+    femu_rg_ruhs(&c, log, pid, ruhid, ruamw);
+    for (uint32_t g = 0; g < nrg; g++) {
+        g_assert_cmpuint(ruamw[1 * nrg + g], ==,
+                         g == nrg - 1 ? full : full - 2);
+    }
+    g_assert_cmpuint(femu_fdp_host_events(&c, log, NULL), ==, 2);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmphex(hev[64 + 64], ==, 0x00);
+    g_assert_cmphex(lduw_le_p(hev + 128 + 2), ==,
+                    ((nrg - 1) << (16 - want->rgif)) | 1);
+    g_assert_cmpuint(lduw_le_p(hev + 128 + 32), ==, nrg - 1);
+    g_assert_cmpuint(lduw_le_p(hev + 128 + 34), ==, 1);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    /* a 512-byte block would let one page hold blocks of two groups */
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_INVALID_FORMAT);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The whole namespace through one group, then overwrites of random pages
+ * through the same (group, handle) until collection has run in it many
+ * times. A group holds the whole namespace, so every write succeeds. The
+ * other group is never touched: no valid page and no erase there. Every
+ * page reads back, and the checks find each page on the dies of its unit's
+ * group. An initially isolated handle logs its moves with that group.
+ */
+static void femu_test_fdp_rg_gc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuRgWant *want = data;
+    const uint32_t pages = 256;
+    const uint32_t g = want->nrg - 1;
+    const uint16_t use = (g << (16 - want->rgif)) | want->ph;
+    const uint32_t burst = want->burst ? want->burst : 1;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t vpc[FEMU_RG_MAX][4], erases[FEMU_RG_MAX];
+    uint64_t mapped, lost, orphans;
+    uint32_t seq[256] = { 0 };
+    uint8_t ev[8 * 64];
+    uint32_t seed = 5, nev;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    c.lba_size = 4096;              /* lba_index=3 */
+    for (uint32_t p = 0; p < pages; p++) {
+        seq[p] = 1;
+        femu_fdpns_fill(qts, buf, 1, p, 1);
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, p, 1, buf, list,
+                                      use), ==, NVME_SUCCESS);
+    }
+    /*
+     * A write of several pages takes more units than one background pass
+     * per command frees, so collection in the write's group must run in
+     * the foreground.
+     */
+    for (uint32_t i = 0; i < 4 * pages / burst; i++) {
+        uint32_t p;
+
+        seed = seed * 1103515245 + 12345;
+        p = (seed >> 8) % (pages - burst + 1);
+        for (uint32_t k = 0; k < burst; k++) {
+            femu_fdpns_fill(qts, buf + k * 4096, 1, p + k, ++seq[p + k]);
+        }
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, p, burst, buf,
+                                      list, use), ==, NVME_SUCCESS);
+    }
+
+    femu_rg_units(qts, vpc, erases);
+    for (uint32_t o = 0; o < want->nrg; o++) {
+        uint64_t sum = 0;
+
+        for (int h = 0; h < 4; h++) {
+            sum += vpc[o][h];
+        }
+        g_assert_cmpuint(sum, ==, o == g ? pages : 0);
+        g_assert_cmpuint(erases[o], ==, o == g ? erases[o] : 0);
+    }
+    g_assert_cmpuint(erases[g], >, 0);
+    g_assert_cmpuint(vpc[g][want->ph], ==, pages);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    for (uint32_t p = 0; p < pages; p += 7) {
+        femu_fdpns_verify(&c, buf, list, 1, p, seq[p]);
+    }
+
+    /* moves of initially isolated data name the group they happened in */
+    nev = femu_fdp_ctrl_events(&c, log, ev, 8);
+    g_test_message("%u controller events", nev);
+    if (want->ph == 3) {
+        g_assert_cmpuint(nev, >, 0);
+    }
+    for (uint32_t i = 0; i < MIN(nev, 8); i++) {
+        g_assert_cmphex(ev[i * 64 + 1] & 0x4, ==, 0x4);
+        g_assert_cmpuint(lduw_le_p(ev + i * 64 + 32), ==, g);
+        g_assert_cmpuint(lduw_le_p(ev + i * 64 + 34), ==, 3);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The namespace's own mode decides the Format rule: a bbssd namespace on a
+ * controller of another mode (namespace_modes) keeps whole-page blocks
+ * with reclaim groups. A Format of it, and a Format of every namespace,
+ * to 512-byte blocks fails with Invalid Format.
+ */
+static void femu_test_fdp_rg_format_mode(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_INVALID_FORMAT);
+    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FORMAT);
+    /* 4 KiB blocks stay allowed */
+    g_assert_cmpint(femu_format_dw10(&c, 3), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A full group must not stop writes to another group. With collection held
+ * off (no unit kept free), page writes and RUH Updates through group 0 use
+ * up its units, and writes through it then fill the write buffer with pages
+ * that have nowhere to go. A write through group 1 still succeeds: its page
+ * goes to group 1's unit at once. RUH Update of group 1 writes back only
+ * the held pages of that pair, of which there are none, so it succeeds too.
+ * Flush cannot write group 0's pages and fails, as before.
+ */
+static void femu_test_fdp_rg_buffer(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t vpc[FEMU_RG_MAX][4], erases[FEMU_RG_MAX];
+    uint16_t status = NVME_SUCCESS;
+    NvmeCmd cmd = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    c.lba_size = 4096;              /* lba_index=3 */
+    qtest_memset(qts, buf, 0x5a, 4096);
+
+    /* a page, then a fresh unit, until group 0 has no unit left */
+    for (i = 0; i < 128 && status == NVME_SUCCESS; i++) {
+        g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, i, 1, buf, list,
+                                      0), ==, NVME_SUCCESS);
+        qtest_writew(qts, list, 0);
+        status = femu_ruh_update(&c, list, 1);
+    }
+    g_assert_cmphex(status, ==, NVME_CAP_EXCEEDED);
+    /* group 0 pages until the buffer holds only pages with nowhere to go */
+    for (i = 0; i < 64; i++) {
+        status = femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 160 + i, 1, buf, list,
+                               0);
+        if (status == NVME_CAP_EXCEEDED) {
+            break;
+        }
+        g_assert_cmphex(status, ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(status, ==, NVME_CAP_EXCEEDED);
+
+    femu_rg_units(qts, vpc, erases);
+    g_assert_cmpuint(vpc[1][0], ==, 0);
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 250, 1, buf, list,
+                                  (1 << 15) | 0), ==, NVME_SUCCESS);
+    femu_rg_units(qts, vpc, erases);
+    g_assert_cmpuint(vpc[1][0], ==, 1);
+
+    qtest_writew(qts, list, (1 << 15) | 0);
+    g_assert_cmphex(femu_ruh_update(&c, list, 1), ==, NVME_SUCCESS);
+
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
     femu_disable(&c);
     qos_invalidate_command_line();
 }
@@ -37429,7 +37828,15 @@ static void femu_register_nodes(void)
             "-device femu-subsys,id=fdpsub-runs,nqn=fdpsub-runs,fdp=on,"
             "fdp.nruh=4,fdp.runs=64K "
             "-device femu-subsys,id=fdpsub-tiny,nqn=fdpsub-tiny,fdp=on,"
-            "fdp.nruh=4,fdp.runs=1K",
+            "fdp.nruh=4,fdp.runs=1K "
+            "-device femu-subsys,id=fdpsub-rg2,nqn=fdpsub-rg2,fdp=on,"
+            "fdp.nruh=4,fdp.nrg=2 "
+            "-device femu-subsys,id=fdpsub-rg2-ii,nqn=fdpsub-rg2-ii,fdp=on,"
+            "fdp.nruh=4,fdp.nrg=2,fdp.isolation_mode=1 "
+            "-device femu-subsys,id=fdpsub-rg3,nqn=fdpsub-rg3,fdp=on,"
+            "fdp.nruh=4,fdp.nrg=3 "
+            "-device femu-subsys,id=fdpsub-rg4,nqn=fdpsub-rg4,fdp=on,"
+            "fdp.nruh=4,fdp.nrg=4",
     };
 
     /*
@@ -39813,6 +40220,120 @@ static void femu_register_nodes(void)
                 "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
                 "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,"
                 "nchs=2,subsys=fdpsub",
+        });
+    }
+    {
+        /* a group is one channel of two LUNs: units of 8 pages, 32 KiB */
+        static const FemuFdpConfWant conf2 = {
+            .nrg = 2, .rgif = 1, .nruh = 4, .runs = 32 * 1024,
+        };
+        static const FemuRgWant rg2 = {
+            .nrg = 2, .rgif = 1, .nchs = 2, .luns = 2,
+        };
+        static const FemuRgWant rg3 = {
+            .nrg = 3, .rgif = 2, .nchs = 3, .luns = 1,
+        };
+        static const FemuRgWant rg4 = {
+            .nrg = 4, .rgif = 2, .nchs = 2, .luns = 4, .ph = 1,
+        };
+        static const FemuRgWant rg2_ii = {
+            .nrg = 2, .rgif = 1, .nchs = 2, .luns = 2, .ph = 3,
+        };
+        static const FemuRgWant rg2_burst = {
+            .nrg = 2, .rgif = 1, .nchs = 2, .luns = 2, .burst = 16,
+        };
+
+        qos_add_test("fdp-confs-rg2", "femu", femu_test_fdp_confs,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&conf2,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg2",
+        });
+        qos_add_test("fdp-rg2-place", "femu", femu_test_fdp_rg_place,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg2,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg2",
+        });
+        /* three groups of one die each */
+        qos_add_test("fdp-rg3-place", "femu", femu_test_fdp_rg_place,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg3,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
+                "nchs=3,lba_index=3,subsys=fdpsub-rg3",
+        });
+        /* four groups of two LUNs of one channel */
+        qos_add_test("fdp-rg4-place", "femu", femu_test_fdp_rg_place,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg4,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=4,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg4",
+        });
+        qos_add_test("fdp-rg2-gc", "femu", femu_test_fdp_rg_gc,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg2,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg2",
+        });
+        /* writes of 16 pages: foreground collection in the group */
+        qos_add_test("fdp-rg2-gc-fg", "femu", femu_test_fdp_rg_gc,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg2_burst,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg2",
+        });
+        qos_add_test("fdp-rg2-gc-cb", "femu", femu_test_fdp_rg_gc,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg2,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,gc_copyback=on,subsys=fdpsub-rg2",
+        });
+        qos_add_test("fdp-rg2-gc-ii", "femu", femu_test_fdp_rg_gc,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg2_ii,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg2-ii",
+        });
+        qos_add_test("fdp-rg2-buffer", "femu", femu_test_fdp_rg_buffer,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,lba_index=3,gc_thres_pcent=100,"
+                "gc_thres_pcent_high=100,buffer_size=8,vwc=1,"
+                "subsys=fdpsub-rg2",
+        });
+        qos_add_test("fdp-rg2-format-mode", "femu",
+                     femu_test_fdp_rg_format_mode, &(QOSGraphTestOptions) {
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=2,namespace_modes=bbssd,"
+                "secsz=512,secs_per_pg=8,pgs_per_blk=4,blks_per_pl=64,"
+                "pls_per_lun=1,luns_per_ch=2,nchs=2,lba_index=3,"
+                "subsys=fdpsub-rg2",
+        });
+        qos_add_test("fdp-rg4-gc", "femu", femu_test_fdp_rg_gc,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&rg4,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=4,"
+                "nchs=2,lba_index=3,subsys=fdpsub-rg4",
         });
     }
     qos_add_test("fdp-invalid-pid", "femu", femu_test_fdp_invalid_pid,

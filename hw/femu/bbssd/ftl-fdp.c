@@ -422,7 +422,6 @@ static void fdp_victim_reprioritize(struct ssd *ssd, FemuReclaimUnit *ru)
  */
 static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
 {
-    struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
     bool is_full = true;
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -432,7 +431,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
     for (int i = 0; i < ru->n_lines; i++) {
         /* the data age of ecc_retention_sec counts from here */
         ru->lines[i]->close_time = now;
-        if (ru->lines[i]->vpc != spp->pgs_per_line) {
+        if (ru->lines[i]->vpc != ru->npages / ru->n_lines) {
             is_full = false;
         }
         ru->vpc += ru->lines[i]->vpc;
@@ -507,8 +506,8 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
         wpp->blk = wpp->curline->id;
         check_addr(wpp->blk, spp->blks_per_pl);
         ftl_assert(wpp->pg == 0);
-        ftl_assert(wpp->lun == 0);
-        ftl_assert(wpp->ch == 0);
+        ftl_assert(wpp->lun == wpp->lun0);
+        ftl_assert(wpp->ch == wpp->ch0);
         ftl_assert(wpp->pl == 0);
     }
 
@@ -539,7 +538,7 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
     blk->wp++; /* a program; invalidation never takes it back */
 
     line = get_line(ssd, ppa);
-    ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
+    ftl_assert(line->vpc >= 0 && line->vpc < ru->npages / ru->n_lines);
     line->vpc++;
     if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
         !line->open_time) {
@@ -565,7 +564,6 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
  */
 static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
 {
-    struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = NULL;
     struct nand_page *pg = NULL;
     struct line *line;
@@ -581,23 +579,23 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
     pg->status = PG_INVALID;
 
     blk = get_blk(ssd, ppa);
-    ftl_assert(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
+    ftl_assert(blk->ipc >= 0 && blk->ipc < ssd->sp.pgs_per_blk);
     blk->ipc++;
-    ftl_assert(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
+    ftl_assert(blk->vpc > 0 && blk->vpc <= ssd->sp.pgs_per_blk);
     blk->vpc--;
 
     line = get_line(ssd, ppa);
-    ftl_assert(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
-    if (line->vpc == spp->pgs_per_line) {
+    /* update RU state; a line of a group holds pages of the group's dies */
+    ru = line->my_ru;
+    ftl_assert(ru != NULL);
+    ftl_assert(line->ipc >= 0 && line->ipc < ru->npages / ru->n_lines);
+    if (line->vpc == ru->npages / ru->n_lines) {
         ftl_assert(line->ipc == 0);
     }
     line->ipc++;
-    ftl_assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
+    ftl_assert(line->vpc > 0 && line->vpc <= ru->npages / ru->n_lines);
     line->vpc--;
 
-    /* update RU state */
-    ru = line->my_ru;
-    ftl_assert(ru != NULL);
     rm = ssd->rg[ru->rgidx].ru_mgmt;
     /* aggregate ipc across all lines in this RU (n_lines=1 in typical config) */
     ru->ipc = 0;
@@ -606,7 +604,7 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
     }
 
     /* check if RU was full and needs to move to victim */
-    if (ru->vpc == spp->pgs_per_line * ru->n_lines) {
+    if (ru->vpc == ru->npages) {
         was_full_ru = true;
     }
 
@@ -1030,10 +1028,12 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
                                     struct fdp_moves *mv)
 {
     struct ssdparams *spp = &ssd->sp;
+    FemuReclaimGroup *rg = &ssd->rg[victim_ru->rgidx];
     int npos = spp->nchs * spp->luns_per_ch * spp->pls_per_lun;
     int nlines = spp->lines_per_ru;
     g_autofree int *next = g_new0(int, nlines * npos);
-    int total = nlines * spp->pgs_per_line;
+    /* the pages of the victim: its blocks on the dies of its group */
+    int total = victim_ru->npages;
     int seq = 0;
 
     while (victim_ru->vpc) {
@@ -1072,10 +1072,10 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
             i /= spp->pgs_per_blk;
             src.g.pl = i % spp->pls_per_lun;
             i /= spp->pls_per_lun;
-            src.g.lun = i % spp->luns_per_ch;
-            i /= spp->luns_per_ch;
-            src.g.ch = i % spp->nchs;
-            src.g.blk = victim_ru->lines[i / spp->nchs]->id;
+            src.g.lun = rg->lun0 + i % rg->nlun;
+            i /= rg->nlun;
+            src.g.ch = rg->ch0 + i % rg->nch;
+            src.g.blk = victim_ru->lines[i / rg->nch]->id;
             found = get_pg(ssd, &src)->status == PG_VALID;
         }
         if (!found) {
@@ -1238,6 +1238,7 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
 {
     struct ssdparams *spp = &ssd->sp;
     FemuRuHandle *victim_ruh = victim_ru->ruh;
+    FemuReclaimGroup *rg = &ssd->rg[victim_ru->rgidx];
     struct fdp_moves mv = { .victim = victim_ru };
     struct ppa ppa;
     int blk_cnt = 0;
@@ -1280,10 +1281,11 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
             return -1;
         }
     }
+    /* the unit's blocks are on the dies of its group only */
     for (int i = 0; i < spp->lines_per_ru && !copyback; i++) {
         ppa.g.blk = victim_ru->lines[i]->id;
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+        for (int ch = rg->ch0; ch < rg->ch0 + rg->nch; ch++) {
+            for (int lun = rg->lun0; lun < rg->lun0 + rg->nlun; lun++) {
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
@@ -1302,8 +1304,8 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     for (int i = 0; i < spp->lines_per_ru; i++) {
         struct line *victim_line = victim_ru->lines[i];
         ppa.g.blk = victim_line->id;
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+        for (int ch = rg->ch0; ch < rg->ch0 + rg->nch; ch++) {
+            for (int lun = rg->lun0; lun < rg->lun0 + rg->nlun; lun++) {
                 ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
                                     spp->enable_gc_delay, 0);
                 blk_cnt += spp->pls_per_lun;
@@ -1410,8 +1412,7 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
             gc = &ssd->ruhs[i];
         }
     }
-    if ((!host && !gc) || rm->free_ru_cnt < 2 ||
-        should_gc_high_fdp_style(ssd) >= 0) {
+    if ((!host && !gc) || rm->free_ru_cnt < 2 || fdp_rg_short(ssd, rg)) {
         return false;
     }
     if (host) {
@@ -1495,12 +1496,22 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     enum ssd_reclaim_why why;
     int ok;
 
-    if (!line || should_gc_high_fdp_style(ssd) >= 0) {
+    if (!line) {
         return;
     }
+    /* the refresh moves data inside the group, so its room counts */
     ru = line->my_ru;
     rm = ssd->rg[ru->rgidx].ru_mgmt;
-    if (rm->free_ru_cnt < 2) {
+    if (rm->free_ru_cnt < 2 || fdp_rg_short(ssd, ru->rgidx)) {
+        /*
+         * With several groups, the one queued line must not hold back the
+         * refresh of another group; the next read of the block queues it
+         * again.
+         */
+        if (ssd->nrg > 1) {
+            ssd->read_reclaim_line = NULL;
+            ssd->reclaim_why = RECLAIM_READS;
+        }
         return;
     }
 
@@ -1549,13 +1560,14 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     }
 }
 
+/* collect in group @rgid until it is no longer short of free units */
 static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
 {
     uint64_t fg_gc_iters = 0;
     uint64_t max_fg_gc = (uint64_t)ssd->nrg * ssd->rg[0].ru_mgmt->tt_rus +
                          ssd->nrg;
 
-    while (should_gc_high_fdp_style(ssd) >= 0 && fg_gc_iters < max_fg_gc) {
+    while (fdp_rg_short(ssd, rgid) && fg_gc_iters < max_fg_gc) {
         if (do_gc_fdp_style(ssd, rgid, ruhid, true) == -1) {
             break;
         }
@@ -1565,9 +1577,31 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
 }
 
 /*
+ * The group a write takes when its placement names none (Base 2.3, 8.1.11:
+ * the controller selects it): the one with the most free units, so data
+ * spreads over the groups as they empty. Ties go to the first group after
+ * the one taken last. With one group it is always 0.
+ */
+static uint16_t fdp_select_rg(struct ssd *ssd)
+{
+    uint16_t best = ssd->rg_next % ssd->nrg;
+
+    for (uint64_t k = 1; k < ssd->nrg; k++) {
+        uint16_t g = (ssd->rg_next + k) % ssd->nrg;
+
+        if (ssd->rg[g].ru_mgmt->free_ru_cnt >
+            ssd->rg[best].ru_mgmt->free_ru_cnt) {
+            best = g;
+        }
+    }
+    ssd->rg_next = (best + 1) % ssd->nrg;
+    return best;
+}
+
+/*
  * The handle and group request @req places into. A placement that names no
- * valid handle falls back to placement 0 of group 0, and logs Invalid
- * Placement Identifier if the host tried one.
+ * valid handle falls back to placement handle 0 in a group the controller
+ * selects, and logs Invalid Placement Identifier if the host tried one.
  */
 static void fdp_place(struct ssd *ssd, NvmeRequest *req, uint16_t *rgid,
                       uint16_t *ruhid)
@@ -1580,7 +1614,7 @@ static void fdp_place(struct ssd *ssd, NvmeRequest *req, uint16_t *rgid,
     if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
         !nvme_parse_pid(ns, pid, &ph, rgid)) {
         ph = 0;
-        *rgid = 0;
+        *rgid = fdp_select_rg(ssd);
         if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT) {
             nvme_fdp_note_invalid_pid(ssd->n, ns, pid, *rgid);
         }
@@ -1728,8 +1762,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
      * than for a fixed number of passes. Each pass frees at most one reclaim
      * unit, so the old fixed cap (nrg) let the free-RU pool drain to zero under
      * sustained overwrites and the write then failed with a spurious device-full.
-     * Running until should_gc_high_fdp_style() reports no pressure holds the
-     * pool above the threshold -- the host write effectively waits on GC, which
+     * Running until the write's group is no longer short holds its pool
+     * above the threshold -- the host write effectively waits on GC, which
      * is the intended backpressure. do_gc_fdp_style() returns -1 when no victim
      * remains (nothing left to reclaim); that is the normal exit. The counter is
      * only a guard against an unexpected non-terminating condition, bounded by
@@ -1798,31 +1832,48 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     return maxlat;
 }
 
+/* the held page of @e is one @want names: index ruhid x nrg + rgid */
+static bool fdp_buffer_wanted(struct ssd *ssd, const bool *want,
+                              const struct buffer_entry *e)
+{
+    return !want || want[e->ruhid * ssd->nrg + e->rgid];
+}
+
 /*
  * Write the oldest pages of the write buffer to the media, at most @budget
- * of them, or all with 0. Each goes to the active unit of the handle its
- * last write placed it with, so no unit takes another handle's pages. A page
- * whose handle has no unit and no free one stops the write-back; it stays
- * held. Returns the modelled time of the programs.
+ * of them, or all with 0, of the (handle, group) pairs @want names, or of
+ * all with NULL. Each goes to the active unit of the handle and group its
+ * last write placed it with, so no unit takes another handle's pages. A
+ * page whose handle has no unit in its group, and no free one, stays held;
+ * the write-back goes on with the pages of the other groups. Returns the
+ * modelled time of the programs.
  */
-uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
+static uint64_t fdp_buffer_destage_some(struct ssd *ssd, int budget,
+                                        uint64_t stime, const bool *want)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
     uint64_t curlat, maxlat = 0;
+    g_autofree bool *blocked = g_new0(bool, ssd->nrg);
+    struct buffer_entry *e, *next;
     int done = 0;
 
-    while (budget <= 0 || done < budget) {
-        struct buffer_entry *e = QTAILQ_FIRST(&ssd->write_buffer);
+    for (e = QTAILQ_FIRST(&ssd->write_buffer);
+         e && (budget <= 0 || done < budget); e = next) {
         FemuRuHandle *ruh;
 
-        if (!e) {
-            break;
+        if (blocked[e->rgid] || !fdp_buffer_wanted(ssd, want, e)) {
+            next = QTAILQ_NEXT(e, b_entry);
+            continue;
         }
         ruh = &ssd->ruhs[e->ruhid];
         fdp_gc_until_clear(ssd, e->rgid, e->ruhid);
+        /* the entry after this one, once collection has run */
+        next = QTAILQ_NEXT(e, b_entry);
         if (!fdp_ruh_ready(ssd, ruh, e->rgid)) {
-            break;
+            /* the group is out of room; later pages of it wait too */
+            blocked[e->rgid] = true;
+            continue;
         }
         if (ssd->cmt.capacity) {
             curlat = cmt_touch(ssd, e->lpn, stime, true);
@@ -1839,6 +1890,42 @@ uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         done++;
     }
     return maxlat;
+}
+
+uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
+{
+    return fdp_buffer_destage_some(ssd, budget, stime, NULL);
+}
+
+/*
+ * Before RUH Update @req, write back the held pages of the (handle, group)
+ * pairs it names: data written before the update belongs in the units the
+ * handles reference until it (Base 2.3, 7.4.1.1). Pages of other pairs may
+ * stay. Returns the modelled time; *@held is true when a named pair still
+ * has a held page.
+ */
+uint64_t fdp_buffer_destage_update(struct ssd *ssd, NvmeRequest *req,
+                                   bool *held)
+{
+    NvmeNamespace *ns = req->ns;
+    g_autofree bool *want = g_new0(bool, ssd->nruhs * ssd->nrg);
+    struct buffer_entry *e;
+    uint64_t lat;
+
+    for (uint32_t i = 0; i < req->nr_fdp_pids; i++) {
+        uint16_t ph, rg;
+
+        /* the poller refused the command if any of these was invalid */
+        if (nvme_parse_pid(ns, req->fdp_pids[i], &ph, &rg)) {
+            want[ns->fdp.phs[ph] * ssd->nrg + rg] = true;
+        }
+    }
+    lat = fdp_buffer_destage_some(ssd, 0, req->stime, want);
+    *held = false;
+    QTAILQ_FOREACH(e, &ssd->write_buffer, b_entry) {
+        *held |= fdp_buffer_wanted(ssd, want, e);
+    }
+    return lat;
 }
 
 /*
@@ -1871,7 +1958,7 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t per = pg >> FDP_WRITTEN_SHIFT;
     uint64_t start_lpn, end_lpn, lpn;
     uint64_t curlat, maxlat = 0;
-    uint64_t passes, accepted = 0;
+    uint64_t passes, accepted = 0, direct = 0;
     uint64_t host;
     uint16_t rgid, ruhid;
     bool full = false;
@@ -1905,10 +1992,29 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
             full = true;
             curlat = fdp_buffer_destage(ssd, batch, req->stime);
             maxlat = MAX(maxlat, curlat);
-            if (ssd_buffer_at_watermark(ssd)) {
+        }
+        /*
+         * The held pages are all of groups with no room. The page then
+         * goes to its own unit at once, when its group has room, so a full
+         * group does not stop writes to the others.
+         */
+        if (!ssd_buffer_hit(ssd, lpn) && ssd_buffer_at_watermark(ssd)) {
+            fdp_gc_until_clear(ssd, rgid, ruhid);
+            if (!fdp_ruh_ready(ssd, &ssd->ruhs[ruhid], rgid)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }
+            if (ssd->cmt.capacity) {
+                curlat = cmt_touch(ssd, lpn, req->stime, true);
+                maxlat = MAX(maxlat, curlat);
+            }
+            curlat = fdp_program_page(ssd, &ssd->rg[rgid], &ssd->ruhs[ruhid],
+                                      lpn, req->stime, req, req->slba,
+                                      req->nlb, NULL);
+            maxlat = MAX(maxlat, curlat);
+            direct++;
+            accepted++;
+            continue;
         }
 
         e = ssd_buffer_insert(ssd, lpn, &held);
@@ -1937,6 +2043,11 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
                     ssd->n->subsys->endgrp.fdp.hbmw, host);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, host);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, host);
+    /* pages programmed past the buffer reach the media now */
+    nvme_fdp_eg_add(&ssd->n->subsys->endgrp,
+                    ssd->n->subsys->endgrp.fdp.mbmw, direct * pg);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, direct * pg);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->mbmw, direct * pg);
     ssd->buffer_full_destages += full;
 
     /* accepting into DRAM is not free, even though it is not a program */
@@ -1949,8 +2060,8 @@ static bool fdp_ru_unwritten(FemuReclaimUnit *ru)
 {
     struct write_pointer *wpp = ru->ssd_wptr;
 
-    return wpp->curline == ru->lines[0] && !wpp->ch && !wpp->lun &&
-           !wpp->pl && !wpp->pg;
+    return wpp->curline == ru->lines[0] && wpp->ch == wpp->ch0 &&
+           wpp->lun == wpp->lun0 && !wpp->pl && !wpp->pg;
 }
 
 /*
@@ -2120,13 +2231,18 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
 }
 
 /*
- * femu_fdp_init_ssd_reclaim_unit - initialize one RU with lines and wptr
+ * femu_fdp_init_ssd_reclaim_unit - initialize one RU with lines and wptr.
+ * With one group the unit takes free lines of the whole device. With more,
+ * it takes the lines of its group with the block ids in @ids: one block of
+ * each plane of each die of the group.
  */
 static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
                                            FemuReclaimUnit *femu_ru,
-                                           int rgidx, int index)
+                                           int rgidx, int index,
+                                           const int *ids)
 {
     struct ssdparams *spp = &ssd->sp;
+    FemuReclaimGroup *rg = &ssd->rg[rgidx];
     struct write_pointer *wpp;
 
     femu_ru->n_lines = spp->lines_per_ru;
@@ -2135,12 +2251,18 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     femu_ru->pos = 0;
     femu_ru->ruh_pos = 0;     /* not yet in any victim pqueue */
     femu_ru->ssd_wptr = g_malloc0(sizeof(struct write_pointer));
-    femu_ru->npages = spp->lines_per_ru * spp->pgs_per_line;
+    femu_ru->npages = spp->lines_per_ru * (spp->pgs_per_line / ssd->nrg);
 
     wpp = femu_ru->ssd_wptr;
     femu_ru->lines = g_malloc0(femu_ru->n_lines * sizeof(struct line *));
     for (int i = 0; i < femu_ru->n_lines; i++) {
-        femu_ru->lines[i] = get_next_free_line(ssd);
+        if (ssd->rg_lines) {
+            femu_ru->lines[i] = &ssd->rg_lines[rgidx * spp->blks_per_pl +
+                                               ids[index * femu_ru->n_lines +
+                                                   i]];
+        } else {
+            femu_ru->lines[i] = get_next_free_line(ssd);
+        }
         if (!femu_ru->lines[i]) {
             ftl_err("FDP: no free line for RU %d (rg %d, line %d/%d)\n",
                     index, rgidx, i, femu_ru->n_lines);
@@ -2148,12 +2270,34 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
         }
         femu_ru->lines[i]->my_ru = femu_ru;
     }
-    wpp->curline = femu_ru->lines[0];
-    wpp->ch = 0;
-    wpp->lun = 0;
-    wpp->pl = 0;
-    wpp->blk = wpp->curline->id;
-    wpp->pg = 0;
+    /* the pointer steps over the dies of the group only */
+    wpp->ch0 = rg->ch0;
+    wpp->nch = rg->nch;
+    wpp->lun0 = rg->lun0;
+    wpp->nlun = rg->nlun;
+    ssd_wp_reset(wpp, femu_ru->lines[0]);
+}
+
+/*
+ * The dies of reclaim group @g of @nrg: in the flat order ch x luns_per_ch +
+ * lun, the dies [g x D / nrg, (g + 1) x D / nrg). Realize checked that they
+ * form whole channels, or LUNs of one channel.
+ */
+static void femu_fdp_rg_window(struct ssdparams *spp, int nrg, int g,
+                               FemuReclaimGroup *rg)
+{
+    int per = spp->nchs * spp->luns_per_ch / nrg;
+    int d0 = g * per;
+
+    rg->ch0 = d0 / spp->luns_per_ch;
+    rg->lun0 = d0 % spp->luns_per_ch;
+    if (per >= spp->luns_per_ch) {
+        rg->nch = per / spp->luns_per_ch;
+        rg->nlun = spp->luns_per_ch;
+    } else {
+        rg->nch = 1;
+        rg->nlun = per;
+    }
 }
 
 /*
@@ -2187,25 +2331,55 @@ static int femu_fdp_gc_strategy(const BbCtrlParams *p)
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeSubsystem *subsys = n->subsys;
-    uint64_t rgs = subsys->params.fdp.nrg;
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t rgs = subsys->endgrp.fdp.nrg;
     FemuReclaimGroup *rg;
-    uint64_t tt_nru = ssd->sp.total_ru_cnt;
+    /* units per group: every group has a unit per block id of its dies */
+    uint64_t tt_nru = spp->total_ru_cnt;
+    g_autofree int *ids = NULL;
 
     ftl_assert(tt_nru > 0);
 
     ssd->rg = g_malloc0(rgs * sizeof(FemuReclaimGroup));
     ssd->nrg = rgs;
     ssd->rus = g_malloc0(rgs * sizeof(FemuReclaimUnit *));
+    ssd->rg_dies = spp->nchs * spp->luns_per_ch / rgs;
 
     for (int i = 0; i < (int)rgs; i++) {
         rg = &ssd->rg[i];
         rg->rgidx = i;
-        rg->tt_nru = tt_nru / rgs;
+        rg->tt_nru = tt_nru;
+        femu_fdp_rg_window(spp, rgs, i, rg);
         ssd->rus[i] = g_malloc0(tt_nru * sizeof(FemuReclaimUnit));
         rg->rus = ssd->rus[i];
         rg->ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
         femu_fdp_init_ru_mgmt(ssd, rg);
         fdp_log("Allocated %lu RUs to rg[%d]\n", tt_nru, i);
+    }
+
+    /*
+     * With more than one group, the lines of the device give the block ids
+     * of the units, in the order line mode would hand them out, and each
+     * group gets a line of its own for each id.
+     */
+    if (rgs > 1) {
+        ids = g_new(int, tt_nru * spp->lines_per_ru);
+        for (uint64_t j = 0; j < tt_nru * spp->lines_per_ru; j++) {
+            struct line *l = get_next_free_line(ssd);
+
+            if (!l) {
+                ftl_err("FDP: no free line for block id %" PRIu64 "\n", j);
+                abort();
+            }
+            ids[j] = l->id;
+        }
+        ssd->rg_lines = g_new0(struct line, rgs * spp->blks_per_pl);
+        for (uint64_t g = 0; g < rgs; g++) {
+            for (int b = 0; b < spp->blks_per_pl; b++) {
+                ssd->rg_lines[g * spp->blks_per_pl + b].id = b;
+                ssd->rg_lines[g * spp->blks_per_pl + b].rg = g;
+            }
+        }
     }
 
     /* link NvmeReclaimUnit pointers and init each SSD-level RU */
@@ -2218,7 +2392,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                 rg->rus[j].rgidx = i;
                 rg->rus[j].nvme_ru = &russ[i][j];
                 rg->rus[j].ruidx = j;
-                femu_fdp_init_ssd_reclaim_unit(ssd, &rg->rus[j], i, j);
+                femu_fdp_init_ssd_reclaim_unit(ssd, &rg->rus[j], i, j, ids);
                 QTAILQ_INSERT_TAIL(&rg->ru_mgmt->free_ru_list,
                                    &rg->rus[j], entry);
                 rg->ru_mgmt->free_ru_cnt++;
@@ -2726,6 +2900,29 @@ static int fdp_check_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
 }
 
 /*
+ * 1 if the valid pages in the blocks of @ru, on the dies of its group, are
+ * not its valid count. A page programmed on a die of another group, or
+ * counted in the wrong unit, breaks it.
+ */
+static int fdp_check_dies(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    FemuReclaimGroup *rg = &ssd->rg[ru->rgidx];
+    uint64_t valid = 0;
+
+    for (int i = 0; i < ru->n_lines; i++) {
+        for (int ch = rg->ch0; ch < rg->ch0 + rg->nch; ch++) {
+            for (int lun = rg->lun0; lun < rg->lun0 + rg->nlun; lun++) {
+                for (int pl = 0; pl < ssd->sp.pls_per_lun; pl++) {
+                    valid += ssd->ch[ch].lun[lun].pl[pl].
+                             blk[ru->lines[i]->id].vpc;
+                }
+            }
+        }
+    }
+    return valid != (uint64_t)ru->vpc;
+}
+
+/*
  * Mapped pages in a unit of a handle their namespace's list does not name.
  * A handle keeps the data of the namespaces that use it, so a page of one
  * namespace in another's unit is a write placed through the wrong list.
@@ -2829,6 +3026,7 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
             bad += seen[i] + in_grp[i] != 1;
             bad += in_ruh[i] != (want_ruh ? 1 : 0);
             bad += fdp_check_ruamw(ssd, u);
+            bad += fdp_check_dies(ssd, u);
         }
     }
     return bad + fdp_check_isolation(ssd);
@@ -2924,5 +3122,7 @@ void femu_fdp_ssd_free(struct ssd *ssd)
         g_free(ssd->rus);
         ssd->rus = NULL;
     }
+    g_free(ssd->rg_lines);
+    ssd->rg_lines = NULL;
     ssd->nrg = 0;
 }

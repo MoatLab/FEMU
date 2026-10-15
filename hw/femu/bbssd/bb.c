@@ -31,6 +31,62 @@ uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns)
 }
 
 /*
+ * Reclaim groups of the FTL are sets of dies: in the order ch x luns_per_ch +
+ * lun, group g takes the g-th of nrg equal runs. The write pointer of a
+ * unit steps over a rectangle of channels and LUNs, so a run must be whole
+ * channels, or LUNs of one channel.
+ */
+static int bb_check_fdp_groups(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint32_t nrg = n->subsys->endgrp.fdp.nrg;
+    uint32_t dies = (uint32_t)p->nchs * p->luns_per_ch;
+
+    if (nrg == 1 || (p->nchs % nrg) == 0 ||
+        ((nrg % p->nchs) == 0 && (p->luns_per_ch % (nrg / p->nchs)) == 0)) {
+        return 0;
+    }
+    error_setg(errp, "FEMU bbssd: fdp.nrg (%u) must divide nchs (%d), or be "
+               "a multiple of nchs that divides the %u dies of nchs x "
+               "luns_per_ch: a reclaim group is a set of whole channels, or "
+               "of LUNs of one channel", nrg, p->nchs, dies);
+    return -1;
+}
+
+/*
+ * A reclaim unit holds at least one logical block, or RUAMW, which counts
+ * blocks, stays 0. With more than one group the FTL also keeps groups apart
+ * only if no page holds blocks of two writes: the FTL maps whole pages, and
+ * a write of part of a page would move the rest of it into the group of
+ * the write.
+ */
+static int bb_check_fdp_block(FemuCtrl *n, NvmeNamespace *ns,
+                              const char *mode, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint32_t nrg = n->subsys->endgrp.fdp.nrg;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t unit = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+                    p->pgs_per_blk * page / nrg;
+    uint64_t block = 1ULL << ns->lbaf.lbads;
+
+    if (block > unit) {
+        error_setg(errp, "FEMU %s: a reclaim unit (%" PRIu64 " bytes) must "
+                   "hold a logical block; namespace %u has %" PRIu64 "-byte "
+                   "blocks: lower lba_index or fdp.nrg", mode, unit, ns->id,
+                   block);
+        return -1;
+    }
+    if (nrg == 1 || !(block % page)) {
+        return 0;
+    }
+    error_setg(errp, "FEMU %s: fdp.nrg above 1 needs a logical block of whole "
+               "NAND pages (%" PRIu64 " bytes); namespace %u has %" PRIu64
+               "-byte blocks: set lba_index", mode, page, ns->id, block);
+    return -1;
+}
+
+/*
  * A line is only reclaimable by relocating its valid pages somewhere else, so
  * part of the NAND has to stay unexposed. Expose all of it and a host that
  * fills the namespace leaves garbage collection nothing to free: the write
@@ -90,49 +146,68 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+        uint32_t nrg = endgrp->fdp.nrg;
+        /* each group has a unit per block id, on its own dies */
         uint64_t pool = endgrp->fdp.nru ? MIN(tt_lines, endgrp->fdp.nru) :
                                           tt_lines;
-        uint64_t needed = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg +
-                          endgrp->fdp.nruh + 1;
+        uint64_t needed = 2 * (uint64_t)endgrp->fdp.nruh + 1;
+        uint64_t unit_pgs;
         uint64_t reserve;
 
+        if (bb_check_fdp_groups(n, errp) ||
+            bb_check_fdp_block(n, ns, "bbssd", errp)) {
+            return -1;
+        }
+        unit_pgs = pgs_per_line / nrg;
+
         /*
-         * The FTL's reclaim unit is one superblock, and the host sizes its
-         * placement by the unit it is told about.
+         * The FTL's reclaim unit is one superblock of the dies of a group,
+         * and the host sizes its placement by the unit it is told about.
          */
         if (n->subsys->params.fdp.runs &&
-            n->subsys->params.fdp.runs != pgs_per_line * page_bytes) {
+            n->subsys->params.fdp.runs != unit_pgs * page_bytes) {
             error_setg(errp, "FEMU bbssd: fdp.runs must be %" PRIu64 ", the "
-                       "size of one superblock of this geometry, or unset",
-                       pgs_per_line * page_bytes);
+                       "size of one superblock of the dies of a reclaim "
+                       "group of this geometry, or unset",
+                       unit_pgs * page_bytes);
             return -1;
         }
         if (pool < needed) {
             error_setg(errp, "FEMU bbssd: placement needs %" PRIu64 " reclaim "
-                       "units for %u handles across %u groups and this geometry "
+                       "units in each group for %u handles and this geometry "
                        "gives %" PRIu64 "; raise blks_per_pl or fdp.nru, or "
-                       "lower fdp.nruh", needed, endgrp->fdp.nruh,
-                       endgrp->fdp.nrg, pool);
+                       "lower fdp.nruh", needed, endgrp->fdp.nruh, pool);
             return -1;
         }
 
         /*
          * Placement draws from the units alone, so they are what bounds the
-         * namespace: one held open per handle and group, one more per
+         * namespace: in each group, one held open per handle, one more per
          * persistently isolated handle to collect into (the initially
          * isolated handle collects into its open one), and the free units
          * forced collection keeps. The data pointer line counted above is
-         * not used under placement.
+         * not used under placement. A host may send all of its data to one
+         * group (Base 2.3, 8.1.11), and a write within the namespace
+         * capacity must not fail, so one group must hold every namespace.
          */
-        pool = endgrp->fdp.nrg * (pool / endgrp->fdp.nrg);
-        reserve = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg;
+        reserve = endgrp->fdp.nruh;
         reserve += endgrp->fdp.nruh -
                    (n->subsys->params.fdp.isolation_mode ? 1 : 0);
-        reserve += endgrp->fdp.nrg *
-                   bb_fdp_forced_units(n, pool / endgrp->fdp.nrg);
-        usable_pgs = pool > reserve ? (pool - reserve) * pgs_per_line : 0;
+        reserve += bb_fdp_forced_units(n, pool);
+        usable_pgs = pool > reserve ? (pool - reserve) * unit_pgs : 0;
         /* every namespace of the controller places into this one FTL */
         exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
+        if (exposed_pgs > usable_pgs && nrg > 1) {
+            error_setg(errp, "FEMU bbssd: a reclaim group must hold every "
+                       "namespace, since a host may place all of its data "
+                       "in one: the namespaces expose %" PRIu64 " KiB, and "
+                       "each of the %u groups keeps %" PRIu64 " of its %"
+                       PRIu64 " units for handles and collection, leaving %"
+                       PRIu64 " KiB; lower devsz_mb or fdp.nrg, or raise "
+                       "blks_per_pl or op_pcent", bb_ftl_bytes(n, ns) >> 10,
+                       nrg, reserve, pool, (usable_pgs * page_bytes) >> 10);
+            return -1;
+        }
         if (exposed_pgs > usable_pgs && n->num_namespaces > 1) {
             error_setg(errp, "FEMU bbssd: the %u namespaces expose %" PRIu64
                        " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
@@ -219,9 +294,15 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
         return -1;
     }
 
+    if (bb_check_fdp_block(n, ns, mode, errp)) {
+        return -1;
+    }
+
+    /* a unit is one block of each plane of each die of its group */
     n->subsys->endgrp.fdp.runs = (uint64_t)p->nchs * p->luns_per_ch *
                                  p->pls_per_lun * p->pgs_per_blk *
-                                 p->secs_per_pg * p->secsz;
+                                 p->secs_per_pg * p->secsz /
+                                 n->subsys->endgrp.fdp.nrg;
     nvme_ns_refresh_fdp(ns);
     return 0;
 }

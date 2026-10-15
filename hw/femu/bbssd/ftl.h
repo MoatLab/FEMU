@@ -277,6 +277,8 @@ typedef struct line {
     bool retired;
     /* one of the spare_lines: its blocks replace worn-out ones */
     bool spare;
+    /* FDP with more than one reclaim group: the group of this line */
+    int rg;
 } line;
 
 /* wp: record next write addr */
@@ -287,6 +289,14 @@ struct write_pointer {
     int pg;
     int blk;
     int pl;
+    /*
+     * The dies the pointer steps over: channels ch0 to ch0 + nch - 1 and
+     * LUNs lun0 to lun0 + nlun - 1. nch 0 means every die, as in line mode.
+     */
+    int ch0;
+    int nch;
+    int lun0;
+    int nlun;
 };
 
 struct line_mgmt {
@@ -413,6 +423,11 @@ struct FemuReclaimGroup {
     FemuReclaimUnit *rus;
     int tt_nru;
     struct ru_mgmt *ru_mgmt;
+    /* the dies of the group: a rectangle of channels and LUNs */
+    int ch0;
+    int nch;
+    int lun0;
+    int nlun;
 };
 
 /*
@@ -536,6 +551,13 @@ struct ssd {
     /* FDP: reclaim group/unit/handle management */
     FemuReclaimGroup *rg;
     uint64_t nrg;
+    /*
+     * With more than one group each group has a line per block id, on its
+     * own dies: nrg x blks_per_pl lines, group by group. NULL with one.
+     */
+    struct line *rg_lines;
+    int rg_dies;        /* dies in each group */
+    uint16_t rg_next;   /* where the selection of a group starts next */
     FemuReclaimUnit **rus;
     uint64_t nrus;
     FemuRuHandle *ruhs;

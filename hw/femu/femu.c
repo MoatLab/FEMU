@@ -71,30 +71,19 @@ void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
     }
 }
 
-static bool nvme_calc_rgif(uint16_t nruh, uint16_t nrg, uint8_t *rgif)
+/*
+ * The bits of a placement identifier that name the reclaim group: the fewest
+ * that hold nrg - 1, and none for one group (Base 2.3, Figures 287 and 290).
+ * The rest name the placement handle, and must hold every handle a
+ * namespace may list. Returns false when they cannot.
+ */
+static bool nvme_calc_rgif(uint16_t nruh, uint32_t nrg, uint8_t *rgif)
 {
-    uint16_t val;
-    unsigned int i;
+    unsigned int bits = nrg > 1 ? 32 - clz32(nrg - 1) : 0;
 
-    if (unlikely(nrg == 1)) {
-        *rgif = 0;
-        return true;
-    }
-
-    val = nrg;
-    i = 0;
-    while (val) {
-        val >>= 1;
-        i++;
-    }
-    *rgif = i;
-
-    if (unlikely((UINT16_MAX >> i) < nruh)) {
-        *rgif = 0;
-        return false;
-    }
-
-    return true;
+    *rgif = bits;
+    return bits < 16 &&
+           (1u << (16 - bits)) >= MIN((unsigned int)nruh, NVME_FDP_MAX_PHS);
 }
 
 static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
@@ -107,29 +96,26 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     endgrp->fdp.runs = subsys->params.fdp.runs ?: NVME_DEFAULT_RU_SIZE;
     endgrp->fdp.nru = subsys->params.fdp.nru;
 
-    /*
-     * One active reclaim unit per placement handle, not one per handle and
-     * reclaim group. A write that names a group other than the first is given
-     * the first group's unit anyway -- the assignment that reads the named
-     * group is overwritten on the next line -- and that unit is then filed in
-     * the named group's queue, where its recorded position indexes a heap it
-     * does not belong to. The check that would have caught it is an ftl_assert,
-     * which is compiled out. Until the model holds a unit per handle and group,
-     * say so rather than corrupt the queues quietly.
-     */
-    if (subsys->params.fdp.nrg > 1) {
-        error_setg(errp, "fdp.nrg must be 1: placement into a reclaim group "
-                   "other than the first is not implemented");
-        return false;
-    }
     if (!subsys->params.fdp.nrg) {
         error_setg(errp, "fdp.nrg must be non-zero");
+        return false;
+    }
+    if (subsys->params.fdp.nrg > NVME_FDP_MAX_NRG) {
+        error_setg(errp, "fdp.nrg (%u) must not exceed %u",
+                   subsys->params.fdp.nrg, NVME_FDP_MAX_NRG);
         return false;
     }
     endgrp->fdp.nrg = subsys->params.fdp.nrg;
 
     if (!subsys->params.fdp.nruh) {
         error_setg(errp, "fdp.nruh must be non-zero");
+        return false;
+    }
+    /* the FDP configuration descriptor size in log 20h is 16 bits */
+    if (subsys->params.fdp.nruh > NVME_FDP_MAX_NRUH) {
+        error_setg(errp, "fdp.nruh (%u) must not exceed %u: the size of an "
+                   "FDP configuration descriptor is 16 bits",
+                   subsys->params.fdp.nruh, NVME_FDP_MAX_NRUH);
         return false;
     }
     if (subsys->params.fdp.nruh > tt_nru) {
@@ -152,9 +138,9 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
 
     if (!nvme_calc_rgif(endgrp->fdp.nruh, endgrp->fdp.nrg,
                         &endgrp->fdp.rgif)) {
-        error_setg(errp, "cannot derive a valid rgif "
-                   "(nruh %"PRIu16" nrg %"PRIu16")",
-                   endgrp->fdp.nruh, endgrp->fdp.nrg);
+        error_setg(errp, "fdp.nrg (%u) leaves the placement handle %u bits, "
+                   "too few for fdp.nruh (%u) handles", endgrp->fdp.nrg,
+                   16 - endgrp->fdp.rgif, endgrp->fdp.nruh);
         return false;
     }
 
@@ -372,8 +358,9 @@ static uint16_t nvme_ns_phl(FemuCtrl *n, uint32_t nsid, uint16_t *phs,
     g_auto(GStrv) ids = NULL;
     uint16_t count = 0;
 
+    /* a list holds at most 128 handles (NVM 1.2, Figure 125) */
     if (!n->namespace_phls || !n->namespace_phls[0]) {
-        for (count = 0; count < nruh; count++) {
+        for (count = 0; count < max; count++) {
             phs[count] = count;
         }
         return count;

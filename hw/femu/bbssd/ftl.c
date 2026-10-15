@@ -831,11 +831,13 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         if (ssd->fdp_enabled && req->fdp_pids) {
             /*
              * Pages written before the update belong in the units the
-             * handles name until it, so write the buffer back first. If
-             * it cannot, move no handle.
+             * named handles reference until it, so write those back first.
+             * If one stays held, move no handle.
              */
-            lat = ssd_buffer_destage(ssd, 0, req->stime);
-            if (ssd->write_buffer_cnt) {
+            bool held;
+
+            lat = fdp_buffer_destage_update(ssd, req, &held);
+            if (held) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }
@@ -855,16 +857,15 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 
     /* background GC */
     if (ssd->fdp_enabled) {
-        int16_t rgidx;
         /*
-         * Trigger a single GC pass on a reclaim group over threshold; the GC
-         * policy itself lives in do_gc_fdp_style(), not here.
+         * One background pass in each reclaim group over its threshold: the
+         * dies of a group collect on their own. The GC policy itself lives
+         * in do_gc_fdp_style(), not here.
          */
-        if (!((rgidx = should_gc_fdp_style(ssd)) < 0)) {
-            if (ssd->nrg == 1) {
-                do_gc_fdp_style(ssd, 0, 0, false);
-            } else {
-                do_gc_fdp_style(ssd, rgidx, 0, false);
+        for (uint64_t g = 0; g < ssd->nrg; g++) {
+            if (ssd->rg[g].ru_mgmt->free_ru_cnt <=
+                ssd->rg[g].ru_mgmt->gc_thres_rus) {
+                do_gc_fdp_style(ssd, g, 0, false);
             }
         }
     } else if (ssd->sp.gc_pace) {

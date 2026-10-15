@@ -40,13 +40,17 @@ static const FemuPropDesc femu_subsys_descs[] = {
       "that join this subsystem; only bbssd places data by reclaim unit" },
     { "fdp.runs",
       "Reclaim unit size in bytes; 0 means 96 MiB, and a bbssd controller "
-      "accepts only 0 or the size of one superblock, which it then uses" },
+      "accepts only 0 or the size of one superblock of the dies of a "
+      "reclaim group, which it then uses" },
     { "fdp.nrg",
-      "Number of FDP reclaim groups; must be 1, placement into other groups "
-      "is not implemented" },
+      "Number of FDP reclaim groups, from 1 to 128; with bbssd a group is "
+      "a set of dies (whole channels, or LUNs of one channel), nrg must "
+      "divide nchs or be a multiple of it that divides nchs * luns_per_ch, "
+      "a logical block must be whole NAND pages, and each group must hold "
+      "the whole namespace" },
     { "fdp.nruh",
       "Number of FDP reclaim unit handles (placement handles), from 1 to "
-      "fdp.nru; must be set when fdp=on" },
+      "fdp.nru and at most 16366; must be set when fdp=on" },
     { "fdp.nru",
       "Number of reclaim units in each reclaim group, from fdp.nruh to "
       "65536; bbssd uses at most one per superblock and needs at least 2 "

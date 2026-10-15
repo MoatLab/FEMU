@@ -9,12 +9,12 @@ static inline void check_addr(int a, int max)
     ftl_assert(a >= 0 && a < max);
 }
 
-/* point a write pointer at the first page of @line */
+/* point a write pointer at the first page of @line, on its first die */
 static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
 {
     wpp->curline = line;
-    wpp->ch = 0;
-    wpp->lun = 0;
+    wpp->ch = wpp->ch0;
+    wpp->lun = wpp->lun0;
     wpp->pl = 0;
     wpp->pg = 0;
     wpp->blk = line->id;
@@ -29,6 +29,10 @@ static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
  */
 static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
 {
+    /* the dies of the pointer's window; with none set, every die */
+    int ch_end = wpp->nch ? wpp->ch0 + wpp->nch : spp->nchs;
+    int lun_end = wpp->nlun ? wpp->lun0 + wpp->nlun : spp->luns_per_ch;
+
     if (spp->plane_first) {
         check_addr(wpp->pl, spp->pls_per_lun);
         if (++wpp->pl < spp->pls_per_lun) {
@@ -37,15 +41,15 @@ static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
         wpp->pl = 0;
     }
     check_addr(wpp->ch, spp->nchs);
-    if (++wpp->ch < spp->nchs) {
+    if (++wpp->ch < ch_end) {
         return false;
     }
-    wpp->ch = 0;
+    wpp->ch = wpp->ch0;
     check_addr(wpp->lun, spp->luns_per_ch);
-    if (++wpp->lun < spp->luns_per_ch) {
+    if (++wpp->lun < lun_end) {
         return false;
     }
-    wpp->lun = 0;
+    wpp->lun = wpp->lun0;
     if (!spp->plane_first) {
         check_addr(wpp->pl, spp->pls_per_lun);
         if (++wpp->pl < spp->pls_per_lun) {
@@ -138,9 +142,42 @@ static inline uint64_t ssd_data_age_ns(struct ssd *ssd, uint64_t close_time,
     return age > UINT64_MAX / scale ? UINT64_MAX : age * scale;
 }
 
+/* the reclaim group of the die @ppa names, with more than one group */
+static inline int ssd_ppa_rg(struct ssd *ssd, struct ppa *ppa)
+{
+    return (ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun) / ssd->rg_dies;
+}
+
 static inline struct line *get_line(struct ssd *ssd, struct ppa *ppa)
 {
+    if (unlikely(ssd->rg_lines)) {
+        return &ssd->rg_lines[ssd_ppa_rg(ssd, ppa) * ssd->sp.blks_per_pl +
+                              ppa->g.blk];
+    }
     return &(ssd->lm.lines[ppa->g.blk]);
+}
+
+/*
+ * The dies a line spans: those of its reclaim group for a group line,
+ * every die otherwise.
+ */
+static inline void ssd_line_dies(struct ssd *ssd, struct line *line,
+                                 int *ch0, int *ch1, int *lun0, int *lun1)
+{
+    if (ssd->rg_lines && line >= ssd->rg_lines &&
+        line < ssd->rg_lines + ssd->nrg * ssd->sp.blks_per_pl) {
+        FemuReclaimGroup *rg = &ssd->rg[line->rg];
+
+        *ch0 = rg->ch0;
+        *ch1 = rg->ch0 + rg->nch;
+        *lun0 = rg->lun0;
+        *lun1 = rg->lun0 + rg->nlun;
+        return;
+    }
+    *ch0 = 0;
+    *ch1 = ssd->sp.nchs;
+    *lun0 = 0;
+    *lun1 = ssd->sp.luns_per_ch;
 }
 
 static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
@@ -242,27 +279,11 @@ static inline bool should_gc_high(struct ssd *ssd)
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
 }
 
-/* FDP GC decision: returns rg index if GC needed, -1 otherwise */
-static inline int16_t should_gc_fdp_style(struct ssd *ssd)
+/* reclaim group @g is at or below its forced collection threshold */
+static inline bool fdp_rg_short(struct ssd *ssd, uint16_t g)
 {
-    for (int i = 0; i < (int)ssd->nrg; i++) {
-        if (ssd->rg[i].ru_mgmt->free_ru_cnt <=
-            ssd->rg[i].ru_mgmt->gc_thres_rus) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static inline int should_gc_high_fdp_style(struct ssd *ssd)
-{
-    for (int i = 0; i < (int)ssd->nrg; i++) {
-        if (ssd->rg[i].ru_mgmt->free_ru_cnt <=
-            ssd->rg[i].ru_mgmt->gc_thres_rus_high) {
-            return i;
-        }
-    }
-    return -1;
+    return ssd->rg[g].ru_mgmt->free_ru_cnt <=
+           ssd->rg[g].ru_mgmt->gc_thres_rus_high;
 }
 
 /* line management + garbage collection (hw/femu/bbssd/ftl-line-gc.c) */
@@ -414,6 +435,8 @@ void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);
 void ssd_fdp_count_unprogrammed(FemuCtrl *n, NvmeRequest *req, uint64_t nlb);
+uint64_t fdp_buffer_destage_update(struct ssd *ssd, NvmeRequest *req,
+                                   bool *held);
 void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req);
 uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
