@@ -37,6 +37,11 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->spare_lines = limit ? n->spare_lines : 0;
     ssd->wear_on = limit != 0;
     ssd->wear_pe_total = 0;
+    ssd->eol_ro_mode = ssd->wear_on && n->eol_admit;
+    ssd->media_ro = false;
+    ssd->eol_reserve_lines = ssd->eol_ro_mode ? bb_eol_reserve_lines(n) : 0;
+    ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->pgs_per_line;
+    ssd->eol_word = 0;
     if (ssd->wear_on) {
         qemu_mutex_init(&ssd->wear_lock);
     }
@@ -507,6 +512,67 @@ uint64_t ssd_plane_ops(struct ssd *ssd, int op)
     return qatomic_read(&ssd->media_plane_ops[op]);
 }
 
+/*
+ * End-of-life admission, on the poller, before a write-class command changes
+ * anything. One word holds the read-only bit, the admitted requests and the
+ * pages they may still program. Pages in use never pass eol_cap, which the
+ * reserve lines hold erased; and the FTL sets the read-only bit with one
+ * atomic OR, after which no admission can succeed. So the writes admitted
+ * before it always have room to finish without collection. A command that
+ * does not fit now waits in its queue, unchanged.
+ */
+#define SSD_EOL_RO      (1ULL << 63)
+#define SSD_EOL_REQ     (1ULL << 32)
+#define SSD_EOL_PAGES   0xffffffffULL
+
+int ssd_eol_admit(struct ssd *ssd, uint32_t pages)
+{
+    uint64_t w = qatomic_read(&ssd->eol_word);
+
+    for (;;) {
+        uint64_t old;
+
+        if (w & SSD_EOL_RO) {
+            return FEMU_EOL_READ_ONLY;
+        }
+        if ((w & SSD_EOL_PAGES) + pages > ssd->eol_cap) {
+            return FEMU_EOL_WAIT;
+        }
+        old = qatomic_cmpxchg(&ssd->eol_word, w, w + SSD_EOL_REQ + pages);
+        if (old == w) {
+            return FEMU_EOL_ADMITTED;
+        }
+        w = old;
+    }
+}
+
+void ssd_eol_release(struct ssd *ssd, uint32_t pages)
+{
+    qatomic_sub(&ssd->eol_word, SSD_EOL_REQ + pages);
+}
+
+/*
+ * The pages a command of @bytes may program: it can start part way into a
+ * page. Never more than the reserve, so a command that is too large waits
+ * for an empty device instead of for ever; validation then refuses it
+ * before it changes anything.
+ */
+uint32_t ssd_eol_cost(struct ssd *ssd, uint64_t bytes)
+{
+    uint64_t page = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+
+    if (!bytes) {
+        return 0;
+    }
+    return MIN(DIV_ROUND_UP(bytes, page) + 1, ssd->eol_cap);
+}
+
+/* admitted write-class requests the FTL has not finished */
+uint32_t ssd_eol_requests(struct ssd *ssd)
+{
+    return (qatomic_read(&ssd->eol_word) & ~SSD_EOL_RO) >> 32;
+}
+
 uint64_t ssd_retired_lines(struct ssd *ssd)
 {
     uint64_t v;
@@ -647,7 +713,8 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
-    int start = lm->tt_lines - ssd->spare_lines - ssd->wear_floor_lines;
+    int start = lm->tt_lines - ssd->spare_lines - ssd->eol_reserve_lines -
+                ssd->wear_floor_lines;
     int left = start - lm->retired_line_cnt;
     int fewest = ssd->spare_lines;
 

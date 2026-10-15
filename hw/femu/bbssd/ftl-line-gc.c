@@ -76,7 +76,10 @@ void ssd_init_lines(struct ssd *ssd)
         line->id = i;
         line->retired = false;
         line->spare = i >= lm->tt_lines - ssd->spare_lines;
-        if (line->spare) {
+        line->reserve = !line->spare &&
+                        i >= lm->tt_lines - ssd->spare_lines -
+                             ssd->eol_reserve_lines;
+        if (line->spare || line->reserve) {
             continue;
         }
         line->ipc = 0;
@@ -90,7 +93,8 @@ void ssd_init_lines(struct ssd *ssd)
         lm->free_line_cnt++;
     }
 
-    ftl_assert(lm->free_line_cnt == lm->tt_lines - ssd->spare_lines);
+    ftl_assert(lm->free_line_cnt ==
+               lm->tt_lines - ssd->spare_lines - ssd->eol_reserve_lines);
     lm->full_line_cnt = 0;
 }
 
@@ -1046,7 +1050,8 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
-    int usable = lm->tt_lines - ssd->spare_lines - lm->retired_line_cnt;
+    int usable = lm->tt_lines - ssd->spare_lines - ssd->eol_reserve_lines -
+                 lm->retired_line_cnt;
     bool spares = ssd->spare_lines > 0;
     bool retire;
     int dead = 0;
@@ -1603,7 +1608,7 @@ int do_wear_level(struct ssd *ssd)
         uint32_t w;
 
         line = &lm->lines[i];
-        if (line->retired || line->spare) {
+        if (line->retired || line->spare || line->reserve) {
             continue;
         }
         w = line_wear(ssd, line);

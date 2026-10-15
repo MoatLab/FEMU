@@ -82,6 +82,12 @@ typedef struct FemuQueryNs {
     uint32_t full_lines;
     uint32_t retired_lines;
     uint32_t spare_lines;
+    bool eol_mode;              /* read-only end of life is on */
+    uint32_t reserve_lines;     /* lines still held for it */
+    bool media_ro;
+    uint32_t eol_cap;
+    uint32_t eol_pages;
+    uint32_t eol_reqs;
 
     uint32_t offset;
     uint32_t max_lines;

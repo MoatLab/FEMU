@@ -491,7 +491,9 @@ def report_text(code: int, r: Dict[str, Any]) -> str:
             if lc:
                 lines.append(pad + f"lines: {lc['total']} of "
                              f"{size(ns.get('line-bytes'))}, free "
-                             f"{lc['free']}, spare {lc['spare']}")
+                             f"{lc['free']}, spare {lc['spare']}"
+                             + (f", reserve {lc['reserve']}"
+                                if "reserve" in lc else ""))
             fdp = ns.get("fdp")
             if fdp:
                 lines.append(

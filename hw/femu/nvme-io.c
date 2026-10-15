@@ -192,6 +192,58 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 #endif
 }
 
+/*
+ * End-of-life admission for the command at the head of @sq, before it
+ * changes anything (FemuCtrl.eol_admit). Write, Write Zeroes, Write
+ * Uncorrectable, Copy and a deallocating Dataset Management take credits for
+ * the pages they may program; the rest take none. Returns what
+ * ssd_eol_admit() says, with *pages held when admitted, or -1 when the
+ * command is not one of those.
+ */
+static int nvme_eol_peek(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *cmd,
+                         uint32_t *pages)
+{
+    uint32_t cdw12 = le32_to_cpu(cmd->cdw12);
+    uint64_t nlb = (cdw12 & 0xffff) + 1;
+    NvmeNamespace *ns;
+    uint64_t bytes;
+
+    *pages = 0;
+    /* a command an Abort marked completes without running */
+    if (sq->nr_aborts && sq->abort_cid[sq->head]) {
+        return -1;
+    }
+    ns = nvme_ns(n, le32_to_cpu(cmd->nsid));
+    if (!ns || !ns->ssd || !(NS_BBSSD(ns) || NS_CSD(ns))) {
+        return -1;
+    }
+    switch (cmd->opcode) {
+    case NVME_CMD_WRITE:
+        bytes = nlb << ns->lbaf.lbads;
+        break;
+    case NVME_CMD_WRITE_ZEROES:
+        bytes = (cdw12 >> 16) & NVME_WZ_DEAC ? 0 : nlb << ns->lbaf.lbads;
+        break;
+    case NVME_CMD_COPY:
+        /* its ranges are in host memory: charge the most it may write */
+        bytes = (uint64_t)femu_copy_mcl(n) << ns->lbaf.lbads;
+        break;
+    case NVME_CMD_WRITE_UNCOR:
+        bytes = 0;
+        break;
+    case NVME_CMD_DSM:
+        if (!(le32_to_cpu(cmd->cdw11) & NVME_DSMGMT_AD)) {
+            return -1;
+        }
+        bytes = 0;
+        break;
+    default:
+        return -1;
+    }
+    *pages = ssd_eol_cost(ns->ssd, bytes);
+    return ssd_eol_admit(ns->ssd, *pages);
+}
+
 static void nvme_process_sq_io(void *opaque, int index_poller)
 {
     NvmeSQueue *sq = opaque;
@@ -203,6 +255,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     NvmeRequest *req;
     int processed = 0;
     bool aborted;
+    int eol = -1;
+    uint32_t eol_pages = 0;
 
     /*
      * Inline completion fast path (NoSSD only). NoSSD has a no-op timing model
@@ -264,6 +318,16 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                                   n->sqe_size);
             nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         }
+        /*
+         * A write that finds no room in the end-of-life reserve stays in the
+         * queue, untouched, until the FTL gives credits back.
+         */
+        if (unlikely(n->eol_admit)) {
+            eol = nvme_eol_peek(n, sq, &cmd, &eol_pages);
+            if (eol == FEMU_EOL_WAIT) {
+                break;
+            }
+        }
         aborted = sq->nr_aborts && nvme_take_abort(sq, cmd.cid);
         nvme_inc_sq_head(sq);
 
@@ -294,6 +358,11 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->defer = NULL;
         /* every path that frees a request slot released this first */
         assert(!req->csd_use);
+        assert(!req->eol_held);
+        req->eol_held = eol == FEMU_EOL_ADMITTED;
+        req->eol_pages = req->eol_held ? eol_pages : 0;
+        req->eol_ro = eol == FEMU_EOL_READ_ONLY;
+        eol = -1;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = nvme_io_clock(n);
         req->t_handoff = 0;
@@ -1544,7 +1613,7 @@ static uint16_t nvme_copy_slm_source(FemuCtrl *n, NvmeNamespace *ns,
         if ((saddr | nbyte) & 3) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        if (nbyte > (uint64_t)FEMU_COPY_MSSRL << lbads) {
+        if (nbyte > (uint64_t)femu_copy_mssrl(n) << lbads) {
             return NVME_CMD_SIZE_LIMIT | NVME_DNR;
         }
         total += nbyte;
@@ -1552,7 +1621,7 @@ static uint16_t nvme_copy_slm_source(FemuCtrl *n, NvmeNamespace *ns,
     if (total & ((1ULL << lbads) - 1)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (total >> lbads > FEMU_COPY_MCL) {
+    if (total >> lbads > femu_copy_mcl(n)) {
         return NVME_CMD_SIZE_LIMIT | NVME_DNR;
     }
     if (sdlba >= nsze || total >> lbads > nsze - sdlba) {
@@ -1661,11 +1730,11 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return status;
         }
         snsze = le64_to_cpu(sns[i]->id_ns.nsze);
-        if (nlb > FEMU_COPY_MSSRL) {
+        if (nlb > femu_copy_mssrl(n)) {
             return NVME_CMD_SIZE_LIMIT | NVME_DNR;
         }
         total += nlb;
-        if (total > FEMU_COPY_MCL) {
+        if (total > femu_copy_mcl(n)) {
             return NVME_CMD_SIZE_LIMIT | NVME_DNR;
         }
         if (slba >= snsze || nlb > snsze - slba) {
@@ -2015,6 +2084,10 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* DTYPE is bits 22:20 here; bit 23 is NSZ (NVM 1.2, Figure 82) */
     if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0x7)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* end-of-life admission makes WZSL (= MDTS) a hard limit */
+    if (n->eol_admit && nvme_check_mdts(n, (uint64_t)nlb << ns->lbaf.lbads)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

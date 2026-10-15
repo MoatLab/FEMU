@@ -885,6 +885,13 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
     NvmeIdCtrlZoned id = {};
 
     if (c->csi == NVME_CSI_NVM) {
+        uint8_t nvm[NVME_IDENTIFY_DATA_SIZE] = {};
+
+        /* WZSL, byte 1, in MDTS units: a hard limit with NVMWZSV clear */
+        if (n->eol_admit) {
+            nvm[1] = n->mdts;
+            return dma_read_prp(n, nvm, sizeof(nvm), prp1, prp2);
+        }
         return nvme_rpt_empty_id_struct(n, cmd);
     } else if (c->csi == NVME_CSI_ZONED) {
         if (n->zasl_bs) {

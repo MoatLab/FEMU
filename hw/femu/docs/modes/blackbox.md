@@ -210,6 +210,12 @@ All of these are off by default.
   the line has one. SMART Available Spare is then the spare blocks the
   emptiest plane has left; without spare lines, it is the lines retirement can
   still take.
+- With `blk_pe_limit`, `eol_read_only` (on by default) keeps reserve lines
+  erased for the writes in flight at the end of life. Before a write-class
+  command changes data, it takes credits for the NAND pages it may program.
+  It waits in its queue while the reserve cannot take them. So one command
+  needs a bound: `mdts` must be 1 or more, Write Zeroes is limited to MDTS
+  (WZSL, with ONCS bit 3 clear), and Copy to MDTS (MCL).
 - When the spare falls below its threshold, or the first block stays in
   service past its limit, the controller raises a SMART asynchronous event
   (information 02h or 00h) if the host enabled bit 0 or bit 2 of

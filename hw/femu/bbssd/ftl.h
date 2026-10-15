@@ -277,6 +277,8 @@ typedef struct line {
     bool retired;
     /* one of the spare_lines: its blocks replace worn-out ones */
     bool spare;
+    /* held erased for the writes in flight when the media goes read-only */
+    bool reserve;
     /* FDP with more than one reclaim group: the group of this line */
     int rg;
 } line;
@@ -655,6 +657,17 @@ struct ssd {
      */
     QemuMutex wear_lock;
     uint64_t wear_pe_total;         /* sum of every block's erase limit */
+    /*
+     * Read-only end of life (eol_read_only). eol_word holds the read-only
+     * bit, the admitted write requests and the pages they may still
+     * program; the reserve lines hold at least eol_cap erased pages, so
+     * every admitted write can finish once collection stops for good.
+     */
+    bool eol_ro_mode;
+    bool media_ro;                  /* FTL thread's copy of the bit */
+    int eol_reserve_lines;
+    uint64_t eol_cap;               /* most pages admitted at once */
+    uint64_t eol_word;
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t pd_open_reclaims;      /* lines rewritten for open-block reads */
     uint64_t pd_pad_pages;          /* pages programmed to close open lines */
@@ -713,6 +726,7 @@ struct ssd {
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
+int bb_eol_reserve_lines(FemuCtrl *n);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);

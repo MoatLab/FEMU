@@ -110,6 +110,16 @@ The `state` of a line is one of these values:
 | `unlisted` | on no list; a correct FTL does not report this state |
 | `retired` | out of service: a block in it wore out (`blk_pe_limit`) |
 | `spare` | held back so its blocks can replace worn-out ones (`spare_lines`) |
+| `reserve` | held erased for the writes in flight at the end of life (`eol_read_only`) |
+
+With `eol_read_only` and `blk_pe_limit`, `line-counts` also has `reserve`,
+and the entry has `end-of-life`:
+
+| Member | Content |
+| --- | --- |
+| `read-only` | the media is read-only |
+| `credit-pages` | the most pages admitted writes may hold at once; the reserve lines hold this many erased pages |
+| `held-pages`, `held-requests` | the pages and the write-class commands admitted now, not yet finished by the FTL |
 
 ### FDP namespaces
 

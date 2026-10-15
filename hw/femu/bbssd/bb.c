@@ -100,7 +100,11 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* a line is one block on every plane of every LUN, as the FTL builds it */
     uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch *
                             p->pls_per_lun * p->pgs_per_blk;
-    /* spare lines only replace worn-out blocks; they hold no data */
+    /*
+     * Spare lines only replace worn-out blocks, and reserve lines wait for
+     * the end of life; neither holds data before that.
+     */
+    uint64_t reserve_eol = bb_eol_reserve_lines(n);
     uint64_t tt_lines = (uint64_t)p->blks_per_pl -
                         (n->blk_pe_limit ? n->spare_lines : 0);
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
@@ -130,7 +134,23 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
         reserve_lines += 1;                  /* the log write pointer */
     }
+    /* the admission counts pages in 31 bits of one word */
+    if (reserve_eol * pgs_per_line >= 1ULL << 31) {
+        error_setg(errp, "FEMU bbssd: eol_read_only needs %" PRIu64 " reserve "
+                   "lines of %" PRIu64 " pages; lower mdts", reserve_eol,
+                   pgs_per_line);
+        return -1;
+    }
+    reserve_lines += reserve_eol;
 
+    if (reserve_eol && tt_lines <= reserve_lines) {
+        error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
+                   "fewer than the %" PRIu64 " garbage collection and the "
+                   "eol_read_only reserve (%" PRIu64 ", from mdts) need; lower "
+                   "mdts or raise blks_per_pl", tt_lines, reserve_lines,
+                   reserve_eol);
+        return -1;
+    }
     if (tt_lines <= reserve_lines) {
         error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
                    "fewer than the %" PRIu64 " garbage collection needs free",

@@ -1316,8 +1316,8 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->nsfeat        |= (0x4 | 0x10);
     id_ns->nlbaf         = (n->meta ? 2 * n->nlbaf : n->nlbaf) - 1;
     if (n->oncs & NVME_ONCS_COPY) {
-        id_ns->mssrl     = cpu_to_le16(FEMU_COPY_MSSRL);
-        id_ns->mcl       = cpu_to_le32(FEMU_COPY_MCL);
+        id_ns->mssrl     = cpu_to_le16(femu_copy_mssrl(n));
+        id_ns->mcl       = cpu_to_le32(femu_copy_mcl(n));
         id_ns->msrc      = FEMU_COPY_MSRC;
     }
     id_ns->flbas         = (n->meta ? n->nlbaf + n->lba_index : n->lba_index) |
@@ -2360,6 +2360,8 @@ static void *femu_ftl_thread(void *arg)
                     n->features.volatile_wc;
             }
             lat = femu_ftl_process_req(n, req);
+            /* the write has programmed what it will: its credits go back */
+            nvme_eol_release(req);
             g_clear_pointer(&req->write_data, g_free);
             if (n->power_loss && req->status == NVME_SUCCESS && req->ns) {
                 FemuPollerCtr *ctr = &n->poller_ctr[i];
@@ -2811,6 +2813,46 @@ static bool femu_check_multiplane_props(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/* bytes the largest LBA format holds; formats run from 512 bytes up */
+static unsigned femu_max_lbads(FemuCtrl *n)
+{
+    return BDRV_SECTOR_BITS + MAX(n->nlbaf, 1) - 1;
+}
+
+/*
+ * Copy limits. With end-of-life admission a Copy may write no more than one
+ * Write may, at any LBA format, since its cost is charged before its source
+ * ranges are read.
+ */
+uint32_t femu_copy_mcl(FemuCtrl *n)
+{
+    uint64_t mdts;
+
+    if (!n->eol_admit) {
+        return FEMU_COPY_MCL;
+    }
+    /* realize bounded the exponent before it set eol_admit */
+    mdts = 1ULL << (12 + n->mpsmin + n->mdts);
+    return MAX(MIN(mdts >> femu_max_lbads(n), FEMU_COPY_MCL), 1);
+}
+
+uint16_t femu_copy_mssrl(FemuCtrl *n)
+{
+    return MIN(FEMU_COPY_MSSRL, femu_copy_mcl(n));
+}
+
+/*
+ * The most bytes one write-class command may program under end-of-life
+ * admission: MDTS bounds Write, WZSL (set to MDTS) bounds Write Zeroes, and
+ * MCL in the largest LBA format bounds Copy.
+ */
+uint64_t femu_eol_max_bytes(FemuCtrl *n)
+{
+    uint64_t mdts = 1ULL << (12 + n->mpsmin + n->mdts);
+
+    return MAX(mdts, (uint64_t)femu_copy_mcl(n) << femu_max_lbads(n));
+}
+
 /*
  * Block wear-out and wear levelling run only in the plain line FTL of one
  * bbssd or CSD namespace. Each refused setting has its own write path or
@@ -2874,6 +2916,27 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
                    bp->wl_spread ? "wl_spread" : "gc_pace", why);
         return false;
     }
+    if (!n->blk_pe_limit || !n->eol_read_only) {
+        return true;
+    }
+    /*
+     * Read-only end of life holds back erased space for every write in
+     * flight, so one write needs a bound, and the ring to the FTL must take
+     * every request: a write the ring drops has changed data already.
+     */
+    if (!n->mdts || 12 + n->mpsmin + n->mdts >= 48) {
+        error_setg(errp, "femu: eol_read_only needs mdts 1 to %d",
+                   47 - 12 - n->mpsmin);
+        return false;
+    }
+    /* a ring of FEMU_MAX_INF_REQS slots holds one entry less */
+    if ((uint64_t)n->nr_io_queues * (n->max_q_ents + 1) >
+        FEMU_MAX_INF_REQS - 1) {
+        error_setg(errp, "femu: eol_read_only needs queues x (entries + 1) "
+                   "of at most %d", FEMU_MAX_INF_REQS - 1);
+        return false;
+    }
+    n->eol_admit = true;
     return true;
 }
 
@@ -3908,6 +3971,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("blk_pe_spread", FemuCtrl, blk_pe_spread, 0),
     DEFINE_PROP_UINT64("blk_pe_seed", FemuCtrl, blk_pe_seed, 0),
     DEFINE_PROP_UINT32("spare_lines", FemuCtrl, spare_lines, 0),
+    DEFINE_PROP_BOOL("eol_read_only", FemuCtrl, eol_read_only, true),
     DEFINE_PROP_UINT32("energy_read_nj", FemuCtrl, energy_read_nj, 0),
     DEFINE_PROP_UINT32("energy_prog_nj", FemuCtrl, energy_prog_nj, 0),
     DEFINE_PROP_UINT32("energy_erase_nj", FemuCtrl, energy_erase_nj, 0),

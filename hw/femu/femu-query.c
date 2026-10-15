@@ -670,6 +670,17 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     cnt->full = q->full_lines;
     cnt->retired = q->retired_lines;
     cnt->spare = q->spare_lines;
+    cnt->has_reserve = q->eol_mode;
+    cnt->reserve = q->reserve_lines;
+    if (q->eol_mode) {
+        FemuEolInfo *eol = g_new0(FemuEolInfo, 1);
+
+        eol->read_only = q->media_ro;
+        eol->credit_pages = q->eol_cap;
+        eol->held_pages = q->eol_pages;
+        eol->held_requests = q->eol_reqs;
+        info->end_of_life = eol;
+    }
     cnt->total = q->tt_lines;
     info->line_counts = cnt;
 

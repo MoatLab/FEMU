@@ -1834,6 +1834,15 @@ typedef struct NvmeRequest {
      * when it holds none. See femu_csd_req_done().
      */
     uint64_t        csd_use;
+
+    /*
+     * End-of-life admission (FemuCtrl.eol_admit): the pages this write holds
+     * in its namespace's reserve until the FTL is done with it, whether it
+     * holds any, and whether the media was read-only when it came in.
+     */
+    uint32_t        eol_pages;
+    bool            eol_held;
+    bool            eol_ro;
 } NvmeRequest;
 
 /*
@@ -2549,6 +2558,13 @@ typedef struct FemuCtrl {
     bool            temp_cond_prev; /* condition seen with events enabled */
     uint32_t        spare_lines;    /* lines held back as spare blocks */
     /*
+     * With blk_pe_limit: go read-only when a worn-out block has no
+     * replacement, as a real drive does; off keeps it in service.
+     */
+    bool            eol_read_only;
+    /* writes take page credits before they change anything (eol_read_only) */
+    bool            eol_admit;
+    /*
      * SMART critical warning bits whose condition the FTL thread saw begin
      * and the main loop has not yet raised as an event; set atomically.
      */
@@ -3186,6 +3202,30 @@ uint64_t ssd_read_reclaims(struct ssd *ssd);
 uint64_t ssd_overworn_blocks(struct ssd *ssd);
 uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
+
+/* end-of-life admission and the read-only state; see ssd_eol_admit() */
+enum {
+    FEMU_EOL_ADMITTED,
+    FEMU_EOL_WAIT,
+    FEMU_EOL_READ_ONLY,
+};
+int ssd_eol_admit(struct ssd *ssd, uint32_t pages);
+void ssd_eol_release(struct ssd *ssd, uint32_t pages);
+uint32_t ssd_eol_cost(struct ssd *ssd, uint64_t bytes);
+uint32_t ssd_eol_requests(struct ssd *ssd);
+uint64_t femu_eol_max_bytes(FemuCtrl *n);
+uint32_t femu_copy_mcl(FemuCtrl *n);
+uint16_t femu_copy_mssrl(FemuCtrl *n);
+
+/* give back what an admitted request holds, once */
+static inline void nvme_eol_release(NvmeRequest *req)
+{
+    if (req->eol_held) {
+        ssd_eol_release(req->ns->ssd, req->eol_pages);
+        req->eol_held = false;
+        req->eol_pages = 0;
+    }
+}
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
 uint64_t ssd_gc_copyback_pages(struct ssd *ssd);

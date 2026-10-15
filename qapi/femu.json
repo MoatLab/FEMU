@@ -78,11 +78,14 @@
 #
 # @spare: held back so its blocks can replace worn-out ones
 #
+# @reserve: held erased for the writes in flight when the media goes
+#     read-only at its end of life (eol_read_only)
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuLineState',
   'data': [ 'free', 'open', 'full', 'victim', 'reclaiming', 'unlisted',
-            'retired', 'spare' ] }
+            'retired', 'spare', 'reserve' ] }
 
 ##
 # @FemuGeometry:
@@ -158,13 +161,17 @@
 #
 # @spare: lines held back as replacement blocks
 #
+# @reserve: lines held erased for the end of life; present only with
+#     eol_read_only and blk_pe_limit
+#
 # @total: every line of the namespace
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuLineCounts',
   'data': { 'free': 'uint32', 'victim': 'uint32', 'full': 'uint32',
-            'retired': 'uint32', 'spare': 'uint32', 'total': 'uint32' } }
+            'retired': 'uint32', 'spare': 'uint32', '*reserve': 'uint32',
+            'total': 'uint32' } }
 
 ##
 # @FemuLineInfo:
@@ -761,6 +768,28 @@
             '*pack': 'FemuKvPackInfo' } }
 
 ##
+# @FemuEolInfo:
+#
+# Read-only end of life (eol_read_only with blk_pe_limit).
+#
+# @read-only: the media is read-only: a worn-out block had no
+#     replacement, or the FTL had no line left to write
+#
+# @credit-pages: the most pages that admitted writes may hold at once;
+#     the reserve lines hold that many erased pages
+#
+# @held-pages: pages the admitted writes hold now
+#
+# @held-requests: write-class commands admitted and not yet finished
+#     by the FTL
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuEolInfo',
+  'data': { 'read-only': 'bool', 'credit-pages': 'uint32',
+            'held-pages': 'uint32', 'held-requests': 'uint32' } }
+
+##
 # @FemuBbssdInfo:
 #
 # State of a blackbox namespace, copied by the FTL thread between two
@@ -776,6 +805,9 @@
 #     placement, where reclaim units hold the lines.
 #
 # @fdp: flexible data placement state.  Present only when it is on.
+#
+# @end-of-life: read-only end-of-life state.  Present only with
+#     eol_read_only and blk_pe_limit.
 #
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
@@ -793,6 +825,7 @@
             'counters': 'FemuWriteCounters',
             'media': 'FemuMediaTiming',
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
+            '*end-of-life': 'FemuEolInfo',
             '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 

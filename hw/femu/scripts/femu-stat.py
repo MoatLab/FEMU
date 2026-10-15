@@ -629,7 +629,9 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
     if lc:
         lines.append(pad + f"lines: free {lc.get('free')} of {lc.get('total')}"
                      f", victim {lc.get('victim')}, full {lc.get('full')}"
-                     f", retired {lc.get('retired')}, spare {lc.get('spare')}")
+                     f", retired {lc.get('retired')}, spare {lc.get('spare')}"
+                     + (f", reserve {lc['reserve']}" if "reserve" in lc
+                        else ""))
     fdp = ns.get("fdp")
     if fdp:
         uc = fdp.get("unit-counts", {})

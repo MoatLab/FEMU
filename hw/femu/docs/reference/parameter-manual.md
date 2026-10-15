@@ -415,6 +415,7 @@ Applies to bbssd, CSD and KV unless noted. Reference:
 | `blk_pe_spread` | percent | 0 to 90 | each block's limit varies by up to this much from `blk_pe_limit` |
 | `blk_pe_seed` | | any | seed of the per-block limits; one seed gives the same limits on every run |
 | `spare_lines` | lines | below `blks_per_pl`; needs `blk_pe_limit` | lines held back; their blocks replace worn-out blocks of the same plane; they hold no data, so the namespace must fit without them |
+| `eol_read_only` | on/off | on (default); has an effect only with `blk_pe_limit`; on needs `mdts` 1 or more and `queues` x (`entries` + 1) of at most 65535 | on: reserve lines stay erased for the writes in flight at the end of life, a write waits in its queue until the pages it may program fit in the reserve, and Write Zeroes (WZSL) and Copy (MCL) are limited to `mdts`; off: the version 1 wear model |
 | `err_read_unc_ppm` | per million | 0 disables; bbssd and CSD | reads that fail as Unrecovered Read Error, at a fixed period |
 | `err_write_fail_ppm` | per million | 0 disables; bbssd, CSD and ZNS | writes that fail; a ZNS zone then becomes read only |
 | `read_reclaim_limit` | reads | 0 disables; bbssd and CSD; under FDP a whole reclaim unit | a block read this often since its erase gets its line rewritten on a following write |

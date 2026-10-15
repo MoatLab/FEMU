@@ -26,6 +26,27 @@ int bb_gc_forced_lines(FemuCtrl *n)
 }
 
 /*
+ * Lines held erased for read-only end of life: enough for the most pages
+ * the admitted writes may hold at once, which is at least the largest write
+ * any one command can make. Zero unless eol_admit is on.
+ */
+int bb_eol_reserve_lines(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t line = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+                    p->pgs_per_blk;
+    uint64_t pages;
+
+    if (!n->eol_admit || !page || !line) {
+        return 0;
+    }
+    /* a command may start part way into a page and end part way into one */
+    pages = DIV_ROUND_UP(femu_eol_max_bytes(n), page) + 1;
+    return DIV_ROUND_UP(pages, line);
+}
+
+/*
  * Free reclaim units, out of @units, at or below which placement collection is
  * forced. Collection moves a victim into a frontier that can fill part way
  * through, and with no free unit to follow it the victim stays where it is:

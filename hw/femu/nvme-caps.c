@@ -453,6 +453,14 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
             o |= oncs[i].bit;
         }
     }
+    /*
+     * NVMWZSV clear makes WZSL a hard limit, not a hint (Base 2.3, ONCS bit
+     * 3): end-of-life admission needs a bound on Write Zeroes. The command
+     * stays supported, as Commands Supported and Effects says.
+     */
+    if (n->eol_admit) {
+        o &= ~NVME_ONCS_WRITE_ZEROS;
+    }
     if (nvme_fid_supported(n, NVME_TIMESTAMP)) {
         o |= NVME_ONCS_TIMESTAMP;
     }

@@ -33,6 +33,8 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
             state[i] = FEMU_LINE_STATE_RETIRED;
         } else if (lm->lines[i].spare) {
             state[i] = FEMU_LINE_STATE_SPARE;
+        } else if (lm->lines[i].reserve) {
+            state[i] = FEMU_LINE_STATE_RESERVE;
         }
     }
     QTAILQ_FOREACH(line, &lm->free_line_list, entry) {
@@ -251,6 +253,15 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->full_lines = lm->full_line_cnt;
     q->retired_lines = lm->retired_line_cnt;
     q->spare_lines = ssd->spare_lines;
+    q->eol_mode = ssd->eol_ro_mode;
+    q->media_ro = ssd->media_ro;
+    q->eol_cap = ssd->eol_cap;
+    q->eol_pages = qatomic_read(&ssd->eol_word) & 0xffffffffULL;
+    q->eol_reqs = ssd_eol_requests(ssd);
+    q->reserve_lines = 0;
+    for (int i = 0; q->eol_mode && i < lm->tt_lines; i++) {
+        q->reserve_lines += lm->lines[i].reserve;
+    }
 
     q->nr_lines = 0;
     if (!q->lines || q->offset >= q->tt_lines) {

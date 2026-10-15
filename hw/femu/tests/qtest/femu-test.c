@@ -4206,6 +4206,7 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     uint32_t full = 0;
     uint32_t retired = 0;
     uint32_t spare = 0;
+    uint32_t reserve = 0;
     uint64_t vpc = 0;
     uint64_t erase_lo = 0;
     uint64_t erase_hi = 0;
@@ -4242,9 +4243,10 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
         full += !strcmp(st, "full");
         retired += !strcmp(st, "retired");
         spare += !strcmp(st, "spare");
+        reserve += !strcmp(st, "reserve");
         g_assert_cmpstr(st, !=, "unlisted");
         if (!strcmp(st, "free") || !strcmp(st, "retired") ||
-            !strcmp(st, "spare")) {
+            !strcmp(st, "spare") || !strcmp(st, "reserve")) {
             g_assert_cmpuint(qdict_get_int(l, "vpc"), ==, 0);
         }
     }
@@ -4253,6 +4255,8 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     g_assert_cmpuint(full, ==, qdict_get_int(cnt, "full"));
     g_assert_cmpuint(retired, ==, qdict_get_int(cnt, "retired"));
     g_assert_cmpuint(spare, ==, qdict_get_int(cnt, "spare"));
+    g_assert_cmpuint(reserve, ==, qdict_haskey(cnt, "reserve") ?
+                     qdict_get_int(cnt, "reserve") : 0);
     erases = qdict_get_int(qdict_get_qdict(ns, "counters"), "block-erases");
     g_assert_cmpuint(erase_lo, <=, erases);
     g_assert_cmpuint(erases, <=, erase_hi);
@@ -38635,6 +38639,244 @@ static void femu_test_cps_slm_only(void *obj, void *data,
     femu_cps_disable(&c);
 }
 
+/*
+ * Read-only end of life (eol_read_only with blk_pe_limit). The state that
+ * query-femu reports: whether the media is read-only, the pages admitted
+ * writes may hold, and what they hold now. False when the device has none.
+ */
+static bool femu_eol_state(QTestState *qts, bool *ro, uint64_t *cap,
+                           uint64_t *pages, uint64_t *reqs)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *eol = qdict_haskey(ns, "end-of-life") ?
+                 qdict_get_qdict(ns, "end-of-life") : NULL;
+
+    if (eol) {
+        *ro = qdict_get_bool(eol, "read-only");
+        *cap = qdict_get_int(eol, "credit-pages");
+        *pages = qdict_get_int(eol, "held-pages");
+        *reqs = qdict_get_int(eol, "held-requests");
+    }
+    qobject_unref(rsp);
+    return eol != NULL;
+}
+
+/* Write Zeroes of @nlb blocks from @slba, with the Deallocate bit if @deac */
+static uint16_t femu_wz(FemuCtrlState *c, uint64_t slba, uint32_t nlb,
+                        bool deac)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(slba >> 32));
+    /* DEAC is bit 25 of dword 12 (NVM 1.2, Figure 82) */
+    cmd.cdw12 = cpu_to_le32((nlb - 1) | (deac ? 1u << 25 : 0));
+    return femu_io(c, &cmd);
+}
+
+/*
+ * With read-only end of life, one write-class command needs a bound, so
+ * Write Zeroes and Copy get limits that follow MDTS (16 KiB here): WZSL in
+ * the NVM Identify Controller, a hard limit since ONCS bit 3 (NVMWZSV) is
+ * clear, and MCL and MSSRL of two blocks of the largest format (8 KiB).
+ * The reserve is one line of 16 pages. Fifteen 16 KiB writes queued at
+ * once cost 5 pages each, so at most three hold credits at a time and the
+ * rest wait in the queue; all complete, and the credits all come back.
+ * @data "off" turns eol_read_only off: the limits and the reserve go.
+ */
+static void femu_test_eol_limits(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = strcmp(data, "off") != 0;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t id = guest_alloc(alloc, 4096);
+    const uint64_t slba[3] = { 0, 1, 2 };
+    const uint16_t nlb[3] = { 1, 1, 1 };
+    NvmeIdCtrl ctrl;
+    NvmeIdNs ns;
+    uint8_t nvm[8];
+    bool ro;
+    uint64_t cap, pages, reqs;
+    uint64_t mapped, lost, orphans;
+    uint16_t want, got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4 * 4096);
+
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, &ctrl, sizeof(ctrl));
+    g_assert_cmphex(le16_to_cpu(ctrl.oncs) & NVME_ONCS_WRITE_ZEROES, ==,
+                    on ? 0 : NVME_ONCS_WRITE_ZEROES);
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_CS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, nvm, sizeof(nvm));
+    g_assert_cmpuint(nvm[1], ==, on ? 2 : 0);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, &ns, sizeof(ns));
+    g_assert_cmpuint(le32_to_cpu(ns.mcl), ==, on ? 2 : 1024);
+    g_assert_cmpuint(le16_to_cpu(ns.mssrl), ==, on ? 2 : 128);
+
+    /* 32 blocks of 512 bytes are 16 KiB, the limit */
+    g_assert_cmphex(femu_wz(&c, 0, 32, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wz(&c, 0, 33, false), ==,
+                    on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+    g_assert_cmphex(femu_wz(&c, 0, 33, true), ==,
+                    on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+    g_assert_cmphex(femu_copy(&c, list, 64, slba, nlb, 2, 2, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_copy(&c, list, 64, slba, nlb, 3, 3, 0), ==,
+                    on ? FEMU_CMD_SIZE_LIMIT : NVME_SUCCESS);
+
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs) == on);
+    if (on) {
+        g_assert_false(ro);
+        g_assert_cmpuint(cap, ==, 16);
+    }
+
+    /* fifteen 16 KiB writes in the queue at once */
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, list + i * 8, buf + (i + 1) * 4096);
+    }
+    want = c.cid;
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64(32 * i + 1);
+        rw.nlb = cpu_to_le16(31);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(got, ==, (uint16_t)(want + i));
+    }
+    if (on) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_assert_cmpuint(pages, ==, 0);
+        g_assert_cmpuint(reqs, ==, 0);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", mapped);
+
+    guest_free(alloc, id);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Read-only end of life needs a bound on one write and a ring to the FTL
+ * that takes every request, so realize refuses MDTS 0, more requests than
+ * the ring holds (65535 entries), and a reserve the geometry cannot hold.
+ */
+static void femu_test_eol_refused(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'mdts':0", "eol_read_only needs mdts" },
+        { "'mdts':2,'queues':32,'entries':2047", "queues x (entries + 1)" },
+        { "'mdts':10", "eol_read_only reserve" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'eol','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,'blk_pe_limit':9,"
+            "%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * A queue deleted with admitted writes in it gives their credits back: a
+ * write the FTL never ran programs nothing. Then writes still run.
+ */
+static void femu_test_eol_sq_delete(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool ro;
+    uint64_t cap, pages, reqs;
+    int round, i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_memset(qts, buf, 0x2d, 4096);
+    for (round = 0; round < 8; round++) {
+        NvmeCmd cmd;
+
+        femu_create_io_queues(&c);
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            NvmeRwCmd rw;
+
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = i % 3 ? NVME_CMD_WRITE : NVME_CMD_WRITE_ZEROES;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64(8 * (i + round * FEMU_QSIZE));
+            rw.nlb = cpu_to_le16(7);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        g_assert_cmpint(FEMU_SC(femu_delete_sq(&c, c.io.qid)), ==,
+                        NVME_SUCCESS);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
+        cmd.cdw10 = cpu_to_le32(c.io.qid);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        femu_queue_free(&c, &c.io);
+
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_test_message("round %d: %" PRIu64 " pages, %" PRIu64 " requests",
+                       round, pages, reqs);
+        g_assert_cmpuint(pages, ==, 0);
+        g_assert_cmpuint(reqs, ==, 0);
+    }
+    femu_create_io_queues(&c);
+    for (i = 0; i < 32; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_queue_free(&c, &c.io);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -39754,7 +39996,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=75"
+            "blk_pe_limit=75,"
+            "eol_read_only=off"
     });
     qos_add_test("wear-spread", "femu", femu_test_wear,
                  &(QOSGraphTestOptions) {
@@ -39762,7 +40005,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=60,blk_pe_spread=50,blk_pe_seed=7"
+            "blk_pe_limit=60,blk_pe_spread=50,blk_pe_seed=7,"
+            "eol_read_only=off"
     });
     /* 40 lines, a floor of 18: lines retire in a row until the guard holds */
     qos_add_test("wear-retire", "femu", femu_test_wear,
@@ -39771,7 +40015,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=8"
+            "blk_pe_limit=8,"
+            "eol_read_only=off"
     });
     /* 8 spare lines replace worn-out blocks before any line retires */
     qos_add_test("wear-spare", "femu", femu_test_wear,
@@ -39780,7 +40025,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=8,spare_lines=8"
+            "blk_pe_limit=8,spare_lines=8,"
+            "eol_read_only=off"
     });
     /* spread limits: planes run out of spares at different times */
     qos_add_test("wear-spare-spread", "femu", femu_test_wear,
@@ -39789,7 +40035,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=40,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
+            "blk_pe_limit=40,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8,"
+            "eol_read_only=off"
     });
     /* some planes run out of spares while others have them left */
     qos_add_test("wear-spare-uneven", "femu", femu_test_wear,
@@ -39798,7 +40045,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
+            "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8,"
+            "eol_read_only=off"
     });
     qos_add_test("wear-aer-spare", "femu", femu_test_wear_aer,
                  &(QOSGraphTestOptions) {
@@ -39806,7 +40054,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=75"
+            "blk_pe_limit=75,"
+            "eol_read_only=off"
     });
     qos_add_test("wear-aer-reliability", "femu", femu_test_wear_aer,
                  &(QOSGraphTestOptions) {
@@ -39814,7 +40063,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=75"
+            "blk_pe_limit=75,"
+            "eol_read_only=off"
     });
     qos_add_test("wear-aer-off", "femu", femu_test_wear_aer,
                  &(QOSGraphTestOptions) {
@@ -39822,7 +40072,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=75"
+            "blk_pe_limit=75,"
+            "eol_read_only=off"
     });
     /* CSD runs its NVM commands through the same line FTL */
     qos_add_test("wear-csd", "femu", femu_test_wear,
@@ -39831,14 +40082,41 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,"
             "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,"
-            "luns_per_ch=2,nchs=2,blk_pe_limit=75"
+            "luns_per_ch=2,nchs=2,blk_pe_limit=75,"
+            "eol_read_only=off"
     });
     qos_add_test("wear-query", "femu", femu_test_wear_query,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
-            "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8"
+            "blk_pe_limit=30,blk_pe_spread=60,blk_pe_seed=3,spare_lines=8,"
+            "eol_read_only=off"
+    });
+    /* 40 lines of 16 pages, MDTS 16 KiB: one reserve line */
+    qos_add_test("eol-limits", "femu", femu_test_eol_limits,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2"
+    });
+    qos_add_test("eol-limits-off", "femu", femu_test_eol_limits,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2,eol_read_only=off"
+    });
+    qos_add_test("eol-refused", "femu", femu_test_eol_refused, NULL);
+    qos_add_test("eol-sq-delete", "femu", femu_test_eol_sq_delete,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2"
     });
     qos_add_test("age-scale-warp", "femu", femu_test_age_scale,
                  &(QOSGraphTestOptions) {

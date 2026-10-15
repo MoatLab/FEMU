@@ -472,6 +472,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: lines held back, needs blk_pe_limit; their blocks "
       "replace worn-out blocks of the same plane, and SMART Available Spare "
       "is the spare blocks the emptiest plane has left, in percent" },
+    { "eol_read_only",
+      "bbssd, CSD, with blk_pe_limit: on (default) holds erased reserve "
+      "lines for the writes in flight at the end of life and admits each "
+      "write by the pages it may program; needs mdts 1 or more and limits "
+      "Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps the old wear "
+      "model" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },
