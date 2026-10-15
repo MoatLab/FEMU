@@ -353,7 +353,7 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 | `FEMU bbssd: a reclaim unit (16384 bytes) must hold a logical block; namespace 1 has 32768-byte blocks: lower lba_index or fdp.nrg` | A unit of a group is smaller than a block. |
 | `FEMU bbssd: a reclaim group must hold every namespace, since a host may place all of its data in one: ...` | Lower `devsz_mb` or `fdp.nrg`, or add NAND. |
 | `fdp.runs (1024) is smaller than a logical block of namespace 1 (4096 bytes)` | Raise `fdp.runs` (NoSSD) or lower the block size. |
-| `FDP needs namespaces of the NVM command set; namespace 1 is zoned (znssd)` | ZNS, and the same for OCSSD; also `csd_slm_size` and `csd_cp`. |
+| `FDP needs namespaces of the NVM command set; namespace 1 is zoned (znssd)` | ZNS, and the same for OCSSD. |
 | `FEMU bbssd: placement needs N reclaim units in each group for M handles and this geometry gives K; raise blks_per_pl or fdp.nru, or lower fdp.nruh` | Too few reclaim units for the handles. |
 | `FEMU bbssd: namespace 1 exposes 1024 KiB, but placement keeps 9 of the 24 reclaim units for 4 handles and collection, leaving 960 KiB; lower devsz_mb or fdp.nruh, raise blks_per_pl, or raise op_pcent` | The namespace does not fit in what placement leaves. |
 | `FEMU bbssd: fdp.runs must be 67108864, the size of one superblock of the dies of a reclaim group of this geometry, or unset` | `fdp.runs` does not match the geometry. |
@@ -378,9 +378,10 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 
 NoSSD controllers accept an FDP subsystem and count its writes, with no
 media to place on. ZNS, OCSSD and KV are refused: an FDP endurance group
-holds namespaces of the NVM command set only (Base 2.3, 8.1.10). CSD goes
+holds namespaces of the NVM command set only (Base 2.3, 8.1.11). CSD goes
 through the BlackBox FDP write path, with the same refusals and reclaim unit
-size as BlackBox, and without its memory and compute namespaces.
+size as BlackBox. Its memory and compute namespaces may sit next to FDP,
+because they are in no endurance group (SLM 1.2, 2.1.2; CP 1.2, 2.1.1).
 
 When every reclaim unit is in use and GC cannot free one, a write fails with
 Capacity Exceeded and QEMU prints `ssd_stream_write: device full, no RU for

@@ -1740,7 +1740,7 @@ static bool femu_pd_on(FemuCtrl *n)
  * units and handles, so every bbssd namespace places into one FTL, each in
  * its own slice of the logical pages. A NAND page must then hold blocks of
  * one namespace only, or a trim of one would drop blocks of the next. Only
- * the NVM command set may live in an FDP endurance group (Base 2.3, 8.1.10),
+ * the NVM command set may live in an FDP endurance group (Base 2.3, 8.1.11),
  * and only bbssd and NoSSD carry its placement; mixing the two would let a
  * namespace with no media reset the units the FTL counts.
  */
@@ -1753,21 +1753,16 @@ static int nvme_check_fdp_namespaces(FemuCtrl *n, const uint8_t *modes,
         return 0;
     }
     /*
-     * Base 2.3, 8.1.10: every namespace of an FDP endurance group uses the
-     * NVM command set. Zoned and open-channel namespaces do not, nor do the
-     * memory and compute namespaces of a CSD controller.
+     * Base 2.3, 8.1.11: every namespace of an FDP endurance group uses the
+     * NVM command set. Zoned and open-channel namespaces do not. The memory
+     * and compute namespaces of a CSD controller are in no endurance group
+     * (SLM 1.2, 2.1.2; CP 1.2, 2.1.1), so FDP does not see them.
      */
     if (n->num_namespaces < 2 && (modes[0] == FEMU_ZNSSD_MODE ||
                                   modes[0] == FEMU_OCSSD_MODE)) {
         error_setg(errp, "FDP needs namespaces of the NVM command set; "
                    "namespace 1 is %s", modes[0] == FEMU_ZNSSD_MODE ?
                    "zoned (znssd)" : "open-channel (ocssd)");
-        return -1;
-    }
-    if (n->csd_params.slm_size_mb || n->csd_params.cp) {
-        error_setg(errp, "FDP needs namespaces of the NVM command set; "
-                   "csd_slm_size and csd_cp add memory and compute "
-                   "namespaces");
         return -1;
     }
     if (n->num_namespaces < 2) {

@@ -133,7 +133,7 @@ namespace as for a bbssd one, since CSD runs the same FTL
 ## Several namespaces
 
 Reclaim units and handles belong to the endurance group (Base 2.3,
-8.1.10). Each namespace reaches the handles through its own placement
+8.1.11). Each namespace reaches the handles through its own placement
 handle list (PHL), and namespaces may share a handle. FEMU follows that
 model: every bbssd namespace of an FDP controller places into one FTL, the
 one namespace 1 builds.
@@ -762,7 +762,7 @@ last:
 - Only bbssd places data. A NoSSD controller counts the host side
   ([NoSSD namespaces](#nossd-namespaces)). CSD uses the bbssd path, with
   the same refused knobs and RUNS, and without its memory and compute
-  namespaces. ZNS, OCSSD and KV are refused (Base 2.3, 8.1.10).
+  namespaces. ZNS, OCSSD and KV are refused (Base 2.3, 8.1.11).
 - With more than one group, each group holds the whole exposed capacity,
   and a logical block is whole NAND pages.
 - query-femu shows the FDP state of bbssd namespaces only.
