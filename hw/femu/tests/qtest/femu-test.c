@@ -39402,6 +39402,41 @@ static void femu_test_eol_abort_reset(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * WZSL under read-only end of life. With 8 metadata bytes interleaved in
+ * each block (@data "meta"), the limit (MDTS, 8 KiB) counts them: 15 blocks
+ * of 520 bytes fit, 16 do not. With Write Zeroes off in oncs ("nowz"),
+ * Identify reports neither ONCS bit 3 nor a WZSL.
+ */
+static void femu_test_eol_wzsl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool meta = !strcmp(data, "meta");
+    FemuCtrlState c = { 0 };
+    uint64_t id = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, id + 520) & NVME_ONCS_WRITE_ZEROES, ==,
+                    0);
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_CS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, id + 1), ==, meta ? 1 : 0);
+    if (meta) {
+        g_assert_cmphex(femu_wz(&c, 0, 15, false), ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_wz(&c, 0, 16, false), ==, NVME_INVALID_FIELD);
+    } else {
+        g_assert_cmphex(femu_wz(&c, 0, 8, false), ==, NVME_INVALID_OPCODE);
+    }
+
+    femu_queue_free(&c, &c.io);
+    guest_free(alloc, id);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -40636,6 +40671,22 @@ static void femu_register_nodes(void)
             "blk_pe_limit=1000,mdts=2,eol_read_only=off"
     });
     qos_add_test("eol-refused", "femu", femu_test_eol_refused, NULL);
+    qos_add_test("eol-wzsl-meta", "femu", femu_test_eol_wzsl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"meta",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=1,meta=8,mc=3,extended=1"
+    });
+    qos_add_test("eol-wzsl-nowz", "femu", femu_test_eol_wzsl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"nowz",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2,oncs=0x195"
+    });
     /* 40 lines, 8 spare lines, one reserve line: the pools run out first */
     qos_add_test("eol-ro-pool", "femu", femu_test_eol_ro,
                  &(QOSGraphTestOptions) {

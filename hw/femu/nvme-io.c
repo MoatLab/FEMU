@@ -209,8 +209,13 @@ static int nvme_eol_peek(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *cmd,
     uint64_t bytes;
 
     *pages = 0;
-    /* a command an Abort marked completes without running */
-    if (sq->nr_aborts && sq->abort_cid[sq->head]) {
+    /*
+     * A command an Abort marked completes without running. The mark must
+     * name this command, as nvme_take_abort() asks; another would let it
+     * run without credits.
+     */
+    if (sq->nr_aborts &&
+        sq->abort_cid[sq->head] == (NVME_ABORT_MARKED | cmd->cid)) {
         return -1;
     }
     ns = nvme_ns(n, le32_to_cpu(cmd->nsid));
