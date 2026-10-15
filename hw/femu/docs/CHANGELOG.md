@@ -340,6 +340,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 #### Spec conformance and host compatibility
 
 - A KV namespace runs its I/O commands only when the host enables the controller with CC.CSS 110b. Under 000b, which selects only the NVM command set, they fail with Invalid Command Opcode (Base 2.3, Figure 41). Linux selects 110b. Set Features I/O Command Set Profile (19h) now succeeds with no effect when CC.CSS is not 110b (Base 2.3, 5.2.26.1.17).
+- Write Zeroes reads its directive type from CDW12 bits 22:20 (NVM Command Set 1.2, Figure 82). Bit 23 is NSZ: with it set, a Write Zeroes failed with Invalid Field once the Data Placement Directive was enabled, or lost its placement.
 - A Copy descriptor format 2 range that names the command's own namespace is accepted in every mode that accepts Copy. A CSD namespace refused it with Invalid Namespace, although the controller advertised format 2.
 - Identify CNS 19h (Endurance Group List) lists endurance group 1 on a controller in a subsystem, from a starting identifier of 0 or 1, as `nvme list-endgrp` asks. Without a subsystem it is refused.
 - Commands complete on the completion queue they were bound to, and submission queues that share a completion queue are served (7a3f1d9fa, dc4289f91).

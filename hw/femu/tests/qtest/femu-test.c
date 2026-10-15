@@ -13421,6 +13421,30 @@ static void femu_test_fdp_write_zeroes_placed(void *obj, void *data,
     g_assert_cmpint(femu_ruh_ruamw(&c, buf, 0), ==, ruamw0);
     g_assert_cmpint(femu_fdp_hbmw(&c, buf) - hbmw, ==, blocks * 4096);
 
+    /*
+     * Bit 23 of CDW12 is NSZ and DTYPE is bits 22:20 (NVM 1.2, Figure 82).
+     * With NSZ set the placement still goes to handle 1, and NSZ with no
+     * directive is a plain Write Zeroes, not a directive type of 8.
+     */
+    rw.control = cpu_to_le16((1 << 7) | (2 << 4));
+    rw.slba = cpu_to_le64(blocks);
+    want = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmpint(femu_ruh_ruamw(&c, buf, 1), ==, ruamw1 - 2 * blocks);
+    g_assert_cmpint(femu_ruh_ruamw(&c, buf, 0), ==, ruamw0);
+
+    rw.control = cpu_to_le16(1 << 7);
+    rw.slba = cpu_to_le64(2 * blocks);
+    want = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmpint(femu_ruh_ruamw(&c, buf, 0), ==, ruamw0 - blocks);
+
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);

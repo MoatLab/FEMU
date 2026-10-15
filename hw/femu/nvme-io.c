@@ -1993,7 +1993,8 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     nvme_note_user_write(n);
 
-    if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0xf)) {
+    /* DTYPE is bits 22:20 here; bit 23 is NSZ (NVM 1.2, Figure 82) */
+    if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0x7)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -2015,10 +2016,10 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
 
-    /* Write Zeroes carries directives in the same fields as Write */
+    /* Write Zeroes carries directives as Write does, with a 3-bit DTYPE */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         req->fdp_dspec = le16_to_cpu(rw->dspec);
-        req->fdp_dtype = (control >> 4) & 0xF;
+        req->fdp_dtype = (control >> 4) & 0x7;
     }
 
     /*
