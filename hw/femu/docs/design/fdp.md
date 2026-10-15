@@ -269,14 +269,15 @@ namespace `ssd_fdp_update_ruhs()` then, for each handle:
 
 - skips a handle that has no current unit (device full); the command still
   succeeds;
-- keeps the current unit if nothing was written to it yet;
-- otherwise takes a fresh unit (running one GC pass if none is free) and
-  retires the old one as if it had filled, or fails the command with
-  Capacity Exceeded if no unit can be freed;
-- in both cases records a host event "Reclaim Unit Not Fully Written" when
-  the unit still had room (RUAMW not zero) and that event is enabled on the
-  handle, so an update of a handle whose unit is still empty records one
-  too.
+- keeps the current unit if nothing was written to it yet. The handle does
+  not move, so no event follows (Base 2.3, 7.4.1.1 lets an empty unit
+  stay);
+- otherwise takes a fresh unit, with one GC pass if none is free, and
+  retires the old one as if it had filled. If no unit can be freed, the
+  command fails with Capacity Exceeded;
+- when the handle moves off a unit that still had room (RUAMW not zero),
+  records host event "Reclaim Unit Not Fully Written". The handle must
+  have that event enabled.
 
 I/O Management Receive with operation 1 (RUH Status) returns one descriptor
 per placement handle and reclaim group: PID, RUHID, EARUTR (always 0) and

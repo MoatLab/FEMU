@@ -2959,6 +2959,14 @@ static uint16_t femu_timestamp(FemuCtrlState *c, bool set, uint8_t sel,
     return FEMU_SC(femu_admin(c, &cmd));
 }
 
+static uint16_t femu_write_block_placed(FemuCtrlState *c, uint64_t lba,
+                                        uint64_t data, int pid);
+
+/*
+ * RUH Update of two written units logs event 00h for each (Base 2.3,
+ * 5.2.12.1.32.1.1). The handles hold a written unit first: an empty unit
+ * stays, so its handle does not move and logs nothing.
+ */
 static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -2978,6 +2986,8 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
     pids = guest_alloc(alloc, 4096);
     qtest_writeq(femu->dev.bus->qts, pids, host);
     g_assert_cmpint(femu_timestamp(&c, true, 0, 0, pids), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_write_block_placed(&c, 0, pids, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_write_block_placed(&c, 8, pids, 1), ==, NVME_SUCCESS);
     qtest_memwrite(femu->dev.bus->qts, pids, list, sizeof(list));
     g_assert_cmpint(femu_ruh_update(&c, pids, 2), ==, NVME_SUCCESS);
 
@@ -3008,6 +3018,12 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmpint(ev[10], ==, 1 << 1);            /* origin 001b */
         g_assert_cmpint(ldl_le_p(ev + 12), ==, 1);
     }
+
+    /* handle 2 was never written: its unit stays, and no event follows */
+    qtest_writew(femu->dev.bus->qts, pids, 2);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(femu->dev.bus->qts, log), ==, 2);
 
     guest_free(alloc, log);
     guest_free(alloc, pids);
@@ -10279,6 +10295,8 @@ static void femu_test_fdp_features(void *obj, void *data,
      * the same options share a subsystem, so count from where the log is.
      */
     before = femu_fdp_host_events(&c, log, NULL);
+    g_assert_cmphex(femu_write_block_placed(&c, 0, pids, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_write_block_placed(&c, 8, pids, 1), ==, NVME_SUCCESS);
     qtest_memwrite(qts, pids, list, sizeof(list));
     g_assert_cmpint(femu_ruh_update(&c, pids, 2), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_fdp_host_events(&c, log, &ph), ==, before + 1);

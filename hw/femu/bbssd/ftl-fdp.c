@@ -1982,8 +1982,8 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         if (!old) {
             continue;
         }
+        /* an empty unit stays, so the handle does not move: no event */
         if (fdp_ru_unwritten(old)) {
-            nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
             continue;
         }
 
