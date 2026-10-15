@@ -29,6 +29,12 @@ typedef struct FemuKvssdMappingEntry {
     struct ppa *ppas;                  /* NAND pages holding this value */
     uint32_t nr_ppas;
     /*
+     * kv_pack: the value shares page ppas[0] with other values, at byte
+     * pack_off. ppas[0] is KV_PPA_OPEN while the page is still in DRAM.
+     */
+    bool packed;
+    uint32_t pack_off;
+    /*
      * kv_index=lsm: a newer record of the key shadows this version. It holds
      * no arena bytes, but its pages stay valid until the tree drops its
      * record or value GC finds them stale.
@@ -37,6 +43,7 @@ typedef struct FemuKvssdMappingEntry {
 } FemuKvssdMappingEntry;
 
 struct FemuKvssdState;
+struct KvPackPage;
 
 /*
  * Pluggable KV index strategy: the open-addressed hash (default) or the
@@ -46,9 +53,9 @@ typedef struct FemuKvIndexOps {
     const char *name;
     int  (*find)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl,
                  int *prev_slot);
+    /* @v holds the value: its arena offset, length and flash place */
     uint16_t (*upsert)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl,
-                       uint64_t off, uint64_t len, struct ppa *ppas,
-                       uint32_t nr_ppas);
+                       const FemuKvssdMappingEntry *v);
     /* 1 removed, 0 absent, -1 the index could not record the delete */
     int  (*remove)(struct FemuKvssdState *s, const uint8_t *key, uint8_t kl);
     /*
@@ -130,6 +137,28 @@ typedef struct FemuKvssdState {
     int lsm_gc_level;
     uint64_t lsm_level[KV_LSM_MAX_LEVELS + 1];
 
+    /*
+     * kv_pack: values below a page share pages. The open page collects
+     * them in controller DRAM; packed maps the ppa of each programmed
+     * packed page to its header. line_live holds the live bytes of each
+     * line: a page for a whole or meta page, the live values of a packed
+     * page.
+     */
+    bool pack;
+    struct KvPackPage *open;
+    GHashTable *packed;
+    uint64_t *line_live;
+    uint64_t host_bytes;               /* value bytes Stores wrote */
+    int64_t pack_persist;              /* the last packed program ends (ns) */
+    uint64_t pack_pages;               /* packed pages programmed */
+    uint64_t pack_values;              /* values stored packed */
+    uint64_t pack_pad_bytes;           /* free bytes of programmed packed pages */
+    uint64_t pack_early;               /* programs durability forced early */
+    uint64_t pack_dropped;             /* open pages dropped with no live value */
+    uint64_t pack_buf_reads;           /* Retrieves the open page served */
+    uint64_t gc_moved_values;          /* packed values value GC moved */
+    uint64_t gc_stale_values;          /* packed values GC found stale */
+
     /* stats */
     uint64_t nand_rd_pages;
     uint64_t nand_wr_pages;
@@ -177,6 +206,13 @@ typedef struct FemuKvLsmSnap {
 
 /* fill @snap and return true when @s runs the LSM index */
 bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap);
+
+/* --- durability of the open page --- */
+uint16_t kvssd_ftl_flush(FemuKvssdState *s, NvmeRequest *req);
+/* Flush on a KV namespace with the volatile write cache enabled */
+uint16_t kvssd_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+/* program the open page of every KV namespace: shutdown, WCE cleared */
+uint16_t kvssd_flush_all(FemuCtrl *n);
 
 /* --- KV-FTL firmware (kvssd-ftl.c) --- */
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp);

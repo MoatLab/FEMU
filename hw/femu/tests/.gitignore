@@ -8,3 +8,4 @@ test-femu-cxl-cca-ring
 test-femu-kv-model
 test-femu-onfi-timing
 test-femu-kv-lsm
+test-femu-kv-pack

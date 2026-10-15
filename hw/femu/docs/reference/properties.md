@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 201 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 202 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -68,7 +68,7 @@ Devices:
 | `did` | `uint16` | `7967` | PCI device ID of the controller function |
 | `acl` | `uint8` | `3` | Abort Command Limit reported in Identify Controller (0's based); an Abort run with more than acl others queued behind it fails |
 | `cqr` | `uint8` | `1` | CAP.CQR: 1 requires physically contiguous queues, 0 allows PRP-list queues |
-| `vwc` | `uint8` | `0` | 1 advertises a volatile write cache, which the host can turn off with feature 06h to stop bbssd buffering writes; 0 advertises none and refuses feature 06h. Flush drains the bbssd write buffer either way; 0 or 1 |
+| `vwc` | `uint8` | `0` | 1 advertises a volatile write cache, which the host can turn off with feature 06h to stop bbssd buffering writes; 0 advertises none and refuses feature 06h. Flush drains the bbssd write buffer either way. On KV with 1, Flush programs the open page of packed values, and with the cache off each Store programs it; 0 or 1 |
 | `temperature` | `uint16` | `323` | Composite temperature in kelvin reported by the SMART log and compared with the temperature threshold feature; default 323 (50 C) |
 | `mpsmin` | `uint8` | `0` | CAP.MPSMIN: smallest host memory page size as 2^(12 + mpsmin) bytes; must not exceed mpsmax |
 | `mpsmax` | `uint8` | `0` | CAP.MPSMAX: largest host memory page size as 2^(12 + mpsmax) bytes, from mpsmin to 15 |
@@ -294,6 +294,7 @@ Devices:
 | `kv_lsm_memtable_keys` | `uint32` | `1024` | KV with kv_index=lsm: keys the DRAM memtable holds before it flushes to level 1, 16 to 65536 |
 | `kv_lsm_size_ratio` | `uint32` | `10` | KV with kv_index=lsm: how many times more entries a level holds than the one above, 2 to 64; level i holds memtable keys times ratio^i entries |
 | `kv_lsm_pinned_levels` | `uint32` | `1` | KV with kv_index=lsm: top levels held whole in DRAM, with no flash I/O, 0 to 24 |
+| `kv_pack` | `bool` | `on` | KV: on (default) packs values below a page into shared NAND pages through an open page in controller DRAM; off gives each value whole pages, the model before packing |
 
 ### Generic PCI device properties
 

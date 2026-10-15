@@ -3,6 +3,7 @@
 #include "qemu/error-report.h"
 
 #include "kvssd.h"
+#include "kv-pack.h"
 #include "../nvme.h"
 #include "../bbssd/ftl.h"
 #include "../bbssd/ftl-internal.h"
@@ -65,12 +66,31 @@ static bool kv_key_eq(const FemuKvssdMappingEntry *e, const uint8_t *key,
  */
 #define KV_OWNER_NONE   INVALID_LPN
 #define KV_OWNER_META   (INVALID_LPN - 1)
+/* a page of packed values; its header names the owner of each value */
+#define KV_OWNER_PACK   (INVALID_LPN - 2)
+/* the page of a packed value that is still in the open page, in DRAM */
+#define KV_PPA_OPEN     (UNMAPPED_PPA - 1)
+
+/* live bytes of the line that holds @ppa */
+static void kv_line_live(FemuKvssdState *s, struct ppa *ppa, int64_t bytes)
+{
+    s->line_live[ppa->g.blk] += bytes;
+}
 
 static bool kv_page_owned(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
 {
-    return ppa->ppa != UNMAPPED_PPA && valid_ppa(s->ssd, ppa) &&
+    return ppa->ppa != UNMAPPED_PPA && ppa->ppa != KV_PPA_OPEN &&
+           valid_ppa(s->ssd, ppa) &&
            get_pg(s->ssd, ppa)->status == PG_VALID &&
            get_rmap_ent(s->ssd, ppa) == owner;
+}
+
+/* a whole page or a meta page is programmed for @owner */
+static void kv_page_valid(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
+{
+    mark_page_valid(s->ssd, ppa);
+    set_rmap_ent(s->ssd, owner, ppa);
+    kv_line_live(s, ppa, s->pgsz);
 }
 
 static void kv_release_page(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
@@ -78,7 +98,77 @@ static void kv_release_page(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
     if (kv_page_owned(s, ppa, owner)) {
         set_rmap_ent(s->ssd, KV_OWNER_NONE, ppa);
         mark_page_invalid(s->ssd, ppa);
+        kv_line_live(s, ppa, -(int64_t)s->pgsz);
     }
+}
+
+/* --- packed pages --- */
+
+/*
+ * kv_pack: a value whose record fits a page shares the page with other
+ * values (kv-pack.c holds the page header). A value never crosses a page,
+ * so a Retrieve reads one page. A programmed page stays valid until its
+ * last record dies; ssd->rmap names it KV_OWNER_PACK, and its header names
+ * the owner of each record.
+ */
+/* a value packs when its record fits a page; a larger one takes pages */
+static bool kv_packs(FemuKvssdState *s, uint64_t len)
+{
+    return s->pack && len && len + KV_PACK_HDR <= (uint64_t)s->pgsz;
+}
+
+/* the header of the page @id names, or NULL */
+static KvPackPage *kv_pack_page(FemuKvssdState *s, uint64_t id)
+{
+    if (id == KV_PPA_OPEN) {
+        return s->open;
+    }
+    if (id == UNMAPPED_PPA || !s->packed) {
+        return NULL;
+    }
+    return g_hash_table_lookup(s->packed, &id);
+}
+
+/*
+ * Item @i of @pg dies. A programmed page with no live value left is
+ * invalid now; return true when @pg is freed with it.
+ */
+static bool kv_pack_kill(FemuKvssdState *s, KvPackPage *pg, int i)
+{
+    struct ppa ppa = { .ppa = pg->id };
+    uint32_t bytes = kv_pack_drop(pg, i);
+
+    if (!bytes || pg->id == KV_PACK_NO_PAGE) {
+        return false;           /* the open page: dropped if it stays empty */
+    }
+    kv_line_live(s, &ppa, -(int64_t)bytes);
+    if (pg->live) {
+        return false;
+    }
+    set_rmap_ent(s->ssd, KV_OWNER_NONE, &ppa);
+    mark_page_invalid(s->ssd, &ppa);
+    g_hash_table_remove(s->packed, &pg->id);
+    kv_pack_free(pg);
+    return true;
+}
+
+/* the item of packed value @e, when @owner holds it, or -1 */
+static int kv_pack_owned(FemuKvssdState *s, const FemuKvssdMappingEntry *e,
+                         uint64_t owner, KvPackPage **out)
+{
+    KvPackPage *pg;
+    int i;
+
+    if (!e->packed || e->nr_ppas != 1) {
+        return -1;
+    }
+    pg = kv_pack_page(s, e->ppas[0].ppa);
+    i = pg ? kv_pack_find(pg, e->pack_off) : -1;
+    if (i < 0 || !pg->item[i].live || pg->item[i].owner != owner) {
+        return -1;
+    }
+    *out = pg;
+    return i;
 }
 
 static void kv_release_ppas(FemuKvssdState *s, struct ppa *ppas, uint32_t n,
@@ -89,22 +179,50 @@ static void kv_release_ppas(FemuKvssdState *s, struct ppa *ppas, uint32_t n,
     }
 }
 
-/* the pages of a value change owner, as a table entry moves */
-static void kv_move_owner(FemuKvssdState *s, struct ppa *ppas, uint32_t n,
+/* the flash of value @e changes owner, as a table entry moves */
+static void kv_move_owner(FemuKvssdState *s, const FemuKvssdMappingEntry *e,
                           uint64_t from, uint64_t to)
 {
-    for (uint32_t i = 0; i < n; i++) {
-        if (kv_page_owned(s, &ppas[i], from)) {
-            set_rmap_ent(s->ssd, to, &ppas[i]);
+    KvPackPage *pg;
+    int i;
+
+    if (e->packed) {
+        i = kv_pack_owned(s, e, from, &pg);
+        if (i >= 0) {
+            pg->item[i].owner = to;
+        }
+        return;
+    }
+    for (uint32_t k = 0; k < e->nr_ppas; k++) {
+        if (kv_page_owned(s, &e->ppas[k], from)) {
+            set_rmap_ent(s->ssd, to, &e->ppas[k]);
         }
     }
+}
+
+/* the flash of value @e is garbage, when @owner holds it */
+static void kv_release_value(FemuKvssdState *s, const FemuKvssdMappingEntry *e,
+                             uint64_t owner)
+{
+    KvPackPage *pg;
+    int i;
+
+    if (e->packed) {
+        i = kv_pack_owned(s, e, owner, &pg);
+        if (i >= 0) {
+            kv_pack_kill(s, pg, i);
+        }
+        return;
+    }
+    kv_release_ppas(s, e->ppas, e->nr_ppas, owner);
 }
 
 static void kv_discard_value_ppas(FemuKvssdState *s, FemuKvssdMappingEntry *e,
                                   uint32_t slot)
 {
-    kv_release_ppas(s, e->ppas, e->nr_ppas, slot);
+    kv_release_value(s, e, slot);
     kv_entry_drop_ppas(e);
+    e->packed = false;
 }
 
 /*
@@ -135,9 +253,21 @@ static int kv_hash_find(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
     return -1;
 }
 
+/* the value fields of @v into @e, and its flash to @slot */
+static void kv_entry_set_value(FemuKvssdState *s, FemuKvssdMappingEntry *e,
+                               const FemuKvssdMappingEntry *v, uint32_t slot)
+{
+    e->value_off = v->value_off;
+    e->length = v->length;
+    e->ppas = v->ppas;
+    e->nr_ppas = v->nr_ppas;
+    e->packed = v->packed;
+    e->pack_off = v->pack_off;
+    kv_move_owner(s, e, KV_OWNER_NONE, slot);
+}
+
 static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
-                               uint64_t off, uint64_t len, struct ppa *ppas,
-                               uint32_t nr_ppas)
+                               const FemuKvssdMappingEntry *v)
 {
     uint32_t home = kv_fnv1a(key, kl) % s->hash_slots;
 
@@ -145,11 +275,7 @@ static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl
         uint32_t slot = (home + i) % s->hash_slots;
         FemuKvssdMappingEntry *e = &s->table[slot];
         if (e->key_len != 0 && kv_key_eq(e, key, kl)) {
-            e->value_off = off;        /* update in place */
-            e->length = len;
-            e->ppas = ppas;
-            e->nr_ppas = nr_ppas;
-            kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
+            kv_entry_set_value(s, e, v, slot);  /* update in place */
             return NVME_SUCCESS;
         }
         if (e->key_len == 0) {         /* first free slot in the probe run */
@@ -158,11 +284,7 @@ static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl
             }
             memcpy(e->key, key, kl);
             e->key_len = kl;
-            e->value_off = off;
-            e->length = len;
-            e->ppas = ppas;
-            e->nr_ppas = nr_ppas;
-            kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
+            kv_entry_set_value(s, e, v, slot);
             s->nr_entries++;
             return NVME_SUCCESS;
         }
@@ -193,8 +315,7 @@ static int kv_hash_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
             s->table[hole] = s->table[next];
             kv_entry_clear(&s->table[next]);
             /* value GC finds a page's entry by its slot */
-            kv_move_owner(s, s->table[hole].ppas, s->table[hole].nr_ppas,
-                          next, hole);
+            kv_move_owner(s, &s->table[hole], next, hole);
             hole = next;
         }
         next = (next + 1) % s->hash_slots;
@@ -323,8 +444,13 @@ static void kv_wp_step(FemuKvssdState *s, struct write_pointer *wpp)
 /* pages a value can still take: free lines and the open value line */
 static uint64_t kv_room(FemuKvssdState *s)
 {
-    return (uint64_t)s->ssd->lm.free_line_cnt * s->ssd->sp.pgs_per_line +
-           kv_wp_remaining(s, &s->ssd->wp);
+    uint64_t room = (uint64_t)s->ssd->lm.free_line_cnt *
+                    s->ssd->sp.pgs_per_line +
+                    kv_wp_remaining(s, &s->ssd->wp);
+    /* the open page owes a page: a Flush must find it */
+    uint64_t owed = s->open && s->open->live;
+
+    return room > owed ? room - owed : 0;
 }
 
 /*
@@ -489,8 +615,7 @@ static bool kv_tree_alloc(void *opaque, int level, uint64_t *id)
         return false;
     }
     ppa = kv_wp_ppa(s->meta_wp);
-    mark_page_valid(s->ssd, &ppa);
-    set_rmap_ent(s->ssd, KV_OWNER_META, &ppa);
+    kv_page_valid(s, &ppa, KV_OWNER_META);
     kv_wp_step(s, s->meta_wp);
     *id = ppa.ppa;
     return true;
@@ -635,8 +760,7 @@ static uint16_t kv_tree_put_status(FemuKvssdState *s)
  * goes back on failure, and the caller releases the new pages.
  */
 static uint16_t kv_tree_upsert(FemuKvssdState *s, const uint8_t *key,
-                               uint8_t kl, uint64_t off, uint64_t len,
-                               struct ppa *ppas, uint32_t nr_ppas)
+                               uint8_t kl, const FemuKvssdMappingEntry *v)
 {
     FemuKvssdMappingEntry *e;
     uint32_t old = KV_LSM_NO_SLOT;
@@ -654,16 +778,12 @@ static uint16_t kv_tree_upsert(FemuKvssdState *s, const uint8_t *key,
     e = &s->table[slot];
     memcpy(e->key, key, kl);
     e->key_len = kl;
-    e->value_off = off;
-    e->length = len;
-    e->ppas = ppas;
-    e->nr_ppas = nr_ppas;
     e->stale = false;
-    kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
+    kv_entry_set_value(s, e, v, slot);
 
     s->lsm_nospace = false;
     if (kv_lsm_put(s->lsm, key, kl, slot)) {
-        kv_move_owner(s, ppas, nr_ppas, slot, KV_OWNER_NONE);
+        kv_move_owner(s, &s->table[slot], slot, KV_OWNER_NONE);
         kv_entry_clear(&s->table[slot]);
         s->free_slots[s->nr_free++] = slot;
         return kv_tree_put_status(s);
@@ -812,8 +932,7 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
         }
 
         ppa = kv_wp_ppa(&ssd->wp);
-        mark_page_valid(ssd, &ppa);
-        set_rmap_ent(ssd, KV_OWNER_NONE, &ppa);
+        kv_page_valid(s, &ppa, KV_OWNER_NONE);
         sub = wait + ssd_advance_status(ssd, &ppa, &c);
         *lat = sub > *lat ? sub : *lat;
         ppas[i] = ppa;
@@ -824,7 +943,10 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
          * a page the device relocated, as the black-box mode splits them.
          */
         s->nand_wr_pages++;
-        ssd->host_write_pages++;
+        /* with kv_pack the host side counts bytes (kv_count_host) */
+        if (!s->pack) {
+            ssd->host_write_pages++;
+        }
         ssd->nand_write_pages++;
         kv_wp_step(s, &ssd->wp);
     }
@@ -832,6 +954,216 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
     *out = ppas;
     *out_nr = pages;
     return NVME_SUCCESS;
+}
+
+/*
+ * The open page may stay in controller DRAM unless the host enabled a
+ * volatile write cache and then disabled it: then every command's data
+ * must be persistent at completion (Base 2.3, 5.2.26.1.4). With vwc=0
+ * the controller has no volatile cache, so its buffer counts as
+ * non-volatile, as the bbssd write buffer does (ssd_buffer_enabled()).
+ */
+static bool kv_pack_hold(FemuKvssdState *s)
+{
+    FemuCtrl *n = s->ssd->n;
+
+    return !(n && n->vwc && !n->features.volatile_wc);
+}
+
+/* the host side of the WAF: value bytes in pages, with kv_pack */
+static void kv_count_host(FemuKvssdState *s, uint64_t bytes)
+{
+    uint64_t before = s->host_bytes / s->pgsz;
+
+    if (!s->pack) {
+        return;
+    }
+    s->host_bytes += bytes;
+    s->ssd->host_write_pages += s->host_bytes / s->pgsz - before;
+}
+
+static void kv_pack_moved(void *opaque, uint64_t owner, uint32_t off)
+{
+    FemuKvssdState *s = opaque;
+
+    if (owner < s->hash_slots) {
+        s->table[owner].pack_off = off;
+    }
+}
+
+/*
+ * Close the gaps that dead values left in the open page, as a write
+ * buffer drops the data an overwrite replaced. It is DRAM, so it costs no
+ * time; each live value keeps its slot and moves to a new offset.
+ */
+static void kv_pack_compact_open(FemuKvssdState *s)
+{
+    kv_pack_compact(s->open, kv_pack_moved, s);
+}
+
+/*
+ * Program the open page from @stime; *@lat takes the time it takes. The
+ * page is padded when it is not full. An open page with no live value
+ * goes with no program: its values died in DRAM. @early: durability, not
+ * a full page, asked for the program. @v is the value of a Store that the
+ * index has not taken yet; it learns its page here.
+ */
+static uint16_t kv_pack_program(FemuKvssdState *s, int64_t stime,
+                                uint64_t *lat, bool early,
+                                FemuKvssdMappingEntry *v)
+{
+    struct ssd *ssd = s->ssd;
+    KvPackPage *pg = s->open;
+    struct nand_cmd c = { .type = USER_IO, .cmd = NAND_WRITE,
+                          .stime = stime };
+    struct ppa ppa;
+    uint64_t t;
+
+    if (!pg) {
+        return NVME_SUCCESS;
+    }
+    if (!pg->live) {
+        kv_pack_free(pg);
+        s->open = NULL;
+        s->pack_dropped++;
+        return NVME_SUCCESS;
+    }
+    if (!kv_wp_line(s, &ssd->wp)) {
+        return NVME_CAP_EXCEEDED | NVME_DNR;
+    }
+    /* dead records do not go to flash; a pending Store's record stays put */
+    if (!v) {
+        kv_pack_compact_open(s);
+    }
+    ppa = kv_wp_ppa(&ssd->wp);
+    mark_page_valid(ssd, &ppa);
+    set_rmap_ent(ssd, KV_OWNER_PACK, &ppa);
+    t = ssd_advance_status(ssd, &ppa, &c);
+    *lat = MAX(*lat, t);
+    /* a Flush waits for this program, also once the page has left DRAM */
+    s->pack_persist = MAX(s->pack_persist, stime + (int64_t)t);
+    pg->id = ppa.ppa;
+    kv_line_live(s, &ppa, pg->live_bytes);
+    for (uint32_t i = 0; i < pg->nr; i++) {
+        KvPackItem *it = &pg->item[i];
+
+        if (!it->live) {
+            continue;
+        }
+        if (it->owner < s->hash_slots) {
+            s->table[it->owner].ppas[0] = ppa;
+        } else if (v && v->packed && v->pack_off == it->off) {
+            v->ppas[0] = ppa;
+        }
+    }
+    g_hash_table_insert(s->packed, &pg->id, pg);
+    s->open = NULL;
+    s->nand_wr_pages++;
+    ssd->nand_write_pages++;
+    s->pack_pages++;
+    s->pack_pad_bytes += s->pgsz - pg->fill;
+    s->pack_early += early && kv_pack_fits(pg, 1, s->pgsz);
+    kv_wp_step(s, &ssd->wp);
+    return NVME_SUCCESS;
+}
+
+/*
+ * Place a value of @len bytes for a Store into @v: whole pages for a
+ * value whose record does not fit a page, else the open page. The open
+ * page is programmed first when the value does not fit, and with the
+ * value in it when it may not stay in DRAM; a program that fails leaves
+ * the index as it was. The flash has no owner until the index takes the
+ * value.
+ */
+static uint16_t kv_place_value(FemuKvssdState *s, NvmeRequest *req,
+                               uint64_t len, FemuKvssdMappingEntry *v,
+                               uint64_t *lat)
+{
+    bool hold = kv_pack_hold(s);
+    uint32_t rec = kv_pack_rec(len);
+    uint64_t t = 0;
+    uint16_t status;
+    uint32_t off;
+
+    v->packed = false;
+    v->pack_off = 0;
+    if (!kv_packs(s, len)) {
+        return kv_program_ppas(s, req, len, &v->ppas, &v->nr_ppas, lat,
+                               req->stime);
+    }
+    v->ppas = NULL;
+    v->nr_ppas = 0;
+    *lat = MAX(*lat, kv_reclaim_empty_lines(s, req->stime));
+    if (s->open && !kv_pack_fits(s->open, len, s->pgsz) &&
+        s->open->live_bytes + rec <= (uint32_t)s->pgsz) {
+        kv_pack_compact_open(s);
+    }
+    if (s->open && (!kv_pack_fits(s->open, len, s->pgsz) || !hold)) {
+        status = kv_pack_program(s, req->stime, &t, !hold, NULL);
+        if (status) {
+            return status;
+        }
+    }
+    if (!s->open) {
+        s->open = kv_pack_new();
+        if (!s->open) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+    }
+    v->ppas = g_try_new(struct ppa, 1);
+    if (!v->ppas || kv_pack_append(s->open, KV_OWNER_NONE, len, &off)) {
+        g_free(v->ppas);
+        v->ppas = NULL;
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+    v->ppas[0].ppa = KV_PPA_OPEN;
+    v->nr_ppas = 1;
+    v->packed = true;
+    v->pack_off = off;
+    /*
+     * A page that may not stay in DRAM goes to flash with the value, before
+     * the index takes it, so a failed program changes nothing.
+     */
+    if (!hold) {
+        status = kv_pack_program(s, req->stime, &t, true, v);
+        if (status) {
+            kv_release_value(s, v, KV_OWNER_NONE);
+            g_free(v->ppas);
+            v->ppas = NULL;
+            v->nr_ppas = 0;
+            v->packed = false;
+            return status;
+        }
+    }
+    *lat = MAX(*lat, t);
+    return NVME_SUCCESS;
+}
+
+/*
+ * A Store's packed value is in the index, and the value it replaced is
+ * released. A page now full of live records goes to flash, and the Store
+ * waits for it; one still in DRAM costs the DRAM time, as a bbssd write
+ * the buffer takes. The page may stay in DRAM here, so a program that
+ * finds no page leaves it for the next Store.
+ */
+static void kv_pack_settle(FemuKvssdState *s, NvmeRequest *req,
+                           const FemuKvssdMappingEntry *v, uint64_t *lat)
+{
+    uint64_t t = 0;
+
+    if (!v->packed) {
+        return;
+    }
+    s->pack_values++;
+    if (v->ppas[0].ppa != KV_PPA_OPEN) {
+        return;
+    }
+    if (s->open && kv_pack_full(s->open, s->pgsz) &&
+        !kv_pack_program(s, req->stime, &t, false, NULL)) {
+        *lat = MAX(*lat, t);
+        return;
+    }
+    *lat = MAX(*lat, ssd_buffer_hit_lat(s->ssd));
 }
 
 /* as kv_program_ppas: reads from @stime, latency from the request start */
@@ -847,6 +1179,16 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
         .stime = stime,
     };
 
+    /* a packed value is in one page; still in DRAM it costs no read */
+    if (e->packed && pages && e->nr_ppas == 1 &&
+        e->ppas[0].ppa == KV_PPA_OPEN) {
+        *lat = MAX(*lat, wait + ssd_buffer_hit_lat(s->ssd));
+        s->pack_buf_reads++;
+        return NVME_SUCCESS;
+    }
+    if (e->packed) {
+        pages = MIN(pages, 1);
+    }
     if (pages > e->nr_ppas) {
         return NVME_KV_UNRECOVERED_ERROR | NVME_DNR;
     }
@@ -918,6 +1260,12 @@ typedef struct KvGcFull {
     uint32_t *id;
     uint32_t nr;
     uint32_t next;
+    /*
+     * kv_pack: the closed lines when the run starts. Each is tried once;
+     * the lines the run fills hold what it moved.
+     */
+    uint8_t *cand;
+    uint32_t ncand;
 } KvGcFull;
 
 static void kv_gc_full_init(FemuKvssdState *s, KvGcFull *f)
@@ -928,6 +1276,8 @@ static void kv_gc_full_init(FemuKvssdState *s, KvGcFull *f)
     f->id = NULL;
     f->nr = 0;
     f->next = 0;
+    f->cand = NULL;
+    f->ncand = 0;
     if (!s->lsm || !lm->full_line_cnt) {
         return;
     }
@@ -950,20 +1300,80 @@ static bool kv_line_full(FemuKvssdState *s, struct line *line)
 }
 
 /*
- * The victim: the line with the fewest valid pages, or else, when a Store
- * has no room (@f set), the next full value line of @f. *@full says which.
+ * kv_pack: the closed line with the fewest live bytes. A full line of
+ * packed pages can hold dead values, so the full lines count too; a line
+ * with no dead byte does not.
  */
-static struct line *kv_gc_victim(FemuKvssdState *s, KvGcFull *f, bool *full)
+static struct line *kv_gc_least_live(FemuKvssdState *s, KvGcFull *f)
 {
     struct line_mgmt *lm = &s->ssd->lm;
-    struct line *line = pqueue_peek(lm->victim_line_pq);
+    uint64_t cap = (uint64_t)s->ssd->sp.pgs_per_line * s->pgsz;
+    struct line *best = NULL;
+
+    for (int i = 0; i < lm->tt_lines; i++) {
+        struct line *line = &lm->lines[i];
+
+        if (!f->cand[i] || (!line->pos && !kv_line_full(s, line)) ||
+            s->line_live[i] >= cap) {
+            continue;
+        }
+        if (!best || s->line_live[i] < s->line_live[best->id]) {
+            best = line;
+        }
+    }
+    if (best) {
+        f->cand[best->id] = 0;
+    }
+    return best;
+}
+
+static void kv_gc_cand_init(FemuKvssdState *s, KvGcFull *f)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+
+    if (!s->pack) {
+        return;
+    }
+    f->cand = g_new0(uint8_t, lm->tt_lines);
+    for (int i = 0; i < lm->tt_lines; i++) {
+        if (lm->lines[i].pos || kv_line_full(s, &lm->lines[i])) {
+            f->cand[i] = 1;
+            f->ncand++;
+        }
+    }
+}
+
+/*
+ * The victim: the line with the fewest valid pages (with kv_pack, the
+ * line of @f with the fewest live bytes), or else, when a Store has no
+ * room (@want), the next full value line of @f. *@full says which.
+ */
+static struct line *kv_gc_victim(FemuKvssdState *s, KvGcFull *f, bool want,
+                                 bool *full)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+    struct line *line;
 
     *full = false;
-    if (line) {
-        pqueue_pop(lm->victim_line_pq);
-        return line;
+    if (s->pack) {
+        line = kv_gc_least_live(s, f);
+        if (line && line->pos) {
+            pqueue_remove(lm->victim_line_pq, line);
+            return line;
+        }
+        if (line) {
+            QTAILQ_REMOVE(&lm->full_line_list, line, entry);
+            lm->full_line_cnt--;
+            return line;
+        }
+    } else {
+        line = pqueue_peek(lm->victim_line_pq);
+        if (line) {
+            pqueue_pop(lm->victim_line_pq);
+            return line;
+        }
     }
-    while (f && f->next < f->nr) {
+    while (want && f->next < f->nr) {
         line = &lm->lines[f->id[f->next++]];
         if (kv_line_full(s, line)) {
             QTAILQ_REMOVE(&lm->full_line_list, line, entry);
@@ -1004,15 +1414,18 @@ static void kv_gc_reinsert(FemuKvssdState *s, uint32_t slot)
     e = &s->table[slot];
     e->ppas = NULL;
     e->nr_ppas = 0;
+    e->packed = false;
     e->stale = true;
-    kv_move_owner(s, s->table[to].ppas, s->table[to].nr_ppas, slot, to);
+    kv_move_owner(s, &s->table[to], slot, to);
     if (kv_lsm_reinsert(s->lsm, s->table[to].key, s->table[to].key_len,
                         to)) {
         e = &s->table[slot];
         e->ppas = s->table[to].ppas;
         e->nr_ppas = s->table[to].nr_ppas;
+        e->packed = s->table[to].packed;
+        e->pack_off = s->table[to].pack_off;
         e->stale = false;
-        kv_move_owner(s, e->ppas, e->nr_ppas, to, slot);
+        kv_move_owner(s, e, to, slot);
         kv_entry_clear(&s->table[to]);
         s->free_slots[s->nr_free++] = to;
     }
@@ -1023,21 +1436,230 @@ typedef struct KvGcPage {
     uint64_t owner;
 } KvGcPage;
 
+/* a packed value GC moves: its source and its place in the GC page */
+typedef struct KvGcMove {
+    uint64_t owner;
+    uint64_t src;               /* the ppa of the source page */
+    uint32_t src_off;
+    uint32_t len;
+} KvGcMove;
+
+/* the page GC packs moved values into, programmed before the erase */
+typedef struct KvGcPack {
+    KvGcMove *mv;
+    uint32_t nr;
+    uint32_t cap;
+    uint32_t fill;
+    int64_t ready;              /* the reads of its sources end */
+} KvGcPack;
+
+static void kv_gc_pack_add(KvGcPack *gp, uint64_t owner, uint64_t src,
+                           const KvPackItem *it, int64_t ready)
+{
+    if (gp->nr == gp->cap) {
+        gp->cap = gp->cap ? 2 * gp->cap : 16;
+        gp->mv = g_renew(KvGcMove, gp->mv, gp->cap);
+    }
+    gp->mv[gp->nr++] = (KvGcMove) {
+        .owner = owner, .src = src, .src_off = it->off, .len = it->len,
+    };
+    gp->fill += kv_pack_rec(it->len);
+    gp->ready = MAX(gp->ready, ready);
+}
+
+/*
+ * Program the GC page once its sources are read: each moved value takes
+ * its new place, and its source dies. False when no page is free; the
+ * sources then stay as they are.
+ */
+static bool kv_gc_pack_program(FemuKvssdState *s, KvGcPack *gp,
+                               int64_t *tdone)
+{
+    struct ssd *ssd = s->ssd;
+    struct nand_cmd wr = { .type = GC_IO, .cmd = NAND_WRITE,
+                           .stime = gp->ready };
+    KvPackPage *pg;
+    struct ppa np;
+
+    if (!gp->nr) {
+        return true;
+    }
+    pg = kv_pack_new();
+    if (!pg || kv_pack_reserve(pg, gp->nr) || !kv_wp_line(s, &ssd->wp)) {
+        kv_pack_free(pg);
+        return false;
+    }
+    np = kv_wp_ppa(&ssd->wp);
+    pg->id = np.ppa;
+    mark_page_valid(ssd, &np);
+    set_rmap_ent(ssd, KV_OWNER_PACK, &np);
+    *tdone = MAX(*tdone, gp->ready +
+                 (int64_t)ssd_advance_status(ssd, &np, &wr));
+    for (uint32_t i = 0; i < gp->nr; i++) {
+        KvGcMove *m = &gp->mv[i];
+        FemuKvssdMappingEntry *e = &s->table[m->owner];
+        KvPackPage *src = kv_pack_page(s, m->src);
+        int k = src ? kv_pack_find(src, m->src_off) : -1;
+        uint32_t off;
+
+        if (k < 0 || !e->packed || e->ppas[0].ppa != m->src ||
+            e->pack_off != m->src_off) {
+            continue;
+        }
+        /* the reserve above leaves no allocation to fail here */
+        kv_pack_append(pg, m->owner, m->len, &off);
+        e->ppas[0] = np;
+        e->pack_off = off;
+        kv_pack_kill(s, src, k);
+    }
+    kv_line_live(s, &np, pg->live_bytes);
+    g_hash_table_insert(s->packed, &pg->id, pg);
+    s->gc_wr_pages++;
+    s->gc_moved_values += pg->live;
+    s->pack_pad_bytes += s->pgsz - pg->fill;
+    ssd->gc_write_pages++;
+    kv_wp_step(s, &ssd->wp);
+    gp->nr = 0;
+    gp->fill = 0;
+    gp->ready = 0;
+    if (!pg->live) {
+        /* a mismatch moved nothing: the page holds no value */
+        set_rmap_ent(ssd, KV_OWNER_NONE, &np);
+        mark_page_invalid(ssd, &np);
+        g_hash_table_remove(s->packed, &np.ppa);
+        kv_pack_free(pg);
+    }
+    return true;
+}
+/* the GC check of the LSM tree: newest record and where it is */
+static void kv_gc_seen(FemuKvssdState *s, GHashTable *seen, uint64_t owner)
+{
+    uint32_t slot = (uint32_t)owner;
+    FemuKvssdMappingEntry *e;
+    uint32_t newest;
+    int how = 0;
+
+    if (owner >= s->hash_slots ||
+        g_hash_table_contains(seen, GUINT_TO_POINTER(slot))) {
+        return;
+    }
+    e = &s->table[slot];
+    if (kv_lsm_gc_check(s->lsm, e->key, e->key_len, &newest)) {
+        how |= KV_GC_FLASH;
+    }
+    if (newest == slot) {
+        how |= KV_GC_VALID;
+    }
+    g_hash_table_insert(seen, GUINT_TO_POINTER(slot), GINT_TO_POINTER(how + 4));
+}
+
+static int kv_gc_how(GHashTable *seen, uint64_t owner)
+{
+    return GPOINTER_TO_INT(g_hash_table_lookup(
+               seen, GUINT_TO_POINTER((uint32_t)owner))) - 4;
+}
+
+/*
+ * Reinsert before the erase, as PinK does. Merges of the keys that go back
+ * program meta pages that point to the moved values, so they wait for the
+ * moves (@tdone). A key whose value did not move goes back too, at the
+ * cost of a record.
+ */
+static void kv_gc_reinsert_all(FemuKvssdState *s, GHashTable *seen,
+                               int64_t tdone)
+{
+    GHashTableIter it;
+    gpointer k, v;
+
+    s->lsm_ready = MAX(s->lsm_ready, tdone);
+    g_hash_table_iter_init(&it, seen);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        int how = GPOINTER_TO_INT(v) - 4;
+
+        if ((how & KV_GC_VALID) && (how & KV_GC_FLASH)) {
+            kv_gc_reinsert(s, GPOINTER_TO_UINT(k));
+        }
+    }
+    kv_tree_issue(s);
+}
+
+/*
+ * Move the live values of the packed page @ppa, read from @tmove: each
+ * goes into the GC page, or is released when the LSM tree says it is
+ * stale or no slot holds it. False when the GC page found no free page.
+ */
+static bool kv_gc_packed(FemuKvssdState *s, struct ppa *ppa, int64_t tmove,
+                         GHashTable *seen, KvGcPack *gp, int64_t *tdone)
+{
+    struct nand_cmd rd = { .type = GC_IO, .cmd = NAND_READ, .stime = tmove };
+    KvPackPage *src = kv_pack_page(s, ppa->ppa);
+    g_autofree KvPackItem *items = NULL;
+    int64_t ready;
+    uint32_t nr;
+
+    if (!src) {
+        return true;
+    }
+    ready = tmove + (int64_t)ssd_advance_status(s->ssd, ppa, &rd);
+    nr = src->nr;
+    items = g_memdup2(src->item, nr * sizeof(*items));
+    for (uint32_t i = 0; i < nr; i++) {
+        KvPackItem *it = &items[i];
+
+        if (!it->live) {
+            continue;
+        }
+        if (it->owner >= s->hash_slots ||
+            (s->lsm && !(kv_gc_how(seen, it->owner) & KV_GC_VALID))) {
+            /* the page may go with the last item; look it up each time */
+            KvPackPage *pg = kv_pack_page(s, ppa->ppa);
+            int k = pg ? kv_pack_find(pg, it->off) : -1;
+
+            if (it->owner < s->hash_slots) {
+                FemuKvssdMappingEntry *e = &s->table[it->owner];
+
+                if (e->packed && e->nr_ppas == 1 &&
+                    e->ppas[0].ppa == ppa->ppa && e->pack_off == it->off) {
+                    e->ppas[0].ppa = UNMAPPED_PPA;
+                }
+            }
+            if (it->owner < s->hash_slots) {
+                s->gc_stale_values++;
+            }
+            if (k >= 0 && kv_pack_kill(s, pg, k) &&
+                it->owner < s->hash_slots) {
+                s->gc_stale_pages++;
+            }
+            continue;
+        }
+        if (gp->fill + kv_pack_rec(it->len) > (uint32_t)s->pgsz &&
+            !kv_gc_pack_program(s, gp, tdone)) {
+            return false;
+        }
+        kv_gc_pack_add(gp, it->owner, ppa->ppa, it, ready);
+    }
+    *tdone = MAX(*tdone, ready);
+    return true;
+}
+
 /*
  * Collect one victim line from @t0 (absolute ns). Value pages: the hash
  * index moves each valid page; the LSM tree first checks each version, as
  * PinK does, moves the ones the newest record names and releases the
- * others. Meta pages move and the level list follows them. The victim is
- * erased once nothing on it is valid. *@tend is when the erase ends.
+ * others. Packed values move one by one into a GC page, which is
+ * programmed before the erase. Meta pages move and the level list follows
+ * them. The victim is erased once nothing on it is valid. *@tend is when
+ * the erase ends.
  */
 static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
-                       bool *full, int64_t *tend)
+                       bool want, bool *full, int64_t *tend)
 {
     struct ssd *ssd = s->ssd;
     struct ssdparams *spp = &ssd->sp;
-    struct line *victim = kv_gc_victim(s, f, full);
+    struct line *victim = kv_gc_victim(s, f, want, full);
     g_autoptr(GHashTable) seen = NULL;
     g_autofree KvGcPage *pg = NULL;
+    KvGcPack gp = { 0 };
     struct ppa ppa = { .ppa = 0 };
     struct nand_cmd rd = { .type = GC_IO, .cmd = NAND_READ };
     struct nand_cmd wr = { .type = GC_IO, .cmd = NAND_WRITE };
@@ -1080,24 +1702,15 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
             return false;
         }
         for (uint32_t i = 0; i < npg; i++) {
-            uint32_t slot = (uint32_t)pg[i].owner;
-            FemuKvssdMappingEntry *e;
-            uint32_t newest;
-            int how = 0;
+            KvPackPage *pk = pg[i].owner == KV_OWNER_PACK ?
+                             kv_pack_page(s, pg[i].ppa.ppa) : NULL;
 
-            if (pg[i].owner >= s->hash_slots ||
-                g_hash_table_contains(seen, GUINT_TO_POINTER(slot))) {
-                continue;
+            for (uint32_t k = 0; pk && k < pk->nr; k++) {
+                if (pk->item[k].live) {
+                    kv_gc_seen(s, seen, pk->item[k].owner);
+                }
             }
-            e = &s->table[slot];
-            if (kv_lsm_gc_check(s->lsm, e->key, e->key_len, &newest)) {
-                how |= KV_GC_FLASH;
-            }
-            if (newest == slot) {
-                how |= KV_GC_VALID;
-            }
-            g_hash_table_insert(seen, GUINT_TO_POINTER(slot),
-                                GINT_TO_POINTER(how + 4));
+            kv_gc_seen(s, seen, pg[i].owner);
         }
         s->lsm_stime = t0;
         s->lsm_gc = 0;
@@ -1114,16 +1727,18 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
         uint64_t r;
         uint64_t w;
 
-        if (!meta && s->lsm && owner < s->hash_slots) {
-            int how = GPOINTER_TO_INT(g_hash_table_lookup(
-                          seen, GUINT_TO_POINTER((uint32_t)owner))) - 4;
-
-            if (!(how & KV_GC_VALID)) {
-                kv_entry_forget_ppa(&s->table[owner], &pg[i].ppa);
-                kv_release_page(s, &pg[i].ppa, owner);
-                s->gc_stale_pages++;
-                continue;
+        if (owner == KV_OWNER_PACK) {
+            if (!kv_gc_packed(s, &pg[i].ppa, tmove, seen, &gp, &tdone)) {
+                goto abort;
             }
+            continue;
+        }
+        if (!meta && s->lsm && owner < s->hash_slots &&
+            !(kv_gc_how(seen, owner) & KV_GC_VALID)) {
+            kv_entry_forget_ppa(&s->table[owner], &pg[i].ppa);
+            kv_release_page(s, &pg[i].ppa, owner);
+            s->gc_stale_pages++;
+            continue;
         }
         if (meta && !kv_lsm_relocate(s->lsm, pg[i].ppa.ppa, pg[i].ppa.ppa)) {
             /* no level list names it: a merge already replaced it */
@@ -1136,16 +1751,13 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
             continue;
         }
         if (!kv_wp_line(s, meta ? s->meta_wp : &ssd->wp)) {
-            kv_gc_requeue(s, victim);
-            *tend = tdone;
-            return false;
+            goto abort;
         }
         np = kv_wp_ppa(meta ? s->meta_wp : &ssd->wp);
         rd.stime = tmove;
         r = ssd_advance_status(ssd, &pg[i].ppa, &rd);
         wr.stime = tmove + (int64_t)r;
-        mark_page_valid(ssd, &np);
-        set_rmap_ent(ssd, owner, &np);
+        kv_page_valid(s, &np, owner);
         w = ssd_advance_status(ssd, &np, &wr);
         tdone = MAX(tdone, tmove + (int64_t)(r + w));
         if (meta) {
@@ -1165,26 +1777,19 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
         ssd->gc_write_pages++;
         kv_wp_step(s, meta ? s->meta_wp : &ssd->wp);
     }
-
-    /*
-     * Reinsert before the erase, as PinK does. Merges of the keys that go
-     * back program meta pages that point to the moved values, so they
-     * wait for the moves.
-     */
+    /* the moved values are on flash before their victim is erased */
+    if (!kv_gc_pack_program(s, &gp, &tdone)) {
+        goto abort;
+    }
+    g_free(gp.mv);
     if (!meta && s->lsm) {
-        GHashTableIter it;
-        gpointer k, v;
-
-        s->lsm_ready = MAX(s->lsm_ready, tdone);
-        g_hash_table_iter_init(&it, seen);
-        while (g_hash_table_iter_next(&it, &k, &v)) {
-            int how = GPOINTER_TO_INT(v) - 4;
-
-            if ((how & KV_GC_VALID) && (how & KV_GC_FLASH)) {
-                kv_gc_reinsert(s, GPOINTER_TO_UINT(k));
-            }
-        }
-        kv_tree_issue(s);
+        kv_gc_reinsert_all(s, seen, tdone);
+    }
+    /* a page that is still valid holds data: never erase it */
+    if (victim->vpc) {
+        kv_gc_requeue(s, victim);
+        *tend = tdone;
+        return false;
     }
 
     *tend = tdone;
@@ -1200,6 +1805,19 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
     mark_line_free(ssd, &ppa);
     s->gc_lines++;
     return true;
+
+abort:
+    /*
+     * The values still in the GC page keep their sources; the moves that
+     * were programmed stay, and their keys go back to the memtable too.
+     */
+    g_free(gp.mv);
+    if (!meta && s->lsm) {
+        kv_gc_reinsert_all(s, seen, tdone);
+    }
+    kv_gc_requeue(s, victim);
+    *tend = tdone;
+    return false;
 }
 
 static void kv_check(FemuKvssdState *s);
@@ -1227,15 +1845,17 @@ static void kv_gc_run(FemuKvssdState *s, NvmeRequest *req, uint64_t need,
         return;
     }
     kv_gc_full_init(s, &f);
-    tries = pqueue_size(ssd->lm.victim_line_pq);
+    kv_gc_cand_init(s, &f);
+    tries = s->pack ? f.ncand : pqueue_size(ssd->lm.victim_line_pq);
     while (passes-- > 0 && (should_gc(ssd) || kv_room(s) < need)) {
         uint64_t before = kv_room(s) + kv_wp_remaining(s, s->meta_wp);
         bool want = kv_room(s) < need;
         int64_t end = t;
         bool full;
 
-        /* a full line is moved only for room, never for the threshold */
-        if (!kv_gc_line(s, t, want ? &f : NULL, &full, &end)) {
+        /* a full line holds no dead value unless values pack, or with the
+         * LSM tree; without kv_pack it moves only for room */
+        if (!kv_gc_line(s, t, &f, want, &full, &end)) {
             t = MAX(t, end);
             break;
         }
@@ -1254,6 +1874,7 @@ static void kv_gc_run(FemuKvssdState *s, NvmeRequest *req, uint64_t need,
         }
     }
     g_free(f.id);
+    g_free(f.cand);
     if (t > req->stime) {
         *lat = MAX(*lat, (uint64_t)(t - req->stime));
     }
@@ -1507,8 +2128,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     uint16_t status;
     int existing;
     FemuKvssdMappingEntry old = {};
-    struct ppa *new_ppas = NULL;
-    uint32_t new_nr_ppas = 0;
+    FemuKvssdMappingEntry v = {};
     uint32_t pages = kv_value_pages(s, vsize);
     (void)n;
 
@@ -1594,8 +2214,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         }
     }
 
-    status = kv_program_ppas(s, req, vsize, &new_ppas, &new_nr_ppas,
-                             &lat, req->stime);
+    status = kv_place_value(s, req, vsize, &v, &lat);
     if (status) {
         s->value_next = off;
         kv_unlock(s);
@@ -1607,10 +2226,12 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     if (existing >= 0) {
         old = s->table[existing];
     }
-    status = s->index->upsert(s, key, kl, off, vsize, new_ppas, new_nr_ppas);
+    v.value_off = off;
+    v.length = vsize;
+    status = s->index->upsert(s, key, kl, &v);
     if (status) {
-        kv_release_ppas(s, new_ppas, new_nr_ppas, KV_OWNER_NONE);
-        g_free(new_ppas);
+        kv_release_value(s, &v, KV_OWNER_NONE);
+        g_free(v.ppas);
         s->value_next = off;
         kv_unlock(s);
         kv_apply_lat(req, lat);
@@ -1625,6 +2246,9 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
     s->value_used += vsize;
     s->key_used += kl;
+    /* after the old value died, so an overwrite in DRAM is not programmed */
+    kv_pack_settle(s, req, &v, &lat);
+    kv_count_host(s, vsize);
 
     /* command/index base cost + value-page program timing through the NAND model */
     if (!s->lsm) {
@@ -1756,6 +2380,35 @@ uint16_t kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     kv_apply_lat(req, lat);
     *deleted = removed > 0;
     return removed < 0 ? NVME_INTERNAL_DEV_ERROR | NVME_DNR : NVME_SUCCESS;
+}
+
+/*
+ * Make the values in the open page persistent: Flush with a volatile
+ * write cache enabled (Base 2.3, 7.2). With @req NULL (shutdown, or the
+ * host cleared WCE) no command waits; the program loads the LUN only.
+ */
+static uint16_t kv_flush(FemuKvssdState *s, NvmeRequest *req)
+{
+    int64_t now = req ? req->stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t lat = 0;
+    uint16_t status;
+
+    qemu_mutex_lock(&s->lock);
+    status = kv_pack_program(s, now, &lat, true, NULL);
+    /* values that left DRAM earlier may still be in their program */
+    if (s->pack_persist > now) {
+        lat = MAX(lat, (uint64_t)(s->pack_persist - now));
+    }
+    qemu_mutex_unlock(&s->lock);
+    if (req) {
+        kv_apply_lat(req, lat);
+    }
+    return status ? NVME_INTERNAL_DEV_ERROR | NVME_DNR : NVME_SUCCESS;
+}
+
+uint16_t kvssd_ftl_flush(FemuKvssdState *s, NvmeRequest *req)
+{
+    return kv_flush(s, req);
 }
 
 /* the List return structure as it grows */
@@ -1929,6 +2582,37 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 /* --- lifecycle --- */
 
 /*
+ * Drop the open page and every packed page header. The entries released
+ * their values first, so no header should be left; one that is left
+ * gives its page back too.
+ */
+static void kv_pack_reset(FemuKvssdState *s)
+{
+    GHashTableIter it;
+    gpointer k, v;
+
+    kv_pack_free(s->open);
+    s->open = NULL;
+    if (!s->packed) {
+        return;
+    }
+    g_hash_table_iter_init(&it, s->packed);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        KvPackPage *pg = v;
+
+        struct ppa ppa = { .ppa = pg->id };
+
+        if (s->ssd && kv_page_owned(s, &ppa, KV_OWNER_PACK)) {
+            set_rmap_ent(s->ssd, KV_OWNER_NONE, &ppa);
+            mark_page_invalid(s->ssd, &ppa);
+            kv_line_live(s, &ppa, -(int64_t)pg->live_bytes);
+        }
+        g_hash_table_iter_remove(&it);
+        kv_pack_free(pg);
+    }
+}
+
+/*
  * Drop every pair. The pages they held are released, so the flash shows
  * no orphan; the blocks keep their wear.
  */
@@ -1947,6 +2631,7 @@ static void kvssd_reset_table(FemuKvssdState *s)
     s->key_used = 0;
     s->value_reclaimable = 0;
     kv_tree_reset(s);
+    kv_pack_reset(s);
 }
 
 
@@ -2127,6 +2812,9 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     s->kv_max_keys = s->hash_slots - 1;
     s->index = &kv_index_hash;
+    s->pack = n->kv_pack;
+    s->packed = g_hash_table_new(g_int64_hash, g_int64_equal);
+    s->line_live = g_try_new0(uint64_t, s->ssd->lm.tt_lines);
 
     s->table = g_try_new0(FemuKvssdMappingEntry, s->hash_slots);
     s->values = g_try_malloc0(s->value_capacity);
@@ -2151,7 +2839,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         s->index = &kv_index_lsm;
         kv_tree_reset(s);
     }
-    if (!s->table || !s->values) {
+    if (!s->table || !s->values || !s->line_live) {
         error_setg(errp, "KVSSD DRAM allocation failed");
         goto fail;
     }
@@ -2177,6 +2865,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 fail:
     kv_tree_free(s);
+    g_hash_table_destroy(s->packed);
+    g_free(s->line_live);
     g_free(s->values);
     g_free(s->table);
     kvssd_free_ssd(s);
@@ -2192,8 +2882,7 @@ static uint16_t kv_selftest_store_one(FemuKvssdState *s, NvmeRequest *req,
     uint64_t lat = 0;
     int existing = s->index->find(s, key, kl, NULL);
     FemuKvssdMappingEntry old = {};
-    struct ppa *new_ppas = NULL;
-    uint32_t new_nr_ppas = 0;
+    FemuKvssdMappingEntry v = {};
     uint16_t status;
 
     if (existing >= 0) {
@@ -2213,8 +2902,7 @@ static uint16_t kv_selftest_store_one(FemuKvssdState *s, NvmeRequest *req,
     if (len) {
         memcpy(s->values + off, data, len);
     }
-    status = kv_program_ppas(s, req, len, &new_ppas, &new_nr_ppas,
-                             &lat, req->stime);
+    status = kv_place_value(s, req, len, &v, &lat);
     if (status) {
         s->value_next = off;
         return status;
@@ -2224,10 +2912,12 @@ static uint16_t kv_selftest_store_one(FemuKvssdState *s, NvmeRequest *req,
     if (existing >= 0) {
         old = s->table[existing];
     }
-    status = s->index->upsert(s, key, kl, off, len, new_ppas, new_nr_ppas);
+    v.value_off = off;
+    v.length = len;
+    status = s->index->upsert(s, key, kl, &v);
     if (status) {
-        kv_release_ppas(s, new_ppas, new_nr_ppas, KV_OWNER_NONE);
-        g_free(new_ppas);
+        kv_release_value(s, &v, KV_OWNER_NONE);
+        g_free(v.ppas);
         s->value_next = off;
         return status;
     }
@@ -2239,6 +2929,8 @@ static uint16_t kv_selftest_store_one(FemuKvssdState *s, NvmeRequest *req,
     }
     s->value_used += len;
     s->key_used += kl;
+    kv_pack_settle(s, req, &v, &lat);
+    kv_count_host(s, len);
     kv_apply_lat(req, lat);
     return NVME_SUCCESS;
 }
@@ -2438,15 +3130,19 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
         KVT(ok && s->nand_wr_pages == wr_before, "retrieve-no-page-allocation");
     }
 
-    /* 9. Long overwrite run crosses at least one NAND line without allocator abort */
+    /*
+     * 9. Long overwrite run crosses at least one NAND line without
+     * allocator abort. Values of a page each program a page; a small value
+     * would only stay in the open page.
+     */
     {
         uint64_t loops = MIN((uint64_t)s->ssd->sp.pgs_per_line + 32, 20000ull);
+        g_autofree char *v = g_malloc0(s->pgsz);
         bool ok = true;
 
         for (uint64_t i = 0; i < loops; i++) {
-            char v[16];
-            int vl = snprintf(v, sizeof(v), "L%05" PRIu64, i) + 1;
-            if (kv_selftest_store_locked(s, &req, "loop", 4, v, vl) !=
+            snprintf(v, s->pgsz, "L%05" PRIu64, i);
+            if (kv_selftest_store_locked(s, &req, "loop", 4, v, s->pgsz) !=
                 NVME_SUCCESS) {
                 ok = false;
                 break;
@@ -2510,6 +3206,16 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     s->meta_wr_pages = 0;
     s->gc_meta_pages = 0;
     s->gc_stale_pages = 0;
+    s->host_bytes = 0;
+    s->pack_pages = 0;
+    s->pack_values = 0;
+    s->pack_pad_bytes = 0;
+    s->pack_early = 0;
+    s->pack_dropped = 0;
+    s->pack_buf_reads = 0;
+    s->gc_moved_values = 0;
+    s->gc_stale_values = 0;
+    s->pack_persist = 0;
     if (n) {
         if (n->ssd == s->ssd) {
             n->ssd = NULL;
@@ -2521,6 +3227,10 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
         }
         if (s->meta_wp) {
             memset(s->meta_wp, 0, sizeof(*s->meta_wp));
+        }
+        if (s->ssd) {
+            memset(s->line_live, 0,
+                   s->ssd->lm.tt_lines * sizeof(*s->line_live));
         }
     }
 
@@ -2534,6 +3244,42 @@ static void kv_check_fail(const char *what, uint64_t a, uint64_t b)
     error_report("FEMU kvssd: owner check failed: %s (%" PRIu64 ", %" PRIu64
                  ")", what, a, b);
     abort();
+}
+
+/*
+ * The header of packed page @pg (at @ppa, or the open page with NULL):
+ * its counts add up, and each live value is the one its slot names.
+ */
+static bool kv_check_pack(FemuKvssdState *s, KvPackPage *pg, struct ppa *ppa)
+{
+    uint64_t bytes = 0;
+    uint32_t live = 0;
+    uint32_t fill = 0;
+
+    for (uint32_t i = 0; i < pg->nr; i++) {
+        KvPackItem *it = &pg->item[i];
+        FemuKvssdMappingEntry *e;
+
+        if (it->off != fill) {
+            kv_check_fail("packed item offset", it->off, fill);
+        }
+        fill += kv_pack_rec(it->len);
+        if (!it->live) {
+            continue;
+        }
+        live++;
+        bytes += kv_pack_rec(it->len);
+        e = it->owner < s->hash_slots ? &s->table[it->owner] : NULL;
+        if (!e || !e->packed || e->nr_ppas != 1 || e->pack_off != it->off ||
+            e->length != it->len ||
+            e->ppas[0].ppa != (ppa ? ppa->ppa : KV_PPA_OPEN)) {
+            kv_check_fail("packed item owner", it->owner, it->off);
+        }
+    }
+    if (fill != pg->fill || fill > (uint32_t)s->pgsz) {
+        kv_check_fail("packed page fill", fill, pg->fill);
+    }
+    return live == pg->live && bytes == pg->live_bytes && (!ppa || live);
 }
 
 /* each line is in one place: free, full, victim queue, open or collected */
@@ -2644,9 +3390,12 @@ static void kv_check(FemuKvssdState *s)
     if (!s->check) {
         return;
     }
+    uint64_t npack = 0;
+
     for (int blk = 0; blk < spp->blks_per_pl; blk++) {
         struct line *line = &ssd->lm.lines[blk];
         uint64_t vpc = 0;
+        uint64_t bytes = 0;
         struct ppa ppa = { .ppa = 0 };
 
         ppa.g.blk = blk;
@@ -2666,7 +3415,13 @@ static void kv_check(FemuKvssdState *s)
                         }
                         vpc++;
                         owner = get_rmap_ent(ssd, &ppa);
-                        if (owner == KV_OWNER_META) {
+                        if (owner == KV_OWNER_PACK) {
+                            KvPackPage *pk = kv_pack_page(s, ppa.ppa);
+
+                            held = pk && kv_check_pack(s, pk, &ppa);
+                            bytes += held ? pk->live_bytes : 0;
+                            npack++;
+                        } else if (owner == KV_OWNER_META) {
                             held = s->lsm && kv_lsm_relocate(s->lsm, ppa.ppa,
                                                              ppa.ppa);
                         } else if (owner < s->hash_slots) {
@@ -2680,6 +3435,9 @@ static void kv_check(FemuKvssdState *s)
                             kv_check_fail("valid page with no holder",
                                           ppa.ppa, owner);
                         }
+                        if (owner != KV_OWNER_PACK) {
+                            bytes += s->pgsz;
+                        }
                     }
                 }
             }
@@ -2687,11 +3445,28 @@ static void kv_check(FemuKvssdState *s)
         if (vpc != (uint64_t)line->vpc) {
             kv_check_fail("line valid count", vpc, line->vpc);
         }
+        if (bytes != s->line_live[blk]) {
+            kv_check_fail("line live bytes", bytes, s->line_live[blk]);
+        }
+    }
+    if (npack != g_hash_table_size(s->packed)) {
+        kv_check_fail("packed page headers", npack,
+                      g_hash_table_size(s->packed));
+    }
+    if (s->open && (s->open->id != KV_PACK_NO_PAGE ||
+                    !kv_check_pack(s, s->open, NULL))) {
+        kv_check_fail("open page", s->open->nr, s->open->live);
     }
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         FemuKvssdMappingEntry *e = &s->table[i];
+        KvPackPage *pk;
 
-        for (uint32_t k = 0; k < e->nr_ppas; k++) {
+        if (e->packed && (e->nr_ppas != 1 || !s->pack ||
+                          (e->ppas[0].ppa != UNMAPPED_PPA &&
+                           kv_pack_owned(s, e, i, &pk) < 0))) {
+            kv_check_fail("packed value not owned", i, e->ppas[0].ppa);
+        }
+        for (uint32_t k = 0; !e->packed && k < e->nr_ppas; k++) {
             if (e->ppas[k].ppa != UNMAPPED_PPA &&
                 !kv_page_owned(s, &e->ppas[k], i)) {
                 kv_check_fail("entry page not owned", i, e->ppas[k].ppa);
@@ -2703,7 +3478,8 @@ static void kv_check(FemuKvssdState *s)
         used++;
         if (!e->stale) {
             /* a live value holds every page of its length */
-            if (e->nr_ppas != kv_value_pages(s, e->length)) {
+            if (e->nr_ppas != kv_value_pages(s, e->length) ||
+                e->packed != kv_packs(s, e->length)) {
                 kv_check_fail("live value pages", i, e->nr_ppas);
             }
             for (uint32_t k = 0; k < e->nr_ppas; k++) {
@@ -2788,6 +3564,8 @@ void kvssd_ftl_free(FemuKvssdState *s)
     qemu_mutex_destroy(&s->lock);
     kvssd_reset_table(s);
     kv_tree_free(s);
+    g_hash_table_destroy(s->packed);
+    g_free(s->line_live);
     g_free(s->values);
     g_free(s->table);
     kvssd_free_ssd(s);

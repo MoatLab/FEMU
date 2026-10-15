@@ -9,6 +9,7 @@
 #include "qobject/qstring.h"
 
 #include "./nvme.h"
+#include "./kvssd/kvssd.h"
 #include "./bbssd/ftl.h"
 #include "./nand/onfi.h"
 #include "./femu-props.h"
@@ -865,6 +866,8 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             if (!reset) {
                 nvme_clear_ctrl(n, true);
             }
+            /* the queues are idle: KV programs its open pages of values */
+            kvssd_flush_all(n);
             n->bar.cc = data;
             n->bar.csts |= NVME_CSTS_SHST_COMPLETE;
         } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(cc)) {
@@ -1495,6 +1498,12 @@ static bool femu_kv_index_set(FemuCtrl *n)
            n->kv_lsm_pinned_levels != FEMU_KV_LSM_PINNED_DEF;
 }
 
+/* kv_pack=off, the one KV knob that is set by turning it off */
+static bool femu_kv_pack_set(FemuCtrl *n)
+{
+    return !n->kv_pack;
+}
+
 /* kv_index and its knobs, checked in every mode */
 static int femu_kv_index_check(FemuCtrl *n, Error **errp)
 {
@@ -1986,6 +1995,22 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             error_setg(errp, "kv_index=lsm and the kv_lsm_* knobs need a "
                        "key-value namespace (femu_mode=5 or kvssd in "
                        "namespace_modes)");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
+    /* value packing places KV values only; elsewhere it does nothing */
+    if (femu_kv_pack_set(n)) {
+        bool any_kv = false;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            any_kv |= ns_modes[i] == FEMU_KVSSD_MODE;
+        }
+        if (!any_kv) {
+            error_setg(errp, "kv_pack=off needs a key-value namespace "
+                       "(femu_mode=5 or kvssd in namespace_modes)");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -3170,6 +3195,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "bbssd");
             return;
         }
+        if (femu_kv_pack_set(n)) {
+            error_setg(errp, "kv_pack=off needs a key-value namespace; "
+                       "shared namespaces are NoSSD or bbssd");
+            return;
+        }
         /* shared namespaces are never KV, so the KV timing knobs do nothing */
         if (femu_kv_timing_set(n)) {
             error_setg(errp, "kv_timing=model and kv_model_coeffs need a "
@@ -3783,6 +3813,7 @@ static const Property femu_props[] = {
                        FEMU_KV_LSM_RATIO_DEF),
     DEFINE_PROP_UINT32("kv_lsm_pinned_levels", FemuCtrl, kv_lsm_pinned_levels,
                        FEMU_KV_LSM_PINNED_DEF),
+    DEFINE_PROP_BOOL("kv_pack", FemuCtrl, kv_pack, true),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),

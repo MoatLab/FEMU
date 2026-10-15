@@ -1,6 +1,7 @@
 #include "./nvme.h"
 #include "nvme-pi.h"
 #include "csd/csd.h"
+#include "kvssd/kvssd.h"
 
 static int64_t nvme_io_clock(FemuCtrl *n)
 {
@@ -1993,6 +1994,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static uint16_t nvme_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
+    /* a KV namespace programs the open page of packed values */
+    if (NS_KVSSD(ns)) {
+        return kvssd_flush(n, ns, req);
+    }
     return NVME_SUCCESS;
 }
 

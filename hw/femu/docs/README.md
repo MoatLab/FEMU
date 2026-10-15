@@ -43,6 +43,7 @@ and what the guest needs. In short:
 | Per-block metadata and protection information | NoSSD or BBSSD with `meta`, `mc`, `pi=on` | none | [Metadata and PI](features/ns-management-and-pi.md#metadata-and-protection-information) |
 | Several namespaces on one controller | any NVMe mode | none | [Several namespaces](features/multi-namespace.md) |
 | An LSM-tree key index for KV namespaces | KV with `kv_index=lsm` | `run-kvssd.sh` with `KV_INDEX=lsm` | [LSM-tree key index](features/kv-lsm-index.md) |
+| Small KV values packed into shared NAND pages | KV (default; `kv_pack=off` for one value a page) | `run-kvssd.sh` | [KV value packing](features/kv-value-packing.md) |
 | A CXL memory-semantic SSD | `femu-cxl-ssd` device | `run-cxlssd.sh` | [CXL SSD](modes/cxl-ssd.md), [design note](cxlssd.md) |
 | Guest control of the CXL SSD cache: pin, drop, uncached ranges | `femu-cxl-ssd,cca=on` | `run-cxlssd.sh` | [CXL caching API](features/cxl-cca.md) |
 | The CXL SSD medium also as an NVMe namespace | `femu,femu_mode=1,cxl_ssd=<id>` | `run-cxlssd.sh` plus `-device femu,...` | [CXL NVMe link](features/cxl-nvme-link.md) |

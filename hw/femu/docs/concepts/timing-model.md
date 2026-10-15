@@ -206,6 +206,12 @@ page per unpinned level, in sequence, before the value, and pays no hash
 base read. Merges load the LUNs in the background
 ([LSM-tree key index](../features/kv-lsm-index.md#what-each-command-costs)).
 
+Small values share pages (`kv_pack=on`, the default). A Store goes to an
+open page in DRAM and costs `pg_rd_lat / 16`; the Store that does not fit,
+or that fills the page, programs it. A Retrieve reads the one page of its value, or
+nothing while the value is still in DRAM
+([KV value packing](../features/kv-value-packing.md#what-each-command-costs)).
+
 CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time
 multiplied by the program's own scale, or by `csf_runtime_scale` when it

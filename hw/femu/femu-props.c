@@ -174,7 +174,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "1 advertises a volatile write cache, which the host can turn off "
       "with feature 06h to stop bbssd buffering writes; 0 advertises none "
       "and refuses feature 06h. Flush drains the bbssd write buffer either "
-      "way; 0 or 1" },
+      "way. On KV with 1, Flush programs the open page of packed values, "
+      "and with the cache off each Store programs it; 0 or 1" },
     { "temperature",
       "Composite temperature in kelvin reported by the SMART log and "
       "compared with the temperature threshold feature; default 323 (50 C)" },
@@ -778,6 +779,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "kv_lsm_pinned_levels",
       "KV with kv_index=lsm: top levels held whole in DRAM, with no flash "
       "I/O, 0 to 24" },
+    { "kv_pack",
+      "KV: on (default) packs values below a page into shared NAND pages "
+      "through an open page in controller DRAM; off gives each value whole "
+      "pages, the model before packing" },
     { NULL, NULL }
 };
 

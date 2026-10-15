@@ -361,6 +361,28 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 }
 
+uint16_t kvssd_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
+{
+    FemuKvssdState *s = kvssd_state(n, ns);
+
+    return s ? kvssd_ftl_flush(s, req) : NVME_SUCCESS;
+}
+
+uint16_t kvssd_flush_all(FemuCtrl *n)
+{
+    uint16_t status = NVME_SUCCESS;
+
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (NS_KVSSD(ns) && ns->ext_ops.state &&
+            kvssd_ftl_flush(ns->ext_ops.state, NULL)) {
+            status = NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+    }
+    return status;
+}
+
 static void kvssd_exit(FemuCtrl *n)
 {
     int i, j;

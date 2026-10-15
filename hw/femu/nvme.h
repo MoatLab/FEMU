@@ -2594,6 +2594,7 @@ typedef struct FemuCtrl {
     uint32_t        kv_lsm_memtable_keys;
     uint32_t        kv_lsm_size_ratio;
     uint32_t        kv_lsm_pinned_levels;
+    bool            kv_pack;          /* KV: values below a page share pages */
 
     Oc12Ctrl  *oc12_ctrl;
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];

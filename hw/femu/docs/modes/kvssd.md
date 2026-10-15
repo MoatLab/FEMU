@@ -100,6 +100,20 @@ cost model.
 -device femu,femu_mode=5,devsz_mb=64,kv_index=lsm,kv_lsm_pinned_levels=2
 ```
 
+### Value packing (kv_pack)
+
+Values whose record (the value and a 32 byte header) fits a NAND page
+share pages, as real KV-SSDs pack small values. A Store goes to an open
+page in controller DRAM; the page is programmed when the next record does
+not fit. With `vwc=1`, Flush programs the open page. `kv_pack=off` gives
+each value whole pages, the model before packing. See
+[KV value packing](../features/kv-value-packing.md).
+
+<!-- femu-example: kvssd-pack-off -->
+```
+-device femu,femu_mode=5,devsz_mb=64,kv_pack=off
+```
+
 ### Workload-mix timing (kv_timing=model)
 
 With `kv_timing=model`, Store and Retrieve take their time from a fitted
@@ -334,6 +348,7 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 | `kv_lsm_size_ratio=N is not 2 to 64` (and the other knob ranges) | See the [LSM index properties](../features/kv-lsm-index.md#properties). |
 | `kv_index=lsm and the kv_lsm_* knobs need a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
 | `FEMU kvssd: kv_index=lsm needs a page of at least 32 bytes; the page is N` | A meta page must hold one 32-byte record. |
+| `kv_pack=off needs a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
 
 ## Verify
 
@@ -367,3 +382,4 @@ Related issues: #68.
 - [Architecture: other FTLs](../concepts/architecture.md#other-ftls)
 - [Multiple namespaces](../features/multi-namespace.md)
 - [LSM-tree key index](../features/kv-lsm-index.md)
+- [KV value packing](../features/kv-value-packing.md)

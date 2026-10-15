@@ -577,6 +577,7 @@ starts, with its value space clamped. Design: [KV](../design/kvssd.md).
 | `kv_lsm_memtable_keys` | records | 16 to 65536, `kv_index=lsm` | memtable size before a flush |
 | `kv_lsm_size_ratio` | ratio | 2 to 64, `kv_index=lsm` | capacity of a level over the one above |
 | `kv_lsm_pinned_levels` | levels | 0 to 24, `kv_index=lsm` | top levels held in DRAM, with no flash I/O |
+| `kv_pack` | bool | `on` (default), `off` | values whose record fits a page share pages through an open page in DRAM; `off`: each value takes whole pages |
 
 Interactions:
 
@@ -585,6 +586,9 @@ Interactions:
 - With `kv_timing=model`, the tree still loads the NAND; only the Store and
   Retrieve times come from the model
   ([LSM-tree key index](../features/kv-lsm-index.md#with-kv_timingmodel)).
+- `kv_pack=off` needs a KV namespace. With `vwc=1`, Flush programs the open
+  page of packed values; with WCE cleared, each Store programs it
+  ([KV value packing](../features/kv-value-packing.md#durability)).
 
 ## 14. CXL SSD
 

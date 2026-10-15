@@ -20,7 +20,7 @@ PKG_CONFIG ?= pkg-config
 HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
 UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte \
              test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-             test-femu-kv-lsm
+             test-femu-kv-lsm test-femu-kv-pack
 ifeq ($(HAVE_GLIB),1)
 UNIT_TESTS += test-femu-cxl-cache
 endif
@@ -46,6 +46,10 @@ test-femu-kv-model: unit/test-kv-model.c ../kvssd/kv-model.c ../kvssd/kv-model.h
 # the test includes kv-lsm.c itself, to make its allocations fail on cue
 test-femu-kv-lsm: unit/test-kv-lsm.c ../kvssd/kv-lsm.c ../kvssd/kv-lsm.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-kv-lsm.c
+
+# the test includes kv-pack.c itself, to make its allocations fail on cue
+test-femu-kv-pack: unit/test-kv-pack.c ../kvssd/kv-pack.c ../kvssd/kv-pack.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-kv-pack.c
 
 test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
@@ -98,6 +102,6 @@ check-tools:
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
 	      test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-	      test-femu-kv-lsm nand-media.o onfi.o
+	      test-femu-kv-lsm test-femu-kv-pack nand-media.o onfi.o
 
 .PHONY: check check-docs check-tools clean

@@ -59,6 +59,14 @@ A KV namespace with `kv_index=lsm` adds its merge programs to offset 24. It
 adds the meta pages that value GC moves to offset 16. Thus its factor
 includes the index.
 
+With value packing (`kv_pack=on`, the default), a KV namespace counts
+host data at offset 8. The count is the value bytes of its Stores, in
+whole pages, rounded down. At offset 24 it counts each packed page and
+each whole value page it programs. Thus the factor is programmed pages over host data, and it
+drops below 1 when the open page drops overwritten values. With
+`kv_pack=off`, offset 8 counts the pages of each value, as before
+([KV value packing](../features/kv-value-packing.md#counters)).
+
 They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
 the thermal transition counts.
