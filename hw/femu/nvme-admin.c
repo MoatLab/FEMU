@@ -2169,7 +2169,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
  */
 typedef struct FemuMediaStats {
     uint64_t rd_bytes, wr_bytes, rd_cmds, wr_cmds;
-    uint64_t host_pages, gc_pages, nand_pages;
+    uint64_t host_pages, gc_pages, nand_pages, map_pages, map_reads;
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
     uint64_t buf_reads, buf_read_hits, buf_writes, buf_write_hits;
     uint64_t hybrid_switches;
@@ -2245,6 +2245,8 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->host_pages += ssd_host_write_pages(ns->ssd);
         st->gc_pages   += ssd_gc_write_pages(ns->ssd);
         st->nand_pages += ssd_nand_write_pages(ns->ssd);
+        st->map_pages += ssd_map_write_pages(ns->ssd);
+        st->map_reads += ssd_map_read_pages(ns->ssd);
         ssd_hybrid_stats(ns->ssd, &st->hybrid_switches, &st->hybrid_full,
                          &st->hybrid_erases);
         {
@@ -2254,9 +2256,10 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             st->pd[0] += r;
             st->pd[1] += pads;
             st->pd[2] += cl;
-            /* pad pages are media writes too */
+            /* pad and translation pages are media writes too */
             st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
-                                ssd_gc_write_pages(ns->ssd) + pads) *
+                                ssd_gc_write_pages(ns->ssd) + pads +
+                                ssd_map_write_pages(ns->ssd)) *
                                (uint64_t)ssd_page_size(ns->ssd);
         }
         /*
@@ -2309,7 +2312,9 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
  * Bytes 88, 96 and 104 hold little-endian uint64_t hybrid switch merges,
  * full merges and charged merge erases, summed over namespaces. Physical
  * line GC is excluded. Other mappings leave these formerly reserved bytes
- * zero; existing fields and the 512-byte size are unchanged.
+ * zero; existing fields and the 512-byte size are unchanged. Bytes 280 and
+ * 288 hold the translation page programs and reads of mapping=dftl, which
+ * the amplification at byte 0 includes.
  */
 static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
 {
@@ -2326,8 +2331,8 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
      */
     if (st.host_pages) {
         stats.waf_x1000 = cpu_to_le32((uint32_t)
-            (((st.nand_pages + st.gc_pages + st.pd[1]) * 1000ull) /
-             st.host_pages));
+            (((st.nand_pages + st.gc_pages + st.map_pages + st.pd[1]) *
+              1000ull) / st.host_pages));
     }
     stats.host_write_pages = cpu_to_le64(st.host_pages);
     stats.gc_write_pages = cpu_to_le64(st.gc_pages);
@@ -2366,6 +2371,8 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.pd_open_reclaims = cpu_to_le64(st.pd[0]);
     stats.pd_pad_pages = cpu_to_le64(st.pd[1]);
     stats.pd_pad_closes = cpu_to_le64(st.pd[2]);
+    stats.map_write_pages = cpu_to_le64(st.map_pages);
+    stats.map_read_pages = cpu_to_le64(st.map_reads);
     *log = stats;
 }
 

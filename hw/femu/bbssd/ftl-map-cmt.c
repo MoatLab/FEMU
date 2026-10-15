@@ -1,14 +1,11 @@
 /*
- * DFTL / cached mapping table (CMT) cost model. A bounded cache of translation
- * pages over the flat maptbl; a CMT miss charges a translation-page NAND read
- * (and a write-back if a dirty TP is evicted). Timing-only: the flat maptbl in
- * ftl-map.c stays the source of truth. cmt_touch is the datapath entry point.
+ * DFTL cached mapping table (CMT): a bounded cache of whole translation pages
+ * over the flat maptbl, which stays the source of truth for lookups.
  *
- * Scope: the cost is charged for the USER read/write datapath (ssd_read,
- * ssd_write and the FDP host write). Bulk mapping updates from GC
- * relocation and TRIM update the flat maptbl directly and are not charged,
- * so the CMT models the host-facing translation cost rather than every internal
- * table mutation.
+ * Without FDP the translation pages live on flash (ftl-map-tp.c) and
+ * cmt_access() reads and writes them there. Under FDP cmt_touch() keeps the
+ * timing-only model: a miss reads, and a dirty eviction programs, a
+ * placeholder page on the TP's home LUN, and GC and TRIM cost nothing.
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
@@ -129,6 +126,83 @@ uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write)
     return lat;
 }
 
+int32_t cmt_slot_of(struct ssd *ssd, uint64_t tp)
+{
+    return ssd->cmt.capacity ? cmt_lookup(ssd, tp) : -1;
+}
+
+/* empty the CMT and write nothing back: its mappings are being discarded */
+void cmt_drop_all(struct ssd *ssd)
+{
+    if (!ssd->cmt.capacity) {
+        return;
+    }
+    memset(ssd->cmt.slots, 0, sizeof(*ssd->cmt.slots) * ssd->cmt.capacity);
+    for (uint32_t i = 0; i < ssd->cmt.hash_sz; i++) {
+        ssd->cmt.hash[i] = -1;
+    }
+    ssd->cmt.used = ssd->cmt.hand = 0;
+}
+
+/**
+ * cmt_access - the translation of @lpn for a host access, with TPs on flash
+ * @ssd: the device
+ * @lpn: the logical page
+ * @stime: when the access starts
+ * @is_write: the access changes the mapping
+ *
+ * A hit is ready when the slot's own fill ends. A miss evicts a slot by
+ * CLOCK; a dirty victim is programmed at the TP pointer once its fill has
+ * ended, in parallel with the read of the new TP, since the program holds
+ * its own copy. A TP with no flash copy needs no read. A pending TP merges
+ * its changes into the new slot and the slot is dirty.
+ *
+ * When the dirty victim has no page to go to (the free lines are down to
+ * the forced reserve), nothing is evicted: the TP is read for this access
+ * alone, and a write's change goes pending (tp_note()). So a host command
+ * never fails for TP space. Returns the time the translation is ready.
+ */
+uint64_t cmt_access(struct ssd *ssd, uint64_t lpn, uint64_t stime,
+                    bool is_write)
+{
+    uint64_t tp = lpn / ssd->cmt.lpn_per_tp;
+    int32_t slot = cmt_lookup(ssd, tp);
+    struct cmt_slot *v;
+    uint32_t victim;
+    uint64_t ready;
+
+    if (slot >= 0) {
+        ssd->cmt.slots[slot].ref = true;
+        if (is_write) {
+            ssd->cmt.slots[slot].dirty = true;
+        }
+        ssd->cmt.hits++;
+        return MAX(stime, ssd->cmt.slots[slot].ready);
+    }
+
+    ssd->cmt.misses++;
+    victim = cmt_clock_evict(ssd);
+    v = &ssd->cmt.slots[victim];
+    if (v->valid && v->dirty &&
+        !tp_program(ssd, v->tp_id, false, MAX(stime, v->ready), true, NULL)) {
+        return tp_read(ssd, tp, stime, true);
+    }
+    if (v->valid) {
+        ssd->cmt.used--;
+    }
+
+    ready = tp_read(ssd, tp, stime, true);
+    v->tp_id = tp;
+    v->valid = true;
+    v->ref = true;
+    v->dirty = is_write || tp_pending(ssd, tp);
+    v->ready = ready;
+    tp_pending_drop(ssd, tp);
+    ssd->cmt.used++;
+    cmt_rehash(ssd);
+    return ready;
+}
+
 /*
  * Allocate the CMT from cache_mb (0 = disabled), one slot per translation page.
  * The sizing is held in 64 bits and bounded so capacity and hash_sz stay within
@@ -162,6 +236,10 @@ void cmt_init(struct ssd *ssd, uint32_t cache_mb)
     }
     if (cap < 1) {
         cap = 1;
+    }
+    /* a test may ask for fewer slots than one MiB holds */
+    if (ssd->n && ssd->n->test_cmt_slots) {
+        cap = ssd->n->test_cmt_slots;
     }
     ssd->cmt.capacity = (uint32_t)cap;
     ssd->cmt.hash_sz = ssd->cmt.capacity * 2 + 1;

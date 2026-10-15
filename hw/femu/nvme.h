@@ -1300,7 +1300,9 @@ typedef struct FemuStatsLog {
     uint64_t    pd_open_reclaims; /* lines rewritten for open-block reads */
     uint64_t    pd_pad_pages;     /* pages programmed to close open lines */
     uint64_t    pd_pad_closes;    /* lines or units those pads closed */
-    uint8_t     rsvd280[232];
+    uint64_t    map_write_pages;  /* translation pages programmed (dftl) */
+    uint64_t    map_read_pages;   /* translation pages read (dftl) */
+    uint8_t     rsvd296[216];
 } FemuStatsLog;
 
 /*
@@ -2687,6 +2689,7 @@ typedef struct FemuCtrl {
     uint32_t        test_query_delay_ms;
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
+    uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */
@@ -3221,8 +3224,11 @@ uint32_t ssd_waf_x1000(struct ssd *ssd);
 uint64_t ssd_host_write_pages(struct ssd *ssd);
 uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
+uint64_t ssd_map_write_pages(struct ssd *ssd);
+uint64_t ssd_map_read_pages(struct ssd *ssd);
+uint64_t ssd_tp_moves(struct ssd *ssd);
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
-                       uint64_t *orphans);
+                       uint64_t *orphans, uint64_t *tp_pages, uint64_t *tp_bad);
 /* reclaim units not held by exactly one list, heap or frontier; 0 is right */
 uint64_t ssd_fdp_check_units(struct ssd *ssd);
 uint64_t ssd_fdp_ns_mapped(struct ssd *ssd, NvmeNamespace *ns);

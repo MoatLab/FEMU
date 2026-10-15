@@ -101,6 +101,38 @@ static void femu_map_page_gc_relocate_commit(struct ssd *ssd, uint64_t lpn,
     set_rmap_ent(ssd, lpn, new_ppa);
 }
 
+/*
+ * dftl: the page updates, plus a note to the translation page that holds
+ * the mapping, so it is written back or published (ftl-map-tp.c). Without
+ * translation pages on flash (FDP) the note does nothing.
+ */
+static void femu_map_dftl_commit_write(struct ssd *ssd, uint64_t lpn,
+                                       struct ppa *new_ppa)
+{
+    femu_map_page_commit_write(ssd, lpn, new_ppa);
+    tp_note(ssd, lpn);
+}
+
+static void femu_map_dftl_gc_relocate_commit(struct ssd *ssd, uint64_t lpn,
+                                             struct ppa *old_ppa,
+                                             struct ppa *new_ppa)
+{
+    femu_map_page_gc_relocate_commit(ssd, lpn, old_ppa, new_ppa);
+    tp_note(ssd, lpn);
+}
+
+/* dftl deallocate: the flat invalidation of ssd_deallocate_lpns(), noted */
+static void femu_map_dftl_trim(struct ssd *ssd, uint64_t lpn)
+{
+    struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+    mark_page_invalid(ssd, &ppa);
+    set_rmap_ent(ssd, INVALID_LPN, &ppa);
+    ppa.ppa = UNMAPPED_PPA;
+    set_maptbl_ent(ssd, lpn, &ppa);
+    tp_note(ssd, lpn);
+}
+
 static const struct femu_mapping_ops femu_mapping_schemes[] = {
     {
         .name          = "page",
@@ -115,8 +147,9 @@ static const struct femu_mapping_ops femu_mapping_schemes[] = {
         .uses_cmt      = true,
         .translate     = femu_map_page_translate,
         .prepare_write = femu_map_page_prepare_write,
-        .commit_write  = femu_map_page_commit_write,
-        .gc_relocate_commit = femu_map_page_gc_relocate_commit,
+        .commit_write  = femu_map_dftl_commit_write,
+        .gc_relocate_commit = femu_map_dftl_gc_relocate_commit,
+        .trim          = femu_map_dftl_trim,
     },
 };
 

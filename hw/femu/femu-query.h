@@ -75,6 +75,9 @@ typedef struct FemuQueryNs {
     uint64_t nand_pages;
     uint64_t gc_pages;
     uint64_t pad_pages;
+    uint64_t map_pages;
+    uint64_t map_reads;
+    bool tp_on;                 /* translation pages on flash */
     uint64_t erases;
 
     uint32_t free_lines;

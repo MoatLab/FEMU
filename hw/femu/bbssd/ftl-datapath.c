@@ -500,6 +500,27 @@ static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd)
 }
 
 /*
+ * What the translation of @lpn adds to an access that starts at @stime, as
+ * a duration; nothing without mapping=dftl. With translation pages on flash
+ * the CMT reads and writes them where they are, otherwise (FDP) it charges
+ * placeholder pages.
+ */
+static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
+                            bool is_write)
+{
+    uint64_t t;
+
+    if (!ssd->cmt.capacity) {
+        return 0;
+    }
+    if (!ssd->tp_on) {
+        return cmt_touch(ssd, lpn, stime, is_write);
+    }
+    t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    return cmt_access(ssd, lpn, t, is_write) - t;
+}
+
+/*
  * Program one logical page: choose placement through the mapping scheme,
  * commit it, and charge the media. Shared by the ordinary write path and by
  * the eviction of a buffered page, so both cost the same.
@@ -653,10 +674,8 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         }
 
         /* dftl: demand-cache translation cost (no-op when disabled) */
-        if (ssd->cmt.capacity) {
-            curlat = cmt_touch(ssd, lpn, stime, true);
-            maxlat = (curlat > maxlat) ? curlat : maxlat;
-        }
+        curlat = ssd_map_lat(ssd, lpn, stime, true);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         curlat = ssd_program_lpn(ssd, lpn, stime, -1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
@@ -757,10 +776,8 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             femu_dbg_dump_lpn(ssd, lpn);
 
         /* dftl: charge the demand-cache translation cost (no-op when disabled) */
-        if (ssd->cmt.capacity) {
-            uint64_t clat = cmt_touch(ssd, lpn, req->stime, false);
-            maxlat = (clat > maxlat) ? clat : maxlat;
-        }
+        sublat = ssd_map_lat(ssd, lpn, req->stime, false);
+        maxlat = (sublat > maxlat) ? sublat : maxlat;
 
         ppa = ssd->mapping->translate(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
@@ -960,10 +977,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         /* dftl: charge the demand-cache translation cost (no-op when disabled) */
-        if (ssd->cmt.capacity) {
-            uint64_t clat = cmt_touch(ssd, lpn, req->stime, true);
-            maxlat = (clat > maxlat) ? clat : maxlat;
-        }
+        curlat = ssd_map_lat(ssd, lpn, req->stime, true);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
 
         if (ssd->n->power_loss) {
             ssd_buffer_discard(ssd, lpn);

@@ -22,6 +22,14 @@ int bb_gc_forced_lines(FemuCtrl *n)
                    femu_mapping_name_uses_log_class(p->mapping_scheme))) {
         lines = 1;
     }
+    /*
+     * With translation pages on flash, one victim can roll both the data
+     * pointer and the TP pointer over to a new line, and no TP traffic but
+     * the move of a TP line may take these lines (ftl-map-tp.c).
+     */
+    if (bb_tp_physical(n) && lines < 2) {
+        lines = 2;
+    }
     return lines;
 }
 
@@ -44,6 +52,42 @@ uint64_t bb_eol_reserve_lines(FemuCtrl *n)
     /* a command may start part way into a page and end part way into one */
     pages = DIV_ROUND_UP(femu_eol_max_bytes(n), page) + 1;
     return DIV_ROUND_UP(pages, line);
+}
+
+/*
+ * mapping=dftl keeps its translation pages on flash unless FDP is on: the
+ * reclaim units own every free line there, so FDP keeps the timing-only
+ * model. Realize and ssd_init() ask the same question here.
+ */
+bool bb_tp_physical(FemuCtrl *n)
+{
+    const char *map = n->bb_params.mapping_scheme;
+
+    return map && !strcmp(map, "dftl") &&
+           !(n->subsys && n->subsys->params.fdp.enabled);
+}
+
+/*
+ * Lines the translation pages of @ns take beyond the forced reserve: the
+ * live TPs, rounded up to whole lines, and the TP pointer's open line. A TP
+ * holds page_size / 8 mappings; one more TP covers a namespace that does
+ * not start on a TP boundary. Realize, the wear floor and the reserve rule
+ * of ftl-map-tp.c all use this count.
+ */
+int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t per_line = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+                        p->pgs_per_blk;
+    uint64_t per_tp = MAX(page / sizeof(uint64_t), 1);
+    uint64_t tps;
+
+    if (!bb_tp_physical(n) || !page || !per_line) {
+        return 0;
+    }
+    tps = DIV_ROUND_UP(DIV_ROUND_UP(ns->size, page), per_tp) + 1;
+    return DIV_ROUND_UP(tps, per_line) + 1;
 }
 
 /*

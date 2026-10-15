@@ -79,7 +79,8 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->wear_floor_lines =
         DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), (uint64_t)spp->secsz *
                                             spp->secs_per_pg),
-                     spp->pgs_per_line) + bb_gc_forced_lines(n) + 2;
+                     spp->pgs_per_line) + bb_gc_forced_lines(n) + 2 +
+        bb_tp_reserve_lines(n, ns);
 }
 
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
@@ -215,6 +216,15 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /* the CMT is a dftl-only cost model: never charge it under the page scheme,
      * even if mapping_cache_mb was set */
     cmt_init(ssd, femu_mapping_scheme_uses_cmt(ssd->mapping) ? map_cache_mb : 0);
+    /*
+     * With dftl and no FDP the translation pages live on flash. FDP keeps
+     * the timing-only model: its reclaim units own every free line.
+     */
+    ssd->tp_on = false;
+    if (ssd->cmt.capacity && bb_tp_physical(n) &&
+        (NS_BBSSD(ns) || NS_CSD(ns))) {
+        tp_init(ssd);
+    }
 
     /*
      * Optional DRAM read cache (opt-in via read_cache_mb; 0 = off, bit-identical
@@ -256,8 +266,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
 /*
  * Write-amplification factor scaled by 1000, so it needs no floating point on
- * the read path: pages written to NAND, pad pages included, over pages the
- * host wrote. Reads 1000
+ * the read path: pages written to NAND, translation and pad pages included,
+ * over pages the host wrote. Reads 1000
  * (a factor of 1.0) before the host has written anything.
  *
  * The denominator is what the host wrote, not what reached the media, so a
@@ -269,7 +279,7 @@ uint32_t ssd_waf_x1000(struct ssd *ssd)
 {
     uint64_t host = ssd->host_write_pages;
     uint64_t total = ssd->nand_write_pages + ssd->gc_write_pages +
-                     ssd->pd_pad_pages;
+                     ssd->map_write_pages + ssd->pd_pad_pages;
 
     if (host == 0) {
         return 1000;
@@ -294,15 +304,33 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
     return ssd->nand_write_pages;
 }
 
+/* translation page programs and reads, with TPs on flash; 0 otherwise */
+uint64_t ssd_map_write_pages(struct ssd *ssd)
+{
+    return ssd->map_write_pages;
+}
+
+uint64_t ssd_map_read_pages(struct ssd *ssd)
+{
+    return ssd->map_read_pages;
+}
+
+/* translation pages collection relocated, also in ssd_map_write_pages() */
+uint64_t ssd_tp_moves(struct ssd *ssd)
+{
+    return ssd->tp_moves;
+}
+
 /*
  * Check the mapping against the media. @lost counts logical pages whose
  * mapping names a page that does not hold them: one not valid, or one the
- * reverse map gives to another page. @orphans counts valid pages that no
- * mapping names. Collection that erases a block it has not emptied leaves the
+ * reverse map gives to another page. @orphans counts valid data pages that
+ * no mapping names. @tp_pages and @tp_bad are the valid translation pages
+ * and the TP rules they break (see tp_check()). Collection that erases a block it has not emptied leaves the
  * first; a relocated copy left marked valid leaves the second.
  */
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
-                       uint64_t *orphans)
+                       uint64_t *orphans, uint64_t *tp_pages, uint64_t *tp_bad)
 {
     struct ssdparams *spp = &ssd->sp;
     struct ppa owner;
@@ -337,6 +365,10 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
                             continue;
                         }
                         lpn = get_rmap_ent(ssd, &ppa);
+                        /* translation pages: tp_check() below */
+                        if (rmap_is_tp(lpn)) {
+                            continue;
+                        }
                         owner.ppa = UNMAPPED_PPA;
                         if (lpn < spp->tt_pgs) {
                             owner = get_maptbl_ent(ssd, lpn);
@@ -347,6 +379,7 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
             }
         }
     }
+    *tp_bad = tp_check(ssd, tp_pages);
 }
 
 /* Lines rewritten because a block of theirs passed the read stress limit. */
@@ -969,6 +1002,15 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         do_gc(ssd, false);
     }
 
+    /*
+     * Changes to translation pages that no victim or command published yet,
+     * such as a write that found no room to evict: retry them here. A paced
+     * victim keeps its own until it is done, so each TP goes out once.
+     */
+    if (ssd->tp_on && ssd->tp_fifo_cnt && !ssd->pace_line) {
+        tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+    }
+
     if (n->streams) {
         qemu_mutex_unlock(&n->streams_lock);
     }
@@ -1003,6 +1045,7 @@ void ssd_free(struct ssd *ssd)
     }
 
     rcache_destroy(ssd);
+    tp_free(ssd);
     cmt_destroy(ssd);
     ssd_free_lines(ssd);
     ssd_free_write_buffer(ssd);

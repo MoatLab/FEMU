@@ -94,6 +94,15 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
     return loc;
 }
 
+/*
+ * Translation-page traffic that takes no media effects: no read stress, no
+ * program disturb term, age from the close time only.
+ */
+static inline bool bb_io_meta(int type)
+{
+    return type == MAP_IO || type == TP_IO;
+}
+
 /* timeline-vtable thunks: return pointers into bbssd's own per-resource state */
 static uint64_t *bb_ch_avail(void *opaque, uint32_t ch)
 {
@@ -321,7 +330,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
      * read is only charged for time: it addresses a placeholder block, whose
      * data pages it does not disturb.
      */
-    if (op == NAND_MEDIA_READ && ncmd->type != MAP_IO) {
+    if (op == NAND_MEDIA_READ && !bb_io_meta(ncmd->type)) {
         get_blk(ssd, ppa)->read_cnt++;
     }
 
@@ -329,7 +338,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     /* the thermal model reads these from the main loop */
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
-    loc = bb_decode_loc(ssd, ppa, stime, ncmd->type != MAP_IO);
+    loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
 
@@ -372,7 +381,8 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
         if (op == NAND_MEDIA_READ) {
             get_blk(ssd, &ppas[i])->read_cnt++;
         }
-        locs[i] = bb_decode_loc(ssd, &ppas[i], stime, ncmd->type != MAP_IO);
+        locs[i] = bb_decode_loc(ssd, &ppas[i], stime,
+                               !bb_io_meta(ncmd->type));
     }
 
     ssd->media_ops[op]++;

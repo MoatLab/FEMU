@@ -50,6 +50,7 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
     ssd_query_mark_wp(state, &ssd->hot_wp);
     ssd_query_mark_wp(state, &ssd->log_wp);
     ssd_query_mark_wp(state, &ssd->stream_gc_wp);
+    ssd_query_mark_wp(state, &ssd->tp_wp);
     for (i = 0; i < ARRAY_SIZE(ssd->stream_wp); i++) {
         ssd_query_mark_wp(state, &ssd->stream_wp[i]);
     }
@@ -240,6 +241,9 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->nand_pages = ssd->nand_write_pages;
     q->gc_pages = ssd->gc_write_pages;
     q->pad_pages = ssd->pd_pad_pages;
+    q->map_pages = ssd->map_write_pages;
+    q->map_reads = ssd->map_read_pages;
+    q->tp_on = ssd->tp_on;
     q->erases = ssd->total_erases;
 
     q->fdp = ssd->fdp_enabled;

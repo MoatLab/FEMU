@@ -127,7 +127,7 @@
 #
 # @nand-write-pages: pages programmed on behalf of the host
 #
-# @gc-write-pages: pages relocated by garbage collection
+# @gc-write-pages: data pages relocated by garbage collection
 #
 # @block-erases: block erases, summed over every block
 #
@@ -135,16 +135,25 @@
 #     reclaim units left open past pd_open_close_sec.  Absent when no
 #     page was padded.
 #
+# @map-write-pages: translation pages programmed: dirty evictions,
+#     published changes and translation pages that collection moved.
+#     Present only when mapping=dftl keeps its translation pages on
+#     flash (no FDP).
+#
+# @map-read-pages: translation pages read from flash.  Present under
+#     the same condition as @map-write-pages.
+#
 # @waf: write amplification factor, (@nand-write-pages +
-#     @gc-write-pages + @pad-write-pages) / @host-write-pages.  Absent
-#     until the host has written a page.
+#     @gc-write-pages + @map-write-pages + @pad-write-pages) /
+#     @host-write-pages.  Absent until the host has written a page.
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuWriteCounters',
   'data': { 'host-write-pages': 'uint64', 'nand-write-pages': 'uint64',
             'gc-write-pages': 'uint64', 'block-erases': 'uint64',
-            '*pad-write-pages': 'uint64', '*waf': 'number' } }
+            '*pad-write-pages': 'uint64', '*map-write-pages': 'uint64',
+            '*map-read-pages': 'uint64', '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:

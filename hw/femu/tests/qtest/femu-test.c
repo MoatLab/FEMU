@@ -4188,6 +4188,16 @@ static void femu_query_matches_c0h(FemuCtrlState *c, uint64_t buf)
     } else {
         g_assert_false(qdict_haskey(ctr, "waf"));
     }
+    /* translation pages: present with mapping=dftl, else zero in C0h */
+    if (qdict_haskey(ctr, "map-write-pages")) {
+        g_assert_cmpuint(qdict_get_int(ctr, "map-write-pages"), ==,
+                         ldq_le_p(log + 280));
+        g_assert_cmpuint(qdict_get_int(ctr, "map-read-pages"), ==,
+                         ldq_le_p(log + 288));
+    } else {
+        g_assert_cmpuint(ldq_le_p(log + 280), ==, 0);
+        g_assert_cmpuint(ldq_le_p(log + 288), ==, 0);
+    }
     qobject_unref(rsp);
 }
 
@@ -4212,7 +4222,7 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     uint64_t erase_hi = 0;
     uint64_t erases;
     uint64_t blocks;
-    uint64_t mapped, lost, orphans;
+    uint64_t mapped, lost, orphans, tp_pages, tp_bad;
     QListEntry *e;
     QDict *rsp;
     QDict *ns = femu_query_ns(qts, args, &rsp);
@@ -4265,15 +4275,19 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{'path':%s,"
                     "'property':'x-ftl-check'}}", path);
     g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
-                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
-                           &mapped, &lost, &orphans), ==, 3);
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64, &mapped, &lost, &orphans, &tp_pages,
+                           &tp_bad), ==, 5);
     qobject_unref(rsp);
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(tp_bad, ==, 0);
     g_test_message("lines: %" PRIu64 " valid, %" PRIu64 " mapped, %" PRIu64
-                   " erases", vpc, mapped, erases);
-    g_assert_cmpuint(vpc, ==, mapped);
-    g_assert_cmpuint(vpc, ==, want_valid);
+                   " translation pages, %" PRIu64 " erases", vpc, mapped,
+                   tp_pages, erases);
+    /* a valid page holds data or a translation page of mapping=dftl */
+    g_assert_cmpuint(vpc, ==, mapped + tp_pages);
+    g_assert_cmpuint(mapped, ==, want_valid);
 }
 
 /* @lines records from @offset, and where the listing continues (0 = end) */
@@ -6448,13 +6462,12 @@ static void femu_test_pd_kv(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
- * A dftl translation read addresses page 0 of block 0, a placeholder with no
- * data page. The first touch of each translation page (512 pages here) is a
- * miss that reads it. Every pd_* term is on, with one age tier per 0.1 ms.
- *   - Pages 0 to 2 leave block 0 open; 50 ms later the miss of translation
- *     page 1 pays no edge, open or open-age term: less than one tier.
- *   - Pages 4 to 15 close line 0; 50 ms later the miss of translation page
- *     2 pays the close-time age it pays on master: 4 tiers.
+ * A translation page (TP) read with every pd_* term on, one age tier per
+ * 0.1 ms. The CMT holds one TP, and a TP holds 512 pages.
+ *   - Pages 0 to 2 load TP 0. A write of page 600 loads TP 1 and evicts
+ *     TP 0 to page 0 of an open TP line: an edge wordline of an open block.
+ *   - 50 ms later a write of page 3 reads TP 0 back. A TP read takes no
+ *     program disturb term and no open-line age: less than one tier.
  */
 static void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -6463,21 +6476,18 @@ static void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 16 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
-    uint64_t t1, t2;
+    uint64_t t;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x7a, 16 * 4096);
     femu_pd_write_ns(&c, qts, 0, 3, buf, list);
+    femu_pd_write_ns(&c, qts, 600, 1, buf, list);
     g_usleep(50 * 1000);
-    t1 = femu_pd_write_ns(&c, qts, 600, 1, buf, list);
-    femu_pd_write_ns(&c, qts, 4, 12, buf, list);
-    g_usleep(50 * 1000);
-    t2 = femu_pd_write_ns(&c, qts, 1100, 1, buf, list);
-    g_test_message("pd map: miss on an open block %" PRIu64
-                   ", on a closed line %" PRIu64 " ns", t1, t2);
-    g_assert_cmpuint(t1, <, FEMU_PD_STEP_NS);
-    g_assert_cmpuint(t2, >=, 4 * FEMU_PD_STEP_NS);
+    t = femu_pd_write_ns(&c, qts, 3, 1, buf, list);
+    g_test_message("pd map: a TP read from an open TP line %" PRIu64 " ns",
+                   t);
+    g_assert_cmpuint(t, <, FEMU_PD_STEP_NS);
 
     guest_free(alloc, list);
     guest_free(alloc, buf);
@@ -7856,6 +7866,199 @@ static void femu_test_fdp_cb_utilization(void *obj, void *data,
     g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 3);
 
     guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * x-ftl-check of the device with id @id: mapped, lost and orphan pages,
+ * valid translation pages, broken TP rules and TPs moved by collection.
+ */
+static void femu_tp_check(QTestState *qts, const char *id, uint64_t v[6])
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-ftl-check'}}", id);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64, &v[0], &v[1], &v[2],
+                           &v[3], &v[4], &v[5]), ==, 6);
+    g_test_message("x-ftl-check %s", qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * mapping=dftl keeps its translation pages (TPs) on flash. 2048 pages of
+ * 4 KiB are 4 TPs of 512 mappings, and the CMT holds one TP (x-cmt-slots),
+ * so each write to another TP evicts a dirty one.
+ *   - A sequential fill writes TPs 0 to 3 in turn: 3 evictions program 3
+ *     TPs, and no TP has a copy to read yet.
+ *   - A read of page 0 reads TP 0 back and evicts TP 3: one read, one more
+ *     program.
+ *   - Random overwrites fill the device many times. Collection takes TP
+ *     lines as well as data lines, and every page still reads back what
+ *     was last written to it.
+ * The amplification of log page C0h counts the TP programs. @data names
+ * the variant: "exact" checks the counts of the first two steps, which a
+ * write buffer or pacing changes; "loose" only the invariants; "csd" also
+ * skips query-femu, which has no line counters for a CSD namespace.
+ */
+static void femu_test_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    bool exact = g_str_equal(data, "exact");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 2048;
+    g_autofree uint8_t *want = g_new0(uint8_t, pages);
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t host, nand, gc, map, pad, v[6];
+    uint32_t seed = 5;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    for (i = 0; i < pages / 64; i++) {
+        qtest_memset(qts, buf, 0x10 + i, 64 * 4096);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i * 64, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+        memset(want + i * 64, 0x10 + i, 64);
+    }
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    if (exact) {
+        g_assert_cmpuint(v[0], ==, pages);
+        g_assert_cmpuint(v[3], ==, 3);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, 3);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, 0);
+    }
+
+    g_assert_cmphex(femu_read_pages(&c, 0, 1, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0x10);
+    if (exact) {
+        g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, 4);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, 1);
+    }
+
+    for (i = 0; i < 6000; i++) {
+        uint32_t page;
+        uint8_t b = 0x80 + (i & 0x3f);
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % pages;
+        qtest_memset(qts, buf, b, 4096);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, 1, buf, list)),
+                        ==, NVME_SUCCESS);
+        want[page] = b;
+    }
+    /* a write buffer may still hold pages: flush them to the media */
+    femu_hybrid_flush(&c);
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, pages);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(v[5], >, 0);
+    for (i = 0; i < pages; i += 17) {
+        g_assert_cmphex(femu_read_pages(&c, i, 1, buf, list), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, want[i]);
+    }
+
+    host = femu_c0h_field(&c, log, 8);
+    gc = femu_c0h_field(&c, log, 16);
+    nand = femu_c0h_field(&c, log, 24);
+    map = femu_c0h_field(&c, log, 280);
+    pad = femu_c0h_field(&c, log, 264);
+    g_test_message("host %" PRIu64 " nand %" PRIu64 " gc %" PRIu64
+                   " map %" PRIu64, host, nand, gc, map);
+    g_assert_cmpuint(gc, >, 0);
+    g_assert_cmpuint(map, >, v[5]);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 0) & 0xffffffff, ==,
+                     (nand + gc + map + pad) * 1000 / host);
+    /* query-femu shows a CSD namespace without the line counters */
+    if (!g_str_equal(data, "csd")) {
+        femu_query_matches_c0h(&c, log);
+        femu_query_check_lines(qts, id, pages);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * mapping=dftl keeps lines for its translation pages: the TPs of the
+ * namespace rounded up to whole lines, the TP pointer's line, and at least
+ * two forced free lines. 9 MiB is 72 lines of 32 pages. With 77 lines page
+ * mapping keeps 3 + 1 and fits; dftl keeps 3 + 1 + 2 and is refused.
+ */
+static void femu_test_dftl_capacity(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                           "'driver':'femu','id':'cap','addr':'5',"
+                           "'devsz_mb':9,'secsz':512,'secs_per_pg':8,"
+                           "'pgs_per_blk':8,'blks_per_pl':77,'luns_per_ch':2,"
+                           "'nchs':2,'femu_mode':1,'mapping':'dftl'}}");
+    const char *desc;
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "translation pages"));
+    g_assert_nonnull(strstr(desc, "expose at most 8 MiB"));
+    qobject_unref(rsp);
+}
+
+/*
+ * The smallest geometry dftl accepts for 9 MiB (78 lines), a CMT of one
+ * TP, and five passes of random single-page writes: every write succeeds,
+ * and the mapping, the TPs and the GTD agree at the end.
+ */
+static void femu_test_dftl_tp_min(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 9 * 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[6];
+    uint32_t seed = 11;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 5 * pages; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, "/machine/peripheral/tp", v);
+    g_assert_cmpuint(v[0], ==, pages);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, 0);
+
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
@@ -41416,7 +41619,7 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,ecc_step_ns=10000000,mapping=dftl,pd_edge_wls=1,"
             "pd_edge_tiers=2,pd_open_tiers=1,pd_open_age=on,"
-            "ecc_retention_sec=100,age_scale=1000000"
+            "ecc_retention_sec=100,age_scale=1000000,x-cmt-slots=1"
     });
     qos_add_test("pd-reuse", "femu", femu_test_pd_reuse,
                  &(QOSGraphTestOptions) {
@@ -42887,6 +43090,47 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=4,fdm_size=1,gc_policy=fifo,subsys=fdpsub",
     });
+    qos_add_test("dftl-capacity", "femu", femu_test_dftl_capacity, NULL);
+    qos_add_test("dftl-tp-min", "femu", femu_test_dftl_tp_min,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=9,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=78,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1"
+    });
+    /* forced collection only at the 2 lines dftl keeps at least */
+    qos_add_test("dftl-tp-min-tight", "femu", femu_test_dftl_tp_min,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=9,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=77,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1,gc_thres_pcent=99,"
+            "gc_thres_pcent_high=100"
+    });
+    {
+        /* the TP pages of mapping=dftl through each way collection runs */
+        static const char *const tp_var[][2] = {
+            { "dftl-tp", "femu_mode=1" },
+            { "dftl-tp-copyback", "femu_mode=1,gc_copyback=on" },
+            { "dftl-tp-pace", "femu_mode=1,gc_pace=on" },
+            { "dftl-tp-hot-cold", "femu_mode=1,hot_cold_sep=on" },
+            { "dftl-tp-buffer", "femu_mode=1,buffer_size=64" },
+            { "dftl-tp-csd", "femu_mode=4,fdm_size=1" },
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(tp_var); i++) {
+            qos_add_test(tp_var[i][0], "femu", femu_test_dftl_tp,
+                         &(QOSGraphTestOptions) {
+                .arg = (void *)(!i ? "exact" :
+                                g_str_has_prefix(tp_var[i][1], "femu_mode=4") ?
+                                "csd" : "loose"),
+                .edge.extra_device_opts = g_strdup_printf(
+                    "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+                    "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+                    "mapping=dftl,x-cmt-slots=1,%s", tp_var[i][1]),
+            });
+        }
+    }
     qos_add_test("fdp-dftl", "femu", femu_test_fdp_dftl,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"dftl",

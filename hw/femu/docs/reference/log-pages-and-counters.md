@@ -12,9 +12,9 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 4 | Write amplification factor, scaled by 1000: (pages programmed + pages relocated by garbage collection + pad pages at offset 264) x 1000 / pages the host asked to program |
+| 0 | 4 | Write amplification factor, scaled by 1000: (pages programmed + pages relocated by garbage collection + pad pages at offset 264 + translation pages at offset 280) x 1000 / pages the host asked to program |
 | 8 | 8 | Pages the host asked to program |
-| 16 | 8 | Pages relocated by garbage collection |
+| 16 | 8 | Data pages relocated by garbage collection |
 | 24 | 8 | Pages actually programmed |
 | 32 | 8 | Reads of the most-read block since its erase |
 | 40 | 8 | Lines rewritten because of read stress (reclaim units under FDP) |
@@ -47,8 +47,10 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 256 | 8 | Lines (reclaim units under FDP) rewritten for the open-block read limit (`pd_open_read_limit`); not counted at offset 40 |
 | 264 | 8 | Pages programmed with pad data to close lines or units left open (`pd_open_close_sec`) |
 | 272 | 8 | Lines or units those pads closed |
+| 280 | 8 | Translation pages programmed (`mapping=dftl` without FDP): dirty CMT evictions, published changes, and translation pages that collection, refresh or wear levelling moved |
+| 288 | 8 | Translation pages read from flash (`mapping=dftl` without FDP) |
 
-Bytes 4-7 and 280-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 296-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

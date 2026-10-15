@@ -285,6 +285,8 @@ was not doing anything.
 - Under FDP, forced GC keeps at least one reclaim unit free unless `gc_thres_pcent_high` is 100. Below 20 units the watermark rounded to none, and a pass that filled its destination part way had no unit to go on with (89f34939f).
 - With `hot_cold_sep`, Streams, or a `hybrid` or `fast` mapping, forced GC keeps at least one line free. Below 20 lines, where the watermark used to round to zero, such a namespace can expose one line less (5a81d02cd).
 - OC 1.2 Identify no longer advertises hybrid commands, and unsupported OC 1.2 block opcodes are rejected (f5fc7d573, 6b5081821).
+- `mapping=dftl` without FDP keeps its translation pages on flash, in lines of their own. Collection moves them, and dirty evictions and the changes that collection and deallocate make program them. FDP keeps the timing-only model.
+- Log page C0h (bytes 280 and 288) and `query-femu` count the translation page programs and reads of `mapping=dftl`, and the write amplification factor includes the programs. Realize keeps lines for these pages, so the largest namespace a geometry exposes is smaller than before. `x-ftl-check` adds the translation page checks.
 - The `run-*.sh` launchers name QEMU's threads (`-name ...,debug-threads=on`), so `ps -T` and `top -H` show `femu-poller`, `FEMU-FTL-Thread` and `CPU N/KVM` (e29fe6ee2).
 
 The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in

@@ -4147,7 +4147,11 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     }
 }
 
-/* The FTL's mapping of namespace 1 against its media; see ssd_check_mapping */
+/*
+ * The FTL's mapping of namespace 1 against its media: mapped, lost and
+ * orphan pages, then valid translation pages, broken TP rules and TP moves
+ * by collection. See ssd_check_mapping.
+ */
 static char *femu_test_ftl_check(Object *obj, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -4155,6 +4159,9 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
     uint64_t mapped;
     uint64_t lost;
     uint64_t orphans;
+    uint64_t tp_pages;
+    uint64_t tp_bad;
+    uint64_t moves;
     bool resume;
 
     if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
@@ -4162,10 +4169,12 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
         return NULL;
     }
     resume = nvme_pause_pollers(n);
-    ssd_check_mapping(ns->ssd, &mapped, &lost, &orphans);
+    ssd_check_mapping(ns->ssd, &mapped, &lost, &orphans, &tp_pages, &tp_bad);
+    moves = ssd_tp_moves(ns->ssd);
     nvme_resume_pollers(n, resume);
-    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64,
-                           mapped, lost, orphans);
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRIu64 " %" PRIu64, mapped, lost, orphans,
+                           tp_pages, tp_bad, moves);
 }
 
 /* FDP reclaim units of namespace 1 that sit in no place or in two */
@@ -4413,6 +4422,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_uint32_ptr(obj, "x-cmt-slots",
+                                       &FEMU(obj)->test_cmt_slots,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,
                                        OBJ_PROP_FLAG_READWRITE);

@@ -237,41 +237,66 @@ with no mapping costs no NAND time.
 
 ### DFTL (`mapping=dftl`)
 
-DFTL keeps the page-level mapping on NAND and caches the translation pages
-that are in use. FEMU models the cost of that cache, not its contents: the
-flat `maptbl` stays the source of truth, and `cmt_touch()` in
-`hw/femu/bbssd/ftl-map-cmt.c` charges NAND time for misses.
+DFTL keeps the page-level mapping on NAND in translation pages (TPs) and
+caches the TPs in use in a cached mapping table (CMT). The flat `maptbl`
+still answers every lookup. Without FDP the TPs also live on flash, in
+`hw/femu/bbssd/ftl-map-tp.c`:
 
 ```text
-  host read/write of lpn
-        |
-        v
-  tp_id = lpn / lpn_per_tp          lpn_per_tp = page_size / 8
-        |                           (512 for a 4 KiB page)
-        v
-  +-------------------------------+
-  | cached mapping table (CMT)    |  capacity = mapping_cache_mb / page_size
-  | CLOCK, one slot per TP        |  slots
-  +-------------------------------+
-     | hit: no cost; a write marks the slot dirty
-     | miss:
-     v
-  evict a slot by CLOCK
-     | dirty victim: program it on LUN (victim tp_id % tt_luns)
-     v
-  read the TP on LUN (tp_id % tt_luns), after the write-back
-     |
-     v
-  latency = write-back + read, charged to this request
+ DRAM (power-loss protected)              NAND
+   CMT: whole TPs, CLOCK, dirty bit         TP lines (line kind LINE_TP),
+   GTD: tp -> page of its current copy       written only by the TP pointer
+   pending: changed TPs with no CMT slot     rmap of a TP page: tag | tp
+
+ host read/write of lpn, tp = lpn / (page_size / 8)
+   CMT hit  --> no NAND cost; a write makes the slot dirty
+   CMT miss --> evict a slot by CLOCK
+                 dirty victim --> program it at the TP pointer, GTD = new
+              --> read the GTD copy of tp (none: no read), fill the slot
 ```
 
-With `mapping_cache_mb` left at 0, DFTL uses 4 MiB, which holds 1024
-translation pages and so covers 2 GiB of logical space on a 4 KiB page. The
-translation-page traffic occupies the LUN timelines like any other NAND
-operation but is not counted as host or GC writes. Host reads, host writes
-and buffer write-backs are charged, and under FDP placed writes and Write
-Zeroes without Deallocate too. GC relocation, deallocate and, without FDP,
-Write Zeroes update `maptbl` without a CMT access.
+- A TP holds `page_size / 8` mappings, 512 on a 4 KiB page. With
+  `mapping_cache_mb` left at 0 the CMT is 4 MiB: 1024 TPs, 2 GiB of logical
+  space on a 4 KiB page.
+- The CMT caches whole TPs. This is a DFTL variant with a TP-granularity
+  cache, as many real FTLs use. It is not the entry-granularity CMT of
+  Gupta et al. (ASPLOS '09).
+- Every change of a mapping reaches the TPs through one interface,
+  `tp_note()`. A cached TP gets dirty. Any other TP goes pending, and the
+  FTL publishes it later with one read and one program for all its changes.
+- Collection publishes at the end of each victim. A paced victim publishes
+  when it is empty. The end of each request publishes what is left.
+- Collection takes TP lines and data lines from one victim queue. It moves
+  each valid page by its owner: a TP through the TP pointer and the GTD, a
+  data page through the data path. A TP line never moves by copyback.
+- A TP program never takes one of the free lines that forced collection
+  keeps, except to move a TP line. A dirty eviction or a publication with
+  no page leaves the TP dirty or pending. So a host command does not fail
+  for lack of TP space.
+- The mapping DRAM is modelled as capacitor-backed, as on enterprise SSDs.
+  The pending changes stand for a log of changes in that DRAM. The model does
+  not size it: in the worst case it holds one entry per logical page, and
+  `mapping_cache_mb` does not bound it.
+  A power loss keeps the GTD, the CMT and the pending TPs. Flush and FUA
+  need no extra metadata barrier; ordinary evictions still run.
+
+Under FDP, TPs stay timing only. A miss reads a placeholder page on LUN
+`tp_id % tt_luns`, and a dirty eviction programs one. That traffic counts
+in no counter, and collection and deallocate cost no TP access.
+
+Space. With TPs on flash, realize keeps lines for the live TPs of the
+namespace, rounded up to whole lines, and for the TP pointer. Forced
+collection keeps at least two free lines. So the largest size a geometry
+exposes falls with `mapping=dftl`, and realize refuses a size without room.
+
+Counters. `map-write-pages` and `map-read-pages` (query-femu, C0h bytes 280
+and 288) count TP programs and reads. The write amplification factor adds
+the TP programs:
+
+```text
+ WAF = (nand_write_pages + gc_write_pages + map_write_pages + pad pages)
+       / host_write_pages
+```
 
 ### Log-block mapping: BAST (`mapping=hybrid`) and FAST (`mapping=fast`)
 
@@ -331,7 +356,7 @@ the merge, and the relocated pages count in the write amplification factor.
 | `mapping` | Models | Extra cost charged | Extra write pointer | Counters |
 | --- | --- | --- | --- | --- |
 | `page` | a full page map in DRAM | none | none | none |
-| `dftl` | a page map on NAND with a cache of translation pages | translation page read on a miss, program on a dirty eviction | none | none exported |
+| `dftl` | a page map on NAND with a cache of translation pages | translation page read on a miss, program on a dirty eviction, publication of the changes collection and deallocate make | TP (without FDP) | C0h bytes 280 and 288 |
 | `hybrid` | BAST log blocks | switch and full merges per log | LOG | C0h bytes 88 to 111 |
 | `fast` | FAST log blocks | bounded random merges, sequential switch merges | LOG | none exported |
 
@@ -1060,7 +1085,7 @@ ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 | Critical Warning | bit 0 spare below 20, bit 1 temperature, bit 2 an overworn block, bit 3 media read-only; byte 6 (EGCWS) and the Endurance Group log repeat bits 0, 2 and 3 |
 | Media and Data Integrity Errors | injected read and write faults (and ZNS write faults) |
 | Data units, host commands | the pollers' host I/O counters, not the FTL |
-| Endurance Group Media Units Written | (NAND + GC + pad write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
+| Endurance Group Media Units Written | (NAND + GC + translation + pad write pages) x page size, in units of 10^9 bytes rounded up; needs a `femu-subsys` |
 
 ### Counters kept but not exported
 
@@ -1291,7 +1316,8 @@ never changes in a mode means the mode is not reached.
 | `hw/femu/bbssd/ftl-datapath.c` | read, write, write buffer, deallocate, Write Zeroes, power-loss rollback |
 | `hw/femu/bbssd/ftl-line-gc.c` | lines, write pointers, Streams pointers, GC, victim policies, read reclaim |
 | `hw/femu/bbssd/ftl-map.c` | `maptbl`, `rmap`, page and DFTL schemes, scheme registry |
-| `hw/femu/bbssd/ftl-map-cmt.c` | DFTL cached mapping table cost |
+| `hw/femu/bbssd/ftl-map-cmt.c` | DFTL cached mapping table |
+| `hw/femu/bbssd/ftl-map-tp.c` | DFTL translation pages on flash: GTD, TP pointer, publication, TP moves, checks |
 | `hw/femu/bbssd/ftl-map-hybrid.c` | BAST log-block scheme and its C0h counters |
 | `hw/femu/bbssd/ftl-map-fast.c` | FAST log-block scheme |
 | `hw/femu/bbssd/ftl-cache.c` | read cache and its eviction policies |

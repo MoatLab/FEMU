@@ -32,7 +32,20 @@ enum {
 enum {
     USER_IO = 0,
     GC_IO = 1,
-    MAP_IO = 2,     /* translation-page traffic of the DFTL cache */
+    MAP_IO = 2,     /* translation-page traffic at a placeholder address */
+    TP_IO = 3,      /* a translation page at its real address */
+};
+
+/*
+ * Owner tag of a translation page in rmap: the tag bit plus the TP id. Test
+ * INVALID_LPN first: it is all ones, so it carries the tag bit too.
+ */
+#define TP_RMAP_TAG     (1ULL << 62)
+
+/* what a line holds; a line never holds both */
+enum {
+    LINE_DATA = 0,
+    LINE_TP = 1,    /* translation pages of mapping=dftl */
 };
 
 enum {
@@ -281,6 +294,8 @@ typedef struct line {
     bool reserve;
     /* FDP with more than one reclaim group: the group of this line */
     int rg;
+    /* LINE_DATA or LINE_TP, set when a write pointer takes the line */
+    int kind;
 } line;
 
 /* wp: record next write addr */
@@ -516,6 +531,7 @@ struct cmt_slot {
     bool valid;
     bool ref;   /* CLOCK reference bit */
     bool dirty; /* dirty TP: eviction costs a write-back */
+    uint64_t ready; /* when the TP is in DRAM: the end of its fill read */
 };
 
 /* why the read path queued read_reclaim_line */
@@ -605,6 +621,35 @@ struct ssd {
         uint32_t hash_sz;
     } cmt;
 
+    /*
+     * Translation pages on flash (mapping=dftl without FDP). The GTD names
+     * the page that holds the current copy of each TP. tp_ver counts the
+     * changes to the mappings of a TP and gtd_ver the count its flash copy
+     * holds; a TP whose two differ is dirty in the CMT or pending. All of
+     * it models mapping DRAM that a power loss does not clear.
+     */
+    bool tp_on;
+    uint64_t n_tps;          /* TP ids: ceil(tt_pgs / lpn_per_tp) */
+    struct ppa *gtd;         /* tp -> ppa, or UNMAPPED_PPA */
+    uint32_t *tp_ver;
+    uint32_t *gtd_ver;
+    uint64_t *tp_done;       /* end of the last program of each TP */
+    unsigned long *tp_pending; /* changed TPs with no CMT slot */
+    unsigned long *tp_queued;  /* TPs that have an entry in tp_fifo */
+    uint64_t *tp_fifo;       /* the pending TPs in the order they came */
+    uint64_t tp_fifo_head;
+    uint64_t tp_fifo_cnt;
+    struct write_pointer tp_wp; /* TP lines; takes a line lazily */
+    uint64_t map_write_pages;   /* TP programs */
+    uint64_t map_read_pages;    /* TP reads */
+    uint64_t tp_moves;          /* TPs collection relocated */
+    /*
+     * Loads of a TP whose flash copy was behind its mappings with no change
+     * pending or dirty to bring it up to date: a change that was never
+     * noted, so the loaded copy is wrong. Always 0; x-ftl-check counts it.
+     */
+    uint64_t tp_stale_loads;
+
     /* active L2P mapping scheme (page by default) + its opaque private state */
     const struct femu_mapping_ops *mapping;
     void *map_priv;
@@ -674,7 +719,7 @@ struct ssd {
     uint64_t pd_pad_closes;         /* lines or units those pads closed */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
-    uint64_t gc_write_pages;    /* pages the device relocated itself */
+    uint64_t gc_write_pages;    /* data pages the device relocated itself */
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
      * Lines that forced collection freed with GC delay on, and when the NAND
@@ -727,6 +772,8 @@ int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
 uint64_t bb_eol_reserve_lines(FemuCtrl *n);
+bool bb_tp_physical(FemuCtrl *n);
+int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);

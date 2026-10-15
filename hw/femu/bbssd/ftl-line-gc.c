@@ -138,31 +138,53 @@ struct line *get_next_free_line(struct ssd *ssd)
     return curline;
 }
 
-static void ssd_advance_write_pointer_common(struct ssd *ssd,
-                                             struct write_pointer *wpp)
+/* a write pointer has filled @line: queue it as full or as a victim */
+static void ssd_line_filled(struct ssd *ssd, struct line *line)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
 
+    /* record when the line filled, for age-based GC policies */
+    line->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    line->close_seq = lm->next_close_seq++;
+    /* move current line to {victim,full} line list */
+    if (line->vpc == spp->pgs_per_line) {
+        /* all pgs are still valid, move to full line list */
+        ftl_assert(line->ipc == 0);
+        QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
+        lm->full_line_cnt++;
+    } else {
+        ftl_assert(line->vpc >= 0 && line->vpc < spp->pgs_per_line);
+        /* there must be some invalid pages in this line */
+        ftl_assert(line->ipc > 0);
+        pqueue_insert(lm->victim_line_pq, line);
+    }
+}
+
+/*
+ * Step the TP pointer. A full TP line closes and the pointer takes no new
+ * line until the next TP program asks for one (see tp_wp_ready()).
+ */
+void ssd_advance_tp_pointer(struct ssd *ssd)
+{
+    struct write_pointer *wpp = &ssd->tp_wp;
+
+    if (!ssd_wp_step(&ssd->sp, wpp)) {
+        return;
+    }
+    ssd_line_filled(ssd, wpp->curline);
+    wpp->curline = NULL;
+}
+
+static void ssd_advance_write_pointer_common(struct ssd *ssd,
+                                             struct write_pointer *wpp)
+{
+    struct ssdparams *spp = &ssd->sp;
+
     if (!ssd_wp_step(spp, wpp)) {
         return;
     }
-    /* record when the line filled, for age-based GC policies */
-    wpp->curline->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    wpp->curline->close_seq = lm->next_close_seq++;
-    /* move current line to {victim,full} line list */
-    if (wpp->curline->vpc == spp->pgs_per_line) {
-        /* all pgs are still valid, move to full line list */
-        ftl_assert(wpp->curline->ipc == 0);
-        QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
-        lm->full_line_cnt++;
-    } else {
-        ftl_assert(wpp->curline->vpc >= 0 &&
-                   wpp->curline->vpc < spp->pgs_per_line);
-        /* there must be some invalid pages in this line */
-        ftl_assert(wpp->curline->ipc > 0);
-        pqueue_insert(lm->victim_line_pq, wpp->curline);
-    }
+    ssd_line_filled(ssd, wpp->curline);
     /* current line is used up, pick another empty line */
     check_addr(wpp->blk, spp->blks_per_pl);
     wpp->curline = get_next_free_line(ssd);
@@ -1121,6 +1143,10 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
     } else {
         retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&
                  lm->free_line_cnt >= 1;
+        /* TP traffic stops at the forced reserve; retirement must too */
+        if (ssd->tp_on && lm->free_line_cnt < ssd->sp.gc_thres_lines_high) {
+            retire = false;
+        }
     }
 
     for (int ch = 0; ch < spp->nchs; ch++) {
@@ -1163,6 +1189,7 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
     line->close_time = 0;
     line->open_time = 0;
     line->stream_tag = 0;
+    line->kind = LINE_DATA;
     line->retired = true;
     lm->retired_line_cnt++;
     return true;
@@ -1271,6 +1298,27 @@ static void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
     }
 }
 
+/*
+ * Relocate one valid page by its owner: a translation page goes through the
+ * TP pointer and updates the GTD, a data page through the data path and the
+ * mapping. A valid page with no owner means the counts are wrong, so the
+ * line keeps it.
+ */
+static bool gc_relocate(struct ssd *ssd, struct ppa *ppa)
+{
+    uint64_t owner = get_rmap_ent(ssd, ppa);
+
+    if (owner == INVALID_LPN) {
+        ftl_err("valid page " PPA_FMT " has no owner\n", PPA_ARG(ppa));
+        return false;
+    }
+    if (rmap_is_tp(owner)) {
+        return tp_move(ssd, ppa);
+    }
+    gc_read_page(ssd, ppa);
+    return gc_write_page(ssd, ppa);
+}
+
 static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1282,8 +1330,7 @@ static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
-            gc_read_page(ssd, ppa);
-            if (!gc_write_page(ssd, ppa)) {
+            if (!gc_relocate(ssd, ppa)) {
                 return false;
             }
         }
@@ -1312,6 +1359,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     line->close_time = 0;
     line->open_time = 0;
     line->stream_tag = 0;
+    line->kind = LINE_DATA;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -1406,11 +1454,35 @@ static bool reclaim_line_copyback(struct ssd *ssd, struct line *victim)
  * controller corrects it, and a copyback never shows the data to the
  * controller.
  */
+static bool reclaim_line_moves(struct ssd *ssd, struct line *victim_line,
+                               bool copyback);
+
+/*
+ * Empty @victim_line, then erase and free it, and publish the changes its
+ * data moves made to translation pages not in the CMT: one write per TP
+ * for the whole victim.
+ */
 static bool reclaim_line(struct ssd *ssd, struct line *victim_line,
                          bool copyback)
 {
-    /* a line queued for refresh may be taken by collection first */
-    copyback = copyback && victim_line != ssd->read_reclaim_line;
+    bool ok = reclaim_line_moves(ssd, victim_line, copyback);
+
+    if (ssd->tp_on) {
+        tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+    }
+    return ok;
+}
+
+static bool reclaim_line_moves(struct ssd *ssd, struct line *victim_line,
+                               bool copyback)
+{
+    /*
+     * A line queued for refresh may be taken by collection first. The
+     * controller must see a translation page it moves, so a TP line never
+     * moves on the die.
+     */
+    copyback = copyback && victim_line != ssd->read_reclaim_line &&
+               victim_line->kind != LINE_TP;
     struct ssdparams *spp = &ssd->sp;
     struct ppa ppa;
     int ch, lun, pl;
@@ -1737,6 +1809,10 @@ int do_wear_level(struct ssd *ssd)
     QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
         uint32_t w = line_wear(ssd, line);
 
+        /* a TP line moves through the TP pointer, not the swapped line */
+        if (line->kind == LINE_TP) {
+            continue;
+        }
         if (!src || w < src_wear ||
             (w == src_wear && line->close_seq < src->close_seq)) {
             src = line;
@@ -1812,8 +1888,7 @@ static bool pace_copy_one(struct ssd *ssd)
     while (ssd->pace_cursor < ssd->sp.pgs_per_line) {
         pace_ppa(ssd, line, ssd->pace_cursor, &ppa);
         if (get_pg(ssd, &ppa)->status == PG_VALID) {
-            gc_read_page(ssd, &ppa);
-            if (!gc_write_page(ssd, &ppa)) {
+            if (!gc_relocate(ssd, &ppa)) {
                 return false;
             }
             ssd->pace_cursor++;
@@ -1837,10 +1912,16 @@ static struct line *pace_release(struct ssd *ssd)
     return line;
 }
 
-/* the paced line is empty: erase it and free or retire it */
+/*
+ * The paced line is empty: erase it and free or retire it. Its changes to
+ * translation pages are published now, once for the whole victim.
+ */
 static void pace_done(struct ssd *ssd)
 {
     reclaim_line_tail(ssd, pace_release(ssd));
+    if (ssd->tp_on) {
+        tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+    }
 }
 
 /* a copy found no room: no more pacing until the next request */

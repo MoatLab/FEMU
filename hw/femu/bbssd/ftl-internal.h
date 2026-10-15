@@ -196,6 +196,20 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = *ppa;
+    /*
+     * Every change of a mapping counts here, so a path that changes one
+     * without telling the translation pages leaves a version x-ftl-check
+     * finds neither dirty nor pending.
+     */
+    if (unlikely(ssd->tp_on)) {
+        ssd->tp_ver[lpn / ssd->cmt.lpn_per_tp]++;
+    }
+}
+
+/* an rmap value naming a translation page; INVALID_LPN carries the tag bit */
+static inline bool rmap_is_tp(uint64_t owner)
+{
+    return owner != INVALID_LPN && (owner & TP_RMAP_TAG);
 }
 
 static inline uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
@@ -242,6 +256,24 @@ bool femu_mapping_scheme_uses_cmt(const struct femu_mapping_ops *ops);
 /* DFTL cached mapping table cost model (hw/femu/bbssd/ftl-map-cmt.c) */
 void cmt_init(struct ssd *ssd, uint32_t cache_mb);
 uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write);
+uint64_t cmt_access(struct ssd *ssd, uint64_t lpn, uint64_t stime,
+                    bool is_write);
+int32_t cmt_slot_of(struct ssd *ssd, uint64_t tp);
+void cmt_drop_all(struct ssd *ssd);
+
+/* translation pages on flash (hw/femu/bbssd/ftl-map-tp.c) */
+void tp_init(struct ssd *ssd);
+void tp_free(struct ssd *ssd);
+bool tp_program(struct ssd *ssd, uint64_t tp, bool reserve, uint64_t stime,
+                bool timed, uint64_t *done);
+uint64_t tp_read(struct ssd *ssd, uint64_t tp, uint64_t stime, bool timed);
+void tp_note(struct ssd *ssd, uint64_t lpn);
+void tp_pending_drop(struct ssd *ssd, uint64_t tp);
+bool tp_pending(struct ssd *ssd, uint64_t tp);
+uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed);
+bool tp_move(struct ssd *ssd, struct ppa *old_ppa);
+void tp_discard_all(struct ssd *ssd);
+uint64_t tp_check(struct ssd *ssd, uint64_t *tp_pages);
 
 /*
  * Data-remanence experiment logging (debug; off unless FEMU_EXP_LOG / FEMU_DUMP_LPN
@@ -296,6 +328,7 @@ void ssd_init_write_buffer(struct ssd *ssd);
 struct ppa ssd_stream_page(struct ssd *ssd, unsigned slot, uint64_t tag);
 void ssd_stream_advance(struct ssd *ssd, unsigned slot);
 void ssd_advance_write_pointer(struct ssd *ssd);
+void ssd_advance_tp_pointer(struct ssd *ssd);
 struct ppa get_new_page(struct ssd *ssd);
 struct ppa get_new_page_class(struct ssd *ssd, int klass);
 void ssd_advance_write_pointer_class(struct ssd *ssd, int klass);
