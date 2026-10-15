@@ -12318,6 +12318,62 @@ static void femu_test_zone_notice_other_ns(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_MANY_ZNS   17
+
+/*
+ * One Zone Descriptor Changed notice in each of 17 zoned namespaces, raised
+ * with no Asynchronous Event Request outstanding. Each namespace's notice is
+ * a distinct event, and the 16-entry queue used to drop the 17th for good.
+ * All 17 must reach the host, one per log read, each naming its namespace.
+ */
+static void femu_test_zone_notice_many_ns(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool seen[FEMU_MANY_ZNS + 1] = { false };
+    uint64_t buf, page;
+    uint32_t nsid, k;
+    uint16_t want, got;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    page = guest_alloc(alloc, 4096);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_ZDCN, NULL)),
+                    ==, NVME_SUCCESS);
+    for (nsid = 1; nsid <= FEMU_MANY_ZNS; nsid++) {
+        femu_zone_fault(&c, nsid, 0, buf);
+    }
+
+    for (k = 0; k < FEMU_MANY_ZNS; k++) {
+        want = femu_aer(&c);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+        nsid = femu_admin_last_nsid(&c);
+        g_assert_cmpuint(nsid, >=, 1);
+        g_assert_cmpuint(nsid, <=, FEMU_MANY_ZNS);
+        g_assert_false(seen[nsid]);
+        seen[nsid] = true;
+        g_assert_cmpint(femu_log_cmd(&c, nsid, FEMU_LOG_CHANGED_ZONES,
+                                     (uint32_t)FEMU_CSI_ZONED << 24, page,
+                                     4096), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readw(c.pdev->bus->qts, page), ==, 1);
+    }
+
+    /* nothing is left over */
+    want = femu_aer(&c);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * A Changed Zone List read without RAE whose transfer fails (its buffer is
  * the BIOS ROM) acknowledges nothing: the list keeps its entry and Notice
@@ -44298,6 +44354,13 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zone-notice-many-ns", "femu",
+                 femu_test_zone_notice_many_ns, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=544,femu_mode=3,namespaces=17,secsz=512,zns_num_ch=1,"
             "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
             "err_write_fail_ppm=1000000"
     });

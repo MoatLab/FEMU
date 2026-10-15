@@ -4312,8 +4312,16 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
 }
 
-/* an event is dropped rather than growing this queue without bound */
-#define FEMU_AER_MAX_QUEUED 16
+/*
+ * Controller events past this many queued are dropped, so the queue stays
+ * bounded. An event about a namespace is not counted against it: identical
+ * events coalesce, so each namespace holds at most one entry per kind of
+ * event, and the only such event today is Zone Descriptor Changed. Dropping
+ * one lost that namespace's notice for good, as nothing raises it again.
+ * FEMU_AER_MAX_NS_QUEUED still caps the whole queue against a new caller.
+ */
+#define FEMU_AER_MAX_QUEUED     16
+#define FEMU_AER_MAX_NS_QUEUED  (FEMU_AER_MAX_QUEUED + NVME_MAX_NAMESPACES)
 
 /* Post one admin completion for an entry the controller had been holding. */
 static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
@@ -4419,6 +4427,7 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
 {
     NvmeAsyncEvent *event;
     NvmeAsyncEvent *dup;
+    uint32_t ctrl_queued = 0;
 
     event = g_new0(NvmeAsyncEvent, 1);
     event->result.event_type = event_type;
@@ -4439,8 +4448,10 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
             g_free(event);
             return;
         }
+        ctrl_queued += !dup->nsid;
     }
-    if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
+    if (nsid ? n->aer_queued >= FEMU_AER_MAX_NS_QUEUED :
+               ctrl_queued >= FEMU_AER_MAX_QUEUED) {
         qemu_mutex_unlock(&n->aer_lock);
         g_free(event);
         return;

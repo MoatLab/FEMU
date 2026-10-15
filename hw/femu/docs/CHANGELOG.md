@@ -414,6 +414,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - An asynchronous event identical to one already queued (type, information, log page, namespace) is not queued again. Copies used to fill the 16-entry queue and push out other namespaces' events.
 - Reading one zoned namespace's Changed Zone List no longer unmasks Notice events while another namespace's reported notice is unread. That read used to send the other namespace's queued notice before its log was read (Base 2.3, 5.2.2).
 - A Changed Zone List read without RAE clears the list and its event only after a successful transfer, as SMART and Error Information already did. A failed transfer used to lose the changes. A zone that changes during the read keeps its entry.
+- An asynchronous event about a namespace no longer counts against the 16 queued controller events. With more than 16 zoned namespaces, a Zone Descriptor Changed notice used to be dropped and never raised again.
 
 ### Documentation and tooling
 
