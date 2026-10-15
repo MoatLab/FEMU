@@ -726,7 +726,7 @@ struct ssd {
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
-int bb_eol_reserve_lines(FemuCtrl *n);
+uint64_t bb_eol_reserve_lines(FemuCtrl *n);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);

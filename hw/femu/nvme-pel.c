@@ -73,8 +73,13 @@ struct FemuPel {
     /* per status code: allowance in thousandths of an event, and when */
     int32_t     media_tokens[256];
     int64_t     media_ms[256];
-    /* the critical warning bits last seen; only the BQL touches this */
+    /*
+     * The critical warning bits last seen, and the event for a bit that
+     * comes on, under warn_lock: the FTL thread reports wear bits too, and
+     * one lock keeps the bits, the timestamps and the event order together.
+     */
     uint8_t     warning;
+    QemuMutex   warn_lock;
 };
 
 static uint32_t pel_event_len(const uint8_t *e)
@@ -382,28 +387,24 @@ void femu_pel_power_loss(FemuCtrl *n)
  * the whole warning byte as it now stands. Bits that go off are only noted,
  * so the same bit coming back on is a new event. Only the bits in @mask take
  * the value in @bits; the others keep the value the event log last saw. The
- * FTL thread calls this too, so the byte changes by compare and swap.
+ * FTL thread calls this too; femu_pel_log() takes pel->lock inside.
  */
 static void pel_warning_update(FemuCtrl *n, uint8_t mask, uint8_t bits)
 {
     FemuPel *pel = n->pel;
-    uint8_t old, new, seen;
+    uint8_t old, new;
 
     if (!pel) {
         return;
     }
-    old = qatomic_read(&pel->warning);
-    for (;;) {
-        new = (old & ~mask) | (bits & mask);
-        seen = qatomic_cmpxchg(&pel->warning, old, new);
-        if (seen == old) {
-            break;
-        }
-        old = seen;
-    }
+    qemu_mutex_lock(&pel->warn_lock);
+    old = pel->warning;
+    new = (old & ~mask) | (bits & mask);
+    pel->warning = new;
     if (new & ~old) {
         pel_log_hw_error(n, PEL_HWE_CRITICAL_WARNING, &new, 1);
     }
+    qemu_mutex_unlock(&pel->warn_lock);
 }
 
 /*
@@ -503,6 +504,7 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
     FemuPel *pel = g_new0(FemuPel, 1);
 
     qemu_mutex_init(&pel->lock);
+    qemu_mutex_init(&pel->warn_lock);
     for (int i = 0; i < ARRAY_SIZE(pel->media_tokens); i++) {
         pel->media_tokens[i] = PEL_MEDIA_BURST * 1000;
     }
@@ -513,6 +515,7 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
         if (!pel_file_load(n, errp)) {
             n->pel = NULL;
             qemu_mutex_destroy(&pel->lock);
+            qemu_mutex_destroy(&pel->warn_lock);
             g_free(pel);
             return false;
         }
@@ -551,6 +554,7 @@ void femu_pel_exit(FemuCtrl *n)
     timer_free(pel->snapshot);
     n->pel = NULL;
     qemu_mutex_destroy(&pel->lock);
+    qemu_mutex_destroy(&pel->warn_lock);
     g_free(pel->ctx);
     g_free(pel);
 }

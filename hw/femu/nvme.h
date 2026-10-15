@@ -3210,6 +3210,16 @@ uint64_t ssd_overworn_blocks(struct ssd *ssd);
 uint64_t ssd_grown_bad_blocks(struct ssd *ssd);
 uint64_t ssd_retired_lines(struct ssd *ssd);
 
+/* the wear state SMART reports, read under one lock so its fields agree */
+typedef struct FemuWearHealth {
+    uint8_t     spare;          /* Available Spare */
+    bool        media_ro;       /* read-only end of life */
+    uint64_t    overworn;       /* blocks in service past their limit */
+    uint64_t    grown_bad;      /* worn-out blocks out of service */
+    uint64_t    retired;        /* lines out of service */
+} FemuWearHealth;
+void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h);
+
 /* end-of-life admission and the read-only state; see ssd_eol_admit() */
 enum {
     FEMU_EOL_ADMITTED,
@@ -3225,11 +3235,16 @@ uint64_t femu_eol_max_bytes(FemuCtrl *n);
 uint32_t femu_copy_mcl(FemuCtrl *n);
 uint16_t femu_copy_mssrl(FemuCtrl *n);
 
-/* give back what an admitted request holds, once */
+/*
+ * Give back what an admitted request holds, once. At device teardown the
+ * namespace's FTL is freed before the queues, and its credits go with it.
+ */
 static inline void nvme_eol_release(NvmeRequest *req)
 {
     if (req->eol_held) {
-        ssd_eol_release(req->ns->ssd, req->eol_pages);
+        if (req->ns && req->ns->ssd) {
+            ssd_eol_release(req->ns->ssd, req->eol_pages);
+        }
         req->eol_held = false;
         req->eol_pages = 0;
     }

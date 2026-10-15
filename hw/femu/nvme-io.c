@@ -2086,9 +2086,20 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0x7)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    /* end-of-life admission makes WZSL (= MDTS) a hard limit */
-    if (n->eol_admit && nvme_check_mdts(n, (uint64_t)nlb << ns->lbaf.lbads)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    /*
+     * End-of-life admission makes WZSL (= MDTS) a hard limit. It counts the
+     * metadata too when it is interleaved with the data (NVM 1.2, Figure
+     * 120): FEMU does not report CTRATT.MEM.
+     */
+    if (n->eol_admit) {
+        uint64_t bytes = (uint64_t)nlb << ns->lbaf.lbads;
+
+        if (NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
+            bytes += (uint64_t)nlb * le16_to_cpu(ns->lbaf.ms);
+        }
+        if (nvme_check_mdts(n, bytes)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
     }
 
     /* Non-wrapping bound test: nvme_deallocate_range zeroes the backing store,

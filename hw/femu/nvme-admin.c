@@ -907,7 +907,8 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
         uint8_t nvm[NVME_IDENTIFY_DATA_SIZE] = {};
 
         /* WZSL, byte 1, in MDTS units: a hard limit with NVMWZSV clear */
-        if (n->eol_admit) {
+        if (n->eol_admit &&
+            nvme_io_effects(n, NVME_CSI_NVM, NVME_CMD_WRITE_ZEROES)) {
             nvm[1] = n->mdts;
             return dma_read_prp(n, nvm, sizeof(nvm), prp1, prp2);
         }
@@ -2210,8 +2211,9 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
 
     for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
+        FemuWearHealth wh;
         uint64_t reads;
-        uint8_t spare, used;
+        uint8_t used;
 
         if (!ns->allocated) {
             continue;
@@ -2227,11 +2229,10 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             continue;
         }
         st->media_errors += ssd_media_errors(ns->ssd);
-        /* before the spare: read-only media always reads 0 spare after */
-        st->media_ro |= ssd_media_read_only(ns->ssd);
-        spare = ssd_available_spare(ns->ssd);
-        if (spare < st->available_spare) {
-            st->available_spare = spare;
+        ssd_wear_health(ns->ssd, &wh);
+        st->media_ro |= wh.media_ro;
+        if (wh.spare < st->available_spare) {
+            st->available_spare = wh.spare;
         }
         used = ssd_percentage_used(ns->ssd);
         if (used > st->percentage_used) {
@@ -2267,9 +2268,9 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
             st->max_block_reads = reads;
         }
         st->read_reclaims += ssd_read_reclaims(ns->ssd);
-        st->overworn_blocks += ssd_overworn_blocks(ns->ssd);
-        st->grown_bad_blocks += ssd_grown_bad_blocks(ns->ssd);
-        st->retired_lines += ssd_retired_lines(ns->ssd);
+        st->overworn_blocks += wh.overworn;
+        st->grown_bad_blocks += wh.grown_bad;
+        st->retired_lines += wh.retired;
         st->wl_relocations += ssd_wl_relocations(ns->ssd);
         st->wl_pages += ssd_wl_pages(ns->ssd);
         st->gc_copyback_pages += ssd_gc_copyback_pages(ns->ssd);

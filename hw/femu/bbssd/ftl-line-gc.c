@@ -1206,9 +1206,10 @@ void ssd_enter_read_only(struct ssd *ssd)
         return;
     }
     spare = ssd_available_spare(ssd);
-    qatomic_or(&ssd->eol_word, 1ULL << 63);
 
+    /* under the lock, so SMART sees read-only and no spare together */
     qemu_mutex_lock(&ssd->wear_lock);
+    qatomic_or(&ssd->eol_word, 1ULL << 63);
     ssd->media_ro = true;
     for (int i = 0; i < lm->tt_lines; i++) {
         struct line *line = &lm->lines[i];

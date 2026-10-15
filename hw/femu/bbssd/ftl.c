@@ -39,7 +39,9 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->wear_pe_total = 0;
     ssd->eol_ro_mode = ssd->wear_on && n->eol_admit;
     ssd->media_ro = false;
-    ssd->eol_reserve_lines = ssd->eol_ro_mode ? bb_eol_reserve_lines(n) : 0;
+    /* bb_check_capacity() kept the reserve below 2^31 pages */
+    ssd->eol_reserve_lines = ssd->eol_ro_mode ?
+                             (int)bb_eol_reserve_lines(n) : 0;
     ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->pgs_per_line;
     ssd->eol_word = 0;
     if (ssd->wear_on) {
@@ -760,6 +762,22 @@ uint8_t ssd_available_spare(struct ssd *ssd)
     }
     bad_pct = ((uint64_t)ssd->bad_blocks * 100ull) / (uint64_t)spp->tt_blks;
     return bad_pct >= 100 ? 0 : (uint8_t)(100 - bad_pct);
+}
+
+void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
+{
+    memset(h, 0, sizeof(*h));
+    if (!ssd->wear_on) {
+        h->spare = ssd_available_spare(ssd);
+        return;
+    }
+    qemu_mutex_lock(&ssd->wear_lock);
+    h->spare = ssd_wear_spare(ssd);
+    h->media_ro = ssd->media_ro;
+    h->overworn = ssd->overworn_blocks;
+    h->grown_bad = ssd->grown_bad_blocks;
+    h->retired = ssd->lm.retired_line_cnt;
+    qemu_mutex_unlock(&ssd->wear_lock);
 }
 
 

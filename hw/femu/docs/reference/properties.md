@@ -166,7 +166,7 @@ Devices:
 | `blk_pe_spread` | `uint32` | `0` | bbssd, CSD: how far each block's limit varies from blk_pe_limit, in percent, 0 to 90 |
 | `blk_pe_seed` | `uint64` | `0` | bbssd, CSD: seed of the per-block erase limits; one seed gives the same limits on every run |
 | `spare_lines` | `uint32` | `0` | bbssd, CSD: lines held back, needs blk_pe_limit; their blocks replace worn-out blocks of the same plane, and SMART Available Spare is the spare blocks the emptiest plane has left, in percent |
-| `eol_read_only` | `bool` | `on` | bbssd, CSD, with blk_pe_limit: on (default) puts the media in read-only mode when no block can replace a worn-out one, with reserve lines for the writes in flight; needs mdts 1 or more and limits Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps a worn-out block in service with the SMART reliability warning |
+| `eol_read_only` | `bool` | `on` | bbssd, CSD, with blk_pe_limit: on (default) puts the media in read-only mode when no block can replace a worn-out one, with reserve lines for the writes in flight; needs mdts 1 or more and limits Write Zeroes (WZSL) to mdts and Copy (MCL) to mdts or one block. off keeps a worn-out block in service with the SMART reliability warning |
 | `energy_read_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane read in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_prog_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane program in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `energy_erase_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total in log page C0h; 0 (default) gives no figure |

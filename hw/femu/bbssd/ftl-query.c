@@ -256,8 +256,13 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->eol_mode = ssd->eol_ro_mode;
     q->media_ro = ssd->media_ro;
     q->eol_cap = ssd->eol_cap;
-    q->eol_pages = qatomic_read(&ssd->eol_word) & 0xffffffffULL;
-    q->eol_reqs = ssd_eol_requests(ssd);
+    {
+        /* one load, so the two counts belong to the same admissions */
+        uint64_t w = qatomic_read(&ssd->eol_word);
+
+        q->eol_pages = w & 0xffffffffULL;
+        q->eol_reqs = (w & ~(1ULL << 63)) >> 32;
+    }
     q->reserve_lines = 0;
     for (int i = 0; q->eol_mode && i < lm->tt_lines; i++) {
         q->reserve_lines += lm->lines[i].reserve;

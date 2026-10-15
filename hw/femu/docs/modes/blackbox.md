@@ -227,7 +227,8 @@ All of these are off by default.
   command changes data, it takes credits for the NAND pages it may program.
   It waits in its queue while the reserve cannot take them. So one command
   needs a bound: `mdts` must be 1 or more. Write Zeroes is limited to MDTS
-  (WZSL, with ONCS bit 3 clear), and Copy to MDTS (MCL).
+  (WZSL, with ONCS bit 3 clear). Copy is limited to MDTS (MCL), or to one
+  block of the largest LBA format when that is larger.
 - The controller raises a SMART asynchronous event once for each of these,
   if the host enabled its bit of Asynchronous Event Configuration:
 
@@ -237,9 +238,9 @@ All of these are off by default.
   | the first block stays in service past its limit | 2 | 00h |
   | the media goes read-only | 3 | 00h |
 
-- Version 2 covers bbssd and CSD (the NVM namespace). FDP keeps refusing
-  `blk_pe_limit`: a handle update leaves a unit part written for each command,
-  and units are padded and erased outside the reserve. ZNS ends the life of
+- The read-only end of life covers bbssd and CSD (the NVM namespace). FDP
+  keeps refusing `blk_pe_limit`: a handle update leaves a unit part written
+  for each command, and units are padded and erased outside the reserve. ZNS ends the life of
   a zone with the Read Only and Offline zone states. This model does not
   drive them. KV has no NVM write path. Both refuse `blk_pe_limit`.
 - With `blk_pe_limit`, SMART Percentage Used counts erases against the sum
@@ -250,6 +251,14 @@ All of these are off by default.
 - `read_reclaim_limit` and `retention_limit_sec` rewrite lines that were read
   too often or hold old data. The line is picked on a read and rewritten on a
   following write, so a workload that never writes never triggers it.
+
+This small device wears out after a few thousand writes and then goes
+read-only. Its 16 KiB MDTS keeps the reserve at one line:
+
+<!-- femu-example: blackbox-eol -->
+```
+-device femu,femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,blks_per_pl=40,luns_per_ch=2,nchs=2,blk_pe_limit=8,spare_lines=8,mdts=2
+```
 
 Both refresh knobs act only when something reads the line. A region nothing
 reads is never refreshed: modelling a background media scan would need a

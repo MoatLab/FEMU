@@ -377,7 +377,7 @@ def namespace_report(ns: Dict[str, Any], prev: Optional[Dict[str, Any]],
             get("nand-write-pages", "interval"),
             get("gc-write-pages", "interval"),
             get("pad-write-pages", "interval"))
-    for key in ("geometry", "line-counts", "zone-counts"):
+    for key in ("geometry", "line-counts", "zone-counts", "end-of-life"):
         if isinstance(ns.get(key), dict):
             out[key] = ns[key]
     for key in ("lba-size", "zone-size", "zone-capacity", "max-open",
@@ -395,7 +395,8 @@ def namespace_report(ns: Dict[str, Any], prev: Optional[Dict[str, Any]],
                                   prev.get("pack") if prev else None)
     other = {k: v for k, v in ns.items()
              if k not in ("nsid", "mode", "counters", "geometry",
-                          "line-counts", "zone-counts", "fdp", "media",
+                          "line-counts", "zone-counts", "end-of-life",
+                          "fdp", "media",
                           "lines", "zones", "offset", "next-offset",
                           "lba-size", "zone-size", "zone-capacity",
                           "max-open", "max-active")
@@ -632,6 +633,13 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
                      f", retired {lc.get('retired')}, spare {lc.get('spare')}"
                      + (f", reserve {lc['reserve']}" if "reserve" in lc
                         else ""))
+    eol = ns.get("end-of-life")
+    if eol:
+        lines.append(pad + "end of life: "
+                     + ("media read-only" if eol.get("read-only")
+                        else "writable")
+                     + f", writes hold {eol.get('held-pages')} of "
+                     f"{eol.get('credit-pages')} reserve pages")
     fdp = ns.get("fdp")
     if fdp:
         uc = fdp.get("unit-counts", {})
@@ -1454,6 +1462,17 @@ def selftest_synthetic(t: SelfTest) -> None:
             and "read-reclaim-pages +2" in text
             and "read-reclaim-pages 1.0/s" in text
             and abs(ns["interval-waf"] - 1.6) < 1e-9, text)
+    eol = dict(ns0, **{"line-counts": {"free": 3, "victim": 1, "full": 2,
+                                       "retired": 4, "spare": 0,
+                                       "reserve": 0, "total": 10},
+                       "end-of-life": {"read-only": True,
+                                       "credit-pages": 16, "held-pages": 0,
+                                       "held-requests": 0}})
+    text = report_text(build_report(dev(eol, mono=1.0), dev(eol)),
+                       "synthetic")
+    t.check("end of life: read-only state and reserve shown",
+            "end of life: media read-only, writes hold 0 of 16 reserve "
+            "pages" in text and "reserve 0" in text, text)
     lsm0 = {"nsid": 1, "mode": "kvssd",
             "lsm": {"memtable-keys": 3, "memtable-capacity": 16,
                     "size-ratio": 2, "pinned-levels": 1,

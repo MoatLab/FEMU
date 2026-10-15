@@ -476,8 +476,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, with blk_pe_limit: on (default) puts the media in "
       "read-only mode when no block can replace a worn-out one, with "
       "reserve lines for the writes in flight; needs mdts 1 or more and "
-      "limits Write Zeroes (WZSL) and Copy (MCL) to mdts. off keeps a "
-      "worn-out block in service with the SMART reliability warning" },
+      "limits Write Zeroes (WZSL) to mdts and Copy (MCL) to mdts or one "
+      "block. off keeps a worn-out block in service with the SMART "
+      "reliability warning" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },

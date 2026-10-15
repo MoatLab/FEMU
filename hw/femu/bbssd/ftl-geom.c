@@ -30,7 +30,7 @@ int bb_gc_forced_lines(FemuCtrl *n)
  * the admitted writes may hold at once, which is at least the largest write
  * any one command can make. Zero unless eol_admit is on.
  */
-int bb_eol_reserve_lines(FemuCtrl *n)
+uint64_t bb_eol_reserve_lines(FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
     uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;

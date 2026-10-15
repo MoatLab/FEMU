@@ -135,7 +135,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         reserve_lines += 1;                  /* the log write pointer */
     }
     /* the admission counts pages in 31 bits of one word */
-    if (reserve_eol * pgs_per_line >= 1ULL << 31) {
+    if (reserve_eol >= (1ULL << 31) / pgs_per_line) {
         error_setg(errp, "FEMU bbssd: eol_read_only needs %" PRIu64 " reserve "
                    "lines of %" PRIu64 " pages; lower mdts", reserve_eol,
                    pgs_per_line);
