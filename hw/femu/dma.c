@@ -597,7 +597,7 @@ static uint16_t dma_copy(FemuCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
  * a report the host may ask for more of than there is. The zeroes come from a
  * fixed page, so a request of gigabytes needs no buffer of its own.
  */
-static uint16_t dma_copy_fill(QEMUSGList *qsg, QEMUIOVector *iov,
+static uint16_t dma_copy_fill(FemuCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
                               const uint8_t *ptr, uint32_t len, uint32_t xfer)
 {
     static const uint8_t zeroes[4096];
@@ -619,16 +619,16 @@ static uint16_t dma_copy_fill(QEMUSGList *qsg, QEMUIOVector *iov,
 
         while (left && status == NVME_SUCCESS) {
             const uint8_t *src = pos < len ? ptr + pos : zeroes;
-            dma_addr_t n = pos < len ? MIN(left, len - pos) :
+            dma_addr_t l = pos < len ? MIN(left, len - pos) :
                                        MIN(left, sizeof(zeroes));
 
-            if (dma_memory_write(qsg->as, addr, src, n,
-                                 FEMU_DMA_ATTRS) != MEMTX_OK) {
+            /* a report runs on a poller: direct memory only, as dma_copy() */
+            if (femu_dma_write(n, addr, src, l) != MEMTX_OK) {
                 status = NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
-            addr += n;
-            left -= n;
-            pos += n;
+            addr += l;
+            left -= l;
+            pos += l;
         }
     }
     qemu_sglist_destroy(qsg);
@@ -679,7 +679,7 @@ uint16_t dma_read_prp_fill(FemuCtrl *n, const uint8_t *ptr, uint32_t len,
         return status;
     }
 
-    return dma_copy_fill(&qsg, &iov, ptr, MIN(len, xfer), xfer);
+    return dma_copy_fill(n, &qsg, &iov, ptr, MIN(len, xfer), xfer);
 }
 
 /*
@@ -766,7 +766,7 @@ uint16_t dma_read_cmd_fill(FemuCtrl *n, NvmeCmd *cmd, const uint8_t *ptr,
         return status;
     }
 
-    return dma_copy_fill(&qsg, &iov, ptr, MIN(len, xfer), xfer);
+    return dma_copy_fill(n, &qsg, &iov, ptr, MIN(len, xfer), xfer);
 }
 
 /*

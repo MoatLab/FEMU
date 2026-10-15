@@ -1403,6 +1403,24 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     return femu_map_dptr(n, &req->cmd, &req->qsg, &req->iov, len);
 }
 
+/*
+ * qtest: wait up to *@ms milliseconds, or until a test sets it to 0, with
+ * test_zone_held counting the waiters so a test can see the hold begin.
+ */
+static void zns_test_hold(FemuCtrl *n, uint32_t *ms)
+{
+    uint32_t i;
+
+    if (likely(!qatomic_read(ms))) {
+        return;
+    }
+    qatomic_inc(&n->test_zone_held);
+    for (i = 0; i < qatomic_read(ms); i++) {
+        g_usleep(1000);
+    }
+    qatomic_dec(&n->test_zone_held);
+}
+
 /*Misao: backend read/write without latency emulation*/
 static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req,bool append)
@@ -1835,12 +1853,17 @@ static bool zns_zone_matches_filter(uint32_t zafs, NvmeZone *zl)
     }
 }
 
-static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
+/*
+ * Build a zone report under the zone lock. The caller sends it once the lock
+ * is released: a transfer can wait on host memory, and the admin thread takes
+ * this lock while it holds the BQL.
+ */
+static uint16_t zns_zone_report_build(FemuCtrl *n, NvmeRequest *req,
+                                      uint64_t data_size, void **report,
+                                      uint64_t *report_len)
 {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
-    /* cdw12 is zero-based number of dwords to return. Convert to bytes */
-    uint64_t data_size = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) << 2;
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint32_t zone_idx, zra, zrasf, partial;
     uint64_t max_zones, built, nr_zones = 0;
@@ -1853,14 +1876,10 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     void *buf, *buf_p;
     size_t zone_entry_sz;
 
-    req->status = NVME_SUCCESS;
-
     /* the report is a snapshot, so no write may land in the middle of it */
     QEMU_LOCK_GUARD(&ns->zns->zone_lock);
-    /* qtest: keep the lock busy, as a long report transfer does */
-    if (unlikely(qatomic_read(&n->test_zone_lock_hold_ms))) {
-        g_usleep(qatomic_read(&n->test_zone_lock_hold_ms) * 1000);
-    }
+    /* qtest: keep the lock busy, as a long report build does */
+    zns_test_hold(n, &n->test_zone_lock_hold_ms);
 
     status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
     if (status) {
@@ -1954,6 +1973,27 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
         }
     }
 
+    *report = buf;
+    *report_len = built;
+    return NVME_SUCCESS;
+}
+
+static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
+{
+    NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
+    /* cdw12 is zero-based number of dwords to return. Convert to bytes */
+    uint64_t data_size = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) << 2;
+    uint64_t built;
+    uint16_t status;
+    void *buf;
+
+    req->status = NVME_SUCCESS;
+    status = zns_zone_report_build(n, req, data_size, &buf, &built);
+    if (status) {
+        return status;
+    }
+    /* qtest: hold the transfer, with the zone lock free */
+    zns_test_hold(n, &n->test_zone_report_hold_ms);
     status = dma_read_cmd_fill(n, cmd, buf, built, data_size);
 
     g_free(buf);

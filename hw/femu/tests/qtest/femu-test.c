@@ -11868,6 +11868,168 @@ static void femu_test_query_zns_busy_unplug(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* a value of the femu device with id qz, under qtest */
+static uint64_t femu_qz_get(QTestState *qts, const char *prop)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/qz',"
+                           "'property':%s}}", prop);
+    uint64_t value = qdict_get_int(rsp, "return");
+
+    qobject_unref(rsp);
+    return value;
+}
+
+/* wait until @want threads sleep in a zone hold */
+static void femu_qz_set(QTestState *qts, const char *prop, uint32_t value)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/qz',"
+                             "'property':%s,'value':%u}}", prop, value);
+}
+
+static void femu_zone_held_wait(QTestState *qts, uint64_t want)
+{
+    int i;
+
+    for (i = 0; i < FEMU_POLL_LIMIT_MS &&
+                femu_qz_get(qts, "x-zone-held") != want; i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_qz_get(qts, "x-zone-held"), ==, want);
+}
+
+typedef struct FemuDeadline {
+    GMutex lock;
+    GCond cond;
+    bool done;
+    const char *what;
+} FemuDeadline;
+
+static void *femu_deadline(void *opaque)
+{
+    FemuDeadline *d = opaque;
+    gint64 end = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+
+    g_mutex_lock(&d->lock);
+    while (!d->done) {
+        if (!g_cond_wait_until(&d->cond, &d->lock, end)) {
+            g_error("%s did not return within ten seconds", d->what);
+        }
+    }
+    g_mutex_unlock(&d->lock);
+    return NULL;
+}
+
+static void femu_deadline_end(FemuDeadline *d, GThread *watchdog)
+{
+    g_mutex_lock(&d->lock);
+    d->done = true;
+    g_cond_signal(&d->cond);
+    g_mutex_unlock(&d->lock);
+    g_thread_join(watchdog);
+}
+
+/*
+ * Report Zones into the BIOS ROM while the report holds the zone lock, and a
+ * Changed Zone List read waits for that lock with the BQL held. A ROM write
+ * is served as I/O, which takes the BQL: sent under the lock, the two threads
+ * waited for each other for ever. The report must fail with Data Transfer
+ * Error and the log read must complete.
+ */
+static void femu_test_zone_report_rom(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuDeadline d = { .what = "a log read beside a report into ROM" };
+    uint64_t page = guest_alloc(alloc, 4096);
+    uint8_t report[192];
+    GThread *watchdog;
+    NvmeCmd cmd;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* long enough that the test sees the hold; the log read then waits */
+    femu_zone_lock_hold(qts, 1500);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(0xfffc0000);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    femu_submit(&c, &c.io, &cmd);
+    for (int i = 0; i < FEMU_POLL_LIMIT_MS &&
+                    !femu_qz_get(qts, "x-zone-held") &&
+                    !femu_cq_ready(&c, &c.io); i++) {
+        g_usleep(1000);
+    }
+
+    /* a test descheduled past the hold checks the refusal only */
+    if (femu_cq_ready(&c, &c.io)) {
+        g_test_message("the hold ended unseen; no log read beside it");
+    } else {
+        g_mutex_init(&d.lock);
+        g_cond_init(&d.cond);
+        watchdog = g_thread_new("report-rom-timeout", femu_deadline, &d);
+        g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONE_LIST,
+                                     FEMU_CSI_ZONED << 24, page, 512), ==,
+                        NVME_SUCCESS);
+        femu_deadline_end(&d, watchdog);
+    }
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_DATA_TRAS_ERROR);
+
+    /* a report into memory is unaffected */
+    femu_zone_lock_hold(qts, 0);
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_EMPTY);
+
+    guest_free(alloc, page);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A zone report is held between its build and its transfer. A Changed Zone
+ * List read, which takes the zone lock with the BQL held, must complete
+ * meanwhile: the lock is free during the transfer.
+ */
+static void femu_test_zone_report_unlocked(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuDeadline d = { .what = "a log read beside a held report transfer" };
+    uint64_t rpt = guest_alloc(alloc, 4096);
+    uint64_t page = guest_alloc(alloc, 4096);
+    GThread *watchdog;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_qz_set(qts, "x-zone-report-hold-ms", 20000);
+    femu_zone_report_send(&c, rpt);
+    femu_zone_held_wait(qts, 1);
+
+    g_mutex_init(&d.lock);
+    g_cond_init(&d.cond);
+    watchdog = g_thread_new("report-unlocked-timeout", femu_deadline, &d);
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONE_LIST,
+                                 FEMU_CSI_ZONED << 24, page, 512), ==,
+                    NVME_SUCCESS);
+    femu_deadline_end(&d, watchdog);
+    g_assert_false(femu_cq_ready(&c, &c.io));
+
+    femu_qz_set(qts, "x-zone-report-hold-ms", 0);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    guest_free(alloc, page);
+    guest_free(alloc, rpt);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_ZONE_BOUNDARY_ERROR    0x1b8   /* command specific */
 
 /* Compare reads a zone, so it may not run across a zone boundary either */
@@ -41768,6 +41930,18 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
     qos_add_test("query-zns-busy", "femu", femu_test_query_zns_busy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
+    });
+    qos_add_test("zone-report-unlocked", "femu",
+                 femu_test_zone_report_unlocked, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32"
+    });
+    qos_add_test("zone-report-rom", "femu", femu_test_zone_report_rom,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=qz,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"

@@ -323,6 +323,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - An Open-Channel SSD no longer runs or advertises Dataset Management, Write Zeroes, Compare, Verify, Copy or Write Uncorrectable. Their common handlers used the sparse Open-Channel address as a flat LBA. The default `oncs` allowed Dataset Management, and a deallocate of a high address zeroed memory past the backing store and stopped QEMU. Flush is still accepted.
 - Many `femu-cxl-ssd` lifecycle, decoder and mapping fixes, including teardown while callers wait on invalidation, little-endian forwarding, and keeping stores when NAND has no page for write-back (9e0223c19, bb7e28722, 51c420143, d31c48d92, ec8b1ac7d, 02a872661, 4505cd9a7, 86ba15078, 842d4ff72, b322efb8f, 2d0c1404e).
 - Device threads copy guest memory through the translation they checked. A guest that mapped a ROM over a buffer between the check and the copy could make a poller wait for the BQL while a pause held it.
+- A ZNS zone report is built under the zone lock and sent after the lock is released, to directly reachable memory only. A report into ROM used to hang the VM when a Changed Zone List read waited for that lock.
 
 #### Data correctness
 

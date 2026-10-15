@@ -2681,6 +2681,10 @@ typedef struct FemuCtrl {
     uint32_t        test_ftl_hold;
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
+    /* qtest only: ms a zone report waits before its transfer */
+    uint32_t        test_zone_report_hold_ms;
+    /* qtest only: threads asleep in a zone hold, for a test to wait on */
+    uint32_t        test_zone_held;
     /*
      * qtest only: while test_copy_hold is set, a write stops between the two
      * halves of its data copy, with test_copy_held set while it waits

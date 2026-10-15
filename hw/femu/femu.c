@@ -4393,6 +4393,12 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-zone-lock-hold-ms",
                                        &FEMU(obj)->test_zone_lock_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-zone-report-hold-ms",
+                                       &FEMU(obj)->test_zone_report_hold_ms,
+                                       OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint32_ptr(obj, "x-zone-held",
+                                       &FEMU(obj)->test_zone_held,
+                                       OBJ_PROP_FLAG_READ);
         object_property_add(obj, "x-copy-hold", "uint32",
                             femu_test_copy_hold_get, femu_test_copy_hold_set,
                             NULL, NULL);
