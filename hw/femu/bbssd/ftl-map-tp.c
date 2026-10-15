@@ -33,6 +33,9 @@ void tp_init(struct ssd *ssd)
 
     /* indexed by the global TP id: a namespace at an offset needs no base */
     ssd->n_tps = n;
+    ssd->tp_live_max = MIN(n, DIV_ROUND_UP(DIV_ROUND_UP(ssd->ns->size,
+                                                        ssd_page_size(ssd)),
+                                           ssd->cmt.lpn_per_tp) + 1);
     ssd->gtd = g_new(struct ppa, n);
     for (uint64_t i = 0; i < n; i++) {
         ssd->gtd[i].ppa = UNMAPPED_PPA;
@@ -333,6 +336,39 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
     get_lun(ssd, &ppa)->gc_endtime = get_lun(ssd, &ppa)->next_lun_avail_time;
     ssd->tp_moves++;
     return true;
+}
+
+/**
+ * tp_discard_all - drop every translation page, as a Format or a Sanitize
+ *
+ * The caller has unmapped every logical page, so the mappings the TPs held
+ * are gone: their pages go invalid with no write-back, the GTD, the CMT and
+ * the pending set empty, and the TP pointer's line closes so collection can
+ * take it.
+ */
+void tp_discard_all(struct ssd *ssd)
+{
+    if (!ssd->tp_on) {
+        return;
+    }
+    for (uint64_t tp = 0; tp < ssd->n_tps; tp++) {
+        struct ppa ppa = ssd->gtd[tp];
+
+        if (mapped_ppa(&ppa)) {
+            mark_page_invalid(ssd, &ppa);
+            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            ssd->gtd[tp].ppa = UNMAPPED_PPA;
+        }
+    }
+    memset(ssd->tp_ver, 0, sizeof(*ssd->tp_ver) * ssd->n_tps);
+    memset(ssd->gtd_ver, 0, sizeof(*ssd->gtd_ver) * ssd->n_tps);
+    memset(ssd->tp_done, 0, sizeof(*ssd->tp_done) * ssd->n_tps);
+    bitmap_zero(ssd->tp_pending, ssd->n_tps);
+    bitmap_zero(ssd->tp_queued, ssd->n_tps);
+    ssd->tp_fifo_head = 0;
+    ssd->tp_fifo_cnt = 0;
+    cmt_drop_all(ssd);
+    ssd_close_pointer(ssd, &ssd->tp_wp);
 }
 
 /**

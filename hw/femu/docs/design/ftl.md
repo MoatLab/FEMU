@@ -265,7 +265,17 @@ still answers every lookup. Without FDP the TPs also live on flash, in
   `tp_note()`. A cached TP gets dirty. Any other TP goes pending, and the
   FTL publishes it later with one read and one program for all its changes.
 - Collection publishes at the end of each victim. A paced victim publishes
-  when it is empty. The end of each request publishes what is left.
+  when it is empty, and its budget counts those programs. The end of each
+  request publishes what is left.
+- DSM Deallocate and Write Zeroes with Deallocate publish at the end of the
+  command, and the command pays for it. A cached TP they changed only gets
+  dirty. An uncached TP takes one program, and one read first when it has a
+  flash copy. At the forced reserve the TP stays pending for a later
+  publication. Write Zeroes without Deallocate translates each page as a
+  write.
+- Format and Sanitize discard every TP with no write-back: their pages go
+  invalid, and the GTD, the CMT and the pending set empty. A CSD
+  namespace takes neither command.
 - Collection takes TP lines and data lines from one victim queue. It moves
   each valid page by its owner: a TP through the TP pointer and the GTD, a
   data page through the data path. A TP line never moves by copyback.

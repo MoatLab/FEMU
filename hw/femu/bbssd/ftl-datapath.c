@@ -1118,6 +1118,21 @@ static int ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
 }
 
 /*
+ * Write the translation pages a deallocate changed and has no CMT slot for:
+ * one read and one program per TP for the whole command, charged to it.
+ * Returns that time, or 0 without translation pages on flash.
+ */
+static uint64_t ssd_publish_cmd(struct ssd *ssd, uint64_t stime)
+{
+    uint64_t t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    if (!ssd->tp_on || !ssd->tp_fifo_cnt) {
+        return 0;
+    }
+    return tp_publish(ssd, t, true) - t;
+}
+
+/*
  * Write Zeroes with the Deallocate bit: the blocks become deallocated, so the
  * FTL owes the same unmap DSM Deallocate does. The I/O layer has already zeroed
  * the backing store and cleared the allocation bits; without this the mapping
@@ -1187,7 +1202,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 break;
             }
-            curlat = ssd_program_lpn(ssd, lpn, req->stime, req->stime, -1);
+            /* with dftl, the translation goes with the program */
+            curlat = ssd_map_and_program(ssd, lpn, req->stime, -1);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
             /* the pages are programmed, so wear levelling sees them too */
             if (spp->wl_spread) {
@@ -1211,7 +1227,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
 
     ssd_deallocate_lpns(ssd, start_lpn, end_lpn, &already_invalid);
 
-    return 0;
+    return ssd_publish_cmd(ssd, req->stime);
 }
 
 /*
@@ -1232,6 +1248,8 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
         ssd_deallocate_fdp_ns(ssd, ns);
     } else {
         ssd_deallocate_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
+        /* the translation pages go with the data, unwritten */
+        tp_discard_all(ssd);
     }
 }
 
@@ -1299,7 +1317,8 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
      * instant, bit-identical to the prior behavior.
      */
     if (spp->trim_lat_ns > 0) {
-        return (uint64_t)spp->trim_lat_ns * nr_ranges;
+        return MAX((uint64_t)spp->trim_lat_ns * nr_ranges,
+                   ssd_publish_cmd(ssd, req->stime));
     }
-    return 0;
+    return ssd_publish_cmd(ssd, req->stime);
 }

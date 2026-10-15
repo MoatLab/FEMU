@@ -40229,6 +40229,159 @@ static void femu_test_eol_wzsl(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* Write Zeroes of whole pages from @page, with the Deallocate bit */
+static uint16_t femu_dftl_zeroes_deac(FemuCtrlState *c, uint64_t page,
+                                      uint32_t npages)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)(page * (4096 / c->lba_size)));
+    cmd.cdw12 = cpu_to_le32((npages * (4096 / c->lba_size) - 1) | (1u << 25));
+    return FEMU_SC(femu_io(c, &cmd));
+}
+
+/*
+ * The changes a command makes to translation pages (TPs) not in the CMT
+ * are written once per TP, whatever the pages it changes. 2048 pages are 4
+ * TPs; the CMT holds one. After a fill, TPs 0 to 2 are on flash and TP 3
+ * is in the CMT.
+ *   - A deallocate of pages 0 to 999 changes 1000 mappings in TPs 0 and
+ *     1: 2 reads and 2 programs.
+ *   - Write Zeroes of page 1700, without Deallocate, programs the page: a
+ *     CMT hit on TP 3, so no TP traffic.
+ *   - Write Zeroes with Deallocate of pages 1000 to 1599 changes TPs 1 and
+ *     2 (2 reads and 2 programs) and TP 3, which only gets dirty.
+ *   - Write Zeroes of page 10 misses TP 0: 1 read, and the eviction of the
+ *     dirty TP 3: 1 program.
+ *   - Format discards every TP with no write-back: no valid TP page, no
+ *     mapping, and a read after it reads no TP. With @data "csd" the
+ *     namespace refuses Format, and the test ends there.
+ */
+static void femu_test_dftl_batch(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t w, r, v[6];
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x21, 64 * 4096);
+    for (i = 0; i < 2048; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    w = femu_c0h_field(&c, log, 280);
+    r = femu_c0h_field(&c, log, 288);
+    g_assert_cmpuint(w, ==, 3);
+    g_assert_cmpuint(r, ==, 0);
+
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 1000, log), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, w + 2);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, r + 2);
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, 2048 - 1000);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+
+    w = femu_c0h_field(&c, log, 280);
+    r = femu_c0h_field(&c, log, 288);
+    g_assert_cmphex(femu_write_zeroes(&c, 1700 * 8, 8), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, w);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, r);
+
+    g_assert_cmphex(femu_dftl_zeroes_deac(&c, 1000, 600), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, w + 2);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, r + 2);
+
+    g_assert_cmphex(femu_write_zeroes(&c, 10 * 8, 8), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, w + 3);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, r + 3);
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, 2048 - 1600 + 1);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+
+    /* a CSD namespace takes neither Format nor Sanitize */
+    if (data && g_str_equal(data, "csd")) {
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==,
+                        NVME_INVALID_FORMAT);
+        goto out;
+    }
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0] + v[1] + v[2] + v[3] + v[4], ==, 0);
+    w = femu_c0h_field(&c, log, 280);
+    r = femu_c0h_field(&c, log, 288);
+    g_assert_cmphex(femu_read_pages(&c, 1800, 1, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 5, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, w);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, r);
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, 1);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+
+out:
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A power cut with dftl: the mapping DRAM is power-loss protected, so the
+ * GTD and the CMT stay. Writes the buffer held are undone and never
+ * reached the mapping. FUA writes to TPs 0 to 3 leave TPs 0 to 2 on flash
+ * and TP 3 in the CMT. After the cut the mappings and the TP pages are as
+ * before, a read in TP 3 hits the CMT and reads no TP, and each FUA page
+ * reads back.
+ */
+static void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[6], before[6], reads;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t i = 0; i < 4; i++) {
+        femu_power_write(&c, buf, 1, (uint64_t)i * 512 * 8, 8, 0x30 + i, true);
+        femu_power_write(&c, buf, 1, (uint64_t)i * 512 * 8 + 8, 8, 0x40 + i,
+                         false);
+    }
+    femu_tp_check(qts, "/machine/peripheral/power", before);
+    g_assert_cmpuint(before[3], ==, 3);
+    reads = femu_c0h_field(&c, log, 288);
+    femu_power_cut(&c);
+    femu_tp_check(qts, "/machine/peripheral/power", v);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[0], ==, before[0]);
+    g_assert_cmpuint(v[3], ==, before[3]);
+    femu_power_read(&c, buf, 1, 3 * 512 * 8, 0x33);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, reads);
+    for (uint32_t i = 0; i < 4; i++) {
+        femu_power_read(&c, buf, 1, (uint64_t)i * 512 * 8, 0x30 + i);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -43139,6 +43292,29 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,mapping=dftl,x-cmt-slots=1"
+    });
+    qos_add_test("dftl-batch", "femu", femu_test_dftl_batch,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1"
+    });
+    qos_add_test("dftl-batch-csd", "femu", femu_test_dftl_batch,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"csd",
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=4,fdm_size=1,mapping=dftl,x-cmt-slots=1"
+    });
+    qos_add_test("dftl-power", "femu", femu_test_dftl_power,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1,buffer_size=16,vwc=1,"
+            "power_loss=on"
     });
     qos_add_test("dftl-capacity", "femu", femu_test_dftl_capacity, NULL);
     qos_add_test("dftl-tp-min", "femu", femu_test_dftl_tp_min,

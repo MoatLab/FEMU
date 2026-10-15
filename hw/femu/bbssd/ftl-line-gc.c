@@ -251,6 +251,7 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
     }
     if (!line->vpc && !line->ipc) {
         line->stream_tag = 0;
+        line->kind = LINE_DATA;
         QTAILQ_INSERT_TAIL(&ssd->lm.free_line_list, line, entry);
         ssd->lm.free_line_cnt++;
     } else {
@@ -278,6 +279,12 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
         pqueue_insert(ssd->lm.victim_line_pq, line);
     }
     memset(wp, 0, sizeof(*wp));
+}
+
+/* close the line @wp fills, as a stream release does */
+void ssd_close_pointer(struct ssd *ssd, struct write_pointer *wp)
+{
+    ssd_stream_close_pointer(ssd, wp);
 }
 
 /*
@@ -1980,6 +1987,17 @@ static void pace_budget(struct ssd *ssd)
     }
     a = cur ? P - (uint64_t)cur->vpc - (uint64_t)cur->ipc : 0;
     t = a + (f - hi - 1) * P;
+    /*
+     * The victim publishes its TP changes when it is done: at most one
+     * program for each TP its pages name, on top of what is pending now.
+     * Evictions between the steps are not counted; the forced pass is the
+     * guard for them.
+     */
+    if (ssd->tp_on) {
+        uint64_t tps = ssd->tp_fifo_cnt + MIN(v, ssd->tp_live_max);
+
+        t = t > tps ? t - tps : 0;
+    }
     if (t <= v) {
         pace_finish(ssd);
         return;

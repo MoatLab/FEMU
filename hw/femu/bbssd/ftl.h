@@ -632,6 +632,7 @@ struct ssd {
      */
     bool tp_on;
     uint64_t n_tps;          /* TP ids: ceil(tt_pgs / lpn_per_tp) */
+    uint64_t tp_live_max;    /* TPs the namespace can have: what realize keeps */
     struct ppa *gtd;         /* tp -> ppa, or UNMAPPED_PPA */
     uint32_t *tp_ver;
     uint32_t *gtd_ver;
