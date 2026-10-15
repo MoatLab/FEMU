@@ -133,6 +133,7 @@ FEMU reads a few environment variables
 | `FEMU_EXP_LOG=1` with `FEMU_SECRET=TEXT` | writes, overwrites, deallocations, GC moves and erases of pages whose data contains `TEXT` |
 | `FEMU_DUMP_LPN=N` | a hex dump of logical page N on every read not served from the write buffer |
 | `FEMU_KV_SELFTEST` (any value) | the result of a KV FTL self-test run once at start |
+| `FEMU_KV_CHECK` (any value) | stops QEMU with a message when a KV page owner check fails |
 
 The launchers other than `run-cxlssd.sh` start QEMU with `sudo`, which drops
 your environment.

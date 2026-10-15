@@ -12,6 +12,7 @@ typedef struct NvmeCqe NvmeCqe;
 typedef struct NvmeRequest NvmeRequest;
 struct ssd;
 struct ppa;
+struct write_pointer;
 
 #define FEMU_KVSSD_KEY_MAX 16          /* NVMe-KV: max KV key size is 16 bytes */
 
@@ -27,6 +28,12 @@ typedef struct FemuKvssdMappingEntry {
     uint64_t length;                   /* value length in bytes */
     struct ppa *ppas;                  /* NAND pages holding this value */
     uint32_t nr_ppas;
+    /*
+     * kv_index=lsm: a newer record of the key shadows this version. It holds
+     * no arena bytes, but its pages stay valid until the tree drops its
+     * record or value GC finds them stale.
+     */
+    bool stale;
 } FemuKvssdMappingEntry;
 
 struct FemuKvssdState;
@@ -95,6 +102,8 @@ typedef struct FemuKvssdState {
 
     /*
      * kv_index=lsm: the tree, and the table entries it has not handed out.
+     * Each Store takes a new entry, a version; the table grows on demand.
+     * Meta pages are real pages on meta_wp, in lines of their own.
      * Merge I/O waits in lsm_pend until the command that caused it has
      * charged its own work. lsm_probe, lsm_gc and lsm_level[] are offsets
      * from lsm_stime; lsm_ready, lsm_mstart and lsm_mend are absolute ns.
@@ -102,7 +111,11 @@ typedef struct FemuKvssdState {
     KvLsm *lsm;
     uint32_t *free_slots;
     uint32_t nr_free;
-    uint64_t lsm_next_id;              /* placeholder page ids */
+    struct write_pointer *meta_wp;
+    bool lsm_nospace;                  /* a merge found no free page */
+    uint64_t meta_wr_pages;            /* meta pages merges programmed */
+    uint64_t gc_meta_pages;            /* meta pages value GC moved */
+    uint64_t gc_stale_pages;           /* value pages GC found stale */
     struct FemuKvLsmIo *lsm_pend;
     uint32_t lsm_npend;
     uint32_t lsm_pend_cap;
@@ -112,13 +125,20 @@ typedef struct FemuKvssdState {
     int64_t lsm_mend;                  /* the end of all merge I/O so far */
     int lsm_mkind;                     /* that run: 1 programs, 0 reads */
     uint64_t lsm_probe;
-    uint64_t lsm_gc;
+    uint64_t lsm_gc;                   /* GC check reads, level by level */
+    uint64_t lsm_gc_base;              /* the end of the level before */
+    int lsm_gc_level;
     uint64_t lsm_level[KV_LSM_MAX_LEVELS + 1];
 
     /* stats */
     uint64_t nand_rd_pages;
     uint64_t nand_wr_pages;
     uint64_t gc_wr_pages;
+    uint64_t gc_lines;                 /* victim lines value GC erased */
+
+    /* FEMU_KV_CHECK: check page owners after GC and every 64 commands */
+    bool check;
+    uint64_t check_tick;
 
     QemuMutex lock;
 } FemuKvssdState;
@@ -149,6 +169,10 @@ typedef struct FemuKvLsmSnap {
     uint64_t dropped;
     uint64_t reinserted;
     uint64_t io[KV_LSM_IO_NR];
+    uint64_t gc_meta_pages;
+    uint64_t gc_stale_pages;
+    uint64_t valid_value_pages;
+    uint64_t versions;                 /* table slots in use */
 } FemuKvLsmSnap;
 
 /* fill @snap and return true when @s runs the LSM index */

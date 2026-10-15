@@ -54,7 +54,7 @@ its own tree.
 ## The model
 
 ```
-          device DRAM                             flash (meta pages)
+          device DRAM                             flash: meta lines
  +--------------------+
  | memtable (sorted)  |  Store, Delete (tombstone), GC reinsert
  +---------+----------+
@@ -69,10 +69,15 @@ its own tree.
  +--------------------+                      | merge
  | L3 level list      |------->| L3 meta pages             |
  +--------------------+        +---------------------------+
+                                flash: value lines (values in log order)
 ```
 
 - A record holds a key and a value pointer. A meta page holds
   `page size / 32` records (128 for 4 KiB pages).
+- Meta pages are real NAND pages, on their own write pointer. Their lines
+  hold no value, as PinK keeps meta segments apart from data segments.
+- A merge programs new pages and releases the pages it replaces. Value GC
+  also collects meta lines.
 - A level list in DRAM holds the first key of each meta page. Thus a
   lookup reads at most one meta page in each unpinned level.
 - A merge takes the whole upper level. It reads and rewrites only the
@@ -85,8 +90,7 @@ its own tree.
 
 ```
  Retrieve:  t0 |-- L2 meta read --|-- L3 meta read --|-- value read --|
-                base read (one page on a hashed LUN) from t0, beside them
-            latency = MAX(base, meta reads + value read)
+            latency = meta reads + value read
 ```
 
 | Command | Index cost |
@@ -97,14 +101,15 @@ its own tree.
 | List | each meta page its walk enters; the pages of one level one after the other, the levels side by side |
 | a flushing Store or Delete | the flush and merges, in the background (below) |
 
-Every KV command keeps the base read of the hash index. The meta page
-reads come on top of it, so the default `kv_index=hash` times are
-unchanged.
+A command pays only the flash that the tree reads or programs. It pays no
+base read: that read is the cost model of the hash index, which keeps it.
+Thus an Exist that the memtable answers takes no NAND time. A blind Delete
+takes none either, unless it runs value GC.
 
 ### Merges run in the background
 
 ```
- Store k (memtable full)  |--value program--|--base--|         latency of Store k
+ Store k (memtable full)  |--value program--|                 latency of Store k
  merges, queued:                      reads |-r-|-r-|  programs |-p-|-p-|
  next command on a busy LUN                             ...waits...|----|
 ```
@@ -119,20 +124,53 @@ unchanged.
 - Later commands on the same LUNs wait behind it. A device that cannot
   merge as fast as the host writes shows this in every command.
 
+### Old values stay on flash until the tree drops them
+
+A blind Store or Delete does not look the key up, so the device does not
+know the old value yet. Its pages stay valid on flash. They become
+garbage when the tree drops the old record:
+
+```
+ Store k (blind)     new record (k, v2) in the memtable
+                     v1 pages: still VALID on flash
+ merge over k        drops (k, v1): v1 pages INVALID
+ value GC finds v1   newest record of k is v2: v1 page INVALID now
+```
+
+- An overwrite of a key that the memtable holds replaces the record
+  there, so the old pages go at once.
+- NUSE drops at the Delete or the overwrite, as the KV specification
+  defines it. Only the flash keeps the old pages.
+- `valid-value-pages` in `query-femu` counts the pages that are still
+  valid, with these old ones.
+
 ### Value garbage collection
 
-KV value collection (`kv_compact()`) moves every live value when the value
-space is full. With the LSM tree it works as PinK does (section 4.5 of
-the paper):
+Value GC starts in a Store or a Delete when the free lines fall to the GC
+threshold that `gc_thres_pcent` sets. As PinK does (section 4.5 of the
+paper), it collects one victim line at a time:
 
-1. For each key whose newest record is in an unpinned level, read its
-   meta page once, to check the value.
-2. Move the values, after those reads.
-3. Put those keys back into the memtable, since their meta pages hold the
-   old pointer. Their merges wait for the moves.
+1. The victim is the line with the fewest valid pages. With no invalid
+   page anywhere, a Store with no room takes the full value lines.
+2. For each value on the victim, look its key up. This reads the meta
+   pages of the unpinned levels, once each, level by level.
+3. A value that the newest record names moves to a new page, after its
+   read. A stale value is released, with no move.
+4. A moved key with its record in an unpinned level goes back into the
+   memtable. Its merges wait for the moves.
+5. The victim is erased.
 
-The command that triggers the collection pays steps 1 and 2, as it pays
-the moves with the hash index.
+A meta line moves its valid meta pages, and the level list follows them.
+The Store that runs the collection waits for it. GC ends when the free
+lines are above the threshold and the Store has room. A victim that gives
+no free page also ends it, unless a Store still needs room. Then GC tries
+more queued victims, at most as many as the queue held at the start, and
+each full line once.
+
+A Store can still have no room while Deletes or old records sit in the
+levels. The device then merges every run into the deepest level at once. The
+tombstones and the records they hide drop there. GC then collects the
+meta pages that this frees.
 
 ## List order
 
@@ -157,19 +195,24 @@ The `lsm` member of the namespace in `query-femu` shows the tree
 memtable, each level, and counters of each kind of meta page I/O.
 `femu-stat.py` prints them with their change over each interval.
 
-The meta page I/O is not in the host, NAND or GC write counters of the
-health log or log page C0h. Thus the write amplification there is the
-ratio of value pages, as for the cached mapping table of BlackBox.
+A merge program counts as a page programmed (`nand_write_pages`), not as
+a page the host asked for. In `gc_write_pages`, GC counts each meta page
+or value it moves as a page relocated. Thus the write amplification of
+the health log and of log page C0h includes the index.
 
 ## Limits
 
-- Meta pages take channel and LUN time on placeholder addresses. They take
-  no value space, no line and no erase.
-- A Store or Delete that the tree answers blind frees the old value pages
-  at once. A real device finds them only at a merge.
+- Meta pages take NAND pages, but no value space: NUSE counts keys and
+  values only. A Store leaves free a reserve: two lines, and the pages of
+  a merge that rewrites every record. A Store that would use the reserve
+  gets Capacity Exceeded.
+- A merge that finds too few free pages changes nothing. Every merge
+  leaves one line free, for value GC. A Store whose flush fails gets
+  Capacity Exceeded. A Delete keeps its tombstone in the memtable over its
+  capacity, so it succeeds; the next put flushes again.
 - There is no Bloom filter. PinK also has none.
-- With the ECC properties on, a meta page read takes the read time of the
-  placeholder block, as the hash base read does.
+- With `kv_timing=model`, the model time also hides the time of value GC,
+  as it hides the other NAND time of a Store.
 
 | Message | Cause and fix |
 | --- | --- |

@@ -102,9 +102,14 @@ namespace. A controller can mix KV namespaces with block namespaces
 - **Value pages.** Each entry also records the NAND pages that hold its
   value (`ppas`), `ceil(length / page size)` of them, where the page size is
   `secsz * secs_per_pg`. Those pages exist only in the timing model.
+  `ssd->rmap` names the owner of each programmed page: the table slot of
+  its value, or the LSM tree for a meta page. A page is released only
+  through its owner.
 
-The two views are kept in step: the arena decides where the bytes are, and
-the NAND model decides what storing and reading them costs.
+The two views are separate. The arena is the emulator's store of the host
+bytes: when its frontier is full, `kv_arena_pack()` moves the live bytes
+to the front, with no NAND time. The NAND model is the device: value GC
+collects its lines one victim at a time ([value GC](#value-gc)).
 
 ## Key index
 
@@ -117,26 +122,43 @@ tables in `kvssd_ftl_alloc()`:
 | `hash` (default) | the open-addressing table above, in DRAM | none: no flash read |
 | `lsm` | an LSM tree after PinK (`kv-lsm.c`) | one meta page read per unpinned level, in sequence |
 
-With `lsm`, `table[]` becomes a slot pool. A free stack hands a slot to
-a new key, and the tree maps the key to its slot:
+With `lsm`, `table[]` becomes a pool of versions. Each Store takes a new
+slot from a free stack, and the pool grows when the stack is empty. The
+tree maps the key to the slot of its newest version:
 
 ```text
   memtable (sorted, DRAM) ---flush---> L1 ---merge---> L2 ---> ... L24
   record { key, key_len, tombstone, slot } --------+
                                                     v
-  table[slot] { key, value_off, length, ppas }     value pointer
+  table[slot] { key, value_off, length, ppas, stale }   one version
 ```
 
-- `kv-lsm.c` holds the tree and needs nothing from QEMU. It reports each
-  meta page it reads or programs through a callback, with the page id,
-  the kind of I/O and the level. The unit test
-  `tests/unit/test-kv-lsm.c` builds it alone.
-- `kvssd-ftl.c` turns a page id into a placeholder address. The LUN is
-  `id % luns`, then the plane and the page follow, all inside the geometry.
-  It charges the I/O as `MAP_IO` through `ssd_advance_status()`.
-- An overwrite keeps the slot and adds a new record. A Delete adds a
-  tombstone first and frees the slot after. A lookup takes the newest
-  record, so an older record that names a reused slot is never read.
+- `kv-lsm.c` holds the tree and needs nothing from QEMU. The unit test
+  `tests/unit/test-kv-lsm.c` builds it alone. It calls the FTL through
+  `KvLsmOps`:
+  - `io`: a meta page read or program;
+  - `alloc`: a new meta page;
+  - `free_page`: a page the tree no longer names;
+  - `drop`: a record that leaves the tree.
+- A meta page is a real NAND page on its own write pointer (`meta_wp`),
+  in lines that hold no value. Its id is its `ppa`. Probes and scans
+  charge it as `USER_IO`, merges and GC as `GC_IO`. Thus read counts,
+  wear and ECC see its real block.
+- Each slot has one record. An overwrite or a Delete makes the old version
+  stale: it gives back its arena bytes and NUSE at once, but it keeps its
+  pages. The pages go when `drop` reports its record, from a merge that
+  shadows it or from a memtable put that replaces it.
+- `alloc` takes only a free line, and does not program: the program
+  comes as `KV_LSM_IO_COMPACT_PROGRAM` when the merge commits. GC runs
+  only at the start of a command, never inside a merge. GC itself runs
+  the merges of the keys it reinserts, between two victims.
+- `room` refuses a merge before it takes a page. Every merge leaves one
+  free line for value GC. A Delete whose flush fails keeps its tombstone
+  in the memtable over its capacity (`kv_lsm_put_tombstone()`), so a full
+  device still takes a Delete.
+- `kv_lsm_compact_all()` merges every run into the deepest level in one
+  pass, so its output holds only the live keys. A Store that still has no
+  room after GC runs it, and then GC again.
 - The timing rules, from the request arrival time `t0`:
 
 ```text
@@ -146,8 +168,8 @@ a new key, and the tree maps the key to its slot:
   merge I/O        queued during the command, issued at unlock:
                    reads from t0, programs after the last read,
                    the next merge after the last program; not in the latency
-  value GC         check reads from t0, value moves after them,
-                   reinserted keys' merges after the moves
+  value GC         check reads level by level from t0, each move after
+                   its read, reinserted keys' merges after the moves
 ```
 
 The hash table leaves `probe` NULL and takes none of these paths, so its
@@ -173,7 +195,11 @@ live key and value bytes as NUSE.
 
 A store is refused with Capacity Exceeded when live keys and values would
 pass `value_capacity`, when the index is full, or when the NAND model has
-too few free pages for the value.
+too few free pages for the value and a reserve. The reserve is the room
+that value GC needs to move a victim. It is one line with the hash index.
+The LSM index also needs a line for its open meta page, and the pages of
+its largest merge: one that rewrites every record, with a part page for
+each level.
 
 ## Commands
 
@@ -234,19 +260,24 @@ read and write EDNEK.
 ```text
   kvssd_ftl_store(key, vsize)                    lock held throughout
    1. find key in index
-   2. option or capacity check fails?  -> charge base cost, return error
-   3. kv_value_alloc(vsize)
+   2. option or capacity check fails?  -> charge the index cost, return error
+   3. kv_gc_run(): value GC while free lines <= threshold or room < need
+      lsm, still no room, old records: kv_lsm_compact_all(), GC again
+   4. room < value pages + reserve?    -> Capacity Exceeded
+   5. kv_value_alloc(vsize)
         frontier fits?          -> take [value_next, value_next + vsize)
-        else dead bytes exist?  -> kv_compact(), then retry
+        else dead bytes exist?  -> kv_arena_pack() (memory only), retry
         else                    -> Capacity Exceeded
-   4. copy the value from the host into the arena
-   5. kv_program_ppas(): for each value page
-        kv_ensure_write_pointer()   (may erase empty lines first)
-        get_new_page(); mark valid; charge a NAND program
-        kv_advance_write_pointer()  (channel, LUN, plane, then page)
-   6. index upsert; invalidate the old value's pages, count its bytes dead
-   7. latency: whichever ends last of the compaction in step 3, the base
-      cost, the page programs and the reclaim erases
+   6. copy the value from the host into the arena
+   7. kv_program_ppas(): for each value page
+        kv_wp_line()   (a free line when the pointer has none)
+        mark valid; charge a NAND program
+        kv_wp_step()   (channel, LUN, plane, then page)
+   8. index upsert; the new pages take the slot as owner
+        hash: release the old value's pages now
+        lsm:  the old version goes stale; its pages wait for the tree
+   9. latency: whichever ends last of the GC in step 3, the index cost,
+      the page programs and the reclaim erases
 ```
 
 The write pointer walks a line the way the black-box FTL does: across
@@ -256,19 +287,36 @@ the victim queue if some were invalidated.
 
 **Reclaim.** `kv_reclaim_empty_lines()` takes lines from the victim queue
 whose valid page count is zero and erases them, one multi-plane erase per
-LUN. It runs when a line closes, when the write pointer needs a new line,
-and when the FTL checks how much space is left. KV never moves valid pages out of a partly valid
-line.
+LUN. It runs at the start of GC and before a Store programs its value.
 
-**Compaction.** Compaction runs only when the value arena's frontier cannot
-fit a new value and there are dead bytes. `kv_compact()` then rewrites every
-live value to the front of the arena, in offset order, and programs new NAND
-pages for each as garbage collection writes. This charges the whole live set
-to the store that triggered it. If the NAND model has too few free pages for
-the whole live set, compaction is not attempted and the Store fails with
-Capacity Exceeded. A Store that finds too few free NAND pages for its own
-value also fails with Capacity Exceeded; that case does not try compaction
-either.
+### Value GC
+
+`kv_gc_run()` runs at the start of a Store, and with the LSM index at the
+start of a Delete. It collects victims while the free lines are at or
+below `gc_thres_lines`, or while a Store has too little room:
+
+```text
+  victim = the line with the fewest valid pages (victim queue)
+           lsm, no such line, a Store with no room:
+           the next full value line of the run, oldest first
+  value line:
+     hash   every valid page is live: read it, program a copy
+     lsm    look up each version's key (meta reads, level by level)
+              the newest record names it -> move; record on flash -> reinsert
+              else                       -> release the page, no move
+  meta line: read and program each valid meta page; the level list follows
+  reinsert the keys (lsm), then erase the victim, one erase per LUN
+```
+
+- A victim from the queue that gives no usable page ends the run, unless
+  a Store needs room. GC then tries the victims queued at the start of the
+  run, and the full lines. A run takes only the full lines that existed at
+  its start, so it never moves a line in a loop.
+- The victim is marked `reclaiming` before any page changes. When a move
+  finds no free page, the victim goes back to its list by its counts.
+- Each move reads its source page, then programs the copy. The erase waits
+  for the last program. The next victim starts when the erase ends. The
+  Store waits for all of it.
 
 ## Timing
 
@@ -278,9 +326,9 @@ like a black-box I/O. The NAND timing properties
 ([`pg_rd_lat`, `pg_wr_lat`, `blk_er_lat`, the channel properties](../reference/properties.md#nand-timing-bbssd-csd-kv))
 set the costs.
 
-Every command that reaches the index pays a **base cost**: one NAND page
-read, charged as a mapping read on the LUN that holds the key's part of the
-index (`kv_index_ppa()`). The index is spread over every LUN by the key's
+With the hash index, every command that reaches the index pays a **base
+cost**: one NAND page read, charged as a mapping read on the LUN that holds
+the key's part of the index (`kv_index_ppa()`). The index is spread over every LUN by the key's
 FNV-1a hash, LUN `hash % (nchs * luns_per_ch)`, so lookups of different keys
 run in parallel; a List uses its start key. The cost stands for the
 controller's index work, so that commands that touch no value are not free.
@@ -289,18 +337,18 @@ error paths after the index lookup, are charged nothing.
 
 | Command | Charged |
 | --- | --- |
-| Store | whichever ends last of any compaction it triggers, the base cost, its page programs and any reclaim erases |
+| Store | whichever ends last of any value GC it runs, the base cost, its page programs and any reclaim erases |
 | Retrieve | the reads of the value pages that are transferred, and the base cost; the longest of them |
 | Exist | the base cost |
 | Delete, List | the longer of the base cost and the index cost, which is 0 for the hash index |
-| any command with `kv_index=lsm` | also the meta page reads of the [key index](#key-index) |
+| any command with `kv_index=lsm` | the meta page reads of the [key index](#key-index) in place of the base cost |
 | a missing key, a conditional Store that does not apply, a full index or a full value space | the base cost |
 
 All costs are measured from the command's arrival time on the LUN
 timelines, so a LUN that is already busy makes the command wait, and a
 stage that queues behind an earlier stage of the same command already
 contains that wait. The command therefore ends with its last stage, and
-costs never add up: a Store whose own programs follow its compaction on a LUN
+costs never add up: a Store whose own programs follow its value GC on a LUN
 completes when they do. The result is added to the request's
 `expire_time` (`kv_apply_lat()`). The host-link and firmware models
 ([host link and controller firmware](../reference/properties.md#host-link-and-controller-firmware))
@@ -341,9 +389,10 @@ controller's black-box, CSD and KV namespaces
 ([log pages and counters](../reference/log-pages-and-counters.md#vendor-log-page-c0h)):
 
 - pages the host asked to program: value pages written by Store;
-- pages relocated by garbage collection: value pages rewritten by
-  compaction;
-- pages programmed: the same as the first, since KV has no write buffer;
+- pages relocated by garbage collection: value pages and meta pages that
+  value GC moved;
+- pages programmed: the value pages of the first item, and the meta pages
+  that merges program (LSM index only);
 - reads of the most-read block: value page reads count against their block.
 
 The SMART log counts Store and Retrieve as host writes and reads, with the
@@ -354,13 +403,21 @@ bytes actually moved.
 - qtest cases in `hw/femu/tests/qtest/femu-test.c`, run in CI:
   `kv-discovery` (the command set list and its command effects log),
   `kv-namespaces` (separate key spaces), `kv-accounting` (SMART bytes and
-  the most-read block figure), `kv-base-spread` and `kv-compaction-time`
-  (timing), `namespace-kv-byte-capacity`, `kv-mdts` and
+  the most-read block figure), `kv-base-spread` (timing), `kv-gc-victim`
+  (one victim per GC), `kv-hash-backshift` (page owners after a Delete
+  shifts entries), `kv-css-nvm` and `kv-css-all` (CC.CSS),
+  `namespace-kv-byte-capacity`, `kv-mdts` and
   `kv-list-mdts0` (transfer limits), `kv-identify-reserved` (Identify
   layout), `sgl-kv`, and `kv-fuzz`, a fuzzer over the command fields.
 - The `kv-lsm-*` qtests cover `kv_index=lsm`: data, List order, probe
-  time, background merges, query output, refusals, value GC and Delete.
-  The unit test `test-femu-kv-lsm` checks the tree against a reference.
+  time, background merges, query output, refusals, value GC (also with
+  two planes and two-page values), old values on flash, meta page
+  programs, Delete, a full device, table growth and random overwrites. The
+  unit test `test-femu-kv-lsm` checks the tree against a reference, and
+  each page and record callback.
+- The qtests set `FEMU_KV_CHECK`. After each value GC and every 64
+  commands, the FTL checks the owner that `rmap` names for each valid
+  page. A broken owner stops QEMU.
 - The documentation check stores and retrieves one value in each example
   whose namespace 1 is a KV namespace.
 - `FEMU_KV_SELFTEST`, set in the environment, runs a self-test of the FTL at
@@ -375,11 +432,9 @@ bytes actually moved.
 - One key-value format: keys up to 16 bytes, values up to 2 MiB.
 - Values are held in host memory as well as in the timing model's page
   states, so a KV namespace costs host memory equal to its value capacity.
-- Reclaim only erases lines with no valid pages, and compaction rewrites the
-  whole live set at once, only when the value arena is full. A workload
-  that leaves every line partly valid pays compaction in one command instead
-  of steady background GC, or gets Capacity Exceeded when the NAND runs out
-  first.
+- Value GC runs in the Store that needs room, not in the background.
+- A value takes whole pages: small values use more NAND than their bytes,
+  and a Store can get Capacity Exceeded before NUSE reaches NSZE.
 - The base cost of a key always falls on the same LUN, so a workload that
   hammers one key queues on that LUN.
 - With the hash index, List order follows the hash table, not key order.
@@ -398,9 +453,8 @@ Refusal messages are listed in the
   from `probe` the time of its lookup reads, as the LSM tree does. Add a
   `kv_index` value and set `s->index` to the new table in
   `kvssd_ftl_alloc()`.
-- **Background reclaim.** Valid-page relocation from partly valid lines would
-  replace whole-arena compaction; the black-box GC in `hw/femu/bbssd/` shows
-  the line and victim bookkeeping it would reuse.
+- **Background GC.** `kv_gc_run()` runs in the command; a timer could run
+  it between commands, as the black-box GC in `hw/femu/bbssd/` does.
 - **More KV formats.** `kvssd_fill_id_ns()` reports one format; additional
   formats need a Format NVM path that changes `kv_key_max` and
   `kv_value_max`.
@@ -410,7 +464,7 @@ Refusal messages are listed in the
 | File | Contents |
 | --- | --- |
 | [`hw/femu/kvssd/kvssd.c`](../../kvssd/kvssd.c) | command parsing, registration, init and exit |
-| [`hw/femu/kvssd/kvssd-ftl.c`](../../kvssd/kvssd-ftl.c) | index, value arena, NAND placement, reclaim, compaction, timing, self-test |
+| [`hw/femu/kvssd/kvssd-ftl.c`](../../kvssd/kvssd-ftl.c) | index, value arena, NAND placement, page owners, value GC, timing, owner check, self-test |
 | [`hw/femu/kvssd/kv-lsm.c`](../../kvssd/kv-lsm.c) | the LSM tree of `kv_index=lsm`: memtable, levels, merges, scan |
 | [`hw/femu/kvssd/kvssd-admin.c`](../../kvssd/kvssd-admin.c) | Identify structures, Key Value Configuration feature |
 | [`hw/femu/kvssd/kvssd.h`](../../kvssd/kvssd.h) | `FemuKvssdState`, `FemuKvssdMappingEntry`, `FemuKvIndexOps` |

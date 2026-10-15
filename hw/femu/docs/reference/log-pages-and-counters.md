@@ -55,6 +55,10 @@ stays zero until the host has written a page.
 Bytes 8 and 24 are equal when no write buffer is configured; a buffer that
 absorbs repeated writes to one page makes the factor drop below 1.
 
+A KV namespace with `kv_index=lsm` adds its merge programs to offset 24. It
+adds the meta pages that value GC moves to offset 16. Thus its factor
+includes the index.
+
 They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
 the thermal transition counts.

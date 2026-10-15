@@ -559,7 +559,8 @@ With `subsys`, the controller must be the only one in its subsystem. Guide: [CP 
 ### KV
 
 KV uses the geometry (section 5), the NAND timing (section 6), and
-`gc_thres_pcent` as the share of the NAND usable for values. The FTL,
+`gc_thres_pcent` as the share of the NAND usable for values. The rest of
+the NAND is free space: value GC starts when the free lines fall to it. The FTL,
 mapping, cache, write buffer and other GC properties have no effect on KV,
 but KV runs the same validation as bbssd, so an out-of-range or unknown
 value is still refused. The GC

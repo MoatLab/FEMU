@@ -226,6 +226,9 @@ was not doing anything.
 
 #### Behaviour changes (still boots, numbers move)
 
+- KV value GC collects one victim line at a time when the free lines fall to the GC threshold, with both key indexes. It replaces the old compaction, which rewrote every live value when the value arena filled: emulator memory set that trigger, not the NAND. The arena now packs its bytes with no NAND time. A Store leaves free a reserve for GC, so a full device returns Capacity Exceeded sooner. `FEMU_KV_CHECK` checks the owner of every page.
+- With `kv_index=lsm`, meta pages are real NAND pages in lines of their own. Merges program them and value GC moves them. The health log and log C0h count them, so the WAF includes the index. An old value stays valid on flash until a merge drops its record or value GC finds it stale (PinK, section 4.5). Commands pay only the flash the tree reads, with no hash base read. Thus a memtable hit takes no NAND time.
+- With `kv_index=lsm`, a Store keeps room for a merge of every record. When it finds no room, the device merges every level down, so Deletes give back their space. `query-femu` adds `gc-meta-pages`, `gc-stale-value-pages`, `valid-value-pages` and `versions`.
 - Compare, Write Zeroes, Verify and Copy are on by default: the `oncs` default is now 0x19d instead of 0x14. A guest that sees Write Zeroes in ONCS can send it, and on bbssd the FTL programs the range unless Deallocate is set. `oncs=0x14` gives the old set. Write Uncorrectable still needs bit 0x2.
 - Compare and Verify take the NAND read time of a Read on bbssd, CSD and ZNS namespaces, also after a miscompare. Before, both completed with no media read.
 - A Copy on bbssd issues its destination write when its source reads end. On one LUN, a one-page Copy took the read time twice: 600 ms instead of 500 ms with a 100 ms read and a 400 ms program.

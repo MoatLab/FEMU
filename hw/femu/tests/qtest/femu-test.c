@@ -20867,40 +20867,69 @@ static void femu_test_kv_base_spread(void *obj, void *data,
 }
 
 /*
- * A Store that has to compact first relocates every live value and then
- * programs its own, all on one LUN here. Its own programs wait behind the
- * relocation, so their completion already includes it: 254 relocated pages
- * and 2 of its own take 256 program times. Adding the relocation time on top
- * again made it look like 510.
+ * Value GC collects one victim line at a time. Each line here holds one
+ * cold value and three overwrites of a hot key, so a victim has a quarter
+ * of its pages valid. GC starts when the free lines fall to the threshold,
+ * and a Store that runs it moves one victim's cold pages, a few program
+ * times, not the whole live set. One LUN, 2 ms programs, 16 pages a line.
  */
-static void femu_test_kv_compaction_time(void *obj, void *data,
-                                         QGuestAllocator *alloc)
+#define FEMU_KV_GC_COLD 200
+
+static void femu_test_kv_gc_victim(void *obj, void *data,
+                                   QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
     uint64_t raw = guest_alloc(alloc, 3 * 4096);
     uint64_t buf = (raw + 4095) & ~4095ULL;
-    int64_t start, took;
-    uint64_t k;
+    uint64_t log = guest_alloc(alloc, 512);
+    int64_t worst = 0;
+    uint64_t moved;
+    uint8_t got[16];
 
     femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
-    qtest_memset(femu->dev.bus->qts, buf, 0x5a, 8192);
 
-    /* 127 values of 8 KiB and one rewrite fill the 1 MiB value space */
-    for (k = 1; k <= 127; k++) {
-        g_assert_cmpint(femu_kv_store(&c, k, buf, 8192), ==, NVME_SUCCESS);
+    for (uint64_t k = 0; k < FEMU_KV_GC_COLD; k++) {
+        for (int h = 0; h < 4; h++) {
+            uint64_t key = h ? 1 : 1000 + k;
+            int64_t start;
+            int64_t took;
+
+            qtest_memset(qts, buf, (int)(key + k), 4096);
+            start = g_get_monotonic_time();
+            g_assert_cmphex(femu_kv_store(&c, key, buf, 4096), ==,
+                            NVME_SUCCESS);
+            took = g_get_monotonic_time() - start;
+            worst = MAX(worst, took);
+        }
     }
-    g_assert_cmpint(femu_kv_store(&c, 1, buf, 8192), ==, NVME_SUCCESS);
+    moved = femu_c0h_field(&c, log, 16);
+    g_test_message("gc moved %" PRIu64 " pages; slowest Store %" PRId64
+                   " us", moved, worst);
+    /* GC ran and moved cold pages */
+    g_assert_cmpuint(moved, >, 0);
+    /* one victim: 4 moves and a Store, not 200 live pages (400 ms) */
+    g_assert_cmpint(worst, <, 100000);
 
-    start = g_get_monotonic_time();
-    g_assert_cmpint(femu_kv_store(&c, 2, buf, 8192), ==, NVME_SUCCESS);
-    took = g_get_monotonic_time() - start;
+    for (uint64_t k = 0; k < FEMU_KV_GC_COLD; k++) {
+        NvmeCmd cmd;
 
-    /* 256 programs of 2 ms is 512 ms; counted twice it was over 1 s */
-    g_assert_cmpint(took, >=, 500000);
-    g_assert_cmpint(took, <, 760000);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(1000 + k);
+        cmd.cdw10 = cpu_to_le32(4096);
+        cmd.cdw11 = cpu_to_le32(8);
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, got, sizeof(got));
+        g_assert_cmpuint(got[0], ==, (uint8_t)(1000 + k + k));
+        g_assert_cmpuint(got[15], ==, (uint8_t)(1000 + k + k));
+    }
     femu_disable(&c);
+    guest_free(alloc, log);
     guest_free(alloc, raw);
 }
 
@@ -20945,6 +20974,64 @@ static void femu_test_kv_css(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
                             false, 0, 1, NULL)), ==,
                     all ? FEMU_IOCS_COMBINATION_REJECTED : NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * A hash Delete shifts later entries of its probe run back, so their
+ * pages change owner slot. 700 keys in 1024 slots collide often; every
+ * other key is deleted, and the owner check (FEMU_KV_CHECK, every 64
+ * commands) then finds each page with the slot that holds it. GC runs
+ * over them, and every key that is left reads back.
+ */
+static void femu_test_kv_hash_backshift(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint8_t got[16];
+    NvmeCmd cmd;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint64_t k = 0; k < 700; k++) {
+        qtest_memset(qts, buf, (int)(k & 0xff), 16);
+        g_assert_cmphex(femu_kv_store(&c, k, buf, 16), ==, NVME_SUCCESS);
+    }
+    for (uint64_t k = 0; k < 700; k += 2) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_DELETE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.res1 = cpu_to_le64(k);
+        cmd.cdw11 = cpu_to_le32(8);
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+    /* overwrites fill the lines, so GC moves the shifted entries' pages */
+    for (int round = 0; round < 2; round++) {
+        for (uint64_t k = 1; k < 700; k += 2) {
+            qtest_memset(qts, buf, (int)((k + round + 1) & 0xff), 16);
+            g_assert_cmphex(femu_kv_store(&c, k, buf, 16), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    for (uint64_t k = 0; k < 700; k++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(k);
+        cmd.cdw10 = cpu_to_le32(16);
+        cmd.cdw11 = cpu_to_le32(8);
+        g_assert_cmphex(femu_io(&c, &cmd), ==, k & 1 ? NVME_SUCCESS : 0x87);
+        if (k & 1) {
+            qtest_memread(qts, buf, got, sizeof(got));
+            g_assert_cmpuint(got[0], ==, (uint8_t)(k + 2));
+        }
+    }
     femu_disable(&c);
     guest_free(alloc, raw);
 }
@@ -21485,7 +21572,7 @@ static uint16_t femu_lsm_store(FemuCtrlState *c, uint64_t i, uint64_t buf,
 static uint16_t femu_lsm_check(FemuCtrlState *c, uint64_t i, uint64_t buf,
                                uint32_t len, int ver)
 {
-    uint8_t got[4096];
+    uint8_t got[8192];
     uint16_t status;
 
     g_assert_cmpuint(len, <=, sizeof(got));
@@ -21724,7 +21811,7 @@ static int64_t femu_lsm_timed(FemuCtrlState *c, uint8_t opcode, uint64_t i,
  * A lookup reads the meta page of each unpinned level whose key range
  * holds the key, one after the other, and then the value. With 25 ms
  * reads, a key found after k meta pages takes (k + 1) reads; a key in the
- * memtable takes one, the value read beside the base read.
+ * memtable takes one, the value read. The tree has no other index read.
  */
 #define FEMU_LSM_READ_US 25000
 
@@ -21774,11 +21861,19 @@ static void femu_test_kv_lsm_probe_time(void *obj, void *data,
     }
     g_assert_cmpint(found, >=, 0);
 
-    /* a miss past every level reads no meta page */
+    /*
+     * A miss past every level reads no meta page, and the tree reads no
+     * other flash: no base read, so it takes no 25 ms read time.
+     */
     g_usleep(3 * FEMU_LSM_READ_US);
     reads = femu_lsm_stat(qts, "probe-read-pages");
-    femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, 5000, buf, 0, 0x87);
+    us = femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, 5000, buf, 0, 0x87);
     g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+    g_assert_cmpint(us, <, FEMU_LSM_READ_US / 2);
+    /* an Exist that the memtable answers costs no flash either */
+    us = femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, (135 * 53) % 136, buf, 0,
+                        NVME_SUCCESS);
+    g_assert_cmpint(us, <, FEMU_LSM_READ_US / 2);
 
     femu_disable(&c);
     guest_free(alloc, raw);
@@ -21971,9 +22066,14 @@ static void femu_test_kv_lsm_refused(void *obj, void *data,
 }
 
 /*
- * Value GC with keys in unpinned levels. As in PinK, it reads the meta
- * page of each such key to check the value, and puts the key back in the
- * memtable. The values survive the move.
+ * Value GC with the LSM tree, as PinK does it (section 4.5). Each cold
+ * value shares its line with three writes of a hot key, so the lines stay
+ * partly valid and the free lines fall to the GC threshold. GC checks each
+ * version against the tree (meta page reads), moves the live ones and
+ * puts back the keys whose records are on flash, and releases the stale
+ * ones: the first 50 keys are rewritten while older lines still hold their
+ * first versions. Every value reads back as its last version, and the
+ * owner check (FEMU_KV_CHECK) runs after each GC.
  */
 static void femu_test_kv_lsm_gc(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -21983,32 +22083,404 @@ static void femu_test_kv_lsm_gc(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t raw = guest_alloc(alloc, 3 * 4096);
     uint64_t buf = (raw + 4095) & ~4095ULL;
+    /* with @data, values of two pages, which can span two victim lines */
+    uint32_t len = data ? 8192 : 4096;
+    int cold = data ? 100 : 200;
     int i;
 
     femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
-    for (i = 0; i < 40; i++) {
+    for (i = 0; i < cold + cold / 4; i++) {
+        int key = i < cold ? i : i - cold;
+
+        g_assert_cmphex(femu_lsm_store(&c, key, buf, len, i >= cold), ==,
+                        NVME_SUCCESS);
+        /* two-page values: strides of 6 pages, so GC moves them apart */
+        for (int h = 0; h < (data ? 2 : 3); h++) {
+            g_assert_cmphex(femu_lsm_store(&c, 10000, buf, len, h), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    g_test_message("gc reads %" PRId64 ", reinserted %" PRId64
+                   ", stale %" PRId64 ", meta moved %" PRId64,
+                   femu_lsm_stat(qts, "gc-read-pages"),
+                   femu_lsm_stat(qts, "reinserted-keys"),
+                   femu_lsm_stat(qts, "gc-stale-value-pages"),
+                   femu_lsm_stat(qts, "gc-meta-pages"));
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), >, 0);
+    g_assert_cmpint(femu_lsm_stat(qts, "reinserted-keys"), >, 0);
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-stale-value-pages"), >, 0);
+    /* one-page values leave meta lines with holes that GC collects */
+    if (!data) {
+        g_assert_cmpint(femu_lsm_stat(qts, "gc-meta-pages"), >, 0);
+    }
+    for (i = 0; i < cold; i++) {
+        g_assert_cmphex(femu_lsm_check(&c, i, buf, len, i < cold / 4), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_lsm_check(&c, 10000, buf, len, data ? 1 : 2), ==,
+                    NVME_SUCCESS);
+    /* a short buffer still gets the full value length in Dword 0 */
+    for (i = 0; i < cold; i += 17) {
+        NvmeCmd cmd;
+        uint32_t full = 0;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(femu_lsm_key(i));
+        cmd.cdw10 = cpu_to_le32(16);
+        cmd.cdw11 = cpu_to_le32(8);
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, &full)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(full, ==, len);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * GC looks at every full value line when a Store needs room. The levels
+ * are all pinned, so an overwrite leaves the old page valid and no line
+ * has an invalid page. The oldest full line holds only live values and
+ * gives no room; GC goes on to the line with the stale values, and the
+ * first Store that needs it succeeds. Eight lines of 16 pages.
+ */
+static void femu_test_kv_lsm_full_lines(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i <= 64; i++) {
         g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 0), ==,
                         NVME_SUCCESS);
     }
-    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), ==, 0);
-    /* a hot key fills the 1 MiB value space; its old values are dead */
-    for (i = 0; i < 300; i++) {
-        g_assert_cmphex(femu_lsm_store(&c, 1000, buf, 4096, i & 1), ==,
+    for (int i = 32; i <= 46; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 1), ==,
                         NVME_SUCCESS);
     }
-    g_test_message("gc reads %" PRId64 ", reinserted %" PRId64,
-                   femu_lsm_stat(qts, "gc-read-pages"),
-                   femu_lsm_stat(qts, "reinserted-keys"));
-    g_assert_cmpint(femu_lsm_stat(qts, "gc-read-pages"), >, 0);
-    g_assert_cmpint(femu_lsm_stat(qts, "reinserted-keys"), >, 0);
-    for (i = 0; i < 40; i++) {
-        g_assert_cmphex(femu_lsm_check(&c, i, buf, 4096, 0), ==,
+    g_assert_cmphex(femu_lsm_store(&c, 1000, buf, 4096, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "gc-stale-value-pages"), >, 0);
+    for (int i = 0; i <= 64; i++) {
+        g_assert_cmphex(femu_lsm_check(&c, i, buf, 4096,
+                                       i >= 32 && i <= 46), ==,
                         NVME_SUCCESS);
     }
-    g_assert_cmphex(femu_lsm_check(&c, 1000, buf, 4096, 1), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * MT19937 as Python's random module seeds and draws it, so a test can
+ * replay a sequence that a Python script found.
+ */
+typedef struct FemuMt {
+    uint32_t mt[624];
+    int i;
+} FemuMt;
+
+static uint32_t femu_mt_next(FemuMt *m)
+{
+    uint32_t y;
+
+    if (m->i >= 624) {
+        for (int k = 0; k < 624; k++) {
+            y = (m->mt[k] & 0x80000000u) | (m->mt[(k + 1) % 624] & 0x7fffffffu);
+            m->mt[k] = m->mt[(k + 397) % 624] ^ (y >> 1) ^
+                       ((y & 1) ? 0x9908b0dfu : 0);
+        }
+        m->i = 0;
+    }
+    y = m->mt[m->i++];
+    y ^= y >> 11;
+    y ^= (y << 7) & 0x9d2c5680u;
+    y ^= (y << 15) & 0xefc60000u;
+    return y ^ (y >> 18);
+}
+
+/* random.Random(@seed) for a seed below 2^32 (init_by_array, one word) */
+static void femu_mt_seed(FemuMt *m, uint32_t seed)
+{
+    int i = 1, j = 0;
+
+    m->mt[0] = 19650218u;
+    for (int k = 1; k < 624; k++) {
+        m->mt[k] = 1812433253u * (m->mt[k - 1] ^ (m->mt[k - 1] >> 30)) + k;
+    }
+    for (int k = 624; k; k--) {
+        m->mt[i] = (m->mt[i] ^ ((m->mt[i - 1] ^ (m->mt[i - 1] >> 30)) *
+                                1664525u)) + seed + j;
+        i++;
+        j = 0;
+        if (i >= 624) {
+            m->mt[0] = m->mt[623];
+            i = 1;
+        }
+    }
+    for (int k = 623; k; k--) {
+        m->mt[i] = (m->mt[i] ^ ((m->mt[i - 1] ^ (m->mt[i - 1] >> 30)) *
+                                1566083941u)) - i;
+        i++;
+        if (i >= 624) {
+            m->mt[0] = m->mt[623];
+            i = 1;
+        }
+    }
+    m->mt[0] = 0x80000000u;
+    m->i = 624;
+}
+
+/* random.randrange(@n) for n below 128: 7 bits, drawn again until below n */
+static uint32_t femu_mt_below(FemuMt *m, uint32_t n)
+{
+    uint32_t r;
+
+    do {
+        r = femu_mt_next(m) >> 25;
+    } while (r >= n);
+    return r;
+}
+
+/*
+ * Random overwrites on a small device: 90 keys of one page on 192 pages,
+ * with merges and value GC all the time. The sequence is random.Random(9)
+ * over 90 keys after keys 0 to 79. At its 721st Store a victim gave no
+ * room, since the merges of its keys took what its erase freed, and GC
+ * stopped there. GC now goes on to the next victim, every Store succeeds,
+ * and every key reads back its last value.
+ */
+static void femu_test_kv_lsm_churn(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint8_t ver[90] = { 0 };
+    uint8_t got[16];
+    FemuMt mt;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_mt_seed(&mt, 9);
+    for (int op = 0; op < 2000; op++) {
+        uint32_t k = op < 80 ? (uint32_t)op : femu_mt_below(&mt, 90);
+
+        ver[k]++;
+        qtest_memset(qts, buf, ver[k], 4096);
+        g_assert_cmphex(femu_kv_store(&c, k, buf, 4096), ==, NVME_SUCCESS);
+    }
+    for (uint32_t k = 0; k < 90; k++) {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(k);
+        cmd.cdw10 = cpu_to_le32(4096);
+        cmd.cdw11 = cpu_to_le32(8);
+        g_assert_cmphex(femu_io(&c, &cmd), ==,
+                        ver[k] ? NVME_SUCCESS : 0x87);
+        if (ver[k]) {
+            qtest_memread(qts, buf, got, sizeof(got));
+            g_assert_cmpuint(got[0], ==, ver[k]);
+            g_assert_cmpuint(got[15], ==, ver[k]);
+        }
+    }
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * A full device still takes a Delete, and gets its space back. 32-byte
+ * pages hold one record each, so zero-length values fill the NAND with
+ * meta pages until a Store gets Capacity Exceeded. Every key is then
+ * deleted, and new Stores succeed again.
+ */
+static void femu_test_kv_lsm_full_delete(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t st = NVME_SUCCESS;
+    int i, n;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 4096 && st == NVME_SUCCESS; i++) {
+        st = femu_lsm_store(&c, i, buf, 0, 0);
+    }
+    g_test_message("first refused Store: key %d, status %#x", i - 1, st);
+    g_assert_cmphex(st, ==, NVME_CAP_EXCEEDED);
+    n = i - 1;
+    for (int k = 0; k < n; k++) {
+        g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, k, buf, 0, 0),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_EXIST, k, buf, 0, 0),
+                        ==, 0x87);
+    }
+    /*
+     * The empty namespace takes Stores again: the first one merges the
+     * tombstones down, where they drop with the records they hide.
+     */
+    for (int k = 0; k < n / 2; k++) {
+        g_assert_cmphex(femu_lsm_store(&c, 100000 + k, buf, 0, 0), ==,
+                        NVME_SUCCESS);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Each Store takes a new slot, and an old version keeps its slot until
+ * the tree drops its record. 900 keys written twice need more slots than
+ * the 1024 the table starts with, so the table grows while the old
+ * records wait in the lower levels. Every key still reads back.
+ */
+static void femu_test_kv_lsm_versions(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t peak = 0;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i < 1800; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i % 900, buf, 0, 0), ==,
+                        NVME_SUCCESS);
+        if (i % 50 == 49) {
+            peak = MAX(peak, femu_lsm_stat(qts, "versions"));
+        }
+    }
+    g_test_message("peak versions %" PRId64, peak);
+    g_assert_cmpint(peak, >, 1024);
+    for (int i = 0; i < 900; i++) {
+        g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_EXIST, i, buf, 0, 0),
+                        ==, NVME_SUCCESS);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * An old value stays valid on flash until the tree drops its record (PinK
+ * section 4.5): a blind overwrite of a key whose record is in a level
+ * leaves both versions valid. A flush that merges over the key drops the
+ * old record, and only then is its page released. An overwrite of a key
+ * in the memtable replaces the record there, so the old page goes at
+ * once. Memtable 16, one page per value, no pinned level.
+ */
+static void femu_test_kv_lsm_stale(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    int64_t flushes;
+    int live = 0;
+    int i;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* keys 0..16: the 17th flushes 0..15 into level 1 */
+    for (i = 0; i <= 16; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 0), ==,
+                        NVME_SUCCESS);
+        live++;
+    }
+    g_assert_cmpint(femu_lsm_stat(qts, "flushes"), ==, 1);
+    g_assert_cmpint(femu_lsm_stat(qts, "valid-value-pages"), ==, live);
+
+    /* key 3 is in level 1: its old page stays valid */
+    g_assert_cmphex(femu_lsm_store(&c, 3, buf, 4096, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "valid-value-pages"), ==, live + 1);
+
+    /* key 16 is in the memtable: its old page goes at once */
+    g_assert_cmphex(femu_lsm_store(&c, 16, buf, 4096, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "valid-value-pages"), ==, live + 1);
+
+    /* new keys up to the next flush; its merge drops the old key 3 */
+    flushes = femu_lsm_stat(qts, "flushes");
+    for (i = 100; femu_lsm_stat(qts, "flushes") == flushes; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 0), ==,
+                        NVME_SUCCESS);
+        live++;
+    }
+    g_assert_cmpint(femu_lsm_stat(qts, "valid-value-pages"), ==, live);
+    g_assert_cmphex(femu_lsm_check(&c, 3, buf, 4096, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_check(&c, 16, buf, 4096, 1), ==, NVME_SUCCESS);
+
+    /* a Delete is blind too: the page goes when a merge drops the record */
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 5, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lsm_stat(qts, "valid-value-pages"), ==, live);
+    g_assert_cmphex(femu_lsm_check(&c, 5, buf, 4096, 0), ==, 0x87);
 
     femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * Meta pages are NAND programs (item 1): C0h counts each merge program as
+ * a page programmed, beside the value pages the host asked for. Nothing
+ * is collected here, so the difference is exactly the merge programs.
+ */
+static void femu_test_kv_lsm_meta_flash(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t host, nand, gc;
+    int64_t prog;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* count the change: qos may hand this test a QEMU an earlier one used */
+    host = femu_c0h_field(&c, log, 8);
+    gc = femu_c0h_field(&c, log, 16);
+    nand = femu_c0h_field(&c, log, 24);
+    prog = femu_lsm_stat(qts, "compaction-program-pages");
+    for (int i = 0; i < 300; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, (i * 53) % 300, buf, 16, 0), ==,
+                        NVME_SUCCESS);
+    }
+    host = femu_c0h_field(&c, log, 8) - host;
+    gc = femu_c0h_field(&c, log, 16) - gc;
+    nand = femu_c0h_field(&c, log, 24) - nand;
+    prog = femu_lsm_stat(qts, "compaction-program-pages") - prog;
+    g_test_message("host %" PRIu64 ", nand %" PRIu64 ", merge programs %"
+                   PRId64, host, nand, prog);
+    g_assert_cmpuint(host, ==, 300);
+    g_assert_cmpuint(gc, ==, 0);
+    g_assert_cmpint(prog, >, 0);
+    g_assert_cmpuint(nand, ==, host + (uint64_t)prog);
+    /* the levels name real pages: their flash is what the query shows */
+    g_assert_cmpint(femu_lsm_stat(qts, "meta-flash-bytes"), >, 0);
+
+    femu_disable(&c);
+    guest_free(alloc, log);
     guest_free(alloc, raw);
 }
 
@@ -36608,6 +37080,13 @@ static void femu_register_nodes(void)
             "fdp.isolation_mode=1",
     };
 
+    /*
+     * Every QEMU these tests start inherits this: a KV namespace checks the
+     * owner of each page after value GC and every 64 commands, and aborts
+     * on a broken invariant.
+     */
+    g_setenv("FEMU_KV_CHECK", "1", true);
+
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
 
     qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
@@ -39676,12 +40155,19 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=8,pg_rd_lat=25000000"
     });
-    qos_add_test("kv-compaction-time", "femu", femu_test_kv_compaction_time,
+    qos_add_test("kv-gc-victim", "femu", femu_test_kv_gc_victim,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
+    });
+    qos_add_test("kv-hash-backshift", "femu", femu_test_kv_hash_backshift,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=96,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000"
     });
     qos_add_test("kv-css-nvm", "femu", femu_test_kv_css,
                  &(QOSGraphTestOptions) {
@@ -39778,6 +40264,63 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
             FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-gc-mp", "femu", femu_test_kv_lsm_gc,
+                 &(QOSGraphTestOptions) {
+        /* two planes, the same 1024 pages; values of two pages */
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=32,pls_per_lun=2,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0",
+        .arg = (void *)1,
+    });
+    qos_add_test("kv-lsm-full-lines", "femu", femu_test_kv_lsm_full_lines,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=8,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=24"
+    });
+    qos_add_test("kv-lsm-churn", "femu", femu_test_kv_lsm_churn,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=12,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-full-delete", "femu", femu_test_kv_lsm_full_delete,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=32,secs_per_pg=1,"
+            "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-versions", "femu", femu_test_kv_lsm_versions,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=72,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    /* own device lines: qos reuses a QEMU whose line matches */
+    qos_add_test("kv-lsm-stale", "femu", femu_test_kv_lsm_stale,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=88,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
+    });
+    qos_add_test("kv-lsm-meta-flash", "femu", femu_test_kv_lsm_meta_flash,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=96,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=8," FEMU_LSM_KNOBS "kv_lsm_pinned_levels=0"
     });
     qos_add_test("kv-lsm-delete-ednek", "femu", femu_test_kv_lsm_delete_ednek,
                  &(QOSGraphTestOptions) {

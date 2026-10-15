@@ -275,13 +275,17 @@ the entry keeps its three members: `nsid`, `mode` and `media`.
 | `size-ratio`, `pinned-levels` | the `kv_lsm_size_ratio` and `kv_lsm_pinned_levels` knobs |
 | `records-per-page` | records of one meta page: the page size / 32 |
 | `device-dram-bytes` | modelled controller DRAM: 32 bytes per memtable or pinned record, 24 per meta page of an unpinned level; a pinned level needs no level list |
-| `meta-flash-bytes` | the meta pages of the unpinned levels, in bytes |
+| `meta-flash-bytes` | the meta pages of the unpinned levels, in bytes; they are real NAND pages |
 | `levels` | levels 1 to the deepest one that holds a record: `level`, `records` (tombstones and older versions too), `capacity` (18446744073709551615 for level 24), `pages`, `pinned` |
 | `flushes`, `compactions` | memtable merges into level 1; level merges into the next one |
 | `dropped-records`, `reinserted-keys` | records merges dropped; keys that value GC put back in the memtable |
 | `probe-read-pages`, `scan-read-pages` | meta page reads of lookups and of List |
 | `compaction-read-pages`, `compaction-program-pages` | meta page reads and programs of merges |
 | `gc-read-pages` | meta page reads that check values before value GC moves them |
+| `gc-meta-pages` | meta pages that value GC moved out of a victim line |
+| `gc-stale-value-pages` | value pages that value GC found stale (the tree had a newer record) and released with no move |
+| `valid-value-pages` | value pages valid on flash, with the pages of old values whose records the tree has not dropped yet |
+| `versions` | table slots in use: one for each live key, and one for each old value whose record the tree still holds |
 
 The command copies these under the lock of the namespace, so they agree
 with each other. It needs no enabled controller.
@@ -296,7 +300,8 @@ with each other. It needs no enabled controller.
         "flushes": 11, "compactions": 4, "dropped-records": 0,
         "reinserted-keys": 0, "probe-read-pages": 37, "scan-read-pages": 2,
         "compaction-read-pages": 6, "compaction-program-pages": 5,
-        "gc-read-pages": 0}
+        "gc-read-pages": 0, "gc-meta-pages": 0, "gc-stale-value-pages": 0,
+        "valid-value-pages": 180, "versions": 180}
 ```
 
 ## Example

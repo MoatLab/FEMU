@@ -538,6 +538,10 @@ static FemuKvLsmInfo *femu_query_lsm_info(const FemuKvLsmSnap *l)
     info->compaction_read_pages = l->io[KV_LSM_IO_COMPACT_READ];
     info->compaction_program_pages = l->io[KV_LSM_IO_COMPACT_PROGRAM];
     info->gc_read_pages = l->io[KV_LSM_IO_GC_READ];
+    info->gc_meta_pages = l->gc_meta_pages;
+    info->gc_stale_value_pages = l->gc_stale_pages;
+    info->valid_value_pages = l->valid_value_pages;
+    info->versions = l->versions;
     return info;
 }
 

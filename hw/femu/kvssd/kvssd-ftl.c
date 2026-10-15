@@ -55,6 +55,58 @@ static bool kv_key_eq(const FemuKvssdMappingEntry *e, const uint8_t *key,
     return e->key_len == kl && memcmp(e->key, key, kl) == 0;
 }
 
+/* --- page owners --- */
+
+/*
+ * ssd->rmap names the owner of each programmed page: a table slot for a
+ * value page, KV_OWNER_META for a meta page of the LSM tree. A page is
+ * released only by its owner, so an owner that holds an address after the
+ * page was erased and programmed again cannot release the new data.
+ */
+#define KV_OWNER_NONE   INVALID_LPN
+#define KV_OWNER_META   (INVALID_LPN - 1)
+
+static bool kv_page_owned(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
+{
+    return ppa->ppa != UNMAPPED_PPA && valid_ppa(s->ssd, ppa) &&
+           get_pg(s->ssd, ppa)->status == PG_VALID &&
+           get_rmap_ent(s->ssd, ppa) == owner;
+}
+
+static void kv_release_page(FemuKvssdState *s, struct ppa *ppa, uint64_t owner)
+{
+    if (kv_page_owned(s, ppa, owner)) {
+        set_rmap_ent(s->ssd, KV_OWNER_NONE, ppa);
+        mark_page_invalid(s->ssd, ppa);
+    }
+}
+
+static void kv_release_ppas(FemuKvssdState *s, struct ppa *ppas, uint32_t n,
+                            uint64_t owner)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        kv_release_page(s, &ppas[i], owner);
+    }
+}
+
+/* the pages of a value change owner, as a table entry moves */
+static void kv_move_owner(FemuKvssdState *s, struct ppa *ppas, uint32_t n,
+                          uint64_t from, uint64_t to)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (kv_page_owned(s, &ppas[i], from)) {
+            set_rmap_ent(s->ssd, to, &ppas[i]);
+        }
+    }
+}
+
+static void kv_discard_value_ppas(FemuKvssdState *s, FemuKvssdMappingEntry *e,
+                                  uint32_t slot)
+{
+    kv_release_ppas(s, e->ppas, e->nr_ppas, slot);
+    kv_entry_drop_ppas(e);
+}
+
 /*
  * Default index: open-addressing with LINEAR PROBING. A single consistent scheme
  * (no mixed home-slot/chain links): find/insert both probe forward from the home
@@ -97,6 +149,7 @@ static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl
             e->length = len;
             e->ppas = ppas;
             e->nr_ppas = nr_ppas;
+            kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
             return NVME_SUCCESS;
         }
         if (e->key_len == 0) {         /* first free slot in the probe run */
@@ -109,6 +162,7 @@ static uint16_t kv_hash_upsert(FemuKvssdState *s, const uint8_t *key, uint8_t kl
             e->length = len;
             e->ppas = ppas;
             e->nr_ppas = nr_ppas;
+            kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
             s->nr_entries++;
             return NVME_SUCCESS;
         }
@@ -138,6 +192,9 @@ static int kv_hash_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
         if (movable) {
             s->table[hole] = s->table[next];
             kv_entry_clear(&s->table[next]);
+            /* value GC finds a page's entry by its slot */
+            kv_move_owner(s, s->table[hole].ppas, s->table[hole].nr_ppas,
+                          next, hole);
             hole = next;
         }
         next = (next + 1) % s->hash_slots;
@@ -154,12 +211,151 @@ static const FemuKvIndexOps kv_index_hash = {
     .probe  = NULL,                    /* DRAM-resident hash: 0 flash reads */
 };
 
+/* --- write pointers --- */
+
+static struct ppa kv_wp_ppa(struct write_pointer *wpp)
+{
+    struct ppa ppa = { .ppa = 0 };
+
+    ppa.g.ch = wpp->ch;
+    ppa.g.lun = wpp->lun;
+    ppa.g.pl = wpp->pl;
+    ppa.g.pg = wpp->pg;
+    ppa.g.blk = wpp->blk;
+    return ppa;
+}
+
+/* pages left on the open line of @wpp */
+static uint64_t kv_wp_remaining(FemuKvssdState *s, struct write_pointer *wpp)
+{
+    struct ssdparams *spp = &s->ssd->sp;
+    uint64_t stride = (uint64_t)spp->nchs * spp->luns_per_ch;
+    uint64_t idx;
+
+    if (!wpp || !wpp->curline) {
+        return 0;
+    }
+    /*
+     * The pointer walks channel, then lun, then plane, then page, so the plane
+     * is part of the position. Leaving it out reported up to half a line more
+     * room than the media has once a lun holds more than one plane.
+     */
+    if (spp->plane_first) {
+        idx = (uint64_t)wpp->pg * stride * spp->pls_per_lun +
+              ((uint64_t)wpp->lun * spp->nchs + wpp->ch) * spp->pls_per_lun +
+              wpp->pl;
+    } else {
+        idx = (uint64_t)wpp->pg * stride * spp->pls_per_lun +
+              (uint64_t)wpp->pl * stride +
+              (uint64_t)wpp->lun * spp->nchs + wpp->ch;
+    }
+    return idx < (uint64_t)spp->pgs_per_line ?
+           (uint64_t)spp->pgs_per_line - idx : 0;
+}
+
 /*
- * kv_index=lsm. The LSM tree (kv-lsm.c) maps a key to a slot of s->table,
- * which holds the value pointer as it does for the hash; a free stack hands
- * out the slots. Its meta pages are timing placeholders, like the pages of
- * the cached mapping table: each costs LUN and channel time as MAP_IO, but
- * takes no line and no value space.
+ * Erase every line that holds no valid page, from @stime, and return the
+ * time it takes. The erase runs whatever enable_gc_delay says.
+ */
+static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, int64_t stime)
+{
+    struct ssd *ssd = s->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+    uint64_t lat = 0;
+
+    for (;;) {
+        struct line *line = pqueue_peek(lm->victim_line_pq);
+        struct ppa ppa = { .ppa = 0 };
+
+        if (!line || line->vpc != 0) {
+            break;
+        }
+        line = pqueue_pop(lm->victim_line_pq);
+        ppa.g.blk = line->id;
+
+        for (int ch = 0; ch < spp->nchs; ch++) {
+            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                lat = MAX(lat, ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
+                                                   true, stime));
+            }
+        }
+        mark_line_free(ssd, &ppa);
+    }
+    return lat;
+}
+
+/* give @wpp a free line when it has none; false when no line is free */
+static bool kv_wp_line(FemuKvssdState *s, struct write_pointer *wpp)
+{
+    struct ssd *ssd = s->ssd;
+
+    if (wpp->curline) {
+        return true;
+    }
+    if (QTAILQ_EMPTY(&ssd->lm.free_line_list)) {
+        return false;
+    }
+    ssd_wp_reset(wpp, get_next_free_line(ssd));
+    return true;
+}
+
+/* move @wpp past the page just programmed; a full line goes to its list */
+static void kv_wp_step(FemuKvssdState *s, struct write_pointer *wpp)
+{
+    struct ssd *ssd = s->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+
+    if (!ssd_wp_step(spp, wpp)) {
+        return;
+    }
+    wpp->curline->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (wpp->curline->vpc == spp->pgs_per_line) {
+        QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
+        lm->full_line_cnt++;
+    } else {
+        pqueue_insert(lm->victim_line_pq, wpp->curline);
+    }
+    wpp->curline = NULL;
+}
+
+/* pages a value can still take: free lines and the open value line */
+static uint64_t kv_room(FemuKvssdState *s)
+{
+    return (uint64_t)s->ssd->lm.free_line_cnt * s->ssd->sp.pgs_per_line +
+           kv_wp_remaining(s, &s->ssd->wp);
+}
+
+/*
+ * Pages a Store must leave free. GC needs a line to move a victim's pages
+ * into. The LSM tree also needs a line for its open meta page, and room
+ * for its largest merge: one that rewrites every record, with a part page
+ * for each level. A merge frees its input pages only after it has
+ * programmed its output. A Store that would take that room fails instead,
+ * so any merge, also one that a Delete or GC starts, finds its pages.
+ */
+static uint64_t kv_reserve(FemuKvssdState *s)
+{
+    struct ssdparams *spp = &s->ssd->sp;
+    uint64_t recs;
+
+    if (!s->lsm) {
+        return spp->pgs_per_line;
+    }
+    recs = kv_lsm_records(s->lsm) + 1;
+    return 2ULL * spp->pgs_per_line + KV_LSM_MAX_LEVELS +
+           DIV_ROUND_UP(recs, s->lsm->per_page);
+}
+
+/* --- the LSM index --- */
+
+/*
+ * kv_index=lsm. The LSM tree (kv-lsm.c) maps a key to a slot of s->table.
+ * Each Store takes a new slot, a version of the key, so each slot has one
+ * record in the tree, and a version keeps its pages until the tree drops
+ * its record. Meta pages are real pages on meta_wp, in lines that hold no
+ * value, as PinK keeps meta segments apart from data segments.
  */
 
 /* a merge read or program, issued once the command's own work is charged */
@@ -168,26 +364,11 @@ struct FemuKvLsmIo {
     bool program;
 };
 
-/* a bounded address for meta page @id; consecutive ids stripe the LUNs */
-static struct ppa kv_tree_ppa(FemuKvssdState *s, uint64_t id)
-{
-    struct ssdparams *spp = &s->ssd->sp;
-    uint64_t luns = (uint64_t)spp->nchs * spp->luns_per_ch;
-    uint64_t lun = id % luns;
-    struct ppa ppa = { .ppa = 0 };
-
-    ppa.g.ch = lun % spp->nchs;
-    ppa.g.lun = lun / spp->nchs;
-    ppa.g.pl = (id / luns) % spp->pls_per_lun;
-    ppa.g.pg = (id / (luns * spp->pls_per_lun)) % spp->pgs_per_blk;
-    return ppa;
-}
-
 static uint64_t kv_tree_nand(FemuKvssdState *s, uint64_t id, int cmd,
-                             int64_t stime)
+                             int type, int64_t stime)
 {
-    struct nand_cmd c = { .type = MAP_IO, .cmd = cmd, .stime = stime };
-    struct ppa ppa = kv_tree_ppa(s, id);
+    struct nand_cmd c = { .type = type, .cmd = cmd, .stime = stime };
+    struct ppa ppa = { .ppa = id };
 
     return ssd_advance_status(s->ssd, &ppa, &c);
 }
@@ -195,9 +376,10 @@ static uint64_t kv_tree_nand(FemuKvssdState *s, uint64_t id, int cmd,
 /*
  * The tree reports each page it reads or programs. A lookup reads one
  * level after another, and a List reads the pages of one level one after
- * another, so each read starts when the one before it ends. Merge I/O is
- * queued: issued now, it would make this command's own later reads wait
- * behind it.
+ * another, so each read starts when the one before it ends. A GC check
+ * reads level by level: a key's lookup reads a level only once it missed
+ * the one above. Merge I/O is queued: issued now, it would make this
+ * command's own later reads wait behind it.
  */
 static void kv_tree_issue(FemuKvssdState *s);
 static void kv_tree_issue_one(FemuKvssdState *s, uint64_t id, bool program);
@@ -209,22 +391,32 @@ static void kv_tree_io(void *opaque, uint64_t id, KvLsmIo io, int level)
 
     switch (io) {
     case KV_LSM_IO_PROBE:
-        s->lsm_probe += kv_tree_nand(s, id, NAND_READ,
+        s->lsm_probe += kv_tree_nand(s, id, NAND_READ, USER_IO,
                                      s->lsm_stime + s->lsm_probe);
         return;
     case KV_LSM_IO_SCAN:
         if (level >= 0 && level <= KV_LSM_MAX_LEVELS) {
-            s->lsm_level[level] += kv_tree_nand(s, id, NAND_READ,
+            s->lsm_level[level] += kv_tree_nand(s, id, NAND_READ, USER_IO,
                                                 s->lsm_stime +
                                                 s->lsm_level[level]);
         }
         return;
     case KV_LSM_IO_GC_READ:
-        s->lsm_gc = MAX(s->lsm_gc, kv_tree_nand(s, id, NAND_READ,
-                                                s->lsm_stime));
+        if (level != s->lsm_gc_level) {
+            s->lsm_gc_level = level;
+            s->lsm_gc_base = s->lsm_gc;
+        }
+        s->lsm_gc = MAX(s->lsm_gc, s->lsm_gc_base +
+                        kv_tree_nand(s, id, NAND_READ, GC_IO,
+                                     s->lsm_stime + s->lsm_gc_base));
         return;
     default:
         break;
+    }
+    if (io == KV_LSM_IO_COMPACT_PROGRAM) {
+        /* a program, but not one the host asked for */
+        s->meta_wr_pages++;
+        s->ssd->nand_write_pages++;
     }
     if (s->lsm_npend == s->lsm_pend_cap) {
         uint32_t cap = s->lsm_pend_cap ? 2 * s->lsm_pend_cap : 256;
@@ -251,6 +443,88 @@ static void kv_tree_io(void *opaque, uint64_t id, KvLsmIo io, int level)
     s->lsm_pend[s->lsm_npend].program = io == KV_LSM_IO_COMPACT_PROGRAM;
     s->lsm_npend++;
 }
+
+/* free lines a merge leaves, for the pages value GC moves */
+#define KV_META_FLOOR   1
+
+/* meta pages a merge may take: the open meta line and the free lines */
+static uint64_t kv_tree_pages(FemuKvssdState *s)
+{
+    uint64_t lines = s->ssd->lm.free_line_cnt;
+
+    lines = lines > KV_META_FLOOR ? lines - KV_META_FLOOR : 0;
+    return lines * s->ssd->sp.pgs_per_line +
+           kv_wp_remaining(s, s->meta_wp);
+}
+
+static bool kv_tree_room(void *opaque, uint64_t pages)
+{
+    FemuKvssdState *s = opaque;
+
+    if (kv_tree_pages(s) < pages) {
+        s->lsm_nospace = true;
+        return false;
+    }
+    return true;
+}
+
+/*
+ * A merge takes a meta page. It takes a free line but never erases one or
+ * runs GC: either would change pages the merge still reads. The program is
+ * counted when the merge issues it.
+ */
+static bool kv_tree_alloc(void *opaque, int level, uint64_t *id)
+{
+    FemuKvssdState *s = opaque;
+    struct ppa ppa;
+
+    (void)level;
+    if (!s->meta_wp->curline &&
+        s->ssd->lm.free_line_cnt <= KV_META_FLOOR) {
+        s->lsm_nospace = true;
+        return false;
+    }
+    if (!kv_wp_line(s, s->meta_wp)) {
+        s->lsm_nospace = true;
+        return false;
+    }
+    ppa = kv_wp_ppa(s->meta_wp);
+    mark_page_valid(s->ssd, &ppa);
+    set_rmap_ent(s->ssd, KV_OWNER_META, &ppa);
+    kv_wp_step(s, s->meta_wp);
+    *id = ppa.ppa;
+    return true;
+}
+
+static void kv_tree_free_page(void *opaque, uint64_t id)
+{
+    FemuKvssdState *s = opaque;
+    struct ppa ppa = { .ppa = id };
+
+    kv_release_page(s, &ppa, KV_OWNER_META);
+}
+
+/*
+ * The record that named @slot left the tree, so no lookup can reach the
+ * version: its pages are garbage now, and the slot is free.
+ */
+static void kv_tree_drop(void *opaque, uint32_t slot)
+{
+    FemuKvssdState *s = opaque;
+    FemuKvssdMappingEntry *e = &s->table[slot];
+
+    kv_discard_value_ppas(s, e, slot);
+    kv_entry_clear(e);
+    s->free_slots[s->nr_free++] = slot;
+}
+
+static const KvLsmOps kv_tree_ops = {
+    .io        = kv_tree_io,
+    .room      = kv_tree_room,
+    .alloc     = kv_tree_alloc,
+    .free_page = kv_tree_free_page,
+    .drop      = kv_tree_drop,
+};
 
 /*
  * The merge schedule of one command, in absolute ns. It starts at the
@@ -283,7 +557,7 @@ static void kv_tree_issue_one(FemuKvssdState *s, uint64_t id, bool program)
         s->lsm_mstart = s->lsm_ready;
         s->lsm_mend = MAX(s->lsm_mend, s->lsm_ready);
     }
-    lat = kv_tree_nand(s, id, program ? NAND_WRITE : NAND_READ,
+    lat = kv_tree_nand(s, id, program ? NAND_WRITE : NAND_READ, GC_IO,
                        s->lsm_mstart);
     s->lsm_mend = MAX(s->lsm_mend, s->lsm_mstart + (int64_t)lat);
     s->lsm_mkind = program;
@@ -297,20 +571,44 @@ static void kv_tree_issue(FemuKvssdState *s)
     s->lsm_npend = 0;
 }
 
-/* a new placeholder page id for each program */
-static bool kv_tree_alloc(void *opaque, int level, uint64_t *id)
+/*
+ * A free slot. The table grows when none is left, so a held entry
+ * pointer is stale after this; callers keep slot numbers.
+ */
+static bool kv_slot_pop(FemuKvssdState *s, uint32_t *slot)
 {
-    FemuKvssdState *s = opaque;
+    if (!s->nr_free) {
+        uint32_t old = s->hash_slots;
+        uint64_t want = (uint64_t)old * 2;
+        FemuKvssdMappingEntry *t;
+        uint32_t *f;
 
-    (void)level;
-    *id = s->lsm_next_id++;
+        /* find() returns a slot as an int */
+        if (want > INT32_MAX) {
+            want = INT32_MAX;
+        }
+        if (want <= old) {
+            return false;
+        }
+        t = g_try_renew(FemuKvssdMappingEntry, s->table, want);
+        if (!t) {
+            return false;
+        }
+        s->table = t;
+        memset(&t[old], 0, (want - old) * sizeof(*t));
+        f = g_try_renew(uint32_t, s->free_slots, want);
+        if (!f) {
+            return false;
+        }
+        s->free_slots = f;
+        s->hash_slots = (uint32_t)want;
+        for (uint64_t i = want; i > old; i--) {
+            s->free_slots[s->nr_free++] = (uint32_t)(i - 1);
+        }
+    }
+    *slot = s->free_slots[--s->nr_free];
     return true;
 }
-
-static const KvLsmOps kv_tree_ops = {
-    .io    = kv_tree_io,
-    .alloc = kv_tree_alloc,
-};
 
 static int kv_tree_find(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
                         int *prev_slot)
@@ -323,68 +621,89 @@ static int kv_tree_find(FemuKvssdState *s, const uint8_t *key, uint8_t kl,
     return kv_lsm_get(s->lsm, key, kl, &slot, false) ? (int)slot : -1;
 }
 
+/* the status of a put the tree refused */
+static uint16_t kv_tree_put_status(FemuKvssdState *s)
+{
+    return s->lsm_nospace ? NVME_CAP_EXCEEDED | NVME_DNR :
+           NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+}
+
 /*
- * An overwrite keeps the slot of the key and puts a new record in the
- * memtable, as an LSM tree writes out of place. The entry changes only
- * once the record is in, so a failed put leaves the key as it was.
+ * A Store writes a new version: a new slot with its record in the
+ * memtable, as an LSM tree writes out of place. The old version keeps its
+ * pages until the tree drops its record; it goes stale now. The new slot
+ * goes back on failure, and the caller releases the new pages.
  */
 static uint16_t kv_tree_upsert(FemuKvssdState *s, const uint8_t *key,
                                uint8_t kl, uint64_t off, uint64_t len,
                                struct ppa *ppas, uint32_t nr_ppas)
 {
     FemuKvssdMappingEntry *e;
+    uint32_t old = KV_LSM_NO_SLOT;
     uint32_t slot;
 
-    if (kv_lsm_get(s->lsm, key, kl, &slot, false)) {
-        if (kv_lsm_put(s->lsm, key, kl, slot)) {
-            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
-        }
-        e = &s->table[slot];
-    } else {
-        if ((s->kv_max_keys && s->nr_entries >= s->kv_max_keys) ||
-            !s->nr_free) {
+    if (!kv_lsm_get(s->lsm, key, kl, &old, false)) {
+        old = KV_LSM_NO_SLOT;
+        if (s->kv_max_keys && s->nr_entries >= s->kv_max_keys) {
             return NVME_CAP_EXCEEDED | NVME_DNR;
         }
-        slot = s->free_slots[s->nr_free - 1];
-        if (kv_lsm_put(s->lsm, key, kl, slot)) {
-            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
-        }
-        s->nr_free--;
-        s->nr_entries++;
-        e = &s->table[slot];
-        memcpy(e->key, key, kl);
-        e->key_len = kl;
     }
+    if (!kv_slot_pop(s, &slot)) {
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+    e = &s->table[slot];
+    memcpy(e->key, key, kl);
+    e->key_len = kl;
     e->value_off = off;
     e->length = len;
     e->ppas = ppas;
     e->nr_ppas = nr_ppas;
+    e->stale = false;
+    kv_move_owner(s, ppas, nr_ppas, KV_OWNER_NONE, slot);
+
+    s->lsm_nospace = false;
+    if (kv_lsm_put(s->lsm, key, kl, slot)) {
+        kv_move_owner(s, ppas, nr_ppas, slot, KV_OWNER_NONE);
+        kv_entry_clear(&s->table[slot]);
+        s->free_slots[s->nr_free++] = slot;
+        return kv_tree_put_status(s);
+    }
+    if (old == KV_LSM_NO_SLOT) {
+        s->nr_entries++;
+    } else if (s->table[old].key_len) {
+        /* still in the tree: the put did not replace it in the memtable */
+        s->table[old].stale = true;
+    }
     return NVME_SUCCESS;
 }
 
 /*
- * The tombstone goes in first. The slot is free only after that: an older
- * record of the key may still name it, but the tombstone hides that record.
+ * The tombstone goes in; the old version goes stale and keeps its pages
+ * until a merge drops its record, or at once when the tombstone replaces
+ * it in the memtable.
  */
 static int kv_tree_remove(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
 {
     uint32_t slot;
 
+    s->lsm_nospace = false;
     if (!kv_lsm_get(s->lsm, key, kl, &slot, false)) {
         /*
          * A blind Delete cannot know the key is absent, so its tombstone
          * goes in all the same. With EDNEK the lookup found it absent.
          */
-        if (!s->ednek && kv_lsm_put(s->lsm, key, kl, KV_LSM_NO_SLOT)) {
+        if (!s->ednek && kv_lsm_put_tombstone(s->lsm, key, kl)) {
             return -1;
         }
         return 0;
     }
-    if (kv_lsm_put(s->lsm, key, kl, KV_LSM_NO_SLOT)) {
+    /* with no page for a flush, the memtable holds the tombstone over */
+    if (kv_lsm_put_tombstone(s->lsm, key, kl)) {
         return -1;
     }
-    kv_entry_clear(&s->table[slot]);
-    s->free_slots[s->nr_free++] = slot;
+    if (s->table[slot].key_len) {
+        s->table[slot].stale = true;
+    }
     s->nr_entries--;
     return 1;
 }
@@ -406,14 +725,24 @@ static const FemuKvIndexOps kv_index_lsm = {
     .probe  = kv_tree_probe,
 };
 
-/* every table entry free again, as after realize */
+/*
+ * Every table entry free again, as after realize. The tree is cleared with
+ * no callback, so its meta pages are released here, and the caller has
+ * released the value pages.
+ */
 static void kv_tree_reset(FemuKvssdState *s)
 {
     if (!s->lsm) {
         return;
     }
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        KvLsmRun *r = &s->lsm->lvl[i - 1];
+
+        for (uint32_t p = 0; p < r->npg && s->ssd; p++) {
+            kv_tree_free_page(s, r->pg[p].id);
+        }
+    }
     kv_lsm_clear(s->lsm);
-    s->lsm_next_id = 0;
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         s->free_slots[i] = s->hash_slots - 1 - i;
     }
@@ -438,155 +767,13 @@ static uint32_t kv_value_pages(FemuKvssdState *s, uint64_t bytes)
     return bytes ? DIV_ROUND_UP(bytes, (uint64_t)s->pgsz) : 0;
 }
 
-static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
-{
-    struct ssd *ssd = s->ssd;
-    struct ssdparams *spp = &ssd->sp;
-    struct line_mgmt *lm = &ssd->lm;
-    uint64_t lat = 0;
-    int64_t stime = req ? req->stime : 0;
-
-    for (;;) {
-        struct line *line = pqueue_peek(lm->victim_line_pq);
-        struct ppa ppa = { .ppa = 0 };
-
-        if (!line || line->vpc != 0) {
-            break;
-        }
-        line = pqueue_pop(lm->victim_line_pq);
-        ppa.g.blk = line->id;
-
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                /* charged whatever enable_gc_delay says, from the request */
-                lat = MAX(lat, ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
-                                                   true, stime));
-            }
-        }
-        mark_line_free(ssd, &ppa);
-    }
-    return lat;
-}
-
-static bool kv_ensure_write_pointer(FemuKvssdState *s, NvmeRequest *req,
-                                    uint64_t *lat)
-{
-    struct ssd *ssd = s->ssd;
-    struct line *line;
-
-    if (ssd->wp.curline) {
-        return true;
-    }
-    if (lat) {
-        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
-    } else {
-        kv_reclaim_empty_lines(s, req);
-    }
-    line = get_next_free_line(ssd);
-    if (!line) {
-        return false;
-    }
-    ssd_wp_reset(&ssd->wp, line);
-    return true;
-}
-
-static uint64_t kv_write_pointer_remaining(FemuKvssdState *s)
-{
-    struct ssd *ssd = s->ssd;
-    struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
-    uint64_t stride = (uint64_t)spp->nchs * spp->luns_per_ch;
-    uint64_t idx;
-
-    if (!wpp->curline) {
-        return 0;
-    }
-    /*
-     * The pointer walks channel, then lun, then plane, then page, so the plane
-     * is part of the position. Leaving it out reported up to half a line more
-     * room than the media has once a lun holds more than one plane, and the
-     * checks that ask how much room is left then pass when it is not there.
-     */
-    idx = (uint64_t)wpp->pg * stride * spp->pls_per_lun +
-          (uint64_t)wpp->pl * stride +
-          (uint64_t)wpp->lun * spp->nchs + wpp->ch;
-    return idx < (uint64_t)spp->pgs_per_line ?
-           (uint64_t)spp->pgs_per_line - idx : 0;
-}
-
-static uint64_t kv_physical_pages_available(FemuKvssdState *s, NvmeRequest *req,
-                                            uint64_t *lat)
-{
-    struct ssd *ssd = s->ssd;
-    uint64_t avail;
-
-    if (lat) {
-        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
-    } else {
-        kv_reclaim_empty_lines(s, req);
-    }
-    avail = kv_write_pointer_remaining(s);
-    avail += (uint64_t)ssd->lm.free_line_cnt * ssd->sp.pgs_per_line;
-    return avail;
-}
-
-static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
-                                     uint64_t *lat, bool need_next)
-{
-    struct ssd *ssd = s->ssd;
-    struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
-    struct line_mgmt *lm = &ssd->lm;
-
-    if (!ssd_wp_step(spp, wpp)) {
-        return true;
-    }
-    wpp->curline->close_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    if (wpp->curline->vpc == spp->pgs_per_line) {
-        ftl_assert(wpp->curline->ipc == 0);
-        QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
-        lm->full_line_cnt++;
-    } else {
-        ftl_assert(wpp->curline->ipc > 0);
-        pqueue_insert(lm->victim_line_pq, wpp->curline);
-    }
-
-    wpp->curline = NULL;
-    if (lat) {
-        *lat = MAX(*lat, kv_reclaim_empty_lines(s, req));
-    } else {
-        kv_reclaim_empty_lines(s, req);
-    }
-    if (!need_next && ssd->lm.free_line_cnt == 0) {
-        return true;
-    }
-    return kv_ensure_write_pointer(s, req, lat);
-}
-
-static void kv_invalidate_ppa_array(FemuKvssdState *s, struct ppa *ppas,
-                                    uint32_t nr_ppas)
-{
-    for (uint32_t i = 0; i < nr_ppas; i++) {
-        struct ppa ppa = ppas[i];
-
-        if (valid_ppa(s->ssd, &ppa) && get_pg(s->ssd, &ppa)->status == PG_VALID) {
-            mark_page_invalid(s->ssd, &ppa);
-        }
-    }
-}
-
-static void kv_discard_value_ppas(FemuKvssdState *s, FemuKvssdMappingEntry *e)
-{
-    kv_invalidate_ppa_array(s, e->ppas, e->nr_ppas);
-    kv_entry_drop_ppas(e);
-}
-
 /*
  * Program the pages of a value from @stime, at or after the request start;
- * the latency in *@lat counts from the request start.
+ * the latency in *@lat counts from the request start. The pages have no
+ * owner until the index takes the value.
  */
 static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
-                                uint64_t bytes, int io_type, struct ppa **out,
+                                uint64_t bytes, struct ppa **out,
                                 uint32_t *out_nr, uint64_t *lat, int64_t stime)
 {
     struct ssd *ssd = s->ssd;
@@ -594,7 +781,7 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
     struct ppa *ppas = NULL;
     uint64_t wait = stime > req->stime ? stime - req->stime : 0;
     struct nand_cmd c = {
-        .type = io_type,
+        .type = USER_IO,
         .cmd = NAND_WRITE,
         .stime = stime,
     };
@@ -604,7 +791,8 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
     if (!pages) {
         return NVME_SUCCESS;
     }
-    if (kv_physical_pages_available(s, req, lat) < pages) {
+    *lat = MAX(*lat, kv_reclaim_empty_lines(s, req->stime));
+    if (kv_room(s) < pages) {
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
 
@@ -617,39 +805,28 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
         struct ppa ppa;
         uint64_t sub;
 
-        if (!kv_ensure_write_pointer(s, req, lat)) {
-            kv_invalidate_ppa_array(s, ppas, i);
+        if (!kv_wp_line(s, &ssd->wp)) {
+            kv_release_ppas(s, ppas, i, KV_OWNER_NONE);
             g_free(ppas);
             return NVME_CAP_EXCEEDED | NVME_DNR;
         }
 
-        ppa = get_new_page(ssd);
+        ppa = kv_wp_ppa(&ssd->wp);
         mark_page_valid(ssd, &ppa);
+        set_rmap_ent(ssd, KV_OWNER_NONE, &ppa);
         sub = wait + ssd_advance_status(ssd, &ppa, &c);
         *lat = sub > *lat ? sub : *lat;
         ppas[i] = ppa;
         /*
          * Counted on the ssd as well as in this mode's own state, because the
          * health log reads the counters every FTL-backed mode keeps there.
-         * The two are split the way the black-box mode splits them:
-         * nand_write_pages counts a page the host asked for, gc_write_pages a
-         * page the device relocated. Counting a relocated page in both would
-         * put it in the amplification numerator twice.
+         * nand_write_pages counts a page the host asked for, gc_write_pages
+         * a page the device relocated, as the black-box mode splits them.
          */
-        if (io_type == GC_IO) {
-            s->gc_wr_pages++;
-            ssd->gc_write_pages++;
-        } else {
-            s->nand_wr_pages++;
-            ssd->host_write_pages++;
-            ssd->nand_write_pages++;
-        }
-
-        if (!kv_advance_write_pointer(s, req, lat, i + 1 < pages)) {
-            kv_invalidate_ppa_array(s, ppas, i + 1);
-            g_free(ppas);
-            return NVME_CAP_EXCEEDED | NVME_DNR;
-        }
+        s->nand_wr_pages++;
+        ssd->host_write_pages++;
+        ssd->nand_write_pages++;
+        kv_wp_step(s, &ssd->wp);
     }
 
     *out = ppas;
@@ -687,11 +864,412 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
     return NVME_SUCCESS;
 }
 
+/* --- value GC: one victim line at a time --- */
+
+#define KV_GC_VALID     1           /* the newest record names the version */
+#define KV_GC_FLASH     2           /* that record is in an unpinned level */
+
+/* return a line that GC could not empty to the list its counts call for */
+static void kv_gc_requeue(FemuKvssdState *s, struct line *line)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+
+    line->reclaiming = false;
+    if (line->vpc == s->ssd->sp.pgs_per_line) {
+        QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
+        lm->full_line_cnt++;
+    } else {
+        pqueue_insert(lm->victim_line_pq, line);
+    }
+}
+
+/* the owner of the first valid page of @line, or KV_OWNER_NONE */
+static uint64_t kv_line_owner(FemuKvssdState *s, struct line *line)
+{
+    struct ssdparams *spp = &s->ssd->sp;
+    struct ppa ppa = { .ppa = 0 };
+
+    ppa.g.blk = line->id;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.pl = pl;
+                    ppa.g.pg = pg;
+                    if (get_pg(s->ssd, &ppa)->status == PG_VALID) {
+                        return get_rmap_ent(s->ssd, &ppa);
+                    }
+                }
+            }
+        }
+    }
+    return KV_OWNER_NONE;
+}
+
 /*
- * The LUN that holds a key's part of the index. The index is spread over
- * every LUN by the key's hash, so lookups of different keys proceed in
- * parallel the way value pages do. Charging them all on the LUN at address 0
- * made every command of the device wait for every other one.
+ * The full value lines when a GC run starts, oldest first. With the LSM
+ * tree a full line can still hold stale values that no merge has dropped,
+ * so GC looks at them when no line has an invalid page. Lines that fill
+ * during the run hold what it moved, so they are not in the list.
+ */
+typedef struct KvGcFull {
+    uint32_t *id;
+    uint32_t nr;
+    uint32_t next;
+} KvGcFull;
+
+static void kv_gc_full_init(FemuKvssdState *s, KvGcFull *f)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+    struct line *line;
+
+    f->id = NULL;
+    f->nr = 0;
+    f->next = 0;
+    if (!s->lsm || !lm->full_line_cnt) {
+        return;
+    }
+    f->id = g_new(uint32_t, lm->full_line_cnt);
+    QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
+        if (f->nr < (uint32_t)lm->full_line_cnt &&
+            kv_line_owner(s, line) != KV_OWNER_META) {
+            f->id[f->nr++] = line->id;
+        }
+    }
+}
+
+/* a line is on the full list: closed, all valid, in no queue */
+static bool kv_line_full(FemuKvssdState *s, struct line *line)
+{
+    return !line->pos && !line->reclaiming &&
+           line->vpc == s->ssd->sp.pgs_per_line &&
+           line != s->ssd->wp.curline &&
+           (!s->meta_wp || line != s->meta_wp->curline);
+}
+
+/*
+ * The victim: the line with the fewest valid pages, or else, when a Store
+ * has no room (@f set), the next full value line of @f. *@full says which.
+ */
+static struct line *kv_gc_victim(FemuKvssdState *s, KvGcFull *f, bool *full)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+    struct line *line = pqueue_peek(lm->victim_line_pq);
+
+    *full = false;
+    if (line) {
+        pqueue_pop(lm->victim_line_pq);
+        return line;
+    }
+    while (f && f->next < f->nr) {
+        line = &lm->lines[f->id[f->next++]];
+        if (kv_line_full(s, line)) {
+            QTAILQ_REMOVE(&lm->full_line_list, line, entry);
+            lm->full_line_cnt--;
+            *full = true;
+            return line;
+        }
+    }
+    return NULL;
+}
+
+/* forget the page @ppa of a version: GC found it stale and released it */
+static void kv_entry_forget_ppa(FemuKvssdMappingEntry *e, struct ppa *ppa)
+{
+    for (uint32_t i = 0; i < e->nr_ppas; i++) {
+        if (e->ppas[i].ppa == ppa->ppa) {
+            e->ppas[i].ppa = UNMAPPED_PPA;
+        }
+    }
+}
+
+/*
+ * PinK section 4.5: a moved value whose record is on flash goes back into
+ * the memtable. It takes a new slot that holds the value and its pages; the
+ * old slot keeps no page and goes when the tree drops its record. A put
+ * that fails leaves the old slot as it was, so only the cost is skipped.
+ */
+static void kv_gc_reinsert(FemuKvssdState *s, uint32_t slot)
+{
+    FemuKvssdMappingEntry *e;
+    uint32_t to;
+
+    if (!s->table[slot].key_len || s->table[slot].stale ||
+        !kv_slot_pop(s, &to)) {
+        return;
+    }
+    s->table[to] = s->table[slot];
+    e = &s->table[slot];
+    e->ppas = NULL;
+    e->nr_ppas = 0;
+    e->stale = true;
+    kv_move_owner(s, s->table[to].ppas, s->table[to].nr_ppas, slot, to);
+    if (kv_lsm_reinsert(s->lsm, s->table[to].key, s->table[to].key_len,
+                        to)) {
+        e = &s->table[slot];
+        e->ppas = s->table[to].ppas;
+        e->nr_ppas = s->table[to].nr_ppas;
+        e->stale = false;
+        kv_move_owner(s, e->ppas, e->nr_ppas, to, slot);
+        kv_entry_clear(&s->table[to]);
+        s->free_slots[s->nr_free++] = to;
+    }
+}
+
+typedef struct KvGcPage {
+    struct ppa ppa;
+    uint64_t owner;
+} KvGcPage;
+
+/*
+ * Collect one victim line from @t0 (absolute ns). Value pages: the hash
+ * index moves each valid page; the LSM tree first checks each version, as
+ * PinK does, moves the ones the newest record names and releases the
+ * others. Meta pages move and the level list follows them. The victim is
+ * erased once nothing on it is valid. *@tend is when the erase ends.
+ */
+static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
+                       bool *full, int64_t *tend)
+{
+    struct ssd *ssd = s->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    struct line *victim = kv_gc_victim(s, f, full);
+    g_autoptr(GHashTable) seen = NULL;
+    g_autofree KvGcPage *pg = NULL;
+    struct ppa ppa = { .ppa = 0 };
+    struct nand_cmd rd = { .type = GC_IO, .cmd = NAND_READ };
+    struct nand_cmd wr = { .type = GC_IO, .cmd = NAND_WRITE };
+    int64_t tmove = t0;
+    int64_t tdone = t0;
+    uint32_t npg = 0;
+    bool meta = false;
+
+    if (!victim) {
+        return false;
+    }
+    victim->reclaiming = true;
+    pg = g_new(KvGcPage, spp->pgs_per_line);
+    ppa.g.blk = victim->id;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                for (int p = 0; p < spp->pgs_per_blk; p++) {
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.pl = pl;
+                    ppa.g.pg = p;
+                    if (get_pg(ssd, &ppa)->status != PG_VALID) {
+                        continue;
+                    }
+                    pg[npg].ppa = ppa;
+                    pg[npg].owner = get_rmap_ent(ssd, &ppa);
+                    meta |= pg[npg].owner == KV_OWNER_META;
+                    npg++;
+                }
+            }
+        }
+    }
+
+    /* the validity check reads meta pages; the moves wait for it */
+    seen = g_hash_table_new(NULL, NULL);
+    if (!meta && s->lsm && npg) {
+        if (kv_lsm_gc_begin(s->lsm)) {
+            kv_gc_requeue(s, victim);
+            return false;
+        }
+        for (uint32_t i = 0; i < npg; i++) {
+            uint32_t slot = (uint32_t)pg[i].owner;
+            FemuKvssdMappingEntry *e;
+            uint32_t newest;
+            int how = 0;
+
+            if (pg[i].owner >= s->hash_slots ||
+                g_hash_table_contains(seen, GUINT_TO_POINTER(slot))) {
+                continue;
+            }
+            e = &s->table[slot];
+            if (kv_lsm_gc_check(s->lsm, e->key, e->key_len, &newest)) {
+                how |= KV_GC_FLASH;
+            }
+            if (newest == slot) {
+                how |= KV_GC_VALID;
+            }
+            g_hash_table_insert(seen, GUINT_TO_POINTER(slot),
+                                GINT_TO_POINTER(how + 4));
+        }
+        s->lsm_stime = t0;
+        s->lsm_gc = 0;
+        s->lsm_gc_base = 0;
+        s->lsm_gc_level = -1;
+        kv_lsm_gc_check_done(s->lsm);
+        tmove = t0 + (int64_t)s->lsm_gc;
+        tdone = tmove;
+    }
+
+    for (uint32_t i = 0; i < npg; i++) {
+        uint64_t owner = pg[i].owner;
+        struct ppa np;
+        uint64_t r;
+        uint64_t w;
+
+        if (!meta && s->lsm && owner < s->hash_slots) {
+            int how = GPOINTER_TO_INT(g_hash_table_lookup(
+                          seen, GUINT_TO_POINTER((uint32_t)owner))) - 4;
+
+            if (!(how & KV_GC_VALID)) {
+                kv_entry_forget_ppa(&s->table[owner], &pg[i].ppa);
+                kv_release_page(s, &pg[i].ppa, owner);
+                s->gc_stale_pages++;
+                continue;
+            }
+        }
+        if (meta && !kv_lsm_relocate(s->lsm, pg[i].ppa.ppa, pg[i].ppa.ppa)) {
+            /* no level list names it: a merge already replaced it */
+            kv_release_page(s, &pg[i].ppa, KV_OWNER_META);
+            continue;
+        }
+        if (!meta && owner >= s->hash_slots) {
+            /* no owner: a value page whose Store failed; nothing reads it */
+            kv_release_page(s, &pg[i].ppa, owner);
+            continue;
+        }
+        if (!kv_wp_line(s, meta ? s->meta_wp : &ssd->wp)) {
+            kv_gc_requeue(s, victim);
+            *tend = tdone;
+            return false;
+        }
+        np = kv_wp_ppa(meta ? s->meta_wp : &ssd->wp);
+        rd.stime = tmove;
+        r = ssd_advance_status(ssd, &pg[i].ppa, &rd);
+        wr.stime = tmove + (int64_t)r;
+        mark_page_valid(ssd, &np);
+        set_rmap_ent(ssd, owner, &np);
+        w = ssd_advance_status(ssd, &np, &wr);
+        tdone = MAX(tdone, tmove + (int64_t)(r + w));
+        if (meta) {
+            kv_lsm_relocate(s->lsm, pg[i].ppa.ppa, np.ppa);
+            s->gc_meta_pages++;
+        } else {
+            FemuKvssdMappingEntry *e = &s->table[owner];
+
+            for (uint32_t k = 0; k < e->nr_ppas; k++) {
+                if (e->ppas[k].ppa == pg[i].ppa.ppa) {
+                    e->ppas[k] = np;
+                }
+            }
+            s->gc_wr_pages++;
+        }
+        kv_release_page(s, &pg[i].ppa, owner);
+        ssd->gc_write_pages++;
+        kv_wp_step(s, meta ? s->meta_wp : &ssd->wp);
+    }
+
+    /*
+     * Reinsert before the erase, as PinK does. Merges of the keys that go
+     * back program meta pages that point to the moved values, so they
+     * wait for the moves.
+     */
+    if (!meta && s->lsm) {
+        GHashTableIter it;
+        gpointer k, v;
+
+        s->lsm_ready = MAX(s->lsm_ready, tdone);
+        g_hash_table_iter_init(&it, seen);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            int how = GPOINTER_TO_INT(v) - 4;
+
+            if ((how & KV_GC_VALID) && (how & KV_GC_FLASH)) {
+                kv_gc_reinsert(s, GPOINTER_TO_UINT(k));
+            }
+        }
+        kv_tree_issue(s);
+    }
+
+    *tend = tdone;
+    ppa.ppa = 0;
+    ppa.g.blk = victim->id;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            *tend = MAX(*tend, tdone + (int64_t)ssd_erase_lun_block(
+                            ssd, ch, lun, victim->id, true, tdone));
+        }
+    }
+    victim->reclaiming = false;
+    mark_line_free(ssd, &ppa);
+    s->gc_lines++;
+    return true;
+}
+
+static void kv_check(FemuKvssdState *s);
+
+/*
+ * GC in the command, from its start: while the free lines are at or below
+ * the threshold, or a value of @need pages has no room, collect one victim
+ * after another. A queued victim that gives no usable page ends the run,
+ * unless a Store needs room: then up to as many such victims as the queue
+ * held at the start. A full line is looked at once per run. *@lat takes
+ * the time from the request start.
+ */
+static void kv_gc_run(FemuKvssdState *s, NvmeRequest *req, uint64_t need,
+                      uint64_t *lat)
+{
+    struct ssd *ssd = s->ssd;
+    int64_t t = req->stime;
+    int passes = 2 * ssd->lm.tt_lines;
+    bool ran = false;
+    uint32_t tries;
+    KvGcFull f;
+
+    *lat = MAX(*lat, kv_reclaim_empty_lines(s, req->stime));
+    if (!should_gc(ssd) && kv_room(s) >= need) {
+        return;
+    }
+    kv_gc_full_init(s, &f);
+    tries = pqueue_size(ssd->lm.victim_line_pq);
+    while (passes-- > 0 && (should_gc(ssd) || kv_room(s) < need)) {
+        uint64_t before = kv_room(s) + kv_wp_remaining(s, s->meta_wp);
+        bool want = kv_room(s) < need;
+        int64_t end = t;
+        bool full;
+
+        /* a full line is moved only for room, never for the threshold */
+        if (!kv_gc_line(s, t, want ? &f : NULL, &full, &end)) {
+            t = MAX(t, end);
+            break;
+        }
+        ran = true;
+        t = end;
+        t += kv_reclaim_empty_lines(s, t);
+        /*
+         * A victim can give nothing when its moves and the merges of its
+         * keys take what its erase frees. Without a Store to make room
+         * for, that ends the run; with one, GC tries the victims that were
+         * queued when it started, and the full lines, before it gives up.
+         */
+        if (!full && kv_room(s) + kv_wp_remaining(s, s->meta_wp) <= before &&
+            (!want || tries-- == 0)) {
+            break;
+        }
+    }
+    g_free(f.id);
+    if (t > req->stime) {
+        *lat = MAX(*lat, (uint64_t)(t - req->stime));
+    }
+    if (ran) {
+        kv_check(s);
+    }
+}
+
+/*
+ * Fixed per-command cost of the hash index's work, so metadata-only
+ * commands (exist, delete, a miss) are never free: one page read on the LUN
+ * that holds the key's part of the index. It is charged as a mapping read,
+ * since it reads no data block, and places nothing.
+ *
+ * The index is spread over every LUN by the key's hash, so lookups of
+ * different keys proceed in parallel the way value pages do.
  */
 static struct ppa kv_index_ppa(FemuKvssdState *s, const uint8_t *key,
                                uint8_t kl)
@@ -706,12 +1284,6 @@ static struct ppa kv_index_ppa(FemuKvssdState *s, const uint8_t *key,
     return ppa;
 }
 
-/*
- * Fixed per-command cost of the controller's index work, so metadata-only
- * commands (exist, delete, a miss) are never free: one page read on the LUN
- * that holds the key's part of the index. It is charged as a mapping read,
- * since it reads no data block, and places nothing.
- */
 static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req,
                                const uint8_t *key, uint8_t kl)
 {
@@ -735,6 +1307,9 @@ static uint64_t kv_charge_index(FemuKvssdState *s, NvmeRequest *req,
 }
 
 /*
+ * The cost of a command's index work. The hash pays its base read; the
+ * LSM tree pays only its lookup, which is all the flash it reads.
+ *
  * Every cost is measured from the request's own start time on the LUN
  * timelines, so each already contains any wait the LUN was under, including
  * a wait for an earlier stage of the same command. Adding them would count
@@ -743,10 +1318,12 @@ static uint64_t kv_charge_index(FemuKvssdState *s, NvmeRequest *req,
 static uint64_t kv_charge_stages(FemuKvssdState *s, NvmeRequest *req,
                                  const uint8_t *key, uint8_t kl)
 {
-    uint64_t base = kv_charge_base(s, req, key, kl);
     uint64_t index = kv_charge_index(s, req, key, kl);
 
-    return MAX(base, index);
+    if (s->lsm) {
+        return index;
+    }
+    return MAX(kv_charge_base(s, req, key, kl), index);
 }
 
 /*
@@ -779,6 +1356,8 @@ static void kv_apply_lat(NvmeRequest *req, uint64_t lat)
     req->expire_time += lat;
 }
 
+/* --- the host byte arena --- */
+
 static int kv_entry_value_off_cmp(const void *a, const void *b)
 {
     const FemuKvssdMappingEntry *ea = *(FemuKvssdMappingEntry **)a;
@@ -788,129 +1367,49 @@ static int kv_entry_value_off_cmp(const void *a, const void *b)
 }
 
 /*
- * Real value-log compaction: walk live index entries, copy their value bytes down
- * to a fresh frontier in old-offset order, and update each entry's value_off.
- * Charges the relocated live pages as GC writes through the NAND model and
- * folds their time into *lat, the triggering command's own. Called with the
- * lock held when the append frontier cannot fit a new value but dead space
- * exists.
+ * Pack the live values to the front of the byte arena. The arena is the
+ * emulator's store of the host bytes, not the device: this moves memory
+ * only and costs no NAND time. Value GC is what the device does.
  */
-static bool kv_compact(FemuKvssdState *s, NvmeRequest *req, uint64_t *lat)
+static bool kv_arena_pack(FemuKvssdState *s)
 {
+    g_autofree FemuKvssdMappingEntry **live = NULL;
     uint64_t frontier = 0;
-    uint64_t live_bytes = 0;
-    uint64_t live_pages = 0;
-    uint32_t live_nr = 0;
-    uint32_t back_nr = 0;
-    int64_t stime = req->stime;
-    FemuKvssdMappingEntry **live;
-    FemuKvssdMappingEntry **back = NULL;
+    uint32_t nr = 0;
 
-    live = g_try_new(FemuKvssdMappingEntry *, s->nr_entries);
-    if (!live && s->nr_entries) {
+    live = g_try_new(FemuKvssdMappingEntry *, MAX(s->nr_entries, 1));
+    if (!live) {
         return false;
-    }
-    /* the LSM bookkeeping is taken before anything moves */
-    if (s->lsm) {
-        back = g_try_new(FemuKvssdMappingEntry *,
-                         s->nr_entries ? s->nr_entries : 1);
-        if (!back || kv_lsm_gc_begin(s->lsm)) {
-            g_free(back);
-            g_free(live);
-            return false;
-        }
     }
     for (uint32_t i = 0; i < s->hash_slots; i++) {
         FemuKvssdMappingEntry *e = &s->table[i];
-        if (e->key_len == 0) {
-            continue;
-        }
-        live[live_nr++] = e;
-        live_bytes += e->length;
-        live_pages += kv_value_pages(s, e->length);
-    }
-    if (kv_physical_pages_available(s, req, lat) < live_pages) {
-        if (s->lsm) {
-            kv_lsm_gc_check_done(s->lsm);
-        }
-        g_free(back);
-        g_free(live);
-        return false;
-    }
-    qsort(live, live_nr, sizeof(*live), kv_entry_value_off_cmp);
 
-    /*
-     * The LSM tree, as PinK does, first checks each value against the meta
-     * page that points to it, a read when that page is not in DRAM. The
-     * moves start once the checks are done. Such a page keeps the old
-     * pointer, so the key goes back into the memtable after the move.
-     */
-    if (s->lsm) {
-        for (uint32_t i = 0; i < live_nr; i++) {
-            uint32_t newest;
-
-            if (kv_lsm_gc_check(s->lsm, live[i]->key, live[i]->key_len,
-                                &newest)) {
-                back[back_nr++] = live[i];
-            }
+        if (e->key_len && !e->stale && nr < MAX(s->nr_entries, 1)) {
+            live[nr++] = e;
         }
-        s->lsm_stime = req->stime;
-        s->lsm_gc = 0;
-        kv_lsm_gc_check_done(s->lsm);
-        *lat = MAX(*lat, s->lsm_gc);
-        stime = req->stime + s->lsm_gc;
     }
-
-    for (uint32_t i = 0; i < live_nr; i++) {
+    qsort(live, nr, sizeof(*live), kv_entry_value_off_cmp);
+    for (uint32_t i = 0; i < nr; i++) {
         FemuKvssdMappingEntry *e = live[i];
-        FemuKvssdMappingEntry old;
-        struct ppa *new_ppas = NULL;
-        uint32_t new_nr_ppas = 0;
-        uint16_t status;
 
-        old = *e;
-        status = kv_program_ppas(s, req, e->length, GC_IO, &new_ppas,
-                                 &new_nr_ppas, lat, stime);
-        if (status) {
-            g_free(back);
-            g_free(live);
-            return false;
-        }
         if (e->length && e->value_off != frontier) {
-            memmove(s->values + frontier, s->values + e->value_off, e->length);
+            memmove(s->values + frontier, s->values + e->value_off,
+                    e->length);
         }
         e->value_off = frontier;
-        e->ppas = new_ppas;
-        e->nr_ppas = new_nr_ppas;
-        kv_discard_value_ppas(s, &old);
         frontier += e->length;
     }
-    g_free(live);
-    /*
-     * Merges of the keys that go back read the meta pages and program new
-     * ones that point to the moved values, so they wait for the moves. A
-     * key that does not go back only skips a cost: its slot is current.
-     */
-    s->lsm_ready = MAX(s->lsm_ready, req->stime + (int64_t)*lat);
-    for (uint32_t i = 0; i < back_nr; i++) {
-        kv_lsm_reinsert(s->lsm, back[i]->key, back[i]->key_len,
-                        (uint32_t)(back[i] - s->table));
-    }
-    g_free(back);
-
     s->value_next = frontier;
     s->value_reclaimable = 0;
-    ftl_assert(live_bytes == frontier);
     return true;
 }
 
 /*
- * Allocate value space (log-append). If the append frontier cannot fit and there
- * is reclaimable dead space, compact first. Returns false only if even compacted
- * live data plus the new value would exceed capacity (true Capacity Exceeded).
+ * Allocate host bytes (log-append). If the append frontier cannot fit and
+ * there are dead bytes, pack first. Returns false only if even packed live
+ * data plus the new value would exceed capacity.
  */
-static bool kv_value_alloc(FemuKvssdState *s, NvmeRequest *req, uint64_t len,
-                           uint64_t *off, uint64_t *lat)
+static bool kv_value_alloc(FemuKvssdState *s, uint64_t len, uint64_t *off)
 {
     if (s->value_next <= s->value_capacity &&
         len <= s->value_capacity - s->value_next) {
@@ -918,16 +1417,12 @@ static bool kv_value_alloc(FemuKvssdState *s, NvmeRequest *req, uint64_t len,
         s->value_next += len;
         return true;
     }
-    if (s->value_reclaimable > 0) {
-        if (!kv_compact(s, req, lat)) {
-            return false;
-        }
-        if (s->value_next <= s->value_capacity &&
-            len <= s->value_capacity - s->value_next) {
-            *off = s->value_next;
-            s->value_next += len;
-            return true;
-        }
+    if (s->value_reclaimable > 0 && kv_arena_pack(s) &&
+        s->value_next <= s->value_capacity &&
+        len <= s->value_capacity - s->value_next) {
+        *off = s->value_next;
+        s->value_next += len;
+        return true;
     }
     return false;
 }
@@ -950,6 +1445,18 @@ static bool kv_logical_capacity_ok(FemuKvssdState *s,
     return used + new_len + kl <= s->value_capacity;
 }
 
+/* NUSE: an old version stops using capacity at its overwrite or Delete */
+static void kv_account_drop(FemuKvssdState *s, const FemuKvssdMappingEntry *old)
+{
+    s->value_reclaimable += old->length;
+    if (s->value_used >= old->length) {
+        s->value_used -= old->length;
+    }
+    if (s->key_used >= old->key_len) {
+        s->key_used -= old->key_len;
+    }
+}
+
 uint64_t kvssd_ftl_max_value(FemuKvssdState *s)
 {
     return s->kv_value_max;
@@ -964,6 +1471,16 @@ bool kvssd_ftl_exists(FemuKvssdState *s, const uint8_t *key, uint8_t kl)
     return found;
 }
 
+/* the owner check runs every this many commands under FEMU_KV_CHECK */
+#define KV_CHECK_EVERY  64
+
+static void kv_tick(FemuKvssdState *s)
+{
+    if (s->check && ++s->check_tick % KV_CHECK_EVERY == 0) {
+        kv_check(s);
+    }
+}
+
 uint16_t kvssd_ftl_exist(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                          const uint8_t *key, uint8_t kl)
 {
@@ -974,6 +1491,7 @@ uint16_t kvssd_ftl_exist(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     qemu_mutex_lock(&s->lock);
     found = s->index->find(s, key, kl, NULL) >= 0;
     lat = kv_charge_stages(s, req, key, kl);
+    kv_tick(s);
     qemu_mutex_unlock(&s->lock);
     kv_apply_lat(req, lat);
     return found ? NVME_SUCCESS : (NVME_KV_KEY_NOT_EXIST | NVME_DNR);
@@ -991,10 +1509,12 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     FemuKvssdMappingEntry old = {};
     struct ppa *new_ppas = NULL;
     uint32_t new_nr_ppas = 0;
+    uint32_t pages = kv_value_pages(s, vsize);
     (void)n;
 
     qemu_mutex_lock(&s->lock);
     kv_tree_begin(s, req->stime);   /* for merge I/O the index queues */
+    kv_tick(s);
 
     existing = s->index->find(s, key, kl, NULL);
     if (sike && existing < 0) {
@@ -1010,7 +1530,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         return NVME_KV_KEY_EXISTS | NVME_DNR;
     }
     if (existing < 0 && ((s->kv_max_keys && s->nr_entries >= s->kv_max_keys) ||
-                         s->nr_entries >= s->hash_slots)) {
+                         (!s->lsm && s->nr_entries >= s->hash_slots))) {
         lat = kv_charge_stages(s, req, key, kl);
         kv_unlock(s);
         kv_apply_lat(req, lat);
@@ -1035,7 +1555,27 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         lat = probe;
     }
 
-    if (!kv_value_alloc(s, req, vsize, &off, &lat)) {
+    /* value GC makes room first; the Store leaves the reserve free */
+    kv_gc_run(s, req, pages + kv_reserve(s), &lat);
+    /*
+     * Deletes and old records that sit in the upper levels hold meta pages
+     * and the reserve for their merges. Merge them down, so they drop, and
+     * collect the pages that frees.
+     */
+    if (s->lsm && kv_room(s) < pages + kv_reserve(s) &&
+        kv_lsm_records(s->lsm) > s->nr_entries) {
+        kv_lsm_compact_all(s->lsm);
+        kv_tree_issue(s);
+        kv_gc_run(s, req, pages + kv_reserve(s), &lat);
+    }
+    /* an LSM Store merges, so a zero-length one needs the reserve too */
+    if ((pages || s->lsm) && kv_room(s) < pages + kv_reserve(s)) {
+        kv_unlock(s);
+        kv_apply_lat(req, lat);
+        return NVME_CAP_EXCEEDED | NVME_DNR;
+    }
+
+    if (!kv_value_alloc(s, vsize, &off)) {
         kv_unlock(s);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
@@ -1043,18 +1583,18 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
     if (vsize) {
         /* DMA held under the lock: the arena slot [off,off+vsize) is reserved on
-         * the append frontier and a concurrent compaction could relocate it, so
+         * the append frontier and a concurrent pack could relocate it, so
          * the copy must be atomic with the allocation. */
         status = dma_write_cmd(n, &req->cmd, s->values + off, vsize);
         if (status) {
             s->value_next = off;            /* roll back the append */
             kv_unlock(s);
-            kv_apply_lat(req, lat);         /* any compaction still ran */
+            kv_apply_lat(req, lat);         /* any GC still ran */
             return status;
         }
     }
 
-    status = kv_program_ppas(s, req, vsize, USER_IO, &new_ppas, &new_nr_ppas,
+    status = kv_program_ppas(s, req, vsize, &new_ppas, &new_nr_ppas,
                              &lat, req->stime);
     if (status) {
         s->value_next = off;
@@ -1069,7 +1609,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
     status = s->index->upsert(s, key, kl, off, vsize, new_ppas, new_nr_ppas);
     if (status) {
-        kv_invalidate_ppa_array(s, new_ppas, new_nr_ppas);
+        kv_release_ppas(s, new_ppas, new_nr_ppas, KV_OWNER_NONE);
         g_free(new_ppas);
         s->value_next = off;
         kv_unlock(s);
@@ -1077,20 +1617,19 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         return status;
     }
     if (existing >= 0) {
-        kv_discard_value_ppas(s, &old);
-        s->value_reclaimable += old.length;
-        if (s->value_used >= old.length) {
-            s->value_used -= old.length;
+        /* the LSM tree releases the old pages when it drops their record */
+        if (!s->lsm) {
+            kv_discard_value_ppas(s, &old, (uint32_t)existing);
         }
-        if (s->key_used >= old.key_len) {
-            s->key_used -= old.key_len;
-        }
+        kv_account_drop(s, &old);
     }
     s->value_used += vsize;
     s->key_used += kl;
 
     /* command/index base cost + value-page program timing through the NAND model */
-    lat = MAX(lat, kv_charge_stages(s, req, key, kl));
+    if (!s->lsm) {
+        lat = MAX(lat, kv_charge_stages(s, req, key, kl));
+    }
     lat = MAX(lat, probe);
     lat = kv_model_lat(s, existing >= 0 ? KV_OP_UPDATE : KV_OP_INSERT, vsize,
                        lat);
@@ -1110,6 +1649,7 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     (void)n;
 
     qemu_mutex_lock(&s->lock);
+    kv_tick(s);
     slot = s->index->find(s, key, kl, NULL);
     if (slot < 0) {
         lat = kv_charge_stages(s, req, key, kl);
@@ -1130,16 +1670,16 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         return status;
     }
 
-    /* base + read of the value pages actually touched (the transferred span) */
-    lat = MAX(lat, kv_charge_base(s, req, key, kl));
     if (s->lsm) {
         /* the value pointer is in the meta page: the value read waits for it */
         uint64_t probe = kv_charge_index(s, req, key, kl);
 
-        lat = MAX(lat, probe);
+        lat = probe;
         status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat,
                               req->stime + probe);
     } else {
+        /* base + read of the value pages actually touched (the transferred span) */
+        lat = kv_charge_base(s, req, key, kl);
         status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat,
                               req->stime);
     }
@@ -1176,37 +1716,38 @@ uint16_t kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 {
     int slot;
     int removed;
-    uint64_t lat;
+    uint64_t lat = 0;
     uint64_t probe = 0;
     FemuKvssdMappingEntry old = {};
     (void)n;
 
     qemu_mutex_lock(&s->lock);
     kv_tree_begin(s, req->stime);   /* for merge I/O the index queues */
+    kv_tick(s);
+    /*
+     * The LSM tree looks the key up only when EDNEK makes the status depend
+     * on it; otherwise the tombstone goes in blind. Its merges may need
+     * pages, so GC runs first; a Delete may use the reserve.
+     */
+    if (s->lsm) {
+        if (s->ednek) {
+            probe = kv_charge_index(s, req, key, kl);
+        }
+        kv_gc_run(s, req, 0, &lat);
+    }
     slot = s->index->find(s, key, kl, NULL);
     if (slot >= 0) {
         old = s->table[slot];
     }
-    /*
-     * The LSM tree looks the key up only when EDNEK makes the status depend
-     * on it; otherwise the tombstone goes in blind.
-     */
-    if (s->lsm && s->ednek) {
-        probe = kv_charge_index(s, req, key, kl);
-    }
     removed = s->index->remove(s, key, kl);
     if (removed > 0) {
-        kv_discard_value_ppas(s, &old);
-        s->value_reclaimable += old.length;
-        if (s->value_used >= old.length) {
-            s->value_used -= old.length;
+        if (!s->lsm) {
+            kv_discard_value_ppas(s, &old, (uint32_t)slot);
         }
-        if (s->key_used >= old.key_len) {
-            s->key_used -= old.key_len;
-        }
+        kv_account_drop(s, &old);
     }
     if (s->lsm) {
-        lat = MAX(kv_charge_base(s, req, key, kl), probe);
+        lat = MAX(lat, probe);
     } else {
         lat = kv_charge_stages(s, req, key, kl);
     }
@@ -1350,6 +1891,7 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
 
     qemu_mutex_lock(&s->lock);
+    kv_tick(s);
     if (s->lsm) {
         /* the scan reads each level in sequence, the levels side by side */
         s->lsm_stime = req->stime;
@@ -1361,7 +1903,8 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         return status;
     }
     if (s->lsm) {
-        lat = kv_charge_base(s, req, start_key, start_len);
+        /* the scan reads are all the flash a List of the tree reads */
+        lat = 0;
         for (int i = 0; i <= KV_LSM_MAX_LEVELS; i++) {
             lat = MAX(lat, s->lsm_level[i]);
         }
@@ -1385,9 +1928,16 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
 /* --- lifecycle --- */
 
+/*
+ * Drop every pair. The pages they held are released, so the flash shows
+ * no orphan; the blocks keep their wear.
+ */
 static void kvssd_reset_table(FemuKvssdState *s)
 {
     for (uint32_t i = 0; i < s->hash_slots; i++) {
+        if (s->ssd) {
+            kv_discard_value_ppas(s, &s->table[i], i);
+        }
         kv_entry_drop_ppas(&s->table[i]);
         kv_entry_clear(&s->table[i]);
     }
@@ -1470,9 +2020,11 @@ static void kv_tree_free(FemuKvssdState *s)
     g_free(s->lsm);
     g_free(s->free_slots);
     g_free(s->lsm_pend);
+    g_free(s->meta_wp);
     s->lsm = NULL;
     s->free_slots = NULL;
     s->lsm_pend = NULL;
+    s->meta_wp = NULL;
 }
 
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
@@ -1588,7 +2140,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         }
         s->lsm = g_try_new0(KvLsm, 1);
         s->free_slots = g_try_new(uint32_t, s->hash_slots);
-        if (!s->lsm || !s->free_slots ||
+        s->meta_wp = g_try_new0(struct write_pointer, 1);
+        if (!s->lsm || !s->free_slots || !s->meta_wp ||
             kv_lsm_init(s->lsm, n->kv_lsm_memtable_keys,
                         n->kv_lsm_size_ratio, n->kv_lsm_pinned_levels,
                         s->pgsz / KV_LSM_REC_BYTES, &kv_tree_ops, s)) {
@@ -1607,6 +2160,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     qemu_mutex_init(&s->lock);
+    /* the owner check of every page, for tests; it is slow */
+    s->check = getenv("FEMU_KV_CHECK") != NULL;
 
     femu_log("%s,KVSSD mode: NVMe-KV 1.3, value_cap=%" PRIu64 " MB (NAND %" PRIu64
              " MB, OP %.0f%%), index=%s slots=%u, NAND pgsz=%d\n", n->devname,
@@ -1629,9 +2184,9 @@ fail:
     return NULL;
 }
 
-static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
-                                         const void *key, uint8_t kl,
-                                         const void *data, uint32_t len)
+static uint16_t kv_selftest_store_one(FemuKvssdState *s, NvmeRequest *req,
+                                      const void *key, uint8_t kl,
+                                      const void *data, uint32_t len)
 {
     uint64_t off;
     uint64_t lat = 0;
@@ -1651,13 +2206,14 @@ static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
     if (!kv_logical_capacity_ok(s, existing >= 0 ? &old : NULL, kl, len)) {
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
-    if (!kv_value_alloc(s, req, len, &off, &lat)) {
+    kv_gc_run(s, req, kv_value_pages(s, len) + kv_reserve(s), &lat);
+    if (!kv_value_alloc(s, len, &off)) {
         return NVME_CAP_EXCEEDED | NVME_DNR;
     }
     if (len) {
         memcpy(s->values + off, data, len);
     }
-    status = kv_program_ppas(s, req, len, USER_IO, &new_ppas, &new_nr_ppas,
+    status = kv_program_ppas(s, req, len, &new_ppas, &new_nr_ppas,
                              &lat, req->stime);
     if (status) {
         s->value_next = off;
@@ -1670,25 +2226,34 @@ static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
     }
     status = s->index->upsert(s, key, kl, off, len, new_ppas, new_nr_ppas);
     if (status) {
-        kv_invalidate_ppa_array(s, new_ppas, new_nr_ppas);
+        kv_release_ppas(s, new_ppas, new_nr_ppas, KV_OWNER_NONE);
         g_free(new_ppas);
         s->value_next = off;
         return status;
     }
     if (existing >= 0) {
-        kv_discard_value_ppas(s, &old);
-        s->value_reclaimable += old.length;
-        if (s->value_used >= old.length) {
-            s->value_used -= old.length;
+        if (!s->lsm) {
+            kv_discard_value_ppas(s, &old, (uint32_t)existing);
         }
-        if (s->key_used >= old.key_len) {
-            s->key_used -= old.key_len;
-        }
+        kv_account_drop(s, &old);
     }
     s->value_used += len;
     s->key_used += kl;
     kv_apply_lat(req, lat);
     return NVME_SUCCESS;
+}
+
+/* as a command: merge I/O the store queues is issued before it returns */
+static uint16_t kv_selftest_store_locked(FemuKvssdState *s, NvmeRequest *req,
+                                         const void *key, uint8_t kl,
+                                         const void *data, uint32_t len)
+{
+    uint16_t status;
+
+    kv_tree_begin(s, req->stime);
+    status = kv_selftest_store_one(s, req, key, kl, data, len);
+    kv_tree_issue(s);
+    return status;
 }
 
 static bool kv_selftest_delete_locked(FemuKvssdState *s, const void *key,
@@ -1701,17 +2266,16 @@ static bool kv_selftest_delete_locked(FemuKvssdState *s, const void *key,
         return false;
     }
     old = s->table[slot];
+    kv_tree_begin(s, s->lsm_stime);
     if (s->index->remove(s, key, kl) <= 0) {
+        kv_tree_issue(s);
         return false;
     }
-    kv_discard_value_ppas(s, &old);
-    s->value_reclaimable += old.length;
-    if (s->value_used >= old.length) {
-        s->value_used -= old.length;
+    kv_tree_issue(s);
+    if (!s->lsm) {
+        kv_discard_value_ppas(s, &old, (uint32_t)slot);
     }
-    if (s->key_used >= old.key_len) {
-        s->key_used -= old.key_len;
-    }
+    kv_account_drop(s, &old);
     return true;
 }
 
@@ -1798,7 +2362,6 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     /* 6. compaction: force reclaimable, compact, and verify remapped data + GC writes */
     {
         char *big = g_malloc0(s->pgsz * 2);
-        uint64_t gc_before;
         uint64_t old_next;
 
         memset(big, 0x5a, s->pgsz * 2);
@@ -1815,7 +2378,6 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
         }
         saved_cap = s->value_capacity;
         s->value_capacity = s->value_used + s->key_used + 64;
-        gc_before = s->gc_wr_pages;
         old_next = s->value_next;
         KVT(kv_selftest_store_locked(s, &req, "cmp", 3, "COMPACT", 8) ==
             NVME_SUCCESS, "store-triggers-compaction");
@@ -1824,9 +2386,8 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
             bool ok = slot >= 0 &&
                       memcmp(s->values + s->table[slot].value_off, "XX", 3) == 0 &&
                       s->value_reclaimable == 0 &&
-                      s->value_next < old_next &&
-                      s->gc_wr_pages > gc_before;
-            KVT(ok, "compaction-remap-real-gc (K-2)");
+                      s->value_next < old_next;
+            KVT(ok, "arena-pack-remap (K-2)");
         }
         s->value_capacity = saved_cap;
         g_free(big);
@@ -1945,6 +2506,10 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     s->nand_rd_pages = 0;
     s->nand_wr_pages = 0;
     s->gc_wr_pages = 0;
+    s->gc_lines = 0;
+    s->meta_wr_pages = 0;
+    s->gc_meta_pages = 0;
+    s->gc_stale_pages = 0;
     if (n) {
         if (n->ssd == s->ssd) {
             n->ssd = NULL;
@@ -1954,10 +2519,218 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
             fails++;
             femu_err("KVSELFTEST FAIL reset-timing-ssd\n");
         }
+        if (s->meta_wp) {
+            memset(s->meta_wp, 0, sizeof(*s->meta_wp));
+        }
     }
 
     femu_err("KVSELFTEST DONE pass=%d fails=%d\n", npass, fails);
 #undef KVT
+}
+
+/* a broken owner invariant: say which, and stop, so a test cannot miss it */
+static void kv_check_fail(const char *what, uint64_t a, uint64_t b)
+{
+    error_report("FEMU kvssd: owner check failed: %s (%" PRIu64 ", %" PRIu64
+                 ")", what, a, b);
+    abort();
+}
+
+/* each line is in one place: free, full, victim queue, open or collected */
+static void kv_check_lines(FemuKvssdState *s)
+{
+    struct line_mgmt *lm = &s->ssd->lm;
+    g_autofree uint8_t *seen = g_new0(uint8_t, lm->tt_lines);
+    struct line *line;
+    int n = 0;
+
+    QTAILQ_FOREACH(line, &lm->free_line_list, entry) {
+        if (seen[line->id]++ || line->vpc || line->pos) {
+            kv_check_fail("free line", line->id, line->vpc);
+        }
+        n++;
+    }
+    QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
+        if (seen[line->id]++ || !kv_line_full(s, line)) {
+            kv_check_fail("full line", line->id, line->vpc);
+        }
+        n++;
+    }
+    for (int i = 0; i < lm->tt_lines; i++) {
+        line = &lm->lines[i];
+        if (line->pos) {
+            if (seen[i]++) {
+                kv_check_fail("victim line on two lists", i, line->pos);
+            }
+            n++;
+        }
+        if (line->reclaiming) {
+            kv_check_fail("line left reclaiming", i, line->vpc);
+        }
+    }
+    for (int i = 0; i < lm->tt_lines; i++) {
+        n += !seen[i] && (lm->lines[i].retired || lm->lines[i].spare);
+    }
+    if (s->ssd->wp.curline && seen[s->ssd->wp.curline->id]++) {
+        kv_check_fail("open value line on a list", s->ssd->wp.curline->id, 0);
+    }
+    n += !!s->ssd->wp.curline;
+    if (s->meta_wp && s->meta_wp->curline &&
+        seen[s->meta_wp->curline->id]++) {
+        kv_check_fail("open meta line on a list", s->meta_wp->curline->id, 0);
+    }
+    n += s->meta_wp && s->meta_wp->curline;
+    if (n != lm->tt_lines) {
+        kv_check_fail("lines placed", n, lm->tt_lines);
+    }
+}
+
+/*
+ * Each slot that holds a key has exactly one record, and a free slot none;
+ * each meta page a level names is a valid page the tree owns, named once.
+ */
+static void kv_check_tree(FemuKvssdState *s, uint64_t used)
+{
+    g_autofree uint8_t *refs = g_new0(uint8_t, s->hash_slots);
+    g_autoptr(GHashTable) pages = g_hash_table_new(g_int64_hash,
+                                                   g_int64_equal);
+    uint64_t recs = 0;
+
+    for (int i = 0; i <= KV_LSM_MAX_LEVELS; i++) {
+        KvLsmRun *r = i ? &s->lsm->lvl[i - 1] : &s->lsm->mem;
+
+        for (uint32_t k = 0; k < r->nr; k++) {
+            uint32_t slot = r->rec[k].slot;
+
+            if (r->rec[k].dead) {
+                continue;
+            }
+            if (slot >= s->hash_slots || refs[slot]++ ||
+                !s->table[slot].key_len) {
+                kv_check_fail("record slot", slot, i);
+            }
+            recs++;
+        }
+        if (!i || kv_lsm_level_pinned(s->lsm, i)) {
+            continue;
+        }
+        for (uint32_t p = 0; p < r->npg; p++) {
+            struct ppa ppa = { .ppa = r->pg[p].id };
+
+            if (!kv_page_owned(s, &ppa, KV_OWNER_META) ||
+                g_hash_table_contains(pages, &r->pg[p].id)) {
+                kv_check_fail("meta page", r->pg[p].id, i);
+            }
+            g_hash_table_add(pages, &r->pg[p].id);
+        }
+    }
+    if (recs != used || used + s->nr_free != s->hash_slots) {
+        kv_check_fail("records, slots", recs, used);
+    }
+}
+
+/*
+ * FEMU_KV_CHECK: every valid page has the owner rmap names, every owner
+ * holds its pages, each line counts its valid pages, and with the LSM tree
+ * each slot that holds a key has one record. Called under s->lock.
+ */
+static void kv_check(FemuKvssdState *s)
+{
+    struct ssd *ssd = s->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t live = 0;
+    uint64_t used = 0;
+
+    if (!s->check) {
+        return;
+    }
+    for (int blk = 0; blk < spp->blks_per_pl; blk++) {
+        struct line *line = &ssd->lm.lines[blk];
+        uint64_t vpc = 0;
+        struct ppa ppa = { .ppa = 0 };
+
+        ppa.g.blk = blk;
+        for (int ch = 0; ch < spp->nchs; ch++) {
+            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
+                        uint64_t owner;
+                        bool held = false;
+
+                        ppa.g.ch = ch;
+                        ppa.g.lun = lun;
+                        ppa.g.pl = pl;
+                        ppa.g.pg = pg;
+                        if (get_pg(ssd, &ppa)->status != PG_VALID) {
+                            continue;
+                        }
+                        vpc++;
+                        owner = get_rmap_ent(ssd, &ppa);
+                        if (owner == KV_OWNER_META) {
+                            held = s->lsm && kv_lsm_relocate(s->lsm, ppa.ppa,
+                                                             ppa.ppa);
+                        } else if (owner < s->hash_slots) {
+                            FemuKvssdMappingEntry *e = &s->table[owner];
+
+                            for (uint32_t i = 0; i < e->nr_ppas; i++) {
+                                held |= e->ppas[i].ppa == ppa.ppa;
+                            }
+                        }
+                        if (!held) {
+                            kv_check_fail("valid page with no holder",
+                                          ppa.ppa, owner);
+                        }
+                    }
+                }
+            }
+        }
+        if (vpc != (uint64_t)line->vpc) {
+            kv_check_fail("line valid count", vpc, line->vpc);
+        }
+    }
+    for (uint32_t i = 0; i < s->hash_slots; i++) {
+        FemuKvssdMappingEntry *e = &s->table[i];
+
+        for (uint32_t k = 0; k < e->nr_ppas; k++) {
+            if (e->ppas[k].ppa != UNMAPPED_PPA &&
+                !kv_page_owned(s, &e->ppas[k], i)) {
+                kv_check_fail("entry page not owned", i, e->ppas[k].ppa);
+            }
+        }
+        if (!e->key_len) {
+            continue;
+        }
+        used++;
+        if (!e->stale) {
+            /* a live value holds every page of its length */
+            if (e->nr_ppas != kv_value_pages(s, e->length)) {
+                kv_check_fail("live value pages", i, e->nr_ppas);
+            }
+            for (uint32_t k = 0; k < e->nr_ppas; k++) {
+                if (e->ppas[k].ppa == UNMAPPED_PPA) {
+                    kv_check_fail("live value lost a page", i, k);
+                }
+            }
+            live++;
+        }
+        if (s->lsm) {
+            uint32_t slot;
+            bool newest = kv_lsm_get(s->lsm, e->key, e->key_len, &slot,
+                                     false) && slot == i;
+
+            if (newest == e->stale) {
+                kv_check_fail("stale flag disagrees with the tree", i,
+                              e->stale);
+            }
+        }
+    }
+    if (live != s->nr_entries) {
+        kv_check_fail("live keys", live, s->nr_entries);
+    }
+    kv_check_lines(s);
+    if (s->lsm) {
+        kv_check_tree(s, used);
+    }
 }
 
 bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap)
@@ -1991,6 +2764,18 @@ bool kvssd_ftl_lsm_snap(FemuKvssdState *s, FemuKvLsmSnap *snap)
     snap->dropped = l->dropped;
     snap->reinserted = l->reinserted;
     memcpy(snap->io, l->pages, sizeof(snap->io));
+    snap->versions = s->hash_slots - s->nr_free;
+    snap->gc_meta_pages = s->gc_meta_pages;
+    snap->gc_stale_pages = s->gc_stale_pages;
+    /* every valid page is a value page or a meta page a level names */
+    for (int i = 0; i < s->ssd->lm.tt_lines; i++) {
+        snap->valid_value_pages += s->ssd->lm.lines[i].vpc;
+    }
+    for (int i = 1; i <= KV_LSM_MAX_LEVELS; i++) {
+        if (!kv_lsm_level_pinned(l, i)) {
+            snap->valid_value_pages -= l->lvl[i - 1].npg;
+        }
+    }
     qemu_mutex_unlock(&s->lock);
     return true;
 }

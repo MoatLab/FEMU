@@ -592,8 +592,8 @@
 # @FemuKvLsmInfo:
 #
 # State of the LSM-tree key index (kv_index=lsm) of a key-value
-# namespace.  Page counts are flash meta pages of the index, which
-# take channel and LUN time but no value space.
+# namespace.  Page counts are flash meta pages of the index.  They
+# are real NAND pages, in lines that hold no value.
 #
 # @memtable-keys: records in the memtable
 #
@@ -633,6 +633,20 @@
 # @gc-read-pages: meta page reads that check values before value
 #     garbage collection moves them
 #
+# @gc-meta-pages: meta pages that garbage collection moved out of a
+#     victim line
+#
+# @gc-stale-value-pages: value pages that garbage collection found
+#     stale (the tree held a newer record) and released
+#
+# @valid-value-pages: value pages the flash holds as valid.  This
+#     counts the pages of old values whose records the tree has not
+#     dropped yet.
+#
+# @versions: table slots that hold a version of a key: one for each
+#     live key, and one for each old value whose record the tree has
+#     not dropped yet
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuKvLsmInfo',
@@ -645,7 +659,9 @@
             'probe-read-pages': 'uint64', 'scan-read-pages': 'uint64',
             'compaction-read-pages': 'uint64',
             'compaction-program-pages': 'uint64',
-            'gc-read-pages': 'uint64' } }
+            'gc-read-pages': 'uint64', 'gc-meta-pages': 'uint64',
+            'gc-stale-value-pages': 'uint64',
+            'valid-value-pages': 'uint64', 'versions': 'uint64' } }
 
 ##
 # @FemuKvssdInfo:

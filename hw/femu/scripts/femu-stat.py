@@ -433,7 +433,7 @@ def fdp_report(fdp: Dict[str, Any],
 LSM_COUNTERS = ("flushes", "compactions", "dropped-records",
                 "reinserted-keys", "probe-read-pages", "scan-read-pages",
                 "compaction-read-pages", "compaction-program-pages",
-                "gc-read-pages")
+                "gc-read-pages", "gc-meta-pages", "gc-stale-value-pages")
 
 
 def lsm_report(lsm: Dict[str, Any],

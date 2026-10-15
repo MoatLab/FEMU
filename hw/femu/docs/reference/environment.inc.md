@@ -13,3 +13,4 @@ debugging and host-placement aids, not device configuration, so they have no
 | `FEMU_SECRET` | bbssd FTL (`hw/femu/bbssd/ftl-exp.c`) | A non-empty marker string that selects the pages `FEMU_EXP_LOG` traces. |
 | `FEMU_DUMP_LPN` | bbssd FTL (`hw/femu/bbssd/ftl-exp.c`) | A logical page number (decimal or 0x hex) whose backend page is hex-dumped to stderr on every read not served from the write buffer, independent of `FEMU_EXP_LOG`. |
 | `FEMU_KV_SELFTEST` | KV FTL (`hw/femu/kvssd/kvssd-ftl.c`) | Any value runs the KV FTL self-test once at realize and logs the result. |
+| `FEMU_KV_CHECK` | KV FTL (`hw/femu/kvssd/kvssd-ftl.c`) | Any value checks the owner of every NAND page after each value GC and every 64 commands, and stops QEMU on a broken invariant. The qtests set it. It is slow on a large device. |
