@@ -4358,6 +4358,35 @@ static void femu_test_copy_held_get(Object *obj, Visitor *v, const char *name,
     visit_type_uint32(v, name, &value, errp);
 }
 
+/*
+ * A qtest hook a poller reads or updates while QMP reads or sets it: both
+ * sides use atomics, which the plain uint32 pointer property does not.
+ */
+static void femu_test_u32_get(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    uint32_t value = qatomic_read((uint32_t *)opaque);
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void femu_test_u32_set(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    uint32_t value;
+
+    if (visit_type_uint32(v, name, &value, errp)) {
+        qatomic_set((uint32_t *)opaque, value);
+    }
+}
+
+static void femu_test_add_u32(Object *obj, const char *name, uint32_t *field,
+                              bool writable)
+{
+    object_property_add(obj, name, "uint32", femu_test_u32_get,
+                        writable ? femu_test_u32_set : NULL, NULL, field);
+}
+
 /* lock takes in the memory backend that had to wait for another access */
 static void femu_test_range_waits_get(Object *obj, Visitor *v,
                                       const char *name, void *opaque,
@@ -4390,27 +4419,20 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-ftl-hold",
                                        &FEMU(obj)->test_ftl_hold,
                                        OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-zone-lock-hold-ms",
-                                       &FEMU(obj)->test_zone_lock_hold_ms,
-                                       OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-zone-draining",
-                                       &FEMU(obj)->test_zone_draining,
-                                       OBJ_PROP_FLAG_READ);
-        object_property_add_uint32_ptr(obj, "x-zone-write-hold-ms",
-                                       &FEMU(obj)->test_zone_write_hold_ms,
-                                       OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-zone-log-hold-ms",
-                                       &FEMU(obj)->test_zone_log_hold_ms,
-                                       OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-zone-log-changes",
-                                       &FEMU(obj)->test_zone_log_changes,
-                                       OBJ_PROP_FLAG_READ);
-        object_property_add_uint32_ptr(obj, "x-zone-report-hold-ms",
-                                       &FEMU(obj)->test_zone_report_hold_ms,
-                                       OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-zone-held",
-                                       &FEMU(obj)->test_zone_held,
-                                       OBJ_PROP_FLAG_READ);
+        femu_test_add_u32(obj, "x-zone-lock-hold-ms",
+                          &FEMU(obj)->test_zone_lock_hold_ms, true);
+        femu_test_add_u32(obj, "x-zone-draining",
+                          &FEMU(obj)->test_zone_draining, false);
+        femu_test_add_u32(obj, "x-zone-write-hold-ms",
+                          &FEMU(obj)->test_zone_write_hold_ms, true);
+        femu_test_add_u32(obj, "x-zone-log-hold-ms",
+                          &FEMU(obj)->test_zone_log_hold_ms, true);
+        femu_test_add_u32(obj, "x-zone-log-changes",
+                          &FEMU(obj)->test_zone_log_changes, false);
+        femu_test_add_u32(obj, "x-zone-report-hold-ms",
+                          &FEMU(obj)->test_zone_report_hold_ms, true);
+        femu_test_add_u32(obj, "x-zone-held", &FEMU(obj)->test_zone_held,
+                          false);
         object_property_add(obj, "x-copy-hold", "uint32",
                             femu_test_copy_hold_get, femu_test_copy_hold_set,
                             NULL, NULL);
