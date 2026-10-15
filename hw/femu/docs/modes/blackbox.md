@@ -229,6 +229,9 @@ All of these are off by default.
   needs a bound: `mdts` must be 1 or more. Write Zeroes is limited to MDTS
   (WZSL, with ONCS bit 3 clear). Copy is limited to MDTS (MCL), or to one
   block of the largest LBA format when that is larger.
+- With `mapping=dftl`, read-only media opens no new translation page line.
+  The reserve stays for the writes in flight. Their mapping changes stay in
+  the CMT or pending, in power-loss-protected DRAM.
 - The controller raises a SMART asynchronous event once for each of these,
   if the host enabled its bit of Asynchronous Event Configuration:
 

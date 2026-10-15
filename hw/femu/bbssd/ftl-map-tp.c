@@ -87,6 +87,13 @@ static bool tp_wp_ready(struct ssd *ssd, bool reserve)
     if (wp->curline) {
         return true;
     }
+    /*
+     * Read-only media gives its free lines to the writes admitted before;
+     * the change stays in the CMT or pending, in power-loss-protected DRAM.
+     */
+    if (ssd->media_ro) {
+        return false;
+    }
     if (ssd->lm.free_line_cnt <= keep) {
         return false;
     }

@@ -40104,6 +40104,81 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * Read-only end of life with mapping=dftl. The CMT holds one TP and the
+ * writes go to TPs 0 and 1 in turn, so each write evicts a dirty TP and
+ * programs it. When the media goes read-only, the reserve lines are for
+ * the writes admitted before: a TP program must not open one. Every write
+ * completes with success or 82h, and the map and the TPs stay consistent.
+ * @data is the pages of each write; with 8 pages and MDTS 128 KiB the
+ * reserve is 3 lines, more than the 2 free lines TP traffic leaves alone.
+ */
+static void femu_test_eol_dftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t bufs = guest_alloc(alloc, FEMU_EOL_SLOTS * 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint32_t np = atoi(data);
+    uint64_t v[7];
+    uint32_t rnd = 11;
+    bool ro = false;
+    int batch, k, ok = 0, refused = 0;
+
+    /* every page of a write takes its data from the slot's buffer */
+    for (k = 0; k < 512; k++) {
+        qtest_writeq(qts, list + k * 8, bufs);
+    }
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (batch = 0; batch < 4000 && !ro; batch++) {
+        for (k = 0; k < FEMU_EOL_SLOTS; k++) {
+            NvmeRwCmd rw;
+            uint64_t b = bufs + k * 4096;
+
+            rnd = rnd * 1103515245 + 12345;
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(b);
+            rw.dptr.prp2 = cpu_to_le64(np == 2 ? b : np > 2 ? list : 0);
+            rw.slba = cpu_to_le64(((k & 1) * 512 +
+                                   (rnd >> 8) % (513 - np)) * 8);
+            rw.nlb = cpu_to_le16(np * 8 - 1);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        for (k = 0; k < FEMU_EOL_SLOTS; k++) {
+            uint16_t st = femu_complete(&c, &c.io, NULL, NULL);
+
+            if (FEMU_SC(st) == NVME_SUCCESS) {
+                ok++;
+                continue;
+            }
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+            g_assert_cmphex(st & FEMU_DNR, ==, FEMU_DNR);
+            refused++;
+            ro = true;
+        }
+    }
+    g_test_message("read-only after %d batches: %d writes done, %d refused",
+                   batch, ok, refused);
+    g_assert_true(ro);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), >, 0);
+    femu_tp_check(qts, "/machine/peripheral/gc-test", v);
+    g_assert_cmpuint(v[1], ==, 0);
+    g_assert_cmpuint(v[2], ==, 0);
+    g_assert_cmpuint(v[4], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, bufs);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/*
  * A write that waits in its queue for credits can still be aborted: it was
  * not fetched, so the Abort marks it, and it then completes as aborted
  * without taking credits. A controller reset drops admitted writes from the
@@ -41890,6 +41965,25 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "blk_pe_limit=8,mdts=2,oncs=0x19f,subsys=nssub",
         .before = femu_ns_subsys_before,
+    });
+    /* 1024 pages: TPs 0 and 1, and the CMT holds one of them */
+    qos_add_test("eol-ro-dftl", "femu", femu_test_eol_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"1",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=96,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=2,oncs=0x19f,mapping=dftl,x-cmt-slots=1"
+    });
+    /* 8-page writes, and the free lines run down to the forced 2 */
+    qos_add_test("eol-ro-dftl-big", "femu", femu_test_eol_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"8",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=96,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=5,oncs=0x19f,mapping=dftl,x-cmt-slots=1,"
+            "gc_thres_pcent=99,gc_thres_pcent_high=100"
     });
     qos_add_test("eol-ro-format", "femu", femu_test_eol_ro,
                  &(QOSGraphTestOptions) {

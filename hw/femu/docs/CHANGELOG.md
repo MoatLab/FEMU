@@ -289,6 +289,7 @@ was not doing anything.
 - Log page C0h (bytes 280 and 288) and `query-femu` count the translation page programs and reads of `mapping=dftl`, and the write amplification factor includes the programs. Realize keeps lines for these pages, so the largest namespace a geometry exposes is smaller than before. `x-ftl-check` adds the translation page checks.
 - With `mapping=dftl` and no FDP, a read starts its media read when its translation is ready. So a CMT miss adds the translation read to the page read; before, the two overlapped. With `hot_cold_sep` a write also waits for its translation.
 - With `mapping=dftl` and no FDP, DSM Deallocate and Write Zeroes with Deallocate write the translation pages they change once each, and charge that to the command. Write Zeroes without Deallocate pays the translation of each page, as a write does. Format and Sanitize drop the translation pages with no write-back.
+- With `mapping=dftl` and `eol_read_only`, read-only media opens no new translation page line, so the reserve lines stay for the writes in flight.
 - The `run-*.sh` launchers name QEMU's threads (`-name ...,debug-threads=on`), so `ps -T` and `top -H` show `femu-poller`, `FEMU-FTL-Thread` and `CPU N/KVM` (e29fe6ee2).
 
 The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
