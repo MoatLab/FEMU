@@ -120,6 +120,7 @@ has these members:
 | Member | Content |
 | --- | --- |
 | `reclaim-groups`, `units-per-group` | reclaim groups, and reclaim units in each group |
+| `groups` | each reclaim group: `id`, its dies (`first-channel` and `channels`, `first-lun` and `luns` in each of its channels) and its `free-units` |
 | `pages-per-unit` | NAND pages in each reclaim unit |
 | `handles` | each reclaim unit handle: `id`, `type` (`initially-isolated` or `persistently-isolated`), `host-bytes` and `media-bytes` |
 | `unit-counts` | reclaim units that are `free`, `open`, `full` and `victim`, and the `total` |
@@ -368,7 +369,10 @@ Each handle has one unit open:
             "cache-read": false, "read-cache-busy-ns": 0, "cache-step-ns": 0,
             "cache-select-ns": 0, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
-  "fdp": {"reclaim-groups": 1, "units-per-group": 25, "pages-per-unit": 16,
+  "fdp": {"reclaim-groups": 1,
+          "groups": [{"id": 0, "first-channel": 0, "channels": 2,
+                      "first-lun": 0, "luns": 2, "free-units": 21}],
+          "units-per-group": 25, "pages-per-unit": 16,
           "handles": [{"id": 0, "type": "persistently-isolated",
                        "host-bytes": 0, "media-bytes": 0},
                       {"id": 1, "type": "persistently-isolated",

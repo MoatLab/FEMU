@@ -396,7 +396,13 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
                     "handles": [h.get("type") for h in fdp.get("handles", [])],
                     "unit-counts": fdp.get("unit-counts"),
                     "placement-handles": fdp.get("placement-handles"),
-                    "ftl-nsid": fdp.get("ftl-nsid")}
+                    "ftl-nsid": fdp.get("ftl-nsid"),
+                    # the dies of each reclaim group
+                    "groups": [{k: g.get(k) for k in (
+                        "id", "first-channel", "channels", "first-lun",
+                        "luns")} for g in fdp.get("groups", [])]}
+                if FAULT == "groups-one":
+                    entry["fdp"]["groups"] = entry["fdp"]["groups"][:1]
                 if FAULT == "phl-first" and namespaces and \
                         "fdp" in namespaces[0]:
                     entry["fdp"]["placement-handles"] = \
@@ -487,6 +493,14 @@ def report_text(code: int, r: Dict[str, Any]) -> str:
                     f"{fdp['units-per-group']} units of "
                     f"{size(ns.get('unit-bytes'))}, {len(fdp['handles'])} "
                     f"handles ({', '.join(sorted(set(fdp['handles'])))})")
+                groups = fdp.get("groups") or []
+                if len(groups) > 1:
+                    for g in groups:
+                        c0, l0 = g["first-channel"], g["first-lun"]
+                        lines.append(
+                            pad + f"reclaim group {g['id']}: channels "
+                            f"{c0}-{c0 + g['channels'] - 1}, LUNs "
+                            f"{l0}-{l0 + g['luns'] - 1}")
                 phl = fdp.get("placement-handles")
                 if phl is not None:
                     shared = (f", FTL of namespace {fdp['ftl-nsid']}"
@@ -597,6 +611,36 @@ def self_test(qemu: str) -> int:
                     "namespace 1" in report_text(code, r))
     t.check("fdp: two namespaces, a placement handle list each",
             fdp_two_ok())
+
+    def fdp_groups_ok() -> bool:
+        # four groups of two LUNs of one channel; a unit is a quarter line
+        code, r = check(qemu, ["-device", "femu-subsys,id=s0,nqn=s0,fdp=on,"
+                               "fdp.nruh=4,fdp.nrg=4", "-device",
+                               "femu,femu_mode=1,devsz_mb=8,nchs=2,"
+                               "luns_per_ch=4,blks_per_pl=64,pgs_per_blk=64,"
+                               "lba_index=3,subsys=s0"])
+        ns = ns1(r)
+        gs = ns.get("fdp", {}).get("groups", [])
+        return (code == 0 and ns.get("fdp", {}).get("reclaim-groups") == 4
+                and [(g["first-channel"], g["first-lun"], g["luns"])
+                     for g in gs] == [(0, 0, 2), (0, 2, 2), (1, 0, 2),
+                                      (1, 2, 2)]
+                and ns.get("unit-bytes") * 4 == ns.get("line-bytes")
+                and "reclaim group 3: channels 1-1, LUNs 2-3"
+                    in report_text(code, r))
+    t.check("fdp: four reclaim groups and their dies", fdp_groups_ok())
+    t.control("fdp reclaim groups", "groups-one", fdp_groups_ok)
+
+    for props, want in (
+            ("fdp.nrg=0", "fdp.nrg must be non-zero"),
+            ("fdp.nrg=129", "fdp.nrg (129) must not exceed 128"),
+            ("fdp.nruh=16367", "fdp.nruh (16367) must not exceed 16366"),
+            ("fdp.nrg=3", "fdp.nrg (3) must divide nchs (2)")):
+        code, r = check(qemu, ["-device", "femu-subsys,id=s0,nqn=s0,fdp=on,"
+                               "fdp.nruh=4," + props, "-device",
+                               f"femu,{SMALL_BB},lba_index=3,subsys=s0"])
+        t.check(f"refused: {props}", code == 1 and any(
+            want in e for e in r.get("errors", [])), json.dumps(r)[:400])
     t.control("fdp placement handle lists", "phl-first", fdp_two_ok)
     t.control("fdp shared over-provisioning", "op-each", fdp_two_ok)
 

@@ -35812,6 +35812,40 @@ static void femu_rg_units(QTestState *qts, uint64_t vpc[FEMU_RG_MAX][4],
 }
 
 /*
+ * query-femu lists each group with its dies: group g takes the g-th of nrg
+ * equal runs of the dies in the order ch x luns_per_ch + lun, whole
+ * channels or LUNs of one channel.
+ */
+static void femu_rg_check_groups(QTestState *qts, const FemuRgWant *want)
+{
+    uint32_t per = want->nchs * want->luns / want->nrg;
+    QDict *rsp;
+    QDict *ns = femu_fdpns_query(qts, 1, "", &rsp);
+    QDict *fdp = qdict_get_qdict(ns, "fdp");
+    QListEntry *e;
+    uint32_t g = 0;
+
+    g_assert_cmpint(qdict_get_int(fdp, "reclaim-groups"), ==, want->nrg);
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "groups"), e) {
+        QDict *d = qobject_to(QDict, qlist_entry_obj(e));
+        uint32_t d0 = g * per;
+
+        g_assert_cmpint(qdict_get_int(d, "id"), ==, g);
+        g_assert_cmpint(qdict_get_int(d, "first-channel"), ==,
+                        d0 / want->luns);
+        g_assert_cmpint(qdict_get_int(d, "first-lun"), ==, d0 % want->luns);
+        g_assert_cmpint(qdict_get_int(d, "channels"), ==,
+                        per >= want->luns ? per / want->luns : 1);
+        g_assert_cmpint(qdict_get_int(d, "luns"), ==,
+                        per >= want->luns ? want->luns : per);
+        g_assert_cmpint(qdict_get_int(d, "free-units"), >, 0);
+        g++;
+    }
+    g_assert_cmpuint(g, ==, want->nrg);
+    qobject_unref(rsp);
+}
+
+/*
  * Placement into reclaim groups (Base 2.3, 8.1.11; Figures 289 and 290).
  * RUH Status has a descriptor per placement handle and group, by handle and
  * then by group, and each PID carries the group in its RGIF top bits. A
@@ -35843,6 +35877,7 @@ static void femu_test_fdp_rg_place(void *obj, void *data,
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     c.lba_size = 4096;              /* lba_index=3 */
+    femu_rg_check_groups(qts, want);
 
     g_assert_cmpuint(femu_rg_ruhs(&c, log, pid, ruhid, ruamw), ==, 4 * nrg);
     full = ruamw[0];

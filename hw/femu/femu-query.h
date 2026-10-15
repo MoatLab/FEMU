@@ -30,6 +30,14 @@ typedef struct FemuQueryRuh {
     uint64_t media_bytes;
 } FemuQueryRuh;
 
+typedef struct FemuQueryRg {
+    uint32_t ch0;
+    uint32_t nch;
+    uint32_t lun0;
+    uint32_t nlun;
+    uint32_t free_units;
+} FemuQueryRg;
+
 typedef struct FemuQueryRu {
     uint32_t group;
     uint32_t unit;
@@ -84,6 +92,7 @@ typedef struct FemuQueryNs {
 
     bool fdp;
     uint32_t nrg;
+    FemuQueryRg *rgs;           /* nrg entries, sized by the caller */
     uint32_t rus_per_rg;
     uint32_t pgs_per_ru;
     uint32_t ru_counts[FEMU_RECLAIM_UNIT_STATE__MAX];

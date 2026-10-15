@@ -262,6 +262,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
 
             q->nr_ruhs = ssd->nruhs;
             q->ruhs = g_new0(FemuQueryRuh, MAX(q->nr_ruhs, 1));
+            q->nrg = ssd->nrg;
+            q->rgs = g_new0(FemuQueryRg, MAX(q->nrg, 1));
             /* fixed at realize: FDP refuses namespace management */
             q->nr_phs = ns->fdp.nphs;
             q->phs = g_memdup2(ns->fdp.phs, ns->fdp.nphs * sizeof(uint16_t));
@@ -300,6 +302,7 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
 fail:
     /* req->nr_ns does not count this entry yet; free its buffers here */
     g_clear_pointer(&req->ns[req->nr_ns].ruhs, g_free);
+    g_clear_pointer(&req->ns[req->nr_ns].rgs, g_free);
     g_clear_pointer(&req->ns[req->nr_ns].ru_state, g_free);
     g_clear_pointer(&req->ns[req->nr_ns].phs, g_free);
     return false;
@@ -311,6 +314,7 @@ static void femu_query_free(FemuQueryReq *req)
         g_free(req->ns[i].lines);
         g_free(req->ns[i].state);
         g_free(req->ns[i].ruhs);
+        g_free(req->ns[i].rgs);
         g_free(req->ns[i].rus);
         g_free(req->ns[i].ru_state);
         g_free(req->ns[i].phs);
@@ -418,9 +422,21 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     FemuFdpInfo *fdp = g_new0(FemuFdpInfo, 1);
     FemuReclaimUnitCounts *cnt = g_new0(FemuReclaimUnitCounts, 1);
     FemuRuHandleInfoList **htail = &fdp->handles;
+    FemuReclaimGroupInfoList **gtail = &fdp->groups;
     uint16List **ptail = &fdp->placement_handles;
 
     fdp->reclaim_groups = q->nrg;
+    for (uint32_t g = 0; g < q->nrg; g++) {
+        FemuReclaimGroupInfo *gi = g_new0(FemuReclaimGroupInfo, 1);
+
+        gi->id = g;
+        gi->first_channel = q->rgs[g].ch0;
+        gi->channels = q->rgs[g].nch;
+        gi->first_lun = q->rgs[g].lun0;
+        gi->luns = q->rgs[g].nlun;
+        gi->free_units = q->rgs[g].free_units;
+        QAPI_LIST_APPEND(gtail, gi);
+    }
     fdp->units_per_group = q->rus_per_rg;
     fdp->pages_per_unit = q->pgs_per_ru;
     for (uint32_t h = 0; h < q->nr_ruhs; h++) {

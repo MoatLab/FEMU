@@ -54,6 +54,7 @@ listed one by one.
 - FDP takes more than one reclaim group (`fdp.nrg` up to 128). On bbssd and CSD a group is a set of dies: whole channels, or LUNs of one channel. A reclaim unit is one block of each plane of each die of its group, so RUNS is a line divided by the group count. Each handle has an active unit and a collection unit in every group. Collection, pads and refreshes stay in their group.
 - With more than one reclaim group, a write without placement goes to the group with the most free units. Each group must hold the whole namespace, since a host may place all of its data in one. A logical block must be whole NAND pages.
 - Under FDP, a buffered write that finds the write buffer full of pages with no room programs its page at once when its own handle has room, instead of failing with Capacity Exceeded. RUH Update writes back only the held pages of the handles it names.
+- query-femu lists the reclaim groups of an FDP namespace (`groups`) with their dies and free units; `femu-stat.py` and `femu-config-check.py` show them.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).

@@ -148,12 +148,21 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
     uint32_t total = ssd->nrg * ssd->rg[0].tt_nru;
     uint32_t end;
 
-    q->nrg = ssd->nrg;
-    q->rus_per_rg = ssd->rg[0].tt_nru;
-    q->pgs_per_ru = ssd->rg[0].rus[0].npages;
-    if (ssd->nruhs != q->nr_ruhs || total > q->ru_state_cap) {
+    if (ssd->nrg != q->nrg || ssd->nruhs != q->nr_ruhs ||
+        total > q->ru_state_cap) {
         q->status = -ENOENT;    /* rebuilt since the caller sized the buffers */
         return;
+    }
+    q->rus_per_rg = ssd->rg[0].tt_nru;
+    q->pgs_per_ru = ssd->rg[0].rus[0].npages;
+    for (uint32_t g = 0; g < q->nrg; g++) {
+        FemuReclaimGroup *rg = &ssd->rg[g];
+
+        q->rgs[g].ch0 = rg->ch0;
+        q->rgs[g].nch = rg->nch;
+        q->rgs[g].lun0 = rg->lun0;
+        q->rgs[g].nlun = rg->nlun;
+        q->rgs[g].free_units = rg->ru_mgmt->free_ru_cnt;
     }
     for (uint32_t h = 0; h < q->nr_ruhs; h++) {
         FemuRuHandle *ruh = &ssd->ruhs[h];

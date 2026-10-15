@@ -398,11 +398,39 @@
             'ipc': 'uint32', 'erase-min': 'uint32', 'erase-max': 'uint32' } }
 
 ##
+# @FemuReclaimGroupInfo:
+#
+# One reclaim group: the dies that hold its reclaim units.  A group is
+# a set of whole channels, or of LUNs of one channel, and every unit of
+# the group is one block of each plane of each of its dies.
+#
+# @id: group index, from 0
+#
+# @first-channel: the first channel of the group
+#
+# @channels: channels in the group
+#
+# @first-lun: the first LUN of the group in each of its channels
+#
+# @luns: LUNs of the group in each of its channels
+#
+# @free-units: units of the group that are erased and hold no data
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuReclaimGroupInfo',
+  'data': { 'id': 'uint32', 'first-channel': 'uint32',
+            'channels': 'uint32', 'first-lun': 'uint32', 'luns': 'uint32',
+            'free-units': 'uint32' } }
+
+##
 # @FemuFdpInfo:
 #
 # Flexible data placement state of a blackbox namespace.
 #
 # @reclaim-groups: reclaim groups
+#
+# @groups: every reclaim group, in index order
 #
 # @units-per-group: reclaim units in each group
 #
@@ -426,7 +454,9 @@
 # Since: 10.1
 ##
 { 'struct': 'FemuFdpInfo',
-  'data': { 'reclaim-groups': 'uint32', 'units-per-group': 'uint32',
+  'data': { 'reclaim-groups': 'uint32',
+            'groups': [ 'FemuReclaimGroupInfo' ],
+            'units-per-group': 'uint32',
             'pages-per-unit': 'uint32', 'handles': [ 'FemuRuHandleInfo' ],
             'unit-counts': 'FemuReclaimUnitCounts',
             'placement-handles': [ 'uint16' ], 'ftl-nsid': 'uint32',

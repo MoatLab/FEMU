@@ -404,13 +404,15 @@ def namespace_report(ns: Dict[str, Any], prev: Optional[Dict[str, Any]],
 
 def fdp_report(fdp: Dict[str, Any],
                prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {k: fdp[k] for k in ("reclaim-groups",
+    out: Dict[str, Any] = {k: fdp[k] for k in ("reclaim-groups", "groups",
                                                "units-per-group",
                                                "pages-per-unit", "unit-counts",
                                                "placement-handles", "ftl-nsid")
                            if k in fdp}
     if FAULT == "phl-skip":
         out.pop("placement-handles", None)
+    if FAULT == "groups-skip":
+        out.pop("groups", None)
     old = {h["id"]: h for h in (prev or {}).get("handles", [])}
     handles = []
     for h in fdp.get("handles", []):
@@ -594,6 +596,15 @@ def namespace_text(ns: Dict[str, Any]) -> List[str]:
         lines.append(pad + f"reclaim units: free {uc.get('free')} of "
                      f"{uc.get('total')}, open {uc.get('open')}, "
                      f"victim {uc.get('victim')}, full {uc.get('full')}")
+        # a reclaim group is a set of dies: whole channels or LUNs of one
+        groups = fdp.get("groups", [])
+        if len(groups) > 1:
+            for g in groups:
+                c0, l0 = g["first-channel"], g["first-lun"]
+                lines.append(pad + f"reclaim group {g['id']}: channels "
+                             f"{c0}-{c0 + g['channels'] - 1}, LUNs "
+                             f"{l0}-{l0 + g['luns'] - 1}, free units "
+                             f"{g['free-units']}")
         phl = fdp.get("placement-handles")
         if phl is not None:
             # every FDP namespace of a controller shares one FTL
@@ -1262,6 +1273,12 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
         ("fdp2", ["-device", "femu-subsys,id=fdp0,nqn=fdp0,fdp=on,fdp.nruh=4",
                   "-device", f"femu,id=femu0,{SMALL_BB},subsys=fdp0,"
                   "namespaces=2,namespace_phls=0:1,,1:2"]),
+        # two reclaim groups of one channel each; a group holds the namespace
+        ("fdp-rg2", ["-device", "femu-subsys,id=fdp0,nqn=fdp0,fdp=on,"
+                     "fdp.nruh=4,fdp.nrg=2",
+                     "-device", "femu,id=femu0,femu_mode=1,devsz_mb=16,nchs=2,"
+                     "luns_per_ch=2,blks_per_pl=64,pgs_per_blk=64,lba_index=3,"
+                     "subsys=fdp0"]),
         ("zns", ["-device", "femu,id=femu0,femu_mode=3,devsz_mb=64"]),
         ("mixed", ["-device", f"femu,id=femu0,{SMALL_BB},namespaces=2,"
                    "namespace_modes=nossd,,bbssd"]),
@@ -1297,7 +1314,8 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
             nsid = 2 if name in ("mixed", "fdp2") else 1
             if not name.startswith("kvssd"):
                 t.check(f"{name}: 16 pages written",
-                        write_pages(ctrl, nsid, 0, 16))
+                        write_pages(ctrl, nsid, 0, 16,
+                                    4096 if name == "fdp-rg2" else 512))
             s1 = sampler.sample()
             rep = build_report(s1, s0)
             ns = one_ns(rep, nsid)
@@ -1324,6 +1342,17 @@ def selftest_modes(t: SelfTest, tmp: str) -> None:
                 t.control("placement handle list", "phl-skip",
                           lambda: one_ns(build_report(s1, s0), 2).get(
                               "fdp", {}).get("placement-handles") == [1, 2])
+            elif name == "fdp-rg2":
+                gs = ns.get("fdp", {}).get("groups", [])
+                t.check("fdp-rg2: two groups of one channel each, and the 16 "
+                        "pages in the report",
+                        [(g["first-channel"], g["channels"], g["luns"])
+                         for g in gs] == [(0, 1, 2), (1, 1, 2)]
+                        and "reclaim group 1: channels 1-1, LUNs 0-1" in text,
+                        text)
+                t.control("reclaim groups", "groups-skip",
+                          lambda: len(one_ns(build_report(s1, s0), 1).get(
+                              "fdp", {}).get("groups", [])) == 2)
             elif name == "zns":
                 zc = ns.get("zone-counts", {})
                 t.check("zns: one zone open after the writes",
