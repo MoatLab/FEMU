@@ -38912,6 +38912,28 @@ static void femu_test_eol_sq_delete(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Critical warning events (type 05h, code 06h) in a Persistent Event log
+ * context read at @buf whose warning byte has @bit set
+ */
+static int femu_pel_warnings(QTestState *qts, uint64_t buf, uint8_t bit)
+{
+    uint32_t tnev = qtest_readl(qts, buf + 4);
+    int i, count = 0;
+
+    for (i = 0; i < tnev; i++) {
+        uint64_t e = femu_pel_at(qts, buf, i);
+
+        if (e + 29 > buf + 4096) {
+            break;
+        }
+        count += qtest_readb(qts, e) == 0x05 &&
+                 qtest_readw(qts, e + 24) == 0x06 &&
+                 (qtest_readb(qts, e + 28) & bit);
+    }
+    return count;
+}
+
 /* the raw status bits: DNR is bit 14 of what femu_complete() returns */
 #define FEMU_DNR                0x4000
 #define FEMU_EOL_SLOTS          (FEMU_QSIZE - 1)
@@ -39036,6 +39058,7 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 4 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t log = guest_alloc(alloc, 512);
+    uint64_t pel = guest_alloc(alloc, 4096);
     const uint64_t slba[1] = { 0 };
     const uint16_t nlb[1] = { 8 };
     uint8_t seed_of[256];
@@ -39119,11 +39142,23 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex((result >> 8) & 0xff, ==, NVME_AER_INFO_SMART_RELIABILITY);
     g_assert_cmphex((result >> 16) & 0xff, ==, NVME_LOG_SMART_INFO);
 
+    /*
+     * The FTL thread put the read-only warning in the Persistent Event log
+     * when it happened; a SMART read does not add it again.
+     */
+    g_assert_cmphex(femu_pel(&c, 1, pel, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel_warnings(qts, pel, NVME_SMART_MEDIA_READ_ONLY),
+                    ==, 1);
+
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
                                          sizeof(page), 0)), ==, NVME_SUCCESS);
     qtest_memread(qts, log, page, sizeof(page));
     g_test_message("critical warning 0x%x spare %u used %u", page[0], page[3],
                    page[5]);
+    g_assert_cmphex(femu_pel(&c, 2, pel, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pel(&c, 1, pel, 4096, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_pel_warnings(qts, pel, NVME_SMART_MEDIA_READ_ONLY),
+                    ==, 1);
     g_assert_cmphex(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==,
                     NVME_SMART_MEDIA_READ_ONLY);
     g_assert_cmphex(page[0] & NVME_SMART_SPARE, ==, NVME_SMART_SPARE);
@@ -39208,6 +39243,7 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
         femu_query_check_lines(qts, "/machine/peripheral/gc-test", 0);
     }
 
+    guest_free(alloc, pel);
     guest_free(alloc, log);
     guest_free(alloc, list);
     guest_free(alloc, buf);

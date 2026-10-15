@@ -1169,6 +1169,27 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
 }
 
 /*
+ * The wear warnings as they stand, to the Persistent Event Log, from the
+ * thread that changes them: the event then carries the state at the change,
+ * and a controller reset before the main loop runs cannot lose it.
+ */
+static void ssd_pel_wear(struct ssd *ssd)
+{
+    uint8_t bits = 0;
+
+    if (ssd_available_spare(ssd) < NVME_SPARE_THRESHOLD) {
+        bits |= NVME_SMART_SPARE;
+    }
+    if (ssd->overworn_blocks) {
+        bits |= NVME_SMART_RELIABILITY;
+    }
+    if (ssd->media_ro) {
+        bits |= NVME_SMART_MEDIA_READ_ONLY;
+    }
+    femu_pel_wear_warning(ssd->n, bits);
+}
+
+/*
  * The end of life (eol_read_only): set the read-only bit in the admission
  * word, after which no write is admitted, and give the reserve lines to the
  * allocator. The writes admitted before hold no more pages than the reserve
@@ -1206,6 +1227,7 @@ void ssd_enter_read_only(struct ssd *ssd)
     if (spare >= NVME_SPARE_THRESHOLD) {
         bits |= NVME_SMART_SPARE;
     }
+    ssd_pel_wear(ssd);
     qatomic_or(&ssd->n->health_pending, bits);
     qemu_bh_schedule(ssd->n->aer_bh);
 }
@@ -1234,6 +1256,7 @@ static void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
 {
     uint32_t bits = 0;
 
+    ssd_pel_wear(ssd);
     if (spare >= NVME_SPARE_THRESHOLD &&
         ssd_available_spare(ssd) < NVME_SPARE_THRESHOLD) {
         bits |= NVME_SMART_SPARE;

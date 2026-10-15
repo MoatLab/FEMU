@@ -138,6 +138,7 @@ it:
 | Endurance Group Information (09h) | Critical Warning bit 3 (Endurance Group Read-Only) | 1 |
 | Identify Namespace, CNS 00h byte 99 and CNS 08h byte 8 | NSATTR bit 0 (Currently Write Protected) | 1 |
 | Asynchronous event | SMART, information 00h (reliability), log page 02h | once, if bit 3 of Async Event Configuration is set |
+| Persistent Event log (0Dh) | hardware error event, code 06h (critical warning) | once, with the warning byte when the media went read-only |
 
 Writes fail with Attempted Write to Read Only Range (status 182h, DNR). The
 same holds for Write Zeroes, Write Uncorrectable, Copy and a deallocating

@@ -373,22 +373,48 @@ void femu_pel_power_loss(FemuCtrl *n)
     femu_pel_log(n, NVME_PEL_HW_ERROR, 2, ev, sizeof(ev));
 }
 
+/* the warnings the FTL thread reports itself when the wear model is on */
+#define PEL_WEAR_BITS   (NVME_SMART_SPARE | NVME_SMART_RELIABILITY | \
+                         NVME_SMART_MEDIA_READ_ONLY)
+
 /*
  * A Critical Warning bit that has just come on is an event (code 06h), with
  * the whole warning byte as it now stands. Bits that go off are only noted,
- * so the same bit coming back on is a new event.
+ * so the same bit coming back on is a new event. Only the bits in @mask take
+ * the value in @bits; the others keep the value the event log last saw. The
+ * FTL thread calls this too, so the byte changes by compare and swap.
  */
-void femu_pel_warning(FemuCtrl *n, uint8_t warning)
+static void pel_warning_update(FemuCtrl *n, uint8_t mask, uint8_t bits)
 {
     FemuPel *pel = n->pel;
+    uint8_t old, new, seen;
 
     if (!pel) {
         return;
     }
-    if (warning & ~pel->warning) {
-        pel_log_hw_error(n, PEL_HWE_CRITICAL_WARNING, &warning, 1);
+    old = qatomic_read(&pel->warning);
+    for (;;) {
+        new = (old & ~mask) | (bits & mask);
+        seen = qatomic_cmpxchg(&pel->warning, old, new);
+        if (seen == old) {
+            break;
+        }
+        old = seen;
     }
-    pel->warning = warning;
+    if (new & ~old) {
+        pel_log_hw_error(n, PEL_HWE_CRITICAL_WARNING, &new, 1);
+    }
+}
+
+/*
+ * The whole byte, from a SMART collection. With the wear model on, the
+ * wear bits come from the FTL thread at the moment they change instead
+ * (femu_pel_wear_warning()), so a collection that read them a moment
+ * earlier cannot turn one off and report it twice.
+ */
+void femu_pel_warning(FemuCtrl *n, uint8_t warning)
+{
+    pel_warning_update(n, n->blk_pe_limit ? ~PEL_WEAR_BITS : 0xff, warning);
 }
 
 /*
@@ -397,13 +423,17 @@ void femu_pel_warning(FemuCtrl *n, uint8_t warning)
  */
 void femu_pel_temp_warning(FemuCtrl *n, bool on)
 {
-    FemuPel *pel = n->pel;
+    pel_warning_update(n, NVME_SMART_TEMPERATURE,
+                       on ? NVME_SMART_TEMPERATURE : 0);
+}
 
-    if (!pel) {
-        return;
-    }
-    femu_pel_warning(n, (pel->warning & ~NVME_SMART_TEMPERATURE) |
-                        (on ? NVME_SMART_TEMPERATURE : 0));
+/*
+ * The spare, reliability and read-only bits from the FTL thread, when the
+ * wear changes them: the event carries the warning byte at that moment.
+ */
+void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits)
+{
+    pel_warning_update(n, PEL_WEAR_BITS, bits);
 }
 
 /*

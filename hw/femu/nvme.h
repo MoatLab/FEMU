@@ -2945,6 +2945,7 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
                   uint16_t len);
 void femu_pel_warning(FemuCtrl *n, uint8_t warning);
 void femu_pel_temp_warning(FemuCtrl *n, bool on);
+void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits);
 bool femu_thermal_check(FemuCtrl *n, Error **errp);
 void femu_thermal_start(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
