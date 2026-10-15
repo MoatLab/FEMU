@@ -212,6 +212,7 @@ was not doing anything.
 - Unknown `mapping` or `gc_policy` names, and a negative suspend overhead (29c397f38, 2ae58aa55).
 - A CSD controller with more than one namespace (b425007c2).
 - FDP with more than one reclaim group, and other placement configurations the device cannot serve (f08762450, 8ed17a495).
+- ZNS and OCSSD namespaces in an FDP subsystem, and the memory and compute namespaces of CSD. An FDP endurance group holds NVM command set namespaces only (Base 2.3, 8.1.10). They were accepted, and placement had no effect.
 - An FDP namespace larger than what is left once each handle has a reclaim unit open, each Persistently Isolated handle one to collect into, and forced GC its free units. Such a namespace was accepted and then failed most random writes. A partly exposed last page now counts as a whole one in this check, with or without placement (89f34939f).
 - Open-Channel namespaces on a controller in another mode, and OCSSD geometries the timing model cannot index (8cd92eec5, 598498e93, f4e85634a, 707d8c8c1).
 - Controller memory buffer settings that do not fit, including any CMB BAR other than 2 (1c3a5a2a2, 9d6e13cd3).

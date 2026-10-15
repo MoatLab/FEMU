@@ -1753,8 +1753,28 @@ static int nvme_check_fdp_namespaces(FemuCtrl *n, const uint8_t *modes,
 {
     uint64_t page = (uint64_t)n->bb_params.secsz * n->bb_params.secs_per_pg;
 
-    if (n->num_namespaces < 2 || !n->subsys ||
-        !n->subsys->params.fdp.enabled) {
+    if (!n->subsys || !n->subsys->params.fdp.enabled) {
+        return 0;
+    }
+    /*
+     * Base 2.3, 8.1.10: every namespace of an FDP endurance group uses the
+     * NVM command set. Zoned and open-channel namespaces do not, nor do the
+     * memory and compute namespaces of a CSD controller.
+     */
+    if (n->num_namespaces < 2 && (modes[0] == FEMU_ZNSSD_MODE ||
+                                  modes[0] == FEMU_OCSSD_MODE)) {
+        error_setg(errp, "FDP needs namespaces of the NVM command set; "
+                   "namespace 1 is %s", modes[0] == FEMU_ZNSSD_MODE ?
+                   "zoned (znssd)" : "open-channel (ocssd)");
+        return -1;
+    }
+    if (n->csd_params.slm_size_mb || n->csd_params.cp) {
+        error_setg(errp, "FDP needs namespaces of the NVM command set; "
+                   "csd_slm_size and csd_cp add memory and compute "
+                   "namespaces");
+        return -1;
+    }
+    if (n->num_namespaces < 2) {
         return 0;
     }
     for (int i = 0; i < n->num_namespaces; i++) {

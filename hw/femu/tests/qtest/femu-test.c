@@ -35097,6 +35097,13 @@ static void femu_test_fdp_ns_refused(void *obj, void *data,
           "'namespace_phls':'0,'", "lists no handle" },
         { "'devsz_mb':1,'femu_mode':1,'subsys':'fdpsub',"
           "'namespace_phls':'x'", "names handle 'x'" },
+        /* only NVM command set namespaces (Base 2.3, 8.1.10) */
+        { "'devsz_mb':1,'femu_mode':3,'subsys':'fdpsub'",
+          "namespace 1 is zoned" },
+        { "'devsz_mb':1,'femu_mode':0,'subsys':'fdpsub'",
+          "namespace 1 is open-channel" },
+        { "'devsz_mb':1,'femu_mode':4,'fdm_size':1,'csd_cp':true,"
+          "'subsys':'fdpsub'", "csd_slm_size and csd_cp" },
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
