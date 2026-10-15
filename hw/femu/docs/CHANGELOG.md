@@ -237,6 +237,7 @@ was not doing anything.
 - Log 20h reports MAXPIDS as MIN(128, NRG x NRUH) - 1, below NRG x NRUH as Base 2.3 Figure 287 asks. It was 127 for every configuration; four handles in one group now report 3, and RUH Update still takes that many identifiers.
 - A RUH Update of a handle whose reclaim unit is empty keeps the unit and logs no event 00h. It used to log one, which says that the handle moved.
 - The FDP Statistics log keeps 128-bit sums, which stop at the 128-bit maximum, instead of 64-bit ones.
+- FDP HBMW also counts Write Zeroes with the Deallocate bit and Write Uncorrectable (NVM Command Set 1.2, 4.1.4.6). MBMW does not, since no page is programmed.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
   its first I/O and the kernel disabled the controller (50b65ca91).

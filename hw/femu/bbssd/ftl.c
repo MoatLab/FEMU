@@ -795,6 +795,12 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     case NVME_CMD_COPY:
         lat = ssd_copy(n, ssd, req);
         break;
+    case NVME_CMD_WRITE_UNCOR:
+        /* no page is programmed, but the host bytes count under FDP */
+        if (ssd->fdp_enabled) {
+            ssd_fdp_count_unprogrammed(n, req, req->nlb);
+        }
+        break;
     case NVME_CMD_COMPARE:
     case NVME_CMD_VERIFY: {
         /*

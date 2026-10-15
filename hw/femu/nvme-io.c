@@ -2045,8 +2045,13 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint16_t control = le16_to_cpu(rw->control);
     uint16_t status;
 
+    /* DTYPE is CDW12 bits 23:20 and DSPEC CDW13 31:16 (NVM 1.2, Fig 77, 78) */
+    if (nvme_dp_dtype_invalid(ns, (control >> 4) & 0xf)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -2060,6 +2065,14 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     nvme_mark_written(ns, slba, nlb);
     bitmap_set_atomic(ns->uncorrectable, slba, nlb);
+
+    /* HBMW counts it (NVM 1.2, 4.1.4.6); bbssd counts in the FTL thread */
+    req->slba = slba;
+    req->nlb = nlb;
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        req->fdp_dspec = le16_to_cpu(rw->dspec);
+        req->fdp_dtype = (control >> 4) & 0xf;
+    }
 
     return NVME_SUCCESS;
 }

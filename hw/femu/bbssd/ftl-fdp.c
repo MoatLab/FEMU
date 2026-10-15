@@ -2546,8 +2546,27 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
     }
 
     ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);
+    ssd_fdp_count_unprogrammed(n, req, le16_to_cpu(rw->nlb) + 1);
 
     return 0;
+}
+
+/*
+ * Charge HBMW for @nlb blocks a command asked to write but the FTL does not
+ * program: Write Zeroes with the Deallocate bit, and Write Uncorrectable. NVM
+ * 1.2, 4.1.4.6 counts both commands, and HBMW is what the host asked to
+ * write. No page reaches the media, so MBMW and RUAMW stay.
+ */
+void ssd_fdp_count_unprogrammed(FemuCtrl *n, NvmeRequest *req, uint64_t nlb)
+{
+    struct ssd *ssd = req->ns->ssd;
+    uint64_t bytes = nlb << req->ns->lbaf.lbads;
+    uint16_t rgid, ruhid;
+
+    fdp_place(ssd, req, &rgid, &ruhid);
+    nvme_fdp_eg_add(&n->subsys->endgrp, n->subsys->endgrp.fdp.hbmw, bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, bytes);
+    nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, bytes);
 }
 
 /*

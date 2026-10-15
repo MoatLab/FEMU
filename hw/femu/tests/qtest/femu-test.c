@@ -35476,6 +35476,51 @@ static void femu_test_fdp_hbmw_blocks(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * HBMW counts what the host asked to write (NVM 1.2, 4.1.4.6 names Write
+ * Zeroes and Write Uncorrectable). On bbssd, Write Zeroes with the
+ * Deallocate bit and Write Uncorrectable program no page: HBMW and the
+ * handle's host bytes grow, MBMW and RUAMW do not.
+ */
+static void femu_test_fdp_unprogrammed(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t h0, m0, h1, m1, host0, host1, vpc, ruamw;
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    femu_fdpns_handle(qts, 1, &host0, &vpc);
+    ruamw = femu_ruh_ruamw(&c, log, 1);
+
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(64);
+    rw.nlb = cpu_to_le16(7);
+    rw.control = cpu_to_le16(1 << 9 | 2 << 4);   /* Deallocate */
+    rw.dspec = cpu_to_le16(1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    rw.opcode = 0x04;                            /* Write Uncorrectable */
+    rw.control = cpu_to_le16(2 << 4);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    femu_fdpns_handle(qts, 1, &host1, &vpc);
+    g_assert_cmpuint(h1 - h0, ==, 2 * 4096);
+    g_assert_cmpuint(m1 - m0, ==, 0);
+    g_assert_cmpuint(host1 - host0, ==, 2 * 4096);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, ruamw);
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* what the FDP Configurations log (20h) of a test device must report */
 typedef struct FemuFdpConfWant {
     uint32_t nrg;
@@ -39618,6 +39663,13 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
+    });
+    qos_add_test("fdp-unprogrammed", "femu", femu_test_fdp_unprogrammed,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "oncs=0xe,subsys=fdpsub",
     });
     qos_add_test("fdp-replace-full", "femu", femu_test_fdp_replace_full,
                  &(QOSGraphTestOptions) {

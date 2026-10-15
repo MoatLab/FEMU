@@ -413,6 +413,7 @@ void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 /* nvme_do_write_fdp() is declared in nvme.h (included via ftl.h) */
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);
+void ssd_fdp_count_unprogrammed(FemuCtrl *n, NvmeRequest *req, uint64_t nlb);
 void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req);
 uint64_t fdp_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,

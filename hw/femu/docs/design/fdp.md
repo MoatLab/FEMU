@@ -445,7 +445,7 @@ in 22h.
 
 | Counter | Grows by | Where |
 | --- | --- | --- |
-| HBMW (host bytes with metadata written) | bytes of the logical blocks a Write, Copy or Write Zeroes without Deallocate wrote, in the pages it actually programmed or the buffer took (`fdp_host_bytes()`) | `fdp_count_write()`, `fdp_buffered_write()` |
+| HBMW (host bytes with metadata written) | bytes of the logical blocks a Write, Copy or Write Zeroes without Deallocate wrote, in the pages it actually programmed or the buffer took (`fdp_host_bytes()`); and the bytes of the blocks of a Write Zeroes with Deallocate or a Write Uncorrectable, which NVM Command Set 1.2, 4.1.4.6 counts too, though they program no page | `fdp_count_write()`, `fdp_buffered_write()`, `ssd_fdp_count_unprogrammed()` |
 | MBMW (media bytes with metadata written) | the bytes of the pages programmed for the host, plus bytes relocated by GC, plus pad bytes (`pd_open_close_sec`) | `fdp_count_write()`, `do_gc_fdp_style()`, `fdp_pd_leave_ru()` |
 | MBE (media bytes erased) | bytes of every block erased by GC | `do_gc_fdp_style()` |
 
