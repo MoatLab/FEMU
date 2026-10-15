@@ -2610,7 +2610,9 @@ static uint16_t nvme_fdp_confs(FemuCtrl *n, uint32_t endgrpid,
         hdr->fdpa = FIELD_DP8(hdr->fdpa, FDPA, RGIF, endgrp->fdp.rgif);
         hdr->nrg = cpu_to_le32(endgrp->fdp.nrg);
         hdr->nruh = cpu_to_le16(endgrp->fdp.nruh);
-        hdr->maxpids = cpu_to_le16(NVME_FDP_MAXPIDS - 1);
+        /* 0's based, and below NRG x NRUH (Base 2.3, Figure 287) */
+        hdr->maxpids = cpu_to_le16(MIN(NVME_FDP_MAXPIDS,
+                                       endgrp->fdp.nrg * endgrp->fdp.nruh) - 1);
         hdr->nnss = cpu_to_le32(NVME_MAX_NAMESPACES);
         hdr->runs = cpu_to_le64(endgrp->fdp.runs);
 
@@ -2621,7 +2623,7 @@ static uint16_t nvme_fdp_confs(FemuCtrl *n, uint32_t endgrpid,
     } else {
         hdr->nrg = cpu_to_le32(1);
         hdr->nruh = cpu_to_le16(1);
-        hdr->maxpids = cpu_to_le16(NVME_FDP_MAXPIDS - 1);
+        hdr->maxpids = cpu_to_le16(0);
         hdr->nnss = cpu_to_le32(1);
         hdr->runs = cpu_to_le64(96 * MiB);
         ruhd->ruht = NVME_RUHT_INITIALLY_ISOLATED;

@@ -35458,6 +35458,61 @@ static void femu_test_fdp_hbmw_blocks(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* what the FDP Configurations log (20h) of a test device must report */
+typedef struct FemuFdpConfWant {
+    uint32_t nrg;
+    uint8_t rgif;
+    uint16_t nruh;
+    uint64_t runs;
+} FemuFdpConfWant;
+
+/*
+ * The FDP Configurations log (Base 2.3, Figures 286 and 287): one valid
+ * configuration with the group count, the RGIF bits that hold a group
+ * identifier, and MAXPIDS. MAXPIDS is 0's based and below NRG x NRUH. A RUH
+ * Update takes that many identifiers and refuses one more (7.4.1.1).
+ */
+static void femu_test_fdp_confs(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuFdpConfWant *want = data;
+    uint32_t pids = MIN(128, want->nrg * want->nruh);
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t conf[16 + 64];
+    NvmeCmd cmd = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_endgrp_log(&c, 0x20, 0, log, sizeof(conf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, log, conf, sizeof(conf));
+    g_assert_cmpuint(lduw_le_p(conf), ==, 0);
+    g_assert_cmphex(conf[16 + 2] & 0x80, ==, 0x80);
+    g_assert_cmpuint(conf[16 + 2] & 0xf, ==, want->rgif);
+    g_assert_cmpuint(ldl_le_p(conf + 16 + 4), ==, want->nrg);
+    g_assert_cmpuint(lduw_le_p(conf + 16 + 8), ==, want->nruh);
+    g_assert_cmpuint(lduw_le_p(conf + 16 + 10), ==, pids - 1);
+    g_assert_cmpuint(ldq_le_p(conf + 16 + 16), ==, want->runs);
+
+    /* MAXPIDS + 1 identifiers of placement handle 0 pass, one more fails */
+    for (uint32_t i = 0; i <= pids; i++) {
+        qtest_writew(qts, log + 2 * i, 0);
+    }
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE | ((pids - 1) << 16));
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE | (pids << 16));
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * A write that names a placement identifier the namespace does not have goes
  * through placement handle 0 in a group the controller selects (Base 2.3,
@@ -39525,6 +39580,20 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub,buffer_size=16,vwc=1",
     });
+    {
+        static const FemuFdpConfWant conf1 = {
+            .nrg = 1, .rgif = 0, .nruh = 4, .runs = 64 * 1024,
+        };
+
+        qos_add_test("fdp-confs", "femu", femu_test_fdp_confs,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&conf1,
+            .edge.extra_device_opts =
+                "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,subsys=fdpsub",
+        });
+    }
     qos_add_test("fdp-invalid-pid", "femu", femu_test_fdp_invalid_pid,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

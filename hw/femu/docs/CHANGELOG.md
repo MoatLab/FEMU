@@ -234,6 +234,7 @@ was not doing anything.
 - A Copy on bbssd issues its destination write when its source reads end. On one LUN, a one-page Copy took the read time twice: 600 ms instead of 500 ms with a 100 ms read and a 400 ms program.
 - A zone write cache holds one program unit for each die of its zone. A cache sized from the whole device made a narrow zone (`zns_chnls_per_zone` below `zns_num_ch`) program each of its dies several times in series per flush. Full-width zones keep their timing.
 - A zoned namespace counts the block erases of Zone Reset. SMART Percentage Used (and the Endurance Group log) now reports them against `pe_cycles_rated`, or the rating of `zns_flash_type`; it used to stay 0. Each block passes its erase count to the media layer.
+- Log 20h reports MAXPIDS as MIN(128, NRG x NRUH) - 1, below NRG x NRUH as Base 2.3 Figure 287 asks. It was 127 for every configuration; four handles in one group now report 3, and RUH Update still takes that many identifiers.
 - A CSD namespace now goes through its FTL, so reads and writes take NAND time
   instead of completing instantly. A pure-CSD device previously timed out on
   its first I/O and the kernel disabled the controller (50b65ca91).
