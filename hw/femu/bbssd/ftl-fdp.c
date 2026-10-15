@@ -134,6 +134,9 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
 
     fdp_set_ru_write_pointer(ssd, new_ru);
     eruh->ru_in_use_cnt++;
+    if (eruh->ru_mgmt) {
+        eruh->ru_mgmt[rgidx].in_use++;
+    }
 
     /*
      * The host-visible active RU (NvmeRuHandle.rus) is published by the
@@ -145,15 +148,24 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
 }
 
 /*
+ * Make @ru the unit @ruh writes in group @rg, for the FTL and for the host,
+ * or no unit with NULL. RUH Status reads the host's pointer on a poller, so
+ * it is published whole.
+ */
+static void fdp_set_active(FemuRuHandle *ruh, uint16_t rg, FemuReclaimUnit *ru)
+{
+    ruh->rus[rg] = ru;
+    qatomic_set(&ruh->ruh->rus[rg], ru ? ru->nvme_ru : &ruh->no_ru);
+}
+
+/*
  * The handle's active unit filled with nothing free to follow it. Point both
  * views away from the retired unit: collection can free it and hand it to
  * another handle, whose remaining room the host would then be shown here.
  */
 static void fdp_drop_active_ru(FemuRuHandle *ruh, uint16_t rgidx)
 {
-    ruh->curr_ru = NULL;
-    ruh->rus[rgidx] = NULL;
-    ruh->ruh->rus[rgidx] = &ruh->no_ru;
+    fdp_set_active(ruh, rgidx, NULL);
 }
 
 /*
@@ -347,10 +359,11 @@ static struct ru_mgmt *fdp_victim_ruh_mgmt(struct ssd *ssd,
 {
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
 
-    if (rm->mgmt_type != GC_NOISY_RUH_CUSTOM || !ru->ruh) {
+    if (rm->mgmt_type != GC_NOISY_RUH_CUSTOM || !ru->ruh ||
+        !ru->ruh->ru_mgmt) {
         return NULL;
     }
-    return ru->ruh->ru_mgmt;
+    return &ru->ruh->ru_mgmt[ru->rgidx];
 }
 
 /* queue @ru as a victim of its own reclaim group, and of its handle */
@@ -377,7 +390,7 @@ static void fdp_victim_dequeue(struct ssd *ssd, FemuReclaimUnit *ru)
         pqueue_remove(fdp_victim_heap(rm), ru);
     }
     if (ru->ruh_pos && ru->ruh && ru->ruh->ru_mgmt) {
-        pqueue_remove(ru->ruh->ru_mgmt->victim_ru_pq, ru);
+        pqueue_remove(ru->ruh->ru_mgmt[ru->rgidx].victim_ru_pq, ru);
     }
 }
 
@@ -472,7 +485,7 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
     }
     is_full = fdp_retire_ru(ssd, ru);
 
-    /* allocate a new RU for this RUH cuase ruh->curr_ru is full */
+    /* the unit is full: take a free one of its group for the handle */
     if (ruh != NULL) {
         check_addr(wpp->blk, spp->blks_per_pl);
         new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
@@ -480,14 +493,9 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
             ftl_err("No free RU for ruh %d: device full - point %s L:%d\n",
                     ruh->ruhid, __FILE__, __LINE__);
             /*
-             * Signal device pressure: clear curr_ru so
-             * callers know no active write frontier exists.
-             * A full device is an ordinary outcome the callers
-             * turn into a capacity error, not a bug -- the
-             * assertion that used to stand here aborted the
-             * process in the build that arms assertions.
+             * A full device is an ordinary outcome: the caller drops the
+             * frontier it advanced and turns this into a capacity error.
              */
-            ruh->curr_ru = NULL;
             return NULL;
         }
         FDP_TRACE(ssd, "RU_ROTATE ruhid=%u old_ru=%u "
@@ -642,24 +650,22 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
     FemuReclaimUnit *ru;
 
     if (ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-        if (!ruh->gc_ru) {
-            ruh->gc_ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
+        if (!ruh->gc_rus[rgidx]) {
+            ruh->gc_rus[rgidx] = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
         }
-        return ruh->gc_ru;
+        return ruh->gc_rus[rgidx];
     }
 
     ftl_assert(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED);
-    if (!ruh->curr_ru) {
+    if (!ruh->rus[rgidx]) {
         ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
         if (!ru) {
             return NULL;
         }
-        ruh->curr_ru = ru;
-        ruh->rus[rgidx] = ru;
-        ruh->ruh->rus[rgidx] = ru->nvme_ru;
+        fdp_set_active(ruh, rgidx, ru);
         fdp_note_ruh_modified(ssd, ruh, rgidx, mv);
     }
-    return ruh->curr_ru;
+    return ruh->rus[rgidx];
 }
 
 /*
@@ -813,14 +819,17 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         int best_ruh = -1;
         int i;
         for (i = 0; i < (int)ssd->nruhs; i++) {
-            if (!ssd->ruhs[i].ru_mgmt) {
+            struct ru_mgmt *hm = ssd->ruhs[i].ru_mgmt;
+
+            if (!hm) {
                 continue;
             }
-            if (ssd->ruhs[i].ru_in_use_cnt <=
-                ssd->ruhs[i].ru_mgmt->custom_gc_threshold) {
+            /* the handle's units and victims in this group only */
+            hm = &hm[rgid];
+            if (hm->in_use <= hm->custom_gc_threshold) {
                 continue;
             }
-            ru = pqueue_peek(ssd->ruhs[i].ru_mgmt->victim_ru_pq);
+            ru = pqueue_peek(hm->victim_ru_pq);
             if (!ru) {
                 continue;
             }
@@ -945,38 +954,20 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
     fdp_ru_programmed(ssd, dest_ru, 1);
 
     /*
-     * fdp_advance_ru_pointer() can be called from both the foreground write
-     * path and GC, and only advances the write pointer of the given RU. The
-     * caller is therefore responsible for updating curr_ru / gc_ru by RUH type
-     * right after the advance.
-     */
-
-    /*
-     * Advancing hands back NULL when there is no free reclaim unit left, which
-     * is what a full device looks like from here. The initially-isolated arm
-     * dereferenced that straight away, and the only thing standing between it
-     * and a null pointer was an ftl_assert, which is compiled out. Neither arm
-     * can do anything useful without a unit, so leave the write frontier where
-     * it is and let the caller run out of room.
+     * fdp_advance_ru_pointer() only advances the write pointer of the given
+     * unit, so the frontier of the handle in the unit's group is set here,
+     * by handle type. Advancing hands back NULL when the group has no free
+     * unit left: the frontier is then dropped, and the caller runs out of
+     * room. Kept, the next relocation would program a written page of a
+     * retired unit.
      */
     if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-        FemuReclaimUnit *host_ru = dest_ru->ruh->curr_ru;
-
         ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
                                         dest_ru->ruh, dest_ru);
         if (ret_ru && ret_ru != dest_ru) {
-            dest_ruh->gc_ru = ret_ru;
+            dest_ruh->gc_rus[dest_ru->rgidx] = ret_ru;
         } else if (!ret_ru) {
-            /*
-             * Advancing clears the handle's host write frontier when it cannot
-             * allocate, but what ran out here is the collection frontier. Put
-             * the host's back: cleared, the next host write to this handle
-             * would take a null unit into the page allocator. The collection
-             * unit is retired and its pointer wrapped to page 0, so drop it:
-             * kept, the next relocation would program a written page.
-             */
-            dest_ru->ruh->curr_ru = host_ru;
-            dest_ruh->gc_ru = NULL;
+            dest_ruh->gc_rus[dest_ru->rgidx] = NULL;
         }
     } else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
         int gcruh_id = ssd->nruhs - 1;
@@ -985,9 +976,7 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
         ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
                                         dest_ruh, dest_ru);
         if (ret_ru && ret_ru != dest_ru) {
-            ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
-            ssd->ruhs[gcruh_id].curr_ru = ret_ru;
-            ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
+            fdp_set_active(&ssd->ruhs[gcruh_id], dest_ru->rgidx, ret_ru);
             fdp_note_ruh_modified(ssd, dest_ruh, dest_ru->rgidx, mv);
         } else if (!ret_ru) {
             /* no unit follows yet: the one taken later is the change */
@@ -1110,7 +1099,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
  *  ppa : identifies the block we want to clean
  *  dest_ruh : destination ruh.
  *          ru based mechanism can cause pointer error when gc write page allocates new ru to ruh->gc. 
- *          Replace ru based parameter which makes ruh->curr_ru or ruh->gc_ru dangling
+ *          Replace ru based parameter which leaves a frontier dangling
  *          
  */
 static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
@@ -1211,7 +1200,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
 
 /*
  * The handle a unit's valid pages move to: a persistently isolated handle
- * keeps its own data (gc_ru), and the initially isolated ones share the last
+ * keeps its own data (gc_rus), and the initially isolated ones share the last
  * handle's active unit.
  */
 static FemuRuHandle *fdp_dest_ruh(struct ssd *ssd, FemuReclaimUnit *ru)
@@ -1265,7 +1254,7 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
         return -1;
     }
     /* sanity: don't GC an active RU */
-    if (victim_ru == victim_ru->ruh->curr_ru) {
+    if (victim_ru == victim_ru->ruh->rus[victim_ru->rgidx]) {
         ftl_err("Victim RU %d is active, skipping GC\n", victim_ru->ruidx);
         //This is a bug.
         ftl_assert(false && __LINE__);
@@ -1339,6 +1328,10 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     if (ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt > 0) {
         ssd->ruhs[victim_ru->ruh->ruhid].ru_in_use_cnt--;
     }
+    if (victim_ruh->ru_mgmt &&
+        victim_ruh->ru_mgmt[victim_ru->rgidx].in_use > 0) {
+        victim_ruh->ru_mgmt[victim_ru->rgidx].in_use--;
+    }
 
     /*
      * Free the victim into its OWN reclaim group. A cross-RG NOISY victim can
@@ -1411,9 +1404,9 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
     FemuReclaimUnit *fresh = NULL;
 
     for (int i = 0; i < (int)ssd->nruhs; i++) {
-        if (ssd->ruhs[i].curr_ru == ru) {
+        if (ssd->ruhs[i].rus[rg] == ru) {
             host = &ssd->ruhs[i];
-        } else if (ssd->ruhs[i].gc_ru == ru) {
+        } else if (ssd->ruhs[i].gc_rus[rg] == ru) {
             gc = &ssd->ruhs[i];
         }
     }
@@ -1448,12 +1441,10 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
     }
     fdp_retire_ru(ssd, ru);
     if (gc) {
-        gc->gc_ru = NULL;
+        gc->gc_rus[rg] = NULL;
         return true;
     }
-    host->rus[rg] = fresh;
-    host->curr_ru = fresh;
-    host->ruh->rus[rg] = fresh->nvme_ru;
+    fdp_set_active(host, rg, fresh);
     /* no data moved, so the event names a namespace that uses the handle */
     if (pad) {
         nvme_fdp_note_ru_time_limit(ssd->n, NULL, rg, host->ruhid);
@@ -1475,12 +1466,15 @@ void ssd_fdp_pd_close_aged(struct ssd *ssd, uint64_t stime)
 
     for (int i = 0; i < (int)ssd->nruhs; i++) {
         FemuRuHandle *ruh = &ssd->ruhs[i];
-        FemuReclaimUnit *rus[2] = { ruh->curr_ru, ruh->gc_ru };
 
-        for (int r = 0; r < 2; r++) {
-            if (rus[r] && ssd_data_age_ns(ssd, fdp_ru_open_time(rus[r]),
-                                          stime) >= limit) {
-                fdp_pd_leave_ru(ssd, rus[r], true, stime);
+        for (uint64_t g = 0; g < ssd->nrg; g++) {
+            FemuReclaimUnit *rus[2] = { ruh->rus[g], ruh->gc_rus[g] };
+
+            for (int r = 0; r < 2; r++) {
+                if (rus[r] && ssd_data_age_ns(ssd, fdp_ru_open_time(rus[r]),
+                                              stime) >= limit) {
+                    fdp_pd_leave_ru(ssd, rus[r], true, stime);
+                }
             }
         }
     }
@@ -1521,7 +1515,8 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
 
     /* data still being written: leave it alone, as line mode does */
     for (int i = 0; i < (int)ssd->nruhs; i++) {
-        if (ssd->ruhs[i].curr_ru == ru || ssd->ruhs[i].gc_ru == ru) {
+        if (ssd->ruhs[i].rus[ru->rgidx] == ru ||
+            ssd->ruhs[i].gc_rus[ru->rgidx] == ru) {
             return;
         }
     }
@@ -1609,7 +1604,7 @@ static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
 {
     FemuReclaimUnit *fresh;
 
-    if (likely(ruh->curr_ru)) {
+    if (likely(ruh->rus[rgid])) {
         return true;
     }
     fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
@@ -1618,9 +1613,7 @@ static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
                 ruh->ruhid);
         return false;
     }
-    ruh->rus[rgid] = fresh;
-    ruh->ruh->rus[rgid] = fresh->nvme_ru;
-    ruh->curr_ru = fresh;
+    fdp_set_active(ruh, rgid, fresh);
     return true;
 }
 
@@ -1639,7 +1632,7 @@ static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
     struct ssdparams *spp = &ssd->sp;
     uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
     uint64_t per = pg >> FDP_WRITTEN_SHIFT;
-    FemuReclaimUnit *ru = ruh->curr_ru;
+    FemuReclaimUnit *ru = ruh->rus[rg->rgidx];
     struct nand_cmd swr;
     struct ppa ppa;
 
@@ -1671,10 +1664,8 @@ static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
 
     /* advance RU write pointer; may allocate new RU */
     FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
-    if (ret && ret != ruh->curr_ru) {
-        ruh->rus[rg->rgidx] = ret;
-        ruh->curr_ru = ret;
-        ruh->ruh->rus[rg->rgidx] = ret->nvme_ru;
+    if (ret && ret != ru) {
+        fdp_set_active(ruh, rg->rgidx, ret);
     } else if (!ret) {
         /* no free unit; the next page or command fails for it */
         fdp_drop_active_ru(ruh, rg->rgidx);
@@ -1724,7 +1715,6 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         req->status = NVME_CAP_EXCEEDED | NVME_DNR;
         return 0;
     }
-    ftl_assert(ruh->curr_ru == ruh->rus[rgid]);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
@@ -1767,13 +1757,13 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         fdp_gc_until_clear(ssd, rgid, ruhid);
 
         /*
-         * A previous iteration may have exhausted the last free reclaim unit:
-         * fdp_advance_ru_pointer() cleared curr_ru with nothing left to allocate.
+         * A previous iteration may have exhausted the last free reclaim unit
+         * of the group: the handle then has no unit there.
          * Writing into a NULL RU would dereference it in fdp_get_new_page(); stop
          * and fail the command with a capacity error rather than crashing or
          * reporting a silent success for pages that were never written.
          */
-        if (unlikely(!ruh->curr_ru)) {
+        if (unlikely(!ruh->rus[rgid])) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             break;
         }
@@ -1983,7 +1973,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         /* the poller refused the command if any of these was invalid */
         nvme_parse_pid(ns, pid, &ph, &rgid);
         ruh = &ssd->ruhs[ns->fdp.phs[ph]];
-        old = ruh->curr_ru;
+        old = ruh->rus[rgid];
         if (!old) {
             continue;
         }
@@ -1999,9 +1989,9 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
              * where collection writes. Collection can fill @old and retire
              * it; retiring it again would put it on a list twice.
              */
-            if (ruh->curr_ru != old) {
+            if (ruh->rus[rgid] != old) {
                 nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
-                if (ruh->curr_ru) {
+                if (ruh->rus[rgid]) {
                     continue;
                 }
                 fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
@@ -2009,9 +1999,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
                     req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                     return;
                 }
-                ruh->rus[rgid] = fresh;
-                ruh->curr_ru = fresh;
-                ruh->ruh->rus[rgid] = fresh->nvme_ru;
+                fdp_set_active(ruh, rgid, fresh);
                 continue;
             }
             fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
@@ -2022,9 +2010,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         }
         nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
         fdp_retire_ru(ssd, old);
-        ruh->rus[rgid] = fresh;
-        ruh->curr_ru = fresh;
-        ruh->ruh->rus[rgid] = fresh->nvme_ru;
+        fdp_set_active(ruh, rgid, fresh);
     }
 }
 
@@ -2304,48 +2290,39 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         ssd->ruhs[i].mbmw = 0;
         ssd->ruhs[i].mbe = 0;
 
-        /* allocate per-RG RU pointer array */
-        ssd->ruhs[i].rus = g_malloc0(sizeof(FemuReclaimUnit *) *
-                                     endgrp->fdp.nrg);
+        /* PI type RUHs get their own victim queue in each group */
+        if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+            ssd->ruhs[i].ru_mgmt = g_new0(struct ru_mgmt, endgrp->fdp.nrg);
+            for (int j = 0; j < (int)endgrp->fdp.nrg; j++) {
+                struct ru_mgmt *hm = &ssd->ruhs[i].ru_mgmt[j];
+
+                hm->mgmt_type = femu_fdp_gc_strategy(&n->bb_params);
+                hm->custom_gc_threshold = 0;
+                QTAILQ_INIT(&hm->free_ru_list);
+                QTAILQ_INIT(&hm->full_ru_list);
+                /*
+                 * Per-RUH queues index via ruh_pos (see victim_ru_*_pos_ruh)
+                 * so they do not alias the per-RG queue's pos (issue #189).
+                 */
+                hm->victim_ru_pq =
+                    pqueue_init(ssd->rg[j].tt_nru, victim_ru_cmp_pri,
+                                victim_ru_get_pri, victim_ru_set_pri,
+                                victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
+            }
+        }
+
+        /* an active unit in each group; collection units come on demand */
+        ssd->ruhs[i].rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
+        ssd->ruhs[i].gc_rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
         for (int j = 0; j < (int)endgrp->fdp.nrg; j++) {
             ssd->ruhs[i].rus[j] = fdp_get_new_ru(ssd, j, i);
             ssd->ruhs[i].rus[j]->ruh = &ssd->ruhs[i];
             ssd->ruhs[i].ruh->rus[j] = ssd->ruhs[i].rus[j]->nvme_ru;
         }
-        /*
-         * The active RU must match the default reclaim group (rgid 0), not
-         * the last one allocated by the loop above. A non-placement
-         * write uses rgid 0, and the write path advances ruh->curr_ru through
-         * ssd->rg[rgid]'s management object. Leaving curr_ru in the last group
-         * (nrg-1) made a default write advance an rg[nrg-1] RU through rg[0]'s
-         * bookkeeping: the RU was enqueued in one group's victim queue but later
-         * looked up via its own group's queue with a stale heap position, a NULL
-         * dereference crash under nrg>1. Cross-group placement writes still need
-         * a per-(RUH,RG) active-RU model; this repairs the default path.
-         */
-        ssd->ruhs[i].curr_ru = ssd->ruhs[i].rus[0];
 
-        /* PI type RUHs get their own ru_mgmt for per-RUH victim queues */
-        if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-            ssd->ruhs[i].ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
-            ssd->ruhs[i].ru_mgmt->mgmt_type =
-                femu_fdp_gc_strategy(&n->bb_params);
-            ssd->ruhs[i].ru_mgmt->custom_gc_threshold = 0;
-            QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->free_ru_list);
-            QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->full_ru_list);
-            /*
-             * Per-RUH queues index via ruh_pos (see victim_ru_*_pos_ruh) so
-             * they do not alias the per-RG queue's pos (issue #189).
-             */
-            ssd->ruhs[i].ru_mgmt->victim_ru_pq =
-                pqueue_init(ssd->rg[0].tt_nru, victim_ru_cmp_pri,
-                            victim_ru_get_pri, victim_ru_set_pri,
-                            victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
-        }
-
-        ftl_log("FDP: ruh[%d] type=%d, curr_ru=%d (line=%d)\n",
-                i, ssd->ruhs[i].ruh_type, ssd->ruhs[i].curr_ru->ruidx,
-                ssd->ruhs[i].curr_ru->lines[0]->id);
+        ftl_log("FDP: ruh[%d] type=%d, active ru=%d (line=%d)\n",
+                i, ssd->ruhs[i].ruh_type, ssd->ruhs[i].rus[0]->ruidx,
+                ssd->ruhs[i].rus[0]->lines[0]->id);
     }
 }
 
@@ -2619,9 +2596,12 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     /* reset active RUs and stats for each RUH across all RGs */
     ruh = endgrp->fdp.ruhs;
     for (int i = 0; i < (int)endgrp->fdp.nruh; i++, ruh++) {
-        /* the group drain above took every unit off its handle's heap too */
-        ftl_assert(!ssd->ruhs[i].ru_mgmt ||
-                   pqueue_size(ssd->ruhs[i].ru_mgmt->victim_ru_pq) == 0);
+        /* the group drain above took every unit off its handle's heaps too */
+        for (rg_idx = 0; ssd->ruhs[i].ru_mgmt && rg_idx < (int)ssd->nrg;
+             rg_idx++) {
+            ftl_assert(pqueue_size(
+                       ssd->ruhs[i].ru_mgmt[rg_idx].victim_ru_pq) == 0);
+        }
         ruh->hbmw = 0;
         ruh->mbmw = 0;
         ruh->mbe = 0;
@@ -2629,31 +2609,35 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         ssd->ruhs[i].mbmw = 0;
         ssd->ruhs[i].mbe = 0;
         /*
-         * The collection destination is a frontier like curr_ru, on no queue
-         * the drain above walks. Left as it was, it points at a unit this
+         * The collection and host frontiers of each group are on no queue
+         * the drain above walks. Left as they were, they point at units this
          * reset has handed back, which the next allocation gives to another
          * handle to write into at the same time.
          */
-        if (ssd->ruhs[i].gc_ru && ssd->ruhs[i].gc_ru != ssd->ruhs[i].curr_ru) {
-            mark_ru_free(ssd, ssd->ruhs[i].gc_ru->rgidx, ssd->ruhs[i].gc_ru);
+        for (rg_idx = 0; rg_idx < (int)ssd->nrg; rg_idx++) {
+            FemuReclaimUnit *gc = ssd->ruhs[i].gc_rus[rg_idx];
+            FemuReclaimUnit *host = ssd->ruhs[i].rus[rg_idx];
+
+            if (gc && gc != host) {
+                mark_ru_free(ssd, gc->rgidx, gc);
+            }
+            if (host) {
+                mark_ru_free(ssd, host->rgidx, host);
+            }
+            ssd->ruhs[i].gc_rus[rg_idx] = NULL;
+            ssd->ruhs[i].rus[rg_idx] = NULL;
         }
-        ssd->ruhs[i].gc_ru = NULL;
-        if (ssd->ruhs[i].curr_ru) {
-            mark_ru_free(ssd, ssd->ruhs[i].curr_ru->rgidx,
-                         ssd->ruhs[i].curr_ru);
-        }
-        ssd->ruhs[i].curr_ru = NULL;
         /* every unit was handed back above; count only the ones taken below */
         ssd->ruhs[i].ru_in_use_cnt = 0;
+        for (rg_idx = 0; ssd->ruhs[i].ru_mgmt && rg_idx < (int)ssd->nrg;
+             rg_idx++) {
+            ssd->ruhs[i].ru_mgmt[rg_idx].in_use = 0;
+        }
         ssd->ruhs[i].ruh_live_pages_cnt = 0;
         for (rg_idx = 0; rg_idx < (int)ssd->nrg; rg_idx++) {
-            ssd->ruhs[i].rus[rg_idx] =
-                fdp_get_new_ru(ssd, rg_idx, ssd->ruhs[i].ruhid);
-            ssd->ruhs[i].ruh->rus[rg_idx] =
-                ssd->ruhs[i].rus[rg_idx]->nvme_ru;
+            fdp_set_active(&ssd->ruhs[i], rg_idx,
+                           fdp_get_new_ru(ssd, rg_idx, ssd->ruhs[i].ruhid));
         }
-        /* primary RG (index 0) is the active one */
-        ssd->ruhs[i].curr_ru = ssd->ruhs[i].rus[0];
     }
 
     ssd_reset_maptbl(ssd);
@@ -2807,19 +2791,29 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
     for (uint64_t h = 0; h < ssd->nruhs; h++) {
         FemuRuHandle *ruh = &ssd->ruhs[h];
 
-        if (ruh->curr_ru) {
-            fdp_check_place(ssd, ruh->curr_ru, seen);
-        }
-        if (ruh->gc_ru && ruh->gc_ru != ruh->curr_ru) {
-            fdp_check_place(ssd, ruh->gc_ru, seen);
-        }
-        /* a handle's heap repeats victims its group heap holds */
-        if (ruh->ru_mgmt && ruh->ru_mgmt->victim_ru_pq) {
-            pqueue_t *pq = ruh->ru_mgmt->victim_ru_pq;
+        for (uint64_t g = 0; g < ssd->nrg; g++) {
+            FemuReclaimUnit *host = ruh->rus[g];
+            FemuReclaimUnit *gc = ruh->gc_rus[g];
 
-            fdp_check_heap(ssd, pq, true, in_ruh, &bad);
-            for (size_t i = 1; i < pq->size; i++) {
-                bad += ((FemuReclaimUnit *)pq->d[i])->ruh != ruh;
+            /* a frontier of group g holds a unit of group g */
+            if (host) {
+                fdp_check_place(ssd, host, seen);
+                bad += host->rgidx != g;
+            }
+            if (gc && gc != host) {
+                fdp_check_place(ssd, gc, seen);
+                bad += gc->rgidx != g;
+            }
+            /* a handle's heap repeats victims its group heap holds */
+            if (ruh->ru_mgmt && ruh->ru_mgmt[g].victim_ru_pq) {
+                pqueue_t *pq = ruh->ru_mgmt[g].victim_ru_pq;
+
+                fdp_check_heap(ssd, pq, true, in_ruh, &bad);
+                for (size_t i = 1; i < pq->size; i++) {
+                    FemuReclaimUnit *v = pq->d[i];
+
+                    bad += v->ruh != ruh || v->rgidx != g;
+                }
             }
         }
     }
@@ -2886,11 +2880,12 @@ void femu_fdp_ssd_free(struct ssd *ssd)
                 nruh->rus[g] = &ssd->n->subsys->endgrp.fdp.rus[g][i];
             }
 
-            if (rm) {
-                pqueue_free(rm->victim_ru_pq);
-                g_free(rm);
+            for (uint64_t g = 0; rm && g < ssd->nrg; g++) {
+                pqueue_free(rm[g].victim_ru_pq);
             }
+            g_free(rm);
             g_free(ssd->ruhs[i].rus);
+            g_free(ssd->ruhs[i].gc_rus);
         }
         g_free(ssd->ruhs);
         ssd->ruhs = NULL;

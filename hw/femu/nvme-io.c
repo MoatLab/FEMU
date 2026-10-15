@@ -2512,7 +2512,8 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
 
         for (rg = 0; rg < endgrp->fdp.nrg; rg++, ruhsd++) {
             uint16_t pid = nvme_make_pid(ns, rg, ph);
-            NvmeReclaimUnit *ru = ruh->rus[rg];
+            /* the FTL thread publishes a handle's unit with qatomic_set */
+            NvmeReclaimUnit *ru = qatomic_read(&ruh->rus[rg]);
             ruhsd->pid = cpu_to_le16(pid);
             ruhsd->ruhid = cpu_to_le16(*ruhid);
             ruhsd->earutr = 0;

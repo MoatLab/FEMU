@@ -346,6 +346,8 @@ typedef struct ru_mgmt {
     uint64_t tt_rus;
     uint64_t free_ru_cnt;
     int custom_gc_threshold;
+    /* a handle's heap in one group: the units the handle holds there */
+    int in_use;
 
     uint64_t gc_thres_rus;
     uint64_t gc_thres_rus_high;
@@ -390,11 +392,16 @@ struct FemuRuHandle {
     int ru_in_use_cnt;
     int ruh_live_pages_cnt;
     NvmeRuHandle *ruh;
+    /*
+     * Per reclaim group: the unit host writes go to, and the unit collection
+     * moves the data of a persistently isolated handle into. NULL while the
+     * group has no unit for it.
+     */
     FemuReclaimUnit **rus;
-    FemuReclaimUnit *curr_ru;
-    FemuReclaimUnit *gc_ru;
+    FemuReclaimUnit **gc_rus;
     /* what the host is shown while the handle has no unit: no room */
     NvmeReclaimUnit no_ru;
+    /* persistently isolated handles: a victim heap per reclaim group */
     struct ru_mgmt *ru_mgmt;
     uint64_t hbmw;
     uint64_t mbmw;

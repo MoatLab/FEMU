@@ -118,13 +118,15 @@ static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
     for (uint64_t h = 0; h < ssd->nruhs; h++) {
         FemuRuHandle *ruh = &ssd->ruhs[h];
 
-        if (ruh->curr_ru) {
-            state[ssd_query_ru_index(ssd, ruh->curr_ru)] =
-                FEMU_RECLAIM_UNIT_STATE_OPEN;
-        }
-        if (ruh->gc_ru) {
-            state[ssd_query_ru_index(ssd, ruh->gc_ru)] =
-                FEMU_RECLAIM_UNIT_STATE_OPEN;
+        for (uint64_t g = 0; g < ssd->nrg; g++) {
+            if (ruh->rus[g]) {
+                state[ssd_query_ru_index(ssd, ruh->rus[g])] =
+                    FEMU_RECLAIM_UNIT_STATE_OPEN;
+            }
+            if (ruh->gc_rus[g]) {
+                state[ssd_query_ru_index(ssd, ruh->gc_rus[g])] =
+                    FEMU_RECLAIM_UNIT_STATE_OPEN;
+            }
         }
     }
     for (uint64_t g = 0; g < ssd->nrg; g++) {
