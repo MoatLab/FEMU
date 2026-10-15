@@ -2519,6 +2519,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (NS_SLM(ns) || NS_CP(ns)) {
         return ns->ext_ops.io_cmd(n, ns, cmd, req);
     }
+    /*
+     * CC.CSS 000b selects the NVM command set for every I/O queue, so the
+     * key-value set runs only when 110b enables all sets (Base 2.3,
+     * Figure 41). FEMU's one I/O Command Set combination holds KV.
+     */
+    if (NS_KVSSD(ns) && NVME_CC_CSS(n->bar.cc) != NVME_CC_CSS_CSI) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
 
     switch (cmd->opcode) {
     case NVME_CMD_FLUSH:

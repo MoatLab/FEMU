@@ -15,6 +15,8 @@ effect of the DRAM that pins the top levels.
 
 - A KV namespace: `femu_mode=5`, or `kvssd` in `namespace_modes`
   ([KV mode](../modes/kvssd.md)).
+- A host that enables the controller with CC.CSS 110b, as Linux does. KV
+  I/O fails with Invalid Command Opcode under 000b.
 - Nothing in the guest beyond what KV mode needs. The index is not
   visible to the host, except through the time of each command and the
   order of List.

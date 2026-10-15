@@ -26,6 +26,10 @@ key-value devices, without key-value hardware.
   command sets"). Linux 5.10 to 5.19 log `unknown csi 1 for nsid N` (5.9:
   `unknown csi:1 ns:N`) and skip the namespace, so passthrough on
   `/dev/nvme0` fails too.
+- The host must enable the controller with CC.CSS set to 110b (all
+  supported I/O command sets). Under 000b (NVM only), every I/O command
+  to a KV namespace fails with Invalid Command Opcode (Base 2.3, Figure
+  41). Linux sets 110b when CAP.CSS bit 6 is set, and FEMU sets that bit.
 - Guest tools: `nvme-cli` (`io-passthru`), and a C compiler to build
   `kv-probe.c`. The image from `make-guest-image.sh` has no compiler; add one
   with `./make-guest-image.sh --packages build-essential`, or run
@@ -295,6 +299,7 @@ The `kv-bench` suite of `guest-conformance.sh` runs `kv-probe` and two
 | 0x89 | Key Exists: a Store with bit 9 (only if the key is absent) found the key. |
 | Capacity Exceeded | The value space or the key index is full. |
 | Invalid Field | A key longer than 16 bytes, a List buffer smaller than 4 bytes, or the broadcast namespace ID. |
+| Invalid Command Opcode | The controller runs with CC.CSS 000b, which selects only the NVM command set. Enable it with 110b. |
 
 By default, Delete of a missing key succeeds. Setting the EDNEK bit (bit 0)
 of the Key Value Configuration feature (20h) makes it fail with 0x87:

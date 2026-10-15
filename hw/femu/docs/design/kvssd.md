@@ -211,6 +211,9 @@ Limits on the command fields:
   the FTL.
 - A List buffer smaller than 4 bytes: Invalid Field.
 - The broadcast namespace ID: Invalid Field.
+- A controller enabled with CC.CSS other than 110b: Invalid Command Opcode
+  for every I/O command to a KV namespace (`nvme_io_cmd()`). CC.CSS 000b
+  selects only the NVM command set (Base 2.3, Figure 41).
 
 List walks the index in slot order, starting at the start key's slot when
 the key exists and at slot 0 otherwise. The order is stable while the

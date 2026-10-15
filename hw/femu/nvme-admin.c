@@ -1920,9 +1920,11 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /*
          * The controller offers a single combination, so the host may select
          * index zero and nothing else. Refusing index zero as well left a host
-         * that asks for what it already has with an error.
+         * that asks for what it already has with an error. Under any CC.CSS
+         * but 110b the feature has no effect and the command succeeds
+         * (Base 2.3, 5.2.26.1.17).
          */
-        if (dw11 & 0x1ff) {
+        if ((dw11 & 0x1ff) && NVME_CC_CSS(n->bar.cc) == NVME_CC_CSS_CSI) {
             return NVME_IOCS_COMBINATION_REJECTED | NVME_DNR;
         }
         break;

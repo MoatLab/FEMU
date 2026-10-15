@@ -299,6 +299,17 @@ static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
     femu_enable_cc(c, pdev, alloc, (6 << 16) | (4 << 20) | 1);
 }
 
+/* as femu_enable, with CC.CSS 110b: key-value I/O runs only so, as in Linux */
+static void femu_enable_csi(FemuCtrlState *c, QPCIDevice *pdev,
+                            QGuestAllocator *alloc)
+{
+    c->pdev = pdev;
+    c->alloc = alloc;
+    femu_queue_init(c, &c->admin, 0);
+    femu_enable_cc(c, pdev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
+}
+
 static void femu_disable(FemuCtrlState *c)
 {
     qpci_io_writel(c->pdev, c->bar, 0x14, 0);
@@ -1016,7 +1027,7 @@ static void femu_test_kv_namespaces_are_separate(void *obj, void *data,
     uint64_t buf, id, used1, used2;
     uint16_t want, got;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
     buf = guest_alloc(alloc, 4096);
@@ -1984,12 +1995,14 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
                     ==, NVME_SUCCESS);
     g_assert_cmpint(result, ==, FEMU_WCTEMP);
 
-    /* the one command set combination there is may be selected, no other */
+    /*
+     * Under CC.CSS 000b the profile has no effect, so any index succeeds
+     * and changes nothing (Base 2.3, 5.2.26.1.17). kv-css checks 110b.
+     */
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
                             false, 0, 0, NULL)), ==, NVME_SUCCESS);
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
-                            false, 0, 1, NULL)), ==,
-                    FEMU_IOCS_COMBINATION_REJECTED);
+                            false, 0, 1, NULL)), ==, NVME_SUCCESS);
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
                             NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
                     ==, NVME_SUCCESS);
@@ -2788,7 +2801,7 @@ static void femu_test_kv_accounting(void *obj, void *data,
     uint16_t want, got;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
     buf = guest_alloc(alloc, 4096);
@@ -6376,7 +6389,7 @@ static void femu_test_pd_kv(void *obj, void *data, QGuestAllocator *alloc)
     NvmeCmd cmd;
     int64_t start, spent;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x6f, 4096);
     g_assert_cmphex(femu_kv_store(&c, 42, buf, 4096), ==, NVME_SUCCESS);
@@ -8566,7 +8579,11 @@ static void femu_test_pe_suspend(void *obj, void *data,
     uint16_t cid[2];
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    if (kv) {
+        femu_enable_csi(&c, &femu->dev, alloc);
+    } else {
+        femu_enable(&c, &femu->dev, alloc);
+    }
     femu_zap_create_queue(&c, &q, 1);
     buf = guest_alloc(alloc, FEMU_DATA_SIZE);
     qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
@@ -10601,7 +10618,7 @@ static void femu_test_sgl_kv(void *obj, void *data, QGuestAllocator *alloc)
     NvmeCmd cmd;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     buf = guest_alloc(alloc, 4096);
     list = guest_alloc(alloc, 4096);
@@ -13610,7 +13627,7 @@ static void femu_test_kv_mdts(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf;
     NvmeCmd cmd;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     buf = guest_alloc(alloc, 4 * 4096);
 
@@ -16470,7 +16487,7 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     int distinct = 0;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
     for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
@@ -18820,7 +18837,7 @@ static void femu_test_kv_list_mdts0(void *obj, void *data,
     uint16_t st;
     int k;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     mem = guest_alloc(alloc, 4 * 4096);
     buf = (mem + 4095) & ~4095ULL;
@@ -18878,7 +18895,7 @@ static void femu_test_kv_short_into_list(void *obj, void *data,
     NvmeCmd cmd;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     mem = guest_alloc(alloc, 6 * 4096);
     buf = (mem + 4095) & ~4095ULL;
@@ -19009,7 +19026,7 @@ static void femu_test_kv_list_walk(void *obj, void *data,
     int k, pages, total = 0;
     bool done = false;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     mem = guest_alloc(alloc, 2 * 4096);
     buf = (mem + 4095) & ~4095ULL;
@@ -20827,7 +20844,7 @@ static void femu_test_kv_base_spread(void *obj, void *data,
         }
     }
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
     start = g_get_monotonic_time();
@@ -20866,7 +20883,7 @@ static void femu_test_kv_compaction_time(void *obj, void *data,
     int64_t start, took;
     uint64_t k;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(femu->dev.bus->qts, buf, 0x5a, 8192);
 
@@ -20883,6 +20900,51 @@ static void femu_test_kv_compaction_time(void *obj, void *data,
     /* 256 programs of 2 ms is 512 ms; counted twice it was over 1 s */
     g_assert_cmpint(took, >=, 500000);
     g_assert_cmpint(took, <, 760000);
+    femu_disable(&c);
+    guest_free(alloc, raw);
+}
+
+/*
+ * CC.CSS 000b selects the NVM command set for every I/O queue, so a KV
+ * namespace answers its commands, Flush among them, with Invalid Command
+ * Opcode. 110b enables every set and KV runs (Base 2.3, Figure 41). Under
+ * 110b the I/O Command Set Profile takes only the one combination there is.
+ */
+static void femu_test_kv_css(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool all = data != NULL;
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint16_t want = all ? NVME_SUCCESS : NVME_INVALID_OPCODE;
+    NvmeCmd cmd;
+
+    if (all) {
+        femu_enable_csi(&c, &femu->dev, alloc);
+    } else {
+        femu_enable(&c, &femu->dev, alloc);
+    }
+    femu_create_io_queues(&c);
+    qtest_memset(femu->dev.bus->qts, buf, 0x5a, 4096);
+
+    g_assert_cmphex(femu_kv_store(&c, 7, buf, 4096), ==, want);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, want);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_EXIST;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.res1 = cpu_to_le64(7);
+    cmd.cdw11 = cpu_to_le32(8);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, want);
+
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
+                            false, 0, 0, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
+                            false, 0, 1, NULL)), ==,
+                    all ? FEMU_IOCS_COMBINATION_REJECTED : NVME_SUCCESS);
     femu_disable(&c);
     guest_free(alloc, raw);
 }
@@ -21177,7 +21239,7 @@ static void femu_test_kv_model(void *obj, void *data, QGuestAllocator *alloc)
     int64_t ins, upd, rd, big;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     buf = guest_alloc(alloc, 65536);
     list = guest_alloc(alloc, 4096);
@@ -21536,7 +21598,7 @@ static void femu_test_kv_lsm_many_keys(void *obj, void *data,
     QDict *rsp;
     QDict *lsm;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
     for (i = 0; i < FEMU_LSM_MANY; i++) {
@@ -21610,7 +21672,7 @@ static void femu_test_kv_lsm_list_order(void *obj, void *data,
     uint32_t nrk;
     int i, n;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 200; i++) {
         g_assert_cmphex(femu_lsm_store(&c, (i * 37) % 200, buf, 16, 0), ==,
@@ -21677,7 +21739,7 @@ static void femu_test_kv_lsm_probe_time(void *obj, void *data,
     int64_t us, reads = 0;
     int i, found = -1;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 136; i++) {
         g_assert_cmphex(femu_lsm_store(&c, (i * 53) % 136, buf, 16, 0), ==,
@@ -21746,7 +21808,7 @@ static void femu_test_kv_lsm_background(void *obj, void *data,
     uint16_t cid;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 16; i++) {
         g_assert_cmphex(femu_lsm_store(&c, i, buf, 16, 0), ==, NVME_SUCCESS);
@@ -21821,7 +21883,7 @@ static void femu_test_kv_lsm_query(void *obj, void *data,
 
     raw = guest_alloc(alloc, 3 * 4096);
     buf = (raw + 4095) & ~4095ULL;
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 300; i++) {
         g_assert_cmphex(femu_lsm_store(&c, (i * 7) % 300, buf, 16, 0), ==,
@@ -21923,7 +21985,7 @@ static void femu_test_kv_lsm_gc(void *obj, void *data,
     uint64_t buf = (raw + 4095) & ~4095ULL;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 40; i++) {
         g_assert_cmphex(femu_lsm_store(&c, i, buf, 4096, 0), ==,
@@ -21966,7 +22028,7 @@ static void femu_test_kv_lsm_delete_ednek(void *obj, void *data,
     int64_t reads;
     int i;
 
-    femu_enable(&c, &femu->dev, alloc);
+    femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     for (i = 0; i < 40; i++) {
         g_assert_cmphex(femu_lsm_store(&c, i, buf, 16, 0), ==, NVME_SUCCESS);
@@ -30996,7 +31058,12 @@ static void femu_doc_example(const char *name, const char *ios,
     for (i = 0; i < ctrls.n; i++) {
         FemuCtrlState c = { 0 };
 
-        femu_enable(&c, ctrls.dev[i], &alloc);
+        /* key-value I/O runs only with CC.CSS 110b */
+        if (!strcmp(io[i], "kv")) {
+            femu_enable_csi(&c, ctrls.dev[i], &alloc);
+        } else {
+            femu_enable(&c, ctrls.dev[i], &alloc);
+        }
         need_data |= strcmp(io[i], "identify") != 0;
         moved |= femu_doc_ctrl(&c, io[i]);
         femu_disable(&c);
@@ -39615,6 +39682,15 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,pg_wr_lat=2000000,pg_rd_lat=1000,blk_er_lat=1000"
+    });
+    qos_add_test("kv-css-nvm", "femu", femu_test_kv_css,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=16,femu_mode=5"
+    });
+    qos_add_test("kv-css-all", "femu", femu_test_kv_css,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=16,femu_mode=5",
+        .arg = (void *)1,
     });
     qos_add_test("oc-set-latency", "femu", femu_test_oc_set_latency,
                  &(QOSGraphTestOptions) {
