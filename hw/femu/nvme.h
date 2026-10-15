@@ -243,9 +243,13 @@ typedef struct NvmeEnduranceGroup {
         QemuMutex events_lock;
         /*
          * Held while the byte counters below change and while they are
-         * read: the FTL thread and the admin path reach them.
+         * read: the FTL thread, the pollers of NoSSD namespaces and the
+         * admin path reach them. NoSSD also keeps the RUAMW of its units
+         * under it.
          */
         QemuMutex stats_lock;
+        /* the group a NoSSD write without placement takes next */
+        uint16_t rg_next;
 
         uint16_t nruh;
         uint16_t nrg;
@@ -3107,6 +3111,8 @@ void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
                            const NvmeReclaimUnit *ru);
 void nvme_fdp_note_invalid_pid(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
                                uint16_t rg);
+void nvme_fdp_host_write(FemuCtrl *n, NvmeNamespace *ns, uint8_t dtype,
+                         uint16_t dspec, uint64_t nlb, bool media);
 bool nvme_fdp_event_enabled(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
                             uint8_t type);
 void nvme_fdp_event_filter_set(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,

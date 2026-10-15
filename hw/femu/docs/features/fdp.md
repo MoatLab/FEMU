@@ -290,10 +290,11 @@ reclaim unit handle wrote and moved, and the state of each reclaim unit:
 | `namespace management does not support FDP` | `ns_mgmt=on` together with `fdp=on` on the subsystem. |
 | `Device 'fdp0' not found` | The controller comes before its subsystem on the command line. |
 
-NoSSD, ZNS and OCSSD controllers accept an FDP subsystem, report FDP to the
-host, and ignore it for placement. KV is refused. CSD goes through the
-BlackBox FDP write path, with the same refusals and reclaim unit size as
-BlackBox.
+NoSSD controllers accept an FDP subsystem and count its writes, with no
+media to place on. ZNS, OCSSD and KV are refused: an FDP endurance group
+holds namespaces of the NVM command set only (Base 2.3, 8.1.10). CSD goes
+through the BlackBox FDP write path, with the same refusals and reclaim unit
+size as BlackBox, and without its memory and compute namespaces.
 
 When every reclaim unit is in use and GC cannot free one, a write fails with
 Capacity Exceeded and QEMU prints `ssd_stream_write: device full, no RU for

@@ -22,7 +22,8 @@ so you can measure that effect.
 
 FDP is not a `femu_mode`. It is turned on with `fdp=on` on a `femu-subsys`
 device, and a controller joins the subsystem with `subsys=`. Only a BlackBox
-(bbssd) namespace has the placement data path.
+(bbssd) namespace has the placement data path. A NoSSD namespace counts the
+host side of FDP ([NoSSD namespaces](#nossd-namespaces)).
 
 ## Place in the hierarchy
 
@@ -464,8 +465,8 @@ Each event carries the Timestamp feature's current value.
 
 | Type | Ring | Generated when |
 | --- | --- | --- |
-| 0h Reclaim Unit Not Fully Written | host | RUH Update moves a handle off a unit that still had room |
-| 3h Invalid Placement Identifier | host | a placed write (Write, Copy, Write Zeroes) on a bbssd namespace has DTYPE 2 and a DSPEC that is not a valid PID; checked against the event filter of placement handle 0; other modes never raise it |
+| 0h Reclaim Unit Not Fully Written | host | RUH Update moves a handle off a unit that still had room; an empty unit stays and logs nothing |
+| 3h Invalid Placement Identifier | host | a placed write (Write, Copy, Write Zeroes, Write Uncorrectable) on a bbssd or NoSSD namespace has DTYPE 2 and a DSPEC that is not a valid PID; PIV with that DSPEC, NSIDV, and LV with the group and handle the controller selected (Base 2.3, Figure 296); checked against the event filter of placement handle 0 |
 | 80h Media Reallocated | controller | a collection or refresh pass moved pages of a unit of the Initially Isolated handle; one event per pass, split around each 81h the pass causes, also for a pass that stops part way; checked against that handle's filter |
 | 81h Implicitly Modified Reclaim Unit Handle | controller | a move, not the host, gave the Initially Isolated handle a new unit: the moves filled its active unit and a free unit follows, or the pass takes a unit for a handle left with none; checked against that handle's filter |
 | 1h Reclaim Unit Active Time Limit Exceeded | host | `pd_open_close_sec`: the controller padded a handle's active unit and gave the handle a fresh one; LV, NSIDV and PIV as for 81h |
@@ -521,6 +522,7 @@ no namespaces and FEMU builds the namespace at realize.
 | Parsing DTYPE and DSPEC, validating RUH Update identifiers, I/O Management Receive | poller | data copy to the DRAM backend happens here too |
 | Placement, RU rotation, GC, deallocate, RUH Update on bbssd | FTL thread | sole owner of the FTL structures |
 | Event append | poller or FTL thread | `events_lock` in the endurance group |
+| Counters of log 22h; NoSSD RUAMW | FTL thread, poller | `stats_lock` in the endurance group, taken before `events_lock` |
 | Log pages 20h to 23h, Features 1Dh and 1Eh | admin path | 23h reads under `events_lock` |
 
 A placed write is charged the largest NAND program latency of its pages,

@@ -3485,10 +3485,29 @@ static bool nvme_fdp_format_conflict(FemuCtrl *n, NvmeNamespace *ns,
  * broadcast one passes it by (CP 4.1.2). A memory namespace has one format,
  * index 0, with no metadata or protection information (SLM 4.1.3).
  */
+/*
+ * Under FDP, the blocks of LBA format @lba_idx that @ns cannot take: a
+ * reclaim unit holds at least one block, so RUAMW is never 0.
+ */
+static bool nvme_fdp_format_block_bad(FemuCtrl *n, NvmeNamespace *ns,
+                                      uint8_t lba_idx)
+{
+    NvmeEnduranceGroup *eg = n->subsys ? &n->subsys->endgrp : NULL;
+    uint64_t bs;
+
+    if (!eg || !eg->fdp.enabled || lba_idx >= ARRAY_SIZE(ns->id_ns.lbaf)) {
+        return false;
+    }
+    bs = 1ULL << ns->id_ns.lbaf[lba_idx].lbads;
+    return bs > eg->fdp.runs;
+}
+
 static uint16_t nvme_format_check_ns(FemuCtrl *n, NvmeNamespace *ns,
                                      bool broadcast, uint8_t lba_idx,
                                      uint8_t meta_loc, uint8_t pil, uint8_t pi)
 {
+    uint16_t status;
+
     if (NS_CP(ns)) {
         return broadcast ? NVME_SUCCESS : NVME_INVALID_NSID | NVME_DNR;
     }
@@ -3496,8 +3515,12 @@ static uint16_t nvme_format_check_ns(FemuCtrl *n, NvmeNamespace *ns,
         return lba_idx || meta_loc || pil || pi ?
                NVME_INVALID_FORMAT | NVME_DNR : NVME_SUCCESS;
     }
-    return nvme_format_check(n, &ns->id_ns, ns->femu_mode, lba_idx, meta_loc,
-                             pil, pi);
+    status = nvme_format_check(n, &ns->id_ns, ns->femu_mode, lba_idx,
+                               meta_loc, pil, pi);
+    if (status == NVME_SUCCESS && nvme_fdp_format_block_bad(n, ns, lba_idx)) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
+    return status;
 }
 
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,

@@ -1193,15 +1193,26 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
             }
 
             backend_lock_range(n->mbe, moff, data_size);
-            if (femu_dma_rw(n, prp1, mb + moff, len0, !req->is_write) ||
-                (rem && femu_dma_rw(n, prp2, mb + moff + len0, rem,
-                                    !req->is_write))) {
+            if (femu_dma_rw(n, prp1, mb + moff, len0, !req->is_write)) {
                 backend_unlock_range(n->mbe, moff, data_size);
+                return NVME_DATA_TRAS_ERROR | NVME_DNR;
+            }
+            if (rem && femu_dma_rw(n, prp2, mb + moff + len0, rem,
+                                   !req->is_write)) {
+                backend_unlock_range(n->mbe, moff, data_size);
+                /* the whole blocks of the first page are in the backend */
+                if (req->is_write) {
+                    nvme_fdp_host_write(n, ns, req->fdp_dtype,
+                                        req->fdp_dspec, len0 >> data_shift,
+                                        true);
+                }
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             backend_unlock_range(n->mbe, moff, data_size);
             if (req->is_write) {
                 nvme_mark_written(ns, slba, nlb);
+                nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec,
+                                    nlb, true);
             }
             return NVME_SUCCESS;
         }
@@ -1262,6 +1273,8 @@ mapped:
     if (!ret) {
         if (req->is_write) {
             nvme_mark_written(ns, slba, nlb);
+            nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, nlb,
+                                true);
         }
         return NVME_SUCCESS;
     }
@@ -1781,6 +1794,8 @@ write:
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         req->fdp_dtype = (dw12 >> 20) & 0xf;
         req->fdp_dspec = le32_to_cpu(cmd->cdw13) >> 16;
+        nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, total,
+                            true);
     }
 
     return NVME_SUCCESS;
@@ -2035,6 +2050,8 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_deallocate_range(n, ns, slba, nlb);
         nvme_mark_written(ns, slba, nlb);
     }
+    /* HBMW counts every Write Zeroes, the Deallocate bit or not (4.1.4.6) */
+    nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, nlb, !deac);
 
     return NVME_SUCCESS;
 }
@@ -2072,6 +2089,8 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         req->fdp_dspec = le16_to_cpu(rw->dspec);
         req->fdp_dtype = (control >> 4) & 0xf;
+        nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, nlb,
+                            false);
     }
 
     return NVME_SUCCESS;
@@ -2365,7 +2384,11 @@ void nvme_fdp_note_ru_time_limit(FemuCtrl *n, NvmeNamespace *ns, uint16_t rg,
     nvme_fdp_record_event(n, endgrp, true, &e);
 }
 
-/* A handle with no media behind it leaves its unit by starting it afresh */
+/*
+ * A handle with no media behind it leaves a written unit by starting a fresh
+ * one. An empty unit may stay (Base 2.3, 7.4.1.1), and the handle then does
+ * not move, so no event. The caller holds stats_lock.
+ */
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
 {
     NvmeRuHandle *ruh;
@@ -2378,10 +2401,68 @@ bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
 
     ruh = &ns->endgrp->fdp.ruhs[ns->fdp.phs[ph]];
     ru = ruh->rus[rg];
-    nvme_fdp_note_ru_left(n, ns, pid, ru);
-    ru->ruamw = ruh->ruamw;
+    if (ru->ruamw != ruh->ruamw) {
+        nvme_fdp_note_ru_left(n, ns, pid, ru);
+        ru->ruamw = ruh->ruamw;
+    }
 
     return true;
+}
+
+/*
+ * Count a host write of @nlb blocks to NoSSD namespace @ns, placed by
+ * @dtype and @dspec. HBMW counts what the host asked to write (NVM 1.2,
+ * 4.1.4.6). NoSSD has no NAND model: with @media the backend keeps each
+ * byte once and no controller write exists, so MBMW adds the same (Base
+ * 2.3, Figure 293) and the unit of the handle fills by the blocks; a full
+ * unit gives the handle a fresh one. Without @media (Write Zeroes with
+ * Deallocate, Write Uncorrectable) no user data is stored, as on bbssd.
+ * Nothing is erased. bbssd counts its writes in the FTL.
+ */
+void nvme_fdp_host_write(FemuCtrl *n, NvmeNamespace *ns, uint8_t dtype,
+                         uint16_t dspec, uint64_t nlb, bool media)
+{
+    NvmeEnduranceGroup *eg = ns->endgrp;
+    uint64_t bytes = nlb << ns->lbaf.lbads;
+    NvmeRuHandle *ruh;
+    NvmeReclaimUnit *ru;
+    uint64_t full;
+    uint16_t ph, rg;
+    bool placed;
+
+    if (!eg || !eg->fdp.enabled || !NS_NOSSD(ns) || !ns->fdp.phs || !nlb) {
+        return;
+    }
+
+    qemu_mutex_lock(&eg->fdp.stats_lock);
+    placed = dtype == NVME_DIRECTIVE_DATA_PLACEMENT &&
+             nvme_parse_pid(ns, dspec, &ph, &rg);
+    if (!placed) {
+        /* placement handle 0, in a group the controller selects (8.1.11) */
+        ph = 0;
+        rg = eg->fdp.rg_next;
+        eg->fdp.rg_next = (rg + 1) % eg->fdp.nrg;
+        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT) {
+            nvme_fdp_note_invalid_pid(n, ns, dspec, rg);
+        }
+    }
+    ruh = &eg->fdp.ruhs[ns->fdp.phs[ph]];
+    nvme_fdp_stat_add128(eg->fdp.hbmw, bytes);
+    nvme_fdp_stat_inc(&ruh->hbmw, bytes);
+    if (media) {
+        nvme_fdp_stat_add128(eg->fdp.mbmw, bytes);
+        nvme_fdp_stat_inc(&ruh->mbmw, bytes);
+
+        /* realize and Format keep a unit at one block or more */
+        ru = ruh->rus[rg];
+        full = ruh->ruamw;
+        if (nlb < ru->ruamw) {
+            ru->ruamw -= nlb;
+        } else {
+            ru->ruamw = full - (nlb - ru->ruamw) % full;
+        }
+    }
+    qemu_mutex_unlock(&eg->fdp.stats_lock);
 }
 
 static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
@@ -2423,6 +2504,8 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
     ruhsd = (NvmeRuhStatusDescr *)(buf + sizeof(NvmeRuhStatus));
     hdr->nruhsd = cpu_to_le16(nruhsd);
 
+    /* NoSSD writes change RUAMW on the pollers under this lock */
+    qemu_mutex_lock(&endgrp->fdp.stats_lock);
     ruhid = ns->fdp.phs;
     for (ph = 0; ph < ns->fdp.nphs; ph++, ruhid++) {
         NvmeRuHandle *ruh = &endgrp->fdp.ruhs[*ruhid];
@@ -2436,6 +2519,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
             ruhsd->ruamw = cpu_to_le64(ru->ruamw);
         }
     }
+    qemu_mutex_unlock(&endgrp->fdp.stats_lock);
 
     /* zeroes past the report (Base 2.3, 7.3.1.1) */
     return dma_read_cmd_fill(n, cmd, (uint8_t *)buf, trans_len, len);
@@ -2511,9 +2595,12 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
         return NVME_SUCCESS;
     }
 
+    /* no NoSSD write of this group comes between two of the updates */
+    qemu_mutex_lock(&ns->endgrp->fdp.stats_lock);
     for (i = 0; i < npid; i++) {
         nvme_update_ruh(n, ns, pids[i]);
     }
+    qemu_mutex_unlock(&ns->endgrp->fdp.stats_lock);
 
     return NVME_SUCCESS;
 }

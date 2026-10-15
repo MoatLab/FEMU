@@ -328,6 +328,7 @@ void nvme_ns_refresh_fdp(NvmeNamespace *ns)
     }
 
     /* the handles of this namespace's list, not the first nphs handles */
+    qemu_mutex_lock(&endgrp->fdp.stats_lock);
     for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
         ruh = &endgrp->fdp.ruhs[ns->fdp.phs[i]];
         if (ruh->ruha != NVME_RUHA_HOST) {
@@ -352,6 +353,7 @@ void nvme_ns_refresh_fdp(NvmeNamespace *ns)
             }
         }
     }
+    qemu_mutex_unlock(&endgrp->fdp.stats_lock);
 }
 
 /*
@@ -450,6 +452,13 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
     }
 
     ns->id_ns.endgid = cpu_to_le16(1);
+    /* RUAMW counts blocks, so a unit must hold one */
+    if (!(endgrp->fdp.runs >> ns->lbaf.lbads)) {
+        error_setg(errp, "fdp.runs (%" PRIu64 ") is smaller than a logical "
+                   "block of namespace %u (%u bytes)", endgrp->fdp.runs,
+                   ns->id, 1u << ns->lbaf.lbads);
+        return false;
+    }
     ns->fdp.phs = g_new(uint16_t, endgrp->fdp.nruh);
     ns->fdp.nphs = nvme_ns_phl(ns->ctrl, ns->id, ns->fdp.phs, errp);
     if (!ns->fdp.nphs) {

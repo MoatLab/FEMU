@@ -34993,6 +34993,8 @@ static void femu_test_fdp_ns_nossd(void *obj, void *data,
     QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
     uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
     uint8_t ruhu[8 + 4 * 8];
     uint8_t hev[64 + 8 * 64];
     uint16_t ruhid[8];
@@ -35007,6 +35009,9 @@ static void femu_test_fdp_ns_nossd(void *obj, void *data,
     g_assert_cmpuint(ruhid[1], ==, 1);
     g_assert_cmpuint(femu_fdpns_ruhs(&c, 2, log, ruhid, ruamw), ==, 1);
     g_assert_cmpuint(ruhid[0], ==, 2);
+    /* a written unit, so the update below moves the handle */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 2, 0, 1, buf, list, 0),
+                    ==, NVME_SUCCESS);
     g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_RUH_USAGE, 0, log,
                                     sizeof(ruhu)), ==, NVME_SUCCESS);
     qtest_memread(qts, log, ruhu, sizeof(ruhu));
@@ -35040,6 +35045,8 @@ static void femu_test_fdp_ns_nossd(void *obj, void *data,
     g_assert_cmpuint(ldl_le_p(hev + 64 + 12), ==, 2);
     g_assert_cmpint(lduw_le_p(hev + 64 + 34), ==, 2);
 
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
     guest_free(alloc, log);
     femu_disable(&c);
     qos_invalidate_command_line();
@@ -35104,6 +35111,9 @@ static void femu_test_fdp_ns_refused(void *obj, void *data,
           "namespace 1 is open-channel" },
         { "'devsz_mb':1,'femu_mode':4,'fdm_size':1,'csd_cp':true,"
           "'subsys':'fdpsub'", "csd_slm_size and csd_cp" },
+        /* a 1 KiB unit holds no 4 KiB block */
+        { "'devsz_mb':1,'femu_mode':2,'lba_index':3,'subsys':'fdpsub-tiny'",
+          "smaller than a logical block" },
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -35524,6 +35534,143 @@ static void femu_test_fdp_unprogrammed(void *obj, void *data,
     g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, ruamw);
 
     guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * RUAMW counts logical blocks, so a reclaim unit must hold one. A Format to
+ * a block larger than fdp.runs (1 KiB here) fails with Invalid Format.
+ */
+static void femu_test_fdp_runs_block(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 2);
+    g_assert_cmpint(femu_format_dw10(&c, 3), ==, NVME_INVALID_FORMAT);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 2);
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* MBE of the FDP Statistics log */
+static uint64_t femu_fdp_mbe(FemuCtrlState *c, uint64_t log)
+{
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, log, 64), ==,
+                    NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, log + 32);
+}
+
+/*
+ * A NoSSD namespace under FDP has no NAND model. Its writes still count:
+ * HBMW per endurance group (Base 2.3, Figure 293), for Write, Copy, Write
+ * Zeroes and Write Uncorrectable (NVM 1.2, 4.1.4.6). The backend keeps each
+ * byte of data once and no controller write exists, so MBMW adds the bytes
+ * of the commands that store data, and MBE stays 0. The unit of a handle
+ * fills by the blocks stored: 64 KiB units of 512-byte blocks hold 128
+ * blocks, and a write that reaches the end leaves the handle on a fresh
+ * unit (RUAMW 128), or part way into the next one.
+ */
+static void femu_test_fdp_nossd_counts(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 20 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t h0, m0, h1, m1, hev0;
+    uint64_t slba = 0;
+    uint16_t nlb = 8;
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(c.lba_size, ==, 512);
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 128);
+
+    /* one page through placement 1 */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 0, 1, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    g_assert_cmpuint(h1 - h0, ==, 4096);
+    g_assert_cmpuint(m1 - m0, ==, 4096);
+    g_assert_cmpuint(femu_fdp_mbe(&c, log), ==, 0);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 120);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 128);
+
+    /* the rest of the unit: the handle is on a fresh one */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 1, 15, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 128);
+    /* 136 blocks: one unit and 8 blocks of the next */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 16, 17, buf, list, 1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 120);
+
+    /* no directive: placement handle 0 */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 40, 1, buf, list, -1),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 120);
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    g_assert_cmpuint(h0 - h1, ==, (15 + 17 + 1) * 4096);
+    g_assert_cmpuint(m0 - m1, ==, (15 + 17 + 1) * 4096);
+
+    /*
+     * HBMW counts Write Zeroes with or without the Deallocate bit, and Write
+     * Uncorrectable: 4.1.4.6 names both commands. Only Write Zeroes without
+     * the bit stores data, for MBMW and the unit.
+     */
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(512);
+    rw.nlb = cpu_to_le16(7);
+    rw.control = cpu_to_le16(2 << 4);
+    rw.dspec = cpu_to_le16(1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    rw.control = cpu_to_le16(1 << 9 | 2 << 4);   /* Deallocate */
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    rw.opcode = 0x04;                            /* Write Uncorrectable */
+    rw.control = cpu_to_le16(2 << 4);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    g_assert_cmpuint(h1 - h0, ==, 3 * 4096);
+    g_assert_cmpuint(m1 - m0, ==, 4096);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 112);
+    h0 = h1;
+    m0 = m1;
+
+    /* the write portion of a Copy, through placement 0 */
+    g_assert_cmpint(femu_copy(&c, list, 1024, &slba, &nlb, 1, 1, 2 << 20), ==,
+                    NVME_SUCCESS);
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    g_assert_cmpuint(h1 - h0, ==, 4096);
+    g_assert_cmpuint(m1 - m0, ==, 4096);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, 112);
+    g_assert_cmpuint(femu_fdp_mbe(&c, log), ==, 0);
+
+    /* RUH Update leaves the part-written unit: event 00h, then a full one */
+    hev0 = femu_fdp_host_events(&c, log, NULL);
+    qtest_writew(femu->dev.bus->qts, log, 1);
+    g_assert_cmpint(femu_ruh_update(&c, log, 1), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fdp_host_events(&c, log, NULL), ==, hev0 + 1);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 1), ==, 128);
+    /* the unit is empty now: it stays, and no event follows (7.4.1.1) */
+    qtest_writew(femu->dev.bus->qts, log, 1);
+    g_assert_cmpint(femu_ruh_update(&c, log, 1), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fdp_host_events(&c, log, NULL), ==, hev0 + 1);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
     femu_disable(&c);
     qos_invalidate_command_line();
 }
@@ -37278,7 +37425,11 @@ static void femu_register_nodes(void)
         .before_cmd_line =
             "-device femu-subsys,id=fdpsub,nqn=fdpsub,fdp=on,fdp.nruh=4 "
             "-device femu-subsys,id=fdpsub-ii,nqn=fdpsub-ii,fdp=on,fdp.nruh=4,"
-            "fdp.isolation_mode=1",
+            "fdp.isolation_mode=1 "
+            "-device femu-subsys,id=fdpsub-runs,nqn=fdpsub-runs,fdp=on,"
+            "fdp.nruh=4,fdp.runs=64K "
+            "-device femu-subsys,id=fdpsub-tiny,nqn=fdpsub-tiny,fdp=on,"
+            "fdp.nruh=4,fdp.runs=1K",
     };
 
     /*
@@ -39671,12 +39822,25 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub",
     });
+    qos_add_test("fdp-invalid-pid-nossd", "femu", femu_test_fdp_invalid_pid,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=2,femu_mode=2,subsys=fdpsub",
+    });
     qos_add_test("fdp-unprogrammed", "femu", femu_test_fdp_unprogrammed,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "oncs=0xe,subsys=fdpsub",
+    });
+    qos_add_test("fdp-runs-block", "femu", femu_test_fdp_runs_block,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=2,femu_mode=2,subsys=fdpsub-tiny",
+    });
+    qos_add_test("fdp-nossd-counts", "femu", femu_test_fdp_nossd_counts,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=2,femu_mode=2,oncs=0x10e,subsys=fdpsub-runs",
     });
     qos_add_test("fdp-replace-full", "femu", femu_test_fdp_replace_full,
                  &(QOSGraphTestOptions) {
