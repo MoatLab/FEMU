@@ -3072,6 +3072,8 @@ bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
 void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
                            const NvmeReclaimUnit *ru);
+void nvme_fdp_note_invalid_pid(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
+                               uint16_t rg);
 bool nvme_fdp_event_enabled(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,
                             uint8_t type);
 void nvme_fdp_event_filter_set(NvmeEnduranceGroup *eg, NvmeRuHandle *ruh,

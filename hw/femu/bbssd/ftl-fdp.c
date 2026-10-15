@@ -1581,24 +1581,11 @@ static void fdp_place(struct ssd *ssd, NvmeRequest *req, uint16_t *rgid,
 
     if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
         !nvme_parse_pid(ns, pid, &ph, rgid)) {
-        /* generate INVALID_PID event if placement was attempted */
-        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT && ssd->n->subsys) {
-            NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
-            NvmeRuHandle *def_ruh = &endgrp->fdp.ruhs[ns->fdp.phs[0]];
-            if (nvme_fdp_event_enabled(endgrp, def_ruh,
-                                       FDP_EVT_INVALID_PID)) {
-                NvmeFdpEvent e = {
-                    .type = FDP_EVT_INVALID_PID,
-                    .flags = FDPEF_PIV | FDPEF_NSIDV,
-                    .pid = cpu_to_le16(pid),
-                    .nsid = cpu_to_le32(ns->id),
-                };
-
-                nvme_fdp_record_event(ssd->n, endgrp, true, &e);
-            }
-        }
         ph = 0;
         *rgid = 0;
+        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT) {
+            nvme_fdp_note_invalid_pid(ssd->n, ns, pid, *rgid);
+        }
     }
 
     *ruhid = ns->fdp.phs[ph];

@@ -2203,6 +2203,31 @@ void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
     }
 }
 
+/*
+ * A write named placement identifier @pid, which @ns does not have. The
+ * controller placed it through placement handle 0 in group @rg, and the
+ * event names that group and handle (Base 2.3, Figure 296).
+ */
+void nvme_fdp_note_invalid_pid(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
+                               uint16_t rg)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+    uint16_t ruhid = ns->fdp.phs[0];
+    NvmeFdpEvent e = {
+        .type = FDP_EVT_INVALID_PID,
+        .flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV,
+        .pid = cpu_to_le16(pid),
+        .nsid = cpu_to_le32(ns->id),
+        .rgid = cpu_to_le16(rg),
+        .ruhid = cpu_to_le16(ruhid),
+    };
+
+    if (nvme_fdp_event_enabled(endgrp, &endgrp->fdp.ruhs[ruhid],
+                               FDP_EVT_INVALID_PID)) {
+        nvme_fdp_record_event(n, endgrp, true, &e);
+    }
+}
+
 /* the placement handle through which @ns reaches handle @ruhid, or -1 */
 int nvme_ns_ruh_ph(NvmeNamespace *ns, uint16_t ruhid)
 {

@@ -35459,6 +35459,58 @@ static void femu_test_fdp_hbmw_blocks(void *obj, void *data,
 }
 
 /*
+ * A write that names a placement identifier the namespace does not have goes
+ * through placement handle 0 in a group the controller selects (Base 2.3,
+ * 8.1.11). Event 03h carries the host's identifier with PIV, the namespace,
+ * and with LV the group and handle the controller selected (Figure 296).
+ * The page counts for handle 0, and RUAMW of placement 0 goes down.
+ */
+static void femu_test_fdp_invalid_pid(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t hev[64 + 8 * 64];
+    uint64_t h0, m0, h1, m1, ruamw0;
+    uint32_t n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_fdp_bytes(&c, log, &h0, &m0);
+    ruamw0 = femu_ruh_ruamw(&c, log, 0);
+
+    /* four handles, so placement handle 9 does not exist */
+    g_assert_cmphex(femu_fdpns_io(&c, NVME_CMD_WRITE, 1, 0, 1, buf, list, 9),
+                    ==, NVME_SUCCESS);
+
+    n = femu_fdp_host_events(&c, log, NULL);
+    g_assert_cmpuint(n, ==, 1);
+    qtest_memread(qts, log, hev, sizeof(hev));
+    g_assert_cmphex(hev[64], ==, 0x03);
+    g_assert_cmphex(hev[64 + 1], ==, 0x7);           /* PIV, NSIDV, LV */
+    g_assert_cmpuint(lduw_le_p(hev + 64 + 2), ==, 9);
+    g_assert_cmpuint(ldl_le_p(hev + 64 + 12), ==, 1);
+    g_assert_cmpuint(lduw_le_p(hev + 64 + 32), ==, 0);
+    g_assert_cmpuint(lduw_le_p(hev + 64 + 34), ==, 0);
+
+    femu_fdp_bytes(&c, log, &h1, &m1);
+    g_assert_cmpuint(h1 - h0, ==, 4096);
+    g_assert_cmpuint(m1 - m0, ==, 4096);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==,
+                     ruamw0 - 4096 / c.lba_size);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Computational Programs (CP 1.2) and Subsystem Local Memory (SLM 1.2) on a
  * CSD controller. With csd_slm_size and csd_cp the controller has the block
  * namespace 1, the memory namespace 2 and the compute namespace 3, and every
@@ -39472,6 +39524,13 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub,buffer_size=16,vwc=1",
+    });
+    qos_add_test("fdp-invalid-pid", "femu", femu_test_fdp_invalid_pid,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
     });
     qos_add_test("fdp-replace-full", "femu", femu_test_fdp_replace_full,
                  &(QOSGraphTestOptions) {
