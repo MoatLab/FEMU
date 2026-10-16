@@ -560,8 +560,12 @@ bbssd FTL, so sections 5 to 9 apply.
 | `csd_slm_size` | MiB | 0 to 1024; 0 adds none | adds a memory namespace (SLM 1.2) of this size |
 | `csd_cp` | bool | needs `csd_slm_size` | adds a compute namespace (CP 1.2) |
 | `csd_legacy_opcodes` | bool | needs a CSD namespace | old CEMU admin opcodes 21h to 25h instead of C5h to CDh |
+| `csd_pause` | bool | needs a CSD namespace, KVM on x86 | stop the guest and its clocks while a program runs |
+| `csd_pause_max_ms` | ms | 1 to 60000 | the longest such stop (default 1000) |
 
 `csd_slm_size` and `csd_cp` refuse `ns_mgmt`, `power_loss` and a CXL link.
+`csd_pause` refuses namespaces of other modes than bbssd and CSD, and shared
+namespaces ([CSD](../modes/csd.md#hide-the-host-run-time-csd_pause)).
 With `subsys`, the controller must be the only one in its subsystem. Guide: [CP and SLM](../features/cp-slm.md).
 
 ### KV

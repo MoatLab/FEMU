@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 206 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 208 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -286,6 +286,8 @@ Devices:
 | `csd_slm_size` | `uint32` | `0` | CSD: MiB of a memory namespace (NVMe SLM 1.2, CSI 03h) added after the configured namespaces, 1 to 1024; 0 adds none |
 | `csd_cp` | `bool` | `off` | CSD: add a compute namespace (NVMe CP 1.2, CSI 04h) after the memory namespace; needs csd_slm_size |
 | `csd_legacy_opcodes` | `bool` | `off` | CSD: take the old CEMU admin opcodes 21h, 22h, 23h and 25h instead of the vendor specific C5h, C8h, C9h and CDh; needs a CSD namespace |
+| `csd_pause` | `bool` | `off` | CSD: stop the guest, its vCPUs and clocks, while the host runs a program, so the guest sees only the modelled run time; needs KVM on x86 (host Linux 6.0 or later), the guest TSC at the host rate, and only bbssd and CSD namespaces, none shared |
+| `csd_pause_max_ms` | `uint32` | `1000` | CSD with csd_pause: the longest stop, 1 to 60000 ms; past it the guest runs again and sees the rest of the host run |
 
 ### KV timing
 
@@ -405,7 +407,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

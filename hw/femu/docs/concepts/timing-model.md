@@ -216,7 +216,10 @@ CSD runs a program on the compute unit that frees up first. A program holds
 its unit for its declared run time, or for its measured host run time
 multiplied by the program's own scale, or by `csf_runtime_scale` when it
 gives none. `nr_cu` sets how many units run at once. A copy from the
-namespace into device memory costs `pg_rd_lat`.
+namespace into device memory costs `pg_rd_lat` once. The completion cannot
+come before the host has run the program. The opt-in `csd_pause` stops the
+guest and its clocks for the run, which hides the host run
+([CSD](../modes/csd.md#hide-the-host-run-time-csd_pause)).
 
 Properties: [CSD](../reference/properties.md#csd-computational-storage).
 

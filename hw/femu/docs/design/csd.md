@@ -345,7 +345,51 @@ The completion carries the program's return value, so the poller cannot post
 it before the worker has finished the run. A runtime shorter than the host's
 own run time, declared or scaled below 1, is therefore not reached: the guest
 sees the host's time. `csd_finish_locked()` warns once when a run's runtime
-is shorter than its measured host time.
+is shorter than its measured host time, unless `csd_pause` is on.
+
+### Freeze service (csd_pause)
+
+With `csd_pause=on` the worker hides the host run from the guest. It calls
+`femu_freeze_begin()` before the run and `femu_freeze_end()` after it, with
+no lock held. A main loop bottom half in `hw/femu/femu-freeze.c` does the
+stop and the restart under the BQL, so the worker never takes the BQL.
+
+```
+ worker                         main loop (BQL)
+ ------                         ---------------
+ femu_freeze_begin() --BH-->    pause_all_vcpus()
+   wait for the answer          save kvmclock C0 + host TSC, TSC offsets
+                                stop the device clock, cpu_disable_ticks()
+ run program (hidden)
+ femu_freeze_end()  --BH-->     KVM_SET_CLOCK(C0); measure the span lost
+                                move each TSC offset back by that span
+                                device clock hides the span
+                                cpu_enable_ticks(), resume_all_vcpus()
+```
+
+- The service is process-wide and counts its users, so runs on several
+  compute units and several controllers share one stop.
+- `femu-freeze-kvm.c` reads the kvmclock with the host TSC before and after
+  the set. The difference to the clock the guest would read is the span.
+  Each vCPU TSC offset moves back by the same span. The cycles come from
+  the pvclock scale that KVM derives from the host TSC rate, with the
+  fraction of a cycle carried to the next stop. So an old pvclock page of a
+  halted vCPU reads the time a new one does, up to the rounding of the two
+  clock samples. That rounding is about 1 ns a stop and need not cancel
+  out. An old page keeps the sum until its vCPU next runs, so a reader that
+  mixes the vDSO and a system call can see a step back of that sum.
+- With `csd_pause`, `femu_io_now()` reads the device clock. It is the raw
+  monotonic clock less every hidden span. It also stands while the VM is
+  stopped. Under qtest it is the virtual clock.
+- A reset, suspend, VM stop, hot plug or other resume during a stop marks it
+  spoiled. The restart then does no clock step, and the guest sees that
+  span.
+- `csd_exit()` sets `csd->stopping` and wakes the waiters; a worker that did
+  not get its stop fails the job instead of running it.
+- A REALTIME timer ends a stop after `csd_pause_max_ms`.
+- A KVM failure after the set leaves the kvmclock and the TSC apart, and no
+  set can undo it to the instant. The service then stops the VM with
+  `RUN_STATE_INTERNAL_ERROR` instead of a resume.
 
 ## Parameters
 
@@ -361,6 +405,7 @@ properties apply to the namespace as in the black-box mode.
 | `nr_cu` | compute units, 1 to 64 |
 | `csf_runtime_scale` | host-to-device time factor for programs that give no runtime; not 0 |
 | `csd_program_dir` | where shared-library and eBPF programs load from |
+| `csd_pause`, `csd_pause_max_ms` | stop the guest during a program run, and the longest stop |
 | `pg_rd_lat` | the cost of an NVM to AFDM copy |
 | `nr_thread`, `time_slice`, `context_switch_time` | accepted for CEMU configurations; no effect, and a non-default value warns at realize (`nr_thread` must still not be 0) |
 
@@ -397,7 +442,15 @@ The smallest device line that loads programs:
   controller under it leaves the controller working. No qtest covers the
   case where `csd_program_dir` is unset, or the `/`, `.` and `..` name
   rules. Phantom and eBPF programs and compute unit timing are tested only
-  in a guest.
+  in a guest. `csd-pause` and its control `csd-pause-off` run a program
+  that sleeps 20 ms with a declared 300 ms: with `csd_pause` it completes
+  exactly when the test clock reaches 300 ms, and makes one stop and one
+  restart; without it, it completes on the host clock. A qtest has no KVM,
+  so it cannot show the guest clocks stop.
+- The script `hw/femu/scripts/csd-pause-check/run.sh` boots a KVM guest
+  twice, with the option and without it. It times Execute from the guest.
+  It also watches for a clock step back on each vCPU and for a sleep that
+  ends early.
 - The documentation check starts each CSD example and writes and reads one
   block of the namespace.
 - Shared-library and eBPF programs run only in a guest, with

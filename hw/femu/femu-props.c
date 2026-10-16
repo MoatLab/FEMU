@@ -774,6 +774,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "csd_legacy_opcodes",
       "CSD: take the old CEMU admin opcodes 21h, 22h, 23h and 25h instead "
       "of the vendor specific C5h, C8h, C9h and CDh; needs a CSD namespace" },
+    { "csd_pause",
+      "CSD: stop the guest, its vCPUs and clocks, while the host runs a "
+      "program, so the guest sees only the modelled run time; needs KVM on "
+      "x86 (host Linux 6.0 or later), the guest TSC at the host rate, and "
+      "only bbssd and CSD namespaces, none shared" },
+    { "csd_pause_max_ms",
+      "CSD with csd_pause: the longest stop, 1 to 60000 ms; past it the "
+      "guest runs again and sees the rest of the host run" },
     { "kv_timing",
       "KV: media (default) times every command on the NAND model; model "
       "times Store and Retrieve from the workload mix of the last 16 of "

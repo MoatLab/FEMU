@@ -164,6 +164,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+
     if (CSD_SLM(n)) {
         slm = g_try_malloc0((uint64_t)n->csd_params.slm_size_mb * MiB);
         if (!slm) {
@@ -250,9 +251,11 @@ static void csd_exit(FemuCtrl *n)
 
     /* a program still running holds up teardown until it returns */
     qemu_mutex_lock(&csd->lock);
-    csd->stopping = true;
+    qatomic_set(&csd->stopping, true);
     qemu_cond_broadcast(&csd->job_cond);
     qemu_mutex_unlock(&csd->lock);
+    /* a worker that waits for the guest to stop would wait on this thread */
+    femu_freeze_kick();
     for (i = 0; i < csd->params.nr_cu; i++) {
         qemu_thread_join(&csd->workers[i]);
     }
@@ -954,10 +957,10 @@ static void csd_finish_locked(FemuCsdState *csd, FemuCsdJob *job,
     /*
      * The completion carries the program's result, so it cannot go out
      * before the host has run the program: a runtime shorter than the host's
-     * own is not reached.
+     * own is not reached, unless csd_pause hides the host run.
      */
-    if (!status && !csd->overrun_warned && host_ns > 0 &&
-        runtime < (uint64_t)host_ns) {
+    if (!status && !csd->params.pause && !csd->overrun_warned &&
+        host_ns > 0 && runtime < (uint64_t)host_ns) {
         csd->overrun_warned = true;
         warn_report("femu-csd: a program took longer on the host than its "
                     "modelled run time; its completions follow host time");
@@ -1017,13 +1020,27 @@ static void *csd_worker(void *opaque)
         job->program->busy = true;
         qemu_mutex_unlock(&csd->lock);
 
+        /*
+         * With csd_pause the guest and the device clock stop for the run. A
+         * teardown that cancels the wait fails the job instead of running it.
+         */
         result = 0;
+        status = NVME_SUCCESS;
+        if (csd->params.pause &&
+            !femu_freeze_begin(&csd->stopping, csd->params.pause_max_ms)) {
+            status = NVME_CMD_ABORT_REQ;
+        }
         host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        status = job->cp ? csd_cp_job_prepare(csd, job) : NVME_SUCCESS;
+        if (!status && job->cp) {
+            status = csd_cp_job_prepare(csd, job);
+        }
         if (!status) {
             status = csd_run_program(job->program, &job->args, &result);
         }
         host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
+        if (csd->params.pause) {
+            femu_freeze_end();
+        }
 
         qemu_mutex_lock(&csd->lock);
         if (job->cp && !status) {

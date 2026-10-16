@@ -4,6 +4,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'nvme-pi.c',
                              'nvme-pel.c', 'nvme-streams.c', 'femu.c',
                              'femu-props.c', 'femu-query.c', 'femu-thermal.c',
+                             'femu-freeze.c',
                              'nossd/nop.c', 'nand/nand.c',
                              'nand/nand-media.c', 'nand/onfi.c',
                              'ocssd/oc-timing.c', 'ocssd/oc12.c',
@@ -30,5 +31,6 @@ system_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
               if_true: files('cxlssd/cxlssd.c', 'cxlssd/cache.c',
                              'cxlssd/cca.c', 'cxlssd/cca-ring.c',
                              'cxlssd/props.c'))
+specific_ss.add(when: 'CONFIG_FEMU_PCI', if_true: files('femu-freeze-kvm.c'))
 specific_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
                 if_true: files('cxlssd/qemu-adapter.c'))

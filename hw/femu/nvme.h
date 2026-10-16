@@ -11,6 +11,7 @@
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
 #include "qapi/error.h"
+#include "femu-freeze.h"
 #include "system/kvm.h"
 #include "hw/block/block.h"
 
@@ -2313,6 +2314,8 @@ typedef struct CsdCtrlParams {
     uint32_t slm_size_mb;        /* memory namespace size; 0 adds none */
     bool     cp;                 /* add a compute namespace */
     bool     legacy_opcodes;     /* the CEMU opcodes before Base 2.3 */
+    bool     pause;              /* stop the guest while a program runs */
+    uint32_t pause_max_ms;       /* the longest such stop */
 } CsdCtrlParams;
 
 typedef struct OcCtrlParams {
@@ -2956,17 +2959,24 @@ static inline bool CSD_CP(FemuCtrl *n)
 }
 
 /*
- * Now, in ns, on the clock that times the device: the host clock.
- * femu_io_now() is the clock of the I/O path, which a test may move to the
- * virtual clock with test_oc12_clock.
+ * Now, in ns, on the clock that times the device. With csd_pause the guest
+ * stops while a program runs, and this clock stops with it; without it, the
+ * host clock. femu_io_now() is the clock of the I/O path, which a test may
+ * move to the virtual clock with test_oc12_clock.
  */
 static inline int64_t femu_dev_now(FemuCtrl *n)
 {
+    if (n->csd_params.pause) {
+        return femu_freeze_now();
+    }
     return qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 }
 
 static inline int64_t femu_io_now(FemuCtrl *n)
 {
+    if (n->csd_params.pause) {
+        return femu_freeze_now();
+    }
     return qemu_clock_get_ns(n->test_oc12_clock ? QEMU_CLOCK_VIRTUAL :
                                                 QEMU_CLOCK_REALTIME);
 }

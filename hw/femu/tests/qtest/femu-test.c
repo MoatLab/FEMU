@@ -9816,6 +9816,13 @@ static const struct {
     { "'femu_mode':4,'fdm_size':16,'namespaces':2,"
       "'namespace_modes':'nossd,nossd','csd_slm_size':4", "csd_slm_size" },
     { "'csd_legacy_opcodes':true", "csd_legacy_opcodes" },
+    { "'csd_pause':true", "csd_pause" },
+    { "'femu_mode':4,'fdm_size':16,'namespaces':2,"
+      "'namespace_modes':'csd,nossd','csd_pause':true", "csd_pause" },
+    { "'femu_mode':4,'fdm_size':16,'csd_pause':true,'csd_pause_max_ms':0",
+      "csd_pause_max_ms" },
+    { "'femu_mode':4,'fdm_size':16,'csd_pause':true,"
+      "'csd_pause_max_ms':60001", "csd_pause_max_ms" },
     { "'femu_mode':4,'fdm_size':16,'namespaces':2,"
       "'namespace_modes':'nossd,nossd','csd_legacy_opcodes':true",
       "csd_legacy_opcodes" },
@@ -20713,6 +20720,124 @@ static void femu_test_csd_runtime_floor(void *obj, void *data,
     femu_disable(&c);
     femu_csd_remove_slow();
     unlink(femu_csd_warn_log);
+}
+
+/* the counts of the csd_pause freeze service, from x-csd-pause-stats */
+static void femu_csd_pause_stats(QTestState *qts, uint64_t *freezes,
+                                 uint64_t *thaws, uint64_t *lost,
+                                 uint64_t *users)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/csd-pause',"
+                           "'property':'x-csd-pause-stats'}}");
+    uint64_t skipped, expired;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "freezes=%" SCNu64 " thaws=%" SCNu64
+                           " skipped=%" SCNu64 " lost=%" SCNu64
+                           " expired=%" SCNu64 " users=%" SCNu64,
+                           freezes, thaws, &skipped, lost, &expired, users),
+                    ==, 6);
+    qobject_unref(rsp);
+}
+
+/*
+ * With csd_pause the device times a program on a clock that stops with the
+ * guest. Under qtest that clock is the test clock, so the host run of the
+ * program, here 20 ms, does not count. The completion is due exactly when
+ * the test clock reaches the declared 300 ms. Without csd_pause (the
+ * control) the device runs on the host clock, and the completion is there
+ * once the host has run the program for 300 ms.
+ */
+#define FEMU_CSD_PAUSE_RUN_MS   300
+
+static void femu_test_csd_pause(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool pause = data != NULL;
+    FemuCtrlState c = { 0 };
+    uint64_t freezes, thaws, lost, users;
+    int waited;
+    uint32_t mr[8] = { 0 };
+    uint32_t dw[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf, ranges;
+    uint32_t id = 0;
+
+    if (!femu_csd_build_slow()) {
+        femu_csd_remove_slow();
+        g_test_skip("no host C compiler to build the test program");
+        return;
+    }
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    ranges = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_csd_load(&c, buf, "slow.so", "run"), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_csd_activate(&c, 1), ==, NVME_SUCCESS);
+    cmd.opcode = FEMU_CSD_ALLOC_FDM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(4096);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, &id)), ==,
+                    NVME_SUCCESS);
+    mr[2] = cpu_to_le32(id);
+    qtest_memwrite(qts, ranges, mr, sizeof(mr));
+
+    dw[0] = FEMU_CSD_EXEC;
+    dw[1] = cpu_to_le32(1);
+    dw[2] = cpu_to_le32(1);
+    dw[3] = cpu_to_le32(1);
+    dw[4] = cpu_to_le32(sizeof(mr));
+    dw[6] = cpu_to_le32((uint32_t)ranges);
+    dw[7] = cpu_to_le32(ranges >> 32);
+    dw[10] = cpu_to_le32(20);
+    dw[15] = cpu_to_le32(FEMU_CSD_PAUSE_RUN_MS * 1000 * 1000);
+    femu_submit(&c, &c.io, (NvmeCmd *)dw);
+
+    if (!pause) {
+        /* the host clock alone brings the completion */
+        femu_csd_expect_exec(&c, &c.io);
+        goto out;
+    }
+
+    /*
+     * Wait until the run is over: one stop and one restart for it, and
+     * nobody left waiting. The command arrived before that, on a test clock
+     * that has not moved since.
+     */
+    for (waited = 0;; waited++) {
+        femu_csd_pause_stats(qts, &freezes, &thaws, &lost, &users);
+        if (thaws) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(freezes, ==, 1);
+    g_assert_cmpuint(thaws, ==, 1);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(users, ==, 0);
+
+    /* more than the declared run time on the host clock: not due */
+    g_usleep(2 * FEMU_CSD_PAUSE_RUN_MS * 1000);
+    g_assert_false(femu_csd_cq_ready(&c, &c.io));
+    /* one ms short of the run time on the test clock: still not due */
+    qtest_clock_step(qts, (FEMU_CSD_PAUSE_RUN_MS - 1) * SCALE_MS);
+    g_usleep(100 * 1000);
+    g_assert_false(femu_csd_cq_ready(&c, &c.io));
+    qtest_clock_step(qts, SCALE_MS);
+    femu_csd_expect_exec(&c, &c.io);
+
+out:
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_csd_remove_slow();
 }
 
 /* the CEMU admin opcodes of csd_legacy_opcodes=on */
@@ -47638,6 +47763,19 @@ static void femu_register_nodes(void)
             "femu_mode=4,fdm_size=16,nr_cu=1,csd_program_dir=%s",
             femu_csd_slow_dir),
         .before = femu_csd_warn_before,
+    });
+    qos_add_test("csd-pause", "femu", femu_test_csd_pause,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = g_strdup_printf(
+            "id=csd-pause,femu_mode=4,fdm_size=16,nr_cu=1,"
+            "csd_program_dir=%s,csd_pause=on", femu_csd_slow_dir),
+        .arg = (void *)1,
+    });
+    qos_add_test("csd-pause-off", "femu", femu_test_csd_pause,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = g_strdup_printf(
+            "id=csd-pause,femu_mode=4,fdm_size=16,nr_cu=1,"
+            "csd_program_dir=%s", femu_csd_slow_dir),
     });
     qos_add_test("csd-opcodes", "femu", femu_test_csd_opcodes,
                  &(QOSGraphTestOptions) {

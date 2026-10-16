@@ -11,7 +11,9 @@ timing.
 The mode is a port of [CEMU](https://github.com/cs-qyzhang/CEMU); if you use
 it, cite CEMU as well as FEMU ([citation](#citation)). It does not need
 CEMU's modified guest kernel, FDMFS or a fixed VM image. CEMU's VM freezing
-and virtual clock changes are left out of this port.
+and virtual clock changes are left out of this port. The opt-in
+[`csd_pause`](#hide-the-host-run-time-csd_pause) does that job on an
+unmodified QEMU and guest.
 
 Use it to study offloading filters, scans, compression or other kernels to
 the drive, and what that does to latency and host CPU use.
@@ -107,8 +109,14 @@ namespace; see the [BlackBox guide](blackbox.md#configuration).
   its own holds its unit for its measured host run time times this value
   (default 3).
   A completion carries the program's result, so it never arrives before the
-  host has run the program: a run time, declared or scaled, shorter than the
-  host's own is not reached. QEMU warns once when that happens.
+  host has run the program. Without `csd_pause`, a run time, declared or
+  scaled, shorter than the host's own is not reached, and QEMU warns once
+  when that happens.
+- `csd_pause`: stop the guest while the host runs a program, so the guest
+  sees only the modelled run time (default off). See
+  [below](#hide-the-host-run-time-csd_pause).
+- `csd_pause_max_ms`: with `csd_pause`, the longest stop, 1 to 60000 ms
+  (default 1000).
 - `csd_program_dir`: the host directory programs load from.
 - `nr_thread`, `time_slice` and `context_switch_time` are accepted so CEMU
   configurations still start. They have no effect, and a value other than
@@ -146,6 +154,59 @@ and admin commands go on as usual; only that compute unit is busy.
 - Deleting the I/O queue an Execute came from, or resetting the controller,
   while the program runs drops its result; the program still runs to the
   end.
+
+### Hide the host run time (csd_pause)
+
+A real CSD runs a program on its own cores while the host goes on. FEMU
+runs it on a host thread, and the completion carries the result. So without
+help the guest waits for the host run, also when the model says the device
+is faster.
+
+With `csd_pause=on`, FEMU stops the guest while a program runs, and hides
+that time from the guest clocks. The device clock of the controller stops
+with them. The guest then sees the modelled run time.
+
+```
+ host time   |--Execute--|======= host runs program =======|--CQE--|
+ guest time  |--Execute--|                                 |--CQE--|
+                          <- guest stopped, clocks hidden ->
+ guest sees  Execute .......... modelled run time .......... CQE
+```
+
+- Under KVM, FEMU stops the vCPUs, sets the kvmclock back and moves the
+  TSC of each vCPU back by the same span. Guest readers of the kvmclock,
+  the vDSO and the TSC all skip the stop.
+- Overlapped runs on several compute units share one stop.
+- All I/O of the controller runs on the device clock, so other commands keep
+  their modelled latency.
+- A stop has a cost: the guest runs for a short time before the vCPUs stop.
+  On a 20-CPU host with 4 vCPUs, the guest saw the modelled run time plus
+  30 to 50 us at the median.
+- Time outside the guest does not stop. Network peers, the wall clock and
+  other devices, also other FEMU controllers, move on during a stop.
+- A vCPU that stays halted through many stops keeps an old pvclock page.
+  The page can stray from the clock by about 1 ns a stop until that vCPU
+  runs again.
+- A LAPIC timer due during a stop fires once, early. Linux with high
+  resolution timers sets it again, so a sleep does not end early.
+- A program that runs past `csd_pause_max_ms` lets the guest run again, and
+  the guest sees the rest of the host run. QEMU warns once.
+- A VM stop, suspend, reset or hot plug during a program makes that one
+  stop visible to the guest.
+- If KVM fails a clock call after the kvmclock is set, the vCPUs would run
+  on clocks that disagree. QEMU then stops the VM with an internal error.
+
+It needs KVM on x86 with Linux 6.0 or later on the host. The guest TSC must
+run at the host rate, and realize refuses a `tsc-frequency` that changes
+it. Every namespace of the controller must be CSD or bbssd, and the
+controller must not share namespaces. The script
+`hw/femu/scripts/csd-pause-check/run.sh` boots a guest with and without the
+option, and prints the latency each sees.
+
+<!-- femu-example: csd-pause; io: identify -->
+```
+-device femu,devsz_mb=4096,femu_mode=4,fdm_size=64,csd_program_dir=/home/you/csd-programs,csd_pause=on
+```
 
 ### Commands
 
@@ -282,6 +343,13 @@ BlackBox ([log pages and counters](../reference/log-pages-and-counters.md#vendor
 | `CSD nr_cu must be in range [1, 64]` | `nr_cu` out of range. |
 | `CSD nr_thread must be non-zero` | `nr_thread=0`. |
 | `CSD csf_runtime_scale must be non-zero` | `csf_runtime_scale=0`. |
+| `CSD csd_pause_max_ms must be in range [1, 60000]` | `csd_pause_max_ms` out of range. |
+| `csd_pause needs a CSD namespace` | `csd_pause` on a controller with no CSD namespace. |
+| `csd_pause: namespace N runs a mode other than bbssd or CSD` | Other modes keep their own clocks; use them on another controller. |
+| `csd_pause cannot be used with shared namespaces: ...` | Two controllers would time one FTL on two clocks. |
+| `csd_pause needs KVM` | Another accelerator; `csd_pause` needs `-enable-kvm`. |
+| `csd_pause needs KVM_CLOCK_HOST_TSC and KVM_CAP_VM_TSC_CONTROL ...` | The host kernel is older than Linux 6.0. |
+| `csd_pause needs the guest TSC at the host rate; ...` | Remove `tsc-frequency` from `-cpu`. |
 | `csd supports at most one namespace per controller` | Two CSD namespaces, from `namespace_modes` or from `femu_mode=4` with `namespaces` above 1. Other namespaces of the controller may use other modes. |
 | `FEMU bbssd: namespace 1 exposes ...` | The namespace does not fit the NAND geometry; see the [BlackBox limits](blackbox.md#limits-and-refusals). |
 | `FEMU csd: hot_cold_sep is not supported under FDP: ...` | A knob the FDP write path does not take, on a controller in an FDP subsystem; the same list as for BlackBox ([FDP](../features/fdp.md#limits-and-refusals)). |

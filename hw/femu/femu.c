@@ -1982,6 +1982,45 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             g_free(ns_modes);
             return 1;
         }
+        /*
+         * csd_pause moves the I/O clock of the whole controller, and only
+         * the black-box FTL that CSD runs reads that clock. A mode with a
+         * clock of its own would not stop with it.
+         */
+        for (i = 0; n->csd_params.pause && i < n->num_namespaces; i++) {
+            if (ns_modes[i] != FEMU_CSD_MODE &&
+                ns_modes[i] != FEMU_BBSSD_MODE) {
+                error_setg(errp, "csd_pause: namespace %d runs a mode other "
+                           "than bbssd or CSD", i + 1);
+                g_free(ns_sizes);
+                g_free(ns_modes);
+                return 1;
+            }
+        }
+        if (n->csd_params.pause && !n_csd) {
+            error_setg(errp, "csd_pause needs a CSD namespace");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        if (n->csd_params.pause &&
+            (n->csd_params.pause_max_ms == 0 ||
+             n->csd_params.pause_max_ms > 60000)) {
+            error_setg(errp, "CSD csd_pause_max_ms must be in range "
+                       "[1, 60000]");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        if (n->csd_params.pause && !femu_freeze_init(errp)) {
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        /* the Timestamp now runs on the device clock; start it from there */
+        if (n->csd_params.pause) {
+            nvme_timestamp_set(n, 0, 0);
+        }
     }
 
     if (femu_kv_index_check(n, errp)) {
@@ -3285,6 +3324,17 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     int64_t bs_size;
     uint64_t nand_cap = 0;
 
+    /*
+     * csd_pause times the controller on a clock of its own, and a shared
+     * namespace takes the FTL of another controller. Refuse it before the
+     * shared path, which skips the namespace checks.
+     */
+    if (n->csd_params.pause && nvme_ns_shared(n)) {
+        error_setg(errp, "csd_pause cannot be used with shared namespaces: "
+                   "two clocks would time one FTL");
+        return;
+    }
+
     if (nvme_ns_shared(n)) {
         FemuCtrl *storage = n->subsys->storage;
 
@@ -3929,6 +3979,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("csd_cp", FemuCtrl, csd_params.cp, false),
     DEFINE_PROP_BOOL("csd_legacy_opcodes", FemuCtrl,
                      csd_params.legacy_opcodes, false),
+    DEFINE_PROP_BOOL("csd_pause", FemuCtrl, csd_params.pause, false),
+    DEFINE_PROP_UINT32("csd_pause_max_ms", FemuCtrl, csd_params.pause_max_ms,
+                       1000),
     DEFINE_PROP_STRING("kv_timing", FemuCtrl, kv_timing),
     DEFINE_PROP_STRING("kv_model_coeffs", FemuCtrl, kv_model_coeffs),
     DEFINE_PROP_STRING("kv_index", FemuCtrl, kv_index),
@@ -4317,6 +4370,19 @@ static char *femu_test_ftl_trace(Object *obj, Error **errp)
     return out;
 }
 
+/* qtest only: the counts of the freeze service behind csd_pause */
+static char *femu_test_pause_stats(Object *obj, Error **errp)
+{
+    FemuFreezeStats st;
+
+    femu_freeze_stats(&st);
+    return g_strdup_printf("freezes=%" PRIu64 " thaws=%" PRIu64
+                           " skipped=%" PRIu64 " lost=%" PRIu64
+                           " expired=%" PRIu64 " users=%" PRIu64,
+                           st.freezes, st.thaws, st.skipped, st.lost,
+                           st.expired, st.users);
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -4508,6 +4574,8 @@ static void femu_instance_init(Object *obj)
     if (qtest_enabled()) {
         object_property_add_bool(obj, "x-oc12-clock", NULL,
                                  femu_test_oc12_clock);
+        object_property_add_str(obj, "x-csd-pause-stats",
+                                femu_test_pause_stats, NULL);
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);

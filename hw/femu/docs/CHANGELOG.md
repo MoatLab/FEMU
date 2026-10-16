@@ -58,6 +58,7 @@ listed one by one.
 - Computational Storage Drive mode (`femu_mode=4`) with program load and execute commands, routed through the bbssd FTL (eb01bb73b, 50b65ca91).
 - CSD `nr_cu` and `csf_runtime_scale` now take effect (202ab7afb).
 - A CSD runtime shorter than the program's own run on the host cannot be reached, since the completion carries the result; QEMU now warns once when that happens (b8e8d6b45).
+- Opt-in `csd_pause` stops the guest while a CSD program runs on the host. Under KVM the kvmclock and the TSC skip the stop. The controller times its I/O on a clock that stops too, so the guest sees the modelled run time. `csd_pause_max_ms` bounds a stop.
 - Key-value SSD mode (`femu_mode=5`) with store, retrieve, list, delete and exist commands (e72465909).
 - Every KV namespace has its own command set and key space, the KV command set is advertised to the host, and the KV Configuration feature is served (39664d242, e62db84f2, e4949509c).
 - Opt-in KV workload-mix timing (`kv_timing=model`): Store and Retrieve take their time from the Samsung KVSSD emulator fit over the last 16 of them, or from coefficients in `kv_model_coeffs`. A device with no KV namespace refuses both.
