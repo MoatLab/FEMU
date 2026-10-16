@@ -354,7 +354,11 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
         req->zone_resets = NULL;
+        req->zone_reset_gens = NULL;
         req->nr_zone_resets = 0;
+        req->zone_finishes = NULL;
+        req->zone_finish_gens = NULL;
+        req->nr_zone_finishes = 0;
         req->fdp_pids = NULL;
         req->nr_fdp_pids = 0;
         req->fdp_dtype = 0;

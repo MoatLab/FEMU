@@ -153,6 +153,12 @@ struct zns_sram{
     struct zns_write_cache* write_cache;
 };
 
+typedef struct ZnsFinEvent {
+    uint64_t ns;        /* when the zone finished */
+    uint32_t zone;
+    uint32_t gen;
+} ZnsFinEvent;
+
 struct zns_ssd {
     uint64_t num_ch;
     uint64_t num_lun;
@@ -265,6 +271,29 @@ struct zns_ssd {
      * flush continues there instead of starting over at plane 0.
      */
     uint8_t *zone_wp_plane;
+    /*
+     * Finished zones whose write caches the FTL thread programs. Each
+     * reset starts a new generation of the zone. Under zone_lock, zgen
+     * counts them and each finish adds a record to fin_ev (fin_lock).
+     * The FTL thread owns the rest: ftl_gen is the generation of its last
+     * reset of the zone, ftl_fin and ftl_fin_ns tell that this generation
+     * finished and when, fin_done when its programs end, and fin_wait
+     * keeps the newest record of each zone whose reset it has not seen
+     * yet; ftl_wait_new tells a reset may have made one current. ftl_late
+     * lists finished zones whose cache took a write since: the next
+     * command that is not a read programs them.
+     */
+    QemuMutex fin_lock;
+    GArray *fin_ev;
+    GArray *ftl_late;
+    bool ftl_wait_new;
+    int fin_any;
+    uint32_t *zgen;
+    uint32_t *ftl_gen;
+    unsigned long *ftl_fin;
+    uint64_t *ftl_fin_ns;
+    uint64_t *fin_done;
+    GArray *fin_wait;
 };
 
 enum NvmeZoneAttr {

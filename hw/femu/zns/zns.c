@@ -216,6 +216,27 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     ns->zns->zone_wp_slot = g_new0(uint64_t, ns->num_zones);
     g_free(ns->zns->zone_wp_plane);
     ns->zns->zone_wp_plane = g_new0(uint8_t, ns->num_zones);
+    g_free(ns->zns->zgen);
+    ns->zns->zgen = g_new0(uint32_t, ns->num_zones);
+    g_free(ns->zns->ftl_gen);
+    ns->zns->ftl_gen = g_new0(uint32_t, ns->num_zones);
+    g_free(ns->zns->ftl_fin);
+    ns->zns->ftl_fin = bitmap_new(ns->num_zones);
+    g_free(ns->zns->ftl_fin_ns);
+    ns->zns->ftl_fin_ns = g_new0(uint64_t, ns->num_zones);
+    g_free(ns->zns->fin_done);
+    ns->zns->fin_done = g_new0(uint64_t, ns->num_zones);
+    if (!ns->zns->fin_ev) {
+        qemu_mutex_init(&ns->zns->fin_lock);
+        ns->zns->fin_ev = g_array_new(false, false, sizeof(ZnsFinEvent));
+        ns->zns->fin_wait = g_array_new(false, false, sizeof(ZnsFinEvent));
+        ns->zns->ftl_late = g_array_new(false, false, sizeof(ZnsFinEvent));
+    }
+    g_array_set_size(ns->zns->fin_ev, 0);
+    g_array_set_size(ns->zns->fin_wait, 0);
+    g_array_set_size(ns->zns->ftl_late, 0);
+    ns->zns->fin_any = 0;
+    ns->zns->ftl_wait_new = false;
     if (ns->zd_extension_size) {
         ns->zd_extensions = g_malloc0(ns->zd_extension_size * ns->num_zones);
     }
@@ -409,6 +430,17 @@ static void zns_free_params(NvmeNamespace *ns)
     g_free(zns->maptbl);
     g_free(zns->zone_wp_slot);
     g_free(zns->zone_wp_plane);
+    g_free(zns->zgen);
+    g_free(zns->ftl_gen);
+    g_free(zns->ftl_fin);
+    g_free(zns->ftl_fin_ns);
+    g_free(zns->fin_done);
+    if (zns->fin_ev) {
+        g_array_free(zns->fin_ev, true);
+        g_array_free(zns->fin_wait, true);
+        g_array_free(zns->ftl_late, true);
+        qemu_mutex_destroy(&zns->fin_lock);
+    }
     g_free(zns);
     ns->zns = NULL;
 }
@@ -978,6 +1010,11 @@ static void zns_zone_reset_state(NvmeRequest *req, NvmeZone *zone)
         break;
     }
 
+    /* the zone takes writes again, in a new generation */
+    req->zone_reset_gens = g_renew(uint32_t, req->zone_reset_gens,
+                                   req->nr_zone_resets + 1);
+    req->zone_reset_gens[req->nr_zone_resets] =
+        qatomic_inc_fetch(&ns->zns->zgen[zone_idx]);
     req->zone_resets = g_renew(uint32_t, req->zone_resets,
                                req->nr_zone_resets + 1);
     req->zone_resets[req->nr_zone_resets++] = zone_idx;
@@ -1124,6 +1161,43 @@ static void zns_release_zone_resources(NvmeNamespace *ns, NvmeZone *zone)
     zns_zrwa_release(ns, zone);
 }
 
+/*
+ * A finished zone takes no more writes, so a real device programs what its
+ * write buffer holds for the zone. The FTL thread owns the write caches, so
+ * each finish leaves it a record that outlives the request: a deleted
+ * queue drops a Finish, not its programs. A host Finish also names its
+ * zones in the request, to complete when their programs end; that holds
+ * for a zone already Full too. Called with zone_lock held.
+ */
+static void zns_finish_note(NvmeNamespace *ns, NvmeZone *zone,
+                            NvmeRequest *req, bool record)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint32_t idx = zns_zone_idx(ns, zone->d.zslba);
+    ZnsFinEvent ev = {
+        .ns = req ? req->stime :
+              qemu_clock_get_ns(ns->ctrl->test_oc12_clock ?
+                                QEMU_CLOCK_VIRTUAL : QEMU_CLOCK_REALTIME),
+        .zone = idx,
+        .gen = qatomic_read(&zns->zgen[idx]),
+    };
+
+    if (record) {
+        WITH_QEMU_LOCK_GUARD(&zns->fin_lock) {
+            g_array_append_val(zns->fin_ev, ev);
+        }
+        qatomic_set(&zns->fin_any, 1);
+    }
+    if (req) {
+        req->zone_finishes = g_renew(uint32_t, req->zone_finishes,
+                                     req->nr_zone_finishes + 1);
+        req->zone_finish_gens = g_renew(uint32_t, req->zone_finish_gens,
+                                        req->nr_zone_finishes + 1);
+        req->zone_finish_gens[req->nr_zone_finishes] = ev.gen;
+        req->zone_finishes[req->nr_zone_finishes++] = idx;
+    }
+}
+
 static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
                                 NvmeZoneState state, NvmeRequest *req)
 {
@@ -1136,13 +1210,18 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
         /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         zns_aor_dec_active(ns);
+        zns_finish_note(ns, zone, req, true);
         /* fall through */
     case NVME_ZONE_STATE_EMPTY:
         zone->w_ptr = zns_zone_wr_boundary(zone);
         zone->d.wp = zone->w_ptr;
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
-        /* fall through */
+        return NVME_SUCCESS;
     case NVME_ZONE_STATE_FULL:
+        /* programs a finish started may still run: wait for them too */
+        if (req) {
+            zns_finish_note(ns, zone, req, false);
+        }
         return NVME_SUCCESS;
     default:
         return NVME_ZONE_INVAL_TRANSITION;

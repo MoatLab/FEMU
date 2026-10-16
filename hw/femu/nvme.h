@@ -1812,7 +1812,16 @@ typedef struct NvmeRequest {
      * zns_zone_reset_state().
      */
     uint32_t        *zone_resets;
+    uint32_t        *zone_reset_gens;   /* the generation each reset starts */
     uint32_t        nr_zone_resets;
+
+    /*
+     * Zones a Finish moved to Full. The FTL thread programs what their
+     * write caches still hold, and the command ends after that.
+     */
+    uint32_t        *zone_finishes;
+    uint32_t        *zone_finish_gens;
+    uint32_t        nr_zone_finishes;
 
     /*
      * Placement identifiers a Reclaim Unit Handle Update named, in host order,
@@ -3082,7 +3091,14 @@ static inline void nvme_req_release_ranges(NvmeRequest *req)
     req->dsm_nr_ranges = 0;
     g_free(req->zone_resets);
     req->zone_resets = NULL;
+    g_free(req->zone_reset_gens);
+    req->zone_reset_gens = NULL;
     req->nr_zone_resets = 0;
+    g_free(req->zone_finishes);
+    req->zone_finishes = NULL;
+    g_free(req->zone_finish_gens);
+    req->zone_finish_gens = NULL;
+    req->nr_zone_finishes = 0;
     g_free(req->fdp_pids);
     req->fdp_pids = NULL;
     req->nr_fdp_pids = 0;

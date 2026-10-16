@@ -657,6 +657,26 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     return maxlat;
 }
 
+/*
+ * Program what the write cache of a zone finished in this generation still
+ * holds, from @stime but not before the finish, and keep the latest end of
+ * the generation's programs.
+ */
+static void zns_finish_flush(struct zns_ssd *zns, uint32_t zone_idx,
+                             uint64_t stime)
+{
+    int wcidx = zns_get_wcidx(zns, zone_idx);
+    uint64_t lat;
+
+    if (!test_bit(zone_idx, zns->ftl_fin) || wcidx < 0 ||
+        !zns->cache.write_cache[wcidx].used) {
+        return;
+    }
+    stime = MAX(stime, zns->ftl_fin_ns[zone_idx]);
+    lat = zns_wc_flush(zns, wcidx, USER_IO, stime);
+    zns->fin_done[zone_idx] = MAX(zns->fin_done[zone_idx], stime + lat);
+}
+
 static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
@@ -697,6 +717,11 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
         {
             ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
             sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
+            /* a finished zone's programs: its Finish waits for them too */
+            if (test_bit(req_zone, zns->ftl_fin)) {
+                zns->fin_done[req_zone] = MAX(zns->fin_done[req_zone],
+                                              req->stime + sublat);
+            }
             ftl_debug("[W] flush lat: %u\n", (int)sublat);
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             sublat = 0;
@@ -705,6 +730,26 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
         sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
         maxlat = (sublat > maxlat) ? sublat : maxlat;
         ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
+    }
+    /*
+     * The zone finished before this write reached the FTL thread. Writes
+     * admitted before the finish may follow; the next command for another
+     * target programs the cache, once, so the pages stay packed.
+     */
+    if (test_bit(req_zone, zns->ftl_fin)) {
+        ZnsFinEvent ev = { .ns = req->stime, .zone = req_zone };
+        guint k;
+
+        for (k = 0; k < zns->ftl_late->len; k++) {
+            if (g_array_index(zns->ftl_late, ZnsFinEvent, k).zone ==
+                req_zone) {
+                g_array_index(zns->ftl_late, ZnsFinEvent, k).ns = req->stime;
+                break;
+            }
+        }
+        if (k == zns->ftl_late->len) {
+            g_array_append_val(zns->ftl_late, ev);
+        }
     }
     return maxlat;
 }
@@ -720,6 +765,30 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
  * command may reset many zones; they share the planes, so the command ends
  * with the last erase rather than the sum of them.
  */
+/*
+ * Reset a zone for the reset that starts generation @gen. The number, not
+ * +1: a deleted queue may have dropped a reset before this thread ran it.
+ */
+static uint64_t zns_zone_reset_gen(NvmeNamespace *ns, struct zns_ssd *zns,
+                                   uint32_t zone_idx, uint32_t gen,
+                                   uint64_t stime)
+{
+    uint64_t lat;
+
+    lat = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz, stime);
+    zns->ftl_gen[zone_idx] = gen;
+    zns->ftl_wait_new = true;
+    clear_bit(zone_idx, zns->ftl_fin);
+    zns->fin_done[zone_idx] = 0;
+
+    /* the allocator restarts this zone from the first channel and LUN */
+    if (zns->active_zone == zone_idx) {
+        zns->wp.ch = 0;
+        zns->wp.lun = 0;
+    }
+    return lat;
+}
+
 static uint64_t zns_zone_reset_deferred(NvmeNamespace *ns, struct zns_ssd *zns,
                                         NvmeRequest *req)
 {
@@ -727,23 +796,132 @@ static uint64_t zns_zone_reset_deferred(NvmeNamespace *ns, struct zns_ssd *zns,
     uint32_t i;
 
     for (i = 0; i < req->nr_zone_resets; i++) {
-        uint32_t zone_idx = req->zone_resets[i];
-        uint64_t lat;
+        uint64_t lat = zns_zone_reset_gen(ns, zns, req->zone_resets[i],
+                                          req->zone_reset_gens[i],
+                                          req->stime);
 
-        lat = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz,
-                             req->stime);
-        if (lat > maxlat) {
-            maxlat = lat;
-        }
-
-        /* the allocator restarts this zone from the first channel and LUN */
-        if (zns->active_zone == zone_idx) {
-            zns->wp.ch = 0;
-            zns->wp.lun = 0;
-        }
+        maxlat = MAX(maxlat, lat);
     }
 
     return maxlat;
+}
+
+static int zns_fin_cmp(const void *a, const void *b)
+{
+    const ZnsFinEvent *x = a;
+    const ZnsFinEvent *y = b;
+
+    if (x->ns != y->ns) {
+        return x->ns < y->ns ? -1 : 1;
+    }
+    return x->zone < y->zone ? -1 : x->zone > y->zone;
+}
+
+#define ZNS_FIN_WAIT_MAX 64
+
+/* by zone, the newest generation last */
+static int zns_fin_zone_cmp(const void *a, const void *b)
+{
+    const ZnsFinEvent *x = a;
+    const ZnsFinEvent *y = b;
+
+    if (x->zone != y->zone) {
+        return x->zone < y->zone ? -1 : 1;
+    }
+    return (int32_t)(x->gen - y->gen) < 0 ? -1 : x->gen != y->gen;
+}
+
+/*
+ * Take the finish records in the order the zones finished. A record of
+ * the generation this thread holds marks the zone finished and programs
+ * its cache; the programs hold the planes, so later commands wait for
+ * them. A record of a later generation waits for its reset; one of an
+ * earlier generation is stale. Only resets a deleted queue dropped leave
+ * records waiting for good, so each zone keeps its newest
+ * ZNS_FIN_WAIT_MAX of them.
+ */
+static void zns_finish_drain(struct zns_ssd *zns)
+{
+    GArray *w = zns->fin_wait;
+    guint keep = 0;
+
+    if (qatomic_read(&zns->fin_any) && qatomic_xchg(&zns->fin_any, 0)) {
+        WITH_QEMU_LOCK_GUARD(&zns->fin_lock) {
+            g_array_append_vals(w, zns->fin_ev->data, zns->fin_ev->len);
+            g_array_set_size(zns->fin_ev, 0);
+        }
+    } else if (!zns->ftl_wait_new || !w->len) {
+        return;
+    }
+    zns->ftl_wait_new = false;
+    qsort(w->data, w->len, sizeof(ZnsFinEvent), zns_fin_cmp);
+    for (guint i = 0; i < w->len; i++) {
+        ZnsFinEvent *ev = &g_array_index(w, ZnsFinEvent, i);
+        int32_t d = (int32_t)(ev->gen - zns->ftl_gen[ev->zone]);
+
+        if (d > 0) {
+            g_array_index(w, ZnsFinEvent, keep++) = *ev;
+        } else if (d == 0 && !test_bit(ev->zone, zns->ftl_fin)) {
+            set_bit(ev->zone, zns->ftl_fin);
+            zns->ftl_fin_ns[ev->zone] = ev->ns;
+            zns_finish_flush(zns, ev->zone, ev->ns);
+        }
+    }
+    g_array_set_size(w, keep);
+    if (keep > ZNS_FIN_WAIT_MAX) {
+        guint n = 0;
+
+        qsort(w->data, keep, sizeof(ZnsFinEvent), zns_fin_zone_cmp);
+        for (guint i = 0; i < keep; i++) {
+            uint32_t zone = g_array_index(w, ZnsFinEvent, i).zone;
+            guint newer = 0;
+
+            for (guint j = i + 1; j < keep &&
+                 g_array_index(w, ZnsFinEvent, j).zone == zone; j++) {
+                newer++;
+            }
+            if (newer < ZNS_FIN_WAIT_MAX) {
+                g_array_index(w, ZnsFinEvent, n++) =
+                    g_array_index(w, ZnsFinEvent, i);
+            }
+        }
+        g_array_set_size(w, n);
+    }
+}
+
+/*
+ * Program the caches that writes to finished zones filled, except the one
+ * @req itself writes to: the writes of that zone may go on. A read programs
+ * nothing, so writes on either side of it still share pages.
+ */
+static void zns_late_flush(struct zns_ssd *zns, NvmeRequest *req)
+{
+    GArray *late = zns->ftl_late;
+    int64_t skip = -1;
+    guint keep = 0;
+    uint8_t op = req->cmd.opcode;
+
+    if (!late->len || op == NVME_CMD_READ || op == NVME_CMD_COMPARE ||
+        op == NVME_CMD_VERIFY) {
+        return;
+    }
+    if (req->cmd.opcode == NVME_CMD_WRITE ||
+        req->cmd.opcode == NVME_CMD_ZONE_APPEND) {
+        NvmeNamespace *ns = req->ns;
+
+        skip = ns->zone_size_log2 > 0 ? req->slba >> ns->zone_size_log2 :
+               req->slba / ns->zone_size;
+    }
+    for (guint i = 0; i < late->len; i++) {
+        ZnsFinEvent ev = g_array_index(late, ZnsFinEvent, i);
+
+        if (ev.zone == skip) {
+            g_array_index(late, ZnsFinEvent, keep++) = ev;
+            continue;
+        }
+        zns_finish_flush(zns, ev.zone, ev.ns);
+    }
+    g_array_set_size(late, keep);
 }
 
 uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
@@ -755,13 +933,32 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
         return 0;
     }
 
+    zns_finish_drain(zns);
+    zns_late_flush(zns, req);
+    if (req->nr_zone_finishes) {
+        /* a host Finish completes when the programs of its zones end */
+        for (uint32_t i = 0; i < req->nr_zone_finishes; i++) {
+            uint32_t zone = req->zone_finishes[i];
+            uint64_t done = zns->fin_done[zone];
+
+            if (req->zone_finish_gens[i] == zns->ftl_gen[zone] &&
+                done > req->stime) {
+                lat = MAX(lat, done - req->stime);
+            }
+        }
+        return lat;
+    }
+
     /*
      * A zone the poller has already moved to Empty must be erased even when
      * the command as a whole failed part way through, or the descriptor reads
      * empty while the mapping still points at the old data.
      */
     if (req->nr_zone_resets) {
-        return zns_zone_reset_deferred(ns, zns, req);
+        lat = zns_zone_reset_deferred(ns, zns, req);
+        /* finishes of the generations these resets start */
+        zns_finish_drain(zns);
+        return lat;
     }
 
     if (req->status != NVME_SUCCESS && !nvme_req_media_checked(req)) {
