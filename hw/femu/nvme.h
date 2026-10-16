@@ -3269,6 +3269,7 @@ void ssd_eol_release(struct ssd *ssd, uint32_t pages);
 uint32_t ssd_eol_cost(struct ssd *ssd, uint64_t bytes);
 uint32_t ssd_eol_requests(struct ssd *ssd);
 bool ssd_media_read_only(struct ssd *ssd);
+void ssd_enter_read_only(struct ssd *ssd);
 uint64_t femu_eol_max_bytes(FemuCtrl *n);
 uint32_t femu_copy_mcl(FemuCtrl *n);
 uint16_t femu_copy_mssrl(FemuCtrl *n);

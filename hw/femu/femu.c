@@ -4451,6 +4451,29 @@ static void femu_test_tp_hold_set(Object *obj, bool value, Error **errp)
     nvme_resume_pollers(n, resume);
 }
 
+/*
+ * x-eol-enter: end the life of namespace 1 now, as a worn-out block with
+ * no replacement does, so a test can choose the request it comes before
+ */
+static void femu_test_eol_enter(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    bool resume;
+
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd ||
+        !ns->ssd->eol_ro_mode) {
+        error_setg(errp, "x-eol-enter requires eol_read_only on namespace 1");
+        return;
+    }
+    if (!value) {
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd_enter_read_only(ns->ssd);
+    nvme_resume_pollers(n, resume);
+}
+
 static void femu_instance_init(Object *obj)
 {
     object_property_add_bool(obj, "simulate-power-loss", NULL,
@@ -4468,6 +4491,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
         object_property_add_bool(obj, "x-tp-hold", femu_test_tp_hold_get,
                                  femu_test_tp_hold_set);
+        object_property_add_bool(obj, "x-eol-enter", NULL,
+                                 femu_test_eol_enter);
         object_property_add_uint32_ptr(obj, "x-cmt-slots",
                                        &FEMU(obj)->test_cmt_slots,
                                        OBJ_PROP_FLAG_READWRITE);

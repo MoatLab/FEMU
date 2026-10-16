@@ -40442,6 +40442,92 @@ static void femu_test_eol_dftl(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+/* x-eol-enter: end the life of the media of the device "gc-test" now */
+static void femu_eol_enter(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-eol-enter','value':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * Read-only end of life with dftl: once the media is read-only, a TP
+ * program opens no line, since the reserve lines belong to the writes
+ * admitted before. This is the set-up of dftl-tp-reserve with MDTS 16 KiB,
+ * so the reserve is 9 lines of 4 pages: 36 pages of credits. The fill
+ * leaves 5 free lines, and 47 TPs are pending.
+ *   - With the FTL held, four 4 KiB writes take all 36 credits.
+ *   - The hold on the TPs ends, and x-eol-enter ends the life of the media
+ *     before the FTL runs the writes, as a worn-out block would. The free
+ *     lines are now 14.
+ *   - The FTL runs the four writes. Each one succeeds, and the 47 TPs stay
+ *     pending, in power-loss-protected DRAM.
+ * If a TP could open a line, the first write would publish the 47 TPs into
+ * 12 lines, down to the 2 forced lines, and a later write would find no
+ * page.
+ */
+static void femu_test_eol_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/gc-test";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t cap, pages, reqs, v[7];
+    bool ro;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_dftl_tp_pending(&c, id, buf, list, 5);
+
+    femu_eol_hold(qts, true);
+    for (i = 0; i < 4; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(8 + 16 * i);
+        rw.nlb = cpu_to_le16(7);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_eol_wait_held(qts, 4);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(cap, ==, 36);
+    g_assert_cmpuint(pages, ==, 36);
+
+    femu_tp_hold(qts, id, false);
+    femu_eol_enter(qts);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(femu_free_lines(qts), ==, 14);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, 64 * 64 - 47);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[6], ==, 47);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                    NVME_WRITE_TO_RO);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    /* the media is read-only now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
 /*
  * A write that waits in its queue for credits can still be aborted: it was
  * not fetched, so the Abort marks it, and it then completes as aborted
@@ -42248,6 +42334,15 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=96,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "blk_pe_limit=8,mdts=5,oncs=0x19f,mapping=dftl,x-cmt-slots=1,"
             "gc_thres_pcent=99,gc_thres_pcent_high=100"
+    });
+    /* the device of dftl-tp-reserve, with 9 reserve lines */
+    qos_add_test("eol-ro-dftl-tp", "femu", femu_test_eol_dftl_tp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=2,secsz=512,secs_per_pg=1,pgs_per_blk=2,"
+            "blks_per_pl=1055,pls_per_lun=1,luns_per_ch=2,nchs=1,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1,gc_thres_pcent=100,"
+            "gc_thres_pcent_high=100,blk_pe_limit=1000,mdts=2"
     });
     qos_add_test("eol-ro-format", "femu", femu_test_eol_ro,
                  &(QOSGraphTestOptions) {
