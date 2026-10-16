@@ -92,10 +92,16 @@ namespace. A controller can mix KV namespaces with block namespaces
 
 - **Index.** A hash table with linear probing on a 32-bit FNV-1a hash of the
   key bytes. Deletion shifts following entries back so probe runs stay
-  intact. It has `min(2^22, 2 * (value_capacity / 4096 + 1))` slots, at
-  least 1024, and holds at most `hash_slots - 1` keys; that limit is what the
-  namespace reports as its maximum number of keys. The index lives in host
-  memory and costs no flash reads.
+  intact. The table lives in host memory, 64 bytes a slot, and costs no
+  flash reads.
+- **Key limit.** `kv_index_size()` sets `kv_max_keys`, which the
+  namespace reports as MNK. The property `kv_max_keys` sets it, or else
+  the flash does ([KV mode](../modes/kvssd.md#key-limit-kv_max_keys)).
+  With `kv_pack` it is the number of 1-byte values the usable flash holds,
+  from 1023 to 2^22 - 1. Without `kv_pack` it is the old limit:
+  `hash_slots - 1` of `min(2^22, 2 * (value_capacity / 4096 + 1))` slots,
+  at least 1024. Otherwise a limit of K keys gets `K + K/3 + 1` slots, so
+  a probe always ends at an empty slot.
 - **Value arena.** The value bytes the host stores, appended at
   `value_next`. An overwrite or delete leaves the old bytes behind as dead
   space (`value_reclaimable`).

@@ -21,7 +21,6 @@
 
 #define KV_DEFAULT_KEY_MAX    16
 #define KV_DEFAULT_VALUE_MAX  (2u << 20)    /* 2 MiB max value (KVVML) */
-#define KV_INDEX_LOAD_NUM     2             /* size index ~2x expected keys */
 
 static uint32_t kv_fnv1a(const uint8_t *key, uint8_t kl)
 {
@@ -2619,6 +2618,10 @@ static void kv_pack_reset(FemuKvssdState *s)
 static void kvssd_reset_table(FemuKvssdState *s)
 {
     for (uint32_t i = 0; i < s->hash_slots; i++) {
+        /* a write to a slot never used would cost its page host memory */
+        if (!s->table[i].key_len && !s->table[i].ppas) {
+            continue;
+        }
         if (s->ssd) {
             kv_discard_value_ppas(s, &s->table[i], i);
         }
@@ -2712,11 +2715,78 @@ static void kv_tree_free(FemuKvssdState *s)
     s->meta_wp = NULL;
 }
 
+/*
+ * The hash index holds at most K keys in K + K/3 + 1 slots: it is never
+ * more than three quarters full, and one slot is always empty, so a
+ * linear probe ends.
+ */
+static uint64_t kv_index_slots(uint64_t keys)
+{
+    return keys + keys / 3 + 1;
+}
+
+/* the automatic key limit stops at the old largest one, 2^22 - 1 keys */
+#define KV_AUTO_KEYS_MAX    ((1u << 22) - 1)
+#define KV_AUTO_KEYS_MIN    1023
+
+/*
+ * Set the key limit (MNK) and allocate the index. kv_max_keys sets it.
+ * Otherwise, with kv_pack, it is the number of 1-byte values the usable
+ * flash holds, one record each, whole records per page (one value a page
+ * when a record does not fit). This sizes the index for small values;
+ * the value space or the flash can still run out first. Without kv_pack
+ * a value takes whole pages, and the index keeps its old size: two slots
+ * for each 4 KiB of value space, all but one usable.
+ *
+ * A slot is 64 bytes of host DRAM. The automatic limit stops at 2^22 - 1
+ * keys, so an index takes at most about 341.3 MiB. The table comes zeroed
+ * from calloc, and a page of it costs host memory once a key lands in it.
+ *
+ * kv_index=lsm keeps its own table of versions. It starts at the old
+ * size and grows as Stores need slots, so the key limit sizes nothing.
+ */
+static bool kv_index_size(FemuKvssdState *s, FemuCtrl *n, uint64_t cap)
+{
+    struct ssdparams *spp = &s->ssd->sp;
+    uint64_t old_slots = MIN((uint64_t)1 << 22, (cap / 4096 + 1) * 2);
+    uint64_t keys;
+    uint64_t slots;
+
+    old_slots = MAX(old_slots, 1024);
+    if (n->kv_max_keys) {
+        keys = n->kv_max_keys;
+        slots = kv_index_slots(keys);
+    } else if (s->pack) {
+        /* the integer share, which a double could round one page down */
+        int pct = n->bb_params.gc_thres_pcent;
+        uint64_t pages;
+        uint32_t per = s->pgsz >= kv_pack_rec(1) ?
+                       s->pgsz / kv_pack_rec(1) : 1;
+
+        if (pct < 1 || pct > 100) {
+            pct = 75;
+        }
+        pages = (uint64_t)spp->tt_pgs * (uint64_t)pct / 100;
+
+        keys = MIN(MAX(pages * per, KV_AUTO_KEYS_MIN), KV_AUTO_KEYS_MAX);
+        slots = kv_index_slots(keys);
+    } else {
+        keys = old_slots - 1;
+        slots = old_slots;
+    }
+    if (n->kv_index && !strcmp(n->kv_index, "lsm")) {
+        slots = old_slots;
+    }
+    s->kv_max_keys = keys;
+    s->hash_slots = (uint32_t)slots;
+    s->table = g_try_new0(FemuKvssdMappingEntry, slots);
+    return s->table != NULL;
+}
+
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     FemuKvssdState *s;
     uint64_t cap;
-    uint32_t slots;
 
     /*
      * KV reclaims by taking the emptiest line off the shared victim queue.
@@ -2797,26 +2867,28 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     cap = s->value_capacity;
 
-    /* size the index to ~2x the keys that fit if all values were 4 KiB */
-    slots = (uint32_t)MIN((uint64_t)(1u << 22),
-                          (cap / 4096 + 1) * KV_INDEX_LOAD_NUM);
-    if (slots < 1024) {
-        slots = 1024;
-    }
-    s->hash_slots = slots;
     /*
-     * The index is what actually caps the key count, and the format reported a
-     * maximum of zero -- which the field defines as no maximum -- so a host was
-     * told it could store keys the device then refused for want of capacity.
-     * Report the limit that is enforced.
+     * The index caps the key count, and a format that reports a maximum of
+     * zero indicates none (KV 1.3, Figure 42), so report the limit that is
+     * enforced.
      */
-    s->kv_max_keys = s->hash_slots - 1;
-    s->index = &kv_index_hash;
     s->pack = n->kv_pack;
+    if (!kv_index_size(s, n, cap)) {
+        bool lsm = n->kv_index && !strcmp(n->kv_index, "lsm");
+
+        error_setg(errp, "FEMU kvssd: no host memory for an index table of "
+                   "%u slots (%" PRIu64 " MiB)%s", s->hash_slots,
+                   (uint64_t)s->hash_slots *
+                   sizeof(FemuKvssdMappingEntry) / (1024 * 1024),
+                   lsm ? "" : "; set a smaller kv_max_keys");
+        kvssd_free_ssd(s);
+        g_free(s);
+        return NULL;
+    }
+    s->index = &kv_index_hash;
     s->packed = g_hash_table_new(g_int64_hash, g_int64_equal);
     s->line_live = g_try_new0(uint64_t, s->ssd->lm.tt_lines);
 
-    s->table = g_try_new0(FemuKvssdMappingEntry, s->hash_slots);
     s->values = g_try_malloc0(s->value_capacity);
     if (s->table && s->values && n->kv_index && !strcmp(n->kv_index, "lsm")) {
         /* a meta page record: 16 key bytes, 8 pointer, 8 length and flags */
@@ -2839,12 +2911,9 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         s->index = &kv_index_lsm;
         kv_tree_reset(s);
     }
-    if (!s->table || !s->values || !s->line_live) {
+    if (!s->values || !s->line_live) {
         error_setg(errp, "KVSSD DRAM allocation failed");
         goto fail;
-    }
-    for (uint32_t i = 0; i < s->hash_slots; i++) {
-        kv_entry_clear(&s->table[i]);
     }
 
     qemu_mutex_init(&s->lock);
@@ -2988,6 +3057,12 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
         else { fails++; femu_err("KVSELFTEST FAIL %s\n", (name)); } \
     } while (0)
 
+    /* the checks below hold up to 67 keys at once */
+    if (s->kv_max_keys < 128) {
+        femu_log("KVSELFTEST SKIP: kv_max_keys=%" PRIu64 " is below 128\n",
+                 s->kv_max_keys);
+        return;
+    }
     req.stime = req.expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qemu_mutex_lock(&s->lock);
 

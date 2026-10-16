@@ -790,6 +790,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "KV: on (default) packs values below a page into shared NAND pages "
       "through an open page in controller DRAM; off gives each value whole "
       "pages, the model before packing" },
+    { "kv_max_keys",
+      "KV: the key limit of each KV namespace, reported as MNK; 0 "
+      "(default) sizes it from the flash: with kv_pack the 1-byte values "
+      "it holds, at most 4194303, else the old two index slots per 4 KiB; "
+      "1 to 1610612735 sets it, at 85 bytes of hash index DRAM a key" },
     { NULL, NULL }
 };
 

@@ -114,6 +114,50 @@ each value whole pages, the model before packing. See
 -device femu,femu_mode=5,devsz_mb=64,kv_pack=off
 ```
 
+### Key limit (kv_max_keys)
+
+Each KV namespace has a key limit. Identify reports it as MNK, the maximum
+number of keys of KV format 0 (KV 1.3, Figure 42). A Store of a new key
+past the limit fails with Capacity Exceeded. An overwrite of a key that
+exists passes the key check.
+
+With `kv_max_keys=0` (the default), FEMU sizes the limit from the flash:
+
+```
+ kv_pack=on   MNK = usable pages * floor(page size / 33)
+              (one 33-byte record per 1-byte value), 1023 to 4194303
+              (a page below 33 bytes holds one value)
+ kv_pack=off  MNK = 2 * (value space / 4 KiB + 1) - 1, 1023 to 4194303
+              (the old limit: a value takes whole pages)
+ usable pages = NAND pages * gc_thres_pcent / 100
+```
+
+So with packing, small values are no longer held to the old two keys
+for each 4 KiB of value space. MNK is an estimate that sizes the index.
+The value space, the flash or the limit can stop new keys first. A
+namespace with more than about 130 MiB of usable flash gets the top of
+4194303 keys. Real KV-SSDs also limit the key count by the device DRAM
+that holds the index. In FEMU the index is a table in host DRAM:
+
+```
+ hash index: K keys --> K + K/3 + 1 slots * 64 bytes  (about 85 B a key)
+             K = 4194303 (the automatic top) --> about 341.3 MiB
+ kv_pack=off without kv_max_keys: the old table, K + 1 slots
+ a page of the table costs host memory only when a key lands in it
+```
+
+`kv_max_keys=N` (1 to 1610612735) sets the limit of each KV namespace.
+With the hash index, a small value saves host DRAM, and a large value
+gives more keys than the automatic top. Realize fails when the host
+cannot allocate the table. With `kv_index=lsm` the limit counts live
+keys only. The LSM table holds versions, starts small and grows with the
+Stores.
+
+<!-- femu-example: kvssd-max-keys -->
+```
+-device femu,femu_mode=5,devsz_mb=64,kv_max_keys=100000
+```
+
 ### Workload-mix timing (kv_timing=model)
 
 With `kv_timing=model`, Store and Retrieve take their time from a fitted
@@ -311,7 +355,7 @@ The `kv-bench` suite of `guest-conformance.sh` runs `kv-probe` and two
 | 0x86 | Invalid Key Size: a key length of 0 on Store, Retrieve, Delete or Exist. For List, length 0 means "from the start". |
 | 0x87 | Key Does Not Exist: Retrieve or Exist of a missing key, a Store with bit 8 (only if the key exists) for a missing key, or Delete of a missing key when EDNEK is set. It comes with Do Not Retry set. |
 | 0x89 | Key Exists: a Store with bit 9 (only if the key is absent) found the key. |
-| Capacity Exceeded | The value space or the key index is full. |
+| Capacity Exceeded | The value space is full, or a new key is past the key limit (MNK). |
 | Invalid Field | A key longer than 16 bytes, a List buffer smaller than 4 bytes, or the broadcast namespace ID. |
 | Invalid Command Opcode | The controller runs with CC.CSS 000b, which selects only the NVM command set. Enable it with 110b. |
 
@@ -349,6 +393,9 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 | `kv_index=lsm and the kv_lsm_* knobs need a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
 | `FEMU kvssd: kv_index=lsm needs a page of at least 32 bytes; the page is N` | A meta page must hold one 32-byte record. |
 | `kv_pack=off needs a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
+| `kv_max_keys needs a key-value namespace ...` | The device has no KV namespace, or its namespaces are shared. |
+| `kv_max_keys=N is not 0 to 1610612735` | Use 0 (automatic) or a limit in that range. |
+| `FEMU kvssd: no host memory for an index table of N slots (M MiB); set a smaller kv_max_keys` | The host cannot allocate the hash index table. With `kv_index=lsm` the message has no hint: the first LSM table size comes from the value space. |
 
 ## Verify
 
@@ -373,6 +420,7 @@ sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u8 -j 8 
 - **`FEMU_KV_SELFTEST`**: set this environment variable to run the KV FTL
   self-test once at realize and log the result
   ([environment variables](../reference/properties.md#environment-variables)).
+  A key limit below 128 skips it, with a `KVSELFTEST SKIP` line.
 
 Related issues: #68.
 

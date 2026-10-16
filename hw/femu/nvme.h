@@ -2354,6 +2354,11 @@ typedef struct FemuPollerCtr {
 #define FEMU_KV_LSM_RATIO_MAX       64
 #define FEMU_KV_LSM_PINNED_DEF      1
 #define FEMU_KV_LSM_PINNED_MAX      24
+/*
+ * kv_max_keys: the largest key limit whose index of K + K/3 + 1 slots
+ * still fits a slot number in an int
+ */
+#define FEMU_KV_MAX_KEYS_MAX        1610612735u
 
 typedef struct FemuCtrl {
     PCIDevice       parent_obj;
@@ -2623,6 +2628,7 @@ typedef struct FemuCtrl {
     uint32_t        kv_lsm_size_ratio;
     uint32_t        kv_lsm_pinned_levels;
     bool            kv_pack;          /* KV: values below a page share pages */
+    uint32_t        kv_max_keys;      /* KV: key limit (MNK), 0 = automatic */
 
     Oc12Ctrl  *oc12_ctrl;
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];

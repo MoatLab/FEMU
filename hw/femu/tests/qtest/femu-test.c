@@ -22147,8 +22147,9 @@ static void femu_test_kv_css(void *obj, void *data, QGuestAllocator *alloc)
 
 /*
  * A hash Delete shifts later entries of its probe run back, so their
- * pages (or packed records) change owner slot. 700 keys in 1024 slots
- * collide often; every other key is deleted, and the owner check
+ * pages (or packed records) change owner slot. 700 keys in the 1287
+ * slots of kv_max_keys=965 collide often (the Deletes shift entries
+ * back 4485 times); every other key is deleted, and the owner check
  * (FEMU_KV_CHECK, every 64 commands) then finds each page and record with
  * the slot that holds it. Half of the survivors are rewritten; the other
  * half keep the records whose owners shifted. Then 600 cold keys of 990
@@ -23238,6 +23239,8 @@ static void femu_test_kv_lsm_refused(void *obj, void *data,
         { 5, "'kv_index':'lsm','secsz':16,'secs_per_pg':1",
           "needs a page of at least 32 bytes" },
         { 1, "'kv_pack':false", "kv_pack=off needs a key-value namespace" },
+        { 1, "'kv_max_keys':100", "kv_max_keys needs a key-value namespace" },
+        { 5, "'kv_max_keys':1610612736", "is not 0 to 1610612735" },
     };
 
     for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
@@ -23256,6 +23259,123 @@ static void femu_test_kv_lsm_refused(void *obj, void *data,
         g_assert_nonnull(strstr(desc, bad[i].want));
         qobject_unref(rsp);
     }
+}
+
+/* MNK, the key limit of KV format 0 (KV 1.3, Figures 41 and 42) */
+static uint32_t femu_kv_mnk(FemuCtrlState *c, QGuestAllocator *alloc)
+{
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t mnk;
+
+    g_assert_cmphex(femu_identify(c, 1, NVME_ID_CNS_CS_NS,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    mnk = qtest_readl(c->pdev->bus->qts, buf + 72 + 8);
+    guest_free(alloc, buf);
+    return mnk;
+}
+
+/*
+ * With kv_pack the key limit is the number of 1-byte values the usable
+ * flash holds. 1.5 MiB of NAND with 4 KiB pages, 3/4 of it usable, is
+ * 288 pages of 124 records of 33 bytes. The old index took two slots for
+ * each 4 KiB of value space, 1023 keys here, so 64-byte values stopped
+ * with most of the space free. Now they fill it: the Stores stop with
+ * Capacity Exceeded, below MNK, once NUSE is near NSZE, and every value
+ * reads back.
+ */
+static void femu_test_kv_keys_small(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint64_t id = guest_alloc(alloc, 4096);
+    uint64_t nsze, nuse;
+    uint32_t mnk;
+    uint16_t status;
+    uint64_t n;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mnk = femu_kv_mnk(&c, alloc);
+    g_assert_cmpuint(mnk, ==, 288 * 124);
+    for (n = 0; n < mnk; n++) {
+        status = femu_lsm_store(&c, n, buf, 64, 0);
+        if (status != NVME_SUCCESS) {
+            break;
+        }
+    }
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_CS_NS,
+                                  (uint32_t)FEMU_CSI_KV << 24, id), ==,
+                    NVME_SUCCESS);
+    nsze = qtest_readq(femu->dev.bus->qts, id);
+    nuse = qtest_readq(femu->dev.bus->qts, id + 16);
+    g_test_message("MNK %u, 64-byte values stored %" PRIu64 ", NUSE %"
+                   PRIu64 " of NSZE %" PRIu64, mnk, n, nuse, nsze);
+    g_assert_cmphex(status, ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpuint(n, <, mnk);
+    g_assert_cmpuint(nuse * 10, >=, nsze * 9);
+    for (uint64_t i = 0; i < n; i++) {
+        g_assert_cmphex(femu_lsm_check(&c, i, buf, 64, 0), ==, NVME_SUCCESS);
+    }
+    femu_disable(&c);
+    guest_free(alloc, id);
+    guest_free(alloc, raw);
+}
+
+/*
+ * The automatic key limit of a geometry, in data. 100 pages at
+ * gc_thres_pcent=29 are 29 usable pages of 124 records; 100 * 0.29 in
+ * double is 28.999..., which once cut a page. NAND of 1 GiB reaches the
+ * top of 4194303 keys. Without kv_pack a small value space keeps the
+ * old floor of 1023 keys.
+ */
+static void femu_test_kv_mnk_auto(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    g_assert_cmpuint(femu_kv_mnk(&c, alloc), ==, GPOINTER_TO_UINT(data));
+    femu_disable(&c);
+}
+
+/*
+ * kv_max_keys=3000: MNK reports 3000, and 3000 keys fit. A new key past
+ * them fails with Capacity Exceeded, but an overwrite at the limit
+ * succeeds, and a Delete makes room for one new key. The same holds for
+ * the hash index with and without kv_pack and for the LSM tree.
+ */
+static void femu_test_kv_keys_limit(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_kv_mnk(&c, alloc), ==, 3000);
+    for (uint64_t i = 0; i < 3000; i++) {
+        g_assert_cmphex(femu_lsm_store(&c, i, buf, 1, 0), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_lsm_store(&c, 3000, buf, 1, 0), ==,
+                    NVME_CAP_EXCEEDED);
+    g_assert_cmphex(femu_lsm_store(&c, 7, buf, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_cmd(&c, FEMU_KV_CMD_DELETE, 8, buf, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_store(&c, 3000, buf, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_store(&c, 3001, buf, 1, 0), ==,
+                    NVME_CAP_EXCEEDED);
+    g_assert_cmphex(femu_lsm_check(&c, 7, buf, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_check(&c, 3000, buf, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lsm_check(&c, 8, buf, 1, 0), ==, 0x87);
+    femu_disable(&c);
+    guest_free(alloc, raw);
 }
 
 /* the C0h log counters: host, GC and NAND programmed pages */
@@ -44261,14 +44381,16 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
-            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            "kv_max_keys=965"
     });
     qos_add_test("kv-hash-backshift-off", "femu", femu_test_kv_hash_backshift,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=96,pls_per_lun=1,luns_per_ch=1,"
-            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,kv_pack=off"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,kv_pack=off,"
+            "kv_max_keys=965"
     });
     qos_add_test("kv-css-nvm", "femu", femu_test_kv_css,
                  &(QOSGraphTestOptions) {
@@ -44360,6 +44482,62 @@ static void femu_register_nodes(void)
             "nchs=8,kv_index=hash"
     });
     qos_add_test("kv-lsm-refused", "femu", femu_test_kv_lsm_refused, NULL);
+    qos_add_test("kv-keys-small", "femu", femu_test_kv_keys_small,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=2,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000"
+    });
+    qos_add_test("kv-mnk-pcent", "femu", femu_test_kv_mnk_auto,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(29 * 124),
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=29"
+    });
+    qos_add_test("kv-mnk-top", "femu", femu_test_kv_mnk_auto,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(4194303),
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=256,blks_per_pl=64,pls_per_lun=1,luns_per_ch=4,"
+            "nchs=4"
+    });
+    qos_add_test("kv-mnk-off", "femu", femu_test_kv_mnk_auto,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(1023),
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=24,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,kv_pack=off"
+    });
+    qos_add_test("kv-keys-limit", "femu", femu_test_kv_keys_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            "kv_max_keys=3000"
+    });
+    qos_add_test("kv-keys-limit-off", "femu", femu_test_kv_keys_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            "kv_max_keys=3000,kv_pack=off"
+    });
+    /* 1 MiB of value space: the LSM table starts at 1024 slots and grows */
+    qos_add_test("kv-keys-limit-lsm", "femu", femu_test_kv_keys_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pg_wr_lat=1000,pg_rd_lat=1000,blk_er_lat=1000,"
+            "kv_max_keys=3000,kv_index=lsm"
+    });
     /* one value a page: the counts and times below are of value pages */
     qos_add_test("kv-lsm-gc", "femu", femu_test_kv_lsm_gc,
                  &(QOSGraphTestOptions) {

@@ -87,7 +87,7 @@ typedef struct FemuKvssdState {
     /* KV format (selected at format time) */
     uint32_t kv_key_max;               /* KVKML */
     uint32_t kv_value_max;             /* KVVML */
-    uint64_t kv_max_keys;              /* MNKS, 0 = unlimited */
+    uint64_t kv_max_keys;              /* MNK: the live keys the index takes */
 
     /* Key Value Configuration feature (20h) */
     bool ednek;                        /* Error on Delete of Non-Existent KV Key */

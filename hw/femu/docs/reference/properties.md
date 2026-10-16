@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 203 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 204 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -296,6 +296,7 @@ Devices:
 | `kv_lsm_size_ratio` | `uint32` | `10` | KV with kv_index=lsm: how many times more entries a level holds than the one above, 2 to 64; level i holds memtable keys times ratio^i entries |
 | `kv_lsm_pinned_levels` | `uint32` | `1` | KV with kv_index=lsm: top levels held whole in DRAM, with no flash I/O, 0 to 24 |
 | `kv_pack` | `bool` | `on` | KV: on (default) packs values below a page into shared NAND pages through an open page in controller DRAM; off gives each value whole pages, the model before packing |
+| `kv_max_keys` | `uint32` | `0` | KV: the key limit of each KV namespace, reported as MNK; 0 (default) sizes it from the flash: with kv_pack the 1-byte values it holds, at most 4194303, else the old two index slots per 4 KiB; 1 to 1610612735 sets it, at 85 bytes of hash index DRAM a key |
 
 ### Generic PCI device properties
 

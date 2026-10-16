@@ -16,7 +16,7 @@ typedef struct QEMU_PACKED NvmeKvFormat {
     uint8_t  rsvd2;
     uint8_t  afo;                       /* Additional Format Options / RP */
     uint32_t kv_value_max_len;          /* KVVML: max value bytes */
-    uint32_t max_num_keys;              /* MNKS: 0 = no max */
+    uint32_t max_num_keys;              /* MNK: 0 = no maximum indicated */
     uint32_t rsvd12;
 } NvmeKvFormat;
 

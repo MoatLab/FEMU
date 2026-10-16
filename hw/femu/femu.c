@@ -1537,6 +1537,11 @@ static int femu_kv_index_check(FemuCtrl *n, Error **errp)
                    n->kv_lsm_pinned_levels, FEMU_KV_LSM_PINNED_MAX);
         return -1;
     }
+    if (n->kv_max_keys > FEMU_KV_MAX_KEYS_MAX) {
+        error_setg(errp, "kv_max_keys=%u is not 0 to %u", n->kv_max_keys,
+                   FEMU_KV_MAX_KEYS_MAX);
+        return -1;
+    }
     return 0;
 }
 
@@ -1995,6 +2000,22 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             error_setg(errp, "kv_index=lsm and the kv_lsm_* knobs need a "
                        "key-value namespace (femu_mode=5 or kvssd in "
                        "namespace_modes)");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
+    /* the key limit sizes a KV index only; elsewhere it does nothing */
+    if (n->kv_max_keys) {
+        bool any_kv = false;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            any_kv |= ns_modes[i] == FEMU_KVSSD_MODE;
+        }
+        if (!any_kv) {
+            error_setg(errp, "kv_max_keys needs a key-value namespace "
+                       "(femu_mode=5 or kvssd in namespace_modes)");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -3269,6 +3290,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "shared namespaces are NoSSD or bbssd");
             return;
         }
+        if (n->kv_max_keys) {
+            error_setg(errp, "kv_max_keys needs a key-value namespace; "
+                       "shared namespaces are NoSSD or bbssd");
+            return;
+        }
         /* shared namespaces are never KV, so the KV timing knobs do nothing */
         if (femu_kv_timing_set(n)) {
             error_setg(errp, "kv_timing=model and kv_model_coeffs need a "
@@ -3889,6 +3915,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("kv_lsm_pinned_levels", FemuCtrl, kv_lsm_pinned_levels,
                        FEMU_KV_LSM_PINNED_DEF),
     DEFINE_PROP_BOOL("kv_pack", FemuCtrl, kv_pack, true),
+    DEFINE_PROP_UINT32("kv_max_keys", FemuCtrl, kv_max_keys, 0),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
