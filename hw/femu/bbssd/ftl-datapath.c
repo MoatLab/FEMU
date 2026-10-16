@@ -291,7 +291,7 @@ uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat)
 /* Admin callers hold both pollers and the FTL thread paused. */
 uint16_t bbssd_flush_all(FemuCtrl *n)
 {
-    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t now = femu_dev_now(n);
 
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
@@ -520,7 +520,7 @@ static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     if (!ssd->tp_on) {
         return cmt_touch(ssd, lpn, stime, is_write);
     }
-    t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    t = stime ? stime : ssd_now(ssd);
     return cmt_access(ssd, lpn, t, is_write) - t;
 }
 
@@ -537,7 +537,7 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
                                     uint64_t stime, int stream)
 {
     uint64_t map = ssd_map_lat(ssd, lpn, stime, true);
-    uint64_t t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t t = stime ? stime : ssd_now(ssd);
 
     if (ssd->tp_on && ssd->sp.hot_cold_sep && map) {
         return ssd_program_lpn(ssd, lpn, t + map, t, stream);
@@ -765,7 +765,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
      * now; only a translation that delays the page needs that time at once.
      */
     uint64_t base = req->stime || !ssd->tp_on ? req->stime :
-                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                    ssd_now(ssd);
     uint64_t map, dstart, wait;
     g_autofree NandLoc *pend = NULL;
     uint32_t npend = 0;
@@ -786,7 +786,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         pend = g_new(NandLoc, end_lpn - start_lpn + 1);
         /* as ssd_advance_status(): no start time means now */
         seq_stime = req->stime ? req->stime :
-                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                    ssd_now(ssd);
     }
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
@@ -1123,7 +1123,7 @@ static int ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
  */
 static uint64_t ssd_publish_cmd(struct ssd *ssd, uint64_t stime)
 {
-    uint64_t t = stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t t = stime ? stime : ssd_now(ssd);
 
     if (!ssd->tp_on || !ssd->tp_fifo_cnt) {
         return 0;

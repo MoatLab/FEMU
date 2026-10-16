@@ -203,14 +203,20 @@ void nvme_resume_pollers(FemuCtrl *n, bool was_started)
  * soon as it flips, so on a host without strong store ordering a single copy
  * could show the new phase beside the previous command identifier.
  */
+/* the guest reads the Timestamp as a clock, so it runs on the device clock */
+static int64_t nvme_timestamp_now_ms(FemuCtrl *n)
+{
+    return femu_dev_now(n) / SCALE_MS;
+}
+
 /*
  * The Timestamp feature (Base 2.3, 5.2.26.1.7) as Figure 415 lays it out:
  * milliseconds modulo 2^48, then Synch in bit 48 and the origin in 51:49.
- * The host clock counts on continuously, paused guest or not, so Synch is 0.
+ * The clock counts on continuously in the guest's time, so Synch is 0.
  */
 uint64_t nvme_timestamp(FemuCtrl *n)
 {
-    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    int64_t now = nvme_timestamp_now_ms(n);
     uint64_t base, ms;
     int64_t anchor;
     uint8_t origin;
@@ -235,7 +241,7 @@ void nvme_timestamp_set(FemuCtrl *n, uint64_t value, uint8_t origin)
 {
     seqlock_write_begin(&n->ts_seq);
     n->ts_base = value & ((1ULL << 48) - 1);
-    n->ts_anchor = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    n->ts_anchor = nvme_timestamp_now_ms(n);
     n->ts_origin = origin;
     seqlock_write_end(&n->ts_seq);
 }
@@ -667,8 +673,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
                     bool completed = req->status != NVME_SUCCESS ||
                         ((!n->use_ftl_thread || r == 1) &&
                          !n->pcie_enabled && !n->fw_enabled &&
-                         req->expire_time <=
-                         qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+                         req->expire_time <= femu_dev_now(n));
 
                     nvme_retire_ns_request(req, completed);
                     QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
@@ -688,7 +693,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
             if (req->ns == ns) {
                 nvme_retire_ns_request(req, req->status != NVME_SUCCESS ||
                                         req->expire_time <=
-                                        qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+                                        femu_dev_now(n));
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
             } else {
                 kept[nkept++] = req;

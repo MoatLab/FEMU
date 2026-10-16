@@ -808,6 +808,17 @@ void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
+/* now on the clock that times the controller's I/O, in ns and in us */
+static inline uint64_t ssd_now(struct ssd *ssd)
+{
+    return femu_dev_now(ssd->n);
+}
+
+static inline uint64_t ssd_now_us(struct ssd *ssd)
+{
+    return femu_dev_now(ssd->n) / SCALE_US;
+}
+
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */
 void bb_nand_media_init(struct ssd *ssd);
 void bb_nand_media_refresh_timing(struct ssd *ssd);

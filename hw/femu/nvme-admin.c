@@ -3625,8 +3625,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
             return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
         }
     }
-    status = bbssd_drain_namespace(ns, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
-                                    NULL);
+    status = bbssd_drain_namespace(ns, femu_dev_now(n), NULL);
     if (status) {
         g_free(mdata);
         return status;

@@ -22,9 +22,9 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
-static inline uint64_t tp_now(uint64_t stime)
+static inline uint64_t tp_now(struct ssd *ssd, uint64_t stime)
 {
-    return stime ? stime : qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    return stime ? stime : ssd_now(ssd);
 }
 
 void tp_init(struct ssd *ssd)
@@ -124,7 +124,7 @@ bool tp_program(struct ssd *ssd, uint64_t tp, bool reserve, uint64_t stime,
     struct write_pointer *wp = &ssd->tp_wp;
     struct ppa old = ssd->gtd[tp];
     struct ppa ppa;
-    uint64_t t = tp_now(stime);
+    uint64_t t = tp_now(ssd, stime);
 
     if (!tp_wp_ready(ssd, reserve)) {
         return false;
@@ -177,7 +177,7 @@ bool tp_program(struct ssd *ssd, uint64_t tp, bool reserve, uint64_t stime,
 uint64_t tp_read(struct ssd *ssd, uint64_t tp, uint64_t stime, bool timed)
 {
     struct ppa ppa = ssd->gtd[tp];
-    uint64_t t = tp_now(stime);
+    uint64_t t = tp_now(ssd, stime);
     struct nand_cmd r = {
         .type = TP_IO,
         .cmd = NAND_READ,
@@ -283,7 +283,7 @@ bool tp_pending(struct ssd *ssd, uint64_t tp)
  */
 uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
 {
-    uint64_t end = tp_now(stime);
+    uint64_t end = tp_now(ssd, stime);
 
     /* a test holds them, as the forced reserve would */
     if (ssd->n && ssd->n->test_tp_hold) {

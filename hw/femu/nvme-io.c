@@ -3,12 +3,6 @@
 #include "csd/csd.h"
 #include "kvssd/kvssd.h"
 
-static int64_t nvme_io_clock(FemuCtrl *n)
-{
-    return qemu_clock_get_ns(n->test_oc12_clock ? QEMU_CLOCK_VIRTUAL :
-                                                QEMU_CLOCK_REALTIME);
-}
-
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
@@ -120,7 +114,7 @@ static int nvme_post_backlog(FemuCtrl *n, int index_poller, bool *should_isr)
         }
         QTAILQ_REMOVE(backlog, req, entry);
         if (n->stage_sets) {
-            nvme_stages_note(n, index_poller, req, nvme_io_clock(n));
+            nvme_stages_note(n, index_poller, req, femu_io_now(n));
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         should_isr[cq->cqid] = true;
@@ -373,7 +367,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->eol_ro = eol == FEMU_EOL_READ_ONLY;
         eol = -1;
         /* Coperd: record req->stime at earliest convenience */
-        req->expire_time = req->stime = nvme_io_clock(n);
+        req->expire_time = req->stime = femu_io_now(n);
         req->t_handoff = 0;
         req->t_return = 0;
         req->cqe.cid = cmd.cid;
@@ -494,7 +488,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                     n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
                     if (n->stage_sets) {
                         nvme_stages_note(n, index_poller, req,
-                                         nvme_io_clock(n));
+                                         femu_io_now(n));
                     }
                 }
                 QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
@@ -513,7 +507,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             int rc;
 
             if (n->stage_sets) {
-                req->t_handoff = nvme_io_clock(n);
+                req->t_handoff = femu_io_now(n);
             }
             rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
@@ -577,7 +571,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 
         qemu_spin_lock(&v->lock);
         if (!v->pending) {
-            v->first_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            v->first_ns = femu_dev_now(n);
         }
         v->pending++;
         /* the spec recommends no coalescing for a completion with an error */
@@ -647,7 +641,7 @@ static void nvme_cq_notify(FemuCtrl *n, NvmeCQueue *cq)
     if (v->pending &&
         (!nvme_cq_coalesces(n, cq, &thr, &time_ns) || v->urgent ||
          v->pending >= thr ||
-         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - v->first_ns >= time_ns)) {
+         femu_dev_now(n) - v->first_ns >= time_ns)) {
         v->pending = 0;
         v->urgent = false;
         fire = true;
@@ -737,7 +731,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
         assert(req);
         if (n->stage_sets) {
-            req->t_return = nvme_io_clock(n);
+            req->t_return = femu_io_now(n);
         }
 
         /*
@@ -812,7 +806,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 
     while ((req = pqueue_peek(pq))) {
-        now = nvme_io_clock(n);
+        now = femu_io_now(n);
         if (now < req->expire_time) {
             break;
         }
@@ -853,7 +847,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
         if (n->stage_sets) {
             /* after the entry is written, as the host sees it */
-            nvme_stages_note(n, index_poller, req, nvme_io_clock(n));
+            nvme_stages_note(n, index_poller, req, femu_io_now(n));
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;
@@ -2845,7 +2839,7 @@ void nvme_post_cqes_io(void *opaque)
             break;
         }
 
-        cur_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        cur_time = femu_dev_now(cq->ctrl);
         if (cq->cqid != 0 && cur_time < req->expire_time) {
             ntt = req->expire_time;
             break;
@@ -2856,7 +2850,7 @@ void nvme_post_cqes_io(void *opaque)
     }
 
     if (ntt == 0) {
-        ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS;
+        ntt = femu_dev_now(cq->ctrl) + CQ_POLLING_PERIOD_NS;
     }
 
     /* Only interrupt guest when we "do" complete some I/Os */

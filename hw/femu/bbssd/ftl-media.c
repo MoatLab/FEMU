@@ -310,7 +310,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd)
 {
     uint64_t stime = (ncmd->stime == 0) ?
-        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+        ssd_now(ssd) : ncmd->stime;
     NandLoc loc;
     NandMediaOp op;
 
@@ -376,7 +376,7 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
     }
 
     stime = (ncmd->stime == 0) ?
-        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+        ssd_now(ssd) : ncmd->stime;
 
     for (i = 0; i < nppas; i++) {
         if (op == NAND_MEDIA_READ) {
@@ -415,7 +415,7 @@ bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
     if (ssd->sp.onfi_cb_parity && ((src->g.pg ^ dst->g.pg) & 1)) {
         return false;
     }
-    loc = bb_decode_loc(ssd, src, qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+    loc = bb_decode_loc(ssd, src, ssd_now(ssd),
                         true);
     return nand_media_read_ecc_ns(&ssd->media, &loc) == 0;
 }
@@ -474,7 +474,7 @@ uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
 uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
                               struct ppa *dst)
 {
-    uint64_t stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t stime = ssd_now(ssd);
     NandLoc sloc;
     NandLoc dloc;
 

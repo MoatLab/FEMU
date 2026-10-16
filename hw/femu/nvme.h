@@ -2955,6 +2955,22 @@ static inline bool CSD_CP(FemuCtrl *n)
     return CSD(n) && n->csd_params.cp;
 }
 
+/*
+ * Now, in ns, on the clock that times the device: the host clock.
+ * femu_io_now() is the clock of the I/O path, which a test may move to the
+ * virtual clock with test_oc12_clock.
+ */
+static inline int64_t femu_dev_now(FemuCtrl *n)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+}
+
+static inline int64_t femu_io_now(FemuCtrl *n)
+{
+    return qemu_clock_get_ns(n->test_oc12_clock ? QEMU_CLOCK_VIRTUAL :
+                                                QEMU_CLOCK_REALTIME);
+}
+
 /* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,

@@ -424,7 +424,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
     bool is_full = true;
-    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t now = ssd_now(ssd);
 
     ru->vpc = 0;
     ru->close_seq = ++ssd->ru_close_seq;
@@ -449,7 +449,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
      * from time zero and outscore every other unit; age it from now.
      */
     if (ru->last_invalidated_time == 0) {
-        ru->last_invalidated_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        ru->last_invalidated_time = ssd_now_us(ssd);
     }
     if (rm->mgmt_type == GC_GLOBAL_CB) {
         if (ru->utilization < 1.0f && ru->last_invalidated_time > 0) {
@@ -542,7 +542,7 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
     line->vpc++;
     if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
         !line->open_time) {
-        line->open_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        line->open_time = ssd_now(ssd);
     }
 
     /* update RU vpc from its line (single-line RU fast path) */
@@ -615,7 +615,7 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
      * never written are freed by the erase too, so they count as reclaimable.
      */
     ru->utilization = (float)ru->vpc / ru->npages;
-    ru->last_invalidated_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    ru->last_invalidated_time = ssd_now_us(ssd);
 
     if (rm->mgmt_type == GC_GLOBAL_CB && ru->utilization < 1.0f &&
         ru->last_invalidated_time > 0) {
@@ -703,7 +703,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
          * the line GC does rather than trust a priority fixed at insertion.
          */
         pqueue_t *pq = rm->victim_ru_cb;
-        uint64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        uint64_t now = ssd_now_us(ssd);
         double best = -1.0;
         double best_bg = -1.0;
         bool best_free = false;
