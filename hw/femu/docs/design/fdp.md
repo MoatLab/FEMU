@@ -339,8 +339,9 @@ identifiers. The poller checks every identifier first and fails the command
 with Invalid Field if one is invalid, so nothing changes. On a bbssd
 namespace `ssd_fdp_update_ruhs()` then, for each handle:
 
-- skips a handle that has no current unit (device full); the command still
-  succeeds;
+- gives a handle that has no current unit (its last unit filled with
+  nothing free to follow it) an empty unit, after the same passes as below,
+  or fails with Capacity Exceeded when none can be freed;
 - keeps the current unit if nothing was written to it yet. The handle does
   not move, so no event follows (Base 2.3, 7.4.1.1 lets an empty unit
   stay);

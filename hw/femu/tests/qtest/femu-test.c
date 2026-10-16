@@ -36617,6 +36617,70 @@ static void femu_test_fdp_ruh_update_moved(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * RUH Update of a handle with no unit. With both collection watermarks at
+ * 100 and no eol_read_only, overwrites through four persistently isolated
+ * handles run the group out of units: a write fails with Capacity Exceeded,
+ * and its handle is left with no unit (RUAMW 0). Deallocating the whole
+ * namespace lets collection free empty units. An update of that handle
+ * then gives it an empty unit (Base 2.3, 7.4.1.1), so its RUAMW is a whole
+ * unit; it used to succeed and leave the handle with none.
+ */
+static void femu_test_fdp_ruh_update_none(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t full;
+    uint32_t rnd = 5;
+    uint16_t pid;
+    int i, ph = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 3; i++) {
+        qtest_writeq(qts, list + 8 * i, buf + 4096 * (i + 1));
+    }
+    qtest_memset(qts, buf, 0x44, 4 * 4096);
+    full = femu_ruh_ruamw(&c, log, 0);
+    for (i = 0; i < 4000 && ph < 0; i++) {
+        uint16_t st;
+
+        rnd = rnd * 1103515245 + 12345;
+        st = FEMU_SC(femu_write_pages_placed(&c, i < 64 ? 4 * i :
+                                             (rnd >> 8) % 253,
+                                             i < 64 ? 4 : 1 + (rnd >> 20) % 4,
+                                             buf, list, i % 4));
+        if (st == NVME_CAP_EXCEEDED) {
+            ph = i % 4;
+            break;
+        }
+        g_assert_cmphex(st, ==, NVME_SUCCESS);
+    }
+    g_test_message("write %d through handle %d found no unit", i, ph);
+    g_assert_cmpint(ph, >=, 0);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, ph), ==, 0);
+
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 256, list), ==, NVME_SUCCESS);
+    pid = cpu_to_le16(ph);
+    qtest_memwrite(qts, pids, &pid, sizeof(pid));
+    g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, ph), ==, full);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* query-femu pad-write-pages of namespace 1, -1 when absent, and its waf */
 static int64_t femu_pd2_query_pads(QTestState *qts, double *waf)
 {
@@ -45273,6 +45337,13 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_thres_pcent=99,gc_thres_pcent_high=99,subsys=fdpsub-ii",
+    });
+    qos_add_test("fdp-ruh-update-none", "femu", femu_test_fdp_ruh_update_none,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub"
     });
     qos_add_test("fdp-ruh-update-full", "femu", femu_test_fdp_ruh_update_full,
                  &(QOSGraphTestOptions) {

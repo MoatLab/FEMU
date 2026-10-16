@@ -2202,11 +2202,8 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         nvme_parse_pid(ns, pid, &ph, &rgid);
         ruh = &ssd->ruhs[ns->fdp.phs[ph]];
         old = ruh->rus[rgid];
-        if (!old) {
-            continue;
-        }
         /* an empty unit stays, so the handle does not move: no event */
-        if (fdp_ru_unwritten(old)) {
+        if (old && fdp_ru_unwritten(old)) {
             continue;
         }
 
@@ -2220,7 +2217,11 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
          * room now says nothing about the move.
          */
         fdp_gc_until_clear(ssd, rgid, ruh->ruhid);
-        if (ruh->rus[rgid] != old) {
+        /*
+         * A handle whose last unit filled with nothing free to follow it
+         * references no unit, which is not an empty one: give it one.
+         */
+        if (!old || ruh->rus[rgid] != old) {
             if (!fdp_ruh_ready(ssd, ruh, rgid)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                 return;
