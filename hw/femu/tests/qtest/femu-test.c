@@ -11957,6 +11957,413 @@ static void femu_test_zns_fzr_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* Identify Namespace for the zoned command set: ZOC, RRL and FRL */
+static void femu_zns_id_limits(FemuCtrlState *c, QTestState *qts,
+                               uint64_t page, uint16_t *zoc, uint32_t *rrl,
+                               uint32_t *frl)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(page);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CS_NS);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_ZONED << 24);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    *zoc = qtest_readw(qts, page);
+    *rrl = qtest_readl(qts, page + 12);
+    *frl = qtest_readl(qts, page + 16);
+}
+
+/* the Changed Zone List: the count, and the first entry */
+static uint16_t femu_changed_zones_rae(FemuCtrlState *c, QTestState *qts,
+                                       uint64_t page, uint64_t *first,
+                                       bool rae)
+{
+    g_assert_cmpint(femu_log_cmd(c, 1, FEMU_LOG_CHANGED_ZONE_LIST |
+                                 (rae ? FEMU_LOG_RAE : 0),
+                                 FEMU_CSI_ZONED << 24, page, 512), ==,
+                    NVME_SUCCESS);
+    *first = qtest_readq(qts, page + 8);
+    return qtest_readw(qts, page);
+}
+
+static uint16_t femu_changed_zones(FemuCtrlState *c, QTestState *qts,
+                                   uint64_t page, uint64_t *first)
+{
+    return femu_changed_zones_rae(c, qts, page, first, false);
+}
+
+/*
+ * ZNS 1.4, 5.4, with zns_rzr_sec=2 and zns_rrl_sec=4. Zone 0 is written and
+ * finished by the host, which raises no event. At the first check 2 s or
+ * more after it became Full it gets Reset Zone Recommended, with RZRTL 00b,
+ * a Zone Descriptor Changed notice and an entry in the Changed Zone List.
+ * 4 s later the controller refreshes the zone itself: RZR clears with
+ * another notice and the zone stays Full, and 2 s after that RZR comes
+ * back. Zone 1 stays open and gets nothing, as zns_fzr_sec is 0. Identify
+ * reports RRL 4, with FRL and ZOC.ZAE clear.
+ *
+ * The checks run once a second, at a phase the test does not know. So the
+ * clock moves 1 s at a time, one check per step, and the test asserts the
+ * steps between the changes.
+ */
+static void femu_test_zns_rzr(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf, page, zone1, first;
+    uint32_t result, rrl, frl;
+    uint16_t want, got, zoc;
+    int set = -1, clear = -1, again = -1;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    page = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+
+    femu_zns_id_limits(&c, qts, page, &zoc, &rrl, &frl);
+    g_assert_cmphex(zoc & 0x2, ==, 0);                          /* ZOC.ZAE */
+    g_assert_cmpuint(rrl, ==, 4);
+    g_assert_cmpuint(frl, ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, 1u << 27, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_zone_report(&c, page, report);
+    zone1 = ldq_le_p(report + 128 + 16);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_FINISH), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, zone1, buf)), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+
+    for (int k = 1; k <= 12 && again < 0; k++) {
+        bool rzr, changed;
+
+        qtest_clock_step(qts, 1000LL * SCALE_MS);
+        femu_zone_report(&c, page, report);
+        g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+        g_assert_cmphex(femu_zr_za(report, 0) & ~NVME_ZA_RESET_RECOMMENDED,
+                        ==, 0);
+        g_assert_cmphex(report[64 + 3] & 0xc, ==, 0);          /* RZRTL: RRL */
+        g_assert_cmpint(femu_zr_state(report, 1), ==,
+                        NVME_ZONE_STATE_IMPLICITLY_OPEN);
+        g_assert_cmphex(femu_zr_za(report, 1), ==, 0);
+
+        rzr = femu_zr_za(report, 0) & NVME_ZA_RESET_RECOMMENDED;
+        changed = set < 0 ? rzr : clear < 0 ? !rzr : rzr;
+        if (!changed) {
+            g_assert_false(femu_cq_ready(&c, &c.admin));
+            continue;
+        }
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+        g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+        if (set < 0) {
+            set = k;
+        } else if (clear < 0) {
+            clear = k;
+        } else {
+            again = k;
+            break;
+        }
+        /* the list names zone 0 only; reading it lets the next notice in */
+        g_assert_cmpuint(femu_changed_zones(&c, qts, page, &first), ==, 1);
+        g_assert_cmpuint(first, ==, 0);
+        want = femu_aer(&c);
+    }
+    g_test_message("RZR at check %d, cleared at %d, again at %d",
+                   set, clear, again);
+    g_assert_cmpint(set, >=, 2);
+    g_assert_cmpint(set, <=, 3);
+    g_assert_cmpint(clear - set, ==, 4);         /* RRL */
+    g_assert_cmpint(again - clear, ==, 2);       /* the zone ages again */
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Reset of a zone with RZR, with zns_rzr_sec=2 and, for "rrl", also
+ * zns_rrl_sec=3. Without RRL the recommendation stays on the Full zone.
+ * The Reset clears it and changes neither the Changed Zone List nor the
+ * notices (ZNS 1.4, Figure 43): the entry of the earlier RZR stays until
+ * the host reads the list. No refresh follows at the old deadline. A
+ * zone finished late by the host starts a full interval at the Finish.
+ * With notices open, a Reset raises none.
+ */
+static void femu_test_zns_rzr_reset(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool has_rrl = data && !strcmp(data, "rrl");
+    uint8_t report[192];
+    uint64_t buf, page, first;
+    uint32_t rrl, frl, result;
+    uint16_t zoc, want, got;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    page = guest_alloc(alloc, 4096);
+    femu_zns_id_limits(&c, qts, page, &zoc, &rrl, &frl);
+    g_assert_cmpuint(rrl, ==, has_rrl ? 3 : 0);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, 1u << 27, NULL)), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_FINISH), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 3100LL * SCALE_MS);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+    femu_zone_report(&c, page, report);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, NVME_ZA_RESET_RECOMMENDED);
+    if (!has_rrl) {
+        qtest_clock_step(qts, 10000LL * SCALE_MS);
+        femu_zone_report(&c, page, report);
+        g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+        g_assert_cmphex(femu_zr_za(report, 0), ==, NVME_ZA_RESET_RECOMMENDED);
+    }
+
+    /* the entry is kept across the Reset; RAE keeps it for the next read */
+    g_assert_cmpuint(femu_changed_zones_rae(&c, qts, page, &first, true), ==,
+                     1);
+    g_assert_cmpuint(first, ==, 0);
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_EMPTY);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, 0);
+    g_assert_cmpuint(femu_changed_zones_rae(&c, qts, page, &first, true), ==,
+                     1);
+    g_assert_cmpuint(first, ==, 0);
+    g_assert_cmpuint(femu_changed_zones(&c, qts, page, &first), ==, 1);
+    g_assert_cmpuint(femu_changed_zones(&c, qts, page, &first), ==, 0);
+
+    /* past the deadline of the cancelled refresh: no event, no attribute */
+    want = femu_aer(&c);
+    qtest_clock_step(qts, 5000LL * SCALE_MS);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_EMPTY);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, 0);
+
+    /*
+     * A write, and a host Finish 3 s later: the clock starts at the Finish,
+     * so no RZR 1 s after it, RZR at the check 2 s or more after it.
+     */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 3000LL * SCALE_MS);
+    g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_FINISH), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 1000LL * SCALE_MS);
+    femu_zone_report(&c, page, report);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, 0);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    qtest_clock_step(qts, 2000LL * SCALE_MS);
+    femu_zone_report(&c, page, report);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, NVME_ZA_RESET_RECOMMENDED);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+
+    /* with the list read and notices open, a Reset raises nothing */
+    g_assert_cmpuint(femu_changed_zones(&c, qts, page, &first), ==, 1);
+    want = femu_aer(&c);
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 5000LL * SCALE_MS);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_EMPTY);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, 0);
+    g_assert_cmpuint(femu_changed_zones_rae(&c, qts, page, &first, true), ==,
+                     0);
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Each way into Full starts the RZR clock, with zns_fzr_sec=2,
+ * zns_frl_sec=2, zns_rzr_sec=3 and zns_rrl_sec=2. Zone 1 fills by writes.
+ * Zone 0 gets one write and FZR, then the controller finishes it and sets
+ * ZFC. Each zone gets RZR 3 checks after it became Full, not after its
+ * first write. On zone 0, ZFC stays through RZR, the refresh 2 checks
+ * later and the next RZR, and FZR stays clear. The data still reads back.
+ */
+static void femu_test_zns_rzr_origins(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf, page, zone1, zcap, lba;
+    uint32_t per;
+    int full0 = -1, rzr0 = -1, clear0 = -1, again0 = -1, rzr1 = -1;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    page = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    femu_zone_report(&c, page, report);
+    zone1 = ldq_le_p(report + 128 + 16);
+    zcap = ldq_le_p(report + 128 + 8);
+    per = FEMU_DATA_SIZE / c.lba_size;
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    for (lba = zone1; lba < zone1 + zcap; lba += per) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 1), ==, NVME_ZONE_STATE_FULL);
+    g_assert_cmpint(femu_zr_state(report, 0), ==,
+                    NVME_ZONE_STATE_IMPLICITLY_OPEN);
+
+    for (int k = 1; k <= 16 && again0 < 0; k++) {
+        uint8_t za0, za1;
+
+        qtest_clock_step(qts, 1000LL * SCALE_MS);
+        femu_zone_report(&c, page, report);
+        za0 = femu_zr_za(report, 0);
+        za1 = femu_zr_za(report, 1);
+        g_assert_cmpint(femu_zr_state(report, 1), ==, NVME_ZONE_STATE_FULL);
+        g_assert_cmphex(za1 & ~NVME_ZA_RESET_RECOMMENDED, ==, 0);
+        if (rzr1 < 0 && (za1 & NVME_ZA_RESET_RECOMMENDED)) {
+            rzr1 = k;
+        }
+        if (full0 < 0) {
+            if (femu_zr_state(report, 0) != NVME_ZONE_STATE_FULL) {
+                g_assert_cmphex(za0 & NVME_ZA_RESET_RECOMMENDED, ==, 0);
+                continue;
+            }
+            full0 = k;
+        }
+        g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+        g_assert_cmphex(za0 & ~NVME_ZA_RESET_RECOMMENDED, ==,
+                        NVME_ZA_FINISHED_BY_CTLR);
+        if (za0 & NVME_ZA_RESET_RECOMMENDED) {
+            if (rzr0 < 0) {
+                rzr0 = k;
+            } else if (clear0 >= 0) {
+                again0 = k;
+            }
+        } else if (rzr0 >= 0 && clear0 < 0) {
+            clear0 = k;
+        }
+    }
+    g_test_message("zone 1 RZR at check %d; zone 0 Full at %d, RZR at %d, "
+                   "cleared at %d, again at %d",
+                   rzr1, full0, rzr0, clear0, again0);
+    g_assert_cmpint(rzr1, >=, 3);
+    g_assert_cmpint(rzr1, <=, 4);
+    /* FZR at check 2 or 3 after the write, the finish 2 checks later */
+    g_assert_cmpint(full0, >=, 4);
+    g_assert_cmpint(full0, <=, 5);
+    g_assert_cmpint(rzr0 - full0, ==, 3);
+    g_assert_cmpint(clear0 - rzr0, ==, 2);
+    g_assert_cmpint(again0 - clear0, ==, 3);
+
+    for (int z = 0; z < 2; z++) {
+        g_autofree uint8_t *got = g_malloc(FEMU_DATA_SIZE);
+
+        qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        z ? zone1 + zcap - per : 0, buf)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, got, FEMU_DATA_SIZE);
+        for (int i = 0; i < FEMU_DATA_SIZE; i++) {
+            g_assert_cmphex(got[i], ==, 0x3c);
+        }
+    }
+
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* without zns_rzr_sec a Full zone keeps no attribute and RRL reads 0 */
+static void femu_test_zns_rzr_off(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t report[192];
+    uint64_t buf, page;
+    uint32_t rrl, frl;
+    uint16_t zoc;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    page = guest_alloc(alloc, 4096);
+    femu_zns_id_limits(&c, qts, page, &zoc, &rrl, &frl);
+    g_assert_cmpuint(rrl, ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_FINISH), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 10000LL * SCALE_MS);
+    femu_zone_report(&c, page, report);
+    g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+    g_assert_cmphex(femu_zr_za(report, 0), ==, 0);
+    guest_free(alloc, page);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* a reset limit with no recommendation to follow is refused */
+static void femu_test_zns_rzr_refused(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QDict *rsp;
+
+    rsp = qtest_qmp(femu->dev.bus->qts,
+                    "{'execute':'device_add','arguments':{'driver':'femu',"
+                    "'id':'zns-rrl','addr':'5','devsz_mb':32,'femu_mode':3,"
+                    "'zns_rrl_sec':3}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "zns_rrl_sec needs"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
 /*
  * The Error Information log counts from 1 and lists the newest error first
  * (Base 2.3, 5.2.12.1.2). Reading SMART or the error log with Retain
@@ -42233,6 +42640,44 @@ static void femu_register_nodes(void)
             "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1"
     });
     qos_add_test("zns-fzr-refused", "femu", femu_test_zns_fzr_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
+    qos_add_test("zns-rzr", "femu", femu_test_zns_rzr,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_rzr_sec=2,zns_rrl_sec=4"
+    });
+    qos_add_test("zns-rzr-reset", "femu", femu_test_zns_rzr_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,zns_rzr_sec=2"
+    });
+    qos_add_test("zns-rzr-reset-rrl", "femu", femu_test_zns_rzr_reset,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"rrl",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,zns_rzr_sec=2,"
+            "zns_rrl_sec=3"
+    });
+    qos_add_test("zns-rzr-origins", "femu", femu_test_zns_rzr_origins,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,zns_fzr_sec=2,"
+            "zns_frl_sec=2,zns_rzr_sec=3,zns_rrl_sec=2"
+    });
+    qos_add_test("zns-rzr-off", "femu", femu_test_zns_rzr_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1"
+    });
+    qos_add_test("zns-rzr-refused", "femu", femu_test_zns_rzr_refused,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512"
     });

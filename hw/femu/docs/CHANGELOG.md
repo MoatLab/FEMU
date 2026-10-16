@@ -128,6 +128,7 @@ listed one by one.
 - Optional LUN contention (`zns_lun_contention`): the planes of one LUN run their operations one at a time, and a zone reset erases each LUN's planes in one multi-plane operation. Off by default, so the timing does not change.
 - Optional zone reset by fill (`zns_reset_by_fill`): a zone reset erases only the blocks that hold programmed pages, so its time and the SMART wear follow the zone's fill. Off by default, so a reset of a non-empty zone still erases every block.
 - Opt-in ZNS read timing by page type (`zns_page_types`) and ECC read time by block wear (`zns_ecc_step_ns`). The page types keep the mean read latency of the flash type.
+- ZNS Reset Zone Recommended (`zns_rzr_sec`, `zns_rrl_sec`, off by default). A zone Full for `zns_rzr_sec` seconds of guest time gets RZR at the next check, and Identify reports RRL. With a nonzero RRL, the controller refreshes the zone itself at the first check once RZR has been set for RRL seconds. It clears RZR, and the zone ages again. RRL 0 means no refresh. Both changes enter the Changed Zone List; a host Reset clears RZR with no event.
 
 #### BlackBox SSD (bbssd) and NAND media
 

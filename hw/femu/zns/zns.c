@@ -281,8 +281,9 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     id_ns_z->mar = cpu_to_le32(ns->max_active_zones - 1);
     id_ns_z->mor = cpu_to_le32(ns->max_open_zones - 1);
     id_ns_z->zoc = ns->zns->frl_sec ? cpu_to_le16(NVME_ID_NS_ZONED_ZOC_ZAE) : 0;
-    /* FZRTL is always 00b, so FRL is the limit a host reads */
+    /* FZRTL and RZRTL are always 00b, so FRL and RRL are the limits */
     id_ns_z->frl = cpu_to_le32(ns->zns->frl_sec);
+    id_ns_z->rrl = cpu_to_le32(ns->zns->rrl_sec);
     id_ns_z->ozcs = ns->cross_zone_read ? NVME_ID_NS_ZONED_OZCS_RAZB : 0x00;
 
     /* advertise ZRWA and its parameters when the namespace is configured for it */
@@ -405,9 +406,9 @@ static void zns_free_params(NvmeNamespace *ns)
         return;
     }
 
-    if (zns->fzr_timer) {
-        timer_free(zns->fzr_timer);
-        zns->fzr_timer = NULL;
+    if (zns->za_timer) {
+        timer_free(zns->za_timer);
+        zns->za_timer = NULL;
     }
     qemu_cond_destroy(&zns->zone_cond);
     qemu_mutex_destroy(&zns->zone_lock);
@@ -596,6 +597,10 @@ static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneSta
     if (state == NVME_ZONE_STATE_READ_ONLY) {
         zone->d.za &= ~(NVME_ZA_RESET_RECOMMENDED | NVME_ZA_FINISHED_BY_CTLR);
     }
+    /* the Reset Zone Recommended clock runs while the zone is Full (5.4) */
+    zone->full_ns = state == NVME_ZONE_STATE_FULL ?
+                    MAX(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 1) : 0;
+    zone->rzr_ns = 0;
 }
 
 /*
@@ -1229,13 +1234,45 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 }
 
 /*
+ * A zone Full for rzr_sec gets Reset Zone Recommended, with RZRTL 00b, so RRL
+ * is its limit (ZNS 1.4, 5.4): the controller wants to refresh the data, and
+ * a reset makes that work needless. If the host has not reset the zone
+ * rrl_sec later, the controller refreshes the data itself, clears RZR, and
+ * the zone ages again. Both changes go to the Changed Zone List.
+ */
+static void zns_rzr_check(NvmeNamespace *ns, NvmeZone *zone, uint64_t now)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint64_t lim = (uint64_t)zns->rzr_sec * NANOSECONDS_PER_SECOND;
+    uint64_t rrl = (uint64_t)zns->rrl_sec * NANOSECONDS_PER_SECOND;
+
+    if (!lim || !zone->full_ns) {
+        return;
+    }
+    if (!(zone->d.za & NVME_ZA_RESET_RECOMMENDED)) {
+        if (now >= zone->full_ns && now - zone->full_ns >= lim) {
+            zone->d.za |= NVME_ZA_RESET_RECOMMENDED;
+            zone->d.rsvd3[0] &= ~0xc;       /* ZAI.RZRTL = 00b: RRL */
+            zone->rzr_ns = now;
+            zns_record_changed_zone(ns, zone->d.zslba);
+        }
+    } else if (rrl && now >= zone->rzr_ns && now - zone->rzr_ns >= rrl) {
+        zone->d.za &= ~NVME_ZA_RESET_RECOMMENDED;
+        zone->rzr_ns = 0;
+        zone->full_ns = now;
+        zns_record_changed_zone(ns, zone->d.zslba);
+    }
+}
+
+/*
  * Once a second: a zone written but not finished for fzr_sec gets Finish
  * Zone Recommended, with FZRTL 00b, so FRL is its limit (ZNS 1.4, 5.5). If
  * the host has not finished or filled it frl_sec later, the controller
  * finishes it itself, a Zone Active Excursion (5.6), and sets ZFC. Both
  * changes are the controller's own, so both enter the Changed Zone List.
+ * Full zones go to zns_rzr_check().
  */
-static void zns_fzr_tick(void *opaque)
+static void zns_za_tick(void *opaque)
 {
     NvmeNamespace *ns = opaque;
     struct zns_ssd *zns = ns->zns;
@@ -1257,7 +1294,14 @@ static void zns_fzr_tick(void *opaque)
         NvmeZone *zone = &ns->zone_array[i];
         NvmeZoneState st = zns_get_zone_state(zone);
 
-        if ((st != NVME_ZONE_STATE_IMPLICITLY_OPEN &&
+        if (zone->d.zt != NVME_ZONE_TYPE_SEQ_WRITE) {
+            continue;
+        }
+        if (st == NVME_ZONE_STATE_FULL) {
+            zns_rzr_check(ns, zone, now);
+            continue;
+        }
+        if (!lim || (st != NVME_ZONE_STATE_IMPLICITLY_OPEN &&
              st != NVME_ZONE_STATE_EXPLICITLY_OPEN &&
              st != NVME_ZONE_STATE_CLOSED) || !zone->act_ns) {
             continue;
@@ -1284,7 +1328,7 @@ static void zns_fzr_tick(void *opaque)
     }
     qemu_mutex_unlock(&zns->zone_lock);
 rearm:
-    timer_mod(zns->fzr_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+    timer_mod(zns->za_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
 }
 
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
@@ -2569,6 +2613,13 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     ns->zns->fzr_sec = n->zns_params.zns_fzr_sec;
     ns->zns->frl_sec = n->zns_params.zns_frl_sec;
+    if (n->zns_params.zns_rrl_sec && !n->zns_params.zns_rzr_sec) {
+        error_setg(errp, "zns_rrl_sec needs zns_rzr_sec: the limit follows "
+                   "Reset Zone Recommended");
+        return;
+    }
+    ns->zns->rzr_sec = n->zns_params.zns_rzr_sec;
+    ns->zns->rrl_sec = n->zns_params.zns_rrl_sec;
 
     /* only SLC, TLC and QLC have built-in figures; the rest need all three knobs */
     if (!ns->zns->timing.pg_rd_lat[ns->zns->flash_type] ||
@@ -2594,11 +2645,10 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
 
-    if (ns->zns->fzr_sec) {
+    if (ns->zns->fzr_sec || ns->zns->rzr_sec) {
         /* guest time, as the thermal model: a paused VM does not age zones */
-        ns->zns->fzr_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                          zns_fzr_tick, ns);
-        timer_mod(ns->zns->fzr_timer,
+        ns->zns->za_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, zns_za_tick, ns);
+        timer_mod(ns->zns->za_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
     }
 }

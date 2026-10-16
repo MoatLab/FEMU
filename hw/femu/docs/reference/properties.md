@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 204 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 206 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -234,6 +234,8 @@ Devices:
 | `zns_reset_by_fill` | `int32` | `0` | ZNS: non-zero makes a zone reset erase only the blocks that hold programmed pages, so its time and wear follow the zone's fill |
 | `zns_fzr_sec` | `uint32` | `0` | ZNS: seconds a zone may stay written but not finished before the controller sets Finish Zone Recommended and reports the zone as changed; 0 disables |
 | `zns_frl_sec` | `uint32` | `0` | ZNS: Finish Recommended Limit in seconds: after it, the controller finishes a zone with Finish Zone Recommended itself (a Zone Active Excursion); 0 means no excursion; needs zns_fzr_sec |
+| `zns_rzr_sec` | `uint32` | `0` | ZNS: seconds a zone may stay Full before the controller sets Reset Zone Recommended and reports the zone as changed; 0 disables |
+| `zns_rrl_sec` | `uint32` | `0` | ZNS: Reset Recommended Limit in seconds: after it, the controller refreshes a zone with Reset Zone Recommended itself and clears it; 0 means no refresh; needs zns_rzr_sec |
 | `zns_page_types` | `int32` | `0` | ZNS: non-zero gives each read the latency of its page type (lower to upper page), spread around the read latency of the flash type; programs keep one latency per wordline |
 | `zns_ecc_step_ns` | `int64` | `0` | ZNS: ECC read time in ns added per 750 erases of the block, up to 4 steps, as bbssd ecc_step_ns; 0 or more |
 | `zns_tsusp_ns` | `int64` | `0` | ZNS: overhead in ns added to a read that suspends a program or erase, 0 or more |

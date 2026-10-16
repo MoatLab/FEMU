@@ -2278,6 +2278,10 @@ typedef struct ZNSCtrlParams {
     uint32_t zns_fzr_sec;
     /* FRL: seconds from FZR to a Zone Active Excursion (0 = none) */
     uint32_t zns_frl_sec;
+    /* seconds a Full zone may stay before RZR (0 = off) */
+    uint32_t zns_rzr_sec;
+    /* RRL: seconds from RZR to the controller's own refresh (0 = none) */
+    uint32_t zns_rrl_sec;
     /* reads take the latency of their page type (0 = off: one latency) */
     int32_t zns_page_types;
     /* ECC read time per wear step, ns (0 = off) */

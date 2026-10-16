@@ -269,6 +269,36 @@ before.
 -device femu,devsz_mb=1024,femu_mode=3,zns_fzr_sec=60,zns_frl_sec=300
 ```
 
+- **Reset Zone Recommended.** A real device refreshes the data of a Full
+  zone after some time, to keep it readable. A host Reset makes that work
+  needless, so the device recommends one first. `zns_rzr_sec=N` sets
+  Reset Zone Recommended (RZR) on a zone that has been Full for N seconds
+  of guest time, with RZRTL 00b.
+
+  `zns_rrl_sec=M` reports RRL M in Identify. When RZR has been set for M
+  seconds, the controller refreshes the zone itself and clears RZR. The
+  zone stays Full and ages again from the refresh. Both changes enter the
+  Changed Zone List (ZNS 1.4, 5.4). A change comes at the first check
+  once its time is up, so up to a second late. A check that finds the
+  zones busy waits for the next one.
+
+```text
+ zone Full --(zns_rzr_sec)--> RZR, RZRTL 00b, changed zone
+   host resets the zone          --> Empty, RZR cleared, no event
+   zone goes Read Only or Offline --> RZR cleared
+   else --(zns_rrl_sec)--> refresh: RZR cleared, changed zone,
+                           zone stays Full and ages again
+ without zns_rrl_sec, RZR stays until the host resets the zone
+```
+
+Only Full zones get RZR, as the specification defines it. The refresh
+changes the attribute only: it takes no media time and no wear.
+
+<!-- femu-example: zns-rzr -->
+```
+-device femu,devsz_mb=1024,femu_mode=3,zns_rzr_sec=600,zns_rrl_sec=3600
+```
+
 ## Use it from the guest
 
 Check that Linux sees a zoned device:
@@ -349,8 +379,8 @@ names its namespace in dword 1 of the completion. Notice events stay
 masked until the host reads the list of that namespace; a read of another
 namespace's list leaves them masked.
 
-With `err_write_fail_ppm` and `zns_fzr_sec` unset nothing adds to the
-list, and it stays empty. With it set, one write in every 1,000,000 / `err_write_fail_ppm`
+With `err_write_fail_ppm`, `zns_fzr_sec` and `zns_rzr_sec` unset nothing
+adds to the list, and it stays empty. With it set, one write in every 1,000,000 / `err_write_fail_ppm`
 fails and makes its zone read only, the way a controller does when it can
 no longer program the zone. The failing write completes with Write Fault,
 later writes to that zone are refused as read only, the zone is added to
@@ -385,6 +415,7 @@ applications.
 | `zns_flash_type 2 has no built-in timing; set zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat` | MLC or PLC without the three latencies. |
 | `zns_flash_type must be in [1, 5]` | A cell type outside SLC to PLC. |
 | `zns_frl_sec needs zns_fzr_sec: an excursion follows Finish Zone Recommended` | Set `zns_fzr_sec` too, or drop `zns_frl_sec`. |
+| `zns_rrl_sec needs zns_rzr_sec: the limit follows Reset Zone Recommended` | Set `zns_rzr_sec` too, or drop `zns_rrl_sec`. |
 | `zoned namespaces need a logical block of 4 KiB or less; lba_index selects 8192 bytes` | `lba_index` picks a block larger than 4 KiB. |
 | `zns geometry gives N pages per block; must be in [1, 65536]` | The namespace is too small or too large for `zns_num_ch * zns_num_lun * zns_num_blk`. |
 | `FEMU zns: N zones exceed M blocks per plane ...` | Raise `zns_num_blk` or the namespace size. |

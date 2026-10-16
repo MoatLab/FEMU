@@ -217,11 +217,15 @@ struct zns_ssd {
     /*
      * Finish Zone Recommended (ZNS 1.4, 5.5) and Zone Active Excursions
      * (5.6): a zone written but not finished for fzr_sec gets FZR, and
-     * frl_sec later the controller finishes it. Checked once a second.
+     * frl_sec later the controller finishes it. Reset Zone Recommended
+     * (5.4): a zone Full for rzr_sec gets RZR, and rrl_sec later the
+     * controller refreshes its data itself. Checked once a second.
      */
     uint32_t fzr_sec;
     uint32_t frl_sec;
-    QEMUTimer *fzr_timer;
+    uint32_t rzr_sec;
+    uint32_t rrl_sec;
+    QEMUTimer *za_timer;
     uint64_t fzr_set;
     uint64_t zae_done;
     /*
@@ -416,6 +420,10 @@ typedef struct NvmeZone {
     uint64_t        act_ns;
     /* when Finish Zone Recommended was set, ns; 0 = not set */
     uint64_t        fzr_ns;
+    /* when the zone became Full, ns; 0 = not Full */
+    uint64_t        full_ns;
+    /* when Reset Zone Recommended was set, ns; 0 = not set */
+    uint64_t        rzr_ns;
     /* writes admitted and not yet finalized, under zone_lock */
     uint32_t        inflight;
     QTAILQ_ENTRY(NvmeZone) entry;

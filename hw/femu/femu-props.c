@@ -640,6 +640,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "ZNS: Finish Recommended Limit in seconds: after it, the controller "
       "finishes a zone with Finish Zone Recommended itself (a Zone Active "
       "Excursion); 0 means no excursion; needs zns_fzr_sec" },
+    { "zns_rzr_sec",
+      "ZNS: seconds a zone may stay Full before the controller sets Reset "
+      "Zone Recommended and reports the zone as changed; 0 disables" },
+    { "zns_rrl_sec",
+      "ZNS: Reset Recommended Limit in seconds: after it, the controller "
+      "refreshes a zone with Reset Zone Recommended itself and clears it; "
+      "0 means no refresh; needs zns_rzr_sec" },
     { "zns_page_types",
       "ZNS: non-zero gives each read the latency of its page type (lower "
       "to upper page), spread around the read latency of the flash type; "
