@@ -8068,6 +8068,150 @@ static void femu_test_dftl_tp_min(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* free lines of the only namespace, from query-femu */
+static uint32_t femu_free_lines(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    uint32_t n = qdict_get_int(qdict_get_qdict(ns, "line-counts"), "free");
+
+    qobject_unref(rsp);
+    return n;
+}
+
+/* x-tp-hold of the device at @path: keep pending TPs pending, or not */
+static void femu_tp_hold(QTestState *qts, const char *path, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'x-tp-hold','value':%i}}",
+                           path, hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* deallocate the one logical block @lba, with @buf for the range */
+static uint16_t femu_dealloc_lba(FemuCtrlState *c, uint64_t lba, uint64_t buf)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, 1);
+    stq_le_p(range + 8, lba);
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+}
+
+/*
+ * The set-up of the tests of the TP reserve rules. Pages are 512 bytes,
+ * so a TP holds 64 mappings and the 2 MiB namespace has 64 TPs; a line
+ * is 4 pages, and the CMT holds one TP.
+ *   - A sequential fill programs TPs 0 to 62 in turn, 4 to a TP line, and
+ *     leaves @free lines free. TP 63 stays dirty in the CMT.
+ *   - Under x-tp-hold, a deallocate of block 0 of TPs 1, 2, 3, 5, 6, 7 and
+ *     so on makes 47 TPs pending. Each old TP line keeps its first TP
+ *     valid, so publication empties no line.
+ * The hold is still on at return.
+ */
+static void femu_dftl_tp_pending(FemuCtrlState *c, const char *path,
+                                 uint64_t buf, uint64_t list, uint32_t free)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t v[7];
+    uint32_t tp, i;
+
+    qtest_memset(qts, buf, 0x5a, 4 * 4096);
+    /* 16 KiB per write, the MDTS of a device with read-only end of life */
+    for (i = 0; i < 64 * 64 / 8; i += 4) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, i, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, path, v);
+    g_assert_cmpuint(v[3], ==, 63);
+    g_assert_cmpuint(femu_free_lines(qts), ==, free);
+
+    femu_tp_hold(qts, path, true);
+    for (tp = 1; tp < 63; tp++) {
+        if (tp % 4) {
+            g_assert_cmphex(femu_dealloc_lba(c, tp * 64, list), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_tp_check(qts, path, v);
+    g_assert_cmpuint(v[0], ==, 64 * 64 - 47);
+    g_assert_cmpuint(v[6], ==, 47);
+    g_assert_cmpuint(femu_free_lines(qts), ==, free);
+}
+
+/*
+ * Forced collection keeps 2 free lines with dftl, and only the move of a
+ * TP line may take them (tp_wp_ready()). After the set-up above, with 5
+ * free lines:
+ *   - The hold ends, and a deallocate publishes the 47 TPs. They want 12
+ *     lines, and the TP pointer stops at the 2 lines of the reserve.
+ *   - Overwrites need collection. Its first victims are the old TP lines,
+ *     and each moves its one valid TP into the reserve.
+ * Every write succeeds, and the map, the TPs and the GTD agree. If TP
+ * traffic could take the reserve, the publication would leave no free
+ * line, no victim could move its TP, and the overwrites would fail.
+ */
+static void femu_test_dftl_tp_reserve(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 64 * 64 / 8;
+    g_autofree bool *rewritten = g_new0(bool, pages);
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t want = 64 * 64;
+    uint64_t v[7];
+    uint32_t free_lines, tp, i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_dftl_tp_pending(&c, id, buf, list, 5);
+
+    femu_tp_hold(qts, id, false);
+    /* block 64 has no mapping now: the deallocate only publishes */
+    g_assert_cmphex(femu_dealloc_lba(&c, 64, list), ==, NVME_SUCCESS);
+    free_lines = femu_free_lines(qts);
+    femu_tp_check(qts, id, v);
+    g_test_message("published: %u free lines, %" PRIu64 " TPs pending",
+                   free_lines, v[6]);
+
+    for (i = 0; i < 400; i++) {
+        uint32_t page = i * 37 % pages;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        rewritten[page] = true;
+    }
+    g_assert_cmpuint(free_lines, ==, 2);
+    g_assert_cmpuint(v[6], >, 0);
+
+    for (tp = 1; tp < 63; tp++) {
+        want -= tp % 4 && !rewritten[tp * 8];
+    }
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, want);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * A read waits for its translation. Pages 0 to 63 are in TP 0 and pages
  * 512 to 575 in TP 1; the CMT holds one TP, so writing TP 1 evicts TP 0
@@ -43796,6 +43940,15 @@ static void femu_register_nodes(void)
             "id=tp,devsz_mb=9,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
             "blks_per_pl=77,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,mapping=dftl,x-cmt-slots=1,gc_thres_pcent=99,"
+            "gc_thres_pcent_high=100"
+    });
+    /* 512-byte pages, 4-page lines and 5 free lines after a fill */
+    qos_add_test("dftl-tp-reserve", "femu", femu_test_dftl_tp_reserve,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=2,secsz=512,secs_per_pg=1,pgs_per_blk=2,"
+            "blks_per_pl=1046,pls_per_lun=1,luns_per_ch=2,nchs=1,"
+            "femu_mode=1,mapping=dftl,x-cmt-slots=1,gc_thres_pcent=100,"
             "gc_thres_pcent_high=100"
     });
     {
