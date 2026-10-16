@@ -320,10 +320,13 @@
 #
 # @unlisted: on no list the FTL keeps
 #
+# @retired: out of service: a block reached its erase limit
+#     (blk_pe_limit).  It holds no data.
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuReclaimUnitState',
-  'data': [ 'free', 'open', 'full', 'victim', 'unlisted' ] }
+  'data': [ 'free', 'open', 'full', 'victim', 'unlisted', 'retired' ] }
 
 ##
 # @FemuRuHandleType:
@@ -377,13 +380,15 @@
 #
 # @victim: units waiting for garbage collection
 #
+# @retired: units out of service after a block wore out
+#
 # @total: every reclaim unit, over every reclaim group
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuReclaimUnitCounts',
   'data': { 'free': 'uint32', 'open': 'uint32', 'full': 'uint32',
-            'victim': 'uint32', 'total': 'uint32' } }
+            'victim': 'uint32', 'retired': 'uint32', 'total': 'uint32' } }
 
 ##
 # @FemuReclaimUnitInfo:

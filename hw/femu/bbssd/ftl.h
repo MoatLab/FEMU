@@ -380,6 +380,8 @@ typedef struct ru_mgmt {
 
     uint64_t gc_thres_rus;
     uint64_t gc_thres_rus_high;
+    /* units a worn-out block took out of service (blk_pe_limit) */
+    uint64_t retired_ru_cnt;
     double gc_thres_pcent;
     double gc_thres_pcent_high;
 } ru_mgmt;
@@ -413,6 +415,8 @@ struct FemuReclaimUnit {
     float my_cb;
     /* a refresh has taken the unit off every list for its move */
     bool reclaiming;
+    /* a worn-out block took the unit out of service: on no list, no data */
+    bool retired;
 };
 
 struct FemuRuHandle {
@@ -695,7 +699,8 @@ struct ssd {
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
-    int wear_floor_lines;           /* usable lines retirement keeps */
+    /* usable lines retirement keeps; under FDP, units of each group */
+    int wear_floor_lines;
     int spare_lines;                /* lines held back as spare blocks */
     bool wear_on;                   /* blk_pe_limit set */
     /*
@@ -778,6 +783,7 @@ uint64_t bb_eol_reserve_lines(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
+uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns);

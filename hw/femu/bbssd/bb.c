@@ -214,10 +214,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
          * group (Base 2.3, 8.1.11), and a write within the namespace
          * capacity must not fail, so one group must hold every namespace.
          */
-        reserve = endgrp->fdp.nruh;
-        reserve += endgrp->fdp.nruh -
-                   (n->subsys->params.fdp.isolation_mode ? 1 : 0);
-        reserve += bb_fdp_forced_units(n, pool);
+        reserve = bb_fdp_reserve_units(n, pool);
         usable_pgs = pool > reserve ? (pool - reserve) * unit_pgs : 0;
         /* every namespace of the controller places into this one FTL */
         exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);

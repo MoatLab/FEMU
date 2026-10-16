@@ -1148,13 +1148,11 @@ static void fdp_count_gc_writes(struct ssd *ssd, FemuReclaimUnit *victim_ru,
 }
 
 /*
- * mark_ru_free - reset a victim RU to free state after GC
+ * fdp_ru_reset - reset an erased RU to the state of a free one, without
+ * putting it on the free list
  */
-static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
-                         FemuReclaimUnit *ru)
+static void fdp_ru_reset(struct ssd *ssd, FemuReclaimUnit *ru)
 {
-    struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
-
     ftl_assert(ru != NULL);
 
     /*
@@ -1193,9 +1191,123 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ftl_assert(ru->ruh != NULL);
     ftl_assert(ru->ruh->ruh != NULL);
     fdp_ru_sync_ruamw(ssd, ru);
+}
 
+/*
+ * mark_ru_free - reset a victim RU to free state after GC
+ */
+static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
+                         FemuReclaimUnit *ru)
+{
+    struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
+
+    fdp_ru_reset(ssd, ru);
     QTAILQ_INSERT_TAIL(&rm->free_ru_list, ru, entry);
     rm->free_ru_cnt++;
+}
+
+/*
+ * After the erase of @ru, deal with each of its blocks that has reached its
+ * erase limit (blk_pe_limit), as ssd_wear_out_line() does for a line. The
+ * unit holds no data now. It retires only while its group keeps
+ * wear_floor_lines units and one free unit besides it, so collection still
+ * has a unit to move pages into. Otherwise the worn-out blocks stay in
+ * service, overworn, each counted once. Called with wear_lock held.
+ * Returns true when the unit was retired.
+ */
+static bool fdp_wear_out_ru(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    struct ssdparams *spp = &ssd->sp;
+    FemuReclaimGroup *rg = &ssd->rg[ru->rgidx];
+    struct ru_mgmt *rm = rg->ru_mgmt;
+    int64_t usable = (int64_t)rg->tt_nru - (int64_t)rm->retired_ru_cnt;
+    bool retire = false;
+    int dead = 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < ru->n_lines; i++) {
+            for (int ch = rg->ch0; ch < rg->ch0 + rg->nch; ch++) {
+                for (int lun = rg->lun0; lun < rg->lun0 + rg->nlun; lun++) {
+                    for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                        struct nand_block *blk = &ssd->ch[ch].lun[lun].
+                                                 pl[pl].blk[ru->lines[i]->id];
+                        bool worn = blk->pe_limit &&
+                                    blk->erase_cnt >= blk->pe_limit;
+
+                        if (!pass) {
+                            dead += worn;
+                        } else if (!retire) {
+                            if (worn && !blk->overworn) {
+                                blk->overworn = true;
+                                ssd->overworn_blocks++;
+                            }
+                        } else {
+                            if (blk->overworn) {
+                                blk->overworn = false;
+                                ssd->overworn_blocks--;
+                            }
+                            if (worn) {
+                                ssd->grown_bad_blocks++;
+                            } else {
+                                ssd->sacrificed_blocks++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!pass && !dead) {
+            return false;
+        }
+        retire = usable - 1 >= ssd->wear_floor_lines && rm->free_ru_cnt >= 1;
+    }
+    if (!retire) {
+        return false;
+    }
+
+    fdp_ru_reset(ssd, ru);
+    ru->retired = true;
+    rm->retired_ru_cnt++;
+    ssd->lm.retired_line_cnt += ru->n_lines;
+    return true;
+}
+
+/*
+ * The wear-out step of a collected unit: retire it, or leave it to be
+ * freed. The warnings this crosses go to the host as for a line.
+ */
+static bool fdp_wear_out(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    uint8_t spare = ssd_available_spare(ssd);
+    uint64_t overworn = ssd->overworn_blocks;
+    bool retired;
+
+    qemu_mutex_lock(&ssd->wear_lock);
+    retired = fdp_wear_out_ru(ssd, ru);
+    qemu_mutex_unlock(&ssd->wear_lock);
+    ssd_wear_events(ssd, spare, overworn);
+    return retired;
+}
+
+/*
+ * SMART Available Spare under FDP, with wear_lock held: in each group, the
+ * units retirement may still take against those it could take at start;
+ * the group with the least left speaks for the endurance group. No room to
+ * retire at start means nothing is used up.
+ */
+uint8_t ssd_fdp_wear_spare(struct ssd *ssd)
+{
+    uint8_t spare = 100;
+
+    for (uint64_t g = 0; ssd->rg && g < ssd->nrg; g++) {
+        int64_t start = (int64_t)ssd->rg[g].tt_nru - ssd->wear_floor_lines;
+        int64_t left = start - (int64_t)ssd->rg[g].ru_mgmt->retired_ru_cnt;
+
+        if (start > 0) {
+            spare = MIN(spare, MAX(left, 0) * 100 / start);
+        }
+    }
+    return spare;
 }
 
 /*
@@ -1333,6 +1445,11 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     if (victim_ruh->ru_mgmt &&
         victim_ruh->ru_mgmt[victim_ru->rgidx].in_use > 0) {
         victim_ruh->ru_mgmt[victim_ru->rgidx].in_use--;
+    }
+
+    /* a worn-out block can take the unit out of service instead */
+    if (ssd->wear_on && fdp_wear_out(ssd, victim_ru)) {
+        return 0;
     }
 
     /*
@@ -2969,8 +3086,8 @@ static uint64_t fdp_check_isolation(struct ssd *ssd)
 
 /*
  * ssd_fdp_check_units - count reclaim units not held by exactly one place:
- * the free list, the full list, a group victim heap, or a handle's write or
- * collection frontier. Under the per-handle strategy a victim of a
+ * the free list, the full list, a group victim heap, a handle's write or
+ * collection frontier, or retirement, where a unit holds nothing. Under the per-handle strategy a victim of a
  * persistently isolated handle must also sit once in that handle's heap,
  * and no other unit may. Heap entries whose stored position is wrong count
  * too, and so does a unit whose programmed bytes differ from its valid and
@@ -3034,6 +3151,7 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
     }
     for (uint64_t g = 0; g < ssd->nrg; g++) {
         struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+        uint64_t retired = 0;
 
         for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
             FemuReclaimUnit *u = &ssd->rg[g].rus[j];
@@ -3041,11 +3159,19 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
             bool want_ruh = in_grp[i] && rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
                             u->ruh && u->ruh->ru_mgmt;
 
+            /* a retired unit is its own place, and holds nothing */
+            if (u->retired) {
+                fdp_check_place(ssd, u, seen);
+                bad += u->vpc != 0 || u->ipc != 0 || u->prog_bytes != 0;
+                retired++;
+            }
+
             bad += seen[i] + in_grp[i] != 1;
             bad += in_ruh[i] != (want_ruh ? 1 : 0);
             bad += fdp_check_ruamw(ssd, u);
             bad += fdp_check_dies(ssd, u);
         }
+        bad += retired != rm->retired_ru_cnt;
     }
     return bad + fdp_check_isolation(ssd);
 }

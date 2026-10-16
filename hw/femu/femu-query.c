@@ -462,6 +462,7 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     cnt->open = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_OPEN];
     cnt->full = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_FULL];
     cnt->victim = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_VICTIM];
+    cnt->retired = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_RETIRED];
     cnt->total = q->nrg * q->rus_per_rg;
     fdp->unit_counts = cnt;
 

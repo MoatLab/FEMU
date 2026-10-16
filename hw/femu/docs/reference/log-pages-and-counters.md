@@ -28,7 +28,7 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 104 | 8 | Erases charged to log-block merges |
 | 112 | 8 | Blocks in service past their erase limit (`blk_pe_limit`) |
 | 120 | 8 | Worn-out blocks taken out of service |
-| 128 | 8 | Lines taken out of service |
+| 128 | 8 | Lines taken out of service (under FDP, the lines of retired reclaim units) |
 | 136 | 8 | Lines moved by static wear levelling (`wl_spread`) |
 | 144 | 8 | Pages those moves copied (also counted at offset 16) |
 | 152 | 8 | NAND pages host writes covered only in part (a device reads such a page to program it again; FEMU does not charge that read) |

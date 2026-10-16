@@ -2882,14 +2882,16 @@ uint64_t femu_eol_max_bytes(FemuCtrl *n)
 
 /*
  * Block wear-out and wear levelling run only in the plain line FTL of one
- * bbssd or CSD namespace. Each refused setting has its own write path or
- * allocator that the wear model does not cover yet.
+ * bbssd or CSD namespace, and block wear-out also in the reclaim units of
+ * FDP. Each refused setting has its own write path or allocator that the
+ * wear model does not cover yet.
  */
 static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
 {
     const BbCtrlParams *bp = &n->bb_params;
     const char *map = bp->mapping_scheme;
     const char *why = NULL;
+    bool fdp = n->subsys && n->subsys->params.fdp.enabled;
 
     if (!n->blk_pe_limit) {
         if (n->spare_lines) {
@@ -2915,8 +2917,11 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     }
     if (!BBSSD(n) && !CSD(n)) {
         why = "a mode other than bbssd or CSD";
-    } else if (n->subsys && n->subsys->params.fdp.enabled) {
-        why = "FDP";
+    } else if (fdp && (bp->wl_spread || bp->gc_pace)) {
+        /* levelling and pacing move lines, and FDP has no line pointer */
+        error_setg(errp, "femu: %s is not supported with FDP",
+                   bp->wl_spread ? "wl_spread" : "gc_pace");
+        return false;
     } else if (n->cxl_dev) {
         why = "cxl_ssd";
     } else if (bp->buffer_size > 0) {
@@ -2928,9 +2933,11 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
         why = "hot_cold_sep";
     } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
         why = "a mapping other than page or dftl";
-    } else if (bp->pls_per_lun > 1) {
+    } else if (bp->pls_per_lun > 1 && !fdp) {
+        /* a spare swap moves one plane's block; FDP has no spare lines */
         why = "pls_per_lun > 1";
-    } else if (n->num_namespaces > 1 || n->namespace_modes) {
+    } else if ((n->num_namespaces > 1 && !fdp) || n->namespace_modes) {
+        /* FDP namespaces share one FTL, which counts them all */
         why = "more than one namespace";
     } else if (nvme_ns_shared(n) || n->ns_mgmt) {
         why = "namespace management or shared namespaces";
@@ -2942,6 +2949,31 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
                    n->blk_pe_limit ? "blk_pe_limit" :
                    bp->wl_spread ? "wl_spread" : "gc_pace", why);
         return false;
+    }
+    /*
+     * Under FDP a worn-out block retires its reclaim unit, or stays in
+     * service with the reliability warning. The read-only end of life
+     * needs erased units held back in every group for the writes in
+     * flight, and a handle update or a padded unit uses them up, so it is
+     * not modelled there. A spare block would change a unit's blocks, and
+     * the whole-device trim erases every block outside the wear check.
+     */
+    if (fdp && n->blk_pe_limit) {
+        if (n->spare_lines) {
+            why = "spare_lines";
+        } else if (bp->fdp_trim_erase_all) {
+            why = "fdp_trim_erase_all";
+        } else if (n->eol_read_only) {
+            error_setg(errp, "femu: eol_read_only is not supported with FDP "
+                       "and blk_pe_limit; set eol_read_only=off");
+            return false;
+        }
+        if (why) {
+            error_setg(errp, "femu: %s is not supported with FDP and "
+                       "blk_pe_limit", why);
+            return false;
+        }
+        return true;
     }
     if (!n->blk_pe_limit || !n->eol_read_only) {
         return true;

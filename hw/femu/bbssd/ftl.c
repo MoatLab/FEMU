@@ -73,6 +73,25 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     }
 
     /*
+     * Under FDP the units of each group retire, and a group keeps what
+     * bb_check_capacity() asks of it, since a host may place every
+     * namespace in one group (Base 2.3, 8.1.11): the units the namespaces
+     * fill, the units it keeps for handles and collection, and one more.
+     */
+    if (n->subsys && n->subsys->params.fdp.enabled) {
+        NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+        uint64_t pool = endgrp->fdp.nru ?
+                        MIN((uint64_t)spp->tt_lines, endgrp->fdp.nru) :
+                        (uint64_t)spp->tt_lines;
+        uint64_t unit = spp->pgs_per_line / MAX(endgrp->fdp.nrg, 1);
+        uint64_t pages = DIV_ROUND_UP(bb_ftl_bytes(n, ns),
+                                      (uint64_t)spp->secsz * spp->secs_per_pg);
+
+        ssd->wear_floor_lines = DIV_ROUND_UP(pages, unit) +
+                                bb_fdp_reserve_units(n, pool) + 1;
+        return;
+    }
+    /*
      * Retirement keeps the lines the namespace needs, the free lines forced
      * collection keeps, the data write pointer's line and one more.
      */
@@ -768,6 +787,9 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
     /* the media went read-only because nothing could replace a block */
     if (ssd->media_ro) {
         return 0;
+    }
+    if (ssd->fdp_enabled) {
+        return ssd_fdp_wear_spare(ssd);
     }
     if (ssd->spare_lines) {
         for (int ch = 0; ch < spp->nchs; ch++) {

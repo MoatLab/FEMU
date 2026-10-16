@@ -232,20 +232,27 @@ All of these are off by default.
 - With `mapping=dftl`, read-only media opens no new translation page line.
   The reserve stays for the writes in flight. Their mapping changes stay in
   the CMT or pending, in power-loss-protected DRAM.
-- The controller raises a SMART asynchronous event once for each of these,
-  if the host enabled its bit of Asynchronous Event Configuration:
+- The controller raises a SMART asynchronous event each time one of these
+  starts, if the host enabled its bit of Asynchronous Event Configuration:
 
   | Condition | AEC bit | Information |
   | --- | --- | --- |
   | the spare falls below its threshold | 0 | 02h |
-  | the first block stays in service past its limit | 2 | 00h |
+  | a block stays in service past its limit while none did | 2 | 00h |
   | the media goes read-only | 3 | 00h |
 
-- The read-only end of life covers bbssd and CSD (the NVM namespace). FDP
-  keeps refusing `blk_pe_limit`: a handle update leaves a unit part written
-  for each command, and units are padded and erased outside the reserve. ZNS ends the life of
-  a zone with the Read Only and Offline zone states. This model does not
-  drive them. KV has no NVM write path. Both refuse `blk_pe_limit`.
+- The read-only end of life covers bbssd and CSD (the NVM namespace).
+- FDP takes `blk_pe_limit` with `eol_read_only=off` only. A worn-out block
+  retires its reclaim unit while the unit's group keeps the units the
+  namespaces and placement need; otherwise the block stays in service with
+  critical warning bit 2. SMART and the Endurance Group Information log
+  report it ([FDP wear-out](../design/fdp.md#block-wear-out)). The
+  read-only end of life stays refused under FDP: a handle update can leave
+  a unit part written for each command, and units are padded outside a
+  reserve.
+- ZNS ends the life of a zone with the Read Only and Offline zone states.
+  This model does not drive them. KV has no NVM write path. Both refuse
+  `blk_pe_limit`.
 - With `blk_pe_limit`, SMART Percentage Used counts erases against the sum
   of the blocks' limits. `query-femu` shows retired and spare lines with
   their own states.

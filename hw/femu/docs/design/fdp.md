@@ -488,6 +488,55 @@ instead resets every unit, handle and mapping on any Dataset Management
 deallocate, ignoring the ranges; Write Zeroes with Deallocate still unmaps
 only its range.
 
+### Block wear-out
+
+With `blk_pe_limit` (and `eol_read_only=off`), each block has an erase
+limit, as in bbssd ([end of life](ftl.md#read-only-end-of-life-eol_read_only)).
+The check runs in `fdp_collect_ru()` after the erase of every block of the
+victim unit. The unit holds no data then. Collection, read reclaim and
+retention refresh all reach it there.
+
+```text
+ erase of unit U in group g takes a block of U to its limit
+   U(g) - 1 >= floor and a free unit besides U  --> U retires
+   otherwise                                     --> U goes back to the
+                                                     free list; its worn-out
+                                                     blocks stay in service
+                                                     (overworn, bit 2)
+
+ U(g)  = units of group g - retired units of group g
+ floor = units the namespaces fill (ceil(exposed pages / unit pages))
+       + one unit per handle + one per persistently isolated handle
+       + the units forced collection keeps (at realize) + 1
+```
+
+- The floor is what `bb_check_capacity()` asks of the pool at realize,
+  plus one unit. Each group keeps its own floor, since a host may place all
+  of its data in one group (Base 2.3, 8.1.11).
+- The free unit besides U is where the next collection moves pages to.
+- A retired unit is on no list, holds no data and has no handle. It
+  keeps its blocks; their erase counts no longer change.
+- SMART Available Spare is the worst group's share of the units it may
+  still retire: `(units - floor - retired) * 100 / (units - floor)`, or
+  100 when the group starts at or below the floor.
+- SMART critical warning bit 2, the Endurance Group Critical Warning
+  Summary, and the Endurance Group Information log (09h) critical warning,
+  Available Spare and Percentage Used all follow the same state. Crossing
+  into a warning raises the SMART asynchronous event the host enabled.
+- No FDP event reports a retired unit; the specification has none. The
+  moves before the erase are reported as before. The configuration log
+  and RUH Status do not change.
+- Log page C0h offset 128 counts the lines of retired units. `query-femu`
+  shows them in the `retired` state.
+
+This small device retires units after a few thousand writes, then keeps
+worn-out blocks in service:
+
+<!-- femu-example: design-fdp-wear -->
+```text
+-device femu-subsys,id=fdpw,fdp=on,fdp.nruh=4 -device femu,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,blks_per_pl=40,luns_per_ch=2,nchs=2,subsys=fdpw,blk_pe_limit=8,eol_read_only=off
+```
+
 ## Log pages and features
 
 All four FDP log pages take endurance group 1 in the Log Specific
@@ -785,6 +834,13 @@ last:
 - The handle counters of query-femu are 64-bit and stop at their largest
   value.
 - Metadata, Streams and Namespace Management do not combine with FDP.
+- `blk_pe_limit` needs `eol_read_only=off`. The read-only end of life
+  would need erased units held back in each group for the writes in
+  flight, and a rule for RUH Update and unit padding during the drain.
+  `spare_lines` and `fdp_trim_erase_all` are refused with it.
+- With `gc_thres_pcent_high=100` no unit is kept free for collection. A
+  persistently isolated handle then may find no unit to move pages into,
+  and a write can fail with Capacity Exceeded before the namespace is full.
 
 ## How to extend it
 

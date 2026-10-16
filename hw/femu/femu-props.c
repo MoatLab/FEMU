@@ -437,15 +437,17 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, KV: blocks marked bad at start, capped at the block "
       "count, which lowers SMART Available Spare" },
     { "blk_pe_limit",
-      "bbssd, CSD: mean program/erase cycles a block survives before it "
-      "wears out; 0 (default) turns wear-out off. When no block can replace "
-      "a worn-out one, the media goes read-only (eol_read_only)" },
+      "bbssd, CSD, also FDP: mean program/erase cycles a block survives "
+      "before it wears out; 0 (default) turns wear-out off. When no block "
+      "can replace a worn-out one, the media goes read-only (eol_read_only). "
+      "FDP needs eol_read_only=off: a reclaim unit retires, or its worn-out "
+      "blocks stay in service" },
     { "blk_pe_spread",
-      "bbssd, CSD: how far each block's limit varies from blk_pe_limit, in "
-      "percent, 0 to 90" },
+      "bbssd, CSD, also FDP: how far each block's limit varies from "
+      "blk_pe_limit, in percent, 0 to 90" },
     { "blk_pe_seed",
-      "bbssd, CSD: seed of the per-block erase limits; one seed gives the "
-      "same limits on every run" },
+      "bbssd, CSD, also FDP: seed of the per-block erase limits; one seed "
+      "gives the same limits on every run" },
     { "energy_read_nj",
       "bbssd, CSD, KV: energy of one plane read in nJ, for the energy total "
       "in log page C0h; 0 (default) gives no figure" },
@@ -478,7 +480,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "reserve lines for the writes in flight; needs mdts 1 or more and "
       "limits Write Zeroes (WZSL) to mdts and Copy (MCL) to mdts or one "
       "block. off keeps a worn-out block in service with the SMART "
-      "reliability warning" },
+      "reliability warning. FDP refuses on" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },

@@ -143,6 +143,12 @@ static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
         QTAILQ_FOREACH(ru, &ssd->rg[g].ru_mgmt->free_ru_list, entry) {
             state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FREE;
         }
+        for (int i = 0; i < ssd->rg[g].tt_nru; i++) {
+            if (ssd->rg[g].rus[i].retired) {
+                state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
+                    FEMU_RECLAIM_UNIT_STATE_RETIRED;
+            }
+        }
     }
 }
 
@@ -204,6 +210,7 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
         out->unit = ru->ruidx;
         out->state = q->ru_state[i];
         out->has_handle = out->state != FEMU_RECLAIM_UNIT_STATE_FREE &&
+                          out->state != FEMU_RECLAIM_UNIT_STATE_RETIRED &&
                           ru->ruh;
         out->handle = out->has_handle ? ru->ruh->ruhid : 0;
         out->vpc = ru->vpc;

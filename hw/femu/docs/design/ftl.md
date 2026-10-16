@@ -1152,7 +1152,7 @@ does inside the FTL and what it interacts with.
 | `gc_thres_pcent_high` | forced GC watermark; sizes the reserve | lower values cost exposed capacity |
 | `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
-| `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is |
+| `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is, and under FDP |
 | `gc_strategy` | reclaim unit victim selection | FDP only; a `gc_policy` other than `greedy` replaces it |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams and FDP |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
@@ -1170,7 +1170,7 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `pe_cycles_rated` | Percentage Used denominator | overrides the `nand_cell_type` rating |
 | `nand_bad_blocks` | Available Spare | placement ignores it |
-| wear events | the FTL thread sets a pending SMART warning bit when the spare crosses below 20, the first block is overworn, or the media goes read-only; the controller's event bottom half raises it if Asynchronous Event Configuration enables it. The FTL thread also writes the warning to the Persistent Event log at the change | once each; a controller reset drops a pending bit, not the log entry |
+| wear events | the FTL thread sets a pending SMART warning bit when the spare crosses below 20, a block is overworn while none was, or the media goes read-only; the controller's event bottom half raises it if Asynchronous Event Configuration enables it. The FTL thread also writes the warning to the Persistent Event log at the change | once at each start of a condition; a controller reset drops a pending bit, not the log entry |
 | `spare_lines` | per-plane pool of replacement blocks: a worn-out block swaps its whole state with a spare block of its plane, so addresses do not change; Available Spare follows the emptiest plane | needs `blk_pe_limit`; the namespace must fit without the spare lines |
 | `blk_pe_limit`, `blk_pe_spread`, `blk_pe_seed` | per-block erase limit; after a line erase that takes a block to it, the line retires while usable lines stay at or above the namespace's lines + forced collection lines + 2; otherwise the media goes read-only ([end of life](#read-only-end-of-life-eol_read_only)) | refused with the settings the parameter manual lists |
 | `eol_read_only` | on (default): read-only end of life, reserve lines and page-credit admission; off: retirement also needs an open line and a free line, and a block that cannot retire stays in service (overworn) and sets SMART critical warning bit 2 | has an effect only with `blk_pe_limit`; on needs `mdts` 1 or more |

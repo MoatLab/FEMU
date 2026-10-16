@@ -4991,25 +4991,39 @@ static uint16_t femu_write_zeroes(FemuCtrlState *c, uint64_t slba, uint32_t nlb)
     return FEMU_SC(status);
 }
 
-/* the FTL trace's fill and 600 overwrites, every write required to succeed */
-static void femu_wear_workload(FemuCtrlState *c, uint64_t buf, uint64_t list)
+/*
+ * The FTL trace's fill and 600 overwrites, every write required to succeed,
+ * through placement identifier @pid, or none when it is -1. With -2 the
+ * writes take placement handles 0 to 3 in turn.
+ */
+static void femu_wear_workload_placed(FemuCtrlState *c, uint64_t buf,
+                                      uint64_t list, int pid)
 {
     uint32_t seed = 1;
     int i;
 
     for (i = 0; i < 256; i += 64) {
-        g_assert_cmphex(FEMU_SC(femu_write_pages(c, i, 64, buf, list)), ==,
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(c, i, 64, buf, list,
+                                                        pid == -2 ? i / 64 :
+                                                        pid)), ==,
                         NVME_SUCCESS);
     }
     for (i = 0; i < 600; i++) {
         uint32_t npages = i % 4 == 3 ? 64 : 1;
 
         seed = seed * 1103515245 + 12345;
-        g_assert_cmphex(FEMU_SC(femu_write_pages(c, (seed >> 8) %
-                                                 (256 - npages + 1), npages,
-                                                 buf, list)), ==,
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(c, (seed >> 8) %
+                                                        (256 - npages + 1),
+                                                        npages, buf, list,
+                                                        pid == -2 ? i % 4 :
+                                                        pid)), ==,
                         NVME_SUCCESS);
     }
+}
+
+static void femu_wear_workload(FemuCtrlState *c, uint64_t buf, uint64_t list)
+{
+    femu_wear_workload_placed(c, buf, list, -1);
 }
 
 static void femu_test_wear(void *obj, void *data, QGuestAllocator *alloc)
@@ -14393,6 +14407,268 @@ static uint64_t femu_fdp_check(QTestState *qts)
 
 static int femu_pd2_events(FemuCtrlState *c, uint64_t log, bool host,
                            uint8_t type, uint16_t *ruhid);
+
+/*
+ * The most erases of a block of each reclaim unit, by group and then by unit,
+ * into @erase, or -1 for a unit not retired. Returns the retired units. With
+ * @idle set, no unit of a group above 0 may have been erased.
+ */
+static int femu_fdp_retired_erases(QTestState *qts, int64_t *erase, int max,
+                                   bool idle)
+{
+    QListEntry *e;
+    QDict *rsp;
+    QDict *fdp = qdict_get_qdict(femu_query_ns(qts, "'kind':'reclaim-units',"
+                                               "'limit':4096", &rsp), "fdp");
+    int i = 0;
+    int n = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+        bool r = !strcmp(qdict_get_str(u, "state"), "retired");
+
+        g_assert_cmpint(i, <, max);
+        erase[i++] = r ? qdict_get_int(u, "erase-max") : -1;
+        n += r;
+        if (idle && qdict_get_int(u, "group")) {
+            g_assert_cmpuint(qdict_get_int(u, "erase-max"), ==, 0);
+        }
+    }
+    qobject_unref(rsp);
+    return n;
+}
+
+/*
+ * Block wear-out under FDP (blk_pe_limit, eol_read_only=off). The wear
+ * workload erases every reclaim unit many times. @data pins blocks in
+ * service past their limit, worn-out blocks out of service and retired
+ * units from log page C0h, then SMART Available Spare and Percentage Used.
+ * Every write must succeed: a unit retires only while its group keeps the
+ * units the namespace and placement need. SMART and the Endurance Group
+ * Information log agree, the units hold every mapped page, and query-femu
+ * lists the retired units with no data and no handle.
+ */
+static void femu_test_wear_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    /* "rg0": every write names reclaim group 0, handle 0 */
+    bool rg0 = strstr(data, "rg0");
+    /* "handles": the writes take handles 0 to 3 in turn */
+    int pid = strstr(data, "handles") ? -2 : rg0 ? 0 : -1;
+    /* "format": Format NVM after the wear, then the workload again */
+    bool format = strstr(data, "format");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint64_t want[5];
+    uint64_t mapped, lost, orphans;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t smart[512];
+    uint8_t eg[512];
+    uint64_t got[3];
+    uint32_t retired = 0;
+    uint64_t nsze;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *fdp;
+    NvmeCmd cmd;
+    int i;
+
+    g_assert_cmpint(sscanf(data, "%" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64, &want[0], &want[1],
+                           &want[2], &want[3], &want[4]), ==, 5);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* two reclaim groups take 4 KiB blocks (lba_index=3) */
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload_placed(&c, buf, list, pid);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(smart), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, smart, sizeof(smart));
+    for (i = 0; i < 3; i++) {
+        got[i] = ldq_le_p(smart + 112 + 8 * i);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(smart), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, smart, sizeof(smart));
+    g_test_message("overworn %" PRIu64 " grown bad %" PRIu64 " retired %"
+                   PRIu64 "; critical warning 0x%x available spare %u "
+                   "percentage used %u", got[0], got[1], got[2], smart[0],
+                   smart[3], smart[5]);
+    for (i = 0; i < 3; i++) {
+        g_assert_cmpuint(got[i], ==, want[i]);
+    }
+    g_assert_cmpuint(smart[0] & NVME_SMART_RELIABILITY, ==,
+                     want[0] ? NVME_SMART_RELIABILITY : 0);
+    g_assert_cmpuint(smart[3], ==, want[3]);
+    g_assert_cmpuint(smart[5], ==, want[4]);
+    g_assert_cmpuint(smart[0] & NVME_SMART_SPARE, ==,
+                     want[3] < FEMU_SPARE_THRESHOLD ? NVME_SMART_SPARE : 0);
+    /* the one endurance group holds all the media: EGCWS repeats it */
+    g_assert_cmpuint(smart[6], ==,
+                     smart[0] & (NVME_SMART_SPARE | NVME_SMART_RELIABILITY));
+
+    /* Endurance Group 1: critical warning, spare and used as in SMART */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(NVME_LOG_ENDGRP | ((sizeof(eg) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, eg, sizeof(eg));
+    g_assert_cmpuint(eg[0], ==, smart[6]);
+    g_assert_cmpuint(eg[3], ==, smart[3]);
+    g_assert_cmpuint(eg[5], ==, smart[5]);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    fdp = qdict_get_qdict(femu_query_ns(qts, "'kind':'reclaim-units',"
+                                        "'limit':4096", &rsp), "fdp");
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (strcmp(qdict_get_str(u, "state"), "retired")) {
+            continue;
+        }
+        retired++;
+        g_assert_false(qdict_haskey(u, "handle"));
+        g_assert_cmpuint(qdict_get_int(u, "vpc"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(u, "ipc"), ==, 0);
+        /* data placed in one group wears that group alone */
+        if (rg0) {
+            g_assert_cmpuint(qdict_get_int(u, "group"), ==, 0);
+        }
+    }
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (rg0 && qdict_get_int(u, "group")) {
+            g_assert_cmpuint(qdict_get_int(u, "erase-max"), ==, 0);
+        }
+    }
+    g_assert_cmpuint(retired, ==, want[2]);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "retired"), ==, want[2]);
+    qobject_unref(rsp);
+
+    /*
+     * Format deallocates the data but keeps the media: retired units stay
+     * retired, and the namespace takes the whole workload again.
+     */
+    if (format) {
+        g_autofree int64_t *before = g_new0(int64_t, 4096);
+        g_autofree int64_t *after = g_new0(int64_t, 4096);
+        int units;
+
+        units = femu_fdp_retired_erases(qts, before, 4096, rg0);
+        g_assert_cmpint(units, ==, want[2]);
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, c.lba_size == 4096 ? 3 : 0,
+                                            0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+        /* the same units stay retired, and none is erased again */
+        g_assert_cmpint(femu_fdp_retired_erases(qts, after, 4096, rg0), ==,
+                        units);
+        for (i = 0; i < 4096; i++) {
+            g_assert_cmpint(after[i], ==, before[i]);
+        }
+        femu_wear_workload_placed(&c, buf, list, pid);
+        femu_fdp_retired_erases(qts, after, 4096, rg0);
+        for (i = 0; i < 4096; i++) {
+            if (before[i] >= 0) {
+                g_assert_cmpint(after[i], ==, before[i]);
+            }
+        }
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                             sizeof(smart), 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, log, smart, sizeof(smart));
+        g_test_message("after format: retired %" PRIu64,
+                       ldq_le_p(smart + 128));
+        g_assert_cmpuint(ldq_le_p(smart + 128), >=, want[2]);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 256);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/*
+ * FDP takes blk_pe_limit with eol_read_only=off, also with planes and
+ * namespaces the line FTL refuses. It refuses the read-only end of life,
+ * spare lines, the whole-device trim, levelling and pacing.
+ */
+static void femu_test_wear_fdp_props(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    /* a placement subsystem takes one controller: each success has its own */
+    const struct {
+        const char *opts;
+        const char *msg;        /* NULL: realize succeeds */
+    } cases[] = {
+        { "'blk_pe_limit':8", "set eol_read_only=off" },
+        { "'blk_pe_limit':8,'eol_read_only':true", "set eol_read_only=off" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'spare_lines':2",
+          "spare_lines is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'fdp_trim_erase_all':1",
+          "fdp_trim_erase_all is not supported with FDP" },
+        { "'wl_spread':4", "wl_spread is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'gc_pace':true",
+          "gc_pace is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'subsys':'fdpsub'", NULL },
+        { "'blk_pe_limit':8,'eol_read_only':false,'pls_per_lun':2,"
+          "'subsys':'fdpsub-ii'", NULL },
+        { "'blk_pe_limit':8,'eol_read_only':false,'namespaces':2,"
+          "'subsys':'fdpsub-runs'", NULL },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        /* a device that realizes keeps its slot: each case has its own */
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'wear%d','addr':'%d','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,%s%s}}", i, 8 + i,
+            cases[i].opts, cases[i].msg ? ",'subsys':'fdpsub'" : "");
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        if (!cases[i].msg) {
+            if (qdict_haskey(rsp, "error")) {
+                g_test_message("%s: %s", cases[i].opts,
+                               qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"));
+            }
+            g_assert_false(qdict_haskey(rsp, "error"));
+            qobject_unref(rsp);
+            continue;
+        }
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("%s: %s", cases[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
 static uint16_t femu_fdp_wb_flush(FemuCtrlState *c);
 
 /*
@@ -43258,6 +43534,84 @@ static void femu_register_nodes(void)
             "luns_per_ch=2,nchs=2,blk_pe_limit=75,"
             "eol_read_only=off"
     });
+#define FEMU_WEAR_FDP_GEO \
+    "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=4,pls_per_lun=1,luns_per_ch=2,nchs=2,eol_read_only=off,"
+    /*
+     * 40 units of 16 pages. The namespace fills 16, four handles keep 8,
+     * forced collection 2, plus one: a floor of 27. 13 units retire, then
+     * worn-out blocks stay in service.
+     */
+    qos_add_test("wear-fdp-retire", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"96 52 13 0 235",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=40,blk_pe_limit=8,subsys=fdpsub"
+    });
+    /*
+     * One unit kept free for forced collection, so a relocation often
+     * takes the last free unit: the victim must then go back to the free
+     * list, not retire.
+     */
+    qos_add_test("wear-fdp-tight", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"104 56 14 0 224 handles",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=40,blk_pe_limit=8,gc_thres_pcent=99,"
+            "gc_thres_pcent_high=99,subsys=fdpsub"
+    });
+    /* 28 units, a floor of 26: two units retire, then blocks stay */
+    qos_add_test("wear-fdp-limit", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"92 8 2 0 136",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=28,blk_pe_limit=20,subsys=fdpsub"
+    });
+    /*
+     * Two groups of one channel, 80 units of 8 pages each, a floor of 45 in
+     * each. 24 units retire, 14 of them in one group: the spare is what
+     * that group has left, 21 of 35 units.
+     */
+    qos_add_test("wear-fdp-rg2", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0 24 24 60 37",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=80,blk_pe_limit=20,blk_pe_spread=50,blk_pe_seed=5,"
+            "lba_index=3,subsys=fdpsub-rg2"
+    });
+    /*
+     * Every write placed in group 0: that group retires its 35 units and
+     * keeps worn blocks in service, the other group wears nothing, and the
+     * spare is group 0's. Format then keeps the retired units.
+     */
+    qos_add_test("wear-fdp-rg0", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"50 37 35 0 41 rg0 format",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=80,blk_pe_limit=20,blk_pe_spread=50,blk_pe_seed=5,"
+            "lba_index=3,subsys=fdpsub-rg2"
+    });
+    /* two planes per LUN: a unit holds a block of each plane; floor 18 */
+    qos_add_test("wear-fdp-pl2", "femu", femu_test_wear_fdp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"120 48 6 0 150",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,pls_per_lun=2,luns_per_ch=2,nchs=2,"
+            "eol_read_only=off,blks_per_pl=24,blk_pe_limit=12,subsys=fdpsub"
+    });
+    qos_add_test("wear-fdp-aer-spare", "femu", femu_test_wear_aer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0x1",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=40,blk_pe_limit=8,subsys=fdpsub"
+    });
+    qos_add_test("wear-fdp-aer-reliability", "femu", femu_test_wear_aer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"0x4",
+        .edge.extra_device_opts = FEMU_WEAR_FDP_GEO
+            "blks_per_pl=40,blk_pe_limit=8,subsys=fdpsub"
+    });
     qos_add_test("wear-query", "femu", femu_test_wear_query,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -44121,6 +44475,7 @@ static void femu_register_nodes(void)
             "femu_mode=1"
     });
     qos_add_test("wear-refused", "femu", femu_test_wear_refused, NULL);
+    qos_add_test("wear-fdp-props", "femu", femu_test_wear_fdp_props, NULL);
     qos_add_test("pace-refused", "femu", femu_test_wear_refused,
                  &(QOSGraphTestOptions) { .arg = (void *)"'gc_pace':true" });
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,

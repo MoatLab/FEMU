@@ -1211,7 +1211,7 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
  * thread that changes them: the event then carries the state at the change,
  * and a controller reset before the main loop runs cannot lose it.
  */
-static void ssd_pel_wear(struct ssd *ssd)
+void ssd_pel_wear(struct ssd *ssd)
 {
     uint8_t bits = 0;
 
@@ -1287,11 +1287,13 @@ bool ssd_host_out_of_lines(struct ssd *ssd)
 
 /*
  * Tell the main loop when wear has just crossed into a SMART warning: the
- * spare below its threshold, or the first block kept in service past its
- * limit. Both only get worse, so each is raised once. The FTL thread may not
- * post a completion itself; the controller's event bottom half does.
+ * spare below its threshold, or a block kept in service past its limit
+ * while none was. The spare only falls. The reliability warning clears
+ * when the last overworn block retires with its line or unit, and is
+ * raised again when another block stays in service. The FTL thread may
+ * not post a completion itself; the controller's event bottom half does.
  */
-static void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
+void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
 {
     uint32_t bits = 0;
 
