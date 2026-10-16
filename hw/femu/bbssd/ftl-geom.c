@@ -46,12 +46,47 @@ uint64_t bb_eol_reserve_lines(FemuCtrl *n)
                     p->pgs_per_blk;
     uint64_t pages;
 
-    if (!n->eol_admit || !page || !line) {
+    /* under FDP the reclaim groups hold the reserve (bb_fdp_eol_units) */
+    if (!n->eol_admit || !page || !line ||
+        (n->subsys && n->subsys->params.fdp.enabled)) {
         return 0;
     }
     /* a command may start part way into a page and end part way into one */
     pages = DIV_ROUND_UP(femu_eol_max_bytes(n), page) + 1;
     return DIV_ROUND_UP(pages, line);
+}
+
+/*
+ * Under FDP, the units the admitted writes may fill: the credit cap is this
+ * many units of pages. Each reclaim group holds this many erased units plus
+ * one per handle for the read-only end of life, since a host may place every
+ * admitted page in one group and each handle may take a unit at its first
+ * page. Zero unless eol_admit is on.
+ */
+uint64_t bb_fdp_eol_units(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t unit;
+
+    if (!n->eol_admit || !n->subsys || !n->subsys->params.fdp.enabled ||
+        !page) {
+        return 0;
+    }
+    unit = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+           p->pgs_per_blk / MAX(n->subsys->endgrp.fdp.nrg, 1);
+    if (!unit) {
+        return 0;
+    }
+    return DIV_ROUND_UP(DIV_ROUND_UP(femu_eol_max_bytes(n), page) + 1, unit);
+}
+
+/* the erased units each reclaim group holds back for the end of life */
+uint64_t bb_fdp_eol_reserve(FemuCtrl *n)
+{
+    uint64_t units = bb_fdp_eol_units(n);
+
+    return units ? units + n->subsys->endgrp.fdp.nruh : 0;
 }
 
 /*

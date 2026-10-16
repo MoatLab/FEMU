@@ -491,21 +491,25 @@ only its range.
 
 ### Block wear-out
 
-With `blk_pe_limit` (and `eol_read_only=off`), each block has an erase
-limit, as in bbssd ([end of life](ftl.md#read-only-end-of-life-eol_read_only)).
-The check runs in `fdp_collect_ru()` after the erase of every block of the
-victim unit. The unit holds no data then. Collection, read reclaim and
-retention refresh all reach it there.
+With `blk_pe_limit`, each block has an erase limit, as in bbssd
+([end of life](ftl.md#read-only-end-of-life-eol_read_only)). The check
+runs in `fdp_collect_ru()` after the erase of every block of the victim
+unit. The unit holds no data then. Collection, read reclaim and retention
+refresh all reach it there.
 
 ```text
  erase of unit U in group g takes a block of U to its limit
-   U(g) - 1 >= floor and a free unit besides U  --> U retires
-   otherwise                                     --> U goes back to the
-                                                     free list; its worn-out
-                                                     blocks stay in service
-                                                     (overworn, bit 2)
+   eol_read_only=off:
+     U(g) - 1 >= floor and a free unit besides U  --> U retires
+     otherwise                                     --> U goes back to the
+                                                       free list; its worn-out
+                                                       blocks stay in service
+                                                       (overworn, bit 2)
+   eol_read_only=on (default):
+     U(g) - 1 >= floor                             --> U retires
+     otherwise                                     --> U retires, READ-ONLY
 
- U(g)  = units of group g - retired units of group g
+ U(g)  = units of group g - retired units of group g - reserve units R
  floor = units the namespaces fill (ceil(exposed pages / unit pages))
        + one unit per handle + one per persistently isolated handle
        + the units forced collection keeps (at realize) + 1
@@ -518,8 +522,9 @@ retention refresh all reach it there.
 - A retired unit is on no list, holds no data and has no handle. It
   keeps its blocks; their erase counts no longer change.
 - SMART Available Spare is the worst group's share of the units it may
-  still retire: `(units - floor - retired) * 100 / (units - floor)`, or
-  100 when the group starts at or below the floor.
+  still retire: `(units - R - floor - retired) * 100 / (units - R -
+  floor)`, or 100 when the group starts at or below the floor. It is 0
+  once the media is read-only.
 - SMART critical warning bit 2, the Endurance Group Critical Warning
   Summary, and the Endurance Group Information log (09h) critical warning,
   Available Spare and Percentage Used all follow the same state. Crossing
@@ -530,8 +535,50 @@ retention refresh all reach it there.
 - Log page C0h offset 128 counts the lines of retired units. `query-femu`
   shows them in the `retired` state.
 
-This small device retires units after a few thousand writes, then keeps
-worn-out blocks in service:
+#### Read-only end of life
+
+With `eol_read_only` (on by default), the media goes read-only when a
+worn-out block has no unit to replace it, as in line mode. The page
+credits, the 182h refusal, WZSL, MCL and the Format and Sanitize rules are
+the same. Each reclaim group holds R erased units back for the writes in
+flight:
+
+```text
+ B = most bytes one command may program: MDTS, or MCL in the largest
+     LBA format when that is larger (femu_eol_max_bytes())
+ C = credit cap in pages = ceil((ceil(B / page) + 1) / Q) * Q
+ R = C / Q + handles                      in EVERY reclaim group
+     Q = pages of one unit; realize counts R out of each group's pool
+
+ transition (FTL thread)
+   read-only bit set in the admission word; no write is admitted again
+   each group's R reserve units join its free list
+   collection, read reclaim, retention refresh and padding stop
+   admitted writes finish into their handles' units and the reserve
+```
+
+- A handle that takes c pages takes at most c / Q + 1 new units: one for
+  a missing unit and one at each fill. A host may place every page in one
+  group, so each group holds the whole R.
+- A host write that finds no unit for its handle, after collection, also
+  ends the life of the media. The write then finishes from the reserve.
+  This covers a device whose collection cannot make room, such as one
+  with `gc_thres_pcent_high=100`.
+- RUH Update after the transition fails with Capacity Exceeded, as one
+  with no empty unit to give: a move would take a reserve unit that no
+  data can fill. An update the poller passed before, or whose own
+  collection ends the life of the media, fails the same way. The handles
+  it moved before that stay moved (Base 2.3, 7.4.1.1).
+- `query-femu` shows the reserve units in the `reserve` state and counts
+  them in `unit-counts`. Its `end-of-life` object shows the credits.
+
+<!-- femu-example: design-fdp-eol -->
+```text
+-device femu-subsys,id=fdpe,fdp=on,fdp.nruh=4 -device femu,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,blks_per_pl=40,luns_per_ch=2,nchs=2,subsys=fdpe,blk_pe_limit=8,mdts=2
+```
+
+With `eol_read_only=off`, this small device retires units after a few
+thousand writes, then keeps worn-out blocks in service:
 
 <!-- femu-example: design-fdp-wear -->
 ```text
@@ -835,13 +882,13 @@ last:
 - The handle counters of query-femu are 64-bit and stop at their largest
   value.
 - Metadata, Streams and Namespace Management do not combine with FDP.
-- `blk_pe_limit` needs `eol_read_only=off`. The read-only end of life
-  would need erased units held back in each group for the writes in
-  flight, and a rule for RUH Update and unit padding during the drain.
-  `spare_lines` and `fdp_trim_erase_all` are refused with it.
+- `spare_lines`, `fdp_trim_erase_all` and `buffer_size` are refused with
+  `blk_pe_limit`.
 - With `gc_thres_pcent_high=100` no unit is kept free for collection. A
   persistently isolated handle then may find no unit to move pages into,
   and a write can fail with Capacity Exceeded before the namespace is full.
+  With `blk_pe_limit` and `eol_read_only`, that write ends the life of the
+  media instead.
 
 ## How to extend it
 

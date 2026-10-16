@@ -112,13 +112,13 @@ The `state` of a line is one of these values:
 | `spare` | held back so its blocks can replace worn-out ones (`spare_lines`) |
 | `reserve` | held erased for the writes in flight at the end of life (`eol_read_only`) |
 
-With `eol_read_only` and `blk_pe_limit`, `line-counts` also has `reserve`,
-and the entry has `end-of-life`:
+With `eol_read_only` and `blk_pe_limit`, `line-counts` (with FDP,
+`unit-counts`) also has `reserve`, and the entry has `end-of-life`:
 
 | Member | Content |
 | --- | --- |
 | `read-only` | the media is read-only |
-| `credit-pages` | the most pages admitted writes may hold at once; the reserve lines hold this many erased pages |
+| `credit-pages` | the most pages admitted writes may hold at once; the reserve lines hold this many erased pages, and with FDP each reclaim group's reserve units hold more |
 | `held-pages`, `held-requests` | the pages and the write-class commands admitted now, not yet finished by the FTL |
 
 ### FDP namespaces
@@ -133,7 +133,7 @@ has these members:
 | `groups` | each reclaim group: `id`, its dies (`first-channel` and `channels`, `first-lun` and `luns` in each of its channels) and its `free-units` |
 | `pages-per-unit` | NAND pages in each reclaim unit |
 | `handles` | each reclaim unit handle: `id`, `type` (`initially-isolated` or `persistently-isolated`), `host-bytes` and `media-bytes` |
-| `unit-counts` | reclaim units that are `free`, `open`, `full`, `victim` and `retired`, and the `total` |
+| `unit-counts` | reclaim units that are `free`, `open`, `full`, `victim` and `retired`, the `reserve` ones with `eol_read_only`, and the `total` |
 | `placement-handles` | the placement handle list of the namespace: the reclaim unit handle of placement handle 0, 1, ... |
 | `ftl-nsid` | the namespace whose FTL holds the units |
 | `reclaim-units` | with `kind` `reclaim-units`: `group`, `unit`, `handle`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each unit, by group and then by unit |
@@ -172,13 +172,15 @@ namespace.
  query nsid 2: placement-handles [1, 2]  ftl-nsid 1  the same as nsid 1
 ```
 
-The `state` of a unit is `free`, `open`, `full`, `victim`, `retired` or
-`unlisted`. An `open` unit gets host data or collected data from a handle.
+The `state` of a unit is `free`, `open`, `full`, `victim`, `retired`,
+`reserve` or `unlisted`. A `reserve` unit is held erased for the writes
+in flight at the end of life (`eol_read_only`). An `open` unit gets host data or collected data from a handle.
 A `victim` unit has invalid or unwritten pages. A Reclaim Unit Handle
 Update makes a `victim` of the open unit, also when it is not full. A
 `retired` unit left service after a block in it wore out (`blk_pe_limit`);
 it holds no data. A correct FTL does not report `unlisted`. `handle` is the
-handle that wrote the unit, and it is absent for a free or retired unit.
+handle that wrote the unit, and it is absent for a free, retired or
+reserve unit.
 Page counts are in NAND pages.
 
 ### Zoned namespaces

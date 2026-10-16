@@ -417,6 +417,8 @@ struct FemuReclaimUnit {
     bool reclaiming;
     /* a worn-out block took the unit out of service: on no list, no data */
     bool retired;
+    /* held erased for the writes in flight at the end of life */
+    bool reserve;
 };
 
 struct FemuRuHandle {
@@ -719,6 +721,8 @@ struct ssd {
     bool eol_ro_mode;
     bool media_ro;                  /* FTL thread's copy of the bit */
     int eol_reserve_lines;
+    /* under FDP: the erased units each reclaim group holds back */
+    uint64_t fdp_eol_reserve;
     uint64_t eol_cap;               /* most pages admitted at once */
     uint64_t eol_word;
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
@@ -780,6 +784,8 @@ int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
 uint64_t bb_eol_reserve_lines(FemuCtrl *n);
+uint64_t bb_fdp_eol_units(FemuCtrl *n);
+uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);

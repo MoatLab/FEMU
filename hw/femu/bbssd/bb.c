@@ -177,6 +177,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         uint64_t needed = 2 * (uint64_t)endgrp->fdp.nruh + 1;
         uint64_t unit_pgs;
         uint64_t reserve;
+        const char *eol;
 
         if (bb_check_fdp_groups(n, errp) ||
             bb_check_fdp_block(n, ns, "bbssd", errp)) {
@@ -215,6 +216,19 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
          * capacity must not fail, so one group must hold every namespace.
          */
         reserve = bb_fdp_reserve_units(n, pool);
+        /*
+         * eol_read_only holds erased units in every group for the writes in
+         * flight at the end of life, and counts their pages in 31 bits.
+         */
+        if (bb_fdp_eol_units(n) >= (1ULL << 31) / unit_pgs) {
+            error_setg(errp, "FEMU bbssd: eol_read_only needs %" PRIu64
+                       " reserve units of %" PRIu64 " pages; lower mdts",
+                       bb_fdp_eol_units(n), unit_pgs);
+            return -1;
+        }
+        reserve += bb_fdp_eol_reserve(n);
+        eol = bb_fdp_eol_reserve(n) ? " and the eol_read_only reserve (lower "
+              "mdts)" : "";
         usable_pgs = pool > reserve ? (pool - reserve) * unit_pgs : 0;
         /* every namespace of the controller places into this one FTL */
         exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
@@ -223,29 +237,29 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                        "namespace, since a host may place all of its data "
                        "in one: the namespaces expose %" PRIu64 " KiB, and "
                        "each of the %u groups keeps %" PRIu64 " of its %"
-                       PRIu64 " units for handles and collection, leaving %"
+                       PRIu64 " units for handles, collection%s, leaving %"
                        PRIu64 " KiB; lower devsz_mb or fdp.nrg, or raise "
                        "blks_per_pl or op_pcent", bb_ftl_bytes(n, ns) >> 10,
-                       nrg, reserve, pool, (usable_pgs * page_bytes) >> 10);
+                       nrg, reserve, pool, eol, (usable_pgs * page_bytes) >> 10);
             return -1;
         }
         if (exposed_pgs > usable_pgs && n->num_namespaces > 1) {
             error_setg(errp, "FEMU bbssd: the %u namespaces expose %" PRIu64
                        " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
-                       " reclaim units for %u handles and collection, leaving "
+                       " reclaim units for %u handles, collection%s, leaving "
                        "%" PRIu64 " KiB; lower devsz_mb or fdp.nruh, raise "
                        "blks_per_pl, or raise op_pcent", n->num_namespaces,
                        bb_ftl_bytes(n, ns) >> 10, reserve, pool,
-                       endgrp->fdp.nruh, (usable_pgs * page_bytes) >> 10);
+                       endgrp->fdp.nruh, eol, (usable_pgs * page_bytes) >> 10);
             return -1;
         }
         if (exposed_pgs > usable_pgs) {
             error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64
                        " KiB, but placement keeps %" PRIu64 " of the %" PRIu64
-                       " reclaim units for %u handles and collection, leaving "
+                       " reclaim units for %u handles, collection%s, leaving "
                        "%" PRIu64 " KiB; lower devsz_mb or fdp.nruh, raise "
                        "blks_per_pl, or raise op_pcent", ns->id,
-                       ns->size >> 10, reserve, pool, endgrp->fdp.nruh,
+                       ns->size >> 10, reserve, pool, endgrp->fdp.nruh, eol,
                        (usable_pgs * page_bytes) >> 10);
             return -1;
         }

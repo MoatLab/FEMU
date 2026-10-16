@@ -463,6 +463,8 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     cnt->full = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_FULL];
     cnt->victim = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_VICTIM];
     cnt->retired = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_RETIRED];
+    cnt->has_reserve = q->eol_mode;
+    cnt->reserve = q->ru_counts[FEMU_RECLAIM_UNIT_STATE_RESERVE];
     cnt->total = q->nrg * q->rus_per_rg;
     fdp->unit_counts = cnt;
 
@@ -658,6 +660,15 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     }
     info->counters = ctr;
 
+    if (q->eol_mode) {
+        FemuEolInfo *eol = g_new0(FemuEolInfo, 1);
+
+        eol->read_only = q->media_ro;
+        eol->credit_pages = q->eol_cap;
+        eol->held_pages = q->eol_pages;
+        eol->held_requests = q->eol_reqs;
+        info->end_of_life = eol;
+    }
     if (q->fdp) {
         g_free(cnt);
         info->fdp = femu_query_fdp_info(q);
@@ -680,15 +691,6 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     cnt->spare = q->spare_lines;
     cnt->has_reserve = q->eol_mode;
     cnt->reserve = q->reserve_lines;
-    if (q->eol_mode) {
-        FemuEolInfo *eol = g_new0(FemuEolInfo, 1);
-
-        eol->read_only = q->media_ro;
-        eol->credit_pages = q->eol_cap;
-        eol->held_pages = q->eol_pages;
-        eol->held_requests = q->eol_reqs;
-        info->end_of_life = eol;
-    }
     cnt->total = q->tt_lines;
     info->line_counts = cnt;
 

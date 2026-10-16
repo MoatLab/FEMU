@@ -1212,15 +1212,20 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
  * unit holds no data now. It retires only while its group keeps
  * wear_floor_lines units and one free unit besides it, so collection still
  * has a unit to move pages into. Otherwise the worn-out blocks stay in
- * service, overworn, each counted once. Called with wear_lock held.
- * Returns true when the unit was retired.
+ * service, overworn, each counted once. With eol_read_only a worn-out
+ * block is never written again: the unit always retires, and when that
+ * cuts into the floor the media must go read-only (*@read_only). Units
+ * held for the end of life do not count as usable. Called with wear_lock
+ * held. Returns true when the unit was retired.
  */
-static bool fdp_wear_out_ru(struct ssd *ssd, FemuReclaimUnit *ru)
+static bool fdp_wear_out_ru(struct ssd *ssd, FemuReclaimUnit *ru,
+                            bool *read_only)
 {
     struct ssdparams *spp = &ssd->sp;
     FemuReclaimGroup *rg = &ssd->rg[ru->rgidx];
     struct ru_mgmt *rm = rg->ru_mgmt;
-    int64_t usable = (int64_t)rg->tt_nru - (int64_t)rm->retired_ru_cnt;
+    int64_t usable = (int64_t)rg->tt_nru - (int64_t)rm->retired_ru_cnt -
+                     (int64_t)ssd->fdp_eol_reserve;
     bool retire = false;
     int dead = 0;
 
@@ -1259,7 +1264,13 @@ static bool fdp_wear_out_ru(struct ssd *ssd, FemuReclaimUnit *ru)
         if (!pass && !dead) {
             return false;
         }
-        retire = usable - 1 >= ssd->wear_floor_lines && rm->free_ru_cnt >= 1;
+        if (ssd->eol_ro_mode) {
+            *read_only = usable - 1 < ssd->wear_floor_lines;
+            retire = true;
+        } else {
+            retire = usable - 1 >= ssd->wear_floor_lines &&
+                     rm->free_ru_cnt >= 1;
+        }
     }
     if (!retire) {
         return false;
@@ -1280,12 +1291,16 @@ static bool fdp_wear_out(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     uint8_t spare = ssd_available_spare(ssd);
     uint64_t overworn = ssd->overworn_blocks;
+    bool read_only = false;
     bool retired;
 
     qemu_mutex_lock(&ssd->wear_lock);
-    retired = fdp_wear_out_ru(ssd, ru);
+    retired = fdp_wear_out_ru(ssd, ru, &read_only);
     qemu_mutex_unlock(&ssd->wear_lock);
     ssd_wear_events(ssd, spare, overworn);
+    if (read_only) {
+        ssd_enter_read_only(ssd);
+    }
     return retired;
 }
 
@@ -1300,7 +1315,8 @@ uint8_t ssd_fdp_wear_spare(struct ssd *ssd)
     uint8_t spare = 100;
 
     for (uint64_t g = 0; ssd->rg && g < ssd->nrg; g++) {
-        int64_t start = (int64_t)ssd->rg[g].tt_nru - ssd->wear_floor_lines;
+        int64_t start = (int64_t)ssd->rg[g].tt_nru -
+                        (int64_t)ssd->fdp_eol_reserve - ssd->wear_floor_lines;
         int64_t left = start - (int64_t)ssd->rg[g].ru_mgmt->retired_ru_cnt;
 
         if (start > 0) {
@@ -1474,6 +1490,13 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     struct line *queued = ssd->read_reclaim_line;
     bool copyback;
 
+    /*
+     * Read-only media erases nothing: the admitted writes finish from the
+     * free units and the reserve, with no collection.
+     */
+    if (ssd->media_ro) {
+        return -1;
+    }
     victim_ru = select_victim_ru(ssd, rgid, force);
     if (!victim_ru) {
         //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
@@ -1582,6 +1605,11 @@ void ssd_fdp_pd_close_aged(struct ssd *ssd, uint64_t stime)
     uint64_t limit = (uint64_t)ssd->sp.pd_open_close_sec *
                      NANOSECONDS_PER_SECOND;
 
+    /* after the end of life only the admitted writes may take pages */
+    if (ssd->media_ro) {
+        return;
+    }
+
     for (int i = 0; i < (int)ssd->nruhs; i++) {
         FemuRuHandle *ruh = &ssd->ruhs[i];
 
@@ -1613,7 +1641,8 @@ static void fdp_do_read_reclaim(struct ssd *ssd)
     enum ssd_reclaim_why why;
     int ok;
 
-    if (!line) {
+    /* no refresh, and no frontier seal, on read-only media */
+    if (!line || ssd->media_ro) {
         return;
     }
     /* the refresh moves data inside the group, so its room counts */
@@ -1769,6 +1798,32 @@ static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
 }
 
 /*
+ * The host write path's test for a unit to program. With eol_read_only, a
+ * write the poller admitted has changed data already, so it must not fail
+ * for room: when collection cannot give the handle a unit, the media
+ * cannot take more writes, which ends its life. The write then goes on
+ * from the reserve units. Without it, the handle's own unit or none.
+ */
+static bool fdp_host_frontier(struct ssd *ssd, FemuRuHandle *ruh,
+                              uint16_t rgid)
+{
+    if (!ssd->eol_ro_mode) {
+        return ruh->rus[rgid] != NULL;
+    }
+    if (fdp_ruh_ready(ssd, ruh, rgid)) {
+        return true;
+    }
+    if (!ssd->media_ro) {
+        fdp_gc_until_clear(ssd, rgid, ruh->ruhid);
+        if (fdp_ruh_ready(ssd, ruh, rgid)) {
+            return true;
+        }
+        ssd_enter_read_only(ssd);
+    }
+    return fdp_ruh_ready(ssd, ruh, rgid);
+}
+
+/*
  * Program host page @lpn into @ruh's active unit, which the caller has made
  * sure exists. The written pieces are those of blocks [@slba, @slba + @nlb)
  * of @req, if given, and those of @held, the mask a buffer entry kept.
@@ -1862,7 +1917,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
      * Fail the command with a capacity error instead of completing it as
      * success with no data written.
      */
-    if (!fdp_ruh_ready(ssd, ruh, rgid)) {
+    if (!(ssd->eol_ro_mode ? fdp_host_frontier(ssd, ruh, rgid) :
+          fdp_ruh_ready(ssd, ruh, rgid))) {
         req->status = NVME_CAP_EXCEEDED | NVME_DNR;
         return 0;
     }
@@ -1914,7 +1970,7 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
          * and fail the command with a capacity error rather than crashing or
          * reporting a silent success for pages that were never written.
          */
-        if (unlikely(!ruh->rus[rgid])) {
+        if (unlikely(!ruh->rus[rgid]) && !fdp_host_frontier(ssd, ruh, rgid)) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             break;
         }
@@ -2198,6 +2254,18 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         FemuRuHandle *ruh;
         FemuReclaimUnit *old, *fresh;
 
+        /*
+         * After the end of life no unit takes data, and a move would take a
+         * reserve unit from the writes in flight. An update the poller
+         * passed before the media went read-only, or whose own collection
+         * ended its life, fails as one with no empty unit to give. The
+         * handles it moved before that stay moved (Base 2.3, 7.4.1.1).
+         */
+        if (ssd->media_ro) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            return;
+        }
+
         /* the poller refused the command if any of these was invalid */
         nvme_parse_pid(ns, pid, &ph, &rgid);
         ruh = &ssd->ruhs[ns->fdp.phs[ph]];
@@ -2217,6 +2285,10 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
          * room now says nothing about the move.
          */
         fdp_gc_until_clear(ssd, rgid, ruh->ruhid);
+        if (ssd->media_ro) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            return;
+        }
         /*
          * A handle whose last unit filled with nothing free to follow it
          * references no unit, which is not an empty one: give it one.
@@ -2231,6 +2303,10 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
 
         fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
         if (!fresh && do_gc_fdp_style(ssd, rgid, ruh->ruhid, true) != -1) {
+            if (ssd->media_ro) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                return;
+            }
             /*
              * The last handle of an Initially Isolated configuration is also
              * where collection writes. Collection can fill @old and retire
@@ -2633,6 +2709,49 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         ftl_log("FDP: ruh[%d] type=%d, active ru=%d (line=%d)\n",
                 i, ssd->ruhs[i].ruh_type, ssd->ruhs[i].rus[0]->ruidx,
                 ssd->ruhs[i].rus[0]->lines[0]->id);
+    }
+}
+
+/*
+ * eol_read_only: hold fdp_eol_reserve erased units of each reclaim group off
+ * its free list. Realize counted them out of the group's capacity. They
+ * join the free list when the media goes read-only, for the writes in
+ * flight then (ssd_fdp_release_eol_reserve()).
+ */
+void femu_fdp_ssd_init_eol_reserve(struct ssd *ssd)
+{
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+
+        for (uint64_t k = 0; k < ssd->fdp_eol_reserve; k++) {
+            FemuReclaimUnit *ru = QTAILQ_LAST(&rm->free_ru_list);
+
+            if (!ru) {
+                ftl_err("FDP: no free unit for the end-of-life reserve\n");
+                abort();
+            }
+            QTAILQ_REMOVE(&rm->free_ru_list, ru, entry);
+            rm->free_ru_cnt--;
+            ru->reserve = true;
+        }
+    }
+}
+
+/* The end of life: each group's reserve units become free units. */
+void ssd_fdp_release_eol_reserve(struct ssd *ssd)
+{
+    for (uint64_t g = 0; g < ssd->nrg; g++) {
+        struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+
+        for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
+            FemuReclaimUnit *ru = &ssd->rg[g].rus[j];
+
+            if (ru->reserve) {
+                ru->reserve = false;
+                QTAILQ_INSERT_TAIL(&rm->free_ru_list, ru, entry);
+                rm->free_ru_cnt++;
+            }
+        }
     }
 }
 
@@ -3088,7 +3207,8 @@ static uint64_t fdp_check_isolation(struct ssd *ssd)
 /*
  * ssd_fdp_check_units - count reclaim units not held by exactly one place:
  * the free list, the full list, a group victim heap, a handle's write or
- * collection frontier, or retirement, where a unit holds nothing. Under the per-handle strategy a victim of a
+ * collection frontier, retirement or the end-of-life reserve, where a unit
+ * holds nothing. Under the per-handle strategy a victim of a
  * persistently isolated handle must also sit once in that handle's heap,
  * and no other unit may. Heap entries whose stored position is wrong count
  * too, and so does a unit whose programmed bytes differ from its valid and
@@ -3153,6 +3273,7 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
     for (uint64_t g = 0; g < ssd->nrg; g++) {
         struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
         uint64_t retired = 0;
+        uint64_t reserve = 0;
 
         for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
             FemuReclaimUnit *u = &ssd->rg[g].rus[j];
@@ -3166,6 +3287,13 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
                 bad += u->vpc != 0 || u->ipc != 0 || u->prog_bytes != 0;
                 retired++;
             }
+            /* so is one held erased for the end of life */
+            if (u->reserve) {
+                fdp_check_place(ssd, u, seen);
+                bad += u->vpc != 0 || u->ipc != 0 || u->prog_bytes != 0 ||
+                       u->retired;
+                reserve++;
+            }
 
             bad += seen[i] + in_grp[i] != 1;
             bad += in_ruh[i] != (want_ruh ? 1 : 0);
@@ -3173,6 +3301,8 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
             bad += fdp_check_dies(ssd, u);
         }
         bad += retired != rm->retired_ru_cnt;
+        /* the reserve is whole until the media goes read-only, then gone */
+        bad += reserve != (ssd->media_ro ? 0 : ssd->fdp_eol_reserve);
     }
     return bad + fdp_check_isolation(ssd);
 }

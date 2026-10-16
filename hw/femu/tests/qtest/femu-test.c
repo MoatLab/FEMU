@@ -6130,6 +6130,11 @@ static void femu_test_wear_refused(void *obj, void *data,
             "'luns_per_ch':2,'nchs':2,%s,%s}}", feature, cases[i].opts);
         const char *desc;
 
+        /* FDP takes blk_pe_limit; wear-fdp-props covers it */
+        if (!data && strstr(cases[i].opts, "fdpsub")) {
+            continue;
+        }
+
         rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         g_assert_true(qdict_haskey(rsp, "error"));
         desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
@@ -14557,6 +14562,9 @@ static void femu_test_wear_fdp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(retired, ==, want[2]);
     g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
                                    "retired"), ==, want[2]);
+    /* eol_read_only=off holds no reserve */
+    g_assert_false(qdict_haskey(qdict_get_qdict(fdp, "unit-counts"),
+                                "reserve"));
     qobject_unref(rsp);
 
     /*
@@ -14623,8 +14631,9 @@ static void femu_test_wear_fdp_props(void *obj, void *data,
         const char *opts;
         const char *msg;        /* NULL: realize succeeds */
     } cases[] = {
-        { "'blk_pe_limit':8", "set eol_read_only=off" },
-        { "'blk_pe_limit':8,'eol_read_only':true", "set eol_read_only=off" },
+        { "'blk_pe_limit':8", "the eol_read_only reserve (lower mdts)" },
+        { "'blk_pe_limit':8,'eol_read_only':true,'mdts':0",
+          "eol_read_only needs mdts" },
         { "'blk_pe_limit':8,'eol_read_only':false,'spare_lines':2",
           "spare_lines is not supported with FDP" },
         { "'blk_pe_limit':8,'eol_read_only':false,'fdp_trim_erase_all':1",
@@ -41391,6 +41400,9 @@ static void femu_test_eol_format_busy(void *obj, void *data,
  *   last write that succeeded;
  * - nothing is erased any more, and the FTL map is consistent.
  */
+static int64_t femu_eol_query_int(QTestState *qts, const char *dict,
+                                  const char *key);
+
 static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -41412,7 +41424,10 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t mapped, lost, orphans, erases = 0;
     uint64_t cap, pages, reqs;
     bool csd = !strcmp(data, "csd");
-    bool subsys = !strcmp(data, "subsys");
+    /* "fdp...": a placement subsystem, so an endurance group too */
+    bool fdp = !strncmp(data, "fdp", 3);
+    bool subsys = !strcmp(data, "subsys") || fdp;
+    const char *what = fdp ? (const char *)data + 3 : data;
     bool ro = false;
     int batch, k, i, ok = 0, refused = 0;
     NvmeCmd cmd;
@@ -41420,6 +41435,12 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     femu_eol_cwp(&c, log, 0);
+    /* FDP: 16 credit pages fill one unit; with four handles, 5 units */
+    if (fdp) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_assert_cmpuint(cap, ==, 16);
+        g_assert_cmpint(femu_eol_query_int(qts, "units", "reserve"), ==, 5);
+    }
     g_assert_cmpint(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, false,
                                      0, NVME_SMART_MEDIA_READ_ONLY, NULL), ==,
                     NVME_SUCCESS);
@@ -41572,6 +41593,10 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(mapped, ==, 256);
     if (!csd) {
         g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
+    }
+    if (fdp) {
+        g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    } else if (!csd) {
         femu_query_check_lines(qts, "/machine/peripheral/gc-test", mapped);
     }
 
@@ -41580,8 +41605,9 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
      * whatever the critical warnings say, Base 2.3, 8.1.26). They erase
      * nothing, and the media stays read-only.
      */
-    if (!strcmp(data, "format") || !strcmp(data, "sanitize")) {
-        g_assert_cmphex(!strcmp(data, "format") ?
+    if (!strcmp(what, "-format") || !strcmp(what, "-sanitize") ||
+        !strcmp(data, "format") || !strcmp(data, "sanitize")) {
+        g_assert_cmphex(strstr(what, "format") ?
                         FEMU_SC(femu_format(&c, 1, 0, 0)) :
                         femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
         g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, buf, list)), ==,
@@ -41598,7 +41624,11 @@ static void femu_test_eol_ro(void *obj, void *data, QGuestAllocator *alloc)
         femu_ftl_check(qts, &mapped, &lost, &orphans);
         g_assert_cmpuint(mapped, ==, 0);
         g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
-        femu_query_check_lines(qts, "/machine/peripheral/gc-test", 0);
+        if (fdp) {
+            g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+        } else {
+            femu_query_check_lines(qts, "/machine/peripheral/gc-test", 0);
+        }
     }
 
     guest_free(alloc, pel);
@@ -41695,6 +41725,346 @@ static void femu_eol_enter(QTestState *qts)
 
     g_assert_true(qdict_haskey(rsp, "return"));
     qobject_unref(rsp);
+}
+
+/* submit a write of @np pages from @page through placement identifier @pid */
+static void femu_eol_submit_placed(FemuCtrlState *c, uint64_t page,
+                                   uint32_t np, uint64_t buf, uint64_t list,
+                                   int pid)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(np > 2 ? list : np == 2 ? buf + 4096 : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(np * (4096 / c->lba_size) - 1);
+    if (pid >= 0) {
+        rw.control = cpu_to_le16(2 << 4);
+        rw.dspec = cpu_to_le16(pid);
+    }
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+}
+
+/* a counter of query-femu for namespace 1, or -1 when it is absent */
+static int64_t femu_eol_query_int(QTestState *qts, const char *dict,
+                                  const char *key)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *d = !strcmp(dict, "counters") ? qdict_get_qdict(ns, "counters") :
+               qdict_get_qdict(qdict_get_qdict(ns, "fdp"), "unit-counts");
+    int64_t v = qdict_haskey(d, key) ? qdict_get_int(d, key) : -1;
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * The writes in flight at the end of life under FDP. Forced collection
+ * keeps one unit free, so overwrites through four handles leave about one
+ * free unit. As many 4-page writes as the credits take (each costs 5
+ * pages), one per handle in turn, are admitted and held before the FTL.
+ * The credits (32 pages, or 24 with two groups) and the reserve units of
+ * each group (6, or 7) are what the formula gives. The media then goes
+ * read-only (x-eol-enter), and two more writes are refused. Released, the
+ * six admitted writes must all succeed, from the frontiers and the reserve
+ * units, with no erase; the two later ones fail with 82h and change
+ * nothing. @data: "pad" adds pd_open_close_sec=1 and waits past it, and no
+ * pad page may follow the transition; "reclaim" queues a read reclaim
+ * before it, which must not run after; "rg1" places every write in reclaim
+ * group 1 of two, whose own reserve must take them.
+ */
+static void femu_test_eol_fdp_drain(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t rbuf = guest_alloc(alloc, 4096);
+    uint64_t wbuf = guest_alloc(alloc, 6 * 4 * 4096);
+    uint64_t wlist = guest_alloc(alloc, 6 * 4096);
+    uint64_t mapped, lost, orphans, erases, cap, pages, reqs;
+    int64_t host;
+    int64_t pads = 0;
+    double waf;
+    uint32_t rnd = 11;
+    uint64_t nsze;
+    /* placement identifier of handle 0 of group 1 of two (RGIF 1) */
+    int rg = !strcmp(data, "rg1") ? 0x8000 : 0;
+    bool ro;
+    int i, k, n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(cap, ==, rg ? 24 : 32);
+    g_assert_cmpint(femu_eol_query_int(qts, "units", "reserve"), ==,
+                    rg ? 2 * 7 : 6);
+    /* every group holds the whole reserve */
+    {
+        int per[2] = { 0, 0 };
+        QListEntry *e;
+        QDict *rsp;
+        QDict *fdp = qdict_get_qdict(femu_query_ns(qts,
+                                                   "'kind':'reclaim-units',"
+                                                   "'limit':4096", &rsp),
+                                     "fdp");
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+            QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+            if (!strcmp(qdict_get_str(u, "state"), "reserve")) {
+                per[qdict_get_int(u, "group")]++;
+            }
+        }
+        qobject_unref(rsp);
+        g_assert_cmpint(per[0], ==, rg ? 7 : 6);
+        g_assert_cmpint(per[1], ==, rg ? 7 : 0);
+    }
+    n = MIN(cap / 5, 6);
+    g_assert_cmpint(n, >=, 4);
+    for (i = 0; i < 3; i++) {
+        qtest_writeq(qts, list + 8 * i, buf + 4096 * (i + 1));
+    }
+    qtest_memset(qts, buf, 0x10, 4 * 4096);
+    for (i = 0; i < 256; i += 4) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 4, buf, list,
+                                                        rg | i / 64)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        rnd = rnd * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, (rnd >> 8) % 253,
+                                                        1 + (rnd >> 20) % 4,
+                                                        buf, list,
+                                                        rg | i % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    if (!strcmp(data, "reclaim")) {
+        /* page 0's block passes read_reclaim_limit: its unit is queued */
+        for (i = 0; i < 8; i++) {
+            g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, rbuf, list)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    femu_eol_hold(qts, true);
+    for (k = 0; k < n; k++) {
+        qtest_memset(qts, wbuf + k * 4 * 4096, 0x60 + k, 4 * 4096);
+        for (i = 0; i < 3; i++) {
+            qtest_writeq(qts, wlist + k * 4096 + 8 * i,
+                         wbuf + k * 4 * 4096 + 4096 * (i + 1));
+        }
+        femu_eol_submit_placed(&c, 40 * k, 4, wbuf + k * 4 * 4096,
+                               wlist + k * 4096, rg | k % 4);
+    }
+    femu_eol_wait_held(qts, n);
+    host = femu_eol_query_int(qts, "counters", "host-write-pages");
+    femu_eol_enter(qts);
+    g_assert_cmpint(femu_eol_query_int(qts, "units", "reserve"), ==, 0);
+    erases = femu_eol_erases(qts);
+    if (!strcmp(data, "pad")) {
+        pads = femu_pd2_query_pads(qts, &waf);
+    }
+    /* refused writes: their pages must keep the data of the preparation */
+    qtest_memset(qts, rbuf, 0x7e, 4096);
+    for (k = 0; k < 2; k++) {
+        femu_eol_submit_placed(&c, 250 + k, 1, rbuf, list, rg | k);
+    }
+    femu_eol_hold(qts, false);
+    for (k = 0; k < n + 2; k++) {
+        uint16_t got;
+        uint16_t st = femu_complete(&c, &c.io, &got, NULL);
+        int idx = (uint16_t)(got - (c.cid - n - 2));
+
+        g_test_message("write %d: 0x%x", idx, st);
+        g_assert_cmpint(idx, <, n + 2);
+        if (idx < n) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+        }
+    }
+
+    if (!strcmp(data, "pad")) {
+        /* a request after the limit would pad an open unit */
+        g_usleep(1200 * 1000);
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, rbuf, list)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, pads);
+    }
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(pages, ==, 0);
+    g_assert_cmpuint(reqs, ==, 0);
+    g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
+    /* the FTL programmed every page of every admitted write */
+    g_assert_cmpint(femu_eol_query_int(qts, "counters", "host-write-pages"),
+                    ==, host + 4 * n);
+    for (k = 0; k < n; k++) {
+        for (i = 0; i < 4; i++) {
+            g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 40 * k + i, 1, rbuf,
+                                                    list)), ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, rbuf + 4095), ==, 0x60 + k);
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 250 + k, 1, rbuf, list)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, rbuf), ==, 0x10);
+        g_assert_cmphex(qtest_readb(qts, rbuf + 4095), ==, 0x10);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, wlist);
+    guest_free(alloc, wbuf);
+    guest_free(alloc, rbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * RUH Update at the end of life under FDP. An update of placement handle 0,
+ * whose unit holds a page, and a write behind it are held before the FTL,
+ * then the media goes read-only. The write finishes; the update fails with Capacity Exceeded,
+ * as one with no empty unit to give, and the handle keeps its written
+ * unit. An update sent after the transition fails the same way, and RUH
+ * Status still answers.
+ */
+static void femu_test_eol_fdp_ruh(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t full, left;
+    uint16_t pid = cpu_to_le16(0);
+    NvmeCmd cmd;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x21, 4096);
+    qtest_memwrite(qts, pids, &pid, sizeof(pid));
+    full = femu_ruh_ruamw(&c, log, 0);
+
+    /* the write fills handle 0's unit before the update can move it */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 6, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_eol_hold(qts, true);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(pids);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE);
+    femu_submit(&c, &c.io, &cmd);
+    /* one queue runs in order: once the write is admitted, so is the update */
+    femu_eol_submit_placed(&c, 7, 1, buf, list, 0);
+    femu_eol_wait_held(qts, 1);
+    femu_eol_enter(qts);
+    femu_eol_hold(qts, false);
+    for (k = 0; k < 2; k++) {
+        uint16_t got;
+        uint16_t st = femu_complete(&c, &c.io, &got, NULL);
+
+        g_test_message("command %u: 0x%x", got, st);
+        if (got == (uint16_t)(c.cid - 1)) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_CAP_EXCEEDED);
+            g_assert_cmphex(st & FEMU_DNR, ==, FEMU_DNR);
+        }
+    }
+    /* the handle did not move: its unit holds the page */
+    left = femu_ruh_ruamw(&c, log, 0);
+    g_test_message("RUAMW %" PRIu64 " of %" PRIu64, left, full);
+    g_assert_cmpuint(left, <, full);
+
+    g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, left);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Out of units under FDP. With both collection watermarks at 100, a
+ * persistently isolated handle can find no free unit to collect into, and
+ * then a write finds none for its handle either. A write the poller
+ * admitted has changed data already, so with eol_read_only that ends the
+ * life of the media: the write finishes from the reserve units, and later
+ * writes fail with 82h. No write fails with Capacity Exceeded.
+ */
+static void femu_test_eol_fdp_full(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans, cap, pages, reqs;
+    uint32_t rnd = 5;
+    bool ro = false;
+    int i, ok = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 3; i++) {
+        qtest_writeq(qts, list + 8 * i, buf + 4096 * (i + 1));
+    }
+    qtest_memset(qts, buf, 0x33, 4 * 4096);
+    for (i = 0; i < 4000; i++) {
+        uint16_t st;
+
+        rnd = rnd * 1103515245 + 12345;
+        st = FEMU_SC(femu_write_pages_placed(&c, i < 64 ? 4 * i :
+                                             (rnd >> 8) % 253,
+                                             i < 64 ? 4 : 1 + (rnd >> 20) % 4,
+                                             buf, list, i % 4));
+        if (st == NVME_WRITE_TO_RO) {
+            ro = true;
+            break;
+        }
+        g_assert_cmphex(st, ==, NVME_SUCCESS);
+        ok++;
+    }
+    g_test_message("%d writes, then read-only: %d", ok, ro);
+    g_assert_true(ro);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(reqs, ==, 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
 }
 
 /*
@@ -43823,6 +44193,84 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=4,fdm_size=16,secsz=512,"
             "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,"
             "luns_per_ch=2,nchs=2,blk_pe_limit=8,mdts=2,oncs=0x19f"
+    });
+#define FEMU_EOL_FDP_GEO \
+    "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2," \
+    "blk_pe_limit=8,mdts=2,oncs=0x19f,"
+    /*
+     * FDP: 40 units of 16 pages; 16 credit pages and four handles hold 5
+     * units back; units retire down to a floor of 27 of the other 35.
+     */
+    qos_add_test("eol-fdp", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts = FEMU_EOL_FDP_GEO "subsys=fdpsub"
+    });
+    qos_add_test("eol-fdp-ii", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts = FEMU_EOL_FDP_GEO "subsys=fdpsub-ii"
+    });
+    qos_add_test("eol-fdp-format", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp-format",
+        .edge.extra_device_opts = FEMU_EOL_FDP_GEO "subsys=fdpsub"
+    });
+    qos_add_test("eol-fdp-sanitize", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp-sanitize",
+        .edge.extra_device_opts = FEMU_EOL_FDP_GEO "subsys=fdpsub"
+    });
+    /*
+     * 32 credit pages (MDTS 64 KiB) and four handles: 6 reserve units of
+     * 40. Forced collection keeps one unit free, so about one is free when
+     * the media goes read-only.
+     */
+#define FEMU_EOL_FDP_DRAIN \
+    "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2," \
+    "blk_pe_limit=1000,mdts=4,gc_thres_pcent=99,gc_thres_pcent_high=99," \
+    "subsys=fdpsub"
+    qos_add_test("eol-fdp-drain", "femu", femu_test_eol_fdp_drain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"plain",
+        .edge.extra_device_opts = FEMU_EOL_FDP_DRAIN
+    });
+    qos_add_test("eol-fdp-drain-pad", "femu", femu_test_eol_fdp_drain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pad",
+        .edge.extra_device_opts = FEMU_EOL_FDP_DRAIN ",pd_open_close_sec=1"
+    });
+    qos_add_test("eol-fdp-drain-reclaim", "femu", femu_test_eol_fdp_drain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"reclaim",
+        .edge.extra_device_opts = FEMU_EOL_FDP_DRAIN ",read_reclaim_limit=4"
+    });
+    /*
+     * Two groups of 64 units of 8 pages, 24 credit pages: 7 reserve units
+     * in each. Every write goes to group 1.
+     */
+    qos_add_test("eol-fdp-drain-rg1", "femu", femu_test_eol_fdp_drain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"rg1",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=4,gc_thres_pcent=99,"
+            "gc_thres_pcent_high=99,lba_index=3,subsys=fdpsub-rg2"
+    });
+    qos_add_test("eol-fdp-full", "femu", femu_test_eol_fdp_full,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=4,gc_thres_pcent=100,"
+            "gc_thres_pcent_high=100,subsys=fdpsub"
+    });
+    qos_add_test("eol-fdp-ruh", "femu", femu_test_eol_fdp_ruh,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_EOL_FDP_DRAIN
     });
     qos_add_test("eol-sq-delete", "femu", femu_test_eol_sq_delete,
                  &(QOSGraphTestOptions) {

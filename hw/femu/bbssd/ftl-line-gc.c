@@ -1258,9 +1258,15 @@ void ssd_enter_read_only(struct ssd *ssd)
             lm->free_line_cnt++;
         }
     }
+    /* under FDP each reclaim group gives its reserve units to its pool */
+    if (ssd->fdp_enabled) {
+        ssd_fdp_release_eol_reserve(ssd);
+    }
     qemu_mutex_unlock(&ssd->wear_lock);
     /* the frontier may have run dry: take a reserve line */
-    ssd_out_of_lines(ssd);
+    if (!ssd->fdp_enabled) {
+        ssd_out_of_lines(ssd);
+    }
 
     /* read-only media reports no spare left */
     if (spare >= NVME_SPARE_THRESHOLD) {

@@ -357,6 +357,8 @@ uint64_t ssd_pad_line(struct ssd *ssd, struct line *line, uint64_t stime);
 void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime);
 void ssd_fdp_pd_close_aged(struct ssd *ssd, uint64_t stime);
 uint8_t ssd_fdp_wear_spare(struct ssd *ssd);
+void ssd_fdp_release_eol_reserve(struct ssd *ssd);
+void femu_fdp_ssd_init_eol_reserve(struct ssd *ssd);
 void ssd_pel_wear(struct ssd *ssd);
 void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn);
 int do_wear_level(struct ssd *ssd);

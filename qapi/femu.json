@@ -323,10 +323,15 @@
 # @retired: out of service: a block reached its erase limit
 #     (blk_pe_limit).  It holds no data.
 #
+# @reserve: held erased for the writes in flight at the end of life
+#     (eol_read_only); it joins the free units when the media goes
+#     read-only
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuReclaimUnitState',
-  'data': [ 'free', 'open', 'full', 'victim', 'unlisted', 'retired' ] }
+  'data': [ 'free', 'open', 'full', 'victim', 'unlisted', 'retired',
+            'reserve' ] }
 
 ##
 # @FemuRuHandleType:
@@ -382,13 +387,17 @@
 #
 # @retired: units out of service after a block wore out
 #
+# @reserve: units held erased for the end of life.  Present only with
+#     eol_read_only and blk_pe_limit.
+#
 # @total: every reclaim unit, over every reclaim group
 #
 # Since: 10.1
 ##
 { 'struct': 'FemuReclaimUnitCounts',
   'data': { 'free': 'uint32', 'open': 'uint32', 'full': 'uint32',
-            'victim': 'uint32', 'retired': 'uint32', 'total': 'uint32' } }
+            'victim': 'uint32', 'retired': 'uint32', '*reserve': 'uint32',
+            'total': 'uint32' } }
 
 ##
 # @FemuReclaimUnitInfo:
@@ -790,7 +799,8 @@
 #     replacement, or the FTL had no line left to write
 #
 # @credit-pages: the most pages that admitted writes may hold at once;
-#     the reserve lines hold that many erased pages
+#     the reserve lines hold that many erased pages (under flexible data
+#     placement, the reserve units of each reclaim group hold more)
 #
 # @held-pages: pages the admitted writes hold now
 #

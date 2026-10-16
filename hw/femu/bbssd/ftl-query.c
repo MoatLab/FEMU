@@ -147,6 +147,9 @@ static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
             if (ssd->rg[g].rus[i].retired) {
                 state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
                     FEMU_RECLAIM_UNIT_STATE_RETIRED;
+            } else if (ssd->rg[g].rus[i].reserve) {
+                state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
+                    FEMU_RECLAIM_UNIT_STATE_RESERVE;
             }
         }
     }
@@ -211,6 +214,7 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
         out->state = q->ru_state[i];
         out->has_handle = out->state != FEMU_RECLAIM_UNIT_STATE_FREE &&
                           out->state != FEMU_RECLAIM_UNIT_STATE_RETIRED &&
+                          out->state != FEMU_RECLAIM_UNIT_STATE_RESERVE &&
                           ru->ruh;
         out->handle = out->has_handle ? ru->ruh->ruhid : 0;
         out->vpc = ru->vpc;
@@ -253,6 +257,17 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->tp_on = ssd->tp_on;
     q->erases = ssd->total_erases;
 
+    q->eol_mode = ssd->eol_ro_mode;
+    q->media_ro = ssd->media_ro;
+    q->eol_cap = ssd->eol_cap;
+    {
+        /* one load, so the two counts belong to the same admissions */
+        uint64_t w = qatomic_read(&ssd->eol_word);
+
+        q->eol_pages = w & 0xffffffffULL;
+        q->eol_reqs = (w & ~(1ULL << 63)) >> 32;
+    }
+
     q->fdp = ssd->fdp_enabled;
     if (q->fdp) {
         ssd_query_fdp(ssd, q);
@@ -264,16 +279,6 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->full_lines = lm->full_line_cnt;
     q->retired_lines = lm->retired_line_cnt;
     q->spare_lines = ssd->spare_lines;
-    q->eol_mode = ssd->eol_ro_mode;
-    q->media_ro = ssd->media_ro;
-    q->eol_cap = ssd->eol_cap;
-    {
-        /* one load, so the two counts belong to the same admissions */
-        uint64_t w = qatomic_read(&ssd->eol_word);
-
-        q->eol_pages = w & 0xffffffffULL;
-        q->eol_reqs = (w & ~(1ULL << 63)) >> 32;
-    }
     q->reserve_lines = 0;
     for (int i = 0; q->eol_mode && i < lm->tt_lines; i++) {
         q->reserve_lines += lm->lines[i].reserve;

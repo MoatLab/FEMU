@@ -242,14 +242,12 @@ All of these are off by default.
   | the media goes read-only | 3 | 00h |
 
 - The read-only end of life covers bbssd and CSD (the NVM namespace).
-- FDP takes `blk_pe_limit` with `eol_read_only=off` only. A worn-out block
-  retires its reclaim unit while the unit's group keeps the units the
-  namespaces and placement need; otherwise the block stays in service with
-  critical warning bit 2. SMART and the Endurance Group Information log
-  report it ([FDP wear-out](../design/fdp.md#block-wear-out)). The
-  read-only end of life stays refused under FDP: a handle update can leave
-  a unit part written for each command, and units are padded outside a
-  reserve.
+- FDP takes `blk_pe_limit` too. A worn-out block retires its reclaim unit
+  while the unit's group keeps the units the namespaces and placement
+  need. Otherwise the media goes read-only (`eol_read_only`), or the block
+  stays in service with critical warning bit 2 (`eol_read_only=off`). Each
+  reclaim group then holds its own reserve units, and RUH Update fails
+  after the end of life ([FDP wear-out](../design/fdp.md#block-wear-out)).
 - ZNS ends the life of a zone with the Read Only and Offline zone states.
   This model does not drive them. KV has no NVM write path. Both refuse
   `blk_pe_limit`.

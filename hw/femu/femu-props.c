@@ -440,8 +440,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, also FDP: mean program/erase cycles a block survives "
       "before it wears out; 0 (default) turns wear-out off. When no block "
       "can replace a worn-out one, the media goes read-only (eol_read_only). "
-      "FDP needs eol_read_only=off: a reclaim unit retires, or its worn-out "
-      "blocks stay in service" },
+      "Under FDP a worn-out block retires its reclaim unit" },
     { "blk_pe_spread",
       "bbssd, CSD, also FDP: how far each block's limit varies from "
       "blk_pe_limit, in percent, 0 to 90" },
@@ -480,7 +479,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "reserve lines for the writes in flight; needs mdts 1 or more and "
       "limits Write Zeroes (WZSL) to mdts and Copy (MCL) to mdts or one "
       "block. off keeps a worn-out block in service with the SMART "
-      "reliability warning. FDP refuses on" },
+      "reliability warning. Under FDP each reclaim group holds reserve "
+      "units" },
     { "err_read_unc_ppm",
       "bbssd, CSD: reads per million that fail as Unrecovered Read Error, "
       "injected at a fixed period; 0 disables" },

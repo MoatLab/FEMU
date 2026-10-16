@@ -43,6 +43,13 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->eol_reserve_lines = ssd->eol_ro_mode ?
                              (int)bb_eol_reserve_lines(n) : 0;
     ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->pgs_per_line;
+    ssd->fdp_eol_reserve = 0;
+    if (ssd->eol_ro_mode && n->subsys && n->subsys->params.fdp.enabled) {
+        /* each reclaim group holds the reserve; the cap is in its units */
+        ssd->eol_cap = bb_fdp_eol_units(n) * (spp->pgs_per_line /
+                       MAX(n->subsys->endgrp.fdp.nrg, 1));
+        ssd->fdp_eol_reserve = bb_fdp_eol_reserve(n);
+    }
     ssd->eol_word = 0;
     if (ssd->wear_on) {
         qemu_mutex_init(&ssd->wear_lock);
@@ -273,6 +280,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         femu_fdp_ssd_init_reclaim_group(n, ssd);
         ftl_log("FDP: initializing RU handles\n");
         femu_fdp_ssd_init_ru_handles(n, ssd);
+        femu_fdp_ssd_init_eol_reserve(ssd);
         /* no line write pointer under FDP, but the buffer is shared */
         ssd_init_write_buffer(ssd);
         ftl_log("FDP: init complete (nrg=%lu, nruhs=%lu)\n",

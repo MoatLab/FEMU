@@ -2951,29 +2951,21 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
         return false;
     }
     /*
-     * Under FDP a worn-out block retires its reclaim unit, or stays in
-     * service with the reliability warning. The read-only end of life
-     * needs erased units held back in every group for the writes in
-     * flight, and a handle update or a padded unit uses them up, so it is
-     * not modelled there. A spare block would change a unit's blocks, and
-     * the whole-device trim erases every block outside the wear check.
+     * Under FDP a worn-out block retires its reclaim unit. A spare block
+     * would change a unit's blocks, and the whole-device trim erases every
+     * block outside the wear check.
      */
     if (fdp && n->blk_pe_limit) {
         if (n->spare_lines) {
             why = "spare_lines";
         } else if (bp->fdp_trim_erase_all) {
             why = "fdp_trim_erase_all";
-        } else if (n->eol_read_only) {
-            error_setg(errp, "femu: eol_read_only is not supported with FDP "
-                       "and blk_pe_limit; set eol_read_only=off");
-            return false;
         }
         if (why) {
             error_setg(errp, "femu: %s is not supported with FDP and "
                        "blk_pe_limit", why);
             return false;
         }
-        return true;
     }
     if (!n->blk_pe_limit || !n->eol_read_only) {
         return true;
