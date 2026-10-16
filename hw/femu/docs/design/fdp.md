@@ -344,9 +344,14 @@ namespace `ssd_fdp_update_ruhs()` then, for each handle:
 - keeps the current unit if nothing was written to it yet. The handle does
   not move, so no event follows (Base 2.3, 7.4.1.1 lets an empty unit
   stay);
-- otherwise takes a fresh unit, with one GC pass if none is free, and
-  retires the old one as if it had filled. If no unit can be freed, the
-  command fails with Capacity Exceeded;
+- otherwise first runs foreground GC passes in the group, as a write does,
+  while its free units are at or below the forced watermark. An update
+  that took the last free units would leave collection no unit to move
+  pages into. A pass into an Initially Isolated handle can fill the old
+  unit and move the handle, which then counts as the update;
+- then takes a fresh unit, with one GC pass if none is free, and retires
+  the old one as if it had filled. If no unit can be freed, the command
+  fails with Capacity Exceeded;
 - when the handle moves off a unit that still had room (RUAMW not zero),
   records host event "Reclaim Unit Not Fully Written". The handle must
   have that event enabled.
@@ -413,8 +418,8 @@ whose RUAMW differs from the room they leave.
   `(1 - gc_thres_pcent_high / 100) * units` (at least one unless
   `gc_thres_pcent_high` is 100), it runs passes in that group. It stops
   when the pressure clears or no victim is left. The host write waits for them.
-  Foreground passes, and the pass RUH Update may run, always collect their
-  victim.
+  RUH Update runs the same passes before it takes a unit. Foreground
+  passes, and the passes RUH Update runs, always collect their victim.
 
 ### Victim selection
 

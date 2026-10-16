@@ -7676,6 +7676,69 @@ static void femu_test_fdp_ruh_update_full(void *obj, void *data,
     femu_disable(&c);
 }
 
+static uint64_t femu_fdp_check(QTestState *qts);
+
+/*
+ * A handle update must leave collection the free unit it needs. Four
+ * persistently isolated handles, 40 units of 16 pages, one unit kept free
+ * for forced collection. 34 write-and-update pairs close 34 units holding
+ * one valid page each, leaving 2 free; a page in each handle's new unit
+ * keeps every active unit written. Two more updates would then take both
+ * free units, and collection could not open a unit to move pages into, so
+ * a 17-page write would fill its unit and fail with no unit to follow.
+ * The namespace holds 55 live pages of 256.
+ */
+static void femu_test_fdp_ruh_update_reserve(void *obj, void *data,
+                                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 17 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint16_t pid;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6d, 17 * 4096);
+
+    for (k = 0; k < 34; k++) {
+        pid = cpu_to_le16(k % 4);
+        qtest_memwrite(qts, pids, &pid, sizeof(pid));
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, k, 1, buf, list,
+                                                        k % 4)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    }
+    for (k = 0; k < 4; k++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 34 + k, 1, buf,
+                                                        list, k)), ==,
+                        NVME_SUCCESS);
+    }
+    for (k = 0; k < 2; k++) {
+        pid = cpu_to_le16(k);
+        qtest_memwrite(qts, pids, &pid, sizeof(pid));
+        g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 40, 17, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 55);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * A handle update can leave a unit holding a single valid page: the rest of it
  * was never written, so it counts neither valid nor invalid. It then has the
@@ -36178,6 +36241,106 @@ static int femu_pd2_events(FemuCtrlState *c, uint64_t log, bool host,
     return n;
 }
 
+/* host event 00h entries of handle @ruhid in the FDP Events log */
+static int femu_fdp_not_full_events(FemuCtrlState *c, uint64_t log,
+                                    uint16_t ruhid)
+{
+    uint8_t ev[64 + 63 * 64];
+    uint32_t numd = sizeof(ev) / 4 - 1;
+    NvmeCmd cmd;
+    int n = 0;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | 1 << 8 |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, ev, sizeof(ev));
+    for (uint32_t i = 0; i < MIN(ldl_le_p(ev), 63); i++) {
+        const uint8_t *e = ev + 64 + i * 64;
+
+        n += e[0] == FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN &&
+             lduw_le_p(e + 34) == ruhid;
+    }
+    return n;
+}
+
+/*
+ * The collection a handle update runs can fill the handle's unit and move
+ * the handle on (event 81h), then collect that unit too, which erases it.
+ * The update must not then report it as left part written (event 00h).
+ * Handle 3 is initially isolated, the rest persistently isolated; one unit
+ * is kept free. B, the first unit of handle 3, keeps 2 valid pages; A, its
+ * next unit, takes 15 pages and keeps 1. 33 units of 3 pages each use up
+ * the free units but one. The update of handle 3 collects B into A, which
+ * fills, then A into a fresh unit.
+ */
+static void femu_test_fdp_ruh_update_moved(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint16_t ruhid = 0xffff;
+    uint16_t pid;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2b, 16 * 4096);
+    femu_fdp_move_events_set(&c, pids, 3, "1", true);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list, 3)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 100, 15, buf, list,
+                                                    3)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 2, 14, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 101, 14, buf, list,
+                                                    0)), ==, NVME_SUCCESS);
+    for (k = 0; k < 33; k++) {
+        pid = cpu_to_le16(1 + k % 2);
+        qtest_memwrite(qts, pids, &pid, sizeof(pid));
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 120 + 3 * k, 3,
+                                                        buf, list,
+                                                        1 + k % 2)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_pd2_events(&c, log, false, FEMU_FDP_EVT_RUH_MODIFIED,
+                                    &ruhid), ==, 0);
+    pid = cpu_to_le16(3);
+    qtest_memwrite(qts, pids, &pid, sizeof(pid));
+    g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+
+    /* the move to a fresh unit was the controller's, and A was full */
+    g_assert_cmpint(femu_pd2_events(&c, log, false, FEMU_FDP_EVT_RUH_MODIFIED,
+                                    &ruhid), ==, 1);
+    g_assert_cmpint(ruhid, ==, 3);
+    g_assert_cmpint(femu_fdp_not_full_events(&c, log, 3), ==, 0);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 16 + 15 + 99);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* query-femu pad-write-pages of namespace 1, -1 when absent, and its waf */
 static int64_t femu_pd2_query_pads(QTestState *qts, double *waf)
 {
@@ -44741,6 +44904,20 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=11,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,subsys=fdpsub,femu_mode=4,fdm_size=1,buffer_size=16"
+    });
+    qos_add_test("fdp-ruh-update-reserve", "femu",
+                 femu_test_fdp_ruh_update_reserve, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=99,gc_thres_pcent_high=99,subsys=fdpsub",
+    });
+    qos_add_test("fdp-ruh-update-moved", "femu",
+                 femu_test_fdp_ruh_update_moved, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_thres_pcent=99,gc_thres_pcent_high=99,subsys=fdpsub-ii",
     });
     qos_add_test("fdp-ruh-update-full", "femu", femu_test_fdp_ruh_update_full,
                  &(QOSGraphTestOptions) {

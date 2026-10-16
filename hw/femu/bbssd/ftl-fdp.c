@@ -2093,6 +2093,24 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
             continue;
         }
 
+        /*
+         * Collect first, as a write does. Taking a free unit below the
+         * forced watermark leaves collection none to open a unit to move
+         * pages into, and then no write can get a unit either. Collection
+         * into an initially isolated handle can fill @old and move the
+         * handle on, which does the update. @old was full then, and that
+         * move logged event 81h; a later pass may have erased @old, so its
+         * room now says nothing about the move.
+         */
+        fdp_gc_until_clear(ssd, rgid, ruh->ruhid);
+        if (ruh->rus[rgid] != old) {
+            if (!fdp_ruh_ready(ssd, ruh, rgid)) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                return;
+            }
+            continue;
+        }
+
         fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
         if (!fresh && do_gc_fdp_style(ssd, rgid, ruh->ruhid, true) != -1) {
             /*
