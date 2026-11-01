@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 208 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 215 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -201,6 +201,18 @@ Devices:
 | `buffer_thres_pcent` | `int32` | `90` | bbssd, CSD: buffer fill level in percent at which buffered pages are written to NAND, 1 to 100 when buffer_size > 0 |
 | `fdp_trim_erase_all` | `int32` | `0` | bbssd with FDP: non-zero makes a deallocate reset every reclaim unit instead of the given ranges |
 | `debug_ftl` | `bool` | `off` | bbssd, CSD, KV: print a message when a page is programmed while not free or invalidated while not valid, and print merge counts for hybrid and fast mapping |
+
+### pSLC tier (bbssd)
+
+| Property | Type | Default | Description |
+| --- | --- | --- | --- |
+| `tier_mode` | `str` | unset | bbssd: off (unset) or static; static keeps a pool of lines in pSLC mode in front of the dense lines, and host writes go there first. Needs nand_cell_type 2, 3 or 4 and page mapping; refused with FDP, more than one namespace, buffer_size, Streams and the wear, refresh and pd_* features |
+| `tier_full_policy` | `str` | unset | bbssd with tier_mode=static: what a host page does when the pool has no free page; direct (unset) writes it to the dense lines, through folds the oldest pool line first and writes it to the pool |
+| `tier_static_mb` | `uint32` | `0` | bbssd with tier_mode=static: host data in MiB the pSLC pool holds; the pool takes enough whole lines out of the over-provisioning, and realize refuses a pool that leaves the namespace too little room |
+| `tier_pslc_read_ns` | `uint64` | `25000` | bbssd with tier_mode=static: time in ns of one pSLC page read, at most 10 s |
+| `tier_pslc_prog_ns` | `uint64` | `200000` | bbssd with tier_mode=static: time in ns of one pSLC page program, at most 10 s |
+| `tier_pslc_erase_ns` | `uint64` | `3500000` | bbssd with tier_mode=static: time in ns of one pSLC block erase, at most 10 s |
+| `tier_pslc_pe_cycles` | `uint32` | `0` | bbssd with tier_mode=static: rated erase cycles of a block in pSLC mode, for the tier wear figure; 0 (default) takes 30 times the dense rating |
 
 ### Host link and controller firmware
 
@@ -407,7 +419,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tier-check`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

@@ -2247,6 +2247,14 @@ typedef struct BbCtrlParams {
     int mp_program;   /* charge same-page programs on several planes as one; 0 = off */
     int mp_read;      /* charge same-page reads on several planes as one; 0 = off */
     int plane_first;  /* write pointers step the plane before the channel; 0 = off */
+    /* pSLC tier in front of the dense lines (bbssd/ftl-tier.c) */
+    char *tier_mode;          /* off (unset) or static */
+    char *tier_full_policy;   /* direct (unset) or through */
+    uint32_t tier_static_mb;  /* host MiB the static pool holds */
+    uint64_t tier_pslc_read_ns;     /* pSLC page read time */
+    uint64_t tier_pslc_prog_ns;     /* pSLC page program time */
+    uint64_t tier_pslc_erase_ns;    /* pSLC block erase time */
+    uint32_t tier_pslc_pe_cycles;   /* pSLC erase rating; 0: 30 x dense */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

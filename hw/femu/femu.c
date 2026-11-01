@@ -3410,6 +3410,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_check_copyback_props(n, errp)) {
         return;
     }
+    if (!bb_tier_check_props(n, errp)) {
+        return;
+    }
     if (!femu_check_pd_props(n, errp)) {
         return;
     }
@@ -4138,6 +4141,19 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),
+    /* the pSLC tier in front of the dense lines; off unless tier_mode=static */
+    DEFINE_PROP_STRING("tier_mode", FemuCtrl, bb_params.tier_mode),
+    DEFINE_PROP_STRING("tier_full_policy", FemuCtrl,
+                       bb_params.tier_full_policy),
+    DEFINE_PROP_UINT32("tier_static_mb", FemuCtrl, bb_params.tier_static_mb, 0),
+    DEFINE_PROP_UINT64("tier_pslc_read_ns", FemuCtrl,
+                       bb_params.tier_pslc_read_ns, FTL_TIER_READ_NS),
+    DEFINE_PROP_UINT64("tier_pslc_prog_ns", FemuCtrl,
+                       bb_params.tier_pslc_prog_ns, FTL_TIER_PROG_NS),
+    DEFINE_PROP_UINT64("tier_pslc_erase_ns", FemuCtrl,
+                       bb_params.tier_pslc_erase_ns, FTL_TIER_ERASE_NS),
+    DEFINE_PROP_UINT32("tier_pslc_pe_cycles", FemuCtrl,
+                       bb_params.tier_pslc_pe_cycles, 0),
 };
 
 /* A configuration object has no PCI transport, queues or worker threads. */
@@ -4283,6 +4299,27 @@ static char *femu_test_ftl_check(Object *obj, Error **errp)
     return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64, mapped, lost,
                            orphans, tp_pages, tp_bad, moves, pending);
+}
+
+/*
+ * The pSLC tier of namespace 1: its pool, counters and broken tier rules
+ * (see ssd_tier_report). Empty with the tier off.
+ */
+static char *femu_test_tier_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *report;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "tier check requires a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_tier_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report ? report : g_strdup("");
 }
 
 /* FDP reclaim units of namespace 1 that sit in no place or in two */
@@ -4579,6 +4616,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_str(obj, "x-tier-check", femu_test_tier_check,
+                                NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);

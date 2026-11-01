@@ -21,7 +21,8 @@ DEVICES = [
                       "x-ftl-trace",
                       "x-ns-test", "x-oc12-clock",
                       "x-oc12-trace", "x-query-delay-ms", "x-range-waits",
-                      "x-stream-test", "x-tp-hold", "x-zone-draining",
+                      "x-stream-test", "x-tier-check", "x-tp-hold",
+                      "x-zone-draining",
                       "x-zone-held", "x-zone-lock-hold-ms",
                       "x-zone-log-changes", "x-zone-log-hold-ms",
                       "x-zone-report-hold-ms", "x-zone-write-hold-ms"],
@@ -120,6 +121,15 @@ DEVICES = [
                     "read_cache_mb", "cache_evict", "hot_cold_sep",
                     "buffer_size", "buffer_thres_pcent", "fdp_trim_erase_all",
                     "debug_ftl",
+                ],
+            },
+            {
+                "title": "pSLC tier (bbssd)",
+                "kind": "static",
+                "props": [
+                    "tier_mode", "tier_full_policy", "tier_static_mb",
+                    "tier_pslc_read_ns", "tier_pslc_prog_ns",
+                    "tier_pslc_erase_ns", "tier_pslc_pe_cycles",
                 ],
             },
             {

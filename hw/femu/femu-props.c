@@ -563,6 +563,35 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "buffer_thres_pcent",
       "bbssd, CSD: buffer fill level in percent at which buffered pages "
       "are written to NAND, 1 to 100 when buffer_size > 0" },
+
+    /* pSLC tier */
+    { "tier_mode",
+      "bbssd: off (unset) or static; static keeps a pool of lines in pSLC "
+      "mode in front of the dense lines, and host writes go there first. "
+      "Needs nand_cell_type 2, 3 or 4 and page mapping; refused with FDP, "
+      "more than one namespace, buffer_size, Streams and the wear, refresh "
+      "and pd_* features" },
+    { "tier_full_policy",
+      "bbssd with tier_mode=static: what a host page does when the pool "
+      "has no free page; direct (unset) writes it to the dense lines, "
+      "through folds the oldest pool line first and writes it to the pool" },
+    { "tier_static_mb",
+      "bbssd with tier_mode=static: host data in MiB the pSLC pool holds; "
+      "the pool takes enough whole lines out of the over-provisioning, and "
+      "realize refuses a pool that leaves the namespace too little room" },
+    { "tier_pslc_read_ns",
+      "bbssd with tier_mode=static: time in ns of one pSLC page read, at "
+      "most 10 s" },
+    { "tier_pslc_prog_ns",
+      "bbssd with tier_mode=static: time in ns of one pSLC page program, "
+      "at most 10 s" },
+    { "tier_pslc_erase_ns",
+      "bbssd with tier_mode=static: time in ns of one pSLC block erase, at "
+      "most 10 s" },
+    { "tier_pslc_pe_cycles",
+      "bbssd with tier_mode=static: rated erase cycles of a block in pSLC "
+      "mode, for the tier wear figure; 0 (default) takes 30 times the "
+      "dense rating" },
     { "fdp_trim_erase_all",
       "bbssd with FDP: non-zero makes a deallocate reset every reclaim unit "
       "instead of the given ranges" },

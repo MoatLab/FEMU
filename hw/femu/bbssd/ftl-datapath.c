@@ -586,6 +586,14 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         pslc = true;
     } else {
         ppa = get_new_page_class(ssd, plan.target_class);
+        /* a through fold can take the dense page the caller secured */
+        if (unlikely(ssd->tier) && !mapped_ppa(&ppa)) {
+            if (ssd_out_of_lines(ssd)) {
+                ftl_tier_place_failed(ssd);
+                return stime > base ? stime - base : 0;
+            }
+            ppa = get_new_page_class(ssd, plan.target_class);
+        }
     }
     ssd->mapping->commit_write(ssd, lpn, &ppa);
 

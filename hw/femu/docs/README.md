@@ -39,6 +39,7 @@ and what the guest needs. In short:
 | Computational storage | CSD (`femu_mode=4`) | `run-csd.sh` | [CSD](modes/csd.md), [CSD guest tools](../tests/csd/README.md) |
 | NVMe Computational Programs and Subsystem Local Memory | CSD with `csd_slm_size`, `csd_cp=on` | none | [CP and SLM](features/cp-slm.md) |
 | Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | [FDP](features/fdp.md) |
+| A pSLC cache in front of MLC, TLC or QLC NAND | BBSSD with `nand_cell_type` and `tier_mode=static` | none | [Tiered NAND](features/tiered-nand.md) |
 | Create and delete namespaces from the guest | NoSSD or BBSSD with `ns_mgmt=on` | none | [Namespace management](features/ns-management-and-pi.md#namespace-management) |
 | Per-block metadata and protection information | NoSSD or BBSSD with `meta`, `mc`, `pi=on` | none | [Metadata and PI](features/ns-management-and-pi.md#metadata-and-protection-information) |
 | Several namespaces on one controller | any NVMe mode | none | [Several namespaces](features/multi-namespace.md) |

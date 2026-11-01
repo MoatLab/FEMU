@@ -16,6 +16,11 @@ typedef struct FemuReclaimUnit FemuReclaimUnit;
 /* the optional pSLC tier (ftl-tier.c); NULL while tier_mode is off */
 struct ftl_tier;
 
+/* default pSLC page read, page program and block erase times, in ns */
+#define FTL_TIER_READ_NS    25000ULL
+#define FTL_TIER_PROG_NS    200000ULL
+#define FTL_TIER_ERASE_NS   3500000ULL
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -794,6 +799,9 @@ uint64_t bb_fdp_eol_units(FemuCtrl *n);
 uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
 uint64_t bb_tier_pool_lines(FemuCtrl *n);
+bool bb_tier_check_props(FemuCtrl *n, Error **errp);
+/* the pSLC tier state and its broken rules, for x-tier-check */
+char *ssd_tier_report(struct ssd *ssd);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units);

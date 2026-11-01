@@ -25,7 +25,7 @@ enum ftl_tier_policy {
 /* the state of a line, by line id; a line the tier does not own is dense */
 enum ftl_tier_line_state {
     FTL_TIER_LINE_DENSE = 0,
-    FTL_TIER_LINE_FREE,     /* erased, in the tier free list */
+    FTL_TIER_LINE_FREE,     /* in the tier free list; erased at ready[] */
     FTL_TIER_LINE_OPEN,     /* the pSLC frontier writes it */
     FTL_TIER_LINE_CLOSED,   /* full, in the fold FIFO */
 };
@@ -38,8 +38,13 @@ struct ftl_tier {
     int line_pgs;           /* usable pages of one pSLC line */
     int nlines;             /* lines in the pool */
     uint8_t *state;         /* enum ftl_tier_line_state, by line id */
+    uint64_t *ready;        /* by line id: when the erase of a free line ends */
 
-    /* a pool line is on one of these, or the frontier holds it */
+    /*
+     * A pool line is on one of these, or the frontier holds it. A free line
+     * takes a host page only once its erase ended, so the oldest erase is at
+     * the head.
+     */
     QTAILQ_HEAD(, line) free_lines;
     QTAILQ_HEAD(, line) closed;     /* oldest first: the fold order */
     int free_cnt;
@@ -62,7 +67,19 @@ struct ftl_tier {
     uint64_t folds;         /* pool lines folded and erased */
     uint64_t slc_erase_total;
     uint64_t fold_stale;    /* valid pool pages no mapping named */
-    uint64_t last_fold_ns;  /* first read to last erase of the last fold */
+    uint64_t place_fail;    /* host pages with no pool and no dense page */
+
+    /*
+     * The fold of the head of the FIFO. A fold that ran out of dense pages
+     * keeps these, so its retry still erases after every program it made.
+     */
+    uint64_t fold_start;    /* when the first move started; 0: none */
+    uint64_t fold_fence;    /* the end of the latest program so far */
+
+    /* the last finished fold, from its start, in ns */
+    uint64_t last_fold_ns;          /* to the end of the last erase */
+    uint64_t last_fold_prog_ns;     /* to the end of the latest program */
+    uint64_t last_fold_erase_ns;    /* to the start of the first erase */
 };
 
 /* true when the tier owns @line: a pool line in any state */
@@ -98,6 +115,7 @@ bool ftl_tier_invalidate(struct ssd *ssd, struct line *line);
 bool ftl_tier_host_page(struct ssd *ssd, struct ppa *ppa, uint64_t *stime,
                         uint64_t *base);
 void ftl_tier_advance(struct ssd *ssd);
+void ftl_tier_place_failed(struct ssd *ssd);
 void ftl_tier_tick(struct ssd *ssd);
 
 #endif /* __FEMU_BBSSD_FTL_TIER_H */
