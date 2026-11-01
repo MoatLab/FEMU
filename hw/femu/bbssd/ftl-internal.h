@@ -2,6 +2,7 @@
 #define __FEMU_BBSSD_FTL_INTERNAL_H
 
 #include "ftl.h"
+#include "ftl-tier.h"
 
 /* geometry / validity / resource accessors -- hot-path inlines */
 static inline void check_addr(int a, int max)
@@ -24,10 +25,11 @@ static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
  * Move a write pointer to the next page of its line: channel first, then LUN,
  * then plane, then page. With plane_first the plane comes first, so pages in
  * a row fill the planes of one LUN and form one multi-plane command. Returns
- * true when the step wrapped past the line's last page, leaving the pointer
- * at page 0 for the caller to retire the line.
+ * true when the step wrapped past page @pgs - 1 of each block, leaving the
+ * pointer at page 0 for the caller to retire the line.
  */
-static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
+static inline bool ssd_wp_step_lim(struct ssdparams *spp,
+                                   struct write_pointer *wpp, int pgs)
 {
     /* the dies of the pointer's window; with none set, every die */
     int ch_end = wpp->nch ? wpp->ch0 + wpp->nch : spp->nchs;
@@ -57,12 +59,18 @@ static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
         }
         wpp->pl = 0;
     }
-    check_addr(wpp->pg, spp->pgs_per_blk);
-    if (++wpp->pg < spp->pgs_per_blk) {
+    check_addr(wpp->pg, pgs);
+    if (++wpp->pg < pgs) {
         return false;
     }
     wpp->pg = 0;
     return true;
+}
+
+/* step a write pointer over a line whose blocks take every page */
+static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
+{
+    return ssd_wp_step_lim(spp, wpp, spp->pgs_per_blk);
 }
 
 /* fold the id of a collected line or reclaim unit into the victim digest */

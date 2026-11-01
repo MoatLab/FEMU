@@ -13,6 +13,9 @@ typedef struct FemuReclaimGroup FemuReclaimGroup;
 typedef struct FemuRuHandle FemuRuHandle;
 typedef struct FemuReclaimUnit FemuReclaimUnit;
 
+/* the optional pSLC tier (ftl-tier.c); NULL while tier_mode is off */
+struct ftl_tier;
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -773,6 +776,9 @@ struct ssd {
     uint64_t err_write_counter;
     uint64_t err_write_injected;
 
+    /* the pSLC tier in front of the dense lines; NULL when it is off */
+    struct ftl_tier *tier;
+
     FemuCtrl *n;
     NvmeNamespace *ns;  /* the namespace whose blocks this FTL maps */
     /* FDP: 512-byte pieces of the FTL space the FTL holds as written */
@@ -787,6 +793,7 @@ uint64_t bb_eol_reserve_lines(FemuCtrl *n);
 uint64_t bb_fdp_eol_units(FemuCtrl *n);
 uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
+uint64_t bb_tier_pool_lines(FemuCtrl *n);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
 uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units);

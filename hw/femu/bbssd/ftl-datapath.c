@@ -559,6 +559,7 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     struct nand_cmd swr;
     struct ppa ppa;
     uint64_t lat;
+    bool pslc = false;
 
     /* log the overwrite before commit_write invalidates the old mapping */
     if (exp_lpn_watched(lpn)) {
@@ -579,6 +580,10 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         /* Sub-SWS writes share their FTL page and line with its other LBAs. */
         ppa = ssd_stream_page(ssd, stream,
                               ssd->n->stream_slots[stream].tag);
+    } else if (unlikely(ssd->tier) &&
+               ftl_tier_host_page(ssd, &ppa, &stime, &base)) {
+        /* a pSLC tier page, taken before the mapping changes */
+        pslc = true;
     } else {
         ppa = get_new_page_class(ssd, plan.target_class);
     }
@@ -597,6 +602,8 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     /* need to advance the write pointer here */
     if (stream >= 0) {
         ssd_stream_advance(ssd, stream);
+    } else if (pslc) {
+        ftl_tier_advance(ssd);
     } else {
         ssd_advance_write_pointer_class(ssd, plan.target_class);
     }

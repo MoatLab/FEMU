@@ -586,6 +586,10 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 
     /* update corresponding line status */
     line = get_line(ssd, ppa);
+    /* a pSLC tier line keeps only its counts: the tier owns its place */
+    if (unlikely(ssd->tier) && ftl_tier_invalidate(ssd, line)) {
+        return;
+    }
     ftl_assert(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
     if (line->vpc == spp->pgs_per_line) {
         ftl_assert(line->ipc == 0);

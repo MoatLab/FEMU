@@ -68,6 +68,11 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
         .age_sec = 0,
     };
 
+    /* a page of a pSLC tier line takes the pSLC timing row */
+    if (unlikely(ssd->tier)) {
+        ftl_tier_decode(ssd, ppa, &loc);
+    }
+
     /*
      * Charge leaks with time as well as with wear, so how long the data has sat
      * programmed feeds the same correction model. close_time is when the line
@@ -199,6 +204,9 @@ void bb_nand_media_init(struct ssd *ssd)
         cfg.timing.er_table_ns[ft] = get_blk_erase_latency(ft);
         cfg.policy.use_flat_timing = false;
         cfg.timing.pgtype_lat = false; /* the table path already carries pairing */
+    }
+    if (unlikely(ssd->tier)) {
+        ftl_tier_media_cfg(ssd, &cfg);
     }
 
     /*

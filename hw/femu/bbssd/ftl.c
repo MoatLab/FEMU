@@ -208,6 +208,9 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
                            get_rated_pe_cycles(n->nand_cell_type);
     ssd_init_wear(ssd, n, ns);
 
+    /* the pSLC tier, before the media layer takes its timing row */
+    ftl_tier_init(ssd, n);
+
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 
@@ -223,6 +226,9 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     /* initialize all the lines */
     ssd_init_lines(ssd);
+    if (unlikely(ssd->tier)) {
+        ftl_tier_take_lines(ssd);
+    }
 
     /*
      * L2P mapping scheme: "page" (default, full DRAM L2P, bit-identical) vs "dftl"
@@ -1038,6 +1044,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         do_gc(ssd, false);
     }
 
+    /* the pSLC tier's turn: a fold when its pool has no page left */
+    if (unlikely(ssd->tier)) {
+        ftl_tier_tick(ssd);
+    }
+
     /*
      * Changes to translation pages that no victim or command published yet,
      * such as a write that found no room to evict: retry them here. A paced
@@ -1083,6 +1094,7 @@ void ssd_free(struct ssd *ssd)
     rcache_destroy(ssd);
     tp_free(ssd);
     cmt_destroy(ssd);
+    ftl_tier_free(ssd);
     ssd_free_lines(ssd);
     ssd_free_write_buffer(ssd);
 

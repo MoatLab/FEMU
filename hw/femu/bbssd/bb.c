@@ -108,6 +108,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     uint64_t tt_lines = (uint64_t)p->blks_per_pl -
                         (n->blk_pe_limit ? n->spare_lines : 0);
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
+    uint64_t tier_lines;
     int tp_lines;
 
     /*
@@ -146,6 +147,9 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* dftl without FDP: translation page lines and their pointer */
     tp_lines = bb_tp_reserve_lines(n, ns);
     reserve_lines += tp_lines;
+    /* the static pSLC pool: its lines never hold dense data */
+    tier_lines = bb_tier_pool_lines(n);
+    reserve_lines += tier_lines;
 
     if (reserve_eol && tt_lines <= reserve_lines) {
         error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
@@ -157,8 +161,9 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     if (tt_lines <= reserve_lines) {
         error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
-                   "fewer than the %" PRIu64 " garbage collection needs free",
-                   tt_lines, reserve_lines);
+                   "fewer than the %" PRIu64 " garbage collection needs free%s",
+                   tt_lines, reserve_lines, tier_lines ? " with the "
+                   "tier_static_mb pSLC pool" : "");
         return -1;
     }
 
@@ -273,12 +278,14 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64 " MiB of "
                    "the %" PRIu64 " MiB this geometry has, leaving garbage "
                    "collection no room; expose at most %" PRIu64 " MiB per "
-                   "namespace (lower devsz_mb, or set op_pcent)%s",
+                   "namespace (lower devsz_mb, or set op_pcent)%s%s",
                    ns->id, ns->size >> 20,
                    (tt_lines * pgs_per_line * page_bytes) >> 20,
                    (usable_pgs * page_bytes) >> 20,
                    tp_lines ? "; mapping=dftl keeps lines for its translation "
-                   "pages" : "");
+                   "pages" : "",
+                   tier_lines ? "; the tier_static_mb pSLC pool keeps lines "
+                   "out of the dense capacity" : "");
         return -1;
     }
 
