@@ -4141,7 +4141,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),
-    /* the pSLC tier in front of the dense lines; off unless tier_mode=static */
+    /* the pSLC tier in front of the dense lines; off unless tier_mode is set */
     DEFINE_PROP_STRING("tier_mode", FemuCtrl, bb_params.tier_mode),
     DEFINE_PROP_STRING("tier_full_policy", FemuCtrl,
                        bb_params.tier_full_policy),
@@ -4154,6 +4154,9 @@ static const Property femu_props[] = {
                        bb_params.tier_pslc_erase_ns, FTL_TIER_ERASE_NS),
     DEFINE_PROP_UINT32("tier_pslc_pe_cycles", FemuCtrl,
                        bb_params.tier_pslc_pe_cycles, 0),
+    DEFINE_PROP_UINT32("tier_max_mb", FemuCtrl, bb_params.tier_max_mb, 0),
+    DEFINE_PROP_UINT32("tier_shrink_pct", FemuCtrl, bb_params.tier_shrink_pct,
+                       FTL_TIER_SHRINK_PCT),
 };
 
 /* A configuration object has no PCI transport, queues or worker threads. */

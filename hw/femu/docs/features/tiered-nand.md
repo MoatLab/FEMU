@@ -68,21 +68,79 @@ pool takes 4 lines.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `tier_mode` | unset (off) | `static` turns the tier on |
-| `tier_static_mb` | `0` | host data in MiB the pool holds |
+| `tier_mode` | unset (off) | `static` or `dynamic` turns the tier on |
+| `tier_static_mb` | `0` | host data in MiB the static pool holds |
 | `tier_full_policy` | unset (`direct`) | `direct` or `through` |
 | `tier_pslc_read_ns` | `25000` | pSLC page read time in ns |
 | `tier_pslc_prog_ns` | `200000` | pSLC page program time in ns |
 | `tier_pslc_erase_ns` | `3500000` | pSLC block erase time in ns |
 | `tier_pslc_pe_cycles` | `0` | pSLC erase rating; 0 is 30 times the dense rating |
+| `tier_max_mb` | `0` | `dynamic`: cap of the borrowed lines in MiB; 0 sets no cap |
+| `tier_shrink_pct` | `50` | `dynamic`: fill in % where the pool starts to shrink |
 
 The full descriptions are in the
 [property reference](../reference/properties.md#pslc-tier-bbssd).
 
+## Dynamic pool
+
+With `tier_mode=dynamic`, the pool also borrows free dense lines while the
+device has room. `tier_static_mb` is then a floor and can be 0. A borrowed
+line goes back to the dense free list after its fold:
+
+```
+ dense free --borrow--> open --> closed (FIFO) --fold--> dense free
+```
+
+The number of borrowed lines the pool may hold falls as the device fills:
+
+```
+ lines
+ max |________
+     |        \
+     |         \
+   0 +---------+--\---> logical fill (valid host pages / exported pages)
+     0      shrink   100%
+```
+
+- `max` is `tier_max_mb` in whole lines, rounded down, or every line when
+  it is 0. Realize refuses a cap below one pool line.
+- The fill counts mapped FTL pages. A deallocate of part of a page unmaps
+  the whole FTL page, as without the tier.
+- `shrink` is `tier_shrink_pct`. Above it, the allowance falls in a straight
+  line to 0 at a full device.
+- After each request, a pool that holds more closed borrowed lines than the
+  fill allows folds the oldest ones until it does not. The open line folds
+  after it fills.
+- When the pool has no line and may borrow none, the end of the request
+  folds the oldest pool line, as in a static pool.
+
+FEMU borrows a line only when three rules hold:
+
+1. The fill allows one more borrowed line.
+2. The dense lines that stay still hold every valid page, plus one full pool
+   line.
+3. The dense free lines stay above the forced garbage collection threshold.
+
+Before each host page, FEMU checks rule 2 again for the page. When the page
+would break it, a borrowed line folds first. So a full device always has
+dense room for every page, and the pool shrinks to its floor.
+
+`tier_full_policy=through` needs a static floor, so `dynamic` with
+`through` also needs `tier_static_mb` above 0.
+
+A 4 GiB TLC device with no fixed pool and a cache of up to 1 GiB:
+
+<!-- femu-example: tiered-nand-dynamic -->
+```
+-device femu,femu_mode=1,devsz_mb=4096,nchs=8,luns_per_ch=8,pgs_per_blk=256,blks_per_pl=256,nand_cell_type=3,tier_mode=dynamic,tier_max_mb=1024
+```
+
 ## Capacity
 
 The exported capacity does not change. Realize checks that the dense lines
-alone can hold the whole namespace plus the garbage collection reserve:
+alone can hold the whole namespace plus the garbage collection reserve. The
+check counts the static pool only; a dynamic pool keeps the same rule at run
+time (see [Dynamic pool](#dynamic-pool)):
 
 ```
  (lines - pool lines - reserve lines) x dense pages per line  >=  exported pages
@@ -174,14 +232,14 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
 - With `pe_suspend`, a read could move the end of a fold program past the
   time the erase waits for, so the tier refuses it.
 - `tier_full_policy=through` needs `tier_static_mb` above 0. A static pool
-  always needs it.
+  always needs it. A dynamic pool needs it only with `through`.
 - Folds always charge their time. `enable_gc_delay` off (the GC delay flip)
   does not remove the fold cost.
 - Dense programs use the FEMU page model: one program per page, timed by its
   page type. A one-shot word line program is a later option.
 - A fold moves a whole pool line in one step. Host requests do not run
   between the page moves of a fold.
-- No dynamic pool, no idle fold and no read promotion yet.
+- No idle fold and no read promotion yet.
 
 ## Credit
 

@@ -130,6 +130,7 @@ DEVICES = [
                     "tier_mode", "tier_full_policy", "tier_static_mb",
                     "tier_pslc_read_ns", "tier_pslc_prog_ns",
                     "tier_pslc_erase_ns", "tier_pslc_pe_cycles",
+                    "tier_max_mb", "tier_shrink_pct",
                 ],
             },
             {

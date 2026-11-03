@@ -57,4 +57,33 @@ static inline uint64_t tier_damage_ppm(uint64_t dense_erases,
     return ppm;
 }
 
+/* whole lines of @line_pgs pages of @page_bytes each in @mb MiB: a cap */
+static inline uint64_t tier_cap_lines(uint64_t mb, uint64_t page_bytes,
+                                      uint64_t line_pgs)
+{
+    uint64_t line_bytes = page_bytes * line_pgs;
+
+    return line_bytes ? mb * 1048576ULL / line_bytes : 0;
+}
+
+/*
+ * The borrowed lines a dynamic pool may hold at a fill of @live of @total
+ * host pages: @dmax up to @shrink_pct percent fill, then a straight line
+ * down to 0 at a full device.
+ */
+static inline uint64_t tier_allowed(uint64_t dmax, uint64_t live,
+                                    uint64_t total, uint32_t shrink_pct)
+{
+    uint64_t start;
+
+    if (!total || live >= total) {
+        return 0;
+    }
+    start = total * shrink_pct / 100;
+    if (live <= start) {
+        return dmax;
+    }
+    return dmax * (total - live) / (total - start);
+}
+
 #endif /* __FEMU_BBSSD_FTL_TIER_MATH_H */

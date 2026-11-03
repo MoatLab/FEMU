@@ -20,6 +20,8 @@ struct ftl_tier;
 #define FTL_TIER_READ_NS    25000ULL
 #define FTL_TIER_PROG_NS    200000ULL
 #define FTL_TIER_ERASE_NS   3500000ULL
+/* default fill in % where a dynamic pool starts to give lines back */
+#define FTL_TIER_SHRINK_PCT 50
 
 enum {
     NAND_READ =  0,

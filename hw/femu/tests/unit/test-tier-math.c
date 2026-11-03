@@ -52,6 +52,34 @@ static void test_damage(void)
     g_assert_cmpuint(tier_damage_ppm(5, 0, 7, 0), ==, 0);
 }
 
+/* a cap counts whole lines only, so it rounds down */
+static void test_cap_lines(void)
+{
+    /* 64 pages of 4 KiB: 256 KiB a line */
+    g_assert_cmpuint(tier_cap_lines(1, 4096, 64), ==, 4);
+    /* 5440 pages of 4 KiB: 64 MiB is 3 lines, not 4 as for a pool */
+    g_assert_cmpuint(tier_cap_lines(64, 4096, 5440), ==, 3);
+    g_assert_cmpuint(tier_pool_lines(64, 4096, 5440), ==, 4);
+    g_assert_cmpuint(tier_cap_lines(1, 4096, 5440), ==, 0);
+    g_assert_cmpuint(tier_cap_lines(1, 4096, 0), ==, 0);
+}
+
+/* the borrowed-line allowance: flat to the shrink point, then down to 0 */
+static void test_allowed(void)
+{
+    g_assert_cmpuint(tier_allowed(32, 0, 4096, 50), ==, 32);
+    g_assert_cmpuint(tier_allowed(32, 2048, 4096, 50), ==, 32);
+    g_assert_cmpuint(tier_allowed(32, 3072, 4096, 50), ==, 16);
+    g_assert_cmpuint(tier_allowed(32, 4095, 4096, 50), ==, 0);
+    g_assert_cmpuint(tier_allowed(32, 4096, 4096, 50), ==, 0);
+    g_assert_cmpuint(tier_allowed(32, 5000, 4096, 50), ==, 0);
+    /* 32 x 1024 / 3687 at a shrink point of 10% */
+    g_assert_cmpuint(tier_allowed(32, 3072, 4096, 10), ==, 8);
+    /* shrink at 0%: a straight line from empty */
+    g_assert_cmpuint(tier_allowed(32, 1024, 4096, 0), ==, 24);
+    g_assert_cmpuint(tier_allowed(32, 0, 0, 50), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -59,5 +87,7 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/tier/pool-lines", test_pool_lines);
     g_test_add_func("/femu/tier/slc-limit", test_slc_limit);
     g_test_add_func("/femu/tier/damage", test_damage);
+    g_test_add_func("/femu/tier/allowed", test_allowed);
+    g_test_add_func("/femu/tier/cap-lines", test_cap_lines);
     return g_test_run();
 }

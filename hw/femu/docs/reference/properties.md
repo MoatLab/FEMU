@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 215 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 217 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -206,13 +206,15 @@ Devices:
 
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
-| `tier_mode` | `str` | unset | bbssd: off (unset) or static; static keeps a pool of lines in pSLC mode in front of the dense lines, and host writes go there first. Needs nand_cell_type 2, 3 or 4 and page mapping; refused with FDP, more than one namespace, buffer_size, Streams and the wear, refresh and pd_* features |
-| `tier_full_policy` | `str` | unset | bbssd with tier_mode=static: what a host page does when the pool has no free page; direct (unset) writes it to the dense lines, through folds the oldest pool line first and writes it to the pool |
-| `tier_static_mb` | `uint32` | `0` | bbssd with tier_mode=static: host data in MiB the pSLC pool holds; the pool takes enough whole lines out of the over-provisioning, and realize refuses a pool that leaves the namespace too little room |
-| `tier_pslc_read_ns` | `uint64` | `25000` | bbssd with tier_mode=static: time in ns of one pSLC page read, at most 10 s |
-| `tier_pslc_prog_ns` | `uint64` | `200000` | bbssd with tier_mode=static: time in ns of one pSLC page program, at most 10 s |
-| `tier_pslc_erase_ns` | `uint64` | `3500000` | bbssd with tier_mode=static: time in ns of one pSLC block erase, at most 10 s |
-| `tier_pslc_pe_cycles` | `uint32` | `0` | bbssd with tier_mode=static: rated erase cycles of a block in pSLC mode, for the tier wear figure; 0 (default) takes 30 times the dense rating |
+| `tier_mode` | `str` | unset | bbssd: off (unset), static or dynamic; static keeps a pool of lines in pSLC mode in front of the dense lines, and host writes go there first. dynamic also borrows free dense lines for the pool while the device has room. Needs nand_cell_type 2, 3 or 4 and page mapping; refused with FDP, more than one namespace, buffer_size, Streams and the wear, refresh and pd_* features |
+| `tier_full_policy` | `str` | unset | bbssd with a tier_mode: what a host page does when the pool has no free page; direct (unset) writes it to the dense lines, through folds the oldest pool line first and writes it to the pool |
+| `tier_static_mb` | `uint32` | `0` | bbssd with a tier_mode: host data in MiB the static pSLC pool holds; the pool takes enough whole lines out of the over-provisioning, and realize refuses a pool that leaves the namespace too little room. Above 0 for static and for through; with dynamic it is the floor the pool keeps |
+| `tier_pslc_read_ns` | `uint64` | `25000` | bbssd with a tier_mode: time in ns of one pSLC page read, at most 10 s |
+| `tier_pslc_prog_ns` | `uint64` | `200000` | bbssd with a tier_mode: time in ns of one pSLC page program, at most 10 s |
+| `tier_pslc_erase_ns` | `uint64` | `3500000` | bbssd with a tier_mode: time in ns of one pSLC block erase, at most 10 s |
+| `tier_pslc_pe_cycles` | `uint32` | `0` | bbssd with a tier_mode: rated erase cycles of a block in pSLC mode, for the tier wear figure; 0 (default) takes 30 times the dense rating |
+| `tier_max_mb` | `uint32` | `0` | bbssd with tier_mode=dynamic: host data in MiB the borrowed lines may hold at most; 0 (default) sets no cap, and the free space alone limits the pool |
+| `tier_shrink_pct` | `uint32` | `50` | bbssd with tier_mode=dynamic: logical fill in percent at which the pool starts to give borrowed lines back, 0 to 99; above it the allowance falls in a line to 0 at a full device |
 
 ### Host link and controller firmware
 

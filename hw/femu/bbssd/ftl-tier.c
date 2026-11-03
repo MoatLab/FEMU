@@ -1,17 +1,23 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * bbssd pSLC tier: a static pool of lines that the FTL programs one bit per
- * NAND unit, in front of the dense (MLC, TLC or QLC) lines. Host writes go
- * to the pool first. A fold moves the valid pages of the oldest full pool
- * line to the dense frontier and erases the pool line.
+ * bbssd pSLC tier: a pool of lines that the FTL programs one bit per NAND
+ * unit, in front of the dense (MLC, TLC or QLC) lines. Host writes go to
+ * the pool first. A fold moves the valid pages of the oldest full pool line
+ * to the dense frontier and erases the pool line.
  *
  * Off by default: ssd->tier is NULL and every hook in the FTL returns at
- * once. The pool lines leave the dense free list at start and never enter
+ * once. The static lines leave the dense free list at start and never enter
  * the full list or the victim queue:
  *
  *   free --host write--> open --last usable page--> closed (FIFO)
  *     ^                                                  |
  *     +-------- fold: read, program dense, erase --------+
+ *
+ * A dynamic pool also borrows free dense lines while the dense lines keep
+ * room for every valid page. A borrowed line goes back to the dense free
+ * list after its fold:
+ *
+ *   dense free --borrow--> open --> closed (FIFO) --fold--> dense free
  *
  * A fold charges each move as a pSLC read, then a dense program that starts
  * when the read data is ready. The erase of the pool line waits for the last
@@ -45,6 +51,16 @@ static bool ftl_tier_static(const BbCtrlParams *p)
     return p->tier_mode && !strcmp(p->tier_mode, "static");
 }
 
+static bool ftl_tier_dynamic(const BbCtrlParams *p)
+{
+    return p->tier_mode && !strcmp(p->tier_mode, "dynamic");
+}
+
+static bool ftl_tier_on(const BbCtrlParams *p)
+{
+    return ftl_tier_static(p) || ftl_tier_dynamic(p);
+}
+
 static bool ftl_tier_through(const BbCtrlParams *p)
 {
     return p->tier_full_policy && !strcmp(p->tier_full_policy, "through");
@@ -66,13 +82,14 @@ static uint64_t bb_tier_line_pgs(FemuCtrl *n)
  *
  * Enough lines to hold tier_static_mb of host data at the usable pSLC size
  * of a line. They hold no dense data, so the capacity check counts them as
- * a reserve. Returns 0 with the tier off.
+ * a reserve. Borrowed lines are not in this count. Returns 0 with the tier
+ * off.
  */
 uint64_t bb_tier_pool_lines(FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
 
-    if (!ftl_tier_static(p)) {
+    if (!ftl_tier_on(p)) {
         return 0;
     }
     return tier_pool_lines(p->tier_static_mb,
@@ -172,20 +189,32 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
     const char *why;
     int density;
 
-    if (mode && *mode && strcmp(mode, "off") && strcmp(mode, "static")) {
-        error_setg(errp, "femu: tier_mode must be off or static, got %s",
-                   mode);
+    if (mode && *mode && strcmp(mode, "off") && strcmp(mode, "static") &&
+        strcmp(mode, "dynamic")) {
+        error_setg(errp, "femu: tier_mode must be off, static or dynamic, "
+                   "got %s", mode);
         return false;
     }
-    if (!ftl_tier_static(p)) {
+    if (!ftl_tier_on(p)) {
         if (p->tier_static_mb || (pol && *pol) || p->tier_pslc_pe_cycles ||
             p->tier_pslc_read_ns != FTL_TIER_READ_NS ||
             p->tier_pslc_prog_ns != FTL_TIER_PROG_NS ||
-            p->tier_pslc_erase_ns != FTL_TIER_ERASE_NS) {
+            p->tier_pslc_erase_ns != FTL_TIER_ERASE_NS ||
+            p->tier_max_mb || p->tier_shrink_pct != FTL_TIER_SHRINK_PCT) {
             warn_report("femu: the tier_* properties have no effect unless "
-                        "tier_mode=static");
+                        "tier_mode is static or dynamic");
         }
         return true;
+    }
+    if (!ftl_tier_dynamic(p) &&
+        (p->tier_max_mb || p->tier_shrink_pct != FTL_TIER_SHRINK_PCT)) {
+        warn_report("femu: tier_max_mb and tier_shrink_pct have no effect "
+                    "unless tier_mode=dynamic");
+    }
+    if (ftl_tier_dynamic(p) && p->tier_shrink_pct > 99) {
+        error_setg(errp, "femu: tier_shrink_pct must be 0 to 99, got %u",
+                   p->tier_shrink_pct);
+        return false;
     }
     if (pol && *pol && strcmp(pol, "direct") && strcmp(pol, "through")) {
         error_setg(errp, "femu: tier_full_policy must be direct or through, "
@@ -203,27 +232,35 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
 
     why = bb_tier_refused(n);
     if (why) {
-        error_setg(errp, "femu: tier_mode=static is not supported with %s",
-                   why);
+        error_setg(errp, "femu: tier_mode=%s is not supported with %s",
+                   mode, why);
         return false;
     }
     density = ftl_tier_density(n->nand_cell_type);
     if (!density) {
-        error_setg(errp, "femu: tier_mode=static needs nand_cell_type 2 "
+        error_setg(errp, "femu: tier_mode=%s needs nand_cell_type 2 "
                    "(MLC), 3 (TLC) or 4 (QLC): the pool programs dense "
-                   "blocks one bit per NAND unit");
+                   "blocks one bit per NAND unit", mode);
         return false;
     }
-    if (!p->tier_static_mb) {
-        error_setg(errp, "femu: tier_mode=static needs tier_static_mb above "
-                   "0%s", ftl_tier_through(p) ? ": tier_full_policy=through "
-                   "writes every host page through the pool" : "");
+    if (!p->tier_static_mb && (ftl_tier_static(p) || ftl_tier_through(p))) {
+        error_setg(errp, "femu: tier_mode=%s needs tier_static_mb above "
+                   "0%s", mode, ftl_tier_through(p) ? ": tier_full_policy="
+                   "through writes every host page through the pool" : "");
         return false;
     }
     if (!tier_blk_pgs(p->pgs_per_blk, density)) {
-        error_setg(errp, "femu: tier_mode=static needs pgs_per_blk of at "
-                   "least %d at nand_cell_type %u", density,
+        error_setg(errp, "femu: tier_mode=%s needs pgs_per_blk of at "
+                   "least %d at nand_cell_type %u", mode, density,
                    n->nand_cell_type);
+        return false;
+    }
+    if (ftl_tier_dynamic(p) && p->tier_max_mb &&
+        !tier_cap_lines(p->tier_max_mb, (uint64_t)p->secs_per_pg * p->secsz,
+                        bb_tier_line_pgs(n))) {
+        error_setg(errp, "femu: tier_max_mb=%u holds no whole pSLC line of "
+                   "%" PRIu64 " KiB", p->tier_max_mb,
+                   bb_tier_line_pgs(n) * p->secs_per_pg * p->secsz >> 10);
         return false;
     }
     return true;
@@ -234,7 +271,8 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
  * @ssd: the FTL, with its geometry and wear rating set
  * @n: the controller
  *
- * Leaves ssd->tier NULL unless tier_mode=static, so every hook stays inert.
+ * Leaves ssd->tier NULL unless tier_mode is static or dynamic, so every
+ * hook stays inert.
  * Runs before the media layer, which takes the pSLC timing row from here.
  */
 void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
@@ -245,7 +283,7 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     int density;
 
     ssd->tier = NULL;
-    if (!ftl_tier_static(p) || !ssd->ns || !NS_BBSSD(ssd->ns)) {
+    if (!ftl_tier_on(p) || !ssd->ns || !NS_BBSSD(ssd->ns)) {
         return;
     }
     density = ftl_tier_density(n->nand_cell_type);
@@ -254,7 +292,7 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     }
 
     t = g_new0(struct ftl_tier, 1);
-    t->mode = FTL_TIER_STATIC;
+    t->mode = ftl_tier_dynamic(p) ? FTL_TIER_DYNAMIC : FTL_TIER_STATIC;
     t->policy = ftl_tier_through(p) ? FTL_TIER_THROUGH : FTL_TIER_DIRECT;
     t->density = density;
     t->blk_pgs = tier_blk_pgs(spp->pgs_per_blk, density);
@@ -262,6 +300,15 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     t->nlines = (int)bb_tier_pool_lines(n);
     t->state = g_new0(uint8_t, spp->tt_lines);
     t->ready = g_new0(uint64_t, spp->tt_lines);
+    t->dyn = g_new0(uint8_t, spp->tt_lines);
+    /* a cap holds whole lines; with none, every line is the bound */
+    t->dyn_max = p->tier_max_mb ?
+                 tier_cap_lines(p->tier_max_mb,
+                                (uint64_t)p->secs_per_pg * p->secsz,
+                                t->line_pgs) : (uint64_t)spp->tt_lines;
+    t->shrink_pct = p->tier_shrink_pct;
+    t->user_pgs = DIV_ROUND_UP(ssd->ns->size,
+                               (uint64_t)p->secs_per_pg * p->secsz);
     QTAILQ_INIT(&t->free_lines);
     QTAILQ_INIT(&t->closed);
     t->read_ns = p->tier_pslc_read_ns;
@@ -308,6 +355,7 @@ void ftl_tier_free(struct ssd *ssd)
         return;
     }
     g_free(t->slc_erases);
+    g_free(t->dyn);
     g_free(t->ready);
     g_free(t->state);
     g_free(t);
@@ -339,13 +387,15 @@ void ftl_tier_decode(struct ssd *ssd, struct ppa *ppa, NandLoc *loc)
 
 /*
  * A page of a pool line became invalid. Only the counts change: the line
- * stays where the tier keeps it. Returns false for a dense line.
+ * stays where the tier keeps it. Returns false for a dense line, after the
+ * dense count drops.
  */
 bool ftl_tier_invalidate(struct ssd *ssd, struct line *line)
 {
     struct ftl_tier *t = ssd->tier;
 
     if (t->state[line->id] == FTL_TIER_LINE_DENSE) {
+        t->dense_valid--;
         return false;
     }
     line->ipc++;
@@ -354,10 +404,93 @@ bool ftl_tier_invalidate(struct ssd *ssd, struct line *line)
     return true;
 }
 
+/* a page of a dense line became valid */
+void ftl_tier_validate(struct ssd *ssd, struct line *line)
+{
+    if (ssd->tier->state[line->id] == FTL_TIER_LINE_DENSE) {
+        ssd->tier->dense_valid++;
+    }
+}
+
+/* valid host pages, in dense and pool lines */
+static uint64_t ftl_tier_live(struct ftl_tier *t)
+{
+    return t->dense_valid + t->valid;
+}
+
 /*
- * The frontier holds a line with a free page; it takes the oldest free line
- * if it can. A line whose erase ends after @now is taken only with @wait,
- * which then gets the end of the erase.
+ * The dense pages that may hold host data while the pool has @k borrowed
+ * lines: the dense lines less the static pool, the reserves, the forced
+ * collection threshold and the dense frontier.
+ */
+static uint64_t ftl_tier_cap(struct ssd *ssd, int k)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    int64_t dense = (int64_t)lm->tt_lines - ssd->tier->nlines - k -
+                    ssd->spare_lines - ssd->eol_reserve_lines -
+                    lm->retired_line_cnt - ssd->sp.gc_thres_lines_high - 1;
+
+    return dense > 0 ? (uint64_t)dense * ssd->sp.pgs_per_line : 0;
+}
+
+/* the borrowed lines the fill allows now; 0 for a static pool */
+static uint64_t ftl_tier_allowed(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    if (t->mode != FTL_TIER_DYNAMIC) {
+        return 0;
+    }
+    return tier_allowed(t->dyn_max, ftl_tier_live(t), t->user_pgs,
+                        t->shrink_pct);
+}
+
+/*
+ * Whether the pool may borrow one more free dense line. The fill must allow
+ * it, the dense lines must still hold every valid page with a full pool
+ * line more, and the dense side must stay above forced collection.
+ */
+static bool ftl_tier_may_borrow(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    return t->mode == FTL_TIER_DYNAMIC &&
+           (uint64_t)t->dyn_cnt + 1 <= ftl_tier_allowed(ssd) &&
+           ftl_tier_live(t) + t->line_pgs <= ftl_tier_cap(ssd, t->dyn_cnt + 1) &&
+           ssd->lm.free_line_cnt - 1 > ssd->sp.gc_thres_lines_high;
+}
+
+/* open @line as the pSLC frontier */
+static void ftl_tier_open(struct ssd *ssd, struct line *line)
+{
+    ssd->tier->state[line->id] = FTL_TIER_LINE_OPEN;
+    ssd_wp_reset(&ssd->tier->wp, line);
+}
+
+/* take the oldest free dense line into the pool, if the rule allows it */
+static bool ftl_tier_borrow(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+    struct line *line;
+
+    if (!ftl_tier_may_borrow(ssd)) {
+        return false;
+    }
+    line = get_next_free_line(ssd);
+    if (!line) {
+        return false;
+    }
+    t->dyn[line->id] = 1;
+    t->dyn_cnt++;
+    ftl_tier_open(ssd, line);
+    return true;
+}
+
+/*
+ * The frontier holds a line with a free page. It takes the oldest free
+ * static line once its erase ended, then a borrowed line. A static line
+ * whose erase ends after @now is taken only with @wait, which then gets
+ * the end of the erase.
  */
 static bool ftl_tier_frontier(struct ssd *ssd, uint64_t now, uint64_t *wait)
 {
@@ -368,19 +501,20 @@ static bool ftl_tier_frontier(struct ssd *ssd, uint64_t now, uint64_t *wait)
         return true;
     }
     line = QTAILQ_FIRST(&t->free_lines);
-    if (!line) {
+    if (line && t->ready[line->id] <= now) {
+        goto take;
+    }
+    if (ftl_tier_borrow(ssd)) {
+        return true;
+    }
+    if (!line || !wait) {
         return false;
     }
-    if (t->ready[line->id] > now) {
-        if (!wait) {
-            return false;
-        }
-        *wait = t->ready[line->id];
-    }
+    *wait = t->ready[line->id];
+take:
     QTAILQ_REMOVE(&t->free_lines, line, entry);
     t->free_cnt--;
-    t->state[line->id] = FTL_TIER_LINE_OPEN;
-    ssd_wp_reset(&t->wp, line);
+    ftl_tier_open(ssd, line);
     return true;
 }
 
@@ -464,27 +598,47 @@ static size_t ftl_tier_blk_index(struct ssdparams *spp, int ch, int lun,
            spp->blks_per_pl + blk;
 }
 
+/* the oldest closed borrowed line, or NULL */
+static struct line *ftl_tier_oldest_dyn(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+    struct line *line;
+
+    QTAILQ_FOREACH(line, &t->closed, entry) {
+        if (t->dyn[line->id]) {
+            return line;
+        }
+    }
+    return NULL;
+}
+
 /*
- * Fold the oldest closed pool line, starting at @now: move its valid pages,
- * then erase its blocks once the last program ends. Returns when the erase
- * ends, or 0 when the line could not be emptied. A line that is not empty
- * stays at the head of the FIFO, with the pages moved so far and the end of
- * their latest program kept for the retry.
+ * Fold the closed pool line @victim, starting at @now: move its valid
+ * pages, then erase its blocks once the last program ends. A fold that
+ * stopped early takes its line again, whatever @victim is. Returns when
+ * the erase ends, or 0 when the line could not be emptied. A line that is
+ * not empty stays closed, with the pages moved so far and the end of their
+ * latest program kept for the retry. A static line goes back to the tier
+ * free list; a borrowed line goes back to the dense free list.
  */
-static uint64_t ftl_tier_fold(struct ssd *ssd, uint64_t now)
+static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
+                              uint64_t now)
 {
     struct ftl_tier *t = ssd->tier;
     struct ssdparams *spp = &ssd->sp;
-    struct line *victim = QTAILQ_FIRST(&t->closed);
     uint64_t first = UINT64_MAX;
     uint64_t fence;
     uint64_t start;
     uint64_t done;
     struct ppa ppa = { .ppa = 0 };
 
+    if (t->fold_line) {
+        victim = t->fold_line;
+    }
     if (!victim) {
         return 0;
     }
+    t->fold_line = victim;
     if (!t->fold_start) {
         t->fold_start = now;
     }
@@ -551,10 +705,22 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, uint64_t now)
     victim->open_time = 0;
     victim->stream_tag = 0;
     victim->kind = LINE_DATA;
-    t->state[victim->id] = FTL_TIER_LINE_FREE;
-    t->ready[victim->id] = done;
-    QTAILQ_INSERT_TAIL(&t->free_lines, victim, entry);
-    t->free_cnt++;
+    if (t->dyn[victim->id]) {
+        struct ppa lp = { .ppa = 0 };
+
+        /* the erase advanced each LUN, so a dense program waits for it */
+        t->dyn[victim->id] = 0;
+        t->dyn_cnt--;
+        t->state[victim->id] = FTL_TIER_LINE_DENSE;
+        lp.g.blk = victim->id;
+        mark_line_free(ssd, &lp);
+    } else {
+        t->state[victim->id] = FTL_TIER_LINE_FREE;
+        t->ready[victim->id] = done;
+        QTAILQ_INSERT_TAIL(&t->free_lines, victim, entry);
+        t->free_cnt++;
+    }
+    t->fold_line = NULL;
     t->folds++;
     t->last_fold_ns = done - t->fold_start;
     t->last_fold_prog_ns = fence - t->fold_start;
@@ -562,6 +728,22 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, uint64_t now)
     t->fold_start = 0;
     t->fold_fence = 0;
     return done;
+}
+
+/*
+ * A dynamic pool must leave the dense lines room for every valid page
+ * after each host page. Rule B keeps this true before each page, so a
+ * break seen here stays counted in cap_fail even when a later fold heals
+ * it. Runs before each host page and after each request.
+ */
+static void ftl_tier_check_cap(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    if (t->mode == FTL_TIER_DYNAMIC &&
+        ftl_tier_live(t) > ftl_tier_cap(ssd, t->dyn_cnt)) {
+        t->cap_fail++;
+    }
 }
 
 /**
@@ -586,9 +768,36 @@ bool ftl_tier_host_page(struct ssd *ssd, struct ppa *ppa, uint64_t *stime,
     uint64_t now = *stime ? *stime : ssd_now(ssd);
     uint64_t wait = 0;
 
-    if (!ftl_tier_frontier(ssd, now, through ? &wait : NULL) && through &&
-        t->closed_cnt && ftl_tier_fold(ssd, now)) {
-        ftl_tier_frontier(ssd, now, &wait);
+    ftl_tier_check_cap(ssd);
+    /*
+     * Rule B: the page may add a valid page. While the dense lines could
+     * not hold every valid page then, give borrowed lines back first. A
+     * fold that ends a stopped static fold frees no dense room, so check
+     * again after each one.
+     */
+    while (t->dyn_cnt &&
+           ftl_tier_live(t) + 1 > ftl_tier_cap(ssd, t->dyn_cnt)) {
+        struct line *dyn = ftl_tier_oldest_dyn(ssd);
+        int before = t->dyn_cnt;
+
+        if (!dyn || !ftl_tier_fold(ssd, dyn, now)) {
+            t->cap_fail++;
+            break;
+        }
+        t->rule_b_folds += t->dyn_cnt < before;
+    }
+    /*
+     * With through, fold until a pool line is free. A folded borrowed line
+     * goes back to the dense lines and frees no pool line, so one fold may
+     * not be enough. The static floor makes this end.
+     */
+    if (!ftl_tier_frontier(ssd, now, through ? &wait : NULL) && through) {
+        for (int tries = t->closed_cnt; tries > 0 && t->closed_cnt; tries--) {
+            if (!ftl_tier_fold(ssd, QTAILQ_FIRST(&t->closed), now) ||
+                ftl_tier_frontier(ssd, now, &wait)) {
+                break;
+            }
+        }
     }
     if (!wp->curline) {
         t->host_dense++;
@@ -644,20 +853,44 @@ void ftl_tier_place_failed(struct ssd *ssd)
 }
 
 /*
- * After each request: with tier_full_policy=direct, fold one line when the
- * pool has no free line left, so later host writes find the pool again. A
+ * After each request. Rule C: a dynamic pool that holds more closed
+ * borrowed lines than the fill allows gives the oldest ones back until it
+ * does not. Otherwise, with
+ * tier_full_policy=direct, fold one line when the pool has no free line
+ * left and may borrow none, so later host writes find the pool again. A
  * free line whose erase has not ended yet counts as free. The through
  * policy folds in the write that needs the room.
  */
 void ftl_tier_tick(struct ssd *ssd)
 {
     struct ftl_tier *t = ssd->tier;
+    uint64_t now = ssd_now(ssd);
+    bool shrunk = false;
 
-    if (t->policy != FTL_TIER_DIRECT || t->wp.curline || t->free_cnt ||
-        !t->closed_cnt) {
+    ftl_tier_check_cap(ssd);
+    /* the open borrowed line cannot fold yet, so it does not count */
+    while (t->dyn_cnt) {
+        int open = t->wp.curline && t->dyn[t->wp.curline->id];
+        struct line *dyn;
+
+        if ((uint64_t)(t->dyn_cnt - open) <= ftl_tier_allowed(ssd)) {
+            break;
+        }
+        dyn = ftl_tier_oldest_dyn(ssd);
+        if (!dyn || !ftl_tier_fold(ssd, dyn, now)) {
+            break;
+        }
+        t->rule_c_folds++;
+        shrunk = true;
+    }
+    if (shrunk) {
         return;
     }
-    ftl_tier_fold(ssd, ssd_now(ssd));
+    if (t->policy != FTL_TIER_DIRECT || t->wp.curline || t->free_cnt ||
+        !t->closed_cnt || ftl_tier_may_borrow(ssd)) {
+        return;
+    }
+    ftl_tier_fold(ssd, QTAILQ_FIRST(&t->closed), now);
 }
 
 /* add 1 to the count of @line in @seen, and 1 to *@bad if it is not @want */
@@ -680,9 +913,16 @@ static uint64_t ftl_tier_check_queues(struct ssd *ssd)
     int nfree = 0;
     int nclosed = 0;
     int npool = 0;
+    int nfree_dense = 0;
+    int nfull_dense = 0;
+    struct write_pointer *wps[] = {
+        &ssd->wp, &ssd->stream_gc_wp, &ssd->log_wp, &ssd->hot_wp, &ssd->tp_wp,
+    };
 
     QTAILQ_FOREACH(line, &t->free_lines, entry) {
         ftl_tier_see(ssd, seen, line, FTL_TIER_LINE_FREE, &bad);
+        /* a borrowed line goes back to the dense free list, not here */
+        bad += t->dyn[line->id];
         nfree++;
     }
     QTAILQ_FOREACH(line, &t->closed, entry) {
@@ -695,32 +935,81 @@ static uint64_t ftl_tier_check_queues(struct ssd *ssd)
     bad += nfree != t->free_cnt;
     bad += nclosed != t->closed_cnt;
 
-    /* a pool line in a dense list or on the dense frontier */
+    /* a pool line in a dense list or on a dense frontier */
     QTAILQ_FOREACH(line, &lm->free_line_list, entry) {
-        bad += t->state[line->id] != FTL_TIER_LINE_DENSE;
+        ftl_tier_see(ssd, seen, line, FTL_TIER_LINE_DENSE, &bad);
+        nfree_dense++;
     }
     QTAILQ_FOREACH(line, &lm->full_line_list, entry) {
-        bad += t->state[line->id] != FTL_TIER_LINE_DENSE;
+        ftl_tier_see(ssd, seen, line, FTL_TIER_LINE_DENSE, &bad);
+        nfull_dense++;
     }
+    /* a borrow or a return that missed a dense count */
+    bad += nfree_dense != lm->free_line_cnt;
+    bad += nfull_dense != lm->full_line_cnt;
     for (size_t i = 1; i < pq->size; i++) {
-        bad += t->state[((struct line *)pq->d[i])->id] != FTL_TIER_LINE_DENSE;
+        ftl_tier_see(ssd, seen, pq->d[i], FTL_TIER_LINE_DENSE, &bad);
     }
-    if (ssd->wp.curline) {
-        bad += t->state[ssd->wp.curline->id] != FTL_TIER_LINE_DENSE;
+    for (size_t i = 0; i < ARRAY_SIZE(wps); i++) {
+        if (wps[i]->curline) {
+            ftl_tier_see(ssd, seen, wps[i]->curline, FTL_TIER_LINE_DENSE,
+                         &bad);
+        }
     }
 
-    /* every pool line in exactly one tier place, no dense line in one */
+    /*
+     * Every line has exactly one owner: a tier place, or a dense list, the
+     * victim queue or a dense frontier. A line with none was lost.
+     */
     for (int i = 0; i < lm->tt_lines; i++) {
-        if (t->state[i] == FTL_TIER_LINE_DENSE) {
-            bad += seen[i] != 0;
-            continue;
-        }
-        npool++;
         bad += seen[i] != 1;
-        bad += lm->lines[i].pos != 0;
+        if (t->state[i] != FTL_TIER_LINE_DENSE) {
+            npool++;
+            bad += lm->lines[i].pos != 0;
+        }
     }
-    bad += npool != t->nlines;
+    bad += npool != t->nlines + t->dyn_cnt;
     return bad;
+}
+
+/*
+ * Rules of the borrowed lines: each mark is on a pool line, the marks add
+ * up to dyn_cnt, and a static pool borrows none. Returns the broken ones.
+ */
+static uint64_t ftl_tier_check_dyn(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t bad = 0;
+    int marks = 0;
+
+    for (int i = 0; i < ssd->lm.tt_lines; i++) {
+        marks += t->dyn[i];
+        bad += t->dyn[i] && t->state[i] == FTL_TIER_LINE_DENSE;
+    }
+    bad += marks != t->dyn_cnt;
+    bad += t->mode != FTL_TIER_DYNAMIC && t->dyn_cnt;
+    return bad;
+}
+
+/*
+ * The broken rules of the live count: the dense valid count against the
+ * pages of the dense lines, and the live count against the mapping table.
+ */
+static uint64_t ftl_tier_check_live(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t dense = 0;
+    uint64_t mapped = 0;
+
+    for (int i = 0; i < ssd->lm.tt_lines; i++) {
+        if (t->state[i] == FTL_TIER_LINE_DENSE) {
+            dense += ssd->lm.lines[i].vpc;
+        }
+    }
+    for (uint64_t lpn = 0; lpn < (uint64_t)ssd->sp.tt_pgs; lpn++) {
+        mapped += mapped_ppa(&ssd->maptbl[lpn]);
+    }
+    return (dense != t->dense_valid) + (mapped != ftl_tier_live(t));
 }
 
 /*
@@ -819,25 +1108,22 @@ static uint64_t ftl_tier_damage_max(struct ssd *ssd)
 }
 
 /*
- * The static pool form of the space rule: the dense lines must hold every
- * mapped page, a fold of every valid pool page included, with the forced
- * reserve and the dense frontier left over. Realize checked this for the
- * exported capacity. Returns 1 when they cannot. The free line form of the
- * rule comes with a pool that takes lines at run time.
+ * The space rule: the dense lines left by the static pool and the borrowed
+ * lines must hold every mapped page, a fold of every valid pool page
+ * included, with the forced reserve and the dense frontier left over.
+ * Realize checked this for the exported capacity of a static pool. The
+ * mapping table is counted here, not the live count, so an error in that
+ * count does not hide a break. Returns 1 when they cannot.
  */
 static uint64_t ftl_tier_check_reserve(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct line_mgmt *lm = &ssd->lm;
-    int64_t dense = (int64_t)lm->tt_lines - ssd->tier->nlines -
-                    ssd->spare_lines - ssd->eol_reserve_lines -
-                    lm->retired_line_cnt - spp->gc_thres_lines_high - 1;
     uint64_t mapped = 0;
 
     for (uint64_t lpn = 0; lpn < (uint64_t)spp->tt_pgs; lpn++) {
         mapped += mapped_ppa(&ssd->maptbl[lpn]);
     }
-    return dense < 0 || mapped > (uint64_t)dense * spp->pgs_per_line;
+    return mapped > ftl_tier_cap(ssd, ssd->tier->dyn_cnt);
 }
 
 /**
@@ -851,8 +1137,12 @@ static uint64_t ftl_tier_check_reserve(struct ssd *ssd)
  * 0 when the state is right; then host pages with no place, stale pages
  * folds dropped, the largest block wear in millionths, and three times of
  * the last fold in ns from its start: the end of its last erase, the end
- * of its latest program and the start of its first erase. Last, the free
- * lines whose erase has not ended. Returns NULL with the tier off.
+ * of its latest program and the start of its first erase. Then the free
+ * lines whose erase has not ended. Last, for a dynamic pool: borrowed
+ * lines, the borrowed lines the fill allows, the broken rules of the dense
+ * valid count and of the borrowed lines, host pages the dense room could
+ * not hold, and the folds that rules B and C made. Returns NULL with the
+ * tier off.
  */
 char *ssd_tier_report(struct ssd *ssd)
 {
@@ -875,7 +1165,9 @@ char *ssd_tier_report(struct ssd *ssd)
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                           " %" PRIu64 " %" PRIu64 " %d",
+                           " %" PRIu64 " %" PRIu64 " %d %d %" PRIu64
+                           " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRIu64,
                            t->nlines, t->line_pgs, t->free_cnt, t->closed_cnt,
                            t->wp.curline != NULL, t->valid, t->host_pslc,
                            t->host_dense, t->fold_pages, t->folds,
@@ -884,5 +1176,8 @@ char *ssd_tier_report(struct ssd *ssd)
                            ftl_tier_check_reserve(ssd), t->place_fail,
                            t->fold_stale, ftl_tier_damage_max(ssd),
                            t->last_fold_ns, t->last_fold_prog_ns,
-                           t->last_fold_erase_ns, busy);
+                           t->last_fold_erase_ns, busy, t->dyn_cnt,
+                           ftl_tier_allowed(ssd), ftl_tier_check_live(ssd),
+                           ftl_tier_check_dyn(ssd), t->cap_fail,
+                           t->rule_b_folds, t->rule_c_folds);
 }
