@@ -99,6 +99,24 @@ QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
 The fuzz cases (names containing `fuzz`) take most of the sanitized run
 time, and CI splits them over three jobs.
 
+Each fuzz case uses a fixed seed, so CI sees the same inputs on each run.
+For a long run with new inputs, set two environment variables:
+
+```
+ FEMU_FUZZ_SEED=N    each seed becomes its fixed value XOR N
+ FEMU_FUZZ_SCALE=K   each round count is multiplied by K (1 to 1000)
+ neither set         fixed seeds and default rounds, as in CI
+```
+
+The test log prints the seed of each case. To reproduce a failure, run the
+same case again with the same `FEMU_FUZZ_SEED`:
+
+```sh
+FEMU_FUZZ_SEED=7 FEMU_FUZZ_SCALE=10 \
+QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
+    -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests/io-fuzz
+```
+
 ## Documentation checks
 
 From the source tree, with the build above in `build/`:

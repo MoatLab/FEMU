@@ -18123,6 +18123,38 @@ static void femu_test_metadata_extended(void *obj, void *data,
 
 #define FEMU_FUZZ_ROUNDS    20000
 #define FEMU_ADM_DEBUG      0xee
+#define FEMU_FUZZ_SCALE_MAX 1000
+
+/*
+ * The fuzzers use fixed seeds so that CI sees the same inputs each run.
+ * FEMU_FUZZ_SEED changes every seed and FEMU_FUZZ_SCALE multiplies every
+ * round count, so a long run can try new inputs. The test log names the
+ * seed, so a failure can be reproduced.
+ */
+static guint32 femu_fuzz_seed(guint32 base)
+{
+    const char *s = getenv("FEMU_FUZZ_SEED");
+    guint32 seed = base;
+
+    if (s && *s) {
+        seed ^= (guint32)g_ascii_strtoull(s, NULL, 0);
+    }
+    g_test_message("fuzz seed 0x%08x (FEMU_FUZZ_SEED=%s)", seed,
+                   s && *s ? s : "unset");
+    return seed;
+}
+
+static int femu_fuzz_rounds(int base)
+{
+    const char *s = getenv("FEMU_FUZZ_SCALE");
+    guint64 scale = s && *s ? g_ascii_strtoull(s, NULL, 0) : 1;
+
+    if (scale < 1 || scale > FEMU_FUZZ_SCALE_MAX) {
+        g_error("FEMU_FUZZ_SCALE must be 1 to %d, got %s",
+                FEMU_FUZZ_SCALE_MAX, s);
+    }
+    return base * (int)scale;
+}
 
 /*
  * Whether a field gets a value the handler accepts, which it mostly does so
@@ -18167,14 +18199,14 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     bool succeeded[256] = { false };
     uint64_t raw = 0;
     uint64_t buf = femu_alloc_64k(alloc, &raw);
-    GRand *rng = g_rand_new_with_seed(0x46454d55);
+    GRand *rng = g_rand_new_with_seed(femu_fuzz_seed(0x46454d55));
     NvmeCmd cmd;
     int distinct = 0;
     int i;
 
     femu_enable(&c, &femu->dev, alloc);
 
-    for (i = 0; i < FEMU_FUZZ_ROUNDS; i++) {
+    for (i = 0; i < femu_fuzz_rounds(FEMU_FUZZ_ROUNDS); i++) {
         uint64_t ptrs[] = { buf + 0x800, buf + 1, 0, 0xffffffff00000000ULL };
         uint32_t numd;
 
@@ -18498,7 +18530,7 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t raw = 0;
     uint64_t region = femu_alloc_64k(alloc, &raw);
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
-    GRand *rng = g_rand_new_with_seed(0x494f4655);
+    GRand *rng = g_rand_new_with_seed(femu_fuzz_seed(0x494f4655));
     uint64_t nsze;
     uint64_t zsze = 0;
     uint64_t zbuf = 0;
@@ -18523,7 +18555,7 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmpuint(zsze * FEMU_FUZZ_ZONES, <=, nsze);
     }
 
-    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+    for (i = 0; i < femu_fuzz_rounds(FEMU_IO_FUZZ_ROUNDS); i++) {
         bool wild = g_rand_int_range(rng, 0, 4) == 0;
         uint32_t nlb = g_rand_int_range(rng, 0, 64);
         uint16_t st;
@@ -18886,7 +18918,7 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t raw = 0;
     uint64_t region = femu_alloc_64k(alloc, &raw);
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
-    GRand *rng = g_rand_new_with_seed(0x4b56465a);
+    GRand *rng = g_rand_new_with_seed(femu_fuzz_seed(0x4b56465a));
     uint8_t wbuf[FEMU_DATA_SIZE];
     uint8_t rbuf[FEMU_DATA_SIZE];
     NvmeRwCmd rw;
@@ -18897,7 +18929,7 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable_csi(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
-    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+    for (i = 0; i < femu_fuzz_rounds(FEMU_IO_FUZZ_ROUNDS); i++) {
         int key;
         uint32_t size = femu_fuzz_sane(rng) ?
                         g_rand_int_range(rng, 1, 16385) :
@@ -19965,7 +19997,7 @@ static void femu_test_csd_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t raw = 0;
     uint64_t region = femu_alloc_64k(alloc, &raw);
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
-    GRand *rng = g_rand_new_with_seed(0x43534446);
+    GRand *rng = g_rand_new_with_seed(femu_fuzz_seed(0x43534446));
     uint8_t wbuf[4096];
     uint8_t rbuf[4096];
     NvmeRwCmd rw;
@@ -19976,7 +20008,7 @@ static void femu_test_csd_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
 
-    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+    for (i = 0; i < femu_fuzz_rounds(FEMU_IO_FUZZ_ROUNDS); i++) {
         int pick = nmem ? g_rand_int_range(rng, 0, nmem) : -1;
         uint32_t id = pick >= 0 ? mem[pick].id : 0;
         uint32_t msize = pick >= 0 ? mem[pick].size : 0;
@@ -20220,7 +20252,7 @@ static void femu_test_oc20_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
     uint64_t lbas = guest_alloc(alloc, 4096);
     uint64_t logbuf = guest_alloc(alloc, 4096);
-    GRand *rng = g_rand_new_with_seed(0x4f433230);
+    GRand *rng = g_rand_new_with_seed(femu_fuzz_seed(0x4f433230));
     uint8_t wbuf[4096];
     uint8_t rbuf[4096];
     NvmeRwCmd rw;
@@ -20278,7 +20310,7 @@ static void femu_test_oc20_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
     }
 
-    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+    for (i = 0; i < femu_fuzz_rounds(FEMU_IO_FUZZ_ROUNDS); i++) {
         uint32_t pu = g_rand_int_range(rng, 0, FEMU_OC_FUZZ_CHUNKS);
         uint32_t chk = 0;
         uint32_t k = g_rand_int_range(rng, 1, FEMU_OC_FUZZ_MAX + 1);
