@@ -452,9 +452,15 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
     return prp_list;
 }
 
+/*
+ * @opc and @csi are the opcode and the command set of the failed command,
+ * bytes 31 and 30 of the entry (Base 2.1 Figure 205). An admin command
+ * carries CSI 00h. OCSSD passes zero for both and keeps its 1.4 entry.
+ */
 void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
                          uint16_t status, uint16_t location, uint64_t lba,
-                         uint32_t nsid, uint64_t info)
+                         uint32_t nsid, uint64_t info, uint8_t opc,
+                         uint8_t csi)
 {
     NvmeErrorLog *elp;
 
@@ -471,6 +477,8 @@ void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
     elp->lba = cpu_to_le64(lba);
     elp->nsid = cpu_to_le32(nsid);
     elp->csinfo = cpu_to_le64(info);
+    elp->csi = csi;
+    elp->opc = opc;
     n->elp_index = (n->elp_index + 1) % (n->elpe + 1);
     ++n->num_errors;
     qemu_spin_unlock(&n->elp_lock);
@@ -478,9 +486,10 @@ void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
 
 void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
                          uint16_t status, uint16_t location, uint64_t lba,
-                         uint32_t nsid)
+                         uint32_t nsid, uint8_t opc, uint8_t csi)
 {
-    nvme_set_error_info(n, sqid, cid, status, location, lba, nsid, 0);
+    nvme_set_error_info(n, sqid, cid, status, location, lba, nsid, 0, opc,
+                        csi);
 }
 
 uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -494,23 +503,27 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* slba + nlb wraps for an slba near the top; test it in a form that cannot */
     if (slba > nsze || nlb > nsze - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                            offsetof(NvmeRwCmd, nlb), elba, ns->id);
+                            offsetof(NvmeRwCmd, nlb), elba, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_LBA_RANGE | NVME_DNR;
     }
     if (nvme_check_mdts(n, data_size)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, nlb), nlb, ns->id);
+                            offsetof(NvmeRwCmd, nlb), nlb, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* metadata is carried only where the namespace keeps a store for it */
     if (meta_size && !ns->mdata) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, control), ctrl, ns->id);
+                            offsetof(NvmeRwCmd, control), ctrl, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
-                            offsetof(NvmeRwCmd, slba), elba, ns->id);
+                            offsetof(NvmeRwCmd, slba), elba, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_UNRECOVERED_READ | NVME_DNR;
     }
     if (!req->is_write) {

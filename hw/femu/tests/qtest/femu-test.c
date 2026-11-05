@@ -15875,6 +15875,49 @@ static uint16_t femu_format_dw10(FemuCtrlState *c, uint32_t dw10)
 }
 
 /*
+ * NVM 1.1 Figure 114 requires DPC bit 3 (protection information in the
+ * first eight bytes of metadata) to be clear, so realize refuses a dpc
+ * property with it. Bit 4 (the last eight bytes) stays allowed, and so does
+ * bit 3 on OCSSD, which reports NVMe 1.4.
+ */
+static void femu_test_dpc_first_refused(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const bad[] = { "8", "25" };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'dpc1','addr':'5','devsz_mb':1,'dpc':%s}}", bad[i]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("dpc %s: %s", bad[i], desc);
+        g_assert_nonnull(strstr(desc, "dpc: bit 3"));
+        qobject_unref(rsp);
+    }
+    /* OCSSD reports NVMe 1.4, so it keeps the dpc it accepted before */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dpc1','addr':'5','femu_mode':0,"
+                    "'dpc':8}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "dpc1", 5);
+    /* the control: bit 4 alone is accepted */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dpc1','addr':'5','devsz_mb':1,"
+                    "'dpc':17}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "dpc1", 5);
+}
+
+/*
  * Protection information lives in the metadata, eight bytes of it, so a
  * format that turns it on must pick an LBA format with at least that much
  * (NVM 1.2, Format NVM). Advertising a protection type in DPC is not enough:
@@ -16922,6 +16965,13 @@ static void femu_test_pi_verify(void *obj, void *data, QGuestAllocator *alloc)
             uint16_t guard = off ? 0xe876 : 0x4f10;
             uint32_t ref = type == 1 ? 16 : 0xffffffff;
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
+                               (type << 5) | (first << 8)), ==,
+                               NVME_INVALID_FORMAT);
+                continue;
+            }
             g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
                            (type << 5) | (first << 8)), ==, NVME_SUCCESS);
             memset(m, 0xa5, sizeof(m));
@@ -17076,6 +17126,15 @@ static void femu_test_pi_rw(void *obj, void *data, QGuestAllocator *alloc)
             uint16_t guard = off ? 0xe876 : 0x4f10;
             uint32_t ref = type == 1 ? 16 : 0xffffffff;
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                if (!create) {
+                    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
+                                   (type << 5) | (first << 8) |
+                                   (extended << 4)), ==, NVME_INVALID_FORMAT);
+                }
+                continue;
+            }
             if (create) {
                 uint32_t nsid;
                 uint8_t clean[1024] = { 0 };
@@ -17088,7 +17147,7 @@ static void femu_test_pi_rw(void *obj, void *data, QGuestAllocator *alloc)
                 g_assert_cmpuint(nsid, ==, 1);
                 g_assert_cmpint(femu_identify(&c, nsid, 0x11, 0, mbuf), ==,
                                NVME_SUCCESS);
-                g_assert_cmphex(qtest_readb(qts, mbuf + 28), ==, 0x1f);
+                g_assert_cmphex(qtest_readb(qts, mbuf + 28), ==, 0x17);
                 g_assert_cmphex(qtest_readb(qts, mbuf + 29), ==,
                                type | (first << 3));
                 g_assert_cmpint(femu_ns_attach(&c, mbuf, nsid, cntlid, true),
@@ -17269,9 +17328,9 @@ static void femu_test_ns_create_pi_validation(void *obj, void *data,
                         g_assert_cmpint(femu_identify(&c, nsid, 0x11, 0, buf),
                                        ==, NVME_SUCCESS);
                         g_assert_cmphex(qtest_readb(qts, buf + 28), ==,
-                                       GPOINTER_TO_UINT(data) == 1 ? 0x1f : 0);
-                        g_assert_cmphex(qtest_readb(qts, buf + 29), ==,
-                                       type ? type | (first << 3) : 0);
+                                       GPOINTER_TO_UINT(data) == 1 ? 0x17 : 0);
+                        /* PIL is never stored */
+                        g_assert_cmphex(qtest_readb(qts, buf + 29), ==, type);
                         g_assert_cmpint(femu_ns_delete(&c, nsid), ==,
                                        NVME_SUCCESS);
                     }
@@ -17279,6 +17338,9 @@ static void femu_test_ns_create_pi_validation(void *obj, void *data,
             }
         }
     }
+    /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+    g_assert_cmpint(femu_ns_create_pi(&c, buf, FEMU_MD_NLBAF, 1 | (1 << 3),
+                                      &nsid), ==, NVME_INVALID_FORMAT);
     g_assert_cmpint(femu_ns_create_pi(&c, buf, 15, 1, &nsid), ==,
                    NVME_INVALID_FORMAT);
     g_assert_cmpint(femu_ns_create_pi(&c, buf, FEMU_MD_NLBAF, 0x11, &nsid),
@@ -17307,6 +17369,13 @@ static void femu_test_pi_compare(void *obj, void *data, QGuestAllocator *alloc)
             unsigned int off = first ? 0 : 8;
             unsigned int other = first ? 8 : 0;
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
+                               (1 << 5) | (first << 8) | (extended << 4)), ==,
+                               NVME_INVALID_FORMAT);
+                continue;
+            }
             g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | (1 << 5) |
                            (first << 8) | (extended << 4)), ==, NVME_SUCCESS);
             memset(m, 0, sizeof(m));
@@ -17382,6 +17451,13 @@ static void femu_test_pi_zeroes(void *obj, void *data, QGuestAllocator *alloc)
             uint32_t ref = type == 1 ? 16 : UINT32_MAX;
             NvmeRwCmd rw = { 0 };
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
+                               (type << 5) | (first << 8)), ==,
+                               NVME_INVALID_FORMAT);
+                continue;
+            }
             g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF |
                            (type << 5) | (first << 8)), ==, NVME_SUCCESS);
             g_assert_cmpint(femu_pi_io(&c, NVME_CMD_WRITE_ZEROES, 1, 16, 2,
@@ -17504,6 +17580,12 @@ static void femu_test_pi_generate_ref(void *obj, void *data,
             unsigned int nlb = copy ? 4 : 2;
             unsigned int i;
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                g_assert_cmpint(femu_pi_format_ns(&c, 1, format), ==,
+                               NVME_INVALID_FORMAT);
+                continue;
+            }
             g_assert_cmpint(femu_pi_format_ns(&c, 1, format), ==, NVME_SUCCESS);
             g_assert_cmpint(femu_pi_format_ns(&c, 2, format), ==, NVME_SUCCESS);
             memset(m, 0, sizeof(m));
@@ -17625,6 +17707,12 @@ static void femu_test_pi_copy(void *obj, void *data, QGuestAllocator *alloc)
             uint32_t dstref = type == 1 ? 64 : 0xfffffffe;
             unsigned int off = first ? 0 : ms - 8;
 
+            if (first) {
+                /* NVM 1.1 Figure 114: no PI in the first metadata bytes */
+                g_assert_cmpint(femu_pi_format_ns(&c, 1, format), ==,
+                               NVME_INVALID_FORMAT);
+                continue;
+            }
             g_assert_cmpint(femu_pi_format_ns(&c, 1, format), ==, NVME_SUCCESS);
             if (fmt == 2) {
                 g_assert_cmpint(femu_pi_format_ns(&c, 2, format), ==,
@@ -17780,8 +17868,9 @@ static void femu_test_pi_copy_convert(void *obj, void *data,
                    NVME_SUCCESS);
     g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 15, 15, 64, 0), ==,
                    FEMU_NS_INCOMPATIBLE);
+    /* PI in the first bytes of metadata is not offered (DPC 17h) */
     g_assert_cmpint(femu_pi_format_ns(&c, 2, FEMU_MD_NLBAF | (1 << 5) |
-                   (1 << 8)), ==, NVME_SUCCESS);
+                   (1 << 8)), ==, NVME_INVALID_FORMAT);
     g_assert_cmpint(femu_pi_copy(&c, list, 64, 2, 1, 15, 15, 64, 0), ==,
                    FEMU_NS_INCOMPATIBLE);
     g_assert_cmpint(femu_pi_format_ns(&c, 2, FEMU_MD_NLBAF), ==, NVME_SUCCESS);
@@ -17826,18 +17915,20 @@ static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                    NVME_SUCCESS);
-    g_assert_cmphex(qtest_readb(qts, buf + 28), ==, enabled ? 0x1f : 0);
+    g_assert_cmphex(qtest_readb(qts, buf + 28), ==, enabled ? 0x17 : 0);
     g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
     for (type = 1; type <= 3; type++) {
         for (first = 0; first <= 1; first++) {
             uint32_t dw10 = FEMU_MD_NLBAF | (type << 5) | (first << 8);
 
+            /* no PI in the first bytes; a refused format keeps the last */
             g_assert_cmpint(femu_format_dw10(&c, dw10), ==,
-                           enabled ? NVME_SUCCESS : NVME_INVALID_FORMAT);
+                           enabled && !first ? NVME_SUCCESS :
+                           NVME_INVALID_FORMAT);
             g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                            NVME_SUCCESS);
             g_assert_cmphex(qtest_readb(qts, buf + 29), ==,
-                           enabled ? type | (first << 3) : 0);
+                           enabled ? type : 0);
         }
     }
     g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | (4 << 5)), ==,
@@ -17856,7 +17947,8 @@ static void femu_test_pi_format(void *obj, void *data, QGuestAllocator *alloc)
                        NVME_SUCCESS);
         g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                        NVME_SUCCESS);
-        g_assert_cmphex(qtest_readb(qts, buf + 29), ==, enabled ? 0 : 8);
+        /* PIL with PI off is not stored: NVM 1.1 Figure 114 wants DPS 00h */
+        g_assert_cmphex(qtest_readb(qts, buf + 29), ==, 0);
         g_assert_cmpint(femu_format_dw10(&c, lbaf), ==, NVME_SUCCESS);
         g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
                        NVME_SUCCESS);
@@ -23061,7 +23153,7 @@ static void femu_test_ns_mgmt_common_dpc(void *obj, void *data,
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
     dpc = qtest_readb(qts, buf + 28);
-    g_assert_cmpint(dpc, ==, 0x1f);
+    g_assert_cmpint(dpc, ==, 0x17);
     g_assert_cmpint(femu_identify(&c, NVME_NSID_BROADCAST, 0, 0, buf), ==,
                     NVME_SUCCESS);
     g_assert_cmpint(qtest_readb(qts, buf + 28), ==, dpc);
@@ -36010,6 +36102,78 @@ static void femu_caps_version(FemuCtrlState *c, FemuCaps *k, bool ocssd)
 }
 
 /*
+ * The command set versions in CNS 06h (TP4135, mandatory in Base 2.1): NVM
+ * 1.1 in bytes 23:20 (NVM 1.1 Figure 120) and ZNS 1.2 in bytes 35:32 (ZNS
+ * 1.2 Figure 61), with AOCS.RALBAS (byte 18 bit 0) set, as Get LBA Status
+ * serves action type 02h. KV keeps 1.3 in bytes 3:0, and SLM and CP keep
+ * 1.2 where the controller has them. OCSSD keeps its 1.4 replies: no VER.
+ * The buffer is poisoned first, so a byte the controller did not send
+ * cannot pass.
+ */
+static void femu_caps_csi_version(FemuCtrlState *c, FemuCaps *k, uint64_t buf,
+                                  const char *opts, bool ocssd)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    static const struct {
+        uint8_t csi;
+        int off;
+        uint32_t want;
+    } v[] = {
+        { NVME_CSI_NVM, 20, 0x00010100 },
+        { FEMU_CSI_ZONED, 32, 0x00010200 },
+        { FEMU_CSI_KV, 0, 0x00010300 },
+        { 0x03, 0, 0x00010200 },
+        { 0x04, 0, 0x00010200 },
+    };
+    /* SLM needs a nonzero csd_slm_size, CP needs csd_cp=on (nvme.h) */
+    bool slm = strstr(opts, "csd_slm_size=") &&
+               !strstr(opts, "csd_slm_size=0,");
+    bool cp = strstr(opts, "csd_cp=on");
+    uint8_t id[4096];
+
+    for (int i = 0; i < ARRAY_SIZE(v); i++) {
+        bool offered = v[i].csi < 0x03 || (v[i].csi == 0x03 ? slm : cp);
+        uint16_t st;
+
+        if (v[i].csi >= 0x03 &&
+            !!(k->cmd_sets[0] & (1 << v[i].csi)) != offered) {
+            femu_caps_bad(k, "CNS 1Ch CSI %02xh is %s; the configuration "
+                          "says %s", v[i].csi,
+                          (k->cmd_sets[0] & (1 << v[i].csi)) ? "on" : "off",
+                          offered ? "on" : "off");
+        }
+        uint32_t want = v[i].want;
+        uint32_t got;
+
+        qtest_memset(qts, buf, 0xa5, sizeof(id));
+        st = femu_identify(c, 0, 0x06, (uint32_t)v[i].csi << 24, buf);
+        if (!offered) {
+            if (st != NVME_INVALID_FIELD) {
+                femu_caps_bad(k, "CNS 06h CSI %02xh without the set: status "
+                              "0x%x", v[i].csi, st);
+            }
+            continue;
+        }
+        if (st != NVME_SUCCESS) {
+            femu_caps_bad(k, "CNS 06h CSI %02xh: status 0x%x", v[i].csi, st);
+            continue;
+        }
+        qtest_memread(qts, buf, id, sizeof(id));
+        if (ocssd && v[i].csi != FEMU_CSI_KV) {
+            want = 0;
+        }
+        got = ldl_le_p(id + v[i].off);
+        if (got != want) {
+            femu_caps_bad(k, "CNS 06h CSI %02xh VER at byte %d is 0x%x; "
+                          "expected 0x%x", v[i].csi, v[i].off, got, want);
+        }
+        if (v[i].csi == NVME_CSI_NVM && (id[18] & 0x1) != (ocssd ? 0 : 1)) {
+            femu_caps_bad(k, "CNS 06h AOCS byte 18 is 0x%x", id[18]);
+        }
+    }
+}
+
+/*
  * What a 2.x controller refuses (Base 2.3): a CC.AMS that CAP.AMS does not
  * offer, Identify CNS 00h for a Key Value namespace (Invalid I/O Command Set,
  * 5.2.13.2.1), a CSI-specific log page for a set the controller does not
@@ -36219,6 +36383,270 @@ static void femu_test_endgrp_list_absent(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Read the four Error Information entries (the default count) into a poisoned
+ * buffer, so a byte the controller did not send cannot pass.
+ */
+static void femu_err21_read(FemuCtrlState *c, uint64_t buf, uint8_t *log)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmpint(femu_log_cmd(c, 0xffffffff, FEMU_LOG_ERROR_INFO, 0, buf,
+                                 256), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, 256);
+}
+
+/* entry @e is empty: Error Count 0, LPVER @lpver, every other byte 0 */
+static void femu_err21_empty(const uint8_t *log, int e, uint8_t lpver)
+{
+    const uint8_t *ent = log + 64 * e;
+
+    for (int b = 0; b < 64; b++) {
+        if (ent[b] != (b == 63 ? lpver : 0)) {
+            g_test_message("entry %d byte %d is 0x%02x", e, b, ent[b]);
+        }
+        g_assert_cmphex(ent[b], ==, b == 63 ? lpver : 0);
+    }
+}
+
+/*
+ * Base 2.1 Figure 205: an Error Information entry carries the command set
+ * (byte 30) and the opcode (byte 31) of the failed command, and log page
+ * version 1 (byte 63) in every entry, an empty one too (TP4113a). Each
+ * variant runs on a device line of its own, so the ring starts empty. OCSSD
+ * keeps its 1.4 entries, with no new byte set. @data names the variant.
+ */
+static void femu_test_error_log_fields(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    const char *v = data;
+    bool ocssd = !strcmp(v, "ocssd");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t log[256];
+    uint16_t cid[2] = { 0 };
+    uint8_t csi = 0;
+    uint8_t opc = 0;
+    int n = 2;
+    int e;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_err21_read(&c, buf, log);
+    for (e = 0; e < 4; e++) {
+        femu_err21_empty(log, e, ocssd ? 0 : 1);
+    }
+    if (ocssd) {
+        /*
+         * A vector read and a vector erase over 64 addresses, refused by
+         * the two OCSSD writers before any transfer. Their entries keep
+         * bytes 30, 31 and 63 at 0, as in an NVMe 1.4 log.
+         */
+        static const uint8_t ops[] = { 0x92, 0x90 };
+
+        femu_create_io_queues(&c);
+        for (e = 0; e < 2; e++) {
+            NvmeRwCmd rw;
+
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = ops[e];
+            rw.nsid = cpu_to_le32(1);
+            rw.nlb = cpu_to_le16(64);
+            cid[e] = c.cid;
+            g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==,
+                            NVME_INVALID_FIELD);
+        }
+        femu_err21_read(&c, buf, log);
+        for (e = 0; e < 2; e++) {
+            const uint8_t *ent = log + 64 * e;
+
+            g_assert_cmpuint(ldq_le_p(ent), ==, 2 - e);
+            g_assert_cmphex(lduw_le_p(ent + 10), ==, cid[1 - e]);
+            g_assert_cmphex(ent[30], ==, 0);
+            g_assert_cmphex(ent[31], ==, 0);
+            g_assert_cmphex(ent[63], ==, 0);
+        }
+        goto out;
+    }
+
+    if (!strcmp(v, "nvm")) {
+        femu_create_io_queues(&c);
+        opc = NVME_CMD_READ;
+        for (e = 0; e < 2; e++) {
+            cid[e] = c.cid;
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0xfffff000,
+                                            buf)), ==, NVME_LBA_RANGE);
+        }
+    } else if (!strcmp(v, "zns")) {
+        NvmeCmd cmp;
+
+        femu_create_io_queues(&c);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+        /* a Compare in a written zone with no data pointer */
+        memset(&cmp, 0, sizeof(cmp));
+        cmp.opcode = NVME_CMD_COMPARE;
+        cmp.nsid = cpu_to_le32(1);
+        cid[0] = c.cid;
+        g_assert_cmpint(femu_io(&c, &cmp), ==, NVME_INVALID_FIELD);
+        csi = FEMU_CSI_ZONED;
+        opc = NVME_CMD_COMPARE;
+        n = 1;
+    } else {
+        /* a Namespace Attachment whose list names another controller */
+        cid[0] = c.cid;
+        g_assert_cmpint(femu_ns_attach(&c, buf, 1, 1, true), ==, 0x11c);
+        opc = NVME_ADM_CMD_NS_ATTACHMENT;
+        n = 1;
+    }
+
+    femu_err21_read(&c, buf, log);
+    for (e = 0; e < n; e++) {
+        const uint8_t *ent = log + 64 * e;
+
+        /* newest first */
+        g_assert_cmpuint(ldq_le_p(ent), ==, n - e);
+        g_assert_cmphex(lduw_le_p(ent + 10), ==, cid[n - 1 - e]);
+        g_assert_cmphex(ent[29], ==, 0);
+        g_assert_cmphex(ent[30], ==, csi);
+        g_assert_cmphex(ent[31], ==, opc);
+        g_assert_cmphex(ent[63], ==, 1);
+    }
+    for (; e < 4; e++) {
+        femu_err21_empty(log, e, 1);
+    }
+out:
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Identify for a Format Index with Namespace Management on (TP4095a):
+ * CNS 09h returns the Identify Namespace fields that hold for a format
+ * (NLBAF, MC, DPC, NMIC and the LBA formats), and CNS 0Ah with CSI 00h a
+ * zero NVM structure, as CNS 05h is. An index past the raw NLBAF is an
+ * invalid field. The expected bytes come from the device properties: 5
+ * block sizes from 512 B, each also with @meta bytes of metadata when
+ * @meta is set. @data is "meta", "empty" (every namespace deleted first)
+ * or anything else for a plain line.
+ */
+static void femu_test_identify_fmt(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool meta = !strcmp(data, "meta");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int nlbaf = meta ? 9 : 4;
+    uint8_t want[4096] = { 0 };
+    uint8_t got[4096];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    if (!strcmp(data, "empty")) {
+        g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    }
+    want[25] = nlbaf;
+    want[27] = meta ? 3 : 0;
+    want[28] = meta ? 0x17 : 0;
+    for (i = 0; i <= nlbaf; i++) {
+        stw_le_p(want + 128 + 4 * i, i >= 5 ? 8 : 0);
+        want[128 + 4 * i + 2] = 9 + i % 5;
+    }
+    for (i = 0; i <= nlbaf; i++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmpint(femu_identify(&c, 0, 0x09, i, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, got, sizeof(got));
+        g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmpint(femu_identify(&c, 0, 0x0a, i, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, got, sizeof(got));
+        for (int b = 0; b < sizeof(got); b++) {
+            g_assert_cmphex(got[b], ==, 0);
+        }
+    }
+    g_assert_cmpint(femu_identify(&c, 0, 0x09, nlbaf + 1, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_identify(&c, 0, 0x0a, nlbaf + 1, buf), ==,
+                    NVME_INVALID_FIELD);
+    /* CNS 09h belongs to the NVM Command Set */
+    g_assert_cmpint(femu_identify(&c, 0, 0x09,
+                                  ((uint32_t)FEMU_CSI_ZONED << 24), buf), ==,
+                    NVME_INVALID_FIELD);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* Without Namespace Management FEMU does not offer CNS 09h or 0Ah for NVM */
+static void femu_test_identify_fmt_off(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 0x09, 0, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_identify(&c, 0, 0x0a, 0, buf), ==,
+                    NVME_INVALID_FIELD);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * KV 1.1 Figures 40 and 41: CNS 0Ah for CSI 01h describes a KV format. NSID
+ * is not used, so NSID 0, an allocated one, one that does not exist and
+ * FFFFFFFFh get the same 4096 bytes. NSZE (bytes 7:0) and the namespace
+ * key limit MNKS (format 0, bytes 83:80) stay zero; NKVF is 0 (one
+ * format), and the key and value limits match the namespace's own CNS 05h
+ * reply. Index 1 does not exist.
+ */
+static void femu_test_kv_identify_fmt(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const uint32_t nsids[] = { 0, 1, 2, 99, 0xffffffff };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t dw11 = (uint32_t)FEMU_CSI_KV << 24;
+    uint8_t want[4096] = { 0 };
+    uint8_t first[4096];
+    uint8_t got[4096];
+    uint8_t ns[4096];
+
+    /* one format: a 16-byte key and a 2 MiB value; every other byte 0 */
+    stw_le_p(want + 72, 16);
+    stl_le_p(want + 76, 2u << 20);
+    femu_enable_csi(&c, &femu->dev, alloc);
+    for (int i = 0; i < ARRAY_SIZE(nsids); i++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmpint(femu_identify(&c, nsids[i], 0x0a, dw11, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, i ? got : first, sizeof(got));
+        g_assert_cmpmem(i ? got : first, sizeof(got), want, sizeof(want));
+    }
+
+    /* the namespace reply keeps its size and key limit */
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmpint(femu_identify(&c, 1, 0x05, dw11, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, ns, sizeof(ns));
+    g_assert_cmpuint(ldq_le_p(ns), !=, 0);
+    g_assert_cmpuint(ldl_le_p(ns + 80), !=, 0);
+    g_assert_cmpuint(lduw_le_p(first + 72), ==, lduw_le_p(ns + 72));
+    g_assert_cmpuint(lduw_le_p(first + 72), !=, 0);
+    g_assert_cmpuint(ldl_le_p(first + 76), ==, ldl_le_p(ns + 76));
+    g_assert_cmpuint(ldl_le_p(first + 76), !=, 0);
+
+    g_assert_cmpint(femu_identify(&c, 0, 0x0a, dw11 | 1, buf), ==,
+                    NVME_INVALID_FIELD);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     const FemuCapsCfg *cfg = data;
@@ -36243,6 +36671,8 @@ static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
     }
     femu_caps_identify(&c, k, buf);
     femu_caps_version(&c, k, g_str_has_prefix(cfg->name, "caps-oc"));
+    femu_caps_csi_version(&c, k, buf, cfg->opts,
+                          g_str_has_prefix(cfg->name, "caps-oc"));
     /* the masks the configuration asks for, independent of the registry */
     if ((le16_to_cpu(k->id.oncs) & 0x19f) != cfg->oncs) {
         femu_caps_bad(k, "ONCS is 0x%x; the configuration asks for 0x%x",
@@ -41270,7 +41700,7 @@ static void femu_test_eol_limits(void *obj, void *data, QGuestAllocator *alloc)
     const uint16_t nlb[3] = { 1, 1, 1 };
     NvmeIdCtrl ctrl;
     NvmeIdNs ns;
-    uint8_t nvm[8];
+    uint8_t nvm[24];
     bool ro;
     uint64_t cap, pages, reqs;
     uint64_t mapped, lost, orphans;
@@ -41290,6 +41720,8 @@ static void femu_test_eol_limits(void *obj, void *data, QGuestAllocator *alloc)
                     NVME_SUCCESS);
     qtest_memread(qts, id, nvm, sizeof(nvm));
     g_assert_cmpuint(nvm[1], ==, on ? 2 : 0);
+    /* the end-of-life reply carries the version as well (NVM 1.1) */
+    g_assert_cmphex(ldl_le_p(nvm + 20), ==, 0x00010100);
     g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, id), ==,
                     NVME_SUCCESS);
     qtest_memread(qts, id, &ns, sizeof(ns));
@@ -45153,11 +45585,48 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
+    qos_add_test("identify-fmt", "femu", femu_test_identify_fmt,
+                 &(QOSGraphTestOptions) { .arg = (void *)"plain",
+        .edge.extra_device_opts = "id=fmt21a,ns_mgmt=on" });
+    qos_add_test("identify-fmt-meta", "femu", femu_test_identify_fmt,
+                 &(QOSGraphTestOptions) { .arg = (void *)"meta",
+        .edge.extra_device_opts = "id=fmt21b,ns_mgmt=on,meta=8,mc=3,pi=on" });
+    qos_add_test("identify-fmt-bbssd", "femu", femu_test_identify_fmt,
+                 &(QOSGraphTestOptions) { .arg = (void *)"plain",
+        .edge.extra_device_opts =
+            "id=fmt21c,femu_mode=1,ns_mgmt=on,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,"
+            "nchs=4" });
+    qos_add_test("identify-fmt-empty", "femu", femu_test_identify_fmt,
+                 &(QOSGraphTestOptions) { .arg = (void *)"empty",
+        .edge.extra_device_opts = "id=fmt21d,ns_mgmt=on" });
+    qos_add_test("identify-fmt-off", "femu", femu_test_identify_fmt_off,
+                 NULL);
+    qos_add_test("kv-identify-fmt", "femu", femu_test_kv_identify_fmt,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=kvfmt21,femu_mode=5,namespaces=2,namespace_sizes=24M,,8M,"
+            "devsz_mb=32" });
+    /* a device line of its own each, so the error ring starts empty */
+    qos_add_test("error-log-fields-nvm", "femu", femu_test_error_log_fields,
+                 &(QOSGraphTestOptions) { .arg = (void *)"nvm",
+        .edge.extra_device_opts = "id=err21nvm" });
+    qos_add_test("error-log-fields-zns", "femu", femu_test_error_log_fields,
+                 &(QOSGraphTestOptions) { .arg = (void *)"zns",
+        .edge.extra_device_opts = "id=err21zns,femu_mode=3,devsz_mb=64" });
+    qos_add_test("error-log-fields-admin", "femu", femu_test_error_log_fields,
+                 &(QOSGraphTestOptions) { .arg = (void *)"admin",
+        .edge.extra_device_opts = "id=err21adm,ns_mgmt=on" });
+    qos_add_test("error-log-fields-ocssd", "femu", femu_test_error_log_fields,
+                 &(QOSGraphTestOptions) { .arg = (void *)"ocssd",
+        .edge.extra_device_opts = "id=err21oc,femu_mode=0" });
+    qos_add_test("dpc-first-refused", "femu", femu_test_dpc_first_refused,
+                 NULL);
     qos_add_test("format-pi-needs-metadata", "femu",
                  femu_test_format_pi_needs_metadata,
                  &(QOSGraphTestOptions) {
-        /* Type 1 in either position is advertised; no format has metadata */
-        .edge.extra_device_opts = "dpc=0x19"
+        /* Type 1, last eight bytes, is advertised; no format has metadata */
+        .edge.extra_device_opts = "dpc=0x11"
     });
     qos_add_test("format", "femu", femu_test_format,
                  &(QOSGraphTestOptions) {
@@ -48980,12 +49449,12 @@ static void femu_register_nodes(void)
     });
     qos_add_test("pi-off-dpc-no-metadata", "femu", femu_test_pi_dpc_no_metadata,
                  &(QOSGraphTestOptions) {
-        .arg = GUINT_TO_POINTER(0x19),
-        .edge.extra_device_opts = "pi=off,meta=0,dpc=0x19"
+        .arg = GUINT_TO_POINTER(0x11),
+        .edge.extra_device_opts = "pi=off,meta=0,dpc=0x11"
     });
     qos_add_test("pi-dpc-no-metadata", "femu", femu_test_pi_dpc_no_metadata,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "pi=on,meta=0,dpc=0x19"
+        .edge.extra_device_opts = "pi=on,meta=0,dpc=0x11"
     });
     qos_add_test("pi-format", "femu", femu_test_pi_format,
                  &(QOSGraphTestOptions) {

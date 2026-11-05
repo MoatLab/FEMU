@@ -317,7 +317,7 @@ static uint16_t oc20_rw_check_chunk_write(FemuCtrl *n, NvmeCmd *cmd,
         Oc20RwCmd *lrw = (Oc20RwCmd *)cmd;
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
                             NVME_INVALID_FIELD, offsetof(Oc20RwCmd, lbal),
-                            lrw->lbal + req->nlb, req->ns->id);
+                            lrw->lbal + req->nlb, req->ns->id, 0, 0);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 #endif
@@ -763,7 +763,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
 
     if (nlb > OC20_CMD_MAX_LBAS) {
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
-                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id);
+                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id, 0, 0);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -950,7 +950,7 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
      */
     if (nlb > OC20_CMD_MAX_LBAS) {
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
-                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id);
+                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id, 0, 0);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

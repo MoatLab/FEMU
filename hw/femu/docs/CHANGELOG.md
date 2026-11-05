@@ -237,6 +237,7 @@ was not doing anything.
 - A format with protection information but no metadata room for it (1c9808bcd).
 - On `femu-cxl-ssd`, a direct ratio without DER, and `der=memslot` under TCG (34b9f8f9e, d03b0606e, f1182b72e).
 - On `femu-cxl-ssd` with the FTL on, NAND with less than 7% of the media as spare beyond the forced collection reserve and two working lines. The old rule counted the reserve as spare. At the old 96 GiB preset (1644 blocks per plane), collection had 1.6% to work in. A request could then wait minutes for queued line copies. The refusal names the new least value (1732 at 96 GiB, 867 at 48 GiB).
+- A `dpc` property with bit 3 set is refused, except on OCSSD. NVM 1.1 does not allow protection information in the first bytes of metadata.
 
 #### Accepted with a warning (still no effect)
 
@@ -303,6 +304,7 @@ was not doing anything.
 
 The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 [namespace management](features/ns-management-and-pi.md#shared-namespaces-in-detail).
+- Identify CNS 06h, DPC with `pi=on` and the Error Information entries return other bytes on a default command line; the lines under Spec conformance give each change.
 
 ### Fixes
 
@@ -431,6 +433,12 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Reading one zoned namespace's Changed Zone List no longer unmasks Notice events while another namespace's reported notice is unread. That read used to send the other namespace's queued notice before its log was read (Base 2.3, 5.2.2).
 - A Changed Zone List read without RAE clears the list and its event only after a successful transfer, as SMART and Error Information already did. A failed transfer used to lose the changes. A zone that changes during the read keeps its entry.
 - An asynchronous event about a namespace no longer counts against the 16 queued controller events. With more than 16 zoned namespaces, a Zone Descriptor Changed notice used to be dropped and never raised again.
+- Identify CNS 06h reports the version of each command set (TP4135): NVM 1.1 in bytes 23:20 and ZNS 1.2 in bytes 35:32. Both read 0. KV stays 1.3, SLM and CP stay 1.2, and an Open-Channel controller is unchanged.
+- The NVM Identify CNS 06h sets AOCS bit 0, as Get LBA Status serves action type 02h. It read 0.
+- With `pi=on`, DPC is 17h instead of 1Fh: protection information sits in the last 8 bytes of metadata only (NVM 1.1, Figure 114). Format and Namespace Management refuse PIL with a protection type, and DPS never reports PIL.
+- Error Information entries name the command (TP4113a): byte 30 holds its command set and byte 31 its opcode. Every returned entry has Log Page Version 1h in byte 63. Open-Channel entries are unchanged.
+- Identify CNS 0Ah for key value ignores the NSID and reports only format capabilities: NSZE and the key limit read 0. Indexes other than 0 fail with Invalid Field.
+- With Namespace Management, Identify CNS 09h and CNS 0Ah answer for the NVM Command Set (TP4095a). Without it they stay refused.
 
 ### Documentation and tooling
 

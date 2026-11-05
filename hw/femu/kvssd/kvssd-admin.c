@@ -109,9 +109,14 @@ uint16_t kvssd_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
 }
 
 /*
- * CNS 0Ah: I/O Command Set specific Identify Namespace for a Format Index. FEMU
- * exposes a single KV format, so report it for index 0 (CNS-specific identifier
- * in CDW11[15:0]); other indices return a zeroed structure per spec.
+ * CNS 0Ah: I/O Command Set specific Identify Namespace for a Format Index
+ * (CDW11 bits 15:0). The reply describes the format, not a namespace, so it
+ * holds only the fields KV 1.1 Figure 41 marks as reported for this CNS:
+ * NKVF and the KV Format descriptors. NSZE, NUSE and the rest stay zero.
+ * MNKS is zero ("no maximum indicated"): the key limit of a namespace comes
+ * from its size, so it is not a property of the format. @ns is any key-value
+ * namespace of the controller; the format limits are the same for all.
+ * FEMU has one KV format, so an index other than 0 is an invalid field.
  */
 uint16_t kvssd_identify_ns_csi_fmt(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
@@ -121,16 +126,15 @@ uint16_t kvssd_identify_ns_csi_fmt(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint16_t fidx = le32_to_cpu(cmd->cdw11) & 0xffff;
     NvmeIdNsKv id;
 
-    if (!s) {
+    if (!s || fidx != 0) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     memset(&id, 0, sizeof(id));
-    if (fidx == 0) {
-        qemu_mutex_lock(&s->lock);
-        kvssd_fill_id_ns(s, &id);
-        qemu_mutex_unlock(&s->lock);
-        id.nuse = 0;                   /* format-index query: NUSE not meaningful */
-    }
+    qemu_mutex_lock(&s->lock);
+    id.nkvf = 0;                       /* one KV format (0's based) */
+    id.kvf[0].kv_key_max_len = cpu_to_le16((uint16_t)s->kv_key_max);
+    id.kvf[0].kv_value_max_len = cpu_to_le32(s->kv_value_max);
+    qemu_mutex_unlock(&s->lock);
     return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
 }
 

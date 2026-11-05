@@ -896,12 +896,18 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
+    /* ZNS 1.2 Figure 61 */
     typedef struct NvmeIdCtrlZoned {
         uint8_t     zasl;
-        uint8_t     rsvd1[4095];
+        uint8_t     rsvd1[31];
+        uint32_t    ver;
+        uint8_t     rsvd36[4060];
     } NvmeIdCtrlZoned;
 
     NvmeIdCtrlZoned id = {};
+
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrlZoned) != NVME_IDENTIFY_DATA_SIZE);
+    QEMU_BUILD_BUG_ON(offsetof(NvmeIdCtrlZoned, ver) != 32);
 
     if (c->csi == NVME_CSI_NVM) {
         uint8_t nvm[NVME_IDENTIFY_DATA_SIZE] = {};
@@ -910,12 +916,25 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
         if (n->eol_admit &&
             nvme_io_effects(n, NVME_CSI_NVM, NVME_CMD_WRITE_ZEROES)) {
             nvm[1] = n->mdts;
-            return dma_read_prp(n, nvm, sizeof(nvm), prp1, prp2);
         }
-        return nvme_rpt_empty_id_struct(n, cmd);
+        if (!OCSSD(n)) {
+            /*
+             * AOCS.RALBAS, byte 18 bit 0: Get LBA Status serves action type
+             * 02h wherever dispatch accepts the command.
+             */
+            if (nvme_admin_effects(n, NVME_ADM_CMD_GET_LBA_STATUS)) {
+                nvm[18] |= 0x1;
+            }
+            /* VER, bytes 23:20 (NVM 1.1 Figure 120, mandatory) */
+            stl_le_p(&nvm[20], NVME_NVM_SPEC_VER);
+        }
+        return dma_read_prp(n, nvm, sizeof(nvm), prp1, prp2);
     } else if (c->csi == NVME_CSI_ZONED) {
         if (n->zasl_bs) {
             id.zasl = n->zasl;
+        }
+        if (!OCSSD(n)) {
+            id.ver = cpu_to_le32(NVME_ZNS_SPEC_VER);
         }
         return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
     } else if (c->csi == NVME_CSI_KV) {
@@ -926,6 +945,54 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
+}
+
+/*
+ * The Format Index of CNS 09h and 0Ah, CDW11 bits 15:0, if it names a format
+ * of this controller: at most the raw NLBAF (FEMU reports NULBAF 0). FEMU
+ * offers these CNS values only with Namespace Management, where a host needs
+ * them to pick a format for a new namespace.
+ */
+static bool nvme_identify_fmt_ok(FemuCtrl *n, NvmeCmd *cmd, NvmeIdNs *caps)
+{
+    uint16_t fidx = le32_to_cpu(cmd->cdw11) & 0xffff;
+
+    if (!nvme_ns_mgmt_supported(n)) {
+        return false;
+    }
+    nvme_ns_common_identify(n, caps);
+    return fidx <= caps->nlbaf;
+}
+
+/* CNS 09h: the Identify Namespace fields that hold for a format index */
+static uint16_t nvme_identify_fmt_nvm(FemuCtrl *n, NvmeCmd *cmd)
+{
+    NvmeIdentify *c = (NvmeIdentify *)cmd;
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    NvmeIdNs id;
+
+    if (c->csi != NVME_CSI_NVM || !nvme_identify_fmt_ok(n, cmd, &id)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
+}
+
+/*
+ * CNS 0Ah with CSI 00h: the NVM Command Set specific structure for a format
+ * index. Its CNS 05h counterpart is all zero, so this one is too.
+ */
+static uint16_t nvme_identify_fmt_csi_nvm(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
+    NvmeIdNs caps;
+
+    if (!nvme_identify_fmt_ok(n, cmd, &caps)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    return dma_read_prp(n, id, sizeof(id), prp1, prp2);
 }
 
 static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd,
@@ -1253,39 +1320,23 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_identify_ctrl(n, cmd);
     case NVME_ID_CNS_CS_CTRL:
         return nvme_identify_ctrl_csi(n, cmd);
+    case NVME_ID_CNS_NS_FMT:
+        return nvme_identify_fmt_nvm(n, cmd);
     case NVME_ID_CNS_CS_NS_FMT:
         /*
-         * Key-value format-index identify: the command names a format index in
-         * CDW11 rather than a namespace, so it is answered from the first
-         * key-value namespace the controller has. Namespace zero is not one on
-         * a controller in another mode, and the key-value code would then be
-         * handed that mode's state object.
+         * Identify for a Format Index: CDW11 names the format, and NSID is
+         * not used (KV 1.1 Figure 40), so any NSID gets the same reply.
          */
         if (c->csi == NVME_CSI_KV) {
-            uint32_t kv_nsid = le32_to_cpu(c->nsid);
-            NvmeNamespace *kv_ns = nvme_ns(n, kv_nsid);
-
-            /*
-             * A host that names a namespace gets that namespace's structure --
-             * it carries the namespace's own size and use, so answering from
-             * another one over-commits its key space. A host that names none
-             * gets the first key-value namespace, which is how the format index
-             * this command selects is reported.
-             */
-            if (kv_ns) {
-                return NS_KVSSD(kv_ns) ?
-                       kvssd_identify_ns_csi_fmt(n, kv_ns, cmd) :
-                       NVME_INVALID_FIELD | NVME_DNR;
-            }
-            if (!kv_nsid) {
-                for (int i = 0; i < n->namespace_limit; i++) {
-                    if (n->namespaces[i].allocated &&
-                        NS_KVSSD(&n->namespaces[i])) {
-                        return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i],
-                                                         cmd);
-                    }
+            for (int i = 0; i < n->namespace_limit; i++) {
+                if (n->namespaces[i].allocated &&
+                    NS_KVSSD(&n->namespaces[i])) {
+                    return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i],
+                                                     cmd);
                 }
             }
+        } else if (c->csi == NVME_CSI_NVM) {
+            return nvme_identify_fmt_csi_nvm(n, cmd);
         }
         return NVME_INVALID_FIELD | NVME_DNR;
     case NVME_ID_CNS_NS_ACTIVE_LIST:
@@ -2020,6 +2071,13 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     qemu_spin_lock(&n->elp_lock);
     for (i = 0; i <= n->elpe; i++) {
         log[i] = n->elpes[(n->elp_index + n->elpe - i) % (n->elpe + 1)];
+        /*
+         * Base 2.1 Figure 205 gives every entry log page version 1,
+         * including an empty one (Error Count 0). OCSSD keeps its 1.4 page.
+         */
+        if (!OCSSD(n)) {
+            log[i].lpver = 1;
+        }
     }
     qemu_spin_unlock(&n->elp_lock);
 
@@ -3647,7 +3705,11 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
      */
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->id_ns.flbas = lba_idx | meta_loc;
-    ns->id_ns.dps = !n->pi || pi ? pil | pi : 0;
+    /*
+     * PIL is never stored: with PI on, a set PIL was refused above (DPC bit
+     * 3 is clear), and with PI off NVM 1.1 Figure 114 requires DPS 00h.
+     */
+    ns->id_ns.dps = pi;
     /* the copy the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_idx];
     ns->ns_blks = ns_blks(ns, lba_idx);
@@ -3932,7 +3994,8 @@ static uint16_t nvme_ns_cmd_error(FemuCtrl *n, NvmeCmd *cmd, uint16_t status,
 {
     status |= NVME_DNR;
     nvme_set_error_info(n, 0, cmd->cid, status, 0xffff, 0,
-                        le32_to_cpu(cmd->nsid), info);
+                        le32_to_cpu(cmd->nsid), info,
+                        cmd->opcode, NVME_CSI_NVM);
     return status;
 }
 

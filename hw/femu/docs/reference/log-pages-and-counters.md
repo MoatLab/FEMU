@@ -145,7 +145,7 @@ it:
 Writes fail with Attempted Write to Read Only Range (status 182h, DNR). The
 same holds for Write Zeroes, Write Uncorrectable, Copy and a deallocating
 Dataset Management. The NVM Identify Controller (CNS 06h, CSI 00h) reports
-WZSL in byte 1, equal to MDTS. ONCS bit 3 is clear, so WZSL is a hard
+WZSL in byte 1, equal to MDTS, and VER 1.1 in bytes 23:20. ONCS bit 3 is clear, so WZSL is a hard
 limit.
 
 ## Thermal model

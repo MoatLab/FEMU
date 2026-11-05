@@ -1029,7 +1029,8 @@ static uint16_t nvme_rw_map_sgl(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     if (status) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, status & ~NVME_DNR,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
     }
     return status;
 }
@@ -1187,7 +1188,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     if (meta_size) {
         if (cmd->psdt == NVME_PSDT_SGL_MPTR_SGL || (mptr & 0x3)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                                offsetof(NvmeRwCmd, mptr), 0, ns->id);
+                                offsetof(NvmeRwCmd, mptr), 0, ns->id,
+                                cmd->opcode, ns->csi);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         if (req->is_write) {
@@ -1294,7 +1296,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     err = nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n);
     if (err) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, err & ~NVME_DNR,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
         return err;
     }
 
@@ -1308,13 +1311,15 @@ mapped:
     if (!req->qsg.nsg) {
         qemu_iovec_destroy(&req->iov);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (((uint64_t)nlb << data_shift) != req->qsg.size) {
         qemu_sglist_destroy(&req->qsg);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1424,7 +1429,8 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (nr_ranges > 256) {
         femu_err("DSM: Invalid range count %u (max 256)\n", nr_ranges);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeCmd, cdw10), nr_ranges, ns->id);
+                            offsetof(NvmeCmd, cdw10), nr_ranges, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1449,7 +1455,8 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (status) {
         status = n->power_loss ? status : NVME_INVALID_FIELD | NVME_DNR;
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, status & ~NVME_DNR,
-                            offsetof(NvmeCmd, dptr.prp1), 0, ns->id);
+                            offsetof(NvmeCmd, dptr.prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
         g_free(ranges);
         return status;
     }
@@ -1472,7 +1479,8 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             femu_err("DSM: Range %d [%lu,+%u) exceeds namespace size %lu\n",
                      i, slba, nlb, ns_size);
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                                offsetof(NvmeCmd, cdw10), slba, ns->id);
+                                offsetof(NvmeCmd, cdw10), slba, ns->id,
+                                cmd->opcode, ns->csi);
             g_free(ranges);
             return NVME_LBA_RANGE | NVME_DNR;
         }
@@ -1929,7 +1937,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                            offsetof(NvmeRwCmd, nlb), elba, ns->id);
+                            offsetof(NvmeRwCmd, nlb), elba, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_LBA_RANGE | NVME_DNR;
     }
     /* the FTL charges the media read, as for a Read */
@@ -1947,7 +1956,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     if (nvme_check_mdts(n, data_size)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, nlb), nlb, ns->id);
+                            offsetof(NvmeRwCmd, nlb), nlb, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* metadata is compared too, from the buffer at MPTR as a Write takes it */
@@ -1981,7 +1991,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /*
@@ -2105,7 +2116,8 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * out-of-range memset. */
     if (slba >= ns->id_ns.nsze || nlb > ns->id_ns.nsze - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                            offsetof(NvmeRwCmd, nlb), slba, ns->id);
+                            offsetof(NvmeRwCmd, nlb), slba, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
@@ -2159,7 +2171,8 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                            offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id);
+                            offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id,
+                            cmd->opcode, ns->csi);
         return NVME_LBA_RANGE | NVME_DNR;
     }
 

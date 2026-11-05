@@ -594,6 +594,12 @@ clear: setting it would oblige a Command Scope in every log 05h entry, and
 Linux warns about any I/O entry bit beyond CSUPP and LBCC as an unusual
 effect.
 
+Identify CNS 06h reports the version of each command set: NVM 1.1 in bytes
+23:20 (CSI 00h) and ZNS 1.2 in bytes 35:32 (CSI 02h). The NVM structure also
+sets AOCS bit 0, as Get LBA Status serves action type 02h. KV reports 1.3,
+and SLM and CP 1.2. An Open-Channel controller keeps its 1.4 replies: the
+NVM and ZNS VER fields and AOCS stay 0, and CSI 01h still reports KV 1.3.
+
 Logs 05h and 00h are built from the same functions, and `nvme_io_cmd()` runs
 an optional NVM command (Compare, Dataset Management, Write Zeroes, Copy,
 Verify, Write Uncorrectable) only where `nvme_io_effects()` lists it for the
@@ -632,7 +638,7 @@ Namespace Management.
 | Log page | Id | Notes |
 | --- | --- | --- |
 | Supported Log Pages | 00h | lists the ids the controller advertises (04h only with Namespace Management) |
-| Error Information | 01h | newest `elpe` + 1 entries |
+| Error Information | 01h | newest `elpe` + 1 entries; each names the command set (byte 30) and opcode (byte 31) of its command, and every entry, an empty one too, has Log Page Version 1h (byte 63); Open-Channel entries keep the 1.4 layout |
 | SMART / Health | 02h | host totals from the pollers, media wear, `temperature` |
 | Firmware Slot | 03h | one slot, read-only; Identify FRMW reports the same |
 | Changed Namespace List | 04h | namespaces whose attributes changed |
@@ -767,7 +773,7 @@ registers with no guest. Cases that target this chapter include:
 | `media-dnr` | Unrecovered Read and Compare Failure set DNR |
 | `fid-effects`, `fid-effects-kv`, `fid-effects-fdp` | log 12h agrees with Get Features; log 13h is zero |
 | `frmw` | FRMW and the firmware slot log agree |
-| `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for; VS, CAP.CRMS, CRTO and BPCAP match the reported version (2.1, or 1.4 for Open-Channel), CAP.AMS is 0, and LPA bit 5 and every command scope are clear |
+| `caps-*` (22 configurations: every mode, the optional commands on, off and in pairs, Namespace Management, Streams, PI, FDP, mixed namespace modes) | every admin opcode, every I/O opcode on every namespace and every log id per command set is answered exactly when logs 05h and 00h list it; log 12h agrees with Get Features; OACS, ONCS, OCFS, LPA, SANICAP, VWC, FRMW, SGLS, CNS 1Ch and the Copy limits in Identify Namespace agree with the logs and with what the controller does; ONCS and the Format bit match what the configuration asks for; VS, CAP.CRMS, CRTO and BPCAP match the reported version (2.1, or 1.4 for Open-Channel); CNS 06h reports the version of each command set it offers and AOCS bit 0, CAP.AMS is 0, and LPA bit 5 and every command scope are clear |
 | `ns-mgmt-before-identify` | a managed bbssd namespace is addressed correctly before the host reads Identify Controller |
 | `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
 | `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh; the FDP pages, FDP Mode and I/O Management are refused |

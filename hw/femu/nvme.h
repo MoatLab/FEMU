@@ -1169,9 +1169,13 @@ typedef struct NvmeErrorLog {
     uint64_t    lba;
     uint32_t    nsid;
     uint8_t     vs;
-    uint8_t     resv[3];
+    uint8_t     trtype;     /* byte 29: transport type, 0 for PCIe */
+    uint8_t     csi;        /* byte 30: command set of the command */
+    uint8_t     opc;        /* byte 31: opcode of the command */
     uint64_t    csinfo;
-    uint8_t     resv40[24];
+    uint16_t    ttsi;       /* bytes 41:40: transport type information */
+    uint8_t     resv42[21];
+    uint8_t     lpver;      /* byte 63: log page version, 1 in Base 2.1 */
 } NvmeErrorLog;
 
 typedef struct NvmeSmartLog {
@@ -1342,6 +1346,14 @@ typedef struct NvmePSD {
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
+/*
+ * Command set versions in the VER field of the I/O Command Set specific
+ * Identify Controller structure (CNS 06h): MJR in bits 31:16, MNR in 15:8,
+ * TER in 7:0. NVM 1.1 and ZNS 1.2 belong to Base 2.1, which FEMU reports.
+ */
+#define NVME_NVM_SPEC_VER       (0x00010100)
+#define NVME_ZNS_SPEC_VER       (0x00010200)
+
 enum NvmeIdCns {
     NVME_ID_CNS_NS                    = 0x00,
     NVME_ID_CNS_CTRL                  = 0x01,
@@ -1350,6 +1362,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_CS_NS                 = 0x05,
     NVME_ID_CNS_CS_CTRL               = 0x06,
     NVME_ID_CNS_NS_CS_INDEP           = 0x08,
+    NVME_ID_CNS_NS_FMT                = 0x09,  /* NVM NS for a format index */
     NVME_ID_CNS_CS_NS_FMT             = 0x0a,  /* CSI-specific NS for a format index */
     NVME_ID_CNS_CS_NS_ACTIVE_LIST     = 0x07,
     NVME_ID_CNS_NS_PRESENT_LIST       = 0x10,
@@ -1678,6 +1691,11 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeRangeType) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeErrorLog) != 64);
+    /* Base 2.1 Figure 205 */
+    QEMU_BUILD_BUG_ON(offsetof(NvmeErrorLog, csi) != 30);
+    QEMU_BUILD_BUG_ON(offsetof(NvmeErrorLog, opc) != 31);
+    QEMU_BUILD_BUG_ON(offsetof(NvmeErrorLog, ttsi) != 40);
+    QEMU_BUILD_BUG_ON(offsetof(NvmeErrorLog, lpver) != 63);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
@@ -3199,10 +3217,11 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
                                queue_depth, uint16_t entry_size);
 void nvme_set_error_info(FemuCtrl *n, uint16_t sqid, uint16_t cid,
                          uint16_t status, uint16_t location, uint64_t lba,
-                         uint32_t nsid, uint64_t info);
+                         uint32_t nsid, uint64_t info, uint8_t opc,
+                         uint8_t csi);
 void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
                          status, uint16_t location, uint64_t lba, uint32_t
-                         nsid);
+                         nsid, uint8_t opc, uint8_t csi);
 uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 NvmeRequest *req, uint64_t slba, uint64_t elba,
                                 uint32_t nlb, uint16_t ctrl, uint64_t data_size,

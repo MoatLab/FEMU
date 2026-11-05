@@ -1267,6 +1267,11 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "meta/extended need a matching metadata capability (mc)");
         return false;
     }
+    if (!OCSSD(n) && NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) {
+        error_setg(errp, "dpc: bit 3 (protection information in the first "
+                   "eight bytes of metadata) is not allowed by NVM 1.1");
+        return false;
+    }
     if ((n->dps && n->meta < 8) ||
         (n->dps && (n->dps & DPS_FIRST_EIGHT) &&
          !NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) ||
@@ -1326,7 +1331,12 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     /* a subsystem has one endurance group, which holds every namespace */
     id_ns->endgid        = cpu_to_le16(n->subsys ? 1 : 0);
     id_ns->mc            = n->mc;
-    id_ns->dpc           = n->pi ? (n->meta >= 8 ? 0x1f : 0) : n->dpc;
+    /*
+     * Types 1 to 3 with the protection information in the last eight bytes
+     * of the metadata. NVM 1.1 Figure 114 requires DPC bit 3 (first eight
+     * bytes) to be clear, so that placement is never offered.
+     */
+    id_ns->dpc           = n->pi ? (n->meta >= 8 ? 0x17 : 0) : n->dpc;
     id_ns->dps           = n->dps;
     id_ns->dlfeat        = 0x9;
     id_ns->lbaf[0].lbads = 9;

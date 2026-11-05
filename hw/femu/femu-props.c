@@ -220,12 +220,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Metadata Capabilities bit mask: bit 0 interleaved (extended LBAs), "
       "bit 1 separate buffer; required when meta is set" },
     { "pi",
-      "Offer end-to-end protection information types 1 to 3 when meta is at "
-      "least 8 bytes and allow Format and Create to select them; not with "
-      "power_loss or cxl_ssd" },
+      "Offer end-to-end protection information types 1 to 3, in the last 8 "
+      "bytes of metadata, when meta is at least 8 bytes, and allow Format "
+      "and Create to select them; not with power_loss or cxl_ssd" },
     { "dpc",
       "Data Protection Capabilities reported in Identify Namespace when pi "
-      "is off; must be 0 with meta" },
+      "is off; must be 0 with meta, and bit 3 (first 8 bytes) is refused "
+      "except on OCSSD" },
     { "dps",
       "Data Protection Type Settings reported in Identify Namespace; a "
       "non-zero value needs 8 bytes of metadata, which meta refuses, so "

@@ -233,7 +233,8 @@ Properties: [LBA formats, metadata and protection](../reference/properties.md#lb
   accepted and offers nothing.
 - `nlbaf`: at most 8 with `meta`, since each format is offered twice.
 - `dpc` and `dps` describe PI without metadata support; leave them at 0 and
-  use `pi`.
+  use `pi`. `dpc` must not set bit 3: NVM 1.1 does not allow PI in the
+  first bytes of metadata, so realize refuses it (OCSSD, at 1.4, keeps it).
 
 ### Use it from the guest
 
@@ -289,7 +290,10 @@ End-to-end Guard, Application Tag or Reference Tag Check Error.
 1. Namespace management: `oacs` has bit 3 set, and a created and attached
    namespace appears in `nvme list` with the size you asked for.
 2. Metadata: `nvme id-ns /dev/nvme0n1` shows a non-zero `ms` for the current
-   format, and `dpc` is `0x1f` with `pi=on`.
+   format, and `dpc` is `0x17` with `pi=on`: types 1 to 3, with PI in the
+   last 8 bytes of metadata only. Format and Create refuse PIL with a type.
+   With Namespace Management on, Identify CNS 09h and CNS 0Ah (CSI 00h)
+   describe each format index.
 3. PI: the write and read above succeed, and a read with `--ref-tag=1` for
    LBA 0 fails with Invalid Protection Information.
 
