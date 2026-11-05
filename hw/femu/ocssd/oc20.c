@@ -1296,7 +1296,7 @@ static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
     uint8_t num_lun = n->oc_params.num_lun;
     uint8_t num_pln = n->oc_params.num_pln;
 
-    /* 
+    /*
      * Byte 0: Major Version Number (MJR)
      * - Value 1: OCSSD Revision 1.2
      * - Value 2: OCSSD Revision 2.0
@@ -1319,9 +1319,9 @@ static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
      */
     /* Coperd: lbaf is auto-calculated below */
 
-    /* 
-     * Byte 16-19: Media and Controller Capabilities (MCCAP): 
-     * Bit 0: Support for Vector Chunk Copy IO Command 
+    /*
+     * Byte 16-19: Media and Controller Capabilities (MCCAP):
+     * Bit 0: Support for Vector Chunk Copy IO Command
      * Bit 1: Support for multi-resets when a chunk is in free state
      */
     mccap = 0x0;
@@ -1525,7 +1525,7 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return 1;
         }
 
-        /* 
+        /*
          * We fail resets for a chunk after a write failure to it, so make sure
          * to allocate the resetfailure buffer if it has not been already
          */

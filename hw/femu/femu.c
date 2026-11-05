@@ -3891,7 +3891,6 @@ static void femu_exit(PCIDevice *pci_dev)
 }
 
 static const Property femu_props[] = {
-    //DEFINE_BLOCK_PROPERTIES(FemuCtrl, blkconf),
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */

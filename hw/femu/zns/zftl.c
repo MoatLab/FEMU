@@ -1,7 +1,5 @@
 #include "zns.h"
 
-//#define FEMU_DEBUG_ZFTL
-
 
 static inline struct ppa get_maptbl_ent(struct zns_ssd *zns, uint64_t lpn)
 {
@@ -338,7 +336,7 @@ static struct ppa get_new_page(struct zns_ssd *zns, uint32_t zone_idx)
     ppa.g.ch = ch;
     ppa.g.fc = lun;
     ppa.g.blk = blk;
-    ppa.g.V = 1; //not padding page
+    ppa.g.V = 1; /* not padding page */
     if(!valid_ppa(zns,&ppa))
     {
         ftl_err("[Misao] invalid ppa: ch %u lun %u pl %u blk %u pg %u subpg  %u \n",ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg);
@@ -545,7 +543,6 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
     uint64_t secs_per_pg = LOGICAL_PAGE_SIZE/zns->lbasz;
     uint64_t start_lpn = lba / secs_per_pg;
     uint64_t end_lpn = (lba + nlb - 1) / secs_per_pg;
-    //int wcidx = zns_get_wcidx(zns);
     struct ppa ppa;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
@@ -615,7 +612,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
                 {
                     if(i+subpage >= zns->cache.write_cache[wcidx].used)
                     {
-                        //No need to write an invalid page
+                        /* No need to write an invalid page */
                         break;
                     }
                     lpn = zns->cache.write_cache[wcidx].lpns[i+subpage];
@@ -626,11 +623,10 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
                     ppa.g.spg = subpage;
                     /* update maptbl */
                     set_maptbl_ent(zns, lpn, &ppa);
-                    // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
                 }
                 i+=ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;
             }
-            //FIXME Misao: identify padding page
+            /* FIXME: identify the padding page */
             if(ppa.g.V)
             {
                 struct nand_cmd swr;
@@ -727,7 +723,7 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
             sublat = 0;
         }
         zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
-        sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
+        sublat += SRAM_WRITE_LATENCY_NS; /* Simplified timing emulation */
         maxlat = (sublat > maxlat) ? sublat : maxlat;
         ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
     }

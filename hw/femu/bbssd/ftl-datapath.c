@@ -833,9 +833,6 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
         ppa = ssd->mapping->translate(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
-            //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             continue;
         }
 
@@ -1272,19 +1269,16 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
-    // uint32_t attributes = req->dsm_attributes;
-    
+
     int total_trimmed_pages = 0;
     int total_already_invalid = 0;
     int total_out_of_bounds = 0;
-    
+
     if (!ranges || nr_ranges <= 0) {
         printf("TRIM: Invalid ranges or count\n");
         return 0;
     }
-    
-    // printf("TRIM: Processing %d ranges (attributes=0x%x)\n", nr_ranges, attributes);
-    
+
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
         uint64_t start_lpn, end_lpn;
         int trimmed_pages;
@@ -1293,29 +1287,23 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
         ssd_lpn_range(ssd, req, le64_to_cpu(ranges[range_idx].slba),
                       le32_to_cpu(ranges[range_idx].nlb), &start_lpn, &end_lpn);
 
-        // Boundary check
+        /* Boundary check */
         if (end_lpn >= spp->tt_pgs) {
-            ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%lu, tt_pgs=%d\n", 
+            ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%lu, tt_pgs=%d\n",
                    range_idx, end_lpn, spp->tt_pgs);
             total_out_of_bounds++;
-            continue;  // Skip this range, continue with others
+            continue;  /* Skip this range, continue with others */
         }
 
-        // Process each LPN in this range
+        /* Process each LPN in this range */
         trimmed_pages = ssd_deallocate_lpns(ssd, start_lpn, end_lpn,
                                             &already_invalid);
-        
+
         total_trimmed_pages += trimmed_pages;
         total_already_invalid += already_invalid;
-        
-        // ftl_debug("TRIM Range %d: %d pages trimmed, %d already invalid\n", 
-        //        range_idx, trimmed_pages, already_invalid);
     }
 
-    // ftl_debug("TRIM: Completed - %d pages trimmed, %d already invalid, %d out of bounds across %d ranges\n", 
-    //        total_trimmed_pages, total_already_invalid, total_out_of_bounds, nr_ranges);
-
-    // Free the ranges array
+    /* Free the ranges array */
     g_free(ranges);
     req->dsm_ranges = NULL;
     req->dsm_nr_ranges = 0;

@@ -1698,7 +1698,6 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeRuhStatusDescr) != 32);
 
     /* Coperd: FIXME, check FEMU OC structure size */
-    //oc12_check_size();
 }
 
 /* Async Event Configuration, bits 7:0: which SMART warnings raise an event */
@@ -3418,7 +3417,6 @@ static inline uint16_t nvme_check_mdts(FemuCtrl *n, uint64_t len)
 #define MN_MAX_LEN (64)
 #define ID_MAX_LEN (4)
 
-//#define FEMU_DEBUG_NVME
 #ifdef FEMU_DEBUG_NVME
 #define femu_debug(fmt, ...) \
     do { printf("[FEMU] Dbg: " fmt, ## __VA_ARGS__); } while (0)

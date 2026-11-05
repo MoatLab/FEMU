@@ -252,7 +252,7 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
 
     int pmode = Oc12PMODE_DUAL;
 #if 1
-    switch (pmode) {     // Check that pmode is supported
+    switch (pmode) {     /* Check that pmode is supported */
     case Oc12PMODE_DUAL:
         if (c->num_pln != 2) {
             printf("_erase_meta: Unsupported pmode(%d) for num_pln(%d)\n",
@@ -274,7 +274,7 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
     }
 #endif
 
-    mask |= ln->ppaf.ch_mask;   // Construct mask
+    mask |= ln->ppaf.ch_mask;   /* Construct mask */
     mask |= ln->ppaf.lun_mask;
     mask |= ln->ppaf.blk_mask;
 
@@ -292,7 +292,6 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
         }
 
         for (pl = pl_bgn; pl <= pl_end; ++pl) {
-            //uint32_t cur_state = 0;
             uint64_t ppa_pl;
 
             ppa_pl = ppa & mask;
@@ -316,7 +315,6 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
                     ppa_sec |= pl << ln->ppaf.pln_offset;
                     ppa_sec |= sec << ln->ppaf.sec_offset;
 
-                    //pr_ppa(ln, ppa_sec);
                     if (!oc12_meta_offset(ln, ppa_sec, 0, ln->meta_len,
                                           &off)) {
                         continue;
@@ -445,7 +443,6 @@ static void parse_ppa_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     memset(bucket, 0, sizeof(AddrBucket) * max_sec_per_rq);
     for (i = 0; i < nlb; i++) {
         ppa = ((uint64_t *)(req->slba))[i];
-        //pr_ppa(ln, ppa);
         cur_pg_addr = (ppa & (~(ln->ppaf.sec_mask)) & (~(ln->ppaf.pln_mask)));
         if (cur_pg_addr == prev_pg_addr) {
             /* Accessing another secotr in the same NAND page */

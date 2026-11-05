@@ -1,8 +1,6 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
-//#define FEMU_DEBUG_FTL
-
 
 
 

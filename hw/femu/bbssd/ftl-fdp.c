@@ -631,7 +631,7 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
     }
     if (ru->ruh->ruh_live_pages_cnt > 0)
         ru->ruh->ruh_live_pages_cnt -=1 ;
-    
+
 }
 
 /*
@@ -1095,12 +1095,12 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
 
 /*
  * clean_one_block_fdp_style - GC one block: read valid pages and write to new_ru
- * @params 
+ * @params
  *  ppa : identifies the block we want to clean
  *  dest_ruh : destination ruh.
- *          ru based mechanism can cause pointer error when gc write page allocates new ru to ruh->gc. 
+ *          ru based mechanism can cause pointer error when gc write page allocates new ru to ruh->gc.
  *          Replace ru based parameter which leaves a frontier dangling
- *          
+ *
  */
 static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
                                       FemuRuHandle *dest_ruh, uint16_t rgidx,
@@ -1385,7 +1385,7 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
     /* sanity: don't GC an active RU */
     if (victim_ru == victim_ru->ruh->rus[victim_ru->rgidx]) {
         ftl_err("Victim RU %d is active, skipping GC\n", victim_ru->ruidx);
-        //This is a bug.
+        /* an active RU must never be a victim */
         ftl_assert(false && __LINE__);
         return -1;
     }
@@ -1499,7 +1499,6 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
     }
     victim_ru = select_victim_ru(ssd, rgid, force);
     if (!victim_ru) {
-        //FDP_TRACE(ssd,"GC_SKIP Unable to find victim RU, gc skip\n");
         return -1;
     }
 

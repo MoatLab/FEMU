@@ -45,7 +45,7 @@ typedef struct Oc12BbtGet {
     uint64_t    prp1;
     uint64_t    prp2;
     uint64_t    spba;
-    uint32_t    rsvd4[4]; // DW15, 14, 13, 12
+    uint32_t    rsvd4[4]; /* DW15, 14, 13, 12 */
 } Oc12BbtGet;
 
 typedef struct Oc12BbtSet {
@@ -204,9 +204,9 @@ typedef struct Oc12Params {
 } QEMU_PACKED Oc12Params;
 
 enum Oc12Pmode {
-    Oc12PMODE_SNGL = 0x0,      ///< Single-plane
-    Oc12PMODE_DUAL = 0x1,      ///< Dual-plane (NVM_IO_DUAL_ACCESS)
-    Oc12PMODE_QUAD = 0x2       ///< Quad-plane (NVM_IO_QUAD_ACCESS)
+    Oc12PMODE_SNGL = 0x0,      /**< Single-plane */
+    Oc12PMODE_DUAL = 0x1,      /**< Dual-plane (NVM_IO_DUAL_ACCESS) */
+    Oc12PMODE_QUAD = 0x2       /**< Quad-plane (NVM_IO_QUAD_ACCESS) */
 };
 
 enum Oc12Responsibility {
@@ -227,7 +227,7 @@ typedef struct Oc12Ctrl {
     uint8_t     *meta_buf;
     int         meta_tbytes;
     int         meta_len;
-    uint8_t     int_meta_size;       // # of bytes for "internal" metadata
+    uint8_t     int_meta_size;       /* # of bytes for "internal" metadata */
     /* NAND timing: the shared media layer, busy-until per LUN and channel */
     NandMedia   media;
     uint64_t    lun_avail[FEMU_MAX_NUM_CHIPS];

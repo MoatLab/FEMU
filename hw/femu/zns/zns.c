@@ -905,9 +905,6 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     }
 }
 
-// Add some function
-// --------------------------------
-
 static inline uint64_t zone_slba(NvmeNamespace *ns, uint32_t zone_idx)
 {
     return (zone_idx) * ns->zone_size;
@@ -1558,7 +1555,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req,bool append)
 {
     int ret;
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
@@ -1571,7 +1568,6 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     bool fault = false;
 
     assert(n->zoned);
-    // Fix zone append not working as expected
     req->is_write = ((rw->opcode == NVME_CMD_WRITE) || (rw->opcode == NVME_CMD_ZONE_APPEND)) ? 1 : 0;
 
     status = nvme_check_mdts(n, data_size);
@@ -2226,8 +2222,6 @@ static void zns_set_ctrl(FemuCtrl *n)
     pci_config_set_device_id(pci_conf, 0x5845);
 }
 
-// Add zns init ch, zns init flash and zns init block
-// ----------------------------
 static void zns_init_blk(struct zns_blk *blk,int num_blk,int blkidx,int flash_type)
 {
     blk->nand_type = flash_type;
@@ -2300,14 +2294,14 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->wp.ch = 0;
     id_zns->wp.lun = 0;
 
-    //Misao: init mapping table
+    /* init the mapping table */
     id_zns->l2p_sz = ns->size/LOGICAL_PAGE_SIZE;
     id_zns->maptbl = g_malloc0(sizeof(struct ppa) * id_zns->l2p_sz);
     for (i = 0; i < id_zns->l2p_sz; i++) {
         id_zns->maptbl[i].ppa = UNMAPPED_PPA;
     }
 
-    //Misao: init sram
+    /* init the SRAM */
     /* one program covers every plane of a die; the flush walks the same set */
     id_zns->program_unit = ZNS_PAGE_SIZE * id_zns->flash_type * id_zns->num_plane;
     /*
@@ -2341,24 +2335,23 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     }
 
     femu_log("===========================================\n");
-    femu_log("|        ZMS HW Configuration()           |\n");      
+    femu_log("|        ZMS HW Configuration()           |\n");
     femu_log("===========================================\n");
     femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tpages per blk\t: %lu\t|\n",id_zns->num_ch,id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->num_page);
-    //femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
     femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_unit/(KiB),id_zns->cache.num_wc,(id_zns->stripe_unit/LOGICAL_PAGE_SIZE));
-    femu_log("===========================================\n"); 
+    femu_log("===========================================\n");
 
-    //Misao: use average read latency
+    /* use the average read latency */
     id_zns->timing.pg_rd_lat[SLC] = SLC_READ_LATENCY_NS;
     id_zns->timing.pg_rd_lat[TLC] = TLC_READ_LATENCY_NS;
     id_zns->timing.pg_rd_lat[QLC] = QLC_READ_LATENCY_NS;
 
-    //Misao: do not suppirt partial programing
+    /* no partial page programs */
     id_zns->timing.pg_wr_lat[SLC] = SLC_PROGRAM_LATENCY_NS;
     id_zns->timing.pg_wr_lat[TLC] = TLC_PROGRAM_LATENCY_NS;
     id_zns->timing.pg_wr_lat[QLC] = QLC_PROGRAM_LATENCY_NS;
 
-    //Misao: copy from nand.h
+    /* copied from nand.h */
     id_zns->timing.blk_er_lat[SLC] = SLC_BLOCK_ERASE_LATENCY_NS;
     id_zns->timing.blk_er_lat[TLC] = TLC_BLOCK_ERASE_LATENCY_NS;
     id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;

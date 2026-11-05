@@ -17,7 +17,7 @@
 #define ZNS_DEFAULT_NUM_WRITE_CACHE (3)
 #define ZNS_DEFAULT_L2P_CACHE_SIZE (1*MiB)
 
-//chunk size = 4MiB = 256*16KiB
+/* chunk size = 4MiB = 256*16KiB */
 #define ZNS_LOG_CHUNK_SIZE (8)
 
 #define UNMAPPED_PPA    (~(0ULL))
@@ -100,7 +100,7 @@ struct nand_cmd {
 struct zns_blk {
     int nand_type;
     uint64_t next_blk_avail_time;
-    uint64_t page_wp; //next free page
+    uint64_t page_wp; /* next free page */
     uint32_t erase_cnt;     /* erases by Zone Reset; FTL thread only */
 };
 
@@ -142,10 +142,10 @@ typedef struct SSDNandFlashTiming {
 } SSDNandFlashTiming;
 
 struct zns_write_cache{
-    uint64_t sblk; //idx of corresponding superblock
-    uint64_t used; 
+    uint64_t sblk; /* idx of corresponding superblock */
+    uint64_t used;
     uint64_t cap;
-    uint64_t* lpns; //identify the cached data
+    uint64_t* lpns; /* identify the cached data */
 };
 
 struct zns_sram{

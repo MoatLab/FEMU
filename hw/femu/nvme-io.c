@@ -1417,10 +1417,10 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int i;
     uint16_t status;
 
-    // Extract number of ranges from CDW10 (bits 7:0, 0-based)
+    /* Extract number of ranges from CDW10 (bits 7:0, 0-based) */
     nr_ranges = (cdw10 & 0xFF) + 1;
-    
-    // Validate range count - NVMe supports up to 256 ranges
+
+    /* Validate range count - NVMe supports up to 256 ranges */
     if (nr_ranges > 256) {
         femu_err("DSM: Invalid range count %u (max 256)\n", nr_ranges);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1428,21 +1428,16 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    // Check if any deallocate operation is requested
+    /* Check if any deallocate operation is requested */
     bool has_deallocate = (cdw11 & NVME_DSMGMT_AD) != 0;
-    // bool has_idr = (cdw11 & NVME_DSMGMT_IDR) != 0;
-    // bool has_idw = (cdw11 & NVME_DSMGMT_IDW) != 0;
 
-    // femu_debug("DSM: nr_ranges=%u, AD=%d, IDR=%d, IDW=%d\n", 
-    //        nr_ranges, has_deallocate, has_idr, has_idw);
-
-    // If no deallocate attribute, no need to process further for TRIM
+    /* If no deallocate attribute, no need to process further for TRIM */
     if (!has_deallocate) {
         femu_err("DSM: No deallocate attribute set, skipping\n");
         return NVME_SUCCESS;
     }
 
-    // Allocate buffer for DSM ranges
+    /* Allocate buffer for DSM ranges */
     size_t ranges_size = sizeof(NvmeDsmRange) * nr_ranges;
     ranges = g_malloc0(ranges_size);
     if (!ranges) {
@@ -1458,7 +1453,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(ranges);
         return status;
     }
-    // Validate and process each range
+    /* Validate and process each range */
     uint64_t total_blocks = 0;
     uint64_t ns_size = le64_to_cpu(ns->id_ns.nsze);
 
@@ -1472,7 +1467,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint64_t slba = le64_to_cpu(ranges[i].slba);
         uint32_t nlb = le32_to_cpu(ranges[i].nlb);
 
-        // Validate LBA range against namespace size
+        /* Validate LBA range against namespace size */
         if (slba >= ns_size || nlb > ns_size - slba) {
             femu_err("DSM: Range %d [%lu,+%u) exceeds namespace size %lu\n",
                      i, slba, nlb, ns_size);
@@ -1482,7 +1477,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_LBA_RANGE | NVME_DNR;
         }
 
-        // Check for integer overflow in block count accumulation
+        /* Check for integer overflow in block count accumulation */
         if (total_blocks > UINT64_MAX - nlb) {
             femu_err("DSM: Total block count overflow\n");
             g_free(ranges);
@@ -1514,13 +1509,13 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     femu_debug("DSM: Total blocks to deallocate: %lu\n", total_blocks);
 
-    // Store ranges in request for FTL processing
+    /* Store ranges in request for FTL processing */
     req->dsm_ranges = ranges;
     req->dsm_nr_ranges = nr_ranges;
     req->dsm_attributes = cdw11;
     req->cmd_opcode = NVME_CMD_DSM;
-    
-    // Don't free ranges here - FTL will handle them
+
+    /* Don't free ranges here - FTL will handle them */
     req->status = NVME_SUCCESS;
     return NVME_SUCCESS;
 }

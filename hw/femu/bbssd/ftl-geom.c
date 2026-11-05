@@ -362,19 +362,17 @@ static void check_params(struct ssdparams *spp)
      * force luns_per_ch and nchs to be power of 2
      */
 
-    //ftl_assert(is_power_of_2(spp->luns_per_ch));
-    //ftl_assert(is_power_of_2(spp->nchs));
 }
 
 void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 {
-    spp->secsz = n->bb_params.secsz; // 512
-    spp->secs_per_pg = n->bb_params.secs_per_pg; // 8
-    spp->pgs_per_blk = n->bb_params.pgs_per_blk; //256
+    spp->secsz = n->bb_params.secsz; /* 512 */
+    spp->secs_per_pg = n->bb_params.secs_per_pg; /* 8 */
+    spp->pgs_per_blk = n->bb_params.pgs_per_blk; /* 256 */
     spp->blks_per_pl = n->bb_params.blks_per_pl; /* 256 16GB */
-    spp->pls_per_lun = n->bb_params.pls_per_lun; // 1
-    spp->luns_per_ch = n->bb_params.luns_per_ch; // 8
-    spp->nchs = n->bb_params.nchs; // 8
+    spp->pls_per_lun = n->bb_params.pls_per_lun; /* 1 */
+    spp->luns_per_ch = n->bb_params.luns_per_ch; /* 8 */
+    spp->nchs = n->bb_params.nchs; /* 8 */
 
     spp->pg_rd_lat = n->bb_params.pg_rd_lat;
     spp->pg_wr_lat = n->bb_params.pg_wr_lat;
