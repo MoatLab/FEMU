@@ -1,0 +1,26 @@
+# Properties that no file under hw/femu/tests/ or hw/femu/scripts/ names.
+# hw/femu/scripts/check-property-tests.py reads this list. Each line is
+#   NAME  REASON
+# A new property needs a test, or a line here. Remove a line when a test
+# names the property; the check fails for a line whose property is tested.
+
+persistent-memdev   inherited from QEMU cxl-type3; femu-cxl-ssd does not document a use
+volatile-dc-memdev  inherited from QEMU cxl-type3; femu-cxl-ssd does not document a use
+x-speed             inherited from QEMU cxl-type3 (link speed); QEMU owns it
+x-width             inherited from QEMU cxl-type3 (link width); QEMU owns it
+cylon-emul-exit     needs a host kernel with the Cylon patch; no qtest can reach it
+max_sqes            no test yet: Identify SQES field only
+max_cqes            no test yet: Identify CQES field only
+elpe                no test yet: Identify ELPE field only
+intc_thresh         no test yet
+intc_time           no test yet
+err_read_unc_ppm    no test yet
+mapping_cache_mb    no test yet
+cache_evict         no test yet
+debug_ftl           no test yet: turns on debug output only
+tier_pslc_prog_ns   no test yet
+tier_pslc_pe_cycles no test yet
+fw_write_ns         no test yet
+zns_cross_zone_read no test yet
+lmax_sec_per_rq     no test yet: OCSSD 1.2 Identify field
+mpsmin              no test yet: CAP.MPSMIN field only

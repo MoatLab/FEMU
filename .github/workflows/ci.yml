@@ -448,6 +448,15 @@ jobs:
         python3 hw/femu/scripts/check-unit-tests.py --self-test
         python3 hw/femu/scripts/check-unit-tests.py
 
+    - name: Check that a test names each property
+      run: |
+        # A property that no test names, and that
+        # hw/femu/tests/untested-properties.list does not list with a
+        # reason, fails here. A listed property that a test now names fails
+        # too, so the list only shrinks.
+        python3 hw/femu/scripts/check-property-tests.py --self-test
+        python3 hw/femu/scripts/check-property-tests.py
+
     - name: Check build system consistency
       run: |
         # Verify FEMU is properly integrated in build system
