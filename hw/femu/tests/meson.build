@@ -26,7 +26,7 @@ foreach test_name, test_src : femu_unit_tests
        args: ['--tap', '-k'],
        protocol: 'tap',
        timeout: 30,
-       suite: ['unit'])
+       suite: ['unit', 'femu-unit'])
 endforeach
 
 # The property reference is generated from the binary's own help text, so a

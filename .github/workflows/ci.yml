@@ -72,11 +72,13 @@ jobs:
     - name: Run the FEMU unit tests through meson
       run: |
         cd build-femu
-        # The same tests the standalone step ran, now built with QEMU's own
+        # Every test in hw/femu/tests/meson.build, built with QEMU's own
         # flags and headers, so a test that only passes against the stub
-        # osdep.h is caught here.
-        ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
-          test-femu-kv-lsm --print-errorlogs
+        # osdep.h is caught here. The suite takes a new test with no CI edit.
+        ./pyvenv/bin/meson test --suite femu-unit --list > femu-unit.list
+        (cd .. && python3 hw/femu/scripts/check-unit-tests.py \
+          --listed build-femu/femu-unit.list)
+        ./pyvenv/bin/meson test --suite femu-unit --print-errorlogs
 
     - name: Verify FEMU device registration
       run: |
@@ -236,8 +238,10 @@ jobs:
       if: matrix.part == 'main'
       run: |
         cd build-debug
-        ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
-          test-femu-kv-lsm --print-errorlogs
+        ./pyvenv/bin/meson test --suite femu-unit --list > femu-unit.list
+        (cd .. && python3 hw/femu/scripts/check-unit-tests.py \
+          --listed build-debug/femu-unit.list)
+        ./pyvenv/bin/meson test --suite femu-unit --print-errorlogs
 
     - name: Instantiate every mode with the checks armed
       if: matrix.part == 'main'
@@ -436,6 +440,13 @@ jobs:
         # trailing whitespace in a .c or .h file.
         python3 hw/femu/scripts/check-c-style.py --self-test
         python3 hw/femu/scripts/check-c-style.py hw/femu
+
+    - name: Check that CI runs every unit test
+      run: |
+        # A unit test source in neither meson.build nor the Makefile never
+        # runs. The self-test plants that fault first.
+        python3 hw/femu/scripts/check-unit-tests.py --self-test
+        python3 hw/femu/scripts/check-unit-tests.py
 
     - name: Check build system consistency
       run: |
