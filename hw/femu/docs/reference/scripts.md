@@ -220,6 +220,7 @@ explains each.
 | `gen-mode-table.py` | rewrites the mode tables from `docs/modes.py`; `--check` compares and checks `modes.py` against the code |
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |
 | `check-changelog-hashes.py` | `[--head COMMIT] [FILE]`; checks that every commit the CHANGELOG names is in the history of `--head` (needs a full clone) |
+| `check-c-style.py` | `[DIR]` (default `hw/femu`) or `--self-test`; finds C99 comments and trailing whitespace in `.c` and `.h` files, and fails on a tree with no source file |
 | `check-doc-examples.py` | `--lint`, `--list`, `--self-test`, `--qemu BINARY`, `--qos-test BINARY`, `--only NAME`, `--timeout SEC`, `[PATH...]`; checks every code block's tag and runs the tagged examples |
 
 ## CXL caching API tools: `hw/femu/tools/cca/`

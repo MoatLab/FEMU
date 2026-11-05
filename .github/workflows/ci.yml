@@ -431,13 +431,11 @@ jobs:
 
     - name: Check code style
       run: |
-        # Check for trailing whitespace in FEMU source files
-        ! find hw/femu -name "*.c" -o -name "*.h" | xargs grep -l '[[:space:]]$'
-        echo "✓ No trailing whitespace found"
-
-        # Check for C++ style comments in C files
-        ! find hw/femu -name "*.c" -o -name "*.h" | xargs grep '//'
-        echo "✓ No C++ style comments found in C files"
+        # The self-test plants each fault first, so a check that cannot fail
+        # turns this step red. Then the tree must have no C99 comment and no
+        # trailing whitespace in a .c or .h file.
+        python3 hw/femu/scripts/check-c-style.py --self-test
+        python3 hw/femu/scripts/check-c-style.py hw/femu
 
     - name: Check build system consistency
       run: |
@@ -462,7 +460,9 @@ jobs:
 
     - name: Validate documentation
       run: |
-        # Check that README references are valid
-        [ -f "README.md" ] && echo "✓ README.md exists"
-        [ -d "hw/femu" ] && echo "✓ FEMU source directory exists"
-        [ -f "hw/femu/meson.build" ] && echo "✓ FEMU meson.build exists"
+        # Each test runs on its own line, so bash -e stops at the first one
+        # that fails. A "[ ... ] && echo" line never stops the step.
+        test -f README.md
+        test -d hw/femu
+        test -f hw/femu/meson.build
+        echo "README.md, hw/femu and hw/femu/meson.build exist"
