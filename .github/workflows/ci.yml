@@ -42,8 +42,25 @@ jobs:
           libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
           liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
           uuid-dev libcap-dev libxml2-dev libmount-dev \
-          liburing-dev flex bison
+          liburing-dev flex bison ccache
 
+    - name: Restore the compiler cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.ccache
+        # A new key per run saves the cache that run built; restore-keys
+        # takes the newest cache of the same job and OS.
+        key: ccache-${{ matrix.os }}-${{ github.run_id }}
+        restore-keys: ccache-${{ matrix.os }}-
+
+    - name: Use the compiler cache
+      run: |
+        # The ccache wrappers come first in PATH, so every cc and gcc call of
+        # configure, meson and make goes through the cache.
+        echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+        echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+        CCACHE_DIR="$HOME/.ccache" ccache --zero-stats
 
     - name: Unit tests needing GLib
       run: |
@@ -68,6 +85,7 @@ jobs:
         echo "Starting parallel FEMU build at $(date)"
         time ./femu-compile.sh
         echo "Build completed at $(date)"
+        ccache --show-stats
 
     - name: Run the FEMU unit tests through meson
       run: |
@@ -223,7 +241,25 @@ jobs:
           libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
           liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
           uuid-dev libcap-dev libxml2-dev libmount-dev \
-          liburing-dev flex bison
+          liburing-dev flex bison ccache
+
+    - name: Restore the compiler cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.ccache
+        # A new key per run saves the cache that run built; restore-keys
+        # takes the newest cache of the same job and OS.
+        key: ccache-debug-${{ matrix.part }}-${{ github.run_id }}
+        restore-keys: ccache-debug-${{ matrix.part }}-
+
+    - name: Use the compiler cache
+      run: |
+        # The ccache wrappers come first in PATH, so every cc and gcc call of
+        # configure, meson and make goes through the cache.
+        echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+        echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+        CCACHE_DIR="$HOME/.ccache" ccache --zero-stats
 
     - name: Build with FTL asserts and sanitizers
       run: |
@@ -233,6 +269,7 @@ jobs:
           --disable-libnfs --disable-libiscsi --disable-curl \
           --enable-asan --enable-ubsan --extra-cflags=-DFEMU_FTL_ASSERT
         make -j "$(nproc)"
+        ccache --show-stats
 
     - name: Run the FEMU unit tests under the sanitizers
       if: matrix.part == 'main'
