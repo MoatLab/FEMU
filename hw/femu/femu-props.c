@@ -603,6 +603,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd with tier_mode=dynamic: logical fill in percent at which the "
       "pool starts to give borrowed lines back, 0 to 99; above it the "
       "allowance falls in a line to 0 at a full device" },
+    { "tier_idle_ms",
+      "bbssd with a tier_mode: quiet time in ms after which the device folds "
+      "pool lines in the background, one bounded step at a time; 0 "
+      "(default) folds only when a write needs room" },
+    { "tier_lazy_pct",
+      "bbssd with tier_idle_ms: 0 (default) folds every closed pool line at "
+      "idle; 1 to 99 folds only while the pool lines in use are above this "
+      "percent of the pool" },
     { "fdp_trim_erase_all",
       "bbssd with FDP: non-zero makes a deallocate reset every reclaim unit "
       "instead of the given ranges" },

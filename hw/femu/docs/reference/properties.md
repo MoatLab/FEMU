@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 217 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 219 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -215,6 +215,8 @@ Devices:
 | `tier_pslc_pe_cycles` | `uint32` | `0` | bbssd with a tier_mode: rated erase cycles of a block in pSLC mode, for the tier wear figure; 0 (default) takes 30 times the dense rating |
 | `tier_max_mb` | `uint32` | `0` | bbssd with tier_mode=dynamic: host data in MiB the borrowed lines may hold at most; 0 (default) sets no cap, and the free space alone limits the pool |
 | `tier_shrink_pct` | `uint32` | `50` | bbssd with tier_mode=dynamic: logical fill in percent at which the pool starts to give borrowed lines back, 0 to 99; above it the allowance falls in a line to 0 at a full device |
+| `tier_idle_ms` | `uint32` | `0` | bbssd with a tier_mode: quiet time in ms after which the device folds pool lines in the background, one bounded step at a time; 0 (default) folds only when a write needs room |
+| `tier_lazy_pct` | `uint32` | `0` | bbssd with tier_idle_ms: 0 (default) folds every closed pool line at idle; 1 to 99 folds only while the pool lines in use are above this percent of the pool |
 
 ### Host link and controller firmware
 

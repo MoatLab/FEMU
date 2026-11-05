@@ -2353,6 +2353,7 @@ static void *femu_ftl_thread(void *arg)
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeRequest *req = NULL;
     uint64_t lat;
+    bool busy;
     int rc, i;
 
     while (!n->dataplane_started) {
@@ -2396,10 +2397,12 @@ static void *femu_ftl_thread(void *arg)
             continue;
         }
 
+        busy = false;
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
             }
+            busy = true;
 
             /*
              * Publish the flag only around a request actually being handled.
@@ -2455,6 +2458,11 @@ static void *femu_ftl_thread(void *arg)
             }
 
             n->ftl_in_sweep = false;
+        }
+
+        /* no request this pass: the pSLC tier may fold in the idle time */
+        if (unlikely(n->tier_idle) && !busy) {
+            bb_tier_idle(n);
         }
     }
 
@@ -4155,6 +4163,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("tier_pslc_pe_cycles", FemuCtrl,
                        bb_params.tier_pslc_pe_cycles, 0),
     DEFINE_PROP_UINT32("tier_max_mb", FemuCtrl, bb_params.tier_max_mb, 0),
+    DEFINE_PROP_UINT32("tier_idle_ms", FemuCtrl, bb_params.tier_idle_ms, 0),
+    DEFINE_PROP_UINT32("tier_lazy_pct", FemuCtrl, bb_params.tier_lazy_pct, 0),
     DEFINE_PROP_UINT32("tier_shrink_pct", FemuCtrl, bb_params.tier_shrink_pct,
                        FTL_TIER_SHRINK_PCT),
 };

@@ -75,6 +75,21 @@ struct ftl_tier {
     uint64_t cap_fail;      /* host pages the dense room could not hold */
     struct line *fold_line; /* a fold that stopped early: retry this line */
 
+    /*
+     * Idle folds (tier_idle_ms). A step moves at most one page of each
+     * LUN, and the next step starts only when the work of the last fold
+     * ended. Only the FTL thread writes these.
+     */
+    uint64_t idle_ns;       /* quiet time before an idle fold; 0: off */
+    uint32_t lazy_pct;      /* 0: eager; else fold while pool use is above */
+    bool idle_quiet;        /* no idle work until the next host request */
+    uint64_t busy_until;    /* the end of the host and media work so far */
+    uint64_t idle_fence;    /* the end of the work of the last fold */
+    uint64_t idle_steps;
+    uint64_t idle_folds;    /* folds that an idle step ended */
+    uint64_t idle_pages;    /* pages idle steps moved */
+    uint64_t idle_early;    /* steps that started before idle_fence */
+
     uint64_t valid;         /* valid pages in pool lines */
     uint64_t dense_valid;   /* valid pages in dense lines */
     uint64_t host_pslc;     /* host pages programmed in the pool */
@@ -133,6 +148,8 @@ bool ftl_tier_host_page(struct ssd *ssd, struct ppa *ppa, uint64_t *stime,
                         uint64_t *base);
 void ftl_tier_advance(struct ssd *ssd);
 void ftl_tier_place_failed(struct ssd *ssd);
-void ftl_tier_tick(struct ssd *ssd);
+void ftl_tier_tick(struct ssd *ssd, uint64_t end);
+bool ftl_tier_idle_due(struct ssd *ssd, uint64_t now);
+void ftl_tier_idle_step(struct ssd *ssd, uint64_t now);
 
 #endif /* __FEMU_BBSSD_FTL_TIER_H */

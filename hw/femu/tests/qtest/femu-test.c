@@ -42814,7 +42814,9 @@ enum {
     TIER_BAD_MAP, TIER_BAD_RESERVE, TIER_BAD_PLACE, TIER_STALE,
     TIER_DAMAGE, TIER_FOLD_NS, TIER_FOLD_PROG_NS, TIER_FOLD_ERASE_NS,
     TIER_BUSY, TIER_DYN, TIER_ALLOWED, TIER_BAD_LIVE, TIER_BAD_DYN,
-    TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_FIELDS,
+    TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_IDLE_STEPS,
+    TIER_IDLE_FOLDS, TIER_IDLE_PAGES, TIER_IDLE_EARLY, TIER_FOLD_OPEN,
+    TIER_FIELDS,
 };
 
 /*
@@ -42848,6 +42850,8 @@ static uint64_t femu_tier_check_lines(QTestState *qts, uint64_t *v,
     for (i = TIER_BAD_LIVE; i <= TIER_CAP_FAIL; i++) {
         g_assert_cmpuint(v[i], ==, 0);
     }
+    /* an idle step never starts before the work of the last one ended */
+    g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
     g_assert_cmpuint(v[TIER_LINES], ==, lines);
     g_assert_cmpuint(v[TIER_LINE_PGS], ==, 64);
     g_assert_cmpuint(v[TIER_FREE] + v[TIER_CLOSED] + v[TIER_OPEN], ==,
@@ -42908,6 +42912,9 @@ static void femu_test_tier_refused(void *obj, void *data,
           "'tier_full_policy':'through'", "tier_full_policy=through" },
         { 1, "'nand_cell_type':3,'tier_mode':'dynamic','tier_shrink_pct':100",
           "tier_shrink_pct must be 0 to 99" },
+        { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
+          "'tier_idle_ms':10,'tier_lazy_pct':100",
+          "tier_lazy_pct must be 0 to 99" },
         { 1, "'nand_cell_type':3,'tier_mode':'dynamic','pe_suspend':1",
           "tier_mode=dynamic is not supported with pe_suspend" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
@@ -43565,16 +43572,415 @@ static void femu_test_tier_dyn_fold_stop(void *obj, void *data,
 }
 
 /*
- * A dynamic pool under dense GC, once for each gc_policy. The device fills
- * to 75%, then random overwrites leave the dense lines fragmented. GC and
- * the shrink folds run in the same writes, and every rule holds after
- * each 250 commands.
+ * Poll x-tier-check until field @f reads @want, for up to 5 s, so a slow
+ * host only waits longer. Returns the mapped pages.
  */
+static uint64_t femu_tier_wait(QTestState *qts, uint64_t *v, uint64_t lines,
+                               int f, uint64_t want)
+{
+    uint64_t mapped = femu_tier_check_lines(qts, v, lines);
+
+    for (int i = 0; v[f] != want && i < 500; i++) {
+        g_usleep(10000);
+        mapped = femu_tier_check_lines(qts, v, lines);
+    }
+    g_assert_cmpuint(v[f], ==, want);
+    return mapped;
+}
+
+/*
+ * tier_idle_ms=20, eager. Three closed lines fold in the idle time, one
+ * step of 4 pages at a time, so each line takes 16 steps. The next burst
+ * finds the pool lines free and no page goes dense.
+ */
+static void femu_test_tier_idle_eager(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 240);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_IDLE_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 48);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 12);
+    g_assert_cmpuint(v[TIER_VALID], ==, 48);
+    g_assert_cmpuint(v[TIER_FREE], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+
+    /* the open line and the three folded lines take the whole burst */
+    femu_tier_settle(qts, v);
+    femu_tier_write(&c, 400, 192, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 432);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 432);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_idle_ms=1000: the idle time counts from the end of the last host
+ * request, so no step runs right after the writes. The folds come later.
+ */
+static void femu_test_tier_idle_wait(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* the same writes with tier_idle_ms=0: nothing folds in the idle time */
+static void femu_test_tier_idle_off(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_usleep(200000);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 0);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_lazy_pct=50 on 4 static lines: idle folds stop once the closed and
+ * open lines are at most 2. Of three closed lines, two fold.
+ */
+static void femu_test_tier_idle_lazy(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    femu_tier_wait(qts, v, 4, TIER_IDLE_FOLDS, 2);
+    g_usleep(200000);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 1);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A dynamic pool with no floor: idle folds give all 8 borrowed lines back
+ * to the dense free list, and the next burst borrows again.
+ */
+static void femu_test_tier_idle_dyn(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 512, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 0, TIER_DYN, 0), ==, 512);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 8);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 8);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 512);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+
+    femu_tier_write(&c, 512, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 576);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 576);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * pSLC reads of 5 ms: a step ends at least 5 ms after it starts, and the
+ * next one waits for it. x-tier-check counts a step that started early,
+ * and femu_tier_check() wants none. Two lines take 32 steps.
+ */
+static void femu_test_tier_idle_steps(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 128, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 128);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 32);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Host writes and a trim while an idle fold is part way through line 1,
+ * with pSLC reads of 20 ms.
+ * The writes fill the pool, so the end of a request folds in the
+ * foreground: it takes line 1 first. No page moves twice, and every rule
+ * holds.
+ */
+static void femu_test_tier_idle_write(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    femu_tier_write(&c, 0, 16, 16, buf, list);
+    g_assert_cmphex(femu_dealloc_pages(&c, 64, 32, list), ==, NVME_SUCCESS);
+    femu_tier_write(&c, 300, 40, 8, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 248);
+
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 248);
+    /* each pool page was programmed once, so it moves at most once */
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], <=, v[TIER_HOST_PSLC]);
+    /* the full pool made a request fold in the foreground */
+    g_assert_cmpuint(v[TIER_FOLDS], >, v[TIER_IDLE_FOLDS]);
+    g_assert_cmpuint(v[TIER_IDLE_PAGES], <=, v[TIER_FOLD_PAGES]);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Format while an idle fold is part way through a line. The Format waits
+ * for the step, unmaps every page, and the idle folds then erase the lines
+ * with nothing to move.
+ */
+static void femu_test_tier_idle_format(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    /* Format unmaps; the pool lines and the stopped fold stay */
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Sanitize block erase while an idle fold is part way through a line. It
+ * takes the same pause as Format: it waits for the step and unmaps every
+ * page, and the idle folds then erase the lines with nothing to move.
+ */
+static void femu_test_tier_idle_sanitize(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+
+    /* the pool takes the next burst again */
+    femu_tier_write(&c, 0, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 64);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A controller reset while an idle fold is part way through a line. The
+ * reset waits for the step. After the reset, the stopped fold continues on
+ * the same line: every page moves once and no data is lost.
+ */
+static void femu_test_tier_idle_reset(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_FOLD_OPEN], ==, 1);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_FOLD_OPEN], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* every gc_policy name */
 static const char *const femu_tier_gc_policies[] = {
     "greedy", "random", "cost-benefit", "fifo", "d-choice",
 };
 
+/*
+ * A dynamic pool under dense GC, once for each gc_policy. The device fills
+ * to 75%, then random overwrites leave the dense lines fragmented. GC and
+ * the shrink folds run in the same writes, and every rule holds after
+ * each 250 commands.
+ */
 static void femu_test_tier_dyn_gc(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
@@ -45913,6 +46319,72 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=dynamic,tier_max_mb=1"
+    });
+    qos_add_test("tier-idle-eager", "femu", femu_test_tier_idle_eager,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20"
+    });
+    qos_add_test("tier-idle-wait", "femu", femu_test_tier_idle_wait,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=1000"
+    });
+    qos_add_test("tier-idle-off", "femu", femu_test_tier_idle_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1"
+    });
+    qos_add_test("tier-idle-lazy", "femu", femu_test_tier_idle_lazy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_lazy_pct=50"
+    });
+    qos_add_test("tier-idle-dyn", "femu", femu_test_tier_idle_dyn,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=dynamic,tier_idle_ms=20"
+    });
+    qos_add_test("tier-idle-steps", "femu", femu_test_tier_idle_steps,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_pslc_read_ns=5000000"
+    });
+    qos_add_test("tier-idle-write", "femu", femu_test_tier_idle_write,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_pslc_read_ns=20000000"
+    });
+    qos_add_test("tier-idle-format", "femu", femu_test_tier_idle_format,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_pslc_read_ns=20000000"
+    });
+    qos_add_test("tier-idle-sanitize", "femu", femu_test_tier_idle_sanitize,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_pslc_read_ns=20000000"
+    });
+    qos_add_test("tier-idle-reset", "femu", femu_test_tier_idle_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "tier_pslc_read_ns=20000000"
     });
     for (size_t i = 0; i < ARRAY_SIZE(femu_tier_gc_policies); i++) {
         const char *pol = femu_tier_gc_policies[i];

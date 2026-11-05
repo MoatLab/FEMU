@@ -200,7 +200,8 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
             p->tier_pslc_read_ns != FTL_TIER_READ_NS ||
             p->tier_pslc_prog_ns != FTL_TIER_PROG_NS ||
             p->tier_pslc_erase_ns != FTL_TIER_ERASE_NS ||
-            p->tier_max_mb || p->tier_shrink_pct != FTL_TIER_SHRINK_PCT) {
+            p->tier_max_mb || p->tier_shrink_pct != FTL_TIER_SHRINK_PCT ||
+            p->tier_idle_ms || p->tier_lazy_pct) {
             warn_report("femu: the tier_* properties have no effect unless "
                         "tier_mode is static or dynamic");
         }
@@ -210,6 +211,15 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
         (p->tier_max_mb || p->tier_shrink_pct != FTL_TIER_SHRINK_PCT)) {
         warn_report("femu: tier_max_mb and tier_shrink_pct have no effect "
                     "unless tier_mode=dynamic");
+    }
+    if (p->tier_lazy_pct > 99) {
+        error_setg(errp, "femu: tier_lazy_pct must be 0 to 99, got %u",
+                   p->tier_lazy_pct);
+        return false;
+    }
+    if (p->tier_lazy_pct && !p->tier_idle_ms) {
+        warn_report("femu: tier_lazy_pct has no effect unless tier_idle_ms "
+                    "is above 0");
     }
     if (ftl_tier_dynamic(p) && p->tier_shrink_pct > 99) {
         error_setg(errp, "femu: tier_shrink_pct must be 0 to 99, got %u",
@@ -307,6 +317,11 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
                                 (uint64_t)p->secs_per_pg * p->secsz,
                                 t->line_pgs) : (uint64_t)spp->tt_lines;
     t->shrink_pct = p->tier_shrink_pct;
+    t->idle_ns = (uint64_t)p->tier_idle_ms * 1000000;
+    t->lazy_pct = p->tier_lazy_pct;
+    if (t->idle_ns) {
+        n->tier_idle = true;
+    }
     t->user_pgs = DIV_ROUND_UP(ssd->ns->size,
                                (uint64_t)p->secs_per_pg * p->secsz);
     QTAILQ_INIT(&t->free_lines);
@@ -534,10 +549,12 @@ static const struct ssd_gc_move_ops ftl_tier_move_ops = {
  * @now, and the program starts when the read data is ready. *@fence becomes
  * the end of the latest program. The destination is secured before the
  * mapping changes. Returns false, with the page not moved, when the dense
- * lines have no page.
+ * lines have no page. An @idle move does not run the forced dense GC that
+ * a host write would: it returns false at that mark, so an idle step stays
+ * bounded.
  */
 static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
-                               uint64_t *fence)
+                               uint64_t *fence, bool idle)
 {
     struct ftl_tier *t = ssd->tier;
     uint64_t lpn = get_rmap_ent(ssd, src);
@@ -562,6 +579,9 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     }
 
     /* make room as a host write does, then take the dense page */
+    if (idle && should_gc_high(ssd)) {
+        return false;
+    }
     while (should_gc_high(ssd)) {
         if (do_gc(ssd, true) == -1) {
             break;
@@ -635,10 +655,13 @@ static struct line *ftl_tier_oldest_dyn(struct ssd *ssd)
  * the erase ends, or 0 when the line could not be emptied. A line that is
  * not empty stays closed, with the pages moved so far and the end of their
  * latest program kept for the retry. A static line goes back to the tier
- * free list; a borrowed line goes back to the dense free list.
+ * free list; a borrowed line goes back to the dense free list. An @idle
+ * fold moves at most one page of each LUN, then stops; the call that moves
+ * the last valid page also erases. x-tier-fold-stop stops only the other
+ * folds.
  */
-static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
-                              uint64_t now)
+static uint64_t ftl_tier_fold_n(struct ssd *ssd, struct line *victim,
+                                uint64_t now, bool idle)
 {
     struct ftl_tier *t = ssd->tier;
     struct ssdparams *spp = &ssd->sp;
@@ -664,23 +687,33 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
     for (int ch = 0; ch < spp->nchs; ch++) {
         ppa.g.ch = ch;
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            bool took = false;
+
             ppa.g.lun = lun;
-            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+            for (int pl = 0; pl < spp->pls_per_lun && !took; pl++) {
                 ppa.g.pl = pl;
-                for (int pg = 0; pg < t->blk_pgs && victim->vpc; pg++) {
+                for (int pg = 0; pg < t->blk_pgs && victim->vpc && !took;
+                     pg++) {
                     ppa.g.pg = pg;
                     if (get_pg(ssd, &ppa)->status != PG_VALID) {
                         continue;
                     }
-                    if (ftl_tier_test_stop(ssd, moved) ||
-                        !ftl_tier_fold_page(ssd, &ppa, now, &fence)) {
+                    if ((!idle && ftl_tier_test_stop(ssd, moved)) ||
+                        !ftl_tier_fold_page(ssd, &ppa, now, &fence, idle)) {
                         t->fold_fence = fence;
+                        t->idle_fence = MAX(t->idle_fence, fence);
                         return 0;
                     }
                     moved++;
+                    took = idle;
                 }
             }
         }
+    }
+    if (idle && victim->vpc) {
+        t->fold_fence = fence;
+        t->idle_fence = MAX(t->idle_fence, fence);
+        return 0;
     }
     if (victim->vpc) {
         ftl_err("pSLC line %d counts %d valid pages it does not hold\n",
@@ -746,7 +779,16 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
     t->last_fold_erase_ns = first - t->fold_start;
     t->fold_start = 0;
     t->fold_fence = 0;
+    /* an idle step does not queue behind the work of any fold */
+    t->idle_fence = MAX(t->idle_fence, done);
     return done;
+}
+
+/* a foreground fold: the whole line */
+static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
+                              uint64_t now)
+{
+    return ftl_tier_fold_n(ssd, victim, now, false);
 }
 
 /*
@@ -872,7 +914,25 @@ void ftl_tier_place_failed(struct ssd *ssd)
 }
 
 /*
- * After each request. Rule C: a dynamic pool that holds more closed
+ * The idle time counts from when the host request ending at @end and the
+ * media work queued so far (GC and folds at the end of the request) end.
+ */
+static void ftl_tier_note_busy(struct ssd *ssd, uint64_t end)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t busy = end;
+
+    for (int ch = 0; ch < ssd->sp.nchs; ch++) {
+        for (int lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
+            busy = MAX(busy, ssd->ch[ch].lun[lun].next_lun_avail_time);
+        }
+    }
+    t->busy_until = MAX(t->busy_until, busy);
+    t->idle_quiet = false;
+}
+
+/*
+ * After each request, which ends at @end. Rule C: a dynamic pool that holds more closed
  * borrowed lines than the fill allows gives the oldest ones back until it
  * does not. Otherwise, with
  * tier_full_policy=direct, fold one line when the pool has no free line
@@ -880,7 +940,7 @@ void ftl_tier_place_failed(struct ssd *ssd)
  * free line whose erase has not ended yet counts as free. The through
  * policy folds in the write that needs the room.
  */
-void ftl_tier_tick(struct ssd *ssd)
+void ftl_tier_tick(struct ssd *ssd, uint64_t end)
 {
     struct ftl_tier *t = ssd->tier;
     uint64_t now = ssd_now(ssd);
@@ -891,25 +951,138 @@ void ftl_tier_tick(struct ssd *ssd)
     while (t->dyn_cnt) {
         int open = t->wp.curline && t->dyn[t->wp.curline->id];
         struct line *dyn;
+        int before;
 
         if ((uint64_t)(t->dyn_cnt - open) <= ftl_tier_allowed(ssd)) {
             break;
         }
         dyn = ftl_tier_oldest_dyn(ssd);
+        before = t->dyn_cnt;
         if (!dyn || !ftl_tier_fold(ssd, dyn, now)) {
             break;
         }
-        t->rule_c_folds++;
+        /* a fold that ends a stopped static fold gives no line back */
+        t->rule_c_folds += t->dyn_cnt < before;
         shrunk = true;
     }
-    if (shrunk) {
+    if (!shrunk && t->policy == FTL_TIER_DIRECT && !t->wp.curline &&
+        !t->free_cnt && t->closed_cnt && !ftl_tier_may_borrow(ssd)) {
+        ftl_tier_fold(ssd, QTAILQ_FIRST(&t->closed), now);
+    }
+    if (t->idle_ns) {
+        ftl_tier_note_busy(ssd, end);
+    }
+}
+
+/*
+ * Whether an idle step has work: a stopped fold to end, whatever the rule
+ * says now, or a closed line the rule allows. Eager folds every closed
+ * line. Lazy folds while the lines in use, closed and open, are above
+ * lazy_pct of the pool: the static lines and the borrowed lines the fill
+ * allows. The open line never folds at idle.
+ */
+static bool ftl_tier_idle_wants(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t used;
+    uint64_t room;
+
+    if (t->fold_line) {
+        return true;
+    }
+    if (!t->closed_cnt) {
+        return false;
+    }
+    if (!t->lazy_pct) {
+        return true;
+    }
+    used = (uint64_t)t->closed_cnt + (t->wp.curline != NULL);
+    room = (uint64_t)t->nlines;
+    if (t->mode == FTL_TIER_DYNAMIC) {
+        room += ftl_tier_allowed(ssd);
+    }
+    return used * 100 > room * t->lazy_pct;
+}
+
+/**
+ * ftl_tier_idle_due - whether the FTL thread runs an idle step now
+ * @ssd: the FTL
+ * @now: the device time
+ *
+ * Due when the host and the media were quiet for idle_ns and the work of
+ * the last fold ended. It reads only fields that this thread alone writes,
+ * so it runs outside ftl_in_sweep. The step checks the rule inside it.
+ */
+bool ftl_tier_idle_due(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    return t && t->idle_ns && !t->idle_quiet &&
+           now >= t->busy_until + t->idle_ns && now >= t->idle_fence;
+}
+
+/**
+ * bb_tier_idle - the idle pass of the FTL thread
+ * @n: the controller; its tier namespace is the only one (realize checks)
+ *
+ * Runs one idle step when one is due. The step runs inside ftl_in_sweep as
+ * a request does, so a caller that pauses the controller waits for it.
+ */
+void bb_tier_idle(FemuCtrl *n)
+{
+    struct ssd *ssd = n->ssd;
+    uint64_t now;
+
+    if (!ssd || !ssd->tier) {
         return;
     }
-    if (t->policy != FTL_TIER_DIRECT || t->wp.curline || t->free_cnt ||
-        !t->closed_cnt || ftl_tier_may_borrow(ssd)) {
+    now = ssd_now(ssd);
+    if (!ftl_tier_idle_due(ssd, now)) {
         return;
     }
-    ftl_tier_fold(ssd, QTAILQ_FIRST(&t->closed), now);
+    n->ftl_in_sweep = true;
+    smp_mb();   /* publish the flag before re-reading the pause state */
+    if (n->dataplane_started) {
+        ftl_tier_idle_step(ssd, now);
+    }
+    n->ftl_in_sweep = false;
+}
+
+/**
+ * ftl_tier_idle_step - one bounded step of an idle fold
+ * @ssd: the FTL
+ * @now: the device time
+ *
+ * Moves at most one page of each LUN from the line a stopped fold holds,
+ * else from the oldest closed line. The step that moves the last valid page
+ * erases the line. With no work the idle folds wait for the next host
+ * request. A step that moves nothing, as at the forced GC mark, waits
+ * idle_ns before the next try. Runs inside ftl_in_sweep.
+ */
+void ftl_tier_idle_step(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t pages = t->fold_pages;
+    uint64_t seen = t->fold_pages + t->fold_stale;
+    uint64_t folds = t->folds;
+    uint64_t done;
+
+    if (!ftl_tier_idle_wants(ssd)) {
+        t->idle_quiet = true;
+        return;
+    }
+    if (now < t->idle_fence) {
+        t->idle_early++;
+    }
+    t->idle_steps++;
+    done = ftl_tier_fold_n(ssd, t->fold_line ? t->fold_line :
+                           QTAILQ_FIRST(&t->closed), now, true);
+    t->idle_pages += t->fold_pages - pages;
+    t->idle_folds += t->folds - folds;
+    if (!done && t->fold_pages + t->fold_stale == seen) {
+        /* the dense lines had no page: try again after a quiet time */
+        t->idle_fence = MAX(t->idle_fence, now + t->idle_ns);
+    }
 }
 
 /* add 1 to the count of @line in @seen, and 1 to *@bad if it is not @want */
@@ -988,6 +1161,10 @@ static uint64_t ftl_tier_check_queues(struct ssd *ssd)
         }
     }
     bad += npool != t->nlines + t->dyn_cnt;
+    /* a stopped fold names a closed pool line */
+    if (t->fold_line) {
+        bad += t->state[t->fold_line->id] != FTL_TIER_LINE_CLOSED;
+    }
     return bad;
 }
 
@@ -1160,8 +1337,10 @@ static uint64_t ftl_tier_check_reserve(struct ssd *ssd)
  * lines whose erase has not ended. Last, for a dynamic pool: borrowed
  * lines, the borrowed lines the fill allows, the broken rules of the dense
  * valid count and of the borrowed lines, host pages the dense room could
- * not hold, and the folds that rules B and C made. Returns NULL with the
- * tier off.
+ * not hold, and the folds that rules B and C made. Then the idle steps,
+ * the folds and pages they ended and moved, the steps that started before
+ * the work of the last fold ended, and 1 while a stopped fold holds a line.
+ * Returns NULL with the tier off.
  */
 char *ssd_tier_report(struct ssd *ssd)
 {
@@ -1186,7 +1365,8 @@ char *ssd_tier_report(struct ssd *ssd)
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %d %d %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                           " %" PRIu64,
+                           " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRIu64 " %d",
                            t->nlines, t->line_pgs, t->free_cnt, t->closed_cnt,
                            t->wp.curline != NULL, t->valid, t->host_pslc,
                            t->host_dense, t->fold_pages, t->folds,
@@ -1198,5 +1378,7 @@ char *ssd_tier_report(struct ssd *ssd)
                            t->last_fold_erase_ns, busy, t->dyn_cnt,
                            ftl_tier_allowed(ssd), ftl_tier_check_live(ssd),
                            ftl_tier_check_dyn(ssd), t->cap_fail,
-                           t->rule_b_folds, t->rule_c_folds);
+                           t->rule_b_folds, t->rule_c_folds, t->idle_steps,
+                           t->idle_folds, t->idle_pages, t->idle_early,
+                           t->fold_line != NULL);
 }

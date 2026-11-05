@@ -802,6 +802,8 @@ uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
 uint64_t bb_tier_pool_lines(FemuCtrl *n);
 bool bb_tier_check_props(FemuCtrl *n, Error **errp);
+/* one idle fold step of the pSLC tier, when one is due (tier_idle_ms) */
+void bb_tier_idle(FemuCtrl *n);
 /* the pSLC tier state and its broken rules, for x-tier-check */
 char *ssd_tier_report(struct ssd *ssd);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);

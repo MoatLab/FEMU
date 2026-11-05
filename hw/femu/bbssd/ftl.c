@@ -1046,7 +1046,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 
     /* the pSLC tier's turn: a fold when its pool has no page left */
     if (unlikely(ssd->tier)) {
-        ftl_tier_tick(ssd);
+        ftl_tier_tick(ssd, req->stime + lat);
     }
 
     /*
