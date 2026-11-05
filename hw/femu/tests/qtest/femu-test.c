@@ -21260,6 +21260,79 @@ static uint64_t femu_vm_peak_kb(QTestState *qts)
     return g_ascii_strtoull(line + strlen("VmPeak:"), NULL, 10);
 }
 
+/* the QEMU process's current virtual size, in KiB */
+static uint64_t femu_vm_size_kb(QTestState *qts)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%d/status", qtest_pid(qts));
+    g_autofree char *text = NULL;
+    const char *line;
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    line = strstr(text, "VmSize:");
+    g_assert_nonnull(line);
+    return g_ascii_strtoull(line + strlen("VmSize:"), NULL, 10);
+}
+
+#define FEMU_LIFECYCLE_CYCLES  4
+#define FEMU_LIFECYCLE_MB      256
+#define FEMU_LIFECYCLE_SLOT    9
+
+/*
+ * Hot-add a 256 MiB device of one mode, use it, unplug it, and repeat. The
+ * backend alone is 256 MiB of address space, so a device whose teardown
+ * leaves it mapped grows the process by that much each cycle. The first
+ * cycle sets the base: QEMU and the allocator keep some memory once used.
+ * @data is the extra device properties, starting with femu_mode; with
+ * "io" in front, the cycle also writes and reads back one block.
+ */
+static void femu_test_lifecycle(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *opts = data;
+    bool io = g_str_has_prefix(opts, "io,");
+    uint64_t base = 0;
+    uint64_t now = 0;
+    int i;
+
+    if (io) {
+        opts += strlen("io,");
+    }
+    for (i = 0; i < FEMU_LIFECYCLE_CYCLES; i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{\"driver\":\"femu\",\"id\":\"life\",\"addr\":\"%d\","
+            "\"devsz_mb\":%d,%s}", FEMU_LIFECYCLE_SLOT, FEMU_LIFECYCLE_MB,
+            opts);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts,
+                               "{'execute':'device_add','arguments':%p}", args);
+        FemuCtrlState c = { 0 };
+        QPCIDevice *pdev;
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        pdev = qpci_device_find(femu->dev.bus,
+                                QPCI_DEVFN(FEMU_LIFECYCLE_SLOT, 0));
+        g_assert_nonnull(pdev);
+        femu_enable(&c, pdev, alloc);
+        if (io) {
+            femu_create_io_queues(&c);
+            femu_round_trip(&c, (uint8_t)(i + 1));
+            femu_queue_free(&c, &c.io);
+        }
+        femu_disable(&c);
+        qpci_unplug_acpi_device_test(qts, "life", FEMU_LIFECYCLE_SLOT);
+        g_free(pdev);
+
+        now = femu_vm_size_kb(qts);
+        if (i == 0) {
+            base = now;
+        }
+        g_test_message("cycle %d: VmSize %" PRIu64 " KiB", i, now);
+    }
+    g_assert_cmpuint(now, <, base + 64 * 1024);
+}
+
 /*
  * With MDTS 0 there is no transfer limit, so the host can ask for up to 4 GiB
  * of a report whose data is a few hundred bytes. The device allocated a
@@ -47257,6 +47330,22 @@ static void femu_register_nodes(void)
             "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,vwc=0,"
             "buffer_size=16"
     });
+    /* plug, use and unplug each mode; the process must not grow */
+    qos_add_test("lifecycle-nossd", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"io,\"femu_mode\":2" });
+    qos_add_test("lifecycle-bbssd", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"io,\"femu_mode\":1" });
+    qos_add_test("lifecycle-zns", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) { .arg = (void *)"\"femu_mode\":3" });
+    qos_add_test("lifecycle-kv", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) { .arg = (void *)"\"femu_mode\":5" });
+    qos_add_test("lifecycle-csd", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"\"femu_mode\":4,\"fdm_size\":64" });
+    qos_add_test("lifecycle-ocssd", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) { .arg = (void *)"\"femu_mode\":0" });
     qos_add_test("gc-seed-d-choice", "femu", femu_test_gc_seed,
                  &(QOSGraphTestOptions) { .arg = (void *)"d-choice" });
     qos_add_test("gc-seed-random", "femu", femu_test_gc_seed,
