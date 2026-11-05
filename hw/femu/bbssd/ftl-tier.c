@@ -598,6 +598,22 @@ static size_t ftl_tier_blk_index(struct ssdparams *spp, int ch, int lun,
            spp->blks_per_pl + blk;
 }
 
+/*
+ * x-tier-fold-stop: qtest stops a fold after @moved pages, once, as if the
+ * dense lines had no page left. Rules A and B keep a workload from that,
+ * so only this reaches the retry of a stopped fold.
+ */
+static bool ftl_tier_test_stop(struct ssd *ssd, uint32_t moved)
+{
+    uint32_t *stop = ssd->n ? &ssd->n->test_tier_fold_stop : NULL;
+
+    if (!stop || !qatomic_read(stop) || qatomic_read(stop) != moved) {
+        return false;
+    }
+    qatomic_set(stop, 0);
+    return true;
+}
+
 /* the oldest closed borrowed line, or NULL */
 static struct line *ftl_tier_oldest_dyn(struct ssd *ssd)
 {
@@ -631,6 +647,7 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
     uint64_t start;
     uint64_t done;
     struct ppa ppa = { .ppa = 0 };
+    uint32_t moved = 0;
 
     if (t->fold_line) {
         victim = t->fold_line;
@@ -655,10 +672,12 @@ static uint64_t ftl_tier_fold(struct ssd *ssd, struct line *victim,
                     if (get_pg(ssd, &ppa)->status != PG_VALID) {
                         continue;
                     }
-                    if (!ftl_tier_fold_page(ssd, &ppa, now, &fence)) {
+                    if (ftl_tier_test_stop(ssd, moved) ||
+                        !ftl_tier_fold_page(ssd, &ppa, now, &fence)) {
                         t->fold_fence = fence;
                         return 0;
                     }
+                    moved++;
                 }
             }
         }

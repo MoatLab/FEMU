@@ -43425,6 +43425,197 @@ static void femu_test_tier_dyn_full(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* stop the next fold of device gc-test after @pages moved pages */
+static void femu_tier_fold_stop(QTestState *qts, uint32_t pages)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-tier-fold-stop','value':%u}}",
+                           pages);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* the stop is spent: a fold reached it */
+static void femu_tier_fold_stopped(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-tier-fold-stop'}}");
+
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 0);
+    qobject_unref(rsp);
+}
+
+/*
+ * A fold that stops part way, as if the dense lines had no page left. The
+ * line stays closed with the pages moved so far, and every rule holds. The
+ * next fold takes the same line and moves only the rest, so no page moves
+ * twice and the line erases once.
+ */
+static void femu_test_tier_fold_stop(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+
+    /* the pool fills, 16 pages go dense, and the fold of line 1 stops */
+    femu_tier_fold_stop(qts, 20);
+    femu_tier_write(&c, 240, 32, 32, buf, list);
+    femu_tier_fold_stopped(qts);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 272);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 20);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 236);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FREE], ==, 0);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+
+    /* the pool has no page, so 16 more go dense; then the fold ends */
+    femu_tier_write(&c, 400, 16, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 288);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FREE], ==, 1);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 32);
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_GC), ==, 64);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The same stop in a dynamic pool capped at 4 borrowed lines. The stopped
+ * line stays borrowed, so the pool can borrow no line and a write goes
+ * dense. The fold then ends and gives the line back, and the pool borrows
+ * again.
+ */
+static void femu_test_tier_dyn_fold_stop(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 192, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 192);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 4);
+
+    femu_tier_fold_stop(qts, 10);
+    femu_tier_write(&c, 192, 64, 16, buf, list);
+    femu_tier_fold_stopped(qts);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 256);
+    g_assert_cmpuint(v[TIER_DYN], ==, 4);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 10);
+    g_assert_cmpuint(v[TIER_VALID], ==, 246);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    femu_tier_write(&c, 256, 16, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+
+    femu_tier_write(&c, 272, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 336);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 320);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 128);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A dynamic pool under dense GC, once for each gc_policy. The device fills
+ * to 75%, then random overwrites leave the dense lines fragmented. GC and
+ * the shrink folds run in the same writes, and every rule holds after
+ * each 250 commands.
+ */
+/* every gc_policy name */
+static const char *const femu_tier_gc_policies[] = {
+    "greedy", "random", "cost-benefit", "fifo", "d-choice",
+};
+
+static void femu_test_tier_dyn_gc(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[TIER_FIELDS];
+    uint32_t seed = 0x74696572;
+
+    g_test_message("gc_policy %s", (const char *)data);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 3072, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 3072);
+    for (int i = 1; i <= 1000; i++) {
+        seed = seed * 1103515245 + 12345;
+        femu_tier_write(&c, ((seed >> 8) % 768) * 4, 4, 4, buf, list);
+        if (i % 250 == 0) {
+            g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 3072);
+            g_assert_cmpuint(v[TIER_DYN], <=,
+                             v[TIER_ALLOWED] + v[TIER_OPEN]);
+        }
+    }
+    g_assert_cmpuint(v[TIER_FOLDS], >, 0);
+    /* dense GC moved pages too, not only the folds */
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_GC), >,
+                     v[TIER_FOLD_PAGES]);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -45711,6 +45902,31 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=dynamic"
     });
+    qos_add_test("tier-fold-stop", "femu", femu_test_tier_fold_stop,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1"
+    });
+    qos_add_test("tier-dyn-fold-stop", "femu", femu_test_tier_dyn_fold_stop,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=dynamic,tier_max_mb=1"
+    });
+    for (size_t i = 0; i < ARRAY_SIZE(femu_tier_gc_policies); i++) {
+        const char *pol = femu_tier_gc_policies[i];
+        g_autofree char *name = g_strdup_printf("tier-dyn-gc-%s", pol);
+
+        /* qos keeps the options for the whole run */
+        qos_add_test(name, "femu", femu_test_tier_dyn_gc,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts = g_strdup_printf(
+                "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+                ",tier_mode=dynamic,gc_policy=%s", pol),
+            .arg = (void *)pol,
+        });
+    }
     qos_add_test("thermal-idle", "femu", femu_test_thermal,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"idle",

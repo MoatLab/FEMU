@@ -2723,6 +2723,8 @@ typedef struct FemuCtrl {
     uint32_t        test_ftl_hold;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
+    /* qtest only: the next pSLC fold stops after this many pages, once */
+    uint32_t        test_tier_fold_stop;
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */
