@@ -1,4 +1,5 @@
 #include "../nvme.h"
+#include "qemu/error-report.h"
 #include "./ftl.h"
 
 static void bb_init_ctrl_str(FemuCtrl *n, NvmeNamespace *ns)

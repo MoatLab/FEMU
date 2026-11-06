@@ -36959,8 +36959,8 @@ static void femu_gci_hold(QTestState *qts, bool on)
 {
     qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
                              "'path':'/machine/peripheral/gc-test',"
-                             "'property':'x-gc-idle-hold','value':%s}}",
-                             on ? "true" : "false");
+                             "'property':'x-gc-idle-hold','value':%i}}",
+                             on);
 }
 
 /* x-gc-idle-kick: one step now, and its outcome or "not-due" */
@@ -37244,7 +37244,7 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
         { "'blks_per_pl':80,'power_loss':true,'buffer_size':16",
           "power_loss" },
         { "'blks_per_pl':80,'ns_mgmt':true", "ns_mgmt" },
-        { "'blks_per_pl':80,'femu_mode':4", "femu_mode 4" },
+        { "'blks_per_pl':80,'femu_mode':4,'fdm_size':16", "femu_mode 4" },
         { "'blks_per_pl':80,'mapping':'dftl'", "a mapping other than page" },
         { "'blks_per_pl':80,'namespaces':2", "more than one namespace" },
         { "'blks_per_pl':80,'subsys':'fdpsub'", "FDP" },
