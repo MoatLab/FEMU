@@ -61,10 +61,14 @@ def corpus(dirs):
                 if not name.endswith(SUFFIXES) and "." in name:
                     continue
                 try:
-                    with open(os.path.join(d, name), errors="replace") as f:
-                        parts.append(f.read())
+                    with open(os.path.join(d, name), "rb") as f:
+                        raw = f.read()
                 except OSError:
-                    pass
+                    continue
+                # a built test binary names functions, not properties
+                if b"\0" in raw:
+                    continue
+                parts.append(raw.decode("utf-8", "replace"))
     return "\n".join(parts)
 
 
@@ -121,6 +125,12 @@ def self_test():
         ("prefix does not count", "theta r\n", 1),
     ]
     bad = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        open(os.path.join(tmp, "bin"), "wb").write(b"\x7fELF\0theta\0")
+        open(os.path.join(tmp, "t.c"), "w").write("gamma_x=1\n")
+        if named("theta", corpus([tmp])) or not named("gamma_x", corpus([tmp])):
+            print("self-test: a binary counted, or a source did not")
+            bad += 1
     for name, ex, want in cases:
         got = len(check(props, text, ex))
         if got != want:
@@ -133,7 +143,7 @@ def self_test():
                       "| `FEMU_X` | x |\n") != ["a_b"]:
         print("self-test: the reference parser read the environment section")
         bad += 1
-    total = len(cases) + 2
+    total = len(cases) + 3
     print(f"check-property-tests self-test: {total - bad} of {total} passed")
     return 1 if bad else 0
 
