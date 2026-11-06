@@ -10,6 +10,14 @@ The table goes between the markers
 in README.md and in every Markdown file under hw/femu/docs/ that has them.
 Links in the table are written relative to the file that holds it.
 
+A checkbox list of the same entries goes between the markers
+
+  <!-- modes-list:start -->
+  <!-- modes-list:end -->
+
+in the GitHub bug report and pull request forms, so a report names the
+mode it used.
+
 Usage:
   gen-mode-table.py            # rewrite the tables
   gen-mode-table.py --check    # verify only
@@ -17,7 +25,8 @@ Usage:
 --check exits 1 when a table differs from a fresh rendering, when README.md
 has no markers, or when modes.py disagrees with the tree: an enum symbol with
 the wrong value, a femu_mode value no entry covers, a launcher that is not in
-hw/femu/scripts, or a guide link whose file or heading does not exist.
+hw/femu/scripts, or a guide link whose file or heading does not exist. It
+also exits 1 when one of those forms has no list markers or a stale list.
 """
 
 import argparse
@@ -32,6 +41,10 @@ NVME_H = os.path.join(ROOT, "hw", "femu", "nvme.h")
 SCRIPTS = os.path.join(ROOT, "hw", "femu", "scripts")
 START = "<!-- modes-table:start -->"
 END = "<!-- modes-table:end -->"
+LIST_START = "<!-- modes-list:start -->"
+LIST_END = "<!-- modes-list:end -->"
+LIST_FILES = (".github/ISSUE_TEMPLATE/bug_report.md",
+              ".github/pull_request_template.md")
 NOTE = ("<!-- Generated from hw/femu/docs/modes.py by "
         "hw/femu/scripts/gen-mode-table.py; edit modes.py, not this table. -->")
 FIELDS = ("key", "name", "use", "device", "symbol", "femu_mode", "select",
@@ -93,6 +106,13 @@ def render(modes, md_file):
     return "\n".join(rows)
 
 
+def render_list(modes):
+    rows = [NOTE]
+    for m in modes:
+        rows.append(f"- [ ] {m['name']}: {m['select']}")
+    return "\n".join(rows)
+
+
 def validate(modes):
     errors = []
     enum = mode_enum()
@@ -146,17 +166,17 @@ def target_files():
     return out
 
 
-def splice(text, table, path):
+def splice(text, table, path, start=START, end=END):
     """Replace what is between the markers, each alone on its line; return
     None when there are none. A marker quoted in prose is not a marker."""
     lines = text.split("\n")
-    starts = [i for i, l in enumerate(lines) if l.strip() == START]
-    ends = [i for i, l in enumerate(lines) if l.strip() == END]
+    starts = [i for i, l in enumerate(lines) if l.strip() == start]
+    ends = [i for i, l in enumerate(lines) if l.strip() == end]
     if not starts and not ends:
         return None
     if len(starts) != 1 or len(ends) != 1 or starts[0] > ends[0]:
-        raise ValueError(f"{path}: needs exactly one {START} line before one "
-                         f"{END} line")
+        raise ValueError(f"{path}: needs exactly one {start} line before one "
+                         f"{end} line")
     return "\n".join(lines[:starts[0] + 1] + [table] + lines[ends[0]:])
 
 
@@ -193,9 +213,33 @@ def main():
     if readme not in found:
         errors.append(f"README.md: no {START} ... {END} markers")
 
+    for rel_path in LIST_FILES:
+        path = os.path.join(ROOT, rel_path)
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            new = splice(text, render_list(modes), rel_path,
+                         LIST_START, LIST_END)
+        except (OSError, ValueError) as e:
+            errors.append(f"{rel_path}: {e}")
+            continue
+        if new is None:
+            errors.append(f"{rel_path}: no {LIST_START} ... {LIST_END} markers")
+            continue
+        found.append(path)
+        if new == text:
+            continue
+        if args.check:
+            errors.append(f"{rel_path}: mode list is stale; "
+                          "run hw/femu/scripts/gen-mode-table.py")
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new)
+            print(f"wrote {rel_path}")
+
     for e in errors:
         print(e)
-    print(f"gen-mode-table: {len(modes)} entries, {len(found)} tables, "
+    print(f"gen-mode-table: {len(modes)} entries, {len(found)} tables and lists, "
           f"{len(errors)} errors")
     return 1 if errors else 0
 

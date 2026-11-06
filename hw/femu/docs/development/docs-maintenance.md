@@ -40,6 +40,12 @@ The script rewrites the text between `<!-- modes-table:start -->` and
 `hw/femu/docs/` that has the two markers. To put the table on a new page, add
 the markers and run the script. README.md must keep its markers.
 
+The same script writes a checkbox list of the entries between
+`<!-- modes-list:start -->` and `<!-- modes-list:end -->` in
+`.github/ISSUE_TEMPLATE/bug_report.md` and `.github/pull_request_template.md`.
+Both files must keep these markers, so a new mode appears in the bug
+report and pull request forms with no manual edit.
+
 `--check` also compares `modes.py` with the code. Each `symbol` must have the
 stated `femu_mode` value in `hw/femu/nvme.h`, every mode in that enum must
 have an entry, each launcher must exist in `hw/femu/scripts/`, and each guide
