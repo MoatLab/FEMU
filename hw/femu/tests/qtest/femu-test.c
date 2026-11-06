@@ -10505,14 +10505,63 @@ static void femu_stages_check_sum(QDict *ret)
 }
 
 /*
+ * The bands must agree with the histograms: band b holds exactly the
+ * commands of total bucket b, their total sums add up to the total sum,
+ * and their past-due sums add up to the past-due sum. The bands come in bucket
+ * order, and only non-empty ones.
+ */
+static void femu_stages_check_bands(QDict *ret)
+{
+    QDict *total = femu_stage(ret, "total");
+    uint64_t count = 0, tsum = 0, lsum = 0;
+    int last = -1;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "bands"), e) {
+        QDict *bd = qobject_to(QDict, qlist_entry_obj(e));
+        int b = qdict_get_int(bd, "bucket");
+
+        g_assert_cmpint(b, >, last);
+        g_assert_cmpint(b, <, 40);
+        last = b;
+        g_assert_cmpuint(qdict_get_int(bd, "count"), >, 0);
+        g_assert_cmpuint(qdict_get_int(bd, "count"), ==,
+                         femu_stage_bucket(total, b));
+        g_assert_cmpuint(qdict_get_int(bd, "total-sum-ns"), >=,
+                         b ? qdict_get_int(bd, "count") << b : 0);
+        count += qdict_get_int(bd, "count");
+        tsum += qdict_get_int(bd, "total-sum-ns");
+        lsum += qdict_get_int(bd, "past-due-sum-ns");
+    }
+    g_assert_cmpuint(count, ==, qdict_get_int(total, "count"));
+    g_assert_cmpuint(tsum, ==, qdict_get_int(total, "sum-ns"));
+    /*
+     * A band filed by past-due time instead of total time must fail the
+     * bucket check above, so the two histograms have to differ somewhere.
+     */
+    if (count) {
+        QDict *pd = femu_stage(ret, "past-due");
+        bool differ = false;
+
+        for (int b = 0; b < 40; b++) {
+            differ |= femu_stage_bucket(total, b) != femu_stage_bucket(pd, b);
+        }
+        g_assert_true(differ);
+    }
+    g_assert_cmpuint(lsum, ==,
+                     qdict_get_int(femu_stage(ret, "past-due"), "sum-ns"));
+}
+
+/*
  * io_stages on a bbssd device. @data "3ms": eight single-page reads with a
  * 3 ms page read. The model gives each read exactly 3 ms from fetch to due,
  * so submit + ftl + hold is exactly 8 x 3 ms when no read comes back after
  * its due time, and total is at least that, whatever the host scheduler
  * does. @data "zero": with no read time every read comes back after its due
  * time, and the stages must still add up to total. Every stage keeps its
- * longest time in its highest non-empty bucket. reset=true clears the
- * counts. @data NULL: io_stages is off, and the command must say so.
+ * longest time in its highest non-empty bucket, and the bands agree
+ * with the histograms. reset=true clears the counts and the bands.
+ * @data NULL: io_stages is off, and the command must say so.
  */
 static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -10565,6 +10614,9 @@ static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
         femu_stage_check_buckets(st);
     }
     femu_stages_check_sum(ret);
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "past-due"), "sum-ns"), >,
+                     0);
+    femu_stages_check_bands(ret);
     if (zero) {
         g_test_message("returned after due: %" PRId64,
                        qdict_get_int(ret, "returned-after-due"));
@@ -10601,6 +10653,7 @@ static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmpuint(qdict_get_int(st, "max-ns"), ==, 0);
     }
     g_assert_cmpuint(qdict_get_int(ret, "returned-after-due"), ==, 0);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(ret, "bands")), ==, 0);
     qobject_unref(rsp);
 
     guest_free(alloc, list);

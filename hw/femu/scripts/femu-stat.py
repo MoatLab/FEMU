@@ -282,6 +282,41 @@ def percentile(buckets: List[int], p: float) -> Optional[Tuple[int, Optional[int
     return None
 
 
+BAND_KEYS = ("count", "total-sum-ns", "past-due-sum-ns")
+BAND_PCTS = (("p50", 0.5), ("p90", 0.9), ("p99", 0.99), ("p99.9", 0.999))
+
+
+def band_report(cur: List[Dict[str, Any]],
+                prev: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The band of each percentile of total time over the window, with
+    the past-due share of the band: its past-due sum over its total sum.
+    Both come from interval differences of raw sums, never from means."""
+    diff: Dict[int, Dict[str, int]] = {}
+    for b in cur:
+        p = prev.get(b["bucket"], {})
+        d = {k: b[k] - p.get(k, 0) for k in BAND_KEYS}
+        if FAULT == "band-mean":
+            mean = b["past-due-sum-ns"] // max(b["count"], 1)
+            d["past-due-sum-ns"] = mean * d["count"]
+        if d["count"] > 0:
+            diff[b["bucket"]] = d
+    counts = [diff.get(i, {}).get("count", 0) for i in range(NBUCKETS)]
+    out: List[Dict[str, Any]] = []
+    for name, q in BAND_PCTS:
+        r = percentile(counts, q)
+        if r is None:
+            continue
+        i = 0 if r[0] == 0 else r[0].bit_length() - 1
+        d = diff[i]
+        out.append({"pct": name, "bucket": i, "count": d["count"],
+                    "total-mean-ns": d["total-sum-ns"] / d["count"],
+                    "past-due-mean-ns": d["past-due-sum-ns"] / d["count"],
+                    "past-due-share": (
+                        d["past-due-sum-ns"] / d["total-sum-ns"]
+                        if d["total-sum-ns"] else 0.0)})
+    return out
+
+
 def stage_report(cur: Dict[str, Any],
                  prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Per stage figures over the interval, or since the last reset when
@@ -295,8 +330,19 @@ def stage_report(cur: Dict[str, Any],
                 s["sum-ns"] < p["sum-ns"] or s["max-ns"] < p["max-ns"] or any(
                 a < b for a, b in zip(s["buckets"], p["buckets"])):
             use_prev = False
+    pbands = {b["bucket"]: b for b in (prev or {}).get("bands", [])}
+    for b in cur.get("bands", []):
+        p = pbands.get(b["bucket"], {})
+        if any(b[k] < p.get(k, 0) for k in BAND_KEYS):
+            use_prev = False
+    if any(k not in {b["bucket"] for b in cur.get("bands", [])}
+           for k in pbands):
+        use_prev = False
     if not use_prev:
         out["window"] = "since-reset"
+    if "bands" in cur:
+        out["bands"] = band_report(cur["bands"],
+                                   pbands if use_prev else {})
     for s in cur.get("stages", []):
         p = prev_by.get(s["stage"]) if use_prev else None
         buckets = list(s["buckets"])
@@ -705,6 +751,16 @@ def stages_text(st: Dict[str, Any]) -> List[str]:
                      f"{fmt_ns(s['max-ns-since-reset']):>10}")
     lines.append("    * max since the counts were reset; p50 and p99 are "
                  "bucket bounds")
+    if st.get("bands"):
+        lines.append(f"    {'band':<7}{'bucket':>7}{'count':>9}"
+                     f"{'total':>10}{'due+':>10}{'due+ %':>8}")
+        for b in st["bands"]:
+            lines.append(f"    {b['pct']:<7}{b['bucket']:>7}{b['count']:>9}"
+                         f"{fmt_ns(b['total-mean-ns']):>10}"
+                         f"{fmt_ns(b['past-due-mean-ns']):>10}"
+                         f"{100 * b['past-due-share']:>7.1f}%")
+        lines.append("    due+: mean past-due time of the band; not a "
+                     "cause")
     return lines
 
 
@@ -1545,6 +1601,30 @@ def selftest_synthetic(t: SelfTest) -> None:
     t.check("a stage sum that goes down is a reset, never a negative mean",
             rep["devices"][0]["stages"]["window"] == "since-reset"
             and rep["devices"][0]["stages"]["stages"][0]["mean-ns"] == 620)
+    t.check("a reply without bands shows no band table",
+            "bands" not in rep["devices"][0]["stages"])
+
+    # bands: 10 commands in bucket 9, then 10 more with all the past-due time
+    def band(b: int, n: int, tot: int, due: int) -> Dict[str, int]:
+        return {"bucket": b, "count": n, "total-sum-ns": tot,
+                "past-due-sum-ns": due}
+    b0 = dict(st, bands=[band(9, 10, 6000, 0)])
+    b1 = {"stages": [{"stage": "total", "count": 20, "sum-ns": 12000,
+                      "max-ns": 2000, "buckets": buckets(b9=20)}],
+          "bands": [band(9, 20, 12000, 3000)]}
+
+    def share_ok() -> bool:
+        bd = build_report(dev(ns0, b1, 1.0),
+                          dev(ns0, b0))["devices"][0]["stages"]["bands"]
+        return (len(bd) == 4 and all(b["bucket"] == 9 for b in bd)
+                and bd[0]["count"] == 10 and bd[0]["past-due-mean-ns"] == 300
+                and bd[0]["past-due-share"] == 0.5)
+    t.check("a band's past-due share comes from interval sums", share_ok())
+    t.control("band", "band-mean", share_ok)
+    b2 = dict(b1, bands=[band(9, 2, 1200, 0)])
+    bd = build_report(dev(ns0, b2, 1.0), dev(ns0, b1))["devices"][0]["stages"]
+    t.check("a band count that goes down is a reset",
+            bd["window"] == "since-reset" and bd["bands"][0]["count"] == 2)
 
 
 def self_test(qemu: str) -> int:

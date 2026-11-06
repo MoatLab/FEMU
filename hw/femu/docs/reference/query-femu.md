@@ -532,6 +532,22 @@ Each stage has `count`, `sum-ns`, `max-ns` and 40 `buckets`. Bucket i holds
 the commands that took 2^i to 2^(i+1) - 1 ns. Bucket 0 also holds 0 ns,
 and bucket 39 also holds every longer time.
 
+`bands` joins two of the stages. It has one entry for each non-empty
+`total` bucket: `bucket`, `count`, `total-sum-ns` and `past-due-sum-ns`. The
+past-due sum covers the commands in that bucket. So it shows whether the
+slow commands are slow in the model, or complete after their due time.
+
+```
+ command: total 3.1 ms --> bucket 21    past-due 0.9 ms
+ bands[21]: count += 1, total-sum-ns += 3.1 ms, past-due-sum-ns += 0.9 ms
+ past-due share of a band = past-due-sum-ns / total-sum-ns
+```
+
+Past-due time is relative to the model. It also grows when the guest does
+not consume its completion queue, so it does not name a cause. A query
+copies the stages and bands of each poller as one, so they agree for
+that poller, also during I/O. Pollers are copied one after the other.
+
 ```json
 {"execute": "query-femu-stages", "arguments": {"reset": true}}
 ```

@@ -8,11 +8,16 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 static void nvme_cq_notify(FemuCtrl *n, NvmeCQueue *cq);
 
+static int nvme_stage_bucket(uint64_t v)
+{
+    return v ? MIN(63 - clz64(v), FEMU_STAGE_BUCKETS - 1) : 0;
+}
+
 /* one writer per set; atomic stores so a QMP read sees each word whole */
 static void nvme_stage_add(FemuStageHist *h, int64_t ns)
 {
     uint64_t v = ns > 0 ? ns : 0;
-    int b = v ? MIN(63 - clz64(v), FEMU_STAGE_BUCKETS - 1) : 0;
+    int b = nvme_stage_bucket(v);
 
     qatomic_set(&h->count, h->count + 1);
     qatomic_set(&h->sum_ns, h->sum_ns + v);
@@ -99,6 +104,19 @@ static int64_t nvme_link_book(FemuCtrl *n, bool to_device, uint64_t bytes,
     return (int64_t)(start + trans_ns + n->pcie_prop_delay_ns);
 }
 
+/* add a command's past-due time to the band of its total time */
+static void nvme_stage_band_add(FemuStageSet *set, int64_t total,
+                                int64_t past_due)
+{
+    uint64_t t = total > 0 ? total : 0;
+    uint64_t l = past_due > 0 ? past_due : 0;
+    FemuStageBand *bd = &set->bands[nvme_stage_bucket(t)];
+
+    qatomic_set(&bd->count, bd->count + 1);
+    qatomic_set(&bd->total_ns, bd->total_ns + t);
+    qatomic_set(&bd->past_due_ns, bd->past_due_ns + l);
+}
+
 /*
  * io_stages: add one posted command to this poller's histograms. The stages
  * meet at "ready", the later of the due time and the return from the FTL,
@@ -117,6 +135,8 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     if (req->expire_time < req->t_submit) {
         return;
     }
+    /* a query copies the whole set of this poller between two commands */
+    seqlock_write_begin(&set->seq);
     if (req->t_handoff && req->t_return) {
         ready = MAX(req->expire_time, req->t_return);
         nvme_stage_add(&set->st[FEMU_STAGE_SUBMIT],
@@ -132,6 +152,8 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     nvme_stage_add(&set->st[FEMU_STAGE_POST_DELAY], post - ready);
     nvme_stage_add(&set->st[FEMU_STAGE_PAST_DUE], post - req->expire_time);
     nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->t_submit);
+    nvme_stage_band_add(set, post - req->t_submit, post - req->expire_time);
+    seqlock_write_end(&set->seq);
 }
 
 /*

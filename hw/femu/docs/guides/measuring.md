@@ -149,6 +149,12 @@ femu-stat  2026-10-14T05:40:20  interval 1.00 s  /tmp/femu-qmp.sock
     total            200   200.2us   <=262.1us   <=262.1us    94.9ms
     past-due         200     235ns     <=255ns     <=1.0us    94.7ms
     * max since the counts were reset; p50 and p99 are bucket bounds
+    band    bucket    count     total      due+  due+ %
+    p50         17      199   199.8us     186ns    0.1%
+    p90         17      199   199.8us     186ns    0.1%
+    p99         17      199   199.8us     186ns    0.1%
+    p99.9       18        1   270.0us    10.0us    3.7%
+    due+: mean past-due time of the band; not a cause
 ```
 
 What each namespace shows depends on what `query-femu` returns for it:
@@ -173,6 +179,11 @@ Read the figures as follows:
   largest time counted, so a bound can be narrower than its bucket. The
   last bucket has no upper bound of its own; without the cap it shows as
   `>=`.
+- The band table takes the `total` bucket of p50, p90, p99 and p99.9 over
+  the interval. For the commands in that bucket it shows the mean total
+  time, the mean past-due time (`due+`) and its share. A high share means
+  the completions landed after the model's due time. An older QEMU
+  without `bands` shows no band table.
 - `max*` is the largest time since the stage counts were last reset. The
   histograms do not give the largest time of one interval.
 - The first sample has no interval. Its figures are totals since the device

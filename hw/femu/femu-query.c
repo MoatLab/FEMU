@@ -927,12 +927,48 @@ out:
     return info;
 }
 
+/*
+ * Copy the set of one poller between two of its commands. The poller adds
+ * a command inside its sequence, so the copy never holds a command in one
+ * stage or band and not yet in another. Each word is read atomically, also
+ * in a copy that is then dropped.
+ */
+static void femu_query_stage_copy(FemuStageSet *set, FemuStageSet *out)
+{
+    unsigned seq;
+
+    do {
+        seq = seqlock_read_begin(&set->seq);
+        for (int st = 0; st < FEMU_STAGE_NR; st++) {
+            const FemuStageHist *h = &set->st[st];
+
+            out->st[st].count = qatomic_read(&h->count);
+            out->st[st].sum_ns = qatomic_read(&h->sum_ns);
+            out->st[st].max_ns = qatomic_read(&h->max_ns);
+            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+                out->st[st].buckets[b] = qatomic_read(&h->buckets[b]);
+            }
+        }
+        out->returned_after_due = qatomic_read(&set->returned_after_due);
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            const FemuStageBand *bd = &set->bands[b];
+
+            out->bands[b].count = qatomic_read(&bd->count);
+            out->bands[b].total_ns = qatomic_read(&bd->total_ns);
+            out->bands[b].past_due_ns = qatomic_read(&bd->past_due_ns);
+        }
+    } while (seqlock_read_retry(&set->seq, seq));
+}
+
 FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
                                     bool reset, Error **errp)
 {
     FemuCtrl *n = femu_query_find(path, errp);
+    g_autofree FemuStageSet *sum = NULL;
+    g_autofree FemuStageSet *copy = NULL;
     FemuIoStages *info;
     FemuIoStageInfoList **tail;
+    FemuIoStageBandList **btail;
     bool clear = has_reset && reset && n && n->stage_sets;
     bool resume = false;
 
@@ -949,34 +985,60 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
     if (clear) {
         resume = nvme_pause_pollers(n);
     }
+    /* sum the per-poller copies; each copy is whole in itself */
+    sum = g_new0(FemuStageSet, 1);
+    copy = g_new0(FemuStageSet, 1);
+    for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
+        femu_query_stage_copy(&n->stage_sets[p], copy);
+        for (int st = 0; st < FEMU_STAGE_NR; st++) {
+            FemuStageHist *d = &sum->st[st];
+            const FemuStageHist *h = &copy->st[st];
+
+            d->count += h->count;
+            d->sum_ns += h->sum_ns;
+            d->max_ns = MAX(d->max_ns, h->max_ns);
+            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+                d->buckets[b] += h->buckets[b];
+            }
+        }
+        sum->returned_after_due += copy->returned_after_due;
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            sum->bands[b].count += copy->bands[b].count;
+            sum->bands[b].total_ns += copy->bands[b].total_ns;
+            sum->bands[b].past_due_ns += copy->bands[b].past_due_ns;
+        }
+    }
+
     info = g_new0(FemuIoStages, 1);
     info->path = object_get_canonical_path(OBJECT(n));
     tail = &info->stages;
     for (int st = 0; st < FEMU_STAGE_NR; st++) {
         FemuIoStageInfo *si = g_new0(FemuIoStageInfo, 1);
-        uint64List **btail = &si->buckets;
-        uint64_t buckets[FEMU_STAGE_BUCKETS] = { 0 };
+        uint64List **ltail = &si->buckets;
 
         si->stage = st;
-        /* the pollers write their own sets; each word reads whole */
-        for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
-            const FemuStageHist *h = &n->stage_sets[p].st[st];
-
-            si->count += qatomic_read(&h->count);
-            si->sum_ns += qatomic_read(&h->sum_ns);
-            si->max_ns = MAX(si->max_ns, qatomic_read(&h->max_ns));
-            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-                buckets[b] += qatomic_read(&h->buckets[b]);
-            }
-        }
+        si->count = sum->st[st].count;
+        si->sum_ns = sum->st[st].sum_ns;
+        si->max_ns = sum->st[st].max_ns;
         for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-            QAPI_LIST_APPEND(btail, buckets[b]);
+            QAPI_LIST_APPEND(ltail, sum->st[st].buckets[b]);
         }
         QAPI_LIST_APPEND(tail, si);
     }
-    for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
-        info->returned_after_due +=
-            qatomic_read(&n->stage_sets[p].returned_after_due);
+    info->returned_after_due = sum->returned_after_due;
+    btail = &info->bands;
+    for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+        FemuIoStageBand *bd;
+
+        if (!sum->bands[b].count) {
+            continue;
+        }
+        bd = g_new0(FemuIoStageBand, 1);
+        bd->bucket = b;
+        bd->count = sum->bands[b].count;
+        bd->total_sum_ns = sum->bands[b].total_ns;
+        bd->past_due_sum_ns = sum->bands[b].past_due_ns;
+        QAPI_LIST_APPEND(btail, bd);
     }
 
     if (clear) {

@@ -1771,10 +1771,19 @@ typedef struct FemuStageHist {
     uint64_t buckets[FEMU_STAGE_BUCKETS];
 } FemuStageHist;
 
+/* the commands whose total time fell in one bucket */
+typedef struct FemuStageBand {
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t past_due_ns;               /* sum of their past-due times */
+} FemuStageBand;
+
 /* one per poller, written only by that poller */
 typedef struct FemuStageSet {
     FemuStageHist st[FEMU_STAGE_NR];
     uint64_t returned_after_due;    /* back from the FTL after its due time */
+    QemuSeqLock seq;                /* odd while the poller adds a command */
+    FemuStageBand bands[FEMU_STAGE_BUCKETS];
 } FemuStageSet;
 
 typedef struct NvmeRequest {

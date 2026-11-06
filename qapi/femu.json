@@ -1216,6 +1216,29 @@
             'max-ns': 'uint64', 'buckets': [ 'uint64' ] } }
 
 ##
+# @FemuIoStageBand:
+#
+# The commands whose total time fell in one bucket, and their
+# past-due time: from the time the model completes a command to its
+# posted entry.  It covers a slow FTL or poller, and also a guest that
+# does not consume its completion queue.  So it is relative to the
+# model, and it does not name a cause.
+#
+# @bucket: the total-time bucket, numbered as in @FemuIoStageInfo
+#
+# @count: commands in the bucket
+#
+# @total-sum-ns: sum of their total times, in nanoseconds
+#
+# @past-due-sum-ns: sum of their past-due times, in nanoseconds
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoStageBand',
+  'data': { 'bucket': 'uint8', 'count': 'uint64', 'total-sum-ns': 'uint64',
+            'past-due-sum-ns': 'uint64' } }
+
+##
 # @FemuIoStages:
 #
 # Stage times of the I/O commands a FEMU controller completed.
@@ -1227,11 +1250,17 @@
 # @returned-after-due: commands that came back from the FTL after the
 #     time the model completes them
 #
+# @bands: one entry per non-empty total-time bucket, in bucket order.
+#     The stages and bands of one poller are read as one copy, also
+#     without reset, so per poller they agree.  Several pollers are
+#     read one after the other.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuIoStages',
   'data': { 'path': 'str', 'stages': [ 'FemuIoStageInfo' ],
-            'returned-after-due': 'uint64' } }
+            'returned-after-due': 'uint64',
+            'bands': [ 'FemuIoStageBand' ] } }
 
 ##
 # @query-femu-stages:
@@ -1265,7 +1294,10 @@
 #                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 #                                       2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 #                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ] } ],
-#            "returned-after-due": 0 } }
+#            "returned-after-due": 0,
+#            "bands": [ { "bucket": 20, "count": 2,
+#                         "total-sum-ns": 4100000,
+#                         "past-due-sum-ns": 30000 } ] } }
 ##
 { 'command': 'query-femu-stages',
   'data': { '*path': 'str', '*reset': 'bool' },
