@@ -23,15 +23,27 @@ Usage:
   femu-config-check.py "femu,femu_mode=3"           # a bare -device value
   femu-config-check.py --json -- -device femu-subsys,id=s,fdp=on \\
       -device femu,femu_mode=1,subsys=s
+  femu-config-check.py --manifest run.json -device femu,femu_mode=1
   femu-config-check.py --self-test --qemu BUILD/qemu-system-x86_64
+
+--manifest FILE also writes an experiment manifest: the report, the host,
+the QEMU build, and each property of each femu device with its value and
+its source:
+
+  qom-get value --> named in the -device option? --> "given"
+                --> equal to the class default?   --> "default"
+                --> else                          --> "derived" (realize set it)
 
 Exit status: 0 the configuration works, 1 QEMU or the controller refused
 it, 2 the check itself failed (no binary, timeout, protocol error).
 """
 
+import datetime
+import hashlib
 import importlib.util
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -269,8 +281,8 @@ def shared_op(namespaces: List[Dict[str, Any]]) -> None:
                                     * 100, 2)
 
 
-def check(qemu: str, args: List[str], timeout: float = 60.0
-          ) -> Tuple[int, Dict[str, Any]]:
+def check(qemu: str, args: List[str], timeout: float = 60.0,
+          records: bool = False) -> Tuple[int, Dict[str, Any]]:
     """Run the check. Returns the exit status and the report. One argument
     with spaces is split as a shell would; a first argument that does not
     start with '-' is the value of a -device option."""
@@ -305,7 +317,10 @@ def check(qemu: str, args: List[str], timeout: float = 60.0
                                + " | ".join(warnings + errors))
             return 2, report
         report["result"] = "accepted"
-        report = inspect(q, report)
+        given = None
+        if records:
+            given = given_by_path(q.qmp, qargs, report)
+        report = inspect(q, report, given)
         if report.get("not-reached"):
             report["result"] = "incomplete"
             report["error"] = ("QEMU accepted the configuration, but this "
@@ -329,8 +344,11 @@ def check(qemu: str, args: List[str], timeout: float = 60.0
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
-    """Enable the controllers, then read Identify and query-femu."""
+def inspect(q, report: Dict[str, Any],
+            given: Optional[Dict[str, Optional[Dict[str, str]]]] = None
+            ) -> Dict[str, Any]:
+    """Enable the controllers, then read Identify and query-femu. With
+    GIVEN (from given_by_path()), also record each femu property."""
     qmp = q.qmp
     mem = stat.GuestMemory.of(qmp)
     if FAULT == "skip-enable":
@@ -340,7 +358,8 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
             ctrls, missed = stat.enable_bus0(qmp, q.qt, mem)
         except stat.NvmeError as e:
             raise Refused(str(e))
-    devices = []
+    devices: List[Dict[str, Any]] = []
+    report["devices"] = devices
     for path in stat.find_devices(qmp):
         dev: Dict[str, Any] = {"path": path}
         ctrl = ctrls.get(path)
@@ -429,9 +448,223 @@ def inspect(q, report: Dict[str, Any]) -> Dict[str, Any]:
         shared_op(namespaces)
         dev["namespaces"] = namespaces
         devices.append(dev)
-    report["devices"] = devices
+        if given is not None:
+            property_records(qmp, path, given.get(path), dev)
     report["not-reached"] = missed
     return report
+
+
+# --------------------------------------------------------------------------
+# Manifest
+
+def qemu_opts(text: str) -> List[Tuple[str, str]]:
+    """Split a QEMU option string as QemuOpts does: a single comma ends an
+    element and ",," is a literal comma."""
+    parts, cur, i = [], [], 0
+    while i < len(text):
+        if text[i] == ",":
+            if text[i + 1:i + 2] == ",":
+                cur.append(",")
+                i += 2
+                continue
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(text[i])
+        i += 1
+    parts.append("".join(cur))
+    out = []
+    for n, part in enumerate(parts):
+        if "=" in part:
+            key, _, val = part.partition("=")
+        elif n == 0:
+            key, val = "driver", part
+        elif part.startswith("no"):
+            key, val = part[2:], "off"
+        else:
+            key, val = part, "on"
+        out.append((key, val))
+    return out
+
+
+def device_options(qargs: List[str]) -> List[Dict[str, str]]:
+    """The properties of each femu -device option, as QEMU creates them:
+    the key=value options in command line order, then the JSON ones.
+    Names stay as given. The first id= wins, as in QEMU; for the other
+    keys, the last one wins."""
+    legacy, js = [], []
+    for i, a in enumerate(qargs[:-1]):
+        if a not in ("-device", "--device"):
+            continue
+        val = qargs[i + 1]
+        if val.lstrip().startswith("{"):
+            try:
+                obj = json.loads(val)
+            except ValueError:
+                continue
+            if obj.get("driver") == "femu":
+                js.append({k: json.dumps(v) if not isinstance(v, str) else v
+                           for k, v in obj.items() if k != "driver"})
+            continue
+        kv: Dict[str, str] = {}
+        driver = None
+        for key, v in qemu_opts(val):
+            if key == "driver":
+                driver = v
+            elif key == "id":
+                kv.setdefault("id", v)
+            else:
+                kv[key] = v
+        if driver == "femu":
+            legacy.append(kv)
+    return legacy + js
+
+
+def given_by_path(qmp, qargs: List[str], report: Dict[str, Any]
+                  ) -> Dict[str, Optional[Dict[str, str]]]:
+    """Map each femu QOM path to the properties given for it, or to None
+    when they cannot be known. A device with id= is /machine/peripheral/ID.
+    QEMU numbers the anonymous devices in creation order, so the anonymous
+    femu options match them in order, but only when the counts agree."""
+    opts = device_options(qargs)
+    paths = stat.find_devices(qmp)
+    anon = sorted((p for p in paths if "/peripheral-anon/" in p),
+                  key=lambda p: int(re.sub(r"\D", "", p.rsplit("/", 1)[1])
+                                    or 0))
+    out: Dict[str, Optional[Dict[str, str]]] = {p: None for p in paths}
+    named = [kv for kv in opts if "id" in kv]
+    unnamed = [kv for kv in opts if "id" not in kv]
+    for kv in named:
+        path = f"/machine/peripheral/{kv['id']}"
+        if path in out:
+            out[path] = {k: v for k, v in kv.items() if k != "id"}
+    if len(unnamed) == len(anon):
+        for path, kv in zip(anon, unnamed):
+            out[path] = kv
+    elif anon:
+        report.setdefault("notes", []).append(
+            f"{len(anon)} anonymous femu devices but {len(unnamed)} options "
+            "without id=; their given properties are unknown")
+    return out
+
+
+def property_records(qmp, path: str, given: Optional[Dict[str, str]],
+                     dev: Dict[str, Any]) -> None:
+    """Record each property of the femu device at PATH in DEV: value,
+    default and source. A failed read is recorded, and what was read so
+    far stays in DEV."""
+    out: List[Dict[str, Any]] = []
+    dev["properties"] = out
+    try:
+        props = qmp.execute("qom-list-properties", {"typename": "femu"})
+    except (stat.QmpError, stat.ToolError) as e:
+        dev["properties-error"] = str(e)
+        return
+    for p in sorted(props, key=lambda p: p["name"]):
+        name = p["name"]
+        if name.startswith("x-") or p.get("type", "").startswith(
+                ("child<", "link<")):
+            continue
+        rec: Dict[str, Any] = {"name": name, "type": p.get("type")}
+        out.append(rec)
+        try:
+            rec["value"] = qmp.execute("qom-get",
+                                       {"path": path, "property": name})
+        except stat.QmpError as e:
+            rec["error"] = str(e)
+            continue
+        except stat.ToolError as e:
+            rec["error"] = str(e)
+            dev["properties-error"] = str(e)
+            return
+        if "default-value" in p:
+            rec["default"] = p["default-value"]
+        if given is None:
+            rec["source"] = "unknown"
+        elif name in given and FAULT != "records-no-given":
+            rec["source"] = "given"
+            rec["given"] = given[name]
+        elif ("default" in rec and rec["value"] == rec["default"]) or \
+                ("default" not in rec and rec["value"] in (None, "")):
+            rec["source"] = "default"
+        else:
+            rec["source"] = "derived"
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def host_context() -> Dict[str, Any]:
+    """The host facts that change emulated timing."""
+    u = platform.uname()
+    cpu = re.search(r"^model name\s*:\s*(.+)$", _read("/proc/cpuinfo"),
+                    re.MULTILINE)
+    mem = re.search(r"^MemTotal:\s*(\d+)", _read("/proc/meminfo"),
+                    re.MULTILINE)
+    nodes = [d for d in os.listdir("/sys/devices/system/node")
+             if re.fullmatch(r"node\d+", d)] \
+        if os.path.isdir("/sys/devices/system/node") else []
+    scaling = _read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    return {"hostname": u.node, "kernel": u.release, "machine": u.machine,
+            "cpu-model": cpu.group(1).strip() if cpu else None,
+            "cpus": os.cpu_count(),
+            "mem-kib": int(mem.group(1)) if mem else None,
+            "numa-nodes": len(nodes),
+            "cpufreq-scaling": scaling.strip() or None,
+            "python": platform.python_version()}
+
+
+def build_context(qemu: str) -> Dict[str, Any]:
+    """The QEMU binary and the source tree this tool came from."""
+    out: Dict[str, Any] = {"qemu": os.path.abspath(qemu)}
+    try:
+        h = hashlib.sha256()
+        with open(qemu, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        out["qemu-sha256"] = h.hexdigest()
+        ver = subprocess.run([qemu, "--version"], capture_output=True,
+                             text=True, timeout=30)
+        out["qemu-version"] = (ver.stdout.splitlines() or [""])[0]
+    except (OSError, subprocess.SubprocessError) as e:
+        out["qemu-error"] = str(e)
+    # the checkout of this tool, which may differ from the QEMU build
+    for key, cmd in (("tool-commit", ["rev-parse", "HEAD"]),
+                     ("tool-dirty", ["status", "--porcelain",
+                                       "--untracked-files=no"])):
+        try:
+            r = subprocess.run(["git", "-C", HERE] + cmd, capture_output=True,
+                               text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            break
+        if r.returncode != 0:
+            break
+        out[key] = r.stdout.strip() if key == "tool-commit" else \
+            bool(r.stdout.strip())
+    return out
+
+
+def manifest(qemu: str, code: int, report: Dict[str, Any]
+             ) -> Dict[str, Any]:
+    return {"manifest": 1,
+            "created": datetime.datetime.now(datetime.timezone.utc)
+            .isoformat(timespec="seconds"),
+            "exit": code, "host": host_context(),
+            "build": build_context(qemu), "report": report}
+
+
+def write_manifest(path: str, data: Dict[str, Any]) -> None:
+    """Write PATH whole or not at all."""
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------
@@ -569,10 +802,30 @@ class ConfigSelfTest(stat.SelfTest):
                    "the check still passed")
 
 
+def parser_checks(t) -> None:
+    """The option parser against QemuOpts rules; no QEMU needed."""
+    t.check("options: ',,' is a comma, a single comma ends the element",
+            qemu_opts("femu,serial=a,,,nchs=2,id=m") ==
+            [("driver", "femu"), ("serial", "a,"), ("nchs", "2"),
+             ("id", "m")])
+    t.check("options: bare flag is on, no-prefix is off",
+            qemu_opts("femu,foo,nobar") ==
+            [("driver", "femu"), ("foo", "on"), ("bar", "off")])
+    opts = device_options([
+        "-device", "driver=femu,acpi-index=7,id=first,id=last",
+        "--device", "femu,nchs=4", "-device", "virtio-blk-pci,drive=x",
+        "-device", '{"driver": "femu", "nchs": 2}'])
+    t.check("options: driver= and --device, dashes kept, first id wins, "
+            "JSON last",
+            opts == [{"acpi-index": "7", "id": "first"}, {"nchs": "4"},
+                     {"nchs": "2"}], str(opts))
+
+
 def self_test(qemu: str) -> int:
     t = ConfigSelfTest(qemu)
     start = time.monotonic()
     me = os.path.abspath(__file__)
+    parser_checks(t)
 
     def ns1(r: Dict[str, Any]) -> Dict[str, Any]:
         devs = r.get("devices") or [{}]
@@ -592,6 +845,21 @@ def self_test(qemu: str) -> int:
             json.dumps(check(qemu, ["-device", f"femu,{SMALL_BB}"])[1])[:600])
     t.control("enable", "skip-enable", bbssd_ok)
     t.control("LBA format", "wrong-lbaf", bbssd_ok)
+
+    def records_ok(opts: str) -> bool:
+        code, r = check(qemu, ["-device", f"femu,{opts}"], records=True)
+        dev = (r.get("devices") or [{}])[0]
+        props = {p["name"]: p for p in dev.get("properties", [])}
+        nchs = props.get("nchs", {})
+        gc = props.get("gc_thres_pcent", {})
+        return (code == 0 and nchs.get("source") == "given"
+                and nchs.get("value") == 2 and gc.get("source") == "default"
+                and gc.get("value") == 75 and "given" not in r)
+    for opts in (f"id=m0,{SMALL_BB}", SMALL_BB):
+        t.check(f"property sources ({opts.split(',')[0]})",
+                records_ok(opts), "")
+    t.control("property sources", "records-no-given",
+              lambda: records_ok(SMALL_BB))
 
     code, r = check(qemu, ["-device", "femu,femu_mode=1,nchs=2,luns_per_ch=2,"
                            "blks_per_pl=64,pgs_per_blk=64,op_pcent=25"])
@@ -787,6 +1055,22 @@ def self_test(qemu: str) -> int:
                 proc.returncode == want and needle in proc.stdout,
                 f"exit {proc.returncode}: {proc.stdout[-400:]}"
                 f"{proc.stderr[-400:]}")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "m.json")
+        proc = subprocess.run([sys.executable, "-I", me, "--qemu", qemu,
+                               "--manifest", out, f"femu,{SMALL_BB}"],
+                              capture_output=True, text=True, timeout=120)
+        try:
+            with open(out) as f:
+                m = json.load(f)
+        except (OSError, ValueError) as e:
+            m = {"error": str(e)}
+        t.check("CLI --manifest: host, build and sources written",
+                proc.returncode == 0 and m.get("exit") == 0
+                and m.get("host", {}).get("kernel")
+                and len(m.get("build", {}).get("qemu-sha256", "")) == 64
+                and m["report"]["devices"][0]["properties"],
+                json.dumps(m)[:400] + proc.stderr[-300:])
     print(f"femu-config-check: self-test {t.passed}/"
           f"{t.passed + len(t.failed)} in {time.monotonic() - start:.1f} s")
     return 1 if t.failed else 0
@@ -795,8 +1079,8 @@ def self_test(qemu: str) -> int:
 # --------------------------------------------------------------------------
 
 USAGE = """\
-usage: femu-config-check.py [--json] [--qemu QEMU] [--timeout SEC] [--]
-                            QEMU-OPTIONS...
+usage: femu-config-check.py [--json] [--manifest FILE] [--qemu QEMU]
+                            [--timeout SEC] [--] QEMU-OPTIONS...
        femu-config-check.py --self-test [--qemu QEMU]
 
 QEMU-OPTIONS are -device, -object, -machine and other QEMU options, given
@@ -805,6 +1089,8 @@ with '-' is the value of one -device option.
 
 options:
   --json         print the report as one JSON object
+  --manifest FILE  also write the report, the host, the build and the
+                 source of each femu property value to FILE (JSON)
   --qemu QEMU    qemu-system-x86_64 to run (default ./qemu-system-x86_64,
                  else build-femu/qemu-system-x86_64 in this source tree)
   --timeout SEC  seconds allowed for QEMU to start (default 60)
@@ -827,6 +1113,7 @@ def default_qemu() -> str:
 def main(argv: List[str]) -> int:
     as_json = selftest = False
     qemu = None
+    mfile = None
     timeout = 60.0
     i = 0
     while i < len(argv):
@@ -838,12 +1125,14 @@ def main(argv: List[str]) -> int:
             as_json = True
         elif a == "--self-test":
             selftest = True
-        elif a in ("--qemu", "--timeout"):
+        elif a in ("--qemu", "--timeout", "--manifest"):
             if i + 1 >= len(argv):
                 print(f"femu-config-check: {a} needs a value", file=sys.stderr)
                 return 2
             if a == "--qemu":
                 qemu = argv[i + 1]
+            elif a == "--manifest":
+                mfile = argv[i + 1]
             else:
                 try:
                     timeout = float(argv[i + 1])
@@ -860,12 +1149,21 @@ def main(argv: List[str]) -> int:
         i += 1
     rest = argv[i:]
     qemu = qemu or default_qemu()
+    if os.sep not in qemu:
+        qemu = shutil.which(qemu) or qemu
     if selftest:
         return self_test(qemu)
     if not rest:
         print(USAGE, end="", file=sys.stderr)
         return 2
-    code, report = check(qemu, rest, timeout)
+    code, report = check(qemu, rest, timeout, records=mfile is not None)
+    if mfile:
+        try:
+            write_manifest(mfile, manifest(qemu, code, report))
+        except OSError as e:
+            print(f"femu-config-check: cannot write {mfile}: {e}",
+                  file=sys.stderr)
+            return 2
     print(json.dumps(report) if as_json else report_text(code, report))
     return code
 

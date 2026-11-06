@@ -261,6 +261,45 @@ Options: `--json` prints one JSON object, `--qemu BINARY` names QEMU
 `--timeout SEC` (default 60). Put `--` before QEMU options when you give
 tool options.
 
+### Record an experiment manifest
+
+`--manifest FILE` also writes one JSON file for each run. Keep it with the
+results, so a reader can find the exact device behind each number.
+
+```text
+  manifest.json
+    exit, created (UTC)
+    host:   kernel, CPU model, CPUs, memory, NUMA nodes, cpufreq scaling
+    build:  QEMU path, sha256, version
+            tool-commit, tool-dirty: the checkout of this script, which
+            need not be the source of the QEMU binary
+    report: the --json report; each femu device also lists
+            properties: name, type, value, default, source
+```
+
+The source of each property value comes from the live device:
+
+| Source | Rule |
+| --- | --- |
+| `given` | the `-device` option names the property; `given` holds its text |
+| `default` | the value equals the class default, or the property has no default and is empty |
+| `derived` | neither of the above: realize, `-global` or another device set it |
+| `unknown` | the check could not match the device to its option |
+
+How the check matches devices and options:
+
+- A device with `id=` matches its option by id. The first `id=` counts, as
+  in QEMU.
+- The other femu devices match their options in creation order: the
+  key=value options first, then the JSON ones. When the counts differ, the
+  sources are `unknown` and the report notes why.
+- Options follow the QEMU rules: `,,` is a comma, a bare `flag` is on and
+  `noflag` is off. Property names stay as given.
+
+The manifest leaves out `x-` test properties, child and link properties,
+and the properties of `femu-subsys` and CXL devices. A failed property
+read keeps its `error`, and the records read before it stay.
+
 ## Inspect a running device
 
 QEMU's monitor shows what QEMU built. With the QMP socket the launchers
