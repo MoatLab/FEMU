@@ -442,6 +442,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 ### Documentation and tooling
 
+- `femu-steady-state.py` reports when per-round fio results reach steady state, by the SNIA PTS rule, so a WAF or GC study can skip the fresh-device rounds.
 - `femu-stat.py` prints the end-of-life state of a namespace with `eol_read_only`: read-only or writable, and the reserve pages that admitted writes hold.
 - Documentation moved under `hw/femu/docs/` with getting-started, concepts, mode and feature guides, an FAQ, security notes and a doc map (e00c70f99, 034670c4c, 62a565ae0, fb1cf3ce6, 28aa224b7, 0bcb5cae2).
 - CXL SSD, caching API and NVMe link guides, and a reference for every `femu-cxl-ssd` property and counter (41b318ef2, 9ec16a701, 93bfbf5c9, ccaa5d190, dcea2b9a8).
