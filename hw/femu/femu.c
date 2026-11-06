@@ -1268,6 +1268,37 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "meta/extended need a matching metadata capability (mc)");
         return false;
     }
+    /*
+     * The namespace atomic write unit holds because one range lock covers
+     * each whole command. A power loss can still tear a buffered write, so
+     * the power-fail unit stays one block and power_loss is refused.
+     */
+    if (n->atomic_write_lbas) {
+        uint32_t na = n->atomic_write_lbas;
+        uint32_t max_lbads = BDRV_SECTOR_BITS + MAX(n->nlbaf, 1) - 1;
+        const char *why = NULL;
+
+        if (na < 2 || na > 65536 || (na & (na - 1))) {
+            why = "it must be 0, or a power of two from 2 to 65536";
+        } else if (n->femu_mode != FEMU_BBSSD_MODE &&
+                   n->femu_mode != FEMU_NOSSD_MODE) {
+            why = "it needs femu_mode 1 (bbssd) or 2 (nossd)";
+        } else if ((n->namespace_modes && n->namespace_modes[0]) ||
+                   n->ns_mgmt || n->subsys) {
+            why = "it is not supported with namespace_modes, ns_mgmt or a "
+                  "subsystem";
+        } else if (n->power_loss) {
+            why = "it is not supported with power_loss";
+        } else if (n->mdts && 12 + n->mpsmin + n->mdts < 48 &&
+                   ((uint64_t)na << max_lbads) >
+                   (1ULL << (12 + n->mpsmin + n->mdts))) {
+            why = "N blocks of the largest block size exceed MDTS";
+        }
+        if (why) {
+            error_setg(errp, "atomic_write_lbas: %s", why);
+            return false;
+        }
+    }
     if (!OCSSD(n) && NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) {
         error_setg(errp, "dpc: bit 3 (protection information in the first "
                    "eight bytes of metadata) is not allowed by NVM 1.1");
@@ -1320,6 +1351,19 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
     id_ns->nsfeat        |= (0x4 | 0x10);
+    /*
+     * atomic_write_lbas: the normal atomic unit, in boundaries of the same
+     * size from block 0. NAWUPF 0 keeps the controller's one-block power-fail
+     * unit, and NABSPF 0 sets no power-fail boundary.
+     */
+    if (n->atomic_write_lbas) {
+        id_ns->nsfeat    |= 0x2;
+        id_ns->nawun     = cpu_to_le16(n->atomic_write_lbas - 1);
+        id_ns->nawupf    = 0;
+        id_ns->nabsn     = cpu_to_le16(n->atomic_write_lbas - 1);
+        id_ns->nabo      = 0;
+        id_ns->nabspf    = 0;
+    }
     id_ns->nlbaf         = (n->meta ? 2 * n->nlbaf : n->nlbaf) - 1;
     if (n->oncs & NVME_ONCS_COPY) {
         id_ns->mssrl     = cpu_to_le16(femu_copy_mssrl(n));
@@ -3997,6 +4041,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("mpsmin", FemuCtrl, mpsmin, 0),
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
+    DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),

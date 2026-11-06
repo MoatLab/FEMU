@@ -37721,6 +37721,175 @@ static void femu_test_rber_refused(void *obj, void *data,
     }
 }
 
+/*
+ * atomic_write_lbas in Identify Namespace: with @data "on" (N = 16), NSFEAT
+ * bit 1, NAWUN 15, NAWUPF 0, NABSN 15, NABO 0, NABSPF 0. With it off, bit 1
+ * is clear and every field is 0.
+ */
+static void femu_test_atomic_identify(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = !strcmp(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 24) & 0x2, ==, on ? 0x2 : 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 34), ==, on ? 15 : 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 36), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 40), ==, on ? 15 : 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 42), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 44), ==, 0);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * The namespace atomic unit, made certain: a 16-block write over two 4 KiB
+ * pages stops halfway through its first page (x-copy-hold). A read of the
+ * second page, sent on another queue, must wait: one range lock covers the
+ * whole write, not the page being copied. After the hold ends, the read
+ * returns the new data.
+ */
+static void femu_test_atomic_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    uint64_t oldb = guest_alloc(alloc, 2 * 4096);
+    uint64_t newb = guest_alloc(alloc, 2 * 4096);
+    uint64_t rd = guest_alloc(alloc, 4096);
+    uint8_t got[4096];
+    NvmeRwCmd rw;
+    uint64_t waits;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+    qtest_memset(qts, oldb, 0x11, 2 * 4096);
+    qtest_memset(qts, newb, 0x22, 2 * 4096);
+    for (i = 0; i < 2; i++) {
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(i ? newb : oldb);
+        rw.dptr.prp2 = cpu_to_le64((i ? newb : oldb) + 4096);
+        rw.nlb = cpu_to_le16(16 - 1);
+        if (i) {
+            femu_rwa_hold(qts, 1);
+        }
+        femu_zap_queue(&c, &q1, (NvmeCmd *)&rw);
+        femu_zap_ring(&c, &q1);
+        if (!i) {
+            g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !femu_rwa_get(qts, "x-copy-held");
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), !=, 0);
+    waits = femu_rwa_get(qts, "x-range-waits");
+
+    /* the second page: blocks 8 to 15, which the held copy has not reached */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(rd);
+    rw.slba = cpu_to_le64(8);
+    rw.nlb = cpu_to_le16(8 - 1);
+    femu_zap_queue(&c, &q2, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q2);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS &&
+         femu_rwa_get(qts, "x-range-waits") == waits; i++) {
+        g_usleep(1000);
+    }
+    g_usleep(200000);
+    g_assert_false(femu_rwa_cq_ready(&c, &q2));
+    g_assert_cmpuint(femu_rwa_get(qts, "x-range-waits"), >, waits);
+
+    femu_rwa_hold(qts, 0);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+    qtest_memread(qts, rd, got, sizeof(got));
+    for (i = 0; i < (int)sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0x22);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+    guest_free(alloc, rd);
+    guest_free(alloc, newb);
+    guest_free(alloc, oldb);
+}
+
+/* atomic_write_lbas is refused where its unit cannot hold */
+static void femu_test_atomic_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':2,'atomic_write_lbas':1", "a power of two" },
+        { "'femu_mode':2,'atomic_write_lbas':12", "a power of two" },
+        { "'femu_mode':2,'atomic_write_lbas':131072", "a power of two" },
+        { "'femu_mode':3,'atomic_write_lbas':16", "femu_mode" },
+        { "'femu_mode':2,'mdts':1,'atomic_write_lbas':2", "exceed MDTS" },
+        { "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+          "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+          "'power_loss':true,'buffer_size':16,'atomic_write_lbas':16",
+          "power_loss" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *opts = g_strdup(cases[i].opts);
+            g_autofree char *cmd = NULL;
+            QDict *rsp;
+
+            if (!on) {
+                /* the control: the same line with the property off */
+                char *p = strstr(opts, "'atomic_write_lbas':");
+
+                g_assert_nonnull(p);
+                strcpy(p, "'atomic_write_lbas':0");
+            }
+            cmd = g_strdup_printf("{'execute':'device_add','arguments':{"
+                                  "'driver':'femu','id':'awu','addr':'5',"
+                                  "'devsz_mb':4,%s}}", opts);
+            rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, "atomic_write_lbas"));
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "awu", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     const FemuCapsCfg *cfg = data;
@@ -46246,6 +46415,19 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "lba_index=3,multipoller_enabled=1,poller_ratio=1"
     });
+    qos_add_test("atomic-identify-off", "femu", femu_test_atomic_identify,
+                 &(QOSGraphTestOptions) { .arg = (void *)"off" });
+    qos_add_test("atomic-identify-on", "femu", femu_test_atomic_identify,
+                 &(QOSGraphTestOptions) { .arg = (void *)"on",
+        .edge.extra_device_opts = "atomic_write_lbas=16" });
+    qos_add_test("atomic-hold", "femu", femu_test_atomic_hold,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rwa,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "atomic_write_lbas=16,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("atomic-refused", "femu", femu_test_atomic_refused, NULL);
     qos_add_test("rw-atomic-split-write", "femu", femu_test_rw_atomic_split,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"write",

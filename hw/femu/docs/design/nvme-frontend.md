@@ -315,7 +315,11 @@ Plan one core per poller and one for the FTL thread
 ### Data copies and write atomicity
 
 Identify reports AWUN 0, so a one-block write must reach the media whole
-with respect to every other command. With more than one poller, two commands
+with respect to every other command. With `atomic_write_lbas` = N, each
+namespace reports NAWUN and NABSN as N - 1. The same locks cover each
+whole command, so a write of up to N blocks inside one N-block boundary
+is atomic too. NAWUPF stays 0: a power loss can still tear a buffered
+write, so `power_loss` refuses the property. With more than one poller, two commands
 on the same blocks copy at the same time. Each access to the memory backend
 therefore holds the locks of the 4 KiB granules it touches. The granules share
 1024 locks: granule `g` takes lock `g % 1024`.

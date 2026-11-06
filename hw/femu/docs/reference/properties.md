@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 236 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 237 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -83,6 +83,7 @@ Devices:
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `nlbaf` | `uint8` | `5` | Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte blocks doubling with each format |
+| `atomic_write_lbas` | `uint32` | `0` | Namespace atomic write unit in blocks: NAWUN and the boundary NABSN become N - 1, from block 0. 0 (default) keeps one block; else a power of two from 2 to 65536 that fits MDTS at the largest block size. The power-fail unit stays one block. bbssd and NoSSD only; refused with power_loss, ns_mgmt, namespace_modes and a subsystem |
 | `lba_index` | `uint8` | `0` | LBA format the namespaces boot with, below nlbaf; ZNS needs a block size of 4 KiB or less |
 | `extended` | `uint8` | `0` | 1 boots with metadata interleaved with the data (extended LBAs); needs bit 0 of mc; 0 or 1 |
 | `meta` | `uint8` | `0` | Metadata bytes per logical block, NoSSD and bbssd only, not with FDP, dpc or dps; each format is then also offered with metadata |

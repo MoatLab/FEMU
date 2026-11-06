@@ -207,6 +207,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "nlbaf",
       "Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte "
       "blocks doubling with each format" },
+    { "atomic_write_lbas",
+      "Namespace atomic write unit in blocks: NAWUN and the boundary "
+      "NABSN become N - 1, from block 0. 0 (default) keeps one block; "
+      "else a power of two from 2 to 65536 that fits MDTS at the largest "
+      "block size. The power-fail unit stays one block. bbssd and NoSSD "
+      "only; refused with power_loss, ns_mgmt, namespace_modes and a "
+      "subsystem" },
     { "lba_index",
       "LBA format the namespaces boot with, below nlbaf; ZNS needs a block "
       "size of 4 KiB or less" },

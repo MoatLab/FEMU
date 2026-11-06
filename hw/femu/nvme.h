@@ -2530,6 +2530,7 @@ typedef struct FemuCtrl {
     uint8_t     nlbaf;
     uint8_t     extended;
     uint8_t     lba_index;
+    uint32_t    atomic_write_lbas; /* namespace atomic write unit; 0 = one */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;
