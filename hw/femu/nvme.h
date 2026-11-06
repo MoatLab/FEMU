@@ -2788,6 +2788,8 @@ typedef struct FemuCtrl {
     uint32_t        test_query_delay_ms;
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
+    /* qtest only (x-stage-hold-ms): ms a poller waits inside a stage update */
+    uint32_t        test_stage_hold_ms;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
     bool            tier_idle;      /* the FTL thread runs idle folds */

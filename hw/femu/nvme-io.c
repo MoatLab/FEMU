@@ -152,6 +152,10 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     nvme_stage_add(&set->st[FEMU_STAGE_POST_DELAY], post - ready);
     nvme_stage_add(&set->st[FEMU_STAGE_PAST_DUE], post - req->expire_time);
     nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->t_submit);
+    /* qtest only: stop between the histograms and the band of a command */
+    if (unlikely(qatomic_read(&n->test_stage_hold_ms))) {
+        g_usleep(qatomic_read(&n->test_stage_hold_ms) * 1000ULL);
+    }
     nvme_stage_band_add(set, post - req->t_submit, post - req->expire_time);
     seqlock_write_end(&set->seq);
 }

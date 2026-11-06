@@ -10535,21 +10535,24 @@ static void femu_stages_check_bands(QDict *ret)
     }
     g_assert_cmpuint(count, ==, qdict_get_int(total, "count"));
     g_assert_cmpuint(tsum, ==, qdict_get_int(total, "sum-ns"));
-    /*
-     * A band filed by past-due time instead of total time must fail the
-     * bucket check above, so the two histograms have to differ somewhere.
-     */
-    if (count) {
-        QDict *pd = femu_stage(ret, "past-due");
-        bool differ = false;
-
-        for (int b = 0; b < 40; b++) {
-            differ |= femu_stage_bucket(total, b) != femu_stage_bucket(pd, b);
-        }
-        g_assert_true(differ);
-    }
     g_assert_cmpuint(lsum, ==,
                      qdict_get_int(femu_stage(ret, "past-due"), "sum-ns"));
+}
+
+/*
+ * A band filed by past-due time instead of total time fails the bucket
+ * check of femu_stages_check_bands() only when the two histograms differ.
+ */
+static void femu_stages_check_differ(QDict *ret)
+{
+    QDict *total = femu_stage(ret, "total");
+    QDict *pd = femu_stage(ret, "past-due");
+    bool differ = false;
+
+    for (int b = 0; b < 40; b++) {
+        differ |= femu_stage_bucket(total, b) != femu_stage_bucket(pd, b);
+    }
+    g_assert_true(differ);
 }
 
 /*
@@ -10617,6 +10620,10 @@ static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(qdict_get_int(femu_stage(ret, "past-due"), "sum-ns"), >,
                      0);
     femu_stages_check_bands(ret);
+    if (!zero) {
+        /* with a 3 ms read, past-due time is far below total time */
+        femu_stages_check_differ(ret);
+    }
     if (zero) {
         g_test_message("returned after due: %" PRId64,
                        qdict_get_int(ret, "returned-after-due"));
@@ -10659,6 +10666,66 @@ static void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
+}
+
+/* x-stage-hold-ms of device stage-test */
+static void femu_stage_hold(QTestState *qts, uint32_t ms)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/stage-test',"
+                             "'property':'x-stage-hold-ms','value':%u}}", ms);
+}
+
+/*
+ * A query copies a poller's stages and bands between two commands. Here a
+ * poller stops inside the update of one read (x-stage-hold-ms), after its
+ * histograms and before its band. A query sent during that stop must wait
+ * for the update to end, and its copy must agree: one TOTAL command and one
+ * band command. A copy taken without the sequence check shows the read in
+ * TOTAL and in no band.
+ */
+static void femu_test_io_stages_overlap(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw;
+    QDict *rsp, *ret;
+    gint64 t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    qobject_unref(rsp);
+
+    femu_stage_hold(qts, 400);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_usleep(100 * 1000);
+
+    t0 = g_get_monotonic_time();
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    g_test_message("the query took %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    ret = qdict_get_qdict(rsp, "return");
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "count"), ==, 1);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(ret, "bands")), ==, 1);
+    femu_stages_check_bands(ret);
+    qobject_unref(rsp);
+
+    femu_stage_hold(qts, 0);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
 }
 
 /* guest-physical memory nothing answers at */
@@ -50923,6 +50990,11 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,devsz_mb=64,pg_rd_lat=3000000,io_stages=on",
         .arg = (void *)"3ms",
+    });
+    qos_add_test("io-stages-overlap", "femu", femu_test_io_stages_overlap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=stage-test,femu_mode=1,devsz_mb=64,"
+            "pg_rd_lat=3000000,io_stages=on",
     });
     qos_add_test("io-stages-zero", "femu", femu_test_io_stages,
                  &(QOSGraphTestOptions) {

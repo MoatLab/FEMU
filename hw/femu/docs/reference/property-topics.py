@@ -23,7 +23,7 @@ DEVICES = [
                       "x-gc-idle-order",
                       "x-ns-test", "x-oc12-clock",
                       "x-oc12-trace", "x-query-delay-ms", "x-range-waits",
-                      "x-rber-u",
+                      "x-rber-u", "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",
                       "x-tp-hold",
                       "x-zone-draining",
