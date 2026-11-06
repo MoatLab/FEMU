@@ -47238,6 +47238,18 @@ static void femu_register_nodes(void)
             "blk_pe_limit=8,mdts=2,oncs=0x19f"
     });
     /*
+     * gc_frontier on, no spare lines: the floor keeps a line for the
+     * collection write pointer too, and admitted writes still finish
+     */
+    qos_add_test("eol-ro-nopool-gcf", "femu", femu_test_eol_ro,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"nopool",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=8,mdts=2,oncs=0x19f,gc_frontier=on"
+    });
+    /*
      * No forced collection reserve and 32 pages of credits: when the media
      * goes read-only, the writes in flight need the reserve lines.
      */
@@ -48299,6 +48311,19 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_frontier=off",
+    });
+    /*
+     * gc_frontier on: collection copies go to lines of their own. The
+     * frontier needs one more reserve line, so the geometry has 22 blocks.
+     */
+    qos_add_test("ftl-trace-gc-frontier", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 2400000000 10306 10306 6849 4224 6977 17155 4224 "
+                       "4430748168361763090",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=22,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_frontier=on",
     });
     /* rber_ppb given as 0: the same trace as the plain device */
     qos_add_test("ftl-trace-rber-off", "femu", femu_test_ftl_trace,
