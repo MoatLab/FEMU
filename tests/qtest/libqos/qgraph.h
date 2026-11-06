@@ -27,7 +27,7 @@
  * Maximum path length, which also bounds the walk's stack: every test on a
  * node is pushed at once, so a node with more tests than this aborts the run.
  */
-#define QOS_PATH_MAX_ELEMENT_SIZE 1024
+#define QOS_PATH_MAX_ELEMENT_SIZE 4096
 
 typedef struct QOSGraphObject QOSGraphObject;
 typedef struct QOSGraphNode QOSGraphNode;
