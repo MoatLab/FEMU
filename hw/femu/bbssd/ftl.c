@@ -222,6 +222,10 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /* the policy orders the victim queue, so resolve it before the lines */
     ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
     ssd->gc_rng = n->gc_seed;
+    ssd->rber_rng = n->bb_params.rber_seed;
+    if (n->bb_params.rber_ppb) {
+        ftl_rber_init_tables();
+    }
 
     /* initialize all the lines */
     ssd_init_lines(ssd);

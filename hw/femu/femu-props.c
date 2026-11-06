@@ -399,6 +399,48 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "ecc_retention_sec",
       "bbssd, CSD, KV: data age in seconds that adds one ECC tier, with "
       "ecc_step_ns; 0 counts wear only" },
+    { "rber_ppb",
+      "bbssd: fresh raw bit error rate of host reads in parts per 10^9; "
+      "it adds read-retry and soft decode time to host reads. 0 "
+      "(default) turns the model off. At most 10^9; refused with bus "
+      "phase or ONFI timing, pe_suspend, mp_read, onfi_cache_read, "
+      "gc_copyback, ecc_step_ns, the pSLC tier and cxl_ssd" },
+    { "rber_pe_double",
+      "bbssd with rber_ppb: block erases that double the raw bit error "
+      "rate; 0 (default) leaves wear out" },
+    { "rber_age_double_sec",
+      "bbssd with rber_ppb: data age in seconds that doubles the raw "
+      "bit error rate, from the line close, or the first program with "
+      "pd_open_age; 0 (default) leaves age out" },
+    { "rber_read_double",
+      "bbssd with rber_ppb: block reads since its erase that double the "
+      "raw bit error rate; 0 (default) leaves read disturb out" },
+    { "ecc_cw_bytes",
+      "bbssd with rber_ppb: data bytes per ECC codeword, 256 or more; "
+      "it divides the page into 16 codewords or fewer" },
+    { "ecc_hard_bits",
+      "bbssd with rber_ppb: bit errors per codeword that hard decode "
+      "corrects, 1 to 1024" },
+    { "ecc_soft_bits",
+      "bbssd with rber_ppb: bit errors per codeword that soft decode "
+      "corrects, ecc_hard_bits to 1024; 0 turns soft decode off" },
+    { "rr_steps",
+      "bbssd with rber_ppb: read-retry steps before soft decode, 0 to "
+      "16; each step is one more page read" },
+    { "rr_gain",
+      "bbssd with rber_ppb: each retry step divides the reducible part "
+      "of the error mean by this, 2 to 16" },
+    { "rr_floor_pct",
+      "bbssd with rber_ppb: percent of the error mean that no retry "
+      "removes, 0 to 100" },
+    { "rr_soft_senses",
+      "bbssd with rber_ppb: page reads of one soft decode, 0 to 8" },
+    { "rr_soft_ns",
+      "bbssd with rber_ppb: controller time in ns of one soft decode, "
+      "at most 10^7; it does not hold the LUN" },
+    { "rber_seed",
+      "bbssd with rber_ppb: seed of the decode outcome generator; the "
+      "same seed and trace give the same counts" },
     { "pd_edge_wls",
       "bbssd, CSD, KV: program disturb, bottom wordlines of each block whose "
       "reads take pd_edge_tiers more ECC tiers; set with pd_edge_tiers and "
@@ -520,7 +562,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "(default)" },
     { "age_scale",
       "bbssd, CSD: data ages this many times faster than wall time, for "
-      "retention_limit_sec and ecc_retention_sec only; 1 (default) or more. "
+      "retention_limit_sec, ecc_retention_sec and rber_age_double_sec "
+      "only; 1 (default) or more. "
       "I/O timing and garbage collection order do not change" },
 
     /* garbage collection, mapping and caches */

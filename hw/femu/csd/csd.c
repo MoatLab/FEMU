@@ -132,6 +132,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      */
     if (bb_check_gc_frontier(n, "csd", errp) ||
         bb_check_gc_idle(n, "csd", errp) ||
+        bb_check_rber(n, "csd", errp) ||
         bb_check_capacity(n, ns, errp)) {
         return;
     }

@@ -2228,6 +2228,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
 typedef struct FemuMediaStats {
     uint64_t rd_bytes, wr_bytes, rd_cmds, wr_cmds;
     uint64_t host_pages, gc_pages, nand_pages, map_pages, map_reads;
+    uint64_t rber[4];
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
     uint64_t buf_reads, buf_read_hits, buf_writes, buf_write_hits;
     uint64_t hybrid_switches;
@@ -2305,6 +2306,14 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->nand_pages += ssd_nand_write_pages(ns->ssd);
         st->map_pages += ssd_map_write_pages(ns->ssd);
         st->map_reads += ssd_map_read_pages(ns->ssd);
+        {
+            uint64_t rb[4];
+
+            ssd_rber_counters(ns->ssd, rb);
+            for (int k = 0; k < 4; k++) {
+                st->rber[k] += rb[k];
+            }
+        }
         ssd_hybrid_stats(ns->ssd, &st->hybrid_switches, &st->hybrid_full,
                          &st->hybrid_erases);
         {
@@ -2431,6 +2440,10 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.pd_pad_closes = cpu_to_le64(st.pd[2]);
     stats.map_write_pages = cpu_to_le64(st.map_pages);
     stats.map_read_pages = cpu_to_le64(st.map_reads);
+    stats.rber_retry_reads = cpu_to_le64(st.rber[0]);
+    stats.rber_retry_passes = cpu_to_le64(st.rber[1]);
+    stats.rber_soft_reads = cpu_to_le64(st.rber[2]);
+    stats.rber_limit_reads = cpu_to_le64(st.rber[3]);
     *log = stats;
 }
 

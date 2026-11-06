@@ -942,6 +942,30 @@ With `ecc_step_ns` set, a block's erase count (one tier per 750 erases) and
 the age of its line add time to each read. That model belongs to the NAND
 timing chapter.
 
+### Read retry and soft decode (`rber_ppb`)
+
+With `rber_ppb`, each host page read draws a decode outcome for each ECC
+codeword. A failed attempt costs one more page read on the same LUN and
+channel. The model is synthetic and not calibrated. It changes read time
+only, never data or status.
+
+```text
+  p        = rber_ppb * 1e-9 * 2^(PE/rber_pe_double + age/rber_age_double_sec
+                                  + reads/rber_read_double)
+  lambda   = min(p * 8 * ecc_cw_bytes, 4 * max(hard, soft), data bits)
+  lambda_k = lambda * (f + (1 - f) * rr_gain^-k)          f = rr_floor_pct / 100
+  codeword: attempt k = 0 .. rr_steps passes when u < F(ecc_hard_bits; lambda_k)
+            no pass --> soft decode passes when u < F(ecc_soft_bits; lambda_rr_steps)
+  page:     retries = deepest codeword; soft when any codeword needs it
+  time:     each retry and soft pass is a page read after the last one ends,
+            then rr_soft_ns of controller time
+```
+
+F is the Poisson CDF, summed in log space. u is a draw from a generator
+seeded with `rber_seed`. Each pass adds to the block read count, so read
+stress and read reclaim see it. GC reads, translation reads and FDP map
+reads are left out. Log page C0h counts the outcomes at offsets 296 to 320.
+
 ### Read-only end of life (`eol_read_only`)
 
 With `blk_pe_limit`, a block wears out on the erase that takes it to its

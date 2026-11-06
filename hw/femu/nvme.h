@@ -1307,7 +1307,11 @@ typedef struct FemuStatsLog {
     uint64_t    pd_pad_closes;    /* lines or units those pads closed */
     uint64_t    map_write_pages;  /* translation pages programmed (dftl) */
     uint64_t    map_read_pages;   /* translation pages read (dftl) */
-    uint8_t     rsvd296[216];
+    uint64_t    rber_retry_reads; /* host page reads with a read retry */
+    uint64_t    rber_retry_passes; /* read-retry page reads */
+    uint64_t    rber_soft_reads;  /* host page reads with a soft decode */
+    uint64_t    rber_limit_reads; /* host page reads past the decode limit */
+    uint8_t     rsvd328[184];
 } FemuStatsLog;
 
 /*
@@ -1699,6 +1703,8 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
+    QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_retry_reads) != 296);
+    QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_limit_reads) != 320);
     QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
@@ -2242,6 +2248,20 @@ typedef struct BbCtrlParams {
     int pgtype_lat;   /* model per-page-type program latency; 0 = off */
     int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear; 0 = off */
     int ecc_retention_sec; /* retention age per ECC tier (s); 0 = age adds none */
+    /* raw bit error model of host reads (rber_ppb); 0 = off */
+    uint32_t rber_ppb;        /* fresh raw bit error rate, parts per 10^9 */
+    uint32_t rber_pe_double;  /* erases per doubling; 0 = no wear term */
+    uint32_t rber_age_double_sec; /* data age per doubling; 0 = no term */
+    uint32_t rber_read_double; /* block reads per doubling; 0 = no term */
+    uint32_t ecc_cw_bytes;    /* data bytes per ECC codeword */
+    uint32_t ecc_hard_bits;   /* bits hard decode corrects per codeword */
+    uint32_t ecc_soft_bits;   /* bits soft decode corrects; 0 = no soft */
+    uint32_t rr_steps;        /* read-retry steps before soft decode */
+    uint32_t rr_gain;         /* error mean divisor per retry step */
+    uint8_t rr_floor_pct;     /* part of the error mean no retry removes */
+    uint32_t rr_soft_senses;  /* page reads of one soft decode */
+    uint32_t rr_soft_ns;      /* controller time of one soft decode */
+    uint32_t rber_seed;       /* seed of the decode outcome generator */
     int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
     int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
     int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */
@@ -3321,6 +3341,8 @@ uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
 uint64_t ssd_map_write_pages(struct ssd *ssd);
 uint64_t ssd_map_read_pages(struct ssd *ssd);
+/* the four counters of the raw bit error model, in C0h order */
+void ssd_rber_counters(struct ssd *ssd, uint64_t out[4]);
 uint64_t ssd_tp_moves(struct ssd *ssd);
 uint64_t ssd_tp_pending_count(struct ssd *ssd);
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,

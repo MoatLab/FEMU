@@ -109,6 +109,10 @@ struct nand_page {
     int status;
 };
 
+#define FTL_RBER_SCRIPT_MAX 64
+#define FTL_RBER_STEPS_MAX  16    /* rr_steps limit */
+#define FTL_RBER_BITS_MAX   1024  /* ecc_hard_bits, ecc_soft_bits limit */
+
 struct nand_block {
     struct nand_page *pg;
     int npgs;
@@ -260,6 +264,19 @@ struct ssdparams {
     int pd_open_tiers;
     bool pd_open_age;
     int pd_wl_pages;  /* pages per wordline of the edge term */
+    /* raw bit error model of host reads; rber_ppb 0 turns it off */
+    uint32_t rber_ppb;
+    uint32_t rber_pe_double;
+    uint32_t rber_age_double_sec;
+    uint32_t rber_read_double;
+    uint32_t ecc_cw_bytes;
+    uint32_t ecc_hard_bits;
+    uint32_t ecc_soft_bits;
+    uint32_t rr_steps;
+    uint32_t rr_gain;
+    uint32_t rr_floor_pct;
+    uint32_t rr_soft_senses;
+    uint32_t rr_soft_ns;
     /* program disturb actions; 0 = off (see do_read_reclaim(), ssd_pd_pad()) */
     int pd_open_read_limit;
     int pd_open_close_sec;
@@ -689,6 +706,16 @@ struct ssd {
     const struct femu_ftl_policy_ops *policy;
     /* sampling state for the random GC policies, seeded from gc_seed */
     uint64_t gc_rng;
+    /* raw bit error model: generator (rber_seed) and C0h counters */
+    uint64_t rber_rng;
+    uint64_t rber_ctr[4];
+    /* qtest only: decode draws given in place of the generator */
+    double rber_script[FTL_RBER_SCRIPT_MAX];
+    int rber_script_len;
+    int rber_script_pos;
+    bool rber_scripted;
+    uint64_t rber_script_short; /* draws asked for past the script */
+    uint64_t rber_last_extra_ns; /* time the last host read added */
     /* the last close_seq given to a retired reclaim unit */
     uint64_t ru_close_seq;
 
@@ -840,6 +867,13 @@ uint64_t ssd_media_last_end(struct ssd *ssd);
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now);
 SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
 void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);
+/* raw bit error model of host reads (ftl-rber.c) */
+int bb_check_rber(FemuCtrl *n, const char *mode, Error **errp);
+void ftl_rber_init_tables(void);
+uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
+                       uint64_t done, uint64_t reads);
+uint64_t ssd_media_read_pass(struct ssd *ssd, struct ppa *ppa,
+                             const NandLoc *loc, uint64_t t);
 void bb_gc_idle(FemuCtrl *n);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);

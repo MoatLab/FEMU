@@ -37038,7 +37038,13 @@ static void femu_test_gc_idle_recover(void *obj, void *data,
     g_assert_cmpint(v[1], >, 0);
     g_assert_cmpint(v[0], >=, v[1]);
     femu_gci_hold(qts, true);
+    /* the last step's media work may not have ended yet: wait out its fence */
     last = femu_gci_kick(qts);
+    for (int i = 0; !strcmp(last, "not-due") && i < 500; i++) {
+        g_free(last);
+        g_usleep(10000);
+        last = femu_gci_kick(qts);
+    }
     g_assert_cmpstr(last, ==, "at-target");
     femu_ftl_check(qts, &mapped, &lost, &orphans);
     g_assert_cmpuint(mapped, ==, 768);
@@ -37374,6 +37380,345 @@ static void femu_test_link_write_order(void *obj, void *data,
     guest_free(alloc, rbuf);
     guest_free(alloc, list);
     guest_free(alloc, wbuf);
+}
+
+/*
+ * x-rber-u of "rber-test": used, length, short, the 4 counters, generator,
+ * and the time the last host read added in ns
+ */
+static void femu_rber_state(QTestState *qts, uint64_t *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/rber-test',"
+                           "'property':'x-rber-u'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 9);
+    for (int i = 0; i < 9; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/* load the next decode draws, or "off" for the generator */
+static void femu_rber_script(QTestState *qts, const char *u)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/rber-test',"
+                             "'property':'x-rber-u','value':%s}}", u);
+}
+
+/* one 4 KiB host read of @lpn, and its time in us */
+static int64_t femu_rber_read(FemuCtrlState *c, uint64_t buf, uint64_t lpn)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * Scripted decode outcomes on one LUN with a 100 ms page read. A draw of 1
+ * fails every attempt; 0 passes, as the mean is tiny (rber_ppb=1). The 4
+ * KiB page has 4 codewords of 1 KiB, read in order. @data names the case:
+ *   retry: codeword 2 fails twice           1 event, 2 passes, 3 reads
+ *   soft:  codeword 0 fails 3 hard, soft ok soft 1, limit 0, 6 reads
+ *   limit: codeword 0 fails soft as well    soft 1, limit 1, 6 reads
+ *   clean: every codeword passes at once    no counter, 1 read
+ * The C0h counters at 296 to 320 must match, and the block read count at
+ * offset 32 must grow by every page read, retries and soft passes too.
+ */
+static void femu_test_rber_scripted(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *name;
+        const char *u;
+        uint64_t used;
+        uint64_t ctr[4];
+        int reads;
+        uint64_t extra_ns;
+    } cases[] = {
+        { "retry", "0 0 1 1 0 0", 6, { 1, 2, 0, 0 }, 3, 200000000 },
+        { "soft", "1 1 1 0 0 0 0", 7, { 1, 2, 1, 0 }, 6, 510000000 },
+        { "limit", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000 },
+        { "clean", "0 0 0 0", 4, { 0, 0, 0, 0 }, 1, 0 },
+    };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    int k = -1;
+    uint64_t v0[9];
+    uint64_t v[9];
+    uint64_t c0[4];
+    uint64_t r0;
+    uint64_t p0;
+    uint8_t out[FEMU_DATA_SIZE];
+    int64_t us;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
+        if (!strcmp(cases[i].name, data)) {
+            k = i;
+        }
+    }
+    g_assert_cmpint(k, >=, 0);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    /* tests with the same device line share one QEMU: count from here */
+    r0 = femu_c0h_field(&c, log, 32);
+    p0 = femu_c0h_field(&c, log, 160);
+    femu_rber_state(qts, v0);
+    for (int i = 0; i < 4; i++) {
+        c0[i] = femu_c0h_field(&c, log, 296 + 8 * i);
+    }
+    femu_rber_script(qts, cases[k].u);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    us = femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    /* the model changes time only: the data and status stay */
+    qtest_memread(qts, buf, out, sizeof(out));
+    for (size_t i = 0; i < sizeof(out); i++) {
+        g_assert_cmphex(out[i], ==, 0x3c);
+    }
+    g_test_message("%s: %" PRId64 " us, used %" PRIu64 ", counters %" PRIu64
+                   " %" PRIu64 " %" PRIu64 " %" PRIu64, cases[k].name, us,
+                   v[0], v[3], v[4], v[5], v[6]);
+    g_assert_cmpuint(v[0], ==, cases[k].used);
+    g_assert_cmpuint(v[2], ==, 0);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[3 + i] - v0[3 + i], ==, cases[k].ctr[i]);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 296 + 8 * i) - c0[i], ==,
+                         cases[k].ctr[i]);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log, 32) - r0, ==, cases[k].reads);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 160) - p0, ==, cases[k].reads);
+    /*
+     * The one LUN is idle, so each extra page read takes pg_rd_lat (100 ms)
+     * and soft decode adds rr_soft_ns (10 ms) once.
+     */
+    if (cases[k].extra_ns) {
+        g_assert_cmpuint(v[8], ==, cases[k].extra_ns);
+    }
+    g_assert_cmpint(us, >=, cases[k].reads * 100000 - 1000);
+    femu_rber_script(qts, "off");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Read disturb with real draws: rber_read_double=1 doubles the error mean
+ * with each read of the block. A fresh block reads with no retry; after 40
+ * reads the mean reaches the cap and reads need retries. Without the read
+ * term, the mean stays near 1e-5 and no read retries.
+ */
+static void femu_test_rber_disturb(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[3], ==, 0);
+    for (int i = 0; i < 40; i++) {
+        femu_rber_read(&c, buf, 0);
+    }
+    femu_rber_state(qts, v);
+    g_test_message("after 41 reads: %" PRIu64 " retry reads, %" PRIu64
+                   " passes, %" PRIu64 " soft", v[3], v[4], v[5]);
+    g_assert_cmpuint(v[3], >, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * rber_ppb=0 given: reads draw nothing and count nothing. The generator
+ * stays at its seed (1) and no read adds time.
+ */
+static void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_rber_read(&c, buf, i);
+    }
+    femu_rber_state(qts, v);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[3 + i], ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 296 + 8 * i), ==, 0);
+    }
+    g_assert_cmpuint(v[7], ==, 1);
+    g_assert_cmpuint(v[8], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The age term, from the first program (pd_open_age), with no ECC tiers.
+ * age_scale=1000000 and rber_age_double_sec=1000 double the error mean
+ * every ms of wall time. A read right after the write needs no retry; after
+ * 300 ms the mean is at the cap, and reads retry. Without the age term the
+ * mean stays near 1e-5.
+ */
+static void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[9];
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v0);
+    g_usleep(300000);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_test_message("after 300 ms: %" PRIu64 " retry reads, %" PRIu64
+                   " passes", v[3] - v0[3], v[4] - v0[4]);
+    g_assert_cmpuint(v[3] - v0[3], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The wear term: rber_ppb=2000000 gives a fresh mean of 16 bit errors per
+ * codeword, far below 40, so a fresh block reads with no retry. Eight
+ * sequential overwrites of the whole namespace erase each line about five
+ * times; with rber_pe_double=1, two erases already give a mean of 64, and
+ * the last written page retries. Without the wear term it does not.
+ */
+static void femu_test_rber_wear(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[9];
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v0);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[3] - v0[3], ==, 0);
+    for (int round = 0; round < 8; round++) {
+        for (int lpn = 0; lpn < 768; lpn++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8,
+                                            buf)), ==, NVME_SUCCESS);
+        }
+    }
+    femu_rber_state(qts, v0);
+    femu_rber_read(&c, buf, 767);
+    femu_rber_state(qts, v);
+    g_test_message("worn read: %" PRIu64 " retry reads, %" PRIu64 " passes",
+                   v[3] - v0[3], v[4] - v0[4]);
+    g_assert_cmpuint(v[3] - v0[3], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* rber_ppb is refused where its booking or inputs would be wrong */
+static void femu_test_rber_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'pg_xfer_lat':1000", "bus phase timing" },
+        { "'cmd_addr_lat':100", "bus phase timing" },
+        { "'ch_xfer_lat':100", "bus phase timing" },
+        { "'status_lat':100", "bus phase timing" },
+        { "'onfi_mode':0", "ONFI timing" },
+        { "'pe_suspend':1", "pe_suspend" },
+        { "'mp_read':1", "mp_read or onfi_cache_read" },
+        { "'gc_copyback':true", "gc_copyback" },
+        { "'ecc_step_ns':100", "ecc_step_ns" },
+        { "'mapping':'hybrid'", "a mapping other than page or dftl" },
+        { "'ecc_cw_bytes':1000", "ecc_cw_bytes must be" },
+        { "'ecc_hard_bits':2000", "ecc_hard_bits must be" },
+        { "'ecc_soft_bits':10", "ecc_soft_bits must be" },
+        { "'rr_steps':17", "rr_steps must be" },
+        { "'rr_gain':1", "rr_gain must be" },
+        { "'rr_floor_pct':101", "rr_floor_pct must be" },
+        { "'rr_soft_senses':9", "rr_soft_senses must be" },
+        { "'rr_soft_ns':20000000", "rr_soft_ns must be" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'rbr','addr':'5','devsz_mb':4,'femu_mode':1,"
+                "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
+                "'nchs':1,'rber_ppb':%d,%s}}", on, cases[i].opts);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                /* the control: the same line with the model off */
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", cases[i].opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "rbr", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
 }
 
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
@@ -46376,6 +46721,64 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95" });
     qos_add_test("gc-idle-refused", "femu", femu_test_gc_idle_refused, NULL);
+    qos_add_test("rber-retry", "femu", femu_test_rber_scripted,
+                 &(QOSGraphTestOptions) { .arg = (void *)"retry",
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1"
+            ",pg_rd_lat=100000000" });
+    qos_add_test("rber-soft", "femu", femu_test_rber_scripted,
+                 &(QOSGraphTestOptions) { .arg = (void *)"soft",
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1"
+            ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("rber-limit", "femu", femu_test_rber_scripted,
+                 &(QOSGraphTestOptions) { .arg = (void *)"limit",
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1"
+            ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("rber-clean", "femu", femu_test_rber_scripted,
+                 &(QOSGraphTestOptions) { .arg = (void *)"clean",
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1"
+            ",pg_rd_lat=100000000" });
+    qos_add_test("rber-disturb", "femu", femu_test_rber_disturb,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1"
+            ",rber_read_double=1,ecc_cw_bytes=1024,ecc_hard_bits=40,"
+            "ecc_soft_bits=72,rr_gain=2,rr_floor_pct=10,rr_soft_senses=3,"
+            "rr_soft_ns=20000,rber_seed=7,rber_pe_double=0,"
+            "rber_age_double_sec=0" });
+    qos_add_test("rber-refused", "femu", femu_test_rber_refused, NULL);
+    qos_add_test("rber-off", "femu", femu_test_rber_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=0" });
+    qos_add_test("rber-age", "femu", femu_test_rber_age,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1,pd_open_age=on,age_scale=1000000,"
+            "rber_age_double_sec=1000" });
+    qos_add_test("rber-wear", "femu", femu_test_rber_wear,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=2000000,rber_pe_double=1" });
     qos_add_test("link-write-first", "femu", femu_test_link_write_order,
                  &(QOSGraphTestOptions) { .arg = (void *)"first",
         .edge.extra_device_opts =
@@ -47896,6 +48299,16 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_frontier=off",
+    });
+    /* rber_ppb given as 0: the same trace as the plain device */
+    qos_add_test("ftl-trace-rber-off", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "rber_ppb=0",
     });
     /* gc_idle_ms given as 0: the same trace as the plain device */
     qos_add_test("ftl-trace-gc-idle-off", "femu", femu_test_ftl_trace,

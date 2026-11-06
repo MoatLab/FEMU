@@ -319,6 +319,8 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
 {
     uint64_t stime = (ncmd->stime == 0) ?
         ssd_now(ssd) : ncmd->stime;
+    NandOpCompletion c;
+    uint64_t reads = 0;
     NandLoc loc;
     NandMediaOp op;
 
@@ -340,7 +342,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
      * data pages it does not disturb.
      */
     if (op == NAND_MEDIA_READ && !bb_io_meta(ncmd->type)) {
-        get_blk(ssd, ppa)->read_cnt++;
+        reads = get_blk(ssd, ppa)->read_cnt++;
     }
 
     ssd->media_ops[op]++;
@@ -348,7 +350,28 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
     loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
-    return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
+    c = nand_media_op(&ssd->media, &loc, op, stime);
+    /* retries and soft decode of a host read (rber_ppb) */
+    if (unlikely(ssd->sp.rber_ppb) && op == NAND_MEDIA_READ &&
+        ncmd->type == USER_IO) {
+        return ssd_rber_read(ssd, ppa, &loc, c.done_ns, reads) - stime;
+    }
+    return c.latency_ns;
+}
+
+/*
+ * One more page read of a decode retry or a soft decode, booked on the LUN
+ * and channel from @t. It stresses the block and counts as a media read,
+ * as the first read did. Returns when it ends.
+ */
+uint64_t ssd_media_read_pass(struct ssd *ssd, struct ppa *ppa,
+                             const NandLoc *loc, uint64_t t)
+{
+    get_blk(ssd, ppa)->read_cnt++;
+    ssd->media_ops[NAND_MEDIA_READ]++;
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_READ],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) + 1);
+    return nand_media_op(&ssd->media, loc, NAND_MEDIA_READ, t).done_ns;
 }
 
 /*

@@ -17,6 +17,7 @@ femu_unit_tests = {
                                  '../nand/nand-media.c', '../nand/onfi.c'),
   'test-femu-pqueue': files('unit/test-pqueue.c', '../lib/pqueue.c'),
   'test-femu-tier-math': files('unit/test-tier-math.c'),
+  'test-femu-rber-math': files('unit/test-rber-math.c'),
 }
 
 foreach test_name, test_src : femu_unit_tests

@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "system/qtest.h"
@@ -3109,12 +3110,15 @@ static bool femu_check_pd_props(FemuCtrl *n, Error **errp)
                    "together");
         return false;
     }
-    if (femu_pd_terms_on(n) && bp->ecc_step_ns <= 0) {
+    /* the raw bit error model reads pd_open_age without ECC tiers */
+    if (femu_pd_terms_on(n) && bp->ecc_step_ns <= 0 &&
+        !(bp->rber_ppb && bp->pd_open_age && !bp->pd_edge_wls &&
+          !bp->pd_edge_tiers && !bp->pd_open_tiers)) {
         error_setg(errp, "femu: the pd_* program disturb read terms need "
                    "ecc_step_ns above 0");
         return false;
     }
-    if (bp->pd_open_age && bp->ecc_retention_sec <= 0) {
+    if (bp->pd_open_age && bp->ecc_retention_sec <= 0 && !bp->rber_ppb) {
         error_setg(errp, "femu: pd_open_age needs ecc_retention_sec above 0");
         return false;
     }
@@ -3426,6 +3430,22 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         if (n->bb_params.gc_idle_ms) {
             error_setg(errp, "FEMU: gc_idle_ms is not supported with shared "
                        "namespaces");
+            return;
+        }
+    }
+    /* the raw bit error model runs on one bbssd FTL; bb_init() checks more */
+    if (n->bb_params.rber_ppb) {
+        const char *why = NULL;
+
+        if (n->femu_mode != FEMU_BBSSD_MODE) {
+            why = "a femu_mode other than 1";
+        } else if (n->namespace_modes && n->namespace_modes[0]) {
+            why = "namespace_modes";
+        } else if (n->ns_mgmt || nvme_ns_shared(n)) {
+            why = "managed or shared namespaces";
+        }
+        if (why) {
+            error_setg(errp, "FEMU: rber_ppb is not supported with %s", why);
             return;
         }
     }
@@ -4126,6 +4146,21 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("ecc_step_ns", FemuCtrl, bb_params.ecc_step_ns, 0),
     DEFINE_PROP_INT32("ecc_retention_sec", FemuCtrl,
                       bb_params.ecc_retention_sec, 0),
+    DEFINE_PROP_UINT32("rber_ppb", FemuCtrl, bb_params.rber_ppb, 0),
+    DEFINE_PROP_UINT32("rber_pe_double", FemuCtrl, bb_params.rber_pe_double, 0),
+    DEFINE_PROP_UINT32("rber_age_double_sec", FemuCtrl,
+                       bb_params.rber_age_double_sec, 0),
+    DEFINE_PROP_UINT32("rber_read_double", FemuCtrl,
+                       bb_params.rber_read_double, 0),
+    DEFINE_PROP_UINT32("ecc_cw_bytes", FemuCtrl, bb_params.ecc_cw_bytes, 1024),
+    DEFINE_PROP_UINT32("ecc_hard_bits", FemuCtrl, bb_params.ecc_hard_bits, 40),
+    DEFINE_PROP_UINT32("ecc_soft_bits", FemuCtrl, bb_params.ecc_soft_bits, 72),
+    DEFINE_PROP_UINT32("rr_steps", FemuCtrl, bb_params.rr_steps, 4),
+    DEFINE_PROP_UINT32("rr_gain", FemuCtrl, bb_params.rr_gain, 2),
+    DEFINE_PROP_UINT8("rr_floor_pct", FemuCtrl, bb_params.rr_floor_pct, 10),
+    DEFINE_PROP_UINT32("rr_soft_senses", FemuCtrl, bb_params.rr_soft_senses, 3),
+    DEFINE_PROP_UINT32("rr_soft_ns", FemuCtrl, bb_params.rr_soft_ns, 20000),
+    DEFINE_PROP_UINT32("rber_seed", FemuCtrl, bb_params.rber_seed, 1),
     DEFINE_PROP_INT32("cmd_addr_lat", FemuCtrl, bb_params.cmd_addr_lat, 0),
     DEFINE_PROP_INT32("pg_xfer_lat", FemuCtrl, bb_params.pg_xfer_lat, 0),
     DEFINE_PROP_INT32("status_lat", FemuCtrl, bb_params.status_lat, 0),
@@ -4550,6 +4585,79 @@ static void femu_test_gc_idle_hold_set(Object *obj, bool on, Error **errp)
     nvme_resume_pollers(n, resume);
 }
 
+/*
+ * qtest only: the decode draws of the raw bit error model. Reading gives
+ * "used length short c0 c1 c2 c3 rng extra": script use, the C0h counters,
+ * the generator state and the time the last host read added. It works with
+ * the model off. Writing "off" goes back to the generator; writing values
+ * in [0, 1] loads them as the next draws.
+ */
+static char *femu_test_rber_get(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = BBSSD(n) ? n->ssd : NULL;
+    char *out;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "x-rber-u requires a bbssd FTL");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = g_strdup_printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                          " %" PRIu64 " %" PRIu64 " %" PRIu64,
+                          ssd->rber_script_pos, ssd->rber_script_len,
+                          ssd->rber_script_short, ssd->rber_ctr[0],
+                          ssd->rber_ctr[1], ssd->rber_ctr[2], ssd->rber_ctr[3],
+                          ssd->rber_rng, ssd->rber_last_extra_ns);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+static void femu_test_rber_set(Object *obj, const char *value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->bb_params.rber_ppb ? n->ssd : NULL;
+    g_auto(GStrv) f = NULL;
+    double v[FTL_RBER_SCRIPT_MAX];
+    int len = 0;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "x-rber-u requires rber_ppb");
+        return;
+    }
+    if (strcmp(value, "off")) {
+        f = g_strsplit(value, " ", 0);
+        for (int i = 0; f[i]; i++) {
+            char *end;
+
+            if (!*f[i]) {
+                continue;
+            }
+            if (len == FTL_RBER_SCRIPT_MAX) {
+                error_setg(errp, "x-rber-u takes at most %d values",
+                           FTL_RBER_SCRIPT_MAX);
+                return;
+            }
+            v[len] = g_ascii_strtod(f[i], &end);
+            if (end == f[i] || *end || !isfinite(v[len]) || v[len] < 0 ||
+                v[len] > 1) {
+                error_setg(errp, "x-rber-u: '%s' is not in [0, 1]", f[i]);
+                return;
+            }
+            len++;
+        }
+    }
+    resume = nvme_pause_pollers(n);
+    memcpy(ssd->rber_script, v, len * sizeof(v[0]));
+    ssd->rber_script_len = len;
+    ssd->rber_script_pos = 0;
+    ssd->rber_script_short = 0;
+    ssd->rber_scripted = strcmp(value, "off") != 0;
+    nvme_resume_pollers(n, resume);
+}
+
 /* qtest only: each later idle step sleeps this many ms inside the sweep */
 static void femu_test_gc_idle_latch(Object *obj, Visitor *v, const char *name,
                                     void *opaque, Error **errp)
@@ -4847,6 +4955,8 @@ static void femu_instance_init(Object *obj)
                                  femu_test_gc_idle_hold_set);
         object_property_add_str(obj, "x-gc-idle-kick", femu_test_gc_idle_kick,
                                 NULL);
+        object_property_add_str(obj, "x-rber-u", femu_test_rber_get,
+                                femu_test_rber_set);
         object_property_add(obj, "x-gc-idle-latch", "uint32", NULL,
                             femu_test_gc_idle_latch, NULL, NULL);
         object_property_add_str(obj, "x-gc-idle-order", femu_test_gc_idle_order,

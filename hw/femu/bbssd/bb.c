@@ -302,6 +302,79 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
  * a step then runs alone inside ftl_in_sweep, and all media work goes
  * through the request path. Each refusal below breaks one of these.
  */
+/*
+ * The raw bit error model books each retry as a later read on the flat
+ * bus model, on host reads only. Refuse it where that booking or its
+ * inputs would be wrong, and check its limits, all only when it is on.
+ */
+int bb_check_rber(FemuCtrl *n, const char *mode, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    const char *map = p->mapping_scheme;
+    const char *page = p->onfi_param_page;
+    uint64_t pgsz = (uint64_t)p->secs_per_pg * p->secsz;
+    const char *why = NULL;
+
+    if (!p->rber_ppb) {
+        return 0;
+    }
+    if (strcmp(mode, "bbssd")) {
+        why = mode;
+    } else if (p->cmd_addr_lat || p->pg_xfer_lat || p->ch_xfer_lat ||
+               p->status_lat) {
+        why = "bus phase timing (cmd_addr_lat, pg_xfer_lat, ch_xfer_lat, "
+              "status_lat)";
+    } else if (p->onfi_mode != -1 || (page && *page) || p->onfi_sca) {
+        why = "ONFI timing";
+    } else if (p->pe_suspend) {
+        why = "pe_suspend";
+    } else if (p->mp_read || p->onfi_cache_read) {
+        why = "mp_read or onfi_cache_read";
+    } else if (p->gc_copyback) {
+        why = "gc_copyback";
+    } else if (p->ecc_step_ns) {
+        why = "ecc_step_ns";
+    } else if (n->cxl_ssd) {
+        why = "cxl_ssd";
+    } else if (p->tier_mode && strcmp(p->tier_mode, "off")) {
+        why = "the pSLC tier";
+    } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
+        why = "a mapping other than page or dftl";
+    }
+    if (why) {
+        error_setg(errp, "FEMU %s: rber_ppb is not supported with %s",
+                   mode, why);
+        return -1;
+    }
+    if (p->rber_ppb > 1000000000u) {
+        why = "rber_ppb must be at most 1000000000";
+    } else if (p->ecc_cw_bytes < 256 || pgsz % p->ecc_cw_bytes ||
+               pgsz / p->ecc_cw_bytes > 16) {
+        why = "ecc_cw_bytes must be 256 or more, divide the page, and give "
+              "16 codewords or fewer";
+    } else if (p->ecc_hard_bits < 1 || p->ecc_hard_bits > FTL_RBER_BITS_MAX) {
+        why = "ecc_hard_bits must be 1 to 1024";
+    } else if (p->ecc_soft_bits && (p->ecc_soft_bits < p->ecc_hard_bits ||
+                                    p->ecc_soft_bits > FTL_RBER_BITS_MAX)) {
+        why = "ecc_soft_bits must be 0, or ecc_hard_bits to 1024";
+    } else if (p->rr_steps > FTL_RBER_STEPS_MAX) {
+        why = "rr_steps must be 0 to 16";
+    } else if (p->rr_gain < 2 || p->rr_gain > 16) {
+        why = "rr_gain must be 2 to 16";
+    } else if (p->rr_floor_pct > 100) {
+        why = "rr_floor_pct must be 0 to 100";
+    } else if (p->rr_soft_senses > 8) {
+        why = "rr_soft_senses must be 0 to 8";
+    } else if (p->rr_soft_ns > 10000000) {
+        why = "rr_soft_ns must be at most 10000000";
+    }
+    if (why) {
+        error_setg(errp, "FEMU %s: %s", mode, why);
+        return -1;
+    }
+    return 0;
+}
+
 int bb_check_gc_idle(FemuCtrl *n, const char *mode, Error **errp)
 {
     const BbCtrlParams *p = &n->bb_params;
@@ -491,7 +564,8 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     struct ssd *ssd;
 
     if (bb_check_gc_frontier(n, "bbssd", errp) ||
-        bb_check_gc_idle(n, "bbssd", errp)) {
+        bb_check_gc_idle(n, "bbssd", errp) ||
+        bb_check_rber(n, "bbssd", errp)) {
         return;
     }
 
