@@ -265,6 +265,7 @@ static void nvme_subsys_unrealize(DeviceState *dev)
 static const Property nvme_subsystem_props[] = {
     DEFINE_PROP_BOOL("ns_mgmt", NvmeSubsystem, ns_mgmt, false),
     DEFINE_PROP_STRING("nqn", NvmeSubsystem, params.nqn),
+    DEFINE_PROP_BOOL("rotational", NvmeSubsystem, params.rotational, false),
     DEFINE_PROP_BOOL("fdp", NvmeSubsystem, params.fdp.enabled, false),
     DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs, 0),
     DEFINE_PROP_UINT32("fdp.nrg", NvmeSubsystem, params.fdp.nrg, 1),
@@ -1912,6 +1913,37 @@ static int nvme_check_fdp_namespaces(FemuCtrl *n, const uint8_t *modes,
     return 0;
 }
 
+/*
+ * Base 2.1, 8.1.23: a rotational namespace is in a rotational endurance
+ * group. Zoned, key-value and open-channel namespaces are not offered as
+ * rotational, and Linux reads RMEDIA only from CNS 08h, which an OC 2.0
+ * controller (NVMe 1.4) does not get asked for.
+ */
+static int nvme_check_rotational_namespaces(FemuCtrl *n,
+                                            const uint8_t *modes,
+                                            Error **errp)
+{
+    if (!n->subsys || !n->subsys->params.rotational) {
+        return 0;
+    }
+    if (n->subsys->params.fdp.enabled) {
+        error_setg(errp, "a rotational subsystem does not offer FDP");
+        return -1;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] == FEMU_ZNSSD_MODE || modes[i] == FEMU_KVSSD_MODE ||
+            modes[i] == FEMU_OCSSD_MODE) {
+            error_setg(errp, "a rotational subsystem needs NVM namespaces; "
+                       "namespace %d is %s", i + 1,
+                       modes[i] == FEMU_ZNSSD_MODE ? "zoned (znssd)" :
+                       modes[i] == FEMU_KVSSD_MODE ? "key-value (kvssd)" :
+                       "open-channel (ocssd)");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1927,7 +1959,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     ns_modes = g_new0(uint8_t, n->num_namespaces);
     if (nvme_resolve_ns_modes(n, ns_modes, errp) ||
         nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp) ||
-        nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp)) {
+        nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp) ||
+        nvme_check_rotational_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;

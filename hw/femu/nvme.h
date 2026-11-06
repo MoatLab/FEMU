@@ -276,7 +276,8 @@ typedef struct NvmeEnduranceGroup {
 
 typedef struct QEMU_PACKED NvmeEndGrpLog {
     uint8_t  critical_warning;
-    uint8_t  rsvd[2];
+    uint8_t  egfeat;            /* bit 0: rotational media (EGRMEDIA) */
+    uint8_t  rsvd;
     uint8_t  avail_spare;
     uint8_t  avail_spare_thres;
     uint8_t  percet_used;
@@ -317,6 +318,7 @@ typedef struct NvmeSubsystem {
 
     struct {
         char *nqn;
+        bool rotational;    /* endurance group 1 is rotational media */
 
         struct {
             bool     enabled;
@@ -328,6 +330,11 @@ typedef struct NvmeSubsystem {
         } fdp;
     } params;
 } NvmeSubsystem;
+
+static inline bool nvme_subsys_rotational(NvmeSubsystem *subsys)
+{
+    return subsys && subsys->params.rotational;
+}
 
 typedef struct QEMU_PACKED NvmeRuhStatus {
     uint8_t  rsvd0[14];
@@ -1238,6 +1245,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FID_EFFECTS    = 0x12,
     NVME_LOG_MI_EFFECTS     = 0x13,
     NVME_LOG_ENDGRP         = 0x09,
+    NVME_LOG_ROTATIONAL     = 0x16,
     NVME_LOG_REACH_GROUPS   = 0x1a,
     NVME_LOG_REACH_ASSOCS   = 0x1b,
     NVME_LOG_FDP_CONFS      = 0x20,
@@ -1557,6 +1565,7 @@ enum NvmeFeatureIds {
     NVME_TIMESTAMP                  = 0xe,
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
+    NVME_SPINUP_CONTROL             = 0x1a,
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,

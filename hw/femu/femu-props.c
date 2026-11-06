@@ -35,6 +35,11 @@ static const FemuPropDesc femu_subsys_descs[] = {
       "Subsystem name reported as nqn.2019-08.org.qemu:<nqn> by controllers "
       "that share namespaces through this subsystem; unset uses the device "
       "id" },
+    { "rotational",
+      "Report endurance group 1 as rotational media: the RMEDIA bit of its "
+      "namespaces, log 09h EGRMEDIA, log 16h and a fixed Spinup Control "
+      "feature; timing does not change; not with fdp, znssd, kvssd or "
+      "ocssd namespaces" },
     { "fdp",
       "Enable Flexible Data Placement in endurance group 1 for controllers "
       "that join this subsystem; only bbssd places data by reclaim unit" },

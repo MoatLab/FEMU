@@ -36423,6 +36423,217 @@ static void femu_test_endgrp_reported(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* the rotational subsystems of the rotational-* tests */
+static void *femu_rot_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line,
+        " -device femu-subsys,id=rotsub,nqn=rotsub,rotational=on"
+        " -device femu-subsys,id=rotsub-off,nqn=rotsub-off"
+        " -device femu-subsys,id=rotsub-fdp,nqn=rotsub-fdp,rotational=on,"
+        "fdp=on,fdp.nruh=4"
+        " -device femu-subsys,id=rotsub-fdp-off,nqn=rotsub-fdp-off,"
+        "fdp=on,fdp.nruh=4 ");
+    return arg;
+}
+
+#define FEMU_LOG_ROTATIONAL     0x16
+#define FEMU_FEAT_SPINUP        0x1a
+#define FEMU_RMEDIA             (1 << 4)
+#define FEMU_VWCNP              (1 << 5)
+
+/*
+ * rotational on a femu-subsys (Base 2.1, 8.1.23). @data "on": endurance
+ * group 1 is rotational media. Its namespace sets NSFEAT.RMEDIA in CNS 08h
+ * and 1Fh next to VWCNP, log 09h sets EGRMEDIA, log 16h reports one
+ * actuator, one spinup and one load, LID 00h lists 16h with LSUPP only, and
+ * Spinup Control (FID 1Ah) is supported with NVM subsystem scope, fixed at
+ * zero. @data "on-vwc": the same with a write cache, so VWCNP is clear.
+ * @data "off": a subsystem without the property has none of that.
+ * Every buffer is poisoned first, so a missing transfer cannot pass.
+ */
+static void femu_test_rotational(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool on = g_str_has_prefix(data, "on");
+    bool vwc = g_str_has_suffix(data, "vwc");
+    uint8_t log[512], indep[4096];
+    uint32_t result;
+    uint64_t buf;
+    NvmeIdCtrl id;
+    NvmeIdNs ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_ENDGRPS, ==,
+                    NVME_CTRATT_ENDGRPS);
+    g_assert_cmpuint(le16_to_cpu(id.endgidmax), ==, 1);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &ns, sizeof(ns));
+    g_assert_cmpuint(le16_to_cpu(ns.endgid), ==, 1);
+    for (uint32_t cns = FEMU_CNS_NS_CS_INDEP; cns <= 0x1f; cns += 0x17) {
+        qtest_memset(qts, buf, on ? 0x00 : 0xff, 4096);
+        g_assert_cmphex(femu_identify(&c, 1, cns, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, indep, sizeof(indep));
+        g_assert_cmphex(indep[0] & FEMU_RMEDIA, ==, on ? FEMU_RMEDIA : 0);
+        g_assert_cmphex(indep[0] & FEMU_VWCNP, ==, vwc ? 0 : FEMU_VWCNP);
+        g_assert_cmpuint(indep[12] | indep[13] << 8, ==, 1);
+    }
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_SUPPORTED, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_LOG_ROTATIONAL), ==,
+                    on ? 1 : 0);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * NVME_LOG_ENDGRP), ==, 1);
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, NVME_LOG_ENDGRP, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 1), ==, on ? 1 : 0);
+    g_assert_cmphex(qtest_readb(qts, buf + 2), ==, 0);
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_FID_EFFECTS, 0, buf, 1024),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FEAT_SPINUP), ==,
+                    on ? 1 | 1u << 25 : 0);
+
+    if (!on) {
+        g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 0, buf, 512),
+                        ==, NVME_INVALID_LOG_ID);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_SPINUP,
+                                NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                        ==, NVME_INVALID_FIELD);
+        for (int sv = 0; sv <= 1; sv++) {
+            g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, sv,
+                                                     0, 0, NULL)), ==,
+                            NVME_INVALID_FIELD);
+        }
+        goto out;
+    }
+
+    /* log 16h, twice: the counters do not move between reads */
+    for (int i = 0; i < 2; i++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 0, buf, 512),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, log, sizeof(log));
+        g_assert_cmpuint(lduw_le_p(&log[0]), ==, 1);    /* ENDGID */
+        g_assert_cmpuint(lduw_le_p(&log[2]), ==, 1);    /* NUMA */
+        g_assert_cmpuint(lduw_le_p(&log[4]), ==, 0);    /* NRS */
+        g_assert_cmpuint(ldl_le_p(&log[8]), ==, 1);     /* SPINC */
+        g_assert_cmpuint(ldl_le_p(&log[12]), ==, 0);    /* FSPINC */
+        g_assert_cmpuint(ldl_le_p(&log[16]), ==, 1);    /* LDC */
+        g_assert_cmpuint(ldl_le_p(&log[20]), ==, 0);    /* FLDC */
+        g_assert_cmpuint(log[6] | log[7], ==, 0);
+        for (int b = 24; b < sizeof(log); b++) {
+            g_assert_cmpuint(log[b], ==, 0);
+        }
+    }
+    /* an offset read, and a group that does not exist */
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 16, buf, 4), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(FEMU_LOG_ROTATIONAL | (127 << 16));
+        cmd.cdw11 = cpu_to_le32(2 << 16);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+    }
+
+    /* Spinup Control: fixed off, not changeable, not saveable */
+    for (uint8_t sel = 0; sel <= 3; sel++) {
+        result = 0xdeadbeef;
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_SPINUP, sel,
+                                                 0, 0, &result)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(result, ==, 0);
+    }
+    for (uint32_t sce = 0; sce <= 1; sce++) {
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, false,
+                                                 0, sce, NULL)), ==,
+                        NVME_FEAT_NOT_CHANGEABLE);
+    }
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, true, 0, 0,
+                                             NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+
+out:
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A rotational subsystem refuses namespaces that are not NVM ones, and
+ * FDP. Each case has a control: the same controller in a subsystem without
+ * the property.
+ */
+static void femu_test_rotational_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *sub;
+        const char *control;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':3", "rotsub", "rotsub-off", "znssd" },
+        { "'femu_mode':5", "rotsub", "rotsub-off", "kvssd" },
+        { "'femu_mode':0", "rotsub", "rotsub-off", "ocssd" },
+        { "'femu_mode':1,'namespaces':2,'namespace_modes':'bbssd,,znssd,',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':64,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':2,'nchs':2", "rotsub", "rotsub-off",
+          "namespace 2" },
+        /* the control keeps FDP and drops only the rotational property */
+        { "'femu_mode':2", "rotsub-fdp", "rotsub-fdp-off", "FDP" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'rot','addr':'5','devsz_mb':64,'subsys':'%s',%s}}",
+                on ? cases[i].sub : cases[i].control, cases[i].opts);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, "rotational"));
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", cases[i].opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "rot", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
 /* Without a subsystem there is no endurance group, so CNS 19h is refused. */
 static void femu_test_endgrp_list_absent(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -51623,6 +51834,30 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "femu_mode=1,subsys=nssub,namespaces=2,"
             "namespace_modes=bbssd,,kvssd," FEMU_CAPS_GEO,
         .before = femu_ns_subsys_before,
+    });
+    qos_add_test("rotational-on", "femu", femu_test_rotational,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=rotsub," FEMU_CAPS_GEO,
+        .before = femu_rot_before,
+        .arg = (void *)"on",
+    });
+    qos_add_test("rotational-on-vwc", "femu", femu_test_rotational,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=rotsub,vwc=1,"
+            FEMU_CAPS_GEO,
+        .before = femu_rot_before,
+        .arg = (void *)"on-vwc",
+    });
+    qos_add_test("rotational-off", "femu", femu_test_rotational,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,subsys=rotsub-off,"
+            FEMU_CAPS_GEO,
+        .before = femu_rot_before,
+        .arg = (void *)"off",
+    });
+    qos_add_test("rotational-refused", "femu", femu_test_rotational_refused,
+                 &(QOSGraphTestOptions) {
+        .before = femu_rot_before,
     });
     qos_add_test("endgrp-list-absent", "femu", femu_test_endgrp_list_absent,
                  &(QOSGraphTestOptions) {

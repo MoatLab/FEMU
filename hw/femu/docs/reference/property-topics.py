@@ -232,6 +232,13 @@ DEVICES = [
                     "fdp.isolation_mode",
                 ],
             },
+            {
+                "title": "Rotational media",
+                "kind": "static",
+                "props": [
+                    "rotational",
+                ],
+            },
         ],
     },
     {

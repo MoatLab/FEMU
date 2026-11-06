@@ -30,6 +30,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_TIMESTAMP]                = true,
+    [NVME_SPINUP_CONTROL]           = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -77,6 +78,9 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
          * capability (CTRATT.FDPS clear) and no FDP features.
          */
         return n->subsys && n->subsys->endgrp.fdp.enabled;
+    case NVME_SPINUP_CONTROL:
+        /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
+        return nvme_subsys_rotational(n->subsys);
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
             if (n->namespaces[i].allocated && NS_KVSSD(&n->namespaces[i])) {
@@ -1148,6 +1152,11 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
         if (nvme_ns_media_ro(ns)) {
             id[8] = NVME_NSATTR_CWP;        /* NSATTR */
         }
+        /* NSFEAT.RMEDIA for the namespaces of a rotational group */
+        if (nvme_subsys_rotational(n->subsys) &&
+            le16_to_cpu(ns->id_ns.endgid) == 1) {
+            id[0] |= 1 << 4;
+        }
         stw_le_p(&id[12], le16_to_cpu(ns->id_ns.endgid));
         id[14] = 0x1;                       /* NSTAT.NRDY */
         /* one Reachability Group holds every namespace (Base 8.1.21) */
@@ -1649,6 +1658,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* the only combination there is, and the only one selectable */
         cqe->n.result = 0;
         break;
+    case NVME_SPINUP_CONTROL:
+        /* fixed off: no capability bit is set, so a Set cannot change it */
+        cqe->n.result = 0;
+        break;
     case NVME_FDP_MODE: {
         uint32_t result;
         uint16_t status = nvme_get_feature_fdp(n, dw11, false, &result);
@@ -1697,12 +1710,13 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
 
-    if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
-        return NVME_FID_NOT_SAVEABLE | NVME_DNR;
-    }
-
+    /* an identifier the controller does not support is an invalid field */
     if (!nvme_fid_supported(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
+        return NVME_FID_NOT_SAVEABLE | NVME_DNR;
     }
 
     if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
@@ -2096,6 +2110,7 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 #define NVME_FID_SCOPE_NS       (1u << 20)
 #define NVME_FID_SCOPE_CTRL     (1u << 21)
 #define NVME_FID_SCOPE_ENDGRP   (1u << 23)
+#define NVME_FID_SCOPE_SUBSYS   (1u << 25)
 
 /*
  * Whether @fid belongs to command set @csi. Features an I/O command set defines
@@ -2148,6 +2163,8 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
+        } else if (fid == NVME_SPINUP_CONTROL) {
+            scope = NVME_FID_SCOPE_SUBSYS;
         } else if (fid == NVME_FDP_EVENTS) {
             scope = 0;  /* a reclaim unit handle, which has no FSP bit */
         } else if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
@@ -2665,6 +2682,7 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
      * included, which is the difference this log is for.
      */
     nvme_collect_media_stats(n, &st);
+    info.egfeat = nvme_subsys_rotational(n->subsys) ? 1 : 0;
     info.avail_spare = st.available_spare;
     info.avail_spare_thres = NVME_SPARE_THRESHOLD;
     info.percet_used = st.percentage_used;
@@ -2695,6 +2713,34 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
 
     buf_len = MIN(sizeof(info) - off, buf_len);
     return dma_read_prp(n, (uint8_t *)&info + off, buf_len, prp1, prp2);
+}
+
+/*
+ * Rotational Media Information (16h, Base 2.1, 5.1.12.1.22) of endurance
+ * group 1. Each QEMU run builds a new group, which spins up and loads its
+ * one actuator once when it is created. FEMU has only power state 0, so no
+ * later spinup or load occurs, and the counters stay at that one event.
+ */
+static uint16_t nvme_rotational_log(FemuCtrl *n, uint32_t buf_len,
+                                    uint64_t off, NvmeCmd *cmd)
+{
+    uint16_t endgrpid = le32_to_cpu(cmd->cdw11) >> 16;
+    uint8_t log[512] = {};
+
+    if (endgrpid != 1 || off >= sizeof(log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    stw_le_p(&log[0], 1);       /* ENDGID */
+    stw_le_p(&log[2], 1);       /* NUMA: one actuator */
+    stw_le_p(&log[4], 0);       /* NRS: the speed is not reported */
+    stl_le_p(&log[8], 1);       /* SPINC */
+    stl_le_p(&log[12], 0);      /* FSPINC */
+    stl_le_p(&log[16], 1);      /* LDC */
+    stl_le_p(&log[20], 0);      /* FLDC */
+
+    buf_len = MIN(sizeof(log) - off, buf_len);
+    return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
 }
 
 static uint16_t nvme_fdp_confs(FemuCtrl *n, uint32_t endgrpid,
@@ -3364,6 +3410,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_sanitize_log(n, cmd, len, off);
     case NVME_LOG_ENDGRP:
         return nvme_endgrp_info(n, len, off, cmd);
+    case NVME_LOG_ROTATIONAL:
+        return nvme_rotational_log(n, len, off, cmd);
     case NVME_LOG_FDP_CONFS:
         return nvme_fdp_confs(n, lspi, len, off, cmd);
     case NVME_LOG_FDP_RUH_USAGE:

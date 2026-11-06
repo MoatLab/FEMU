@@ -651,6 +651,7 @@ Namespace Management.
 | Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: header only |
 | Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID, and the Endurance Group List, CNS 19h) with it |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
+| Rotational Media Information | 16h | with `femu-subsys,rotational=on`: one actuator, one spinup and one load per QEMU run; Spinup Control (Feature 1Ah) is fixed off |
 | LBA Status | 0Eh | |
 | Feature Identifiers Supported and Effects | 12h | built from the check Get and Set Features use; per command set (CSI) when CC.CSS is 110b |
 | NVMe-MI Commands Supported and Effects | 13h | all zero: no NVMe-MI Send or Receive |
