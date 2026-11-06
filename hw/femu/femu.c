@@ -3403,6 +3403,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "must match");
             return;
         }
+        /* a joining controller runs the owner's FTL, as the owner set it */
+        if (storage && n->bb_params.gc_frontier !=
+                       storage->bb_params.gc_frontier) {
+            error_setg(errp, "gc_frontier must match the controller that "
+                       "owns the shared namespaces");
+            return;
+        }
     }
     if (n->ns_mgmt && n->subsys && !n->subsys->ns_mgmt) {
         error_setg(errp, "ns_mgmt=on does not support subsys; "
@@ -4139,6 +4146,7 @@ static const Property femu_props[] = {
                      NvmeSubsystem *),
     /* pages held in the DRAM write buffer; 0 programs every write directly */
     DEFINE_PROP_BOOL("hot_cold_sep", FemuCtrl, bb_params.hot_cold_sep, false),
+    DEFINE_PROP_BOOL("gc_frontier", FemuCtrl, bb_params.gc_frontier, false),
     DEFINE_PROP_INT32("read_reclaim_limit", FemuCtrl,
                       bb_params.read_reclaim_limit, 0),
     DEFINE_PROP_INT32("retention_limit_sec", FemuCtrl,
@@ -4429,6 +4437,37 @@ static char *femu_test_ftl_trace(Object *obj, Error **errp)
     return out;
 }
 
+/*
+ * qtest only: the open line of the data pointer and of the collection
+ * pointer (gc_frontier), each as "line valid", -1 for no line, then an LPN
+ * the collection line holds (-1 for none), so a test can see where
+ * collection copies land and read them.
+ */
+static char *femu_test_gc_frontier(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    struct ssd *ssd = ns ? ns->ssd : NULL;
+    struct line *wl;
+    struct line *gl;
+    char *out;
+    bool resume;
+
+    if (!ssd || !n->poller_ctr) {
+        error_setg(errp, "gc frontier check requires an FTL namespace 1 and "
+                   "pollers");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    wl = ssd->wp.curline;
+    gl = ssd->gc_wp.curline;
+    out = g_strdup_printf("%d %d %d %d %" PRId64, wl ? wl->id : -1,
+                          wl ? wl->vpc : -1, gl ? gl->id : -1,
+                          gl ? gl->vpc : -1, ssd_gc_frontier_lpn(ssd));
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
 /* qtest only: the counts of the freeze service behind csd_pause */
 static char *femu_test_pause_stats(Object *obj, Error **errp)
 {
@@ -4644,6 +4683,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_str(obj, "x-gc-frontier", femu_test_gc_frontier,
+                                NULL);
         object_property_add_bool(obj, "x-tp-hold", femu_test_tp_hold_get,
                                  femu_test_tp_hold_set);
         object_property_add_bool(obj, "x-eol-enter", NULL,

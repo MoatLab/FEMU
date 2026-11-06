@@ -558,6 +558,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "hot_cold_sep",
       "bbssd, CSD with mapping page or dftl: write overwrites of mapped "
       "pages to separate hot lines; refused with FDP" },
+    { "gc_frontier",
+      "bbssd, CSD: write the pages garbage collection copies to lines of "
+      "their own, apart from host writes; refused with FDP, cxl_ssd, "
+      "gc_pace, Streams, and retention_limit_sec without pd_open_close_sec" },
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },

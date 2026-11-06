@@ -34102,6 +34102,9 @@ static void femu_test_cxl_nvme_link(void *obj, void *data,
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
                            "'ecc_step_ns':1000000,'pd_open_tiers':1",
                            "not supported with cxl_ssd");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'gc_frontier':true",
+                           "gc_frontier is not supported with cxl_ssd");
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'rp0'", NULL);
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'later'", NULL);
     rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
@@ -36645,6 +36648,294 @@ static void femu_test_kv_identify_fmt(void *obj, void *data,
                     NVME_INVALID_FIELD);
     guest_free(alloc, buf);
     femu_disable(&c);
+}
+
+/*
+ * x-gc-frontier of the device "trace": data line, valid, GC line, valid,
+ * and an LPN the GC line holds
+ */
+static void femu_gcf_state(QTestState *qts, int *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-gc-frontier'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 5);
+    for (int i = 0; i < 5; i++) {
+        v[i] = atoi(f[i]);
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * gc_frontier: the pages collection copies go to the collection line, not
+ * to the line host writes fill. The fill writes every LPN once, so each
+ * line holds 8 even and 8 odd pages; then only even LPNs are rewritten, in
+ * order. Collection runs only when free lines run short (both thresholds at
+ * 95%), so most victims hold their 8 cold odd pages and few even ones.
+ * For each write that changes no line, the host line gains exactly the one
+ * page written, and the collection line gains the pages copied. Without the
+ * property, the copies would land in the host line.
+ */
+static void femu_test_gc_frontier_placement(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int checked = 0;
+    int a[5];
+    int b[5];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int round = 0; round < 6; round++) {
+        for (int lpn = 0; lpn < 1024; lpn += 2) {
+            uint64_t gc0 = femu_ftl_trace_field(qts, 4);
+            uint64_t gc1;
+
+            femu_gcf_state(qts, a);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            femu_gcf_state(qts, b);
+            gc1 = femu_ftl_trace_field(qts, 4);
+            if (gc1 == gc0 || a[0] != b[0] || a[2] != b[2] || b[2] < 0) {
+                continue;
+            }
+            /*
+             * A write that ran collection, with no line change. The write
+             * may invalidate one page an earlier collection copied, so the
+             * collection line gains the copies or one fewer.
+             */
+            g_assert_cmpint(b[1] - a[1], ==, 1);
+            g_assert_cmpint(b[3] - a[3], <=, (int)(gc1 - gc0));
+            g_assert_cmpint(b[3] - a[3], >=, (int)(gc1 - gc0) - 1);
+            checked++;
+        }
+    }
+    g_test_message("gc frontier: %d collecting writes checked", checked);
+    g_assert_cmpint(checked, >, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Read reclaim of the open collection line. The fill and even overwrites
+ * of the placement test run until the collection line holds pages. Then
+ * four reads of an LPN on that line, and one write, which runs the
+ * reclaim. @data is "rr" (read_reclaim_limit=4 only) or "open"
+ * (pd_open_read_limit=4). Either way the line is sealed and its pages
+ * move. With read_reclaim_limit alone, the data frontier would drop the
+ * request; the collection line is sealed for any reason, so its cold
+ * pages cannot hide in a line that never closes.
+ */
+static void femu_test_gc_frontier_reclaim(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0;
+    int v[5] = { -1, -1, -1, -1, -1 };
+    int lpn = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 6 * 512 && (v[3] < 2 || v[4] < 0); i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(i % 512) * 2 * 8, buf)),
+                        ==, NVME_SUCCESS);
+        femu_gcf_state(qts, v);
+    }
+    g_assert_cmpint(v[4], >=, 0);
+    g_test_message("gc line %d holds %d pages, LPN %d", v[2], v[3], v[4]);
+    gc0 = femu_c0h_field(&c, log, 16);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        (uint64_t)v[4] * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    /* a write to an odd LPN, which no collection line holds yet */
+    {
+        int gcl = v[2];
+
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1 * 8, buf)),
+                        ==, NVME_SUCCESS);
+        femu_gcf_state(qts, v);
+        g_test_message("%s: gc line %d -> %d, pages moved %" PRIu64,
+                       (const char *)data, gcl, v[2],
+                       femu_c0h_field(&c, log, 16) - gc0);
+        g_assert_cmpint(v[2], !=, gcl);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16) - gc0, >, 0);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* gc_frontier is refused where its pointer would be ignored or miscounted */
+static void femu_test_gc_frontier_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'blks_per_pl':80,'gc_pace':true", "gc_pace" },
+        { "'blks_per_pl':80,'streams':true", "Streams" },
+        { "'blks_per_pl':80,'retention_limit_sec':10",
+          "retention_limit_sec without" },
+        { "'blks_per_pl':80,'subsys':'fdpsub'", "FDP" },
+        { "'blks_per_pl':160,'tier_mode':'static','tier_static_mb':1,"
+          "'nand_cell_type':3", "tier_mode=static" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gcfr','addr':'5','devsz_mb':4,'femu_mode':1,"
+            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'gc_frontier':true,"
+            "%s}}", cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_assert_nonnull(strstr(desc, "gc_frontier"));
+        qobject_unref(rsp);
+    }
+    /*
+     * The controls: the plain line with gc_frontier is accepted, and so is
+     * the tier line with gc_frontier off, so each refusal above comes from
+     * gc_frontier and not from the rest of its line.
+     */
+    {
+        static const char *const ok[] = {
+            "'blks_per_pl':80,'gc_frontier':true",
+            "'blks_per_pl':160,'tier_mode':'static','tier_static_mb':1,"
+            "'nand_cell_type':3,'gc_frontier':false",
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(ok); i++) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'gcfr','addr':'5','devsz_mb':4,'femu_mode':1,"
+                "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,%s}}", ok[i]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            g_assert_true(qdict_haskey(rsp, "return"));
+            qobject_unref(rsp);
+            qpci_unplug_acpi_device_test(qts, "gcfr", 5);
+        }
+    }
+}
+
+/*
+ * Run a 90/10 skewed overwrite on a hot-added device and return the pages
+ * collection copied over the measured window. Greedy victims, queue depth
+ * 1, a fixed seed and no time-based maintenance keep the counts exact. Both
+ * GC thresholds at 95% leave collection to the forced passes, so it starts
+ * only when free lines run short, not at the first victim with two
+ * invalid pages.
+ */
+static uint64_t femu_gcf_skew_run(QFemu *femu, QGuestAllocator *alloc,
+                                  bool on, int slot)
+{
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *id = g_strdup_printf("gcs%d", slot);
+    g_autofree char *cmd = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'%s',"
+        "'addr':'%d','devsz_mb':4,'femu_mode':1,'secsz':512,"
+        "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+        "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'gc_thres_pcent':95,"
+        "'gc_thres_pcent_high':95,'gc_frontier':%s}}",
+        id, slot, on ? "true" : "false");
+    QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+    uint64_t data = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    uint32_t lcg = 777;
+    uint64_t gc0 = 0;
+    uint8_t page[512];
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(slot, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, data, 0x6b, FEMU_DATA_SIZE);
+    for (int i = 0; i < 1024; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, data)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 12288; i++) {
+        uint32_t lpn;
+
+        lcg = lcg * 1103515245u + 12345u;
+        /* 90% of the writes go to the first 10% of the LPNs */
+        lpn = ((lcg >> 8) % 10) ? (lcg >> 12) % 102 : (lcg >> 12) % 1024;
+        if (i == 4096) {
+            g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS,
+                                                 log, sizeof(page), 0)), ==,
+                            NVME_SUCCESS);
+            qtest_memread(qts, log, page, sizeof(page));
+            gc0 = ldq_le_p(page + 16);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, data)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qpci_unplug_acpi_device_test(qts, id, slot);
+    g_free(pdev);
+    guest_free(alloc, log);
+    guest_free(alloc, data);
+    return ldq_le_p(page + 16) - gc0;
+}
+
+/*
+ * On a skewed overwrite, keeping the cold pages collection copies apart
+ * from hot host writes leaves fewer valid pages in later victims. This
+ * pins the order for this workload; the counts are exact for it.
+ */
+static void femu_test_gc_frontier_skew(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    uint64_t off = femu_gcf_skew_run(obj, alloc, false, 5);
+    uint64_t on = femu_gcf_skew_run(obj, alloc, true, 6);
+
+    g_test_message("gc pages copied: gc_frontier off %" PRIu64 ", on %" PRIu64,
+                   off, on);
+    g_assert_cmpuint(off, >, 0);
+    g_assert_cmpuint(on, <, off);
 }
 
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
@@ -45585,6 +45876,33 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
+    qos_add_test("gc-frontier-placement", "femu",
+                 femu_test_gc_frontier_placement,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=trace,femu_mode=1,devsz_mb=4,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=95,gc_thres_pcent_high=95,"
+            "gc_frontier=on" });
+    qos_add_test("gc-frontier-read-reclaim", "femu",
+                 femu_test_gc_frontier_reclaim,
+                 &(QOSGraphTestOptions) { .arg = (void *)"rr",
+        .edge.extra_device_opts =
+            "id=trace,femu_mode=1,devsz_mb=4,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=95,gc_thres_pcent_high=95,"
+            "read_reclaim_limit=4,gc_frontier=on" });
+    qos_add_test("gc-frontier-open-reclaim", "femu",
+                 femu_test_gc_frontier_reclaim,
+                 &(QOSGraphTestOptions) { .arg = (void *)"open",
+        .edge.extra_device_opts =
+            "id=trace,femu_mode=1,devsz_mb=4,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=95,gc_thres_pcent_high=95,"
+            "pd_open_read_limit=4,gc_frontier=on" });
+    qos_add_test("gc-frontier-refused", "femu", femu_test_gc_frontier_refused,
+                 NULL);
+    qos_add_test("gc-frontier-skew", "femu", femu_test_gc_frontier_skew, NULL);
     qos_add_test("identify-fmt", "femu", femu_test_identify_fmt,
                  &(QOSGraphTestOptions) { .arg = (void *)"plain",
         .edge.extra_device_opts = "id=fmt21a,ns_mgmt=on" });
@@ -46663,6 +46981,19 @@ static void femu_register_nodes(void)
             ",wl_spread=4"
     });
 
+    /*
+     * gc_frontier on: this workload leaves collection nothing to copy, so
+     * only levelling moves pages, and they must still land in the worn
+     * line the data pointer holds. Same spread and moves as wear-level-on.
+     */
+    qos_add_test("wear-level-gc-frontier", "femu", femu_test_wear_level,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"19 61",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2"
+            ",wl_spread=4,gc_frontier=on"
+    });
     qos_add_test("wear-level-copyback", "femu", femu_test_wear_level,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"cb 19 61",
@@ -47069,6 +47400,16 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2",
+    });
+    /* gc_frontier given as off: the same trace as the plain device */
+    qos_add_test("ftl-trace-gc-frontier-off", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_frontier=off",
     });
     qos_add_test("ftl-trace-hot-cold", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {

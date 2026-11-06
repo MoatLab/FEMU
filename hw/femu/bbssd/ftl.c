@@ -98,13 +98,14 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     }
     /*
      * Retirement keeps the lines the namespace needs, the free lines forced
-     * collection keeps, the data write pointer's line and one more.
+     * collection keeps, the data write pointer's line and one more, and the
+     * collection write pointer's line with gc_frontier.
      */
     ssd->wear_floor_lines =
         DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), (uint64_t)spp->secsz *
                                             spp->secs_per_pg),
                      spp->pgs_per_line) + bb_gc_forced_lines(n) + 2 +
-        bb_tp_reserve_lines(n, ns);
+        (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(n, ns);
 }
 
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns)

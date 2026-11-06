@@ -133,6 +133,9 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (p->hot_cold_sep) {
         reserve_lines += 1;                  /* the hot write pointer */
     }
+    if (p->gc_frontier) {
+        reserve_lines += 1;                  /* the collection write pointer */
+    }
     if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
         reserve_lines += 1;                  /* the log write pointer */
     }
@@ -293,6 +296,47 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 }
 
 /*
+ * gc_frontier gives the pages collection copies a write pointer of their
+ * own. Refuse it where that pointer would be ignored or would break an
+ * accounting that counts one frontier: FDP (reclaim units collect per
+ * handle; checked here, before capacity, so its own message wins), a
+ * controller that borrows the FTL of
+ * a CXL medium, paced collection (its budget counts the data pointer only),
+ * Streams (released tags seal their GC line on each change, and at no free
+ * line Streams refuses a victim), and retention refresh without the aged
+ * close of open lines (an open line has no close time to age from).
+ */
+int bb_check_gc_frontier(FemuCtrl *n, const char *mode, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    const char *why = NULL;
+
+    if (!p->gc_frontier) {
+        return 0;
+    }
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        why = "FDP: each reclaim unit handle already collects into units of "
+              "its own";
+    } else if (n->cxl_ssd) {
+        why = "cxl_ssd: the controller uses the FTL of the CXL medium";
+    } else if (p->gc_pace) {
+        why = "gc_pace: its budget counts one write frontier";
+    } else if (n->streams) {
+        why = "Streams: released streams already collect into a line of "
+              "their own";
+    } else if (p->retention_limit_sec && !p->pd_open_close_sec) {
+        why = "retention_limit_sec without pd_open_close_sec: an open "
+              "collection line would never age";
+    }
+    if (why) {
+        error_setg(errp, "FEMU %s: gc_frontier is not supported with %s",
+                   mode, why);
+        return -1;
+    }
+    return 0;
+}
+
+/*
  * FDP keeps its own write and reclaim path. Refuse the knobs it does not
  * take rather than accept them silently. The write buffer keeps the handle
  * of each page, dftl adds timing only, and gc_policy names a unit strategy,
@@ -355,6 +399,10 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd;
+
+    if (bb_check_gc_frontier(n, "bbssd", errp)) {
+        return;
+    }
 
     /* A linked CXL medium already built the FTL from its own geometry. */
     if (n->cxl_ssd) {

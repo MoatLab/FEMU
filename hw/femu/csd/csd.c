@@ -130,7 +130,8 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * whole of the media was accepted here while black box refused it, and
      * the collector then had nowhere to relocate to.
      */
-    if (bb_check_capacity(n, ns, errp)) {
+    if (bb_check_gc_frontier(n, "csd", errp) ||
+        bb_check_capacity(n, ns, errp)) {
         return;
     }
 

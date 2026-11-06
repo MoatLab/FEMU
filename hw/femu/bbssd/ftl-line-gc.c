@@ -347,6 +347,9 @@ static struct write_pointer *ssd_line_pointer(struct ssd *ssd,
     if (ssd->hot_wp.curline == line) {
         return &ssd->hot_wp;
     }
+    if (ssd->gc_wp.curline == line) {
+        return &ssd->gc_wp;
+    }
     if (ssd->log_wp.curline == line) {
         return &ssd->log_wp;
     }
@@ -391,7 +394,7 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
 {
     uint64_t limit = (uint64_t)ssd->sp.pd_open_close_sec *
                      NANOSECONDS_PER_SECOND;
-    struct write_pointer *wps[5 + ARRAY_SIZE(ssd->stream_wp)];
+    struct write_pointer *wps[6 + ARRAY_SIZE(ssd->stream_wp)];
     int n = 0;
 
     /* read-only media keeps its erased pages for the writes in flight */
@@ -400,6 +403,7 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
     }
     wps[n++] = &ssd->wp;
     wps[n++] = &ssd->hot_wp;
+    wps[n++] = &ssd->gc_wp;
     wps[n++] = &ssd->stream_gc_wp;
     wps[n++] = &ssd->tp_wp;
     for (int i = 0; i < (int)ARRAY_SIZE(ssd->stream_wp); i++) {
@@ -485,6 +489,9 @@ static struct write_pointer *ssd_write_pointer_for_class(struct ssd *ssd,
     } else if (klass == FEMU_MAP_CLASS_HOT) {
         wpp = &ssd->hot_wp;
         what = "hot";
+    } else if (klass == FEMU_MAP_CLASS_GC) {
+        wpp = &ssd->gc_wp;
+        what = "collection";
     }
 
     if (wpp) {
@@ -498,6 +505,25 @@ static struct write_pointer *ssd_write_pointer_for_class(struct ssd *ssd,
 
     /* no line to be had for the class; fall back to the data pointer */
     return &ssd->wp;
+}
+
+/*
+ * For the qtest property x-gc-frontier: the LPN on the first page of the
+ * open collection line, or -1. The pointer fills a line from channel 0,
+ * LUN 0, plane 0, page 0.
+ */
+int64_t ssd_gc_frontier_lpn(struct ssd *ssd)
+{
+    struct line *line = ssd->gc_wp.curline;
+    struct ppa ppa = { .ppa = 0 };
+    uint64_t lpn;
+
+    if (!line || !line->vpc) {
+        return -1;
+    }
+    ppa.g.blk = line->id;
+    lpn = get_rmap_ent(ssd, &ppa);
+    return valid_lpn(ssd, lpn) ? (int64_t)lpn : -1;
 }
 
 void ssd_advance_write_pointer(struct ssd *ssd)
@@ -815,6 +841,21 @@ static struct ppa gc_dest_page(struct ssd *ssd, uint64_t tag,
     if (tag) {
         *stream_wp = ssd_stream_gc_pointer(ssd, tag);
         return ssd_stream_pointer_page(ssd, *stream_wp, tag);
+    }
+    /*
+     * gc_frontier: copies go to a line of their own. Wear levelling keeps
+     * them on the data pointer, which holds the worn line it chose. With no
+     * free line for the collection pointer, they fall back to the data
+     * pointer, as without the property.
+     */
+    if (ssd->sp.gc_frontier && !ssd->wl_active) {
+        struct write_pointer *w =
+            ssd_write_pointer_for_class(ssd, FEMU_MAP_CLASS_GC);
+
+        if (w != &ssd->wp) {
+            *stream_wp = w;
+            return get_new_page_class(ssd, FEMU_MAP_CLASS_GC);
+        }
     }
     if (!ssd->wp.curline) {
         return ssd_stream_pointer_page(ssd, &ssd->wp, 0);
@@ -1161,6 +1202,11 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
     } else {
         retire = usable - 1 >= ssd->wear_floor_lines && ssd->wp.curline &&
                  lm->free_line_cnt >= 1;
+        /* with gc_frontier, collection needs its own line, or one to take */
+        if (spp->gc_frontier && !ssd->gc_wp.curline &&
+            lm->free_line_cnt < 2) {
+            retire = false;
+        }
         /* TP traffic stops at the forced reserve; retirement must too */
         if (ssd->tp_on && lm->free_line_cnt < ssd->sp.gc_thres_lines_high) {
             retire = false;
@@ -1718,7 +1764,8 @@ int do_read_reclaim(struct ssd *ssd)
      * A TP line is sealed for any reason: few TPs can leave it open for
      * good, and the refresh would wait on it for ever.
      */
-    if ((why == RECLAIM_OPEN || line->kind == LINE_TP) && !line->pos &&
+    if ((why == RECLAIM_OPEN || line->kind == LINE_TP ||
+         (ssd->gc_wp.curline == line && !ssd->wl_active)) && !line->pos &&
         (wpp = ssd_line_pointer(ssd, line))) {
         ssd_pd_close_pointer(ssd, wpp, false, 0);
     }
@@ -1893,10 +1940,14 @@ int do_wear_level(struct ssd *ssd)
     lm->full_line_cnt--;
     copied = ssd->gc_write_pages + ssd->tp_moves;
     src->reclaiming = true;
+    /* the worn line now on the data pointer must take the cold copies */
+    ssd->wl_active = true;
     if (!reclaim_line(ssd, src, ssd->sp.gc_copyback)) {
+        ssd->wl_active = false;
         src->reclaiming = false;
         return -1;
     }
+    ssd->wl_active = false;
     src->reclaiming = false;
     ssd->wl_pages += ssd->gc_write_pages + ssd->tp_moves - copied;
     ssd->wl_relocations++;

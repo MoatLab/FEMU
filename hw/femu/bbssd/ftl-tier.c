@@ -136,6 +136,9 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (p->hot_cold_sep) {
         return "hot_cold_sep";
     }
+    if (p->gc_frontier) {
+        return "gc_frontier";
+    }
     if (p->gc_pace) {
         return "gc_pace";
     }
@@ -1108,7 +1111,8 @@ static uint64_t ftl_tier_check_queues(struct ssd *ssd)
     int nfree_dense = 0;
     int nfull_dense = 0;
     struct write_pointer *wps[] = {
-        &ssd->wp, &ssd->stream_gc_wp, &ssd->log_wp, &ssd->hot_wp, &ssd->tp_wp,
+        &ssd->wp, &ssd->stream_gc_wp, &ssd->log_wp, &ssd->hot_wp, &ssd->gc_wp,
+        &ssd->tp_wp,
     };
 
     QTAILQ_FOREACH(line, &t->free_lines, entry) {

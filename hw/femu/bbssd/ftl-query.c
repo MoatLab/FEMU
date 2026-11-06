@@ -48,6 +48,7 @@ static void ssd_query_line_states(struct ssd *ssd, uint8_t *state)
     }
     ssd_query_mark_wp(state, &ssd->wp);
     ssd_query_mark_wp(state, &ssd->hot_wp);
+    ssd_query_mark_wp(state, &ssd->gc_wp);
     ssd_query_mark_wp(state, &ssd->log_wp);
     ssd_query_mark_wp(state, &ssd->stream_gc_wp);
     ssd_query_mark_wp(state, &ssd->tp_wp);

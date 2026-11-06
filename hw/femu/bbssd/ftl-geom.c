@@ -30,6 +30,10 @@ int bb_gc_forced_lines(FemuCtrl *n)
     if (bb_tp_physical(n) && lines < 2) {
         lines = 2;
     }
+    /* one free line for the data pointer and one for the collection one */
+    if (p->gc_frontier && lines < 2) {
+        lines = 2;
+    }
     return lines;
 }
 
@@ -430,6 +434,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_size = n->bb_params.buffer_size;
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
+    spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;
     spp->retention_limit_sec = n->bb_params.retention_limit_sec;
     spp->age_scale = n->bb_params.age_scale;

@@ -175,6 +175,7 @@ listed one by one.
 - Opt-in pSLC tier in front of MLC, TLC or QLC NAND. The properties `tier_mode`, `tier_static_mb`, `tier_full_policy`, `tier_pslc_read_ns`, `tier_pslc_prog_ns`, `tier_pslc_erase_ns` and `tier_pslc_pe_cycles` control it. Host writes go to a static pool of pSLC lines first. A fold moves the oldest full pool line to the dense lines. The tier is off by default, and with it off nothing changes. See [tiered NAND](features/tiered-nand.md).
 - `tier_mode=dynamic` lets the pSLC pool borrow free dense lines while the device has room, with `tier_max_mb` as a cap and `tier_shrink_pct` as the fill where the pool starts to shrink. A borrowed line goes back to the dense free list after its fold, and the dense lines always keep room for every valid page. See [tiered NAND](features/tiered-nand.md#dynamic-pool).
 - `tier_idle_ms` lets the pSLC tier fold pool lines in idle time, one bounded step at a time, so the next burst finds free pool lines. `tier_lazy_pct` folds only while the pool use is above a percent. Both are off by default. See [tiered NAND](features/tiered-nand.md#idle-folds).
+- `gc_frontier=on` writes the pages garbage collection copies to lines of their own, apart from host writes, as real drives do; under a skewed overwrite this lowers the pages copied. Off by default; refused with FDP, `cxl_ssd`, `gc_pace`, Streams, and `retention_limit_sec` without `pd_open_close_sec`.
 
 #### Timing and fault models
 

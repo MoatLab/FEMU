@@ -2213,6 +2213,7 @@ typedef struct BbCtrlParams {
     int gc_thres_pcent_high;
 
     bool hot_cold_sep;        /* separate overwrites from write-once pages */
+    bool gc_frontier;         /* GC copies get a write pointer of their own */
     int read_reclaim_limit;   /* reads before a line is rewritten; 0 = never */
     int retention_limit_sec;  /* age before programmed data is refreshed; 0 = never */
     int age_scale;            /* data age per wall-time unit; 1 = real time */

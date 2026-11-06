@@ -244,6 +244,7 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
 
     bool hot_cold_sep;  /* place overwrites in blocks of their own */
+    bool gc_frontier;   /* GC copies of untagged data go to gc_wp */
     /* reads a block may take before its line is rewritten; 0 = never */
     int read_reclaim_limit;
     /* seconds a line may hold data before it is rewritten; 0 = never */
@@ -483,7 +484,7 @@ struct femu_ftl_policy_ops {
  * LOG so they land in blocks of their own rather than mixed in with data.
  */
 enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1,
-       FEMU_MAP_CLASS_HOT = 2 };
+       FEMU_MAP_CLASS_HOT = 2, FEMU_MAP_CLASS_GC = 3 };
 
 struct map_write_plan {
     int target_class;      /* allocation class for the new page */
@@ -575,6 +576,8 @@ struct ssd {
     int write_buffer_cnt;
     struct write_pointer log_wp; /* LOG class; its line is taken on first use */
     struct write_pointer hot_wp; /* HOT class; likewise */
+    struct write_pointer gc_wp;  /* GC class (gc_frontier); likewise */
+    bool wl_active;     /* wear levelling copies into the data pointer */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */
@@ -811,6 +814,8 @@ uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns);
+int bb_check_gc_frontier(FemuCtrl *n, const char *mode, Error **errp);
+int64_t ssd_gc_frontier_lpn(struct ssd *ssd);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);

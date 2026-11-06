@@ -439,15 +439,18 @@ The FTL has these pointers:
 
 | Pointer | In `struct ssd` | Takes | Opened |
 | --- | --- | --- | --- |
-| data | `wp` | host writes (only first writes with `hot_cold_sep=on`), GC relocations, read reclaim, merge relocations | at init |
+| data | `wp` | host writes (only first writes with `hot_cold_sep=on`), GC relocations and read reclaim (not with `gc_frontier=on`), wear levelling copies, merge relocations | at init |
 | hot | `hot_wp` | overwrites of mapped pages, with `hot_cold_sep=on` | on first use |
+| collection | `gc_wp` | GC relocations, read reclaim and retention refresh of untagged data, with `gc_frontier=on` | on first use |
 | log | `log_wp` | every host write under `hybrid` or `fast` | on first use |
 | stream | `stream_wp[i]` | writes of open stream `i` | on first use |
 | stream GC | `stream_gc_wp` | relocated pages of a released stream | on first use |
 | reclaim unit | per handle | FDP placement; see [FDP](../features/fdp.md) | FDP init |
 
-When a hot or log pointer cannot get a line, the write falls back to the
-data pointer. Every open pointer pins a line, so `bb_check_capacity()` adds
+When a hot, log or collection pointer cannot get a line, the write falls
+back to the data pointer. With `gc_frontier=on`, forced collection keeps at
+least 2 free lines, one for each frontier, and read reclaim seals an open
+collection line for any reason, as it does a translation page line. Every open pointer pins a line, so `bb_check_capacity()` adds
 one reserved line per pointer the configuration can hold open
 ([Capacity](#over-provisioning-and-capacity)).
 

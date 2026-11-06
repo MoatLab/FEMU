@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 219 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 220 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -197,6 +197,7 @@ Devices:
 | `read_cache_mb` | `uint32` | `0` | bbssd, CSD: size of the DRAM read cache in MiB; 0 disables it |
 | `cache_evict` | `str` | unset | bbssd, CSD: read cache eviction policy, one of clock, random, lru or arc; unset is clock |
 | `hot_cold_sep` | `bool` | `off` | bbssd, CSD with mapping page or dftl: write overwrites of mapped pages to separate hot lines; refused with FDP |
+| `gc_frontier` | `bool` | `off` | bbssd, CSD: write the pages garbage collection copies to lines of their own, apart from host writes; refused with FDP, cxl_ssd, gc_pace, Streams, and retention_limit_sec without pd_open_close_sec |
 | `buffer_size` | `int32` | `0` | bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 programs every write directly |
 | `buffer_thres_pcent` | `int32` | `90` | bbssd, CSD: buffer fill level in percent at which buffered pages are written to NAND, 1 to 100 when buffer_size > 0 |
 | `fdp_trim_erase_all` | `int32` | `0` | bbssd with FDP: non-zero makes a deallocate reset every reclaim unit instead of the given ranges |
@@ -423,7 +424,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-query-delay-ms`, `x-range-waits`, `x-stream-test`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables
