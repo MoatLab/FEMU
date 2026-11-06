@@ -746,6 +746,39 @@ buffer, FDP, Streams, CXL, hot/cold or hybrid mapping). Log page C0h counts
 the copies at offset 224, the lines it finishes at 232, and the lines the
 forced pass or the budget had to finish at 240.
 
+### Idle collection (`gc_idle_ms`)
+
+Collection otherwise runs only while host requests run, so a burst after a
+pause starts with the free lines the last burst left. With `gc_idle_ms`, the
+FTL thread collects in idle time, as a real drive does.
+
+```text
+  request tail (FTL thread): busy = max(busy, end of the request's media work)
+  FTL thread pass with no request:
+    due: now >= busy + gc_idle_ms and now >= fence   (timestamps only)
+    inside the sweep flag, as a request:
+      free lines >= idle target --> nothing to do
+      else do_gc(ssd, false): one victim, every normal guard
+      fence = latest end of all media work (LUN, channel, DQ, CA)
+      no victim or no gain --> fence also moves to now + gc_idle_ms
+```
+
+The idle target counts free lines, in the unit of `gc_thres_pcent`:
+
+```text
+  target = (1 - gc_idle_pcent / 100) * lines     (gc_idle_pcent 0: gc_thres_pcent)
+```
+
+A value below `gc_thres_pcent` makes idle time free more lines than the
+write path does.
+A host command that arrives during a step waits at most one victim's copies.
+The fence keeps the next step behind the media work of the last one.
+
+The first version takes one bbssd controller with one namespace of its own
+and page mapping. It refuses shared namespaces, `ns_mgmt`, FDP, `cxl_ssd`,
+`gc_pace`, Streams, `power_loss`, the pSLC tier and CSD. With the property
+at 0, the FTL thread does no new work.
+
 ### FDP reclaim units
 
 With Flexible Data Placement the FTL places data in reclaim units, one line
@@ -1156,6 +1189,7 @@ does inside the FTL and what it interacts with.
 | `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
 | `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is, and under FDP |
+| `gc_idle_ms`, `gc_idle_pcent` | idle collection ([idle collection](#idle-collection-gc_idle_ms)) | one namespace, page mapping; refused with FDP, `gc_pace`, Streams, the tier |
 | `gc_strategy` | reclaim unit victim selection | FDP only; a `gc_policy` other than `greedy` replaces it |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams and FDP |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |

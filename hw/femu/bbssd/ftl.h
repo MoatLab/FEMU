@@ -213,6 +213,7 @@ struct ssdparams {
 
     double gc_thres_pcent;
     int gc_thres_lines;
+    int gc_idle_lines;  /* idle collection runs while fewer lines are free */
     double gc_thres_pcent_high;
     int gc_thres_lines_high;
     bool enable_gc_delay;
@@ -578,6 +579,15 @@ struct ssd {
     struct write_pointer hot_wp; /* HOT class; likewise */
     struct write_pointer gc_wp;  /* GC class (gc_frontier); likewise */
     bool wl_active;     /* wear levelling copies into the data pointer */
+    /* idle collection (gc_idle_ms), written by the FTL thread only */
+    uint64_t gc_idle_ns;    /* quiet time before a step; 0: off */
+    uint64_t gc_idle_busy;  /* end of the last request and its media work */
+    uint64_t gc_idle_fence; /* end of the last step's media work, or a retry */
+    uint64_t gc_idle_steps; /* steps run */
+    uint64_t gc_idle_done;  /* victims reclaimed by steps */
+    bool gc_idle_hold;      /* qtest: no step runs on the FTL thread */
+    uint32_t gc_idle_latch_ms; /* qtest: a step sleeps this long in the sweep */
+    bool gc_idle_running;   /* qtest: a step is inside the sweep now */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */
@@ -816,6 +826,21 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns);
 int bb_check_gc_frontier(FemuCtrl *n, const char *mode, Error **errp);
 int64_t ssd_gc_frontier_lpn(struct ssd *ssd);
+int bb_check_gc_idle(FemuCtrl *n, const char *mode, Error **errp);
+
+typedef enum SsdGcIdleOutcome {
+    SSD_GC_IDLE_AT_TARGET,  /* enough free lines: nothing to do */
+    SSD_GC_IDLE_NONE,       /* no victim taken, nothing copied */
+    SSD_GC_IDLE_PARTIAL,    /* pages copied, victim not erased */
+    SSD_GC_IDLE_RECLAIMED,  /* victim erased, no net free line */
+    SSD_GC_IDLE_GAIN,       /* victim erased, one more free line */
+} SsdGcIdleOutcome;
+
+uint64_t ssd_media_last_end(struct ssd *ssd);
+bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now);
+SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
+void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);
+void bb_gc_idle(FemuCtrl *n);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);

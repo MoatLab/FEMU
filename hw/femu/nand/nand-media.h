@@ -289,6 +289,8 @@ typedef struct NandMedia {
     NandSuspendState *susp;    /* NULL unless policy.pe_suspend */
 } NandMedia;
 
+uint64_t nand_media_last_end(const NandMedia *m);
+
 typedef struct NandOpCompletion {
     uint64_t done_ns;
     uint64_t latency_ns;

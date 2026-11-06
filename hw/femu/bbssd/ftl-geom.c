@@ -485,6 +485,10 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     spp->gc_thres_pcent = n->bb_params.gc_thres_pcent/100.0;
     spp->gc_thres_lines = (int)((1 - spp->gc_thres_pcent) * spp->tt_lines);
+    /* the same occupancy rule as gc_thres_pcent, for idle collection */
+    spp->gc_idle_lines = n->bb_params.gc_idle_pcent ?
+        (int)((1 - n->bb_params.gc_idle_pcent / 100.0) * spp->tt_lines) :
+        spp->gc_thres_lines;
     spp->gc_thres_pcent_high = n->bb_params.gc_thres_pcent_high/100.0;
     spp->gc_thres_lines_high = bb_gc_forced_lines(n);
     spp->enable_gc_delay = true;

@@ -296,6 +296,95 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 }
 
 /*
+ * gc_idle_ms collects in idle time on the FTL thread. The first version
+ * serves one bbssd controller whose one page-mapped namespace is its own:
+ * a step then runs alone inside ftl_in_sweep, and all media work goes
+ * through the request path. Each refusal below breaks one of these.
+ */
+int bb_check_gc_idle(FemuCtrl *n, const char *mode, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    const char *map = p->mapping_scheme;
+    const char *why = NULL;
+
+    if (p->gc_idle_pcent && !p->gc_idle_ms) {
+        warn_report("femu: gc_idle_pcent has no effect unless gc_idle_ms "
+                    "is set");
+    }
+    if (!p->gc_idle_ms) {
+        return 0;
+    }
+    if (p->gc_idle_pcent > 99) {
+        why = "gc_idle_pcent above 99";
+    } else if (strcmp(mode, "bbssd")) {
+        why = mode;
+    } else if (nvme_ns_shared(n)) {
+        why = "shared namespaces";
+    } else if (n->ns_mgmt) {
+        why = "ns_mgmt";
+    } else if (n->num_namespaces != 1) {
+        why = "more than one namespace";
+    } else if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        why = "FDP";
+    } else if (n->cxl_ssd) {
+        why = "cxl_ssd";
+    } else if (p->gc_pace) {
+        why = "gc_pace";
+    } else if (n->streams) {
+        why = "Streams";
+    } else if (n->power_loss) {
+        why = "power_loss";
+    } else if (p->tier_mode && strcmp(p->tier_mode, "off")) {
+        why = "the pSLC tier";
+    } else if (map && *map && strcmp(map, "page")) {
+        why = "a mapping other than page";
+    }
+    if (why) {
+        error_setg(errp, "FEMU %s: gc_idle_ms is not supported with %s",
+                   mode, why);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * bb_gc_idle - the idle collection pass of the FTL thread
+ *
+ * Runs one step when one is due. The step runs inside ftl_in_sweep, as a
+ * request does, so a caller that pauses the controller waits for it.
+ */
+void bb_gc_idle(FemuCtrl *n)
+{
+    struct ssd *ssd = n->ssd;
+    uint64_t now;
+
+    if (!ssd || ssd->gc_idle_hold) {
+        return;
+    }
+    now = ssd_now(ssd);
+    if (!ssd_gc_idle_due(ssd, now)) {
+        return;
+    }
+    n->ftl_in_sweep = true;
+    smp_mb();   /* publish the flag before re-reading the pause state */
+    /*
+     * A qtest hook may have changed the hold or the fence while this
+     * thread was between the first check and the flag, so check again.
+     */
+    now = ssd_now(ssd);
+    if (n->dataplane_started && !ssd->gc_idle_hold &&
+        ssd_gc_idle_due(ssd, now)) {
+        qatomic_set(&ssd->gc_idle_running, true);
+        if (unlikely(ssd->gc_idle_latch_ms)) {
+            g_usleep(ssd->gc_idle_latch_ms * 1000);
+        }
+        ssd_gc_idle_step(ssd, now);
+        qatomic_set(&ssd->gc_idle_running, false);
+    }
+    n->ftl_in_sweep = false;
+}
+
+/*
  * gc_frontier gives the pages collection copies a write pointer of their
  * own. Refuse it where that pointer would be ignored or would break an
  * accounting that counts one frontier: FDP (reclaim units collect per
@@ -400,7 +489,8 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd;
 
-    if (bb_check_gc_frontier(n, "bbssd", errp)) {
+    if (bb_check_gc_frontier(n, "bbssd", errp) ||
+        bb_check_gc_idle(n, "bbssd", errp)) {
         return;
     }
 
@@ -458,6 +548,10 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd->ssdname = (char *)n->devname;
     femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
     ssd_init(n, ns);
+    if (n->bb_params.gc_idle_ms) {
+        ssd->gc_idle_ns = (uint64_t)n->bb_params.gc_idle_ms * 1000000;
+        n->gc_idle = true;
+    }
 }
 
 /*

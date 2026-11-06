@@ -2439,6 +2439,10 @@ static void *femu_ftl_thread(void *arg)
                     n->features.volatile_wc;
             }
             lat = femu_ftl_process_req(n, req);
+            /* idle collection counts quiet time from here (gc_idle_ms) */
+            if (unlikely(n->gc_idle)) {
+                ssd_gc_idle_note(n->ssd, req->stime + lat);
+            }
             /* the write has programmed what it will: its credits go back */
             nvme_eol_release(req);
             g_clear_pointer(&req->write_data, g_free);
@@ -2470,9 +2474,17 @@ static void *femu_ftl_thread(void *arg)
             n->ftl_in_sweep = false;
         }
 
-        /* no request this pass: the pSLC tier may fold in the idle time */
-        if (unlikely(n->tier_idle) && !busy) {
-            bb_tier_idle(n);
+        /*
+         * No request this pass: the pSLC tier may fold, and idle
+         * collection may run, in the idle time.
+         */
+        if (unlikely(n->tier_idle || n->gc_idle) && !busy) {
+            if (n->tier_idle) {
+                bb_tier_idle(n);
+            }
+            if (n->gc_idle) {
+                bb_gc_idle(n);
+            }
         }
     }
 
@@ -3410,6 +3422,31 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "owns the shared namespaces");
             return;
         }
+        /* a joining controller skips mode init, so refuse it here too */
+        if (n->bb_params.gc_idle_ms) {
+            error_setg(errp, "FEMU: gc_idle_ms is not supported with shared "
+                       "namespaces");
+            return;
+        }
+    }
+    /*
+     * The first version of idle collection runs one bbssd namespace built
+     * at realize. bb_init() checks the rest.
+     */
+    if (n->bb_params.gc_idle_ms) {
+        g_autofree char *why = NULL;
+
+        if (n->femu_mode != FEMU_BBSSD_MODE) {
+            why = g_strdup_printf("femu_mode %u", n->femu_mode);
+        } else if (n->namespace_modes && n->namespace_modes[0]) {
+            why = g_strdup("namespace_modes");
+        } else if (n->ns_mgmt) {
+            why = g_strdup("ns_mgmt");
+        }
+        if (why) {
+            error_setg(errp, "FEMU: gc_idle_ms is not supported with %s", why);
+            return;
+        }
     }
     if (n->ns_mgmt && n->subsys && !n->subsys->ns_mgmt) {
         error_setg(errp, "ns_mgmt=on does not support subsys; "
@@ -4181,6 +4218,8 @@ static const Property femu_props[] = {
                        bb_params.tier_pslc_pe_cycles, 0),
     DEFINE_PROP_UINT32("tier_max_mb", FemuCtrl, bb_params.tier_max_mb, 0),
     DEFINE_PROP_UINT32("tier_idle_ms", FemuCtrl, bb_params.tier_idle_ms, 0),
+    DEFINE_PROP_UINT32("gc_idle_ms", FemuCtrl, bb_params.gc_idle_ms, 0),
+    DEFINE_PROP_UINT8("gc_idle_pcent", FemuCtrl, bb_params.gc_idle_pcent, 0),
     DEFINE_PROP_UINT32("tier_lazy_pct", FemuCtrl, bb_params.tier_lazy_pct, 0),
     DEFINE_PROP_UINT32("tier_shrink_pct", FemuCtrl, bb_params.tier_shrink_pct,
                        FTL_TIER_SHRINK_PCT),
@@ -4468,6 +4507,122 @@ static char *femu_test_gc_frontier(Object *obj, Error **errp)
     return out;
 }
 
+/* qtest only: idle collection counters, "steps victims free target" */
+static char *femu_test_gc_idle(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->gc_idle ? n->ssd : NULL;
+    char *out;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "gc idle check requires gc_idle_ms");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = g_strdup_printf("%" PRIu64 " %" PRIu64 " %d %d", ssd->gc_idle_steps,
+                          ssd->gc_idle_done, ssd->lm.free_line_cnt,
+                          ssd->sp.gc_idle_lines);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+static bool femu_test_gc_idle_hold_get(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    return n->gc_idle && n->ssd && n->ssd->gc_idle_hold;
+}
+
+/* qtest only: true stops idle steps on the FTL thread; kicks still run */
+static void femu_test_gc_idle_hold_set(Object *obj, bool on, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    bool resume;
+
+    if (!n->gc_idle || !n->ssd) {
+        error_setg(errp, "gc idle hold requires gc_idle_ms");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    n->ssd->gc_idle_hold = on;
+    nvme_resume_pollers(n, resume);
+}
+
+/* qtest only: each later idle step sleeps this many ms inside the sweep */
+static void femu_test_gc_idle_latch(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    uint32_t ms;
+    bool resume;
+
+    if (!visit_type_uint32(v, name, &ms, errp)) {
+        return;
+    }
+    if (!n->gc_idle || !n->ssd) {
+        error_setg(errp, "gc idle latch requires gc_idle_ms");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    n->ssd->gc_idle_latch_ms = ms;
+    nvme_resume_pollers(n, resume);
+}
+
+/*
+ * qtest only: pause the controller, then report "running steps". The pause
+ * waits for a step inside the sweep, so running must read 0.
+ */
+static char *femu_test_gc_idle_order(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->gc_idle ? n->ssd : NULL;
+    char *out;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "gc idle order requires gc_idle_ms");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = g_strdup_printf("%d %" PRIu64, qatomic_read(&ssd->gc_idle_running),
+                          qatomic_read(&ssd->gc_idle_steps));
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+/*
+ * qtest only: run one idle step now, with the controller paused, and name
+ * what it did: "not-due" when the quiet time or the last step's fence has
+ * not passed, else the step's outcome.
+ */
+static char *femu_test_gc_idle_kick(Object *obj, Error **errp)
+{
+    static const char *const names[] = {
+        [SSD_GC_IDLE_AT_TARGET] = "at-target",
+        [SSD_GC_IDLE_NONE] = "none",
+        [SSD_GC_IDLE_PARTIAL] = "partial",
+        [SSD_GC_IDLE_RECLAIMED] = "reclaimed",
+        [SSD_GC_IDLE_GAIN] = "gain",
+    };
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->gc_idle ? n->ssd : NULL;
+    const char *what;
+    uint64_t now;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "gc idle kick requires gc_idle_ms");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    now = ssd_now(ssd);
+    what = ssd_gc_idle_due(ssd, now) ? names[ssd_gc_idle_step(ssd, now)] :
+                                       "not-due";
+    nvme_resume_pollers(n, resume);
+    return g_strdup(what);
+}
+
 /* qtest only: the counts of the freeze service behind csd_pause */
 static char *femu_test_pause_stats(Object *obj, Error **errp)
 {
@@ -4684,6 +4839,16 @@ static void femu_instance_init(Object *obj)
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
         object_property_add_str(obj, "x-gc-frontier", femu_test_gc_frontier,
+                                NULL);
+        object_property_add_str(obj, "x-gc-idle", femu_test_gc_idle, NULL);
+        object_property_add_bool(obj, "x-gc-idle-hold",
+                                 femu_test_gc_idle_hold_get,
+                                 femu_test_gc_idle_hold_set);
+        object_property_add_str(obj, "x-gc-idle-kick", femu_test_gc_idle_kick,
+                                NULL);
+        object_property_add(obj, "x-gc-idle-latch", "uint32", NULL,
+                            femu_test_gc_idle_latch, NULL, NULL);
+        object_property_add_str(obj, "x-gc-idle-order", femu_test_gc_idle_order,
                                 NULL);
         object_property_add_bool(obj, "x-tp-hold", femu_test_tp_hold_get,
                                  femu_test_tp_hold_set);

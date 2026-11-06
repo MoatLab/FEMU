@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 220 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 222 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -198,6 +198,8 @@ Devices:
 | `cache_evict` | `str` | unset | bbssd, CSD: read cache eviction policy, one of clock, random, lru or arc; unset is clock |
 | `hot_cold_sep` | `bool` | `off` | bbssd, CSD with mapping page or dftl: write overwrites of mapped pages to separate hot lines; refused with FDP |
 | `gc_frontier` | `bool` | `off` | bbssd, CSD: write the pages garbage collection copies to lines of their own, apart from host writes; refused with FDP, cxl_ssd, gc_pace, Streams, and retention_limit_sec without pd_open_close_sec |
+| `gc_idle_ms` | `uint32` | `0` | bbssd with one namespace and page mapping: quiet time in ms after which the device collects lines in the background, one victim at a time; 0 (default) collects only on the write path |
+| `gc_idle_pcent` | `uint8` | `0` | bbssd with gc_idle_ms: idle collection runs while the line fill is above this percent, as gc_thres_pcent counts it; 0 (default) takes gc_thres_pcent, else 1 to 99 |
 | `buffer_size` | `int32` | `0` | bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 programs every write directly |
 | `buffer_thres_pcent` | `int32` | `90` | bbssd, CSD: buffer fill level in percent at which buffered pages are written to NAND, 1 to 100 when buffer_size > 0 |
 | `fdp_trim_erase_all` | `int32` | `0` | bbssd with FDP: non-zero makes a deallocate reset every reclaim unit instead of the given ranges |

@@ -1954,6 +1954,86 @@ int do_wear_level(struct ssd *ssd)
     return 0;
 }
 
+/*
+ * The latest end of all media work booked so far: every LUN and channel
+ * timeline, and the data-out and command windows the media layer books
+ * apart from them.
+ */
+uint64_t ssd_media_last_end(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t end = nand_media_last_end(&ssd->media);
+
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        end = MAX(end, ssd->ch[ch].next_ch_avail_time);
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            end = MAX(end, ssd->ch[ch].lun[lun].next_lun_avail_time);
+        }
+    }
+    return end;
+}
+
+/*
+ * ssd_gc_idle_due - whether an idle collection step may start at @now
+ *
+ * The host and the media were quiet for gc_idle_ns, and the work of the
+ * last step ended. It reads only timestamps this thread alone writes, so it
+ * runs outside ftl_in_sweep. ssd_gc_idle_step() checks the line rule.
+ */
+bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now)
+{
+    return ssd->gc_idle_ns && now >= ssd->gc_idle_busy + ssd->gc_idle_ns &&
+           now >= ssd->gc_idle_fence;
+}
+
+/*
+ * ssd_gc_idle_step - one step of idle collection, inside ftl_in_sweep
+ *
+ * Collects one victim through do_gc(), with every rule the write path has,
+ * while fewer lines are free than the idle target. The next step waits for
+ * the media work of this one; a step that frees nothing also waits
+ * gc_idle_ns. Returns what the step did.
+ */
+SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now)
+{
+    uint64_t erases = ssd->total_erases;
+    uint64_t copies = ssd->gc_write_pages;
+    int free0 = ssd->lm.free_line_cnt;
+    SsdGcIdleOutcome out;
+    uint64_t fence;
+
+    if (ssd->lm.free_line_cnt >= ssd->sp.gc_idle_lines) {
+        return SSD_GC_IDLE_AT_TARGET;
+    }
+    do_gc(ssd, false);
+    ssd->gc_idle_steps++;
+    if (ssd->total_erases != erases) {
+        ssd->gc_idle_done++;
+        out = ssd->lm.free_line_cnt > free0 ? SSD_GC_IDLE_GAIN :
+                                              SSD_GC_IDLE_RECLAIMED;
+    } else {
+        out = ssd->gc_write_pages != copies ? SSD_GC_IDLE_PARTIAL :
+                                              SSD_GC_IDLE_NONE;
+    }
+    fence = MAX(now, ssd_media_last_end(ssd));
+    /* a step that freed no line waits the quiet time before the next try */
+    if (ssd->lm.free_line_cnt <= free0) {
+        fence = MAX(fence, now + ssd->gc_idle_ns);
+    }
+    ssd->gc_idle_fence = MAX(ssd->gc_idle_fence, fence);
+    return out;
+}
+
+/*
+ * The end of a host request on the FTL thread: idle collection counts its
+ * quiet time from the end of the request and of all media work so far.
+ */
+void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end)
+{
+    ssd->gc_idle_busy = MAX(ssd->gc_idle_busy,
+                            MAX(req_end, ssd_media_last_end(ssd)));
+}
+
 /* release what ssd_init_lines() took */
 /*
  * Paced collection (gc_pace): one victim at a time is copied a few pages per

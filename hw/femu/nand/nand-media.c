@@ -133,6 +133,40 @@ static NandBusRes *bus_windows(const NandBusResList *l)
     return l->grown ? l->grown : (NandBusRes *)l->r;
 }
 
+/* the latest end of any window in @l, 0 for none */
+static uint64_t bus_last_end(const NandBusResList *l)
+{
+    const NandBusRes *w = bus_windows(l);
+    uint64_t end = 0;
+
+    for (int k = 0; k < l->n; k++) {
+        if (w[k].end > end) {
+            end = w[k].end;
+        }
+    }
+    return end;
+}
+
+/*
+ * The latest end of any data-out or command window booked on any channel.
+ * The busy-until timelines of the controller do not hold these: a read
+ * books its data-out for later, and leaves the channel time as it was.
+ */
+uint64_t nand_media_last_end(const NandMedia *m)
+{
+    uint64_t end = 0;
+
+    for (uint32_t ch = 0; ch < m->cfg.nchs; ch++) {
+        if (m->bus_res && bus_last_end(&m->bus_res[ch]) > end) {
+            end = bus_last_end(&m->bus_res[ch]);
+        }
+        if (m->ca_res && bus_last_end(&m->ca_res[ch]) > end) {
+            end = bus_last_end(&m->ca_res[ch]);
+        }
+    }
+    return end;
+}
+
 /*
  * The first window that ends after @t. Each window is fitted around every
  * listed one and inserted by start, so the windows are disjoint and their

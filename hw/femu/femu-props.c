@@ -562,6 +562,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: write the pages garbage collection copies to lines of "
       "their own, apart from host writes; refused with FDP, cxl_ssd, "
       "gc_pace, Streams, and retention_limit_sec without pd_open_close_sec" },
+    { "gc_idle_ms",
+      "bbssd with one namespace and page mapping: quiet time in ms after "
+      "which the device collects lines in the background, one victim at a "
+      "time; 0 (default) collects only on the write path" },
+    { "gc_idle_pcent",
+      "bbssd with gc_idle_ms: idle collection runs while the line fill is "
+      "above this percent, as gc_thres_pcent counts it; 0 (default) takes "
+      "gc_thres_pcent, else 1 to 99" },
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },

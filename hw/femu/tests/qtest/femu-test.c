@@ -36938,6 +36938,368 @@ static void femu_test_gc_frontier_skew(void *obj, void *data,
     g_assert_cmpuint(on, <, off);
 }
 
+/* x-gc-idle of the device "gc-test": steps, victims, free lines, target */
+static void femu_gci_state(QTestState *qts, int *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-gc-idle'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 4);
+    for (int i = 0; i < 4; i++) {
+        v[i] = atoi(f[i]);
+    }
+    qobject_unref(rsp);
+}
+
+static void femu_gci_hold(QTestState *qts, bool on)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-hold','value':%s}}",
+                             on ? "true" : "false");
+}
+
+/* x-gc-idle-kick: one step now, and its outcome or "not-due" */
+static char *femu_gci_kick(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-gc-idle-kick'}}");
+    char *out;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    out = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return out;
+}
+
+/*
+ * The fill writes the 768 pages of the namespace once, and two passes of
+ * overwrites in a fixed random order leave invalid pages in most lines.
+ * The write path collects only below 8 free lines (gc_thres_pcent=90).
+ */
+static void femu_gci_workload(FemuCtrlState *c, QTestState *qts, uint64_t buf)
+{
+    uint32_t lcg = 4242;
+
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 2 * 768; i++) {
+        lcg = lcg * 1103515245u + 12345u;
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)((lcg >> 8) % 768) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+    }
+}
+
+/*
+ * gc_idle_ms=5, gc_idle_pcent=75: idle time collects until 20 of the 80
+ * lines are free, which the write path never does. The hold keeps idle
+ * steps out of the workload. After it ends, a bounded wait sees the free
+ * lines reach the target with no host I/O, and every mapping still holds.
+ */
+static void femu_test_gc_idle_recover(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    g_autofree char *last = NULL;
+    int v[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_workload(&c, qts, buf);
+    femu_gci_state(qts, v);
+    g_test_message("before: steps %d victims %d free %d target %d",
+                   v[0], v[1], v[2], v[3]);
+    g_assert_cmpint(v[0], ==, 0);
+    g_assert_cmpint(v[3], ==, 20);
+    g_assert_cmpint(v[2], <, v[3]);
+    femu_gci_hold(qts, false);
+    for (int i = 0; v[2] < v[3] && i < 500; i++) {
+        g_usleep(10000);
+        femu_gci_state(qts, v);
+    }
+    g_test_message("after: steps %d victims %d free %d", v[0], v[1], v[2]);
+    g_assert_cmpint(v[2], >=, v[3]);
+    g_assert_cmpint(v[1], >, 0);
+    g_assert_cmpint(v[0], >=, v[1]);
+    femu_gci_hold(qts, true);
+    last = femu_gci_kick(qts);
+    g_assert_cmpstr(last, ==, "at-target");
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The retry fence: a step that finds no victim moves it gc_idle_ms (3 s)
+ * ahead. The
+ * fill leaves no invalid page, so no line is a victim, and gc_idle_pcent=50
+ * keeps the 31 free lines below the target of 40. The first kick after the
+ * quiet time finds nothing; a kick at once must wait for the fence.
+ */
+static void femu_test_gc_idle_fence(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int v[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    {
+        g_autofree char *k0 = femu_gci_kick(qts);
+
+        g_assert_cmpstr(k0, ==, "not-due");
+    }
+    g_usleep(3300000);
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *k1 = femu_gci_kick(qts);
+        g_autofree char *k2 = femu_gci_kick(qts);
+
+        g_test_message("kick %d: %s, then %s", i, k1, k2);
+        g_assert_cmpstr(k1, ==, "none");
+        g_assert_cmpstr(k2, ==, "not-due");
+        g_usleep(3300000);
+    }
+    femu_gci_state(qts, v);
+    g_assert_cmpint(v[0], ==, 2);
+    g_assert_cmpint(v[1], ==, 0);
+    g_assert_cmpint(v[3], ==, 40);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Fill the namespace, then overwrite LPNs 0 to 63: four lines hold no
+ * valid page, and 27 lines stay free, above the write path threshold.
+ */
+static void femu_gci_dead_lines(FemuCtrlState *c, QTestState *qts,
+                                uint64_t buf)
+{
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768 + 64; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)(lpn % 768) * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+}
+
+/*
+ * The media fence: with a 2 s block erase, a step that erases one victim
+ * keeps the next step out until the erase ends. The quiet time is 1 ms,
+ * and a gain sets no retry fence, so only the erase can hold the kick.
+ */
+static void femu_test_gc_idle_media(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_dead_lines(&c, qts, buf);
+    g_usleep(50000);
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *k1 = femu_gci_kick(qts);
+        g_autofree char *k2 = femu_gci_kick(qts);
+
+        g_test_message("kick %d: %s, then %s", i, k1, k2);
+        g_assert_cmpstr(k1, ==, "gain");
+        g_assert_cmpstr(k2, ==, "not-due");
+        g_usleep(2500000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The sweep flag: each idle step sleeps 300 ms inside the sweep. A pause
+ * must wait for the step, so x-gc-idle-order never sees one running.
+ * Without the flag, the pause returns while a step sleeps.
+ */
+static void femu_test_gc_idle_sweep(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    unsigned steps = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_dead_lines(&c, qts, buf);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':300}}");
+    femu_gci_hold(qts, false);
+    for (int i = 0; i < 60; i++) {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/gc-test',"
+                               "'property':'x-gc-idle-order'}}");
+        int running;
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"), "%d %u",
+                               &running, &steps), ==, 2);
+        qobject_unref(rsp);
+        g_assert_cmpint(running, ==, 0);
+        g_usleep(20000);
+    }
+    g_test_message("idle steps seen: %u", steps);
+    g_assert_cmpuint(steps, >, 0);
+    femu_gci_hold(qts, true);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':0}}");
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * gc_idle_ms omitted: the same workload, then the same wait, and the pages
+ * collection copied do not change. The idle hooks are absent.
+ */
+static void femu_test_gc_idle_off(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_workload(&c, qts, buf);
+    gc0 = femu_c0h_field(&c, log, 16);
+    g_usleep(300000);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, gc0);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-gc-idle'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* gc_idle_ms is refused where the first version cannot keep its model */
+static void femu_test_gc_idle_refused(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'blks_per_pl':80,'gc_pace':true", "gc_pace" },
+        { "'blks_per_pl':80,'streams':true", "Streams" },
+        { "'blks_per_pl':80,'power_loss':true,'buffer_size':16",
+          "power_loss" },
+        { "'blks_per_pl':80,'ns_mgmt':true", "ns_mgmt" },
+        { "'blks_per_pl':80,'femu_mode':4", "femu_mode 4" },
+        { "'blks_per_pl':80,'mapping':'dftl'", "a mapping other than page" },
+        { "'blks_per_pl':80,'namespaces':2", "more than one namespace" },
+        { "'blks_per_pl':80,'subsys':'fdpsub'", "FDP" },
+        { "'blks_per_pl':80,'gc_idle_pcent':100", "gc_idle_pcent above 99" },
+        { "'blks_per_pl':160,'tier_mode':'static','tier_static_mb':1,"
+          "'nand_cell_type':3", "the pSLC tier" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gcir','addr':'5','devsz_mb':4,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'pls_per_lun':1,"
+            "'luns_per_ch':1,'nchs':1,'gc_idle_ms':5,%s%s}}", cases[i].opts,
+            strstr(cases[i].opts, "femu_mode") ? "" : ",'femu_mode':1");
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_assert_nonnull(strstr(desc, "gc_idle_ms"));
+        qobject_unref(rsp);
+    }
+    /*
+     * The controls: the plain line with gc_idle_ms is accepted, and so is
+     * each refused line with gc_idle_ms=0, so each refusal comes from
+     * gc_idle_ms and not from the rest of its line.
+     */
+    for (int i = -1; i < (int)ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gcir','addr':'5','devsz_mb':4,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'pls_per_lun':1,"
+            "'luns_per_ch':1,'nchs':1,'gc_idle_ms':%d,%s%s}}",
+            i < 0 ? 5 : 0, i < 0 ? "'blks_per_pl':80" : cases[i].opts,
+            i >= 0 && strstr(cases[i].opts, "femu_mode") ? "" :
+            ",'femu_mode':1");
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (i >= 0 && strstr(cases[i].msg, "gc_idle_pcent")) {
+            /* the percent alone only warns; drop the device it made */
+            g_assert_true(qdict_haskey(rsp, "return"));
+        } else if (!qdict_haskey(rsp, "return")) {
+            g_test_message("control %d refused: %s", i,
+                           qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"));
+            g_assert_not_reached();
+        }
+        qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "gcir", 5);
+    }
+}
+
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     const FemuCapsCfg *cfg = data;
@@ -45903,6 +46265,41 @@ static void femu_register_nodes(void)
     qos_add_test("gc-frontier-refused", "femu", femu_test_gc_frontier_refused,
                  NULL);
     qos_add_test("gc-frontier-skew", "femu", femu_test_gc_frontier_skew, NULL);
+    qos_add_test("gc-idle-recover", "femu", femu_test_gc_idle_recover,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
+            ",gc_idle_ms=5,gc_idle_pcent=75" });
+    qos_add_test("gc-idle-fence", "femu", femu_test_gc_idle_fence,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
+            ",gc_idle_ms=3000,gc_idle_pcent=50" });
+    qos_add_test("gc-idle-media", "femu", femu_test_gc_idle_media,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
+            ",gc_idle_ms=1,gc_idle_pcent=50,blk_er_lat=2000000000" });
+    qos_add_test("gc-idle-sweep", "femu", femu_test_gc_idle_sweep,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
+            ",gc_idle_ms=1,gc_idle_pcent=50" });
+    qos_add_test("gc-idle-off", "femu", femu_test_gc_idle_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95" });
+    qos_add_test("gc-idle-refused", "femu", femu_test_gc_idle_refused, NULL);
     qos_add_test("identify-fmt", "femu", femu_test_identify_fmt,
                  &(QOSGraphTestOptions) { .arg = (void *)"plain",
         .edge.extra_device_opts = "id=fmt21a,ns_mgmt=on" });
@@ -47410,6 +47807,16 @@ static void femu_register_nodes(void)
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_frontier=off",
+    });
+    /* gc_idle_ms given as 0: the same trace as the plain device */
+    qos_add_test("ftl-trace-gc-idle-off", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_idle_ms=0",
     });
     qos_add_test("ftl-trace-hot-cold", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {

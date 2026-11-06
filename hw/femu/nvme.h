@@ -2276,6 +2276,8 @@ typedef struct BbCtrlParams {
     uint32_t tier_max_mb;     /* dynamic: cap of borrowed lines; 0: none */
     uint32_t tier_shrink_pct; /* dynamic: fill where the allowance falls */
     uint32_t tier_idle_ms;    /* quiet time before an idle fold; 0: off */
+    uint32_t gc_idle_ms;      /* quiet time before idle collection; 0: off */
+    uint8_t gc_idle_pcent;    /* idle collection target; 0: gc_thres_pcent */
     uint32_t tier_lazy_pct;   /* idle folds: 0 eager; else pool use to keep */
 } BbCtrlParams;
 
@@ -2744,6 +2746,7 @@ typedef struct FemuCtrl {
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
     bool            tier_idle;      /* the FTL thread runs idle folds */
+    bool            gc_idle;        /* the FTL thread collects when idle */
     /* qtest only: the next pSLC fold stops after this many pages, once */
     uint32_t        test_tier_fold_stop;
     /* qtest only: ms Report Zones holds the zone lock before it reports */
