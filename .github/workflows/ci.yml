@@ -5,6 +5,10 @@ on:
     branches: [ master, main ]
   pull_request:
     branches: [ master, main ]
+  # Each night the sanitized non-fuzz qtests also run in one process, as a
+  # check for state that one test leaks into the next across shard limits.
+  schedule:
+    - cron: '23 7 * * *'
 
 # Nothing here writes to the repository, so the token only reads it.
 permissions:
@@ -217,12 +221,13 @@ jobs:
   # aborts, and so does a heap overrun in the controller.
   debug-build:
     runs-on: ubuntu-24.04
-    # The fuzz tests are most of the sanitized qtest time, so they are shared
-    # out over runners of their own and every part runs side by side.
+    # The sanitized qtests are shared out over runners that run side by
+    # side: three contiguous shards of the non-fuzz tests, and three parts
+    # of the fuzz tests.
     strategy:
       fail-fast: false
       matrix:
-        part: [main, fuzz0, fuzz1, fuzz2]
+        part: [main0, main1, main2, fuzz0, fuzz1, fuzz2]
     name: debug-build (${{ matrix.part }})
 
     steps:
@@ -272,7 +277,7 @@ jobs:
         ccache --show-stats
 
     - name: Run the FEMU unit tests under the sanitizers
-      if: matrix.part == 'main'
+      if: matrix.part == 'main0'
       run: |
         cd build-debug
         ./pyvenv/bin/meson test --suite femu-unit --list > femu-unit.list
@@ -281,7 +286,7 @@ jobs:
         ./pyvenv/bin/meson test --suite femu-unit --print-errorlogs
 
     - name: Instantiate every mode with the checks armed
-      if: matrix.part == 'main'
+      if: matrix.part == 'main0'
       env:
         # QEMU frees little at exit by design; only real errors should fail.
         ASAN_OPTIONS: detect_leaks=0
@@ -341,12 +346,29 @@ jobs:
             fi
             i=$((i + 1))
           done
-        else
+        elif [ "${{ github.event_name }}" = schedule ]; then
+          # nightly: every non-fuzz test in one process, on main0 only
+          [ "$part" = main0 ] || exit 0
           ./tests/qtest/qos-test -m quick -p "$B" $(printf -- '-s %s ' $fuzz)
+        else
+          # One contiguous shard per part, in one process. The list goes to
+          # a file first; qtest-shard checks the split and, from the TAP
+          # output, that each test of the shard ran and no other did.
+          i="${part#main}"
+          shard=../hw/femu/scripts/qtest-shard.py
+          ./tests/qtest/qos-test -l > qos.list
+          if [ "$i" = 0 ]; then
+            python3 "$shard" --shards 3 --check --skip fuzz < qos.list
+          fi
+          args=$(python3 "$shard" --shards 3 --index "$i" --skip fuzz < qos.list)
+          # shellcheck disable=SC2086
+          ./tests/qtest/qos-test -m quick --tap -p "$B" $args | tee shard.tap
+          python3 "$shard" --shards 3 --index "$i" --skip fuzz \
+            --ran shard.tap < qos.list
         fi
 
     - name: Expand every example config with the checks armed
-      if: matrix.part == 'main'
+      if: matrix.part == 'main0'
       env:
         # QEMU builds without -fno-sanitize-recover, so an undefined-behaviour
         # report would otherwise print and let the process exit 0. The script

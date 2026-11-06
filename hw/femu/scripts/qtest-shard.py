@@ -14,6 +14,9 @@ Usage:
         print the -s arguments that leave shard I of K
     qos-test -l | qtest-shard.py --shards K --check [--only PAT] [--skip PAT]
         check that the K shards cover each test once, none empty
+    qos-test -l | qtest-shard.py --shards K --index I --ran TAP [...]
+        check from the TAP output of the shard's run that each of its tests
+        has a result, no other test ran, and none failed
     qtest-shard.py --self-test
 
 --only keeps the tests whose path contains PAT, --skip drops them; both
@@ -89,6 +92,26 @@ def check(all_paths, chosen, k):
     return problems
 
 
+def ran_problems(tap, part):
+    """Problems with the TAP output of one shard's run. qos-test ignores the
+    test result, so its exit status alone does not show that tests ran."""
+    results = {}
+    for line in tap.split("\n"):
+        words = line.split(" ", 3)
+        if len(words) >= 3 and words[0] in ("ok", "not") and \
+                (words[0] == "ok" or words[1] == "ok"):
+            rest = line.split(" ", 3 if words[0] == "not" else 2)[-1]
+            path = rest.split(" ", 1)[0]
+            if "# SKIP by request" in line:
+                continue
+            results[path] = words[0] == "ok"
+    problems = [f"{p}: no result" for p in part if p not in results]
+    problems += [f"{p}: ran outside the shard" for p in results
+                 if p.startswith(BASE + "/") and p not in set(part)]
+    problems += [f"{p}: failed" for p, good in results.items() if not good]
+    return problems
+
+
 def self_test():
     names = [f"{BASE}/t{i:02d}" for i in range(10)] + [f"{BASE}/io-fuzz-{i}"
                                                        for i in range(3)]
@@ -117,7 +140,17 @@ def self_test():
     expect("the skip list leaves only shard 1",
            [p for p in paths if p not in skips] == parts[1])
     expect("a fuzz test is skipped in a plain shard", names[10] in skips)
-    print(f"qtest-shard self-test: {10 - bad} of 10 passed")
+    tap = "\n".join([f"ok {i + 1} {p}" for i, p in enumerate(parts[1])] +
+                     [f"ok 9 {names[0]} # SKIP by request (-s option)"])
+    expect("a full shard run passes", ran_problems(tap, parts[1]) == [])
+    expect("a missing result fails",
+           ran_problems(tap.split("\n", 1)[1], parts[1]) != [])
+    expect("a failed test fails",
+           ran_problems(tap.replace("ok 2 ", "not ok 2 ", 1),
+                        parts[1]) != [])
+    expect("a test outside the shard fails",
+           ran_problems(tap + f"\nok 10 {names[0]}", parts[1]) != [])
+    print(f"qtest-shard self-test: {14 - bad} of 14 passed")
     return 1 if bad else 0
 
 
@@ -128,6 +161,7 @@ def main():
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--only")
     ap.add_argument("--skip")
+    ap.add_argument("--ran", metavar="TAP")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
@@ -148,6 +182,14 @@ def main():
     if not 0 <= a.index < a.shards:
         ap.error("--index must be in 0 to K-1")
     part = shards(chosen, a.shards)[a.index]
+    if a.ran:
+        with open(a.ran) as f:
+            problems = ran_problems(f.read(), part)
+        for p in problems:
+            print(f"qtest-shard: {p}", file=sys.stderr)
+        print(f"qtest-shard: shard {a.index}: {len(part)} tests, "
+              f"{len(problems)} problem(s)")
+        return 1 if problems else 0
     print(" ".join(f"-s {p}" for p in skip_args(all_paths, part)))
     return 0
 
