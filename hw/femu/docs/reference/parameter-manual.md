@@ -444,6 +444,7 @@ Design: [host link and firmware CPU](../design/nand-timing.md#host-link-and-firm
 | --- | --- | --- | --- |
 | `pcie_bandwidth_mbps` | MB/s (10^6 bytes) | 0 disables | each Read and Write is charged its size at this rate, on one queue per direction |
 | `pcie_prop_delay_ns` | ns | 0 disables | fixed delay added to each Read and Write after its transfer |
+| `pcie_write_first` | bool | on | on books a write's transfer before its media; off charges it after its programs (the old order) |
 | `fw_cpu_ns` | ns per command | 0 disables | firmware time per Read, Write and Zone Append on one modelled core; caps the rate at about one command per `fw_cpu_ns` |
 
 ## 11. ZNS

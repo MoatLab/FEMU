@@ -4167,6 +4167,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("err_write_fail_ppm", FemuCtrl, err_write_fail_ppm, 0),
     DEFINE_PROP_UINT32("pcie_bandwidth_mbps", FemuCtrl, pcie_bandwidth_mbps, 0),
     DEFINE_PROP_UINT32("pcie_prop_delay_ns", FemuCtrl, pcie_prop_delay_ns, 0),
+    DEFINE_PROP_BOOL("pcie_write_first", FemuCtrl, pcie_write_first, true),
     DEFINE_PROP_UINT64("fw_cpu_ns", FemuCtrl, fw_cpu_ns, 0),
     DEFINE_PROP_UINT64("fw_read_ns", FemuCtrl, fw_read_ns, 0),
     DEFINE_PROP_UINT64("fw_write_ns", FemuCtrl, fw_write_ns, 0),

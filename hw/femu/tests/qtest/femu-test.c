@@ -37300,6 +37300,82 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
     }
 }
 
+/*
+ * The host-link order of a write. With a 1 MB/s link, a 64 KiB write takes
+ * 65.5 ms on the link and a 512 B read 0.5 ms; a program takes 0.2 ms on
+ * the one LUN. Both go in under one doorbell, the write first. The write's data
+ * crosses the link before its program, so the read's media waits behind
+ * that program and the write completes first. With pcie_write_first=off
+ * (@data "old"), the old order charges the link after the program, and
+ * the read completes first. The queue posts in model time order, so host
+ * speed does not change which completes first.
+ */
+static void femu_test_link_write_order(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool old = data && !strcmp(data, "old");
+    FemuCtrlState c = { 0 };
+    uint64_t wbuf = guest_alloc(alloc, 16 * FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t rbuf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    NvmeRwCmd w = { 0 };
+    NvmeRwCmd r = { 0 };
+    uint16_t wcid;
+    uint16_t first;
+    uint16_t second;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, wbuf, 0x5a, 16 * FEMU_DATA_SIZE);
+    for (int i = 1; i < 16; i++) {
+        uint64_t prp = cpu_to_le64(wbuf + (uint64_t)i * FEMU_DATA_SIZE);
+
+        qtest_memwrite(qts, list + (i - 1) * 8, &prp, sizeof(prp));
+    }
+    /* the page the read targets holds data, so the read uses the LUN */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1024, wbuf)), ==,
+                    NVME_SUCCESS);
+    g_usleep(50000);
+
+    w.opcode = NVME_CMD_WRITE;
+    w.nsid = cpu_to_le32(1);
+    w.dptr.prp1 = cpu_to_le64(wbuf);
+    w.dptr.prp2 = cpu_to_le64(list);
+    w.slba = cpu_to_le64(0);
+    w.nlb = cpu_to_le16(16 * FEMU_DATA_SIZE / c.lba_size - 1);
+    w.cid = cpu_to_le16(c.cid++);
+    wcid = le16_to_cpu(w.cid);
+    r.opcode = NVME_CMD_READ;
+    r.nsid = cpu_to_le32(1);
+    r.dptr.prp1 = cpu_to_le64(rbuf);
+    r.slba = cpu_to_le64(1024);
+    r.nlb = cpu_to_le16(0);
+    r.cid = cpu_to_le16(c.cid++);
+    qtest_memwrite(qts, c.io.sq_addr + c.io.sq_tail * sizeof(NvmeCmd), &w,
+                   sizeof(NvmeCmd));
+    c.io.sq_tail = (c.io.sq_tail + 1) % FEMU_QSIZE;
+    qtest_memwrite(qts, c.io.sq_addr + c.io.sq_tail * sizeof(NvmeCmd), &r,
+                   sizeof(NvmeCmd));
+    c.io.sq_tail = (c.io.sq_tail + 1) % FEMU_QSIZE;
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, c.io.qid),
+                   c.io.sq_tail);
+
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &first, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &second, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("%s order: %s completes first", old ? "old" : "new",
+                   first == wcid ? "the write" : "the read");
+    g_assert_cmpuint(first == wcid, ==, !old);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, rbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, wbuf);
+}
+
 static void femu_test_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     const FemuCapsCfg *cfg = data;
@@ -46300,6 +46376,19 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95" });
     qos_add_test("gc-idle-refused", "femu", femu_test_gc_idle_refused, NULL);
+    qos_add_test("link-write-first", "femu", femu_test_link_write_order,
+                 &(QOSGraphTestOptions) { .arg = (void *)"first",
+        .edge.extra_device_opts =
+            "id=link,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pcie_bandwidth_mbps=1" });
+    qos_add_test("link-write-old", "femu", femu_test_link_write_order,
+                 &(QOSGraphTestOptions) { .arg = (void *)"old",
+        .edge.extra_device_opts =
+            "id=link,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,pcie_bandwidth_mbps=1"
+            ",pcie_write_first=off" });
     qos_add_test("identify-fmt", "femu", femu_test_identify_fmt,
                  &(QOSGraphTestOptions) { .arg = (void *)"plain",
         .edge.extra_device_opts = "id=fmt21a,ns_mgmt=on" });

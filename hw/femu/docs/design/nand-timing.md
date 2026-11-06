@@ -1088,19 +1088,43 @@ The FTL adds these to a command's latency alongside its NAND operations:
 
 ## Host link and firmware CPU
 
-Both are applied in `nvme_process_cq_cpl()` in `hw/femu/nvme-io.c`, after the
-media latency is in `expire_time` and before the request enters the priority
-queue. Both are off by default.
+Both are off by default. A read pays the link in `nvme_process_cq_cpl()` in
+`hw/femu/nvme-io.c`, after the media latency is in `expire_time`. A write
+that passes the rule below pays it at submit, before the FTL books its
+programs. The firmware cost is charged in `nvme_process_cq_cpl()` for every
+command.
 
 | Model | Applies to | Computation |
 | --- | --- | --- |
-| Link transfer (`pcie_bandwidth_mbps`) | NVMe Read and Write (opcodes 01h and 02h) in BBSSD, CSD, KV, ZNS and NoSSD; KV store and retrieve share those opcodes and use the bytes moved. Not Zone Append, and not the Open-Channel vector commands, so OCSSD 1.2 never pays it | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. `start = max(queue, expire)`, `queue = start + trans` |
+| Link transfer (`pcie_bandwidth_mbps`) | NVMe Read and Write (opcodes 01h and 02h) in BBSSD, CSD, KV, ZNS and NoSSD; KV store and retrieve share those opcodes and use the bytes moved. Not Zone Append, and not the Open-Channel vector commands, so OCSSD 1.2 never pays it | `trans = bytes * 1000 / MBps` ns. One queue per direction: writes on `pcie_rx_next_avail_time`, reads on `pcie_tx_next_avail_time`. Read: `start = max(queue, expire)`. Write, where the rule below allows it: `start = max(queue, submit)`, and the FTL start moves to the transfer end; other writes as a read. Both: `queue = start + trans` |
 | Propagation (`pcie_prop_delay_ns`) | same | `expire = queue + delay`; does not occupy the queue |
 | Firmware CPU (`fw_cpu_ns`, `fw_read_ns`, `fw_write_ns`, `fw_other_ns`, `fw_cores`) | Read (`fw_read_ns`), Write and Zone Append (`fw_write_ns`), each falling back to `fw_cpu_ns` when 0; every other I/O command, the Open-Channel vector commands included, pays `fw_other_ns` | `fw_cores` modelled cores: the command takes the core free soonest, `start = max(core, expire)`, `core = start + cost`, `expire = core` |
 
-The link is modelled after the media for both directions. A read's transfer
-to the host never overlaps its NAND time, and a write's transfer from the
-host is charged after its programs, not before them. The firmware cost is charged at the end of a command,
+A write's data crosses the link before the media can program it. So the
+write books its transfer when it passes its checks, and the FTL starts at
+the transfer end. A read's transfer starts after its NAND time.
+
+The early booking applies only where the FTL books the media later, from
+the request start time. Every other write keeps the old order.
+
+| Write (01h) on | Order |
+| --- | --- |
+| bbssd, FDP or CSD block namespace, `buffer_size=0` | link first |
+| NoSSD | link first |
+| a write buffer (`buffer_size` > 0), ZNS (zone write cache) | old: buffered pages keep no arrival time |
+| KV store, OCSSD 2.0 | old: `nvme_io_cmd()` books the media itself |
+| `power_loss=on` | old: the FTL thread checks the command |
+| a controller linked to a CXL SSD, SLM, CP Execute | old |
+
+```text
+ write: submit --> link (rx queue) --> FTL programs --> firmware --> CQE
+ read:  submit --> FTL reads --> link (tx queue) --> firmware --> CQE
+ pcie_write_first=off: write: submit --> FTL programs --> link --> firmware --> CQE
+```
+
+The stage counters of `query-femu-stages` count from the submit time. The
+FTL handoff time is real time, so a write's link time shows in the hold
+stage. The firmware cost is charged at the end of a command,
 which caps the command rate at about `fw_cores` per firmware time but does not delay
 the start of the media operations. The link model is enabled when either link property is non-zero
 (`pcie_enabled` in `femu.c`).

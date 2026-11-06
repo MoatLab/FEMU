@@ -640,6 +640,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "pcie_prop_delay_ns",
       "Host link propagation delay in ns added to each Read or Write "
       "after its link transfer; 0 disables it" },
+    { "pcie_write_first",
+      "with the host link model: on (default) books a write's transfer "
+      "before its media, as on a real drive; off charges it after the "
+      "programs, the order before this option" },
     { "fw_cpu_ns",
       "Controller firmware time in ns charged to each Read, Write and "
       "Zone Append, serialized on one modelled core; 0 disables it" },

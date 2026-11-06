@@ -23,6 +23,83 @@ static void nvme_stage_add(FemuStageHist *h, int64_t ns)
 }
 
 /*
+ * The optional host-link model moves the data of reads and writes, of
+ * key-value commands, and of memory and program commands that carry data.
+ */
+static bool nvme_link_applies(const NvmeRequest *req)
+{
+    if (!req->ns) {
+        return false;
+    }
+    if (NS_SLM(req->ns) || NS_CP(req->ns)) {
+        return req->xfer_bytes != 0;
+    }
+    return req->cmd_opcode == NVME_CMD_READ ||
+           req->cmd_opcode == NVME_CMD_WRITE;
+}
+
+/*
+ * The bytes a command moves over the link. A key-value store and retrieve
+ * share the Read and Write opcodes and carry no block count.
+ */
+static uint64_t nvme_link_bytes(const NvmeRequest *req)
+{
+    uint8_t lbads;
+
+    if (NS_KVSSD(req->ns) || NS_SLM(req->ns) || NS_CP(req->ns)) {
+        return req->xfer_bytes;
+    }
+    lbads = req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)]
+            .lbads;
+    return (uint64_t)req->nlb << lbads;
+}
+
+/*
+ * Whether a write books its link transfer before its media. Only where the
+ * media is booked later, on the FTL thread, from req->stime: bbssd, FDP and
+ * CSD block namespaces with no write buffer, and NoSSD. KV and OCSSD book
+ * media inside nvme_io_cmd(), ZNS and the write buffer hold pages with no
+ * arrival time, power_loss checks the command on the FTL thread, and CP
+ * Execute keeps its own arrival time; all of them keep the old order.
+ */
+static bool nvme_link_write_first(FemuCtrl *n, const NvmeRequest *req)
+{
+    NvmeNamespace *ns = req->ns;
+
+    if (req->cmd_opcode != NVME_CMD_WRITE || !ns || n->power_loss ||
+        n->cxl_ssd || NS_SLM(ns) || NS_CP(ns)) {
+        return false;
+    }
+    if (NS_NOSSD(ns)) {
+        return true;
+    }
+    return (NS_BBSSD(ns) || NS_CSD(ns)) && n->bb_params.buffer_size == 0;
+}
+
+/*
+ * Book @bytes on the link in one direction, no earlier than @ready, and
+ * return when the data arrives. The link is one physical resource, so
+ * transfers queue behind each other through a next-available time, kept
+ * per direction: a read and a write travel opposite ways.
+ */
+static int64_t nvme_link_book(FemuCtrl *n, bool to_device, uint64_t bytes,
+                              int64_t ready)
+{
+    uint64_t trans_ns = n->pcie_bandwidth_mbps ?
+                        bytes * 1000 / n->pcie_bandwidth_mbps : 0;
+    uint64_t *next;
+    uint64_t start;
+
+    pthread_spin_lock(&n->pcie_lock);
+    next = to_device ? &n->pcie_rx_next_avail_time :
+                       &n->pcie_tx_next_avail_time;
+    start = MAX(*next, (uint64_t)ready);
+    *next = start + trans_ns;
+    pthread_spin_unlock(&n->pcie_lock);
+    return (int64_t)(start + trans_ns + n->pcie_prop_delay_ns);
+}
+
+/*
  * io_stages: add one posted command to this poller's histograms. The stages
  * meet at "ready", the later of the due time and the return from the FTL,
  * so submit, ftl, hold and post-delay add up to total. past-due, from the
@@ -37,13 +114,13 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     FemuStageSet *set = &n->stage_sets[index_poller];
     int64_t ready = req->expire_time;
 
-    if (req->expire_time < req->stime) {
+    if (req->expire_time < req->t_submit) {
         return;
     }
     if (req->t_handoff && req->t_return) {
         ready = MAX(req->expire_time, req->t_return);
         nvme_stage_add(&set->st[FEMU_STAGE_SUBMIT],
-                       req->t_handoff - req->stime);
+                       req->t_handoff - req->t_submit);
         nvme_stage_add(&set->st[FEMU_STAGE_FTL],
                        req->t_return - req->t_handoff);
         nvme_stage_add(&set->st[FEMU_STAGE_HOLD], ready - req->t_return);
@@ -54,7 +131,7 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     }
     nvme_stage_add(&set->st[FEMU_STAGE_POST_DELAY], post - ready);
     nvme_stage_add(&set->st[FEMU_STAGE_PAST_DUE], post - req->expire_time);
-    nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->stime);
+    nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->t_submit);
 }
 
 /*
@@ -367,7 +444,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->eol_ro = eol == FEMU_EOL_READ_ONLY;
         eol = -1;
         /* Coperd: record req->stime at earliest convenience */
-        req->expire_time = req->stime = femu_io_now(n);
+        req->expire_time = req->stime = req->t_submit = femu_io_now(n);
+        req->link_early = false;
         req->t_handoff = 0;
         req->t_return = 0;
         req->cqe.cid = cmd.cid;
@@ -444,6 +522,22 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             default:
                 break;
             }
+        }
+
+        /*
+         * A write's data crosses the host link before the media can program
+         * it, so with the link model on it books the transfer now and the
+         * FTL starts at its end, where nvme_link_write_first() allows it.
+         * Only a command that passed its checks moves data.
+         */
+        if (unlikely(n->pcie_enabled) && n->pcie_write_first &&
+            status == NVME_SUCCESS && nvme_link_write_first(n, req)) {
+            int64_t shift = nvme_link_book(n, true, nvme_link_bytes(req),
+                                           req->stime) - req->stime;
+
+            req->stime += shift;
+            req->expire_time += shift;
+            req->link_early = true;
         }
 
         if (status != NVME_SUCCESS) {
@@ -735,39 +829,16 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
 
         /*
-         * Optional host-link model: charge the transfer over a link of the
-         * configured bandwidth plus a propagation delay. The link is one
-         * physical resource, so transfers queue behind each other through a
-         * next-available time, kept per direction since a read and a write
-         * travel opposite ways over it. Applied once the media latency is
-         * already in expire_time and before the completion is posted.
+         * Optional host-link model: a read's data crosses the link after the
+         * media, before the completion is posted. A write booked its
+         * transfer at submit, unless pcie_write_first=off keeps the old
+         * order.
          */
-        if (unlikely(n->pcie_enabled) && req->ns &&
-            (NS_SLM(req->ns) || NS_CP(req->ns) ? req->xfer_bytes != 0 :
-             req->cmd_opcode == NVME_CMD_READ ||
-             req->cmd_opcode == NVME_CMD_WRITE)) {
-            uint8_t lbads = req->ns->id_ns.lbaf[
-                NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
-            /*
-             * A key-value store and retrieve share these opcodes and carry no
-             * block count, so the link was charged for whatever the previous
-             * command in this request slot moved, in its direction.
-             */
-            uint64_t data_size = NS_KVSSD(req->ns) || NS_SLM(req->ns) ||
-                                 NS_CP(req->ns) ? req->xfer_bytes :
-                                 (uint64_t)req->nlb << lbads;
-            uint64_t trans_ns = n->pcie_bandwidth_mbps ?
-                data_size * 1000 / n->pcie_bandwidth_mbps : 0;
-            uint64_t *next, start;
-
-            pthread_spin_lock(&n->pcie_lock);
-            next = req->is_write ? &n->pcie_rx_next_avail_time :
-                                   &n->pcie_tx_next_avail_time;
-            start = (*next > (uint64_t)req->expire_time) ?
-                    *next : (uint64_t)req->expire_time;
-            *next = start + trans_ns;
-            req->expire_time = (int64_t)(*next + n->pcie_prop_delay_ns);
-            pthread_spin_unlock(&n->pcie_lock);
+        if (unlikely(n->pcie_enabled) && !req->link_early &&
+            nvme_link_applies(req)) {
+            req->expire_time = nvme_link_book(n, req->is_write,
+                                              nvme_link_bytes(req),
+                                              req->expire_time);
         }
 
         /*

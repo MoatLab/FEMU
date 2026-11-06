@@ -1798,6 +1798,10 @@ typedef struct NvmeRequest {
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
     int64_t                 stime;
+    /* the submit time; stime moves past it when a write books the link */
+    int64_t                 t_submit;
+    /* the write paid its host-link transfer before the media */
+    bool                    link_early;
     /* io_stages: when the poller handed it to the FTL ring, and got it back */
     int64_t                 t_handoff;
     int64_t                 t_return;
@@ -2649,6 +2653,7 @@ typedef struct FemuCtrl {
     bool            pcie_enabled;
     uint32_t        pcie_bandwidth_mbps;
     uint32_t        pcie_prop_delay_ns;
+    bool            pcie_write_first;   /* a write books the link before media */
     uint64_t        pcie_tx_next_avail_time;
     uint64_t        pcie_rx_next_avail_time;
     pthread_spinlock_t pcie_lock;
