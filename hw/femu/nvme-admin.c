@@ -3727,6 +3727,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     ns->lbaf = id_ns->lbaf[lba_idx];
     ns->ns_blks = ns_blks(ns, lba_idx);
     nvme_ns_refresh_fdp(ns);
+    nvme_ns_refresh_hints(ns->ctrl, ns);
 
     /*
      * A format ends the life of the data whatever the erase settings say, so

@@ -214,6 +214,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "block size. The power-fail unit stays one block. bbssd and NoSSD "
       "only; refused with power_loss, ns_mgmt, namespace_modes and a "
       "subsystem" },
+    { "perf_hints",
+      "bbssd, CSD: report the optimal write and deallocate granularity "
+      "(NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, "
+      "for the format in use; off (default) reports 0 (one block). "
+      "Refused with FDP and ns_mgmt" },
     { "lba_index",
       "LBA format the namespaces boot with, below nlbaf; ZNS needs a block "
       "size of 4 KiB or less" },

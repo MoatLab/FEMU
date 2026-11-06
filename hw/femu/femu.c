@@ -1299,6 +1299,23 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
             return false;
         }
     }
+    /* the hints come from the bbssd geometry, for the format in use */
+    if (n->perf_hints) {
+        const char *why = NULL;
+
+        if (n->femu_mode != FEMU_BBSSD_MODE && n->femu_mode != FEMU_CSD_MODE) {
+            why = "it needs femu_mode 1 (bbssd) or 4 (CSD)";
+        } else if (n->ns_mgmt) {
+            why = "it is not supported with ns_mgmt";
+        } else if (n->subsys && n->subsys->params.fdp.enabled) {
+            why = "it is not supported with FDP: a write covers one reclaim "
+                  "group";
+        }
+        if (why) {
+            error_setg(errp, "perf_hints: %s", why);
+            return false;
+        }
+    }
     if (!OCSSD(n) && NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) {
         error_setg(errp, "dpc: bit 3 (protection information in the first "
                    "eight bytes of metadata) is not allowed by NVM 1.1");
@@ -1342,6 +1359,41 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
 
     return true;
+}
+
+/*
+ * The optimal write and deallocate hints (NPWG, NPWA, NPDG, NPDA) of a
+ * bbssd or CSD namespace are one flash page, and NOWS is the largest
+ * multiple of that within one stripe, MDTS and 65536 blocks. They need a
+ * page that holds whole blocks and a namespace that starts on a page;
+ * otherwise, or with perf_hints off, every hint is 0 (one block).
+ */
+void nvme_ns_refresh_hints(FemuCtrl *n, NvmeNamespace *ns)
+{
+    NvmeIdNs *id = &ns->id_ns;
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t page_b = (uint64_t)p->secs_per_pg * p->secsz;
+    uint8_t lbads = id->lbaf[NVME_ID_NS_FLBAS_INDEX(id->flbas)].lbads;
+    uint64_t lba_b = 1ULL << lbads;
+    uint64_t pg;
+    uint64_t cap;
+
+    id->npwg = id->npwa = id->npdg = id->npda = id->nows = 0;
+    if (!n->perf_hints || !(NS_BBSSD(ns) || NS_CSD(ns)) || !page_b ||
+        lba_b > page_b || page_b % lba_b || ns->backend_offset % page_b) {
+        return;
+    }
+    pg = page_b / lba_b;
+    cap = page_b * p->nchs * p->luns_per_ch * p->pls_per_lun / lba_b;
+    if (n->mdts && 12 + n->mpsmin + n->mdts < 48) {
+        cap = MIN(cap, (1ULL << (12 + n->mpsmin + n->mdts)) / lba_b);
+    }
+    cap = MIN(cap, 65536);
+    if (cap < pg) {
+        return;
+    }
+    id->npwg = id->npwa = id->npdg = id->npda = cpu_to_le16(pg - 1);
+    id->nows = cpu_to_le16(cap / pg * pg - 1);
 }
 
 static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
@@ -2195,6 +2247,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             ns->id_ns.mcl = 0;
             ns->id_ns.msrc = 0;
         }
+        nvme_ns_refresh_hints(n, ns);
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
             g_free(ns_modes);
@@ -4042,6 +4095,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
+    DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),

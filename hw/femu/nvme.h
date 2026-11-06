@@ -2531,6 +2531,7 @@ typedef struct FemuCtrl {
     uint8_t     extended;
     uint8_t     lba_index;
     uint32_t    atomic_write_lbas; /* namespace atomic write unit; 0 = one */
+    bool        perf_hints;     /* NPWG, NPDG, NOWS from the bbssd geometry */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;
@@ -3097,6 +3098,7 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
+void nvme_ns_refresh_hints(FemuCtrl *n, NvmeNamespace *ns);
 int nvme_streams_open(NvmeNamespace *ns, NvmeCmd *cmd);
 char *nvme_streams_test(Object *obj, Error **errp);
 void nvme_streams_release(NvmeNamespace *ns, bool resources);

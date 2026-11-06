@@ -37830,6 +37830,123 @@ static void femu_test_atomic_hold(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, oldb);
 }
 
+/* the five hints of namespace 1: NPWG, NPWA, NPDG, NPDA, NOWS */
+static void femu_hints(FemuCtrlState *c, uint64_t buf, uint16_t *h,
+                       uint8_t *nsfeat)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmpint(femu_identify(c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 5; i++) {
+        h[i] = qtest_readw(qts, buf + 64 + 2 * i);
+    }
+    *nsfeat = qtest_readb(qts, buf + 24);
+}
+
+/*
+ * perf_hints from a known geometry: a 4 KiB page of 512 B blocks on 2
+ * channels of 2 LUNs. @data "on": NPWG = NPWA = NPDG = NPDA = 7 (one page)
+ * and NOWS = 31 (one stripe); after Format to 4 KiB blocks, 0 and 3.
+ * "off": every hint 0. NSFEAT bits 5:4 stay 01b in every case.
+ */
+static void femu_test_perf_hints(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    uint16_t h[5];
+    uint8_t nsfeat;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_hints(&c, buf, h, &nsfeat);
+    g_assert_cmphex(nsfeat & 0x30, ==, 0x10);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(h[i], ==, on ? 7 : 0);
+    }
+    g_assert_cmpuint(h[4], ==, on ? 31 : 0);
+    if (on) {
+        /* format 3 is 4 KiB: one block per page, four per stripe */
+        g_assert_cmpint(femu_format_dw10(&c, 3), ==, NVME_SUCCESS);
+        femu_hints(&c, buf, h, &nsfeat);
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpuint(h[i], ==, 0);
+        }
+        g_assert_cmpuint(h[4], ==, 3);
+        g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+        femu_hints(&c, buf, h, &nsfeat);
+        g_assert_cmpuint(h[0], ==, 7);
+        g_assert_cmpuint(h[4], ==, 31);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* perf_hints is refused where the geometry does not set the write layout */
+static void femu_test_perf_hints_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':2,'perf_hints':true", "femu_mode" },
+        { "'femu_mode':3,'perf_hints':true", "femu_mode" },
+        { "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+          "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+          "'ns_mgmt':true,'perf_hints':true", "ns_mgmt" },
+        { "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+          "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+          "'subsys':'fdpsub','perf_hints':true", "FDP" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *opts = g_strdup(cases[i].opts);
+            g_autofree char *cmd = NULL;
+            QDict *rsp;
+
+            if (!on) {
+                /* the control: the same line with the property off */
+                char *p = strstr(opts, "'perf_hints':true");
+                char *off;
+
+                g_assert_nonnull(p);
+                *p = '\0';
+                off = g_strdup_printf("%s'perf_hints':false%s", opts,
+                                      p + strlen("'perf_hints':true"));
+                g_free(opts);
+                opts = off;
+            }
+            cmd = g_strdup_printf("{'execute':'device_add','arguments':{"
+                                  "'driver':'femu','id':'phr','addr':'5',"
+                                  "'devsz_mb':4,%s}}", opts);
+            rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, "perf_hints"));
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "phr", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
 /* atomic_write_lbas is refused where its unit cannot hold */
 static void femu_test_atomic_refused(void *obj, void *data,
                                      QGuestAllocator *alloc)
@@ -46428,6 +46545,19 @@ static void femu_register_nodes(void)
             "atomic_write_lbas=16,multipoller_enabled=1,poller_ratio=1"
     });
     qos_add_test("atomic-refused", "femu", femu_test_atomic_refused, NULL);
+    qos_add_test("perf-hints-off", "femu", femu_test_perf_hints,
+                 &(QOSGraphTestOptions) { .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2" });
+    qos_add_test("perf-hints-on", "femu", femu_test_perf_hints,
+                 &(QOSGraphTestOptions) { .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "perf_hints=on" });
+    qos_add_test("perf-hints-refused", "femu", femu_test_perf_hints_refused,
+                 NULL);
     qos_add_test("rw-atomic-split-write", "femu", femu_test_rw_atomic_split,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"write",
