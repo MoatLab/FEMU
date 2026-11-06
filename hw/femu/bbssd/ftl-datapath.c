@@ -306,9 +306,13 @@ uint16_t bbssd_flush_all(FemuCtrl *n)
     return NVME_SUCCESS;
 }
 
-/* Called with the controller stopped; old mappings still name durable pages. */
-void bbssd_power_loss(NvmeNamespace *ns)
+/*
+ * Called with the controller stopped; old mappings still name durable pages.
+ * Returns true when the cut dropped a buffered page.
+ */
+bool bbssd_power_loss(NvmeNamespace *ns)
 {
+    bool lost = false;
     struct ssd *ssd = ns->ssd;
     struct buffer_entry *entry;
     uint32_t page_size = ssd_page_size(ssd);
@@ -323,6 +327,7 @@ void bbssd_power_loss(NvmeNamespace *ns)
         if (!entry->undo) {
             continue;
         }
+        lost = true;
         memcpy(base + offset, entry->undo, page_size);
         for (uint32_t i = 0; i < page_size >> shift; i++) {
             if (entry->lba_state[i] & 1) {
@@ -341,6 +346,7 @@ void bbssd_power_loss(NvmeNamespace *ns)
     while ((entry = QTAILQ_FIRST(&ssd->write_buffer))) {
         ssd_buffer_discard(ssd, entry->lpn);
     }
+    return lost;
 }
 
 /*

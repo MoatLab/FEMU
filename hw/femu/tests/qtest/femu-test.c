@@ -36701,6 +36701,310 @@ static void femu_test_rotational_refused(void *obj, void *data,
     }
 }
 
+/* Get Log Page @lid of @nsid with UUID index @uidx, @len bytes at @off */
+static uint16_t femu_ocp_log_ns(FemuCtrlState *c, uint8_t lid, uint8_t uidx,
+                                uint32_t nsid, uint32_t off, uint64_t buf,
+                                uint32_t len)
+{
+    NvmeCmd cmd;
+
+    qtest_memset(c->pdev->bus->qts, buf, 0xa5, len);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | ((len / 4 - 1) << 16));
+    cmd.cdw12 = cpu_to_le32(off);
+    cmd.cdw14 = cpu_to_le32(uidx);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_ocp_log(FemuCtrlState *c, uint8_t lid, uint8_t uidx,
+                             uint32_t off, uint64_t buf, uint32_t len)
+{
+    return femu_ocp_log_ns(c, lid, uidx, NVME_NSID_BROADCAST, off, buf, len);
+}
+
+static const uint8_t femu_ocp_uuid[16] = {
+    0xc1, 0x94, 0xd5, 0x5b, 0xe0, 0x94, 0x47, 0x94,
+    0xa2, 0x1d, 0x29, 0x99, 0x8f, 0x56, 0xbe, 0x6f,
+};
+static const uint8_t femu_femu_uuid[16] = {
+    0x2f, 0xf9, 0x29, 0x65, 0x47, 0xbe, 0x4c, 0xe0,
+    0x92, 0x3d, 0x64, 0x9d, 0x30, 0x07, 0x92, 0x03,
+};
+static const uint8_t femu_ocp_c0_guid[16] = {
+    0xc5, 0xaf, 0x10, 0x28, 0xea, 0xbf, 0xf2, 0xa4,
+    0x9c, 0x4f, 0x6f, 0x7c, 0xc9, 0x14, 0xd5, 0xaf,
+};
+static const uint8_t femu_ocp_c1_guid[16] = {
+    0x44, 0xd9, 0x31, 0x21, 0xfe, 0x30, 0x34, 0xae,
+    0xab, 0x4d, 0xfd, 0x3d, 0xba, 0x83, 0x19, 0x5a,
+};
+
+/* the 512-byte page at @buf is OCP C0h: version 4, its GUID, OCP 2.5 */
+static bool femu_is_ocp_c0(QTestState *qts, uint64_t buf)
+{
+    uint8_t p[512];
+
+    qtest_memread(qts, buf, p, sizeof(p));
+    return lduw_le_p(&p[494]) == 4 && !memcmp(&p[496], femu_ocp_c0_guid, 16);
+}
+
+/*
+ * ocp on a bbssd controller. @data "on": the UUID List names the OCP UUID
+ * (entry 1) and the FEMU one (entry 2); CTRATT bit 9 and Get Log Page USS
+ * are set. C0h at index 0 and 1 is the OCP page, at index 2 the FEMU page.
+ * C1h says no recovery is needed. Log 00h follows the index, and an index
+ * past 2, or a page the index does not have, is an invalid field. The media
+ * bytes written and read grow by whole pages with I/O. @data "off": none of
+ * that, and the UUID index is ignored.
+ */
+static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool on = g_str_equal(data, "on");
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t w0, w1, r0, r1;
+    uint8_t p[512];
+    NvmeIdCtrl id;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & (1 << 9), ==, on ? 1 << 9 : 0);
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_identify(&c, 0, 0x17, 0, buf), ==,
+                    on ? NVME_SUCCESS : NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * NVME_ADM_CMD_GET_LOG_PAGE),
+                    ==, on ? 1 | 1u << 19 : 1);
+
+    if (!on) {
+        /* no UUID selection: the index is ignored, C0h is the FEMU page */
+        for (uint8_t u = 0; u <= 1; u++) {
+            g_assert_cmphex(femu_ocp_log(&c, 0xc0, u, 0, buf, 512), ==,
+                            NVME_SUCCESS);
+            g_assert_false(femu_is_ocp_c0(qts, buf));
+        }
+        g_assert_cmphex(femu_ocp_log(&c, 0xc1, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
+        goto out;
+    }
+
+    g_assert_cmphex(femu_identify(&c, 0, 0x17, 0, buf), ==, NVME_SUCCESS);
+    {
+        uint8_t l[4096];
+
+        qtest_memread(qts, buf, l, sizeof(l));
+        for (int b = 0; b < 32; b++) {
+            g_assert_cmpuint(l[b], ==, 0);
+        }
+        g_assert_cmpuint(l[32], ==, 0);
+        g_assert_cmpmem(&l[48], 16, femu_ocp_uuid, 16);
+        g_assert_cmpuint(l[64], ==, 0);
+        g_assert_cmpmem(&l[80], 16, femu_femu_uuid, 16);
+        for (int b = 96; b < sizeof(l); b++) {
+            g_assert_cmpuint(l[b], ==, 0);
+        }
+    }
+
+    /* log 00h per index */
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 1, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (int lid = 0; lid < 256; lid++) {
+        uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1;
+
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 2, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (int lid = 0; lid < 256; lid++) {
+        uint32_t want = lid == 0 || lid == 0xc0;
+
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 0, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0xc1), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x02), ==, 1);
+
+    /* pages an index does not have, and an index past the list */
+    g_assert_cmphex(femu_ocp_log(&c, 0x02, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc1, 2, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 3, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    /* the Persistent Event early path checks the index too */
+    {
+        NvmeCmd pel;
+
+        memset(&pel, 0, sizeof(pel));
+        pel.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        pel.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        pel.dptr.prp1 = cpu_to_le64(buf);
+        pel.cdw10 = cpu_to_le32(0x0d | 2 << 8 | 127 << 16);
+        pel.cdw14 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &pel)), ==, NVME_INVALID_FIELD);
+    }
+    /* controller and subsystem scope: a namespace NSID is refused */
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc0, 1, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc1, 0, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc0, 0, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_is_ocp_c0(qts, buf));
+    /* an offset reads the same bytes */
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 496, buf, 16), ==,
+                    NVME_SUCCESS);
+    {
+        uint8_t g[16];
+
+        qtest_memread(qts, buf, g, sizeof(g));
+        g_assert_cmpmem(g, 16, femu_ocp_c0_guid, 16);
+    }
+
+    /* C0h: OCP at 0 and 1, FEMU at 2 */
+    for (uint8_t u = 0; u <= 2; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, u, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_is_ocp_c0(qts, buf), ==, u != 2);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint((uint32_t)ldl_le_p(&p[40]) |
+                     (uint64_t)lduw_le_p(&p[44]) << 32,
+                     ==, 0xffffffffffffULL);        /* system blocks: none */
+    g_assert_cmpuint(lduw_le_p(&p[46]), ==, 0xffff);
+    g_assert_cmpuint(ldq_le_p(&p[48]), ==, 0);      /* XOR recovery */
+    g_assert_cmpuint(p[98], ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[99]), ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[101]), ==, 5);
+    g_assert_cmpuint(p[103], ==, 2);
+    g_assert_cmpuint(lduw_le_p(&p[128]), ==, 0xffff);
+    {
+        NvmeIdNs ns;
+
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmpuint(ldq_le_p(&p[152]), ==, le64_to_cpu(ns.nuse));
+    }
+    for (int b = 216; b < 494; b++) {
+        g_assert_cmpuint(p[b], ==, 0);
+    }
+    w0 = ldq_le_p(&p[0]);
+    r0 = ldq_le_p(&p[16]);
+
+    /* I/O moves the media bytes, in whole 4 KiB pages */
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    for (int i = 0; i < 64; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int i = 0; i < 64; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    w1 = ldq_le_p(&p[0]);
+    r1 = ldq_le_p(&p[16]);
+    g_test_message("media bytes written %" PRIu64 " -> %" PRIu64
+                   ", read %" PRIu64 " -> %" PRIu64, w0, w1, r0, r1);
+    /* one 4 KiB page per command, no buffer, no collection on a new device */
+    g_assert_cmpuint(w1 - w0, ==, 64 * 4096);
+    g_assert_cmpuint(r1 - r0, ==, 64 * 4096);
+    femu_queue_free(&c, &c.io);
+
+    /* C1h at index 0 and 1: no recovery needed, nothing else */
+    for (uint8_t u = 0; u <= 1; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc1, u, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        for (int b = 0; b < 494; b++) {
+            g_assert_cmpuint(p[b], ==, b == 3 ? 1 : 0);
+        }
+        g_assert_cmpuint(lduw_le_p(&p[494]), ==, 3);
+        g_assert_cmpmem(&p[496], 16, femu_ocp_c1_guid, 16);
+    }
+
+out:
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* ocp is refused without an FTL behind every namespace, and in a subsystem */
+static void femu_test_ocp_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *cases[] = {
+        "'femu_mode':2", "'femu_mode':3", "'femu_mode':5", "'femu_mode':0",
+        "'femu_mode':0,'lver':1",
+        "'femu_mode':1,'subsys':'ocpsub'",
+        "'femu_mode':1,'ns_mgmt':true",
+        "'femu_mode':1,'namespaces':2,'namespace_modes':'bbssd,,znssd,',"
+        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':64,'blks_per_pl':80,"
+        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
+    };
+    QDict *csd;
+
+    /* a CSD controller takes it */
+    csd = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'ocp','addr':'5','devsz_mb':64,"
+                    "'ocp':true,'femu_mode':4,'fdm_size':16}}");
+    g_assert_true(qdict_haskey(csd, "return"));
+    qobject_unref(csd);
+    qpci_unplug_acpi_device_test(qts, "ocp", 5);
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'ocp','addr':'5','devsz_mb':64,'ocp':%s,%s}}",
+                on ? "true" : "false", cases[i]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i], desc);
+                g_assert_nonnull(strstr(desc, "ocp"));
+            } else {
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", cases[i],
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "ocp", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
+static void *femu_ocp_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line, " -device femu-subsys,id=ocpsub,nqn=ocpsub ");
+    return arg;
+}
+
 /* Without a subsystem there is no endurance group, so CNS 19h is refused. */
 static void femu_test_endgrp_list_absent(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -50990,6 +51294,20 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,devsz_mb=64,pg_rd_lat=3000000,io_stages=on",
         .arg = (void *)"3ms",
+    });
+    qos_add_test("ocp-on", "femu", femu_test_ocp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,ocp=on",
+        .arg = (void *)"on",
+    });
+    qos_add_test("ocp-off", "femu", femu_test_ocp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64",
+        .arg = (void *)"off",
+    });
+    qos_add_test("ocp-refused", "femu", femu_test_ocp_refused,
+                 &(QOSGraphTestOptions) {
+        .before = femu_ocp_before,
     });
     qos_add_test("io-stages-overlap", "femu", femu_test_io_stages_overlap,
                  &(QOSGraphTestOptions) {

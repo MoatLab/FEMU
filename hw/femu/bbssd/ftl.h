@@ -709,6 +709,8 @@ struct ssd {
     /* raw bit error model: generator (rber_seed) and C0h counters */
     uint64_t rber_rng;
     uint64_t rber_ctr[4];
+    uint64_t rber_recovered;    /* host reads that needed retry or soft decode */
+    uint64_t gc_untimed_reads;  /* collection reads with enable_gc_delay off */
     /* qtest only: decode draws given in place of the generator */
     double rber_script[FTL_RBER_SCRIPT_MAX];
     int rber_script_len;

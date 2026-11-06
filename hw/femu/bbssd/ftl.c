@@ -351,6 +351,87 @@ uint64_t ssd_map_read_pages(struct ssd *ssd)
     return ssd->map_read_pages;
 }
 
+/*
+ * Every page the media read: each plane of a multi-plane read, retry
+ * passes, copyback sources, and collection reads also when untimed.
+ */
+uint64_t ssd_media_read_pages(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) +
+           qatomic_read(&ssd->gc_untimed_reads);
+}
+
+/* host reads that needed more than the first hard decode */
+uint64_t ssd_recovered_reads(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->rber_recovered);
+}
+
+/* reads that completed with an unrecovered read error */
+uint64_t ssd_read_errors(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->err_read_injected);
+}
+
+/*
+ * Block figures of OCP C0h: retired blocks (worn out and sacrificed), the
+ * highest erase count of any block, the lowest of the blocks in service,
+ * the free lines and the blocks in one line.
+ */
+void ssd_ocp_blocks(struct ssd *ssd, uint64_t *bad, uint32_t *max_pe,
+                    uint32_t *min_pe, uint64_t *free_lines,
+                    uint64_t *empty_lines, uint64_t *blocks_per_line)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint32_t hi = 0, lo = UINT32_MAX;
+
+    if (ssd->wear_on) {
+        qemu_mutex_lock(&ssd->wear_lock);
+    }
+    *bad = ssd->grown_bad_blocks + ssd->sacrificed_blocks;
+    for (int ch = 0; ch < spp->nchs; ch++) {
+        for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_plane *p = &ssd->ch[ch].lun[lun].pl[pl];
+
+                for (int b = 0; b < spp->blks_per_pl; b++) {
+                    struct nand_block *blk = &p->blk[b];
+
+                    bool worn = blk->pe_limit &&
+                                blk->erase_cnt >= blk->pe_limit;
+
+                    uint32_t ec = qatomic_read(&blk->erase_cnt);
+
+                    hi = MAX(hi, ec);
+                    /* a block of a retired line, or worn out, is bad */
+                    if (b < ssd->lm.tt_lines &&
+                        !qatomic_read(&ssd->lm.lines[b].retired) && !worn) {
+                        lo = MIN(lo, ec);
+                    }
+                }
+            }
+        }
+    }
+    *free_lines = qatomic_read(&ssd->lm.free_line_cnt);
+    /* lines that hold no valid page but wait in the lists for collection */
+    *empty_lines = 0;
+    for (int l = 0; l < ssd->lm.tt_lines; l++) {
+        struct line *line = &ssd->lm.lines[l];
+
+        if (!qatomic_read(&line->retired) && qatomic_read(&line->vpc) == 0 &&
+            qatomic_read(&line->ipc) > 0) {
+            (*empty_lines)++;
+        }
+    }
+    if (ssd->wear_on) {
+        qemu_mutex_unlock(&ssd->wear_lock);
+    }
+    *max_pe = hi;
+    *min_pe = lo == UINT32_MAX ? 0 : lo;
+    *blocks_per_line = (uint64_t)spp->nchs * spp->luns_per_ch *
+                       spp->pls_per_lun;
+}
+
 /* translation pages collection relocated, also in ssd_map_write_pages() */
 uint64_t ssd_tp_moves(struct ssd *ssd)
 {

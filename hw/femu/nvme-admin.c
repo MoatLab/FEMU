@@ -1124,6 +1124,35 @@ static void nvme_ns_uuid(FemuCtrl *n, NvmeNamespace *ns, uint8_t *uuid)
  * asks for it first and takes readiness, sharing and the endurance group from
  * it, so NRDY has to be set.
  */
+/* the UUIDs of the UUID List (CNS 17h), in the byte order of the list */
+static const uint8_t nvme_ocp_uuid[16] = {
+    0xc1, 0x94, 0xd5, 0x5b, 0xe0, 0x94, 0x47, 0x94,
+    0xa2, 0x1d, 0x29, 0x99, 0x8f, 0x56, 0xbe, 0x6f,
+};
+/* 2ff92965-47be-4ce0-923d-649d30079203: the FEMU counter page (C0h) */
+static const uint8_t nvme_femu_uuid[16] = {
+    0x2f, 0xf9, 0x29, 0x65, 0x47, 0xbe, 0x4c, 0xe0,
+    0x92, 0x3d, 0x64, 0x9d, 0x30, 0x07, 0x92, 0x03,
+};
+
+/*
+ * UUID List (CNS 17h, Base 2.1, 5.1.13.2.17), with ocp=on only: entry 1 is
+ * the OCP UUID and entry 2 the FEMU one. An entry is 32 bytes, the first at
+ * byte 32, and its UUID is at byte 16 of it.
+ */
+static uint16_t nvme_identify_uuid_list(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint8_t list[NVME_IDENTIFY_DATA_SIZE] = {};
+
+    if (!n->ocp) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    memcpy(&list[32 + 16], nvme_ocp_uuid, sizeof(nvme_ocp_uuid));
+    memcpy(&list[64 + 16], nvme_femu_uuid, sizeof(nvme_femu_uuid));
+    return dma_read_prp(n, list, sizeof(list), le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
                                           bool present)
 {
@@ -1362,6 +1391,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_identify_cmd_set(n, cmd);
     case NVME_ID_CNS_ENDGRP_LIST:
         return nvme_identify_endgrp_list(n, cmd);
+    case NVME_ID_CNS_UUID_LIST:
+        return nvme_identify_uuid_list(n, cmd);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -2230,6 +2261,20 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     for (i = 0; i < 256; i++) {
         lids[i] = cpu_to_le32(nvme_log_support(n, csi, i));
     }
+    /* ocp=on: index 1 has the OCP pages, index 2 the FEMU counter page */
+    switch (n->ocp ? le32_to_cpu(cmd->cdw14) & 0x7f : 0) {
+    case 1:
+        memset(lids, 0, sizeof(lids));
+        lids[NVME_LOG_SUPPORTED] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FEMU_STATS] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_OCP_EREC] = cpu_to_le32(NVME_LIDS_LSUPP);
+        break;
+    case 2:
+        memset(lids, 0, sizeof(lids));
+        lids[NVME_LOG_SUPPORTED] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FEMU_STATS] = cpu_to_le32(NVME_LIDS_LSUPP);
+        break;
+    }
 
     trans_len = MIN(sizeof(lids) - off, buf_len);
 
@@ -2479,6 +2524,167 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
     nvme_femu_stats_fill(n, &stats);
 
     return dma_read_prp(n, (uint8_t *)&stats + off, trans_len, prp1, prp2);
+}
+
+/* store @v in @n bytes, little endian, at most the largest value they hold */
+static void nvme_ocp_put(uint8_t *p, int n, uint64_t v)
+{
+    if (n < 8 && v >> (8 * n)) {
+        v = (1ULL << (8 * n)) - 1;
+    }
+    for (int i = 0; i < n; i++) {
+        p[i] = i < 8 ? v >> (8 * i) : 0;
+    }
+}
+
+/* @a + @b, held at UINT64_MAX */
+static uint64_t nvme_ocp_add(uint64_t a, uint64_t b)
+{
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+/* @a * @b, held at UINT64_MAX */
+static uint64_t nvme_ocp_mul(uint64_t a, uint64_t b)
+{
+    uint64_t lo, hi;
+
+    mulu64(&lo, &hi, a, b);
+    return hi ? UINT64_MAX : lo;
+}
+
+/* @pages * @page_size bytes into a 16-byte little-endian field */
+static void nvme_ocp_put_bytes(uint8_t *p, uint64_t pages, uint32_t page_size)
+{
+    uint64_t lo, hi;
+
+    mulu64(&lo, &hi, pages, page_size);
+    stq_le_p(p, lo);
+    stq_le_p(p + 8, hi);
+}
+
+/*
+ * The OCP pages have controller (C0h) or NVM subsystem (C1h) scope: NSID 0
+ * or FFFFFFFFh only.
+ */
+static bool nvme_ocp_nsid_ok(NvmeCmd *cmd)
+{
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+
+    return nsid == 0 || nsid == NVME_NSID_BROADCAST;
+}
+
+/* the version and the GUID that end each OCP page (bytes 494 to 511) */
+static void nvme_ocp_trailer(uint8_t *log, uint16_t ver, const uint8_t *guid)
+{
+    stw_le_p(&log[494], ver);
+    memcpy(&log[496], guid, 16);
+}
+
+static const uint8_t nvme_ocp_smart_guid[16] = {
+    0xc5, 0xaf, 0x10, 0x28, 0xea, 0xbf, 0xf2, 0xa4,
+    0x9c, 0x4f, 0x6f, 0x7c, 0xc9, 0x14, 0xd5, 0xaf,
+};
+static const uint8_t nvme_ocp_erec_guid[16] = {
+    0x44, 0xd9, 0x31, 0x21, 0xfe, 0x30, 0x34, 0xae,
+    0xab, 0x4d, 0xfd, 0x3d, 0xba, 0x83, 0x19, 0x5a,
+};
+
+/*
+ * OCP 2.5 SMART / Health Information Extended (C0h, version 4). Every FTL
+ * namespace adds its media figures. A field FEMU does not model is 0, or
+ * the value OCP gives for "not present" (capacitor health FFFFh: no PLP).
+ */
+static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                   uint64_t off)
+{
+    uint8_t log[512] = {};
+    uint64_t wr_pages = 0, rd_pages = 0, bad = 0, uncorr = 0, soft = 0;
+    uint64_t refresh = 0, free_lines = 0, empty_lines = 0, nuse = 0;
+    uint32_t max_pe = 0, min_pe = UINT32_MAX, page_size = 0;
+    FemuMediaStats st;
+
+    if (off >= sizeof(log) || !nvme_ocp_nsid_ok(cmd)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    nvme_collect_media_stats(n, &st);
+    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        uint64_t b, fl, el, bpl, r, pads, cl, rr;
+        uint32_t hi, lo;
+
+        if (!ns->allocated) {
+            continue;
+        }
+        nuse += le64_to_cpu(ns->id_ns.nuse);
+        if (!ns->ssd || ns->ssd_shared || !(NS_BBSSD(ns) || NS_CSD(ns))) {
+            continue;
+        }
+        /* every FTL namespace of one controller shares one page size */
+        page_size = ssd_page_size(ns->ssd);
+        ssd_pd_stats(ns->ssd, &r, &pads, &cl);
+        wr_pages = nvme_ocp_add(wr_pages, ssd_nand_write_pages(ns->ssd));
+        wr_pages = nvme_ocp_add(wr_pages, ssd_gc_write_pages(ns->ssd));
+        wr_pages = nvme_ocp_add(wr_pages, ssd_map_write_pages(ns->ssd));
+        wr_pages = nvme_ocp_add(wr_pages, pads);
+        rd_pages = nvme_ocp_add(rd_pages, ssd_media_read_pages(ns->ssd));
+        uncorr = nvme_ocp_add(uncorr, ssd_read_errors(ns->ssd));
+        soft = nvme_ocp_add(soft, ssd_recovered_reads(ns->ssd));
+        ssd_ocp_blocks(ns->ssd, &b, &hi, &lo, &fl, &el, &bpl);
+        bad = nvme_ocp_add(bad, b);
+        free_lines = nvme_ocp_add(free_lines, fl);
+        empty_lines = nvme_ocp_add(empty_lines, el);
+        max_pe = MAX(max_pe, hi);
+        min_pe = MIN(min_pe, lo);
+        /* integrity rewrites, in blocks: read, retention, open block */
+        rr = nvme_ocp_add(nvme_ocp_add(ssd_read_reclaims(ns->ssd),
+                                       ssd_retention_refreshes(ns->ssd)), r);
+        refresh = nvme_ocp_add(refresh, nvme_ocp_mul(rr, bpl));
+    }
+
+    nvme_ocp_put_bytes(&log[0], wr_pages, page_size);   /* PMUW */
+    nvme_ocp_put_bytes(&log[16], rd_pages, page_size);  /* PMUR */
+    nvme_ocp_put(&log[32], 6, bad);                 /* bad user blocks */
+    stw_le_p(&log[38], st.available_spare);
+    nvme_ocp_put(&log[40], 6, UINT64_MAX);          /* in the user field */
+    stw_le_p(&log[46], 0xffff);
+    nvme_ocp_put(&log[56], 8, uncorr);
+    nvme_ocp_put(&log[64], 8, soft);
+    nvme_ocp_put(&log[81], 7, refresh);
+    stl_le_p(&log[88], max_pe);
+    stl_le_p(&log[92], min_pe == UINT32_MAX ? 0 : min_pe);
+    stw_le_p(&log[101], 5);                         /* DSSD 2.5 */
+    log[103] = 2;
+    stl_le_p(&log[112], n->ocp_incomplete_shutdowns);
+    /* erased lines over erased and emptied lines that wait for an erase */
+    log[120] = free_lines + empty_lines ?
+               free_lines * 100 / (free_lines + empty_lines) : 0;
+    stw_le_p(&log[128], 0xffff);                    /* no PLP */
+    stq_le_p(&log[152], nuse);
+    nvme_ocp_trailer(log, 4, nvme_ocp_smart_guid);
+
+    buf_len = MIN(sizeof(log) - off, buf_len);
+    return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
+/*
+ * OCP 2.5 Error Recovery (C1h, version 3). FEMU has no device panic, so the
+ * page says no action is needed and names no panic.
+ */
+static uint16_t nvme_ocp_erec_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                  uint64_t off)
+{
+    uint8_t log[512] = {};
+
+    if (off >= sizeof(log) || !nvme_ocp_nsid_ok(cmd)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    log[3] = 0x01;                  /* Device Recovery Action 1: none needed */
+    nvme_ocp_trailer(log, 3, nvme_ocp_erec_guid);
+
+    buf_len = MIN(sizeof(log) - off, buf_len);
+    return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
 }
 
 /*
@@ -3334,6 +3540,23 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     off = (lpou << 32ULL) | lpol;
 
     /*
+     * ocp=on lists two UUIDs (CNS 17h). Index 1 (OCP) answers 00h, C0h and
+     * C1h; index 2 (FEMU) answers 00h and the FEMU counters at C0h. With
+     * ocp=off there is no UUID selection, and the index is ignored.
+     */
+    if (n->ocp) {
+        uint8_t uidx = le32_to_cpu(cmd->cdw14) & 0x7f;
+
+        if (uidx > 2 ||
+            (uidx == 1 && lid != NVME_LOG_SUPPORTED &&
+             lid != NVME_LOG_FEMU_STATS && lid != NVME_LOG_OCP_EREC) ||
+            (uidx == 2 && lid != NVME_LOG_SUPPORTED &&
+             lid != NVME_LOG_FEMU_STATS)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    /*
      * Releasing a Persistent Event context, or reading its header, ignores the
      * length and offset (Figure 229), so they are not checked for it.
      */
@@ -3383,7 +3606,13 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_SMART_INFO:
         return nvme_smart_info(n, cmd, len, off, rae);
     case NVME_LOG_FEMU_STATS:
+        /* OCP UUID-5: the OCP page also at index 0 */
+        if (n->ocp && (le32_to_cpu(cmd->cdw14) & 0x7f) != 2) {
+            return nvme_ocp_smart_log(n, cmd, len, off);
+        }
         return nvme_femu_stats_info(n, cmd, len, off);
+    case NVME_LOG_OCP_EREC:
+        return nvme_ocp_erec_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off);
     case NVME_LOG_CHANGED_NS_LIST:

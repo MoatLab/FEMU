@@ -146,6 +146,9 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
     if (need_soft) {
         qatomic_set(&ssd->rber_ctr[2], ssd->rber_ctr[2] + 1);
     }
+    if ((retries || need_soft) && ssd->rber_recovered != UINT64_MAX) {
+        qatomic_set(&ssd->rber_recovered, ssd->rber_recovered + 1);
+    }
     if (limit) {
         qatomic_set(&ssd->rber_ctr[3], ssd->rber_ctr[3] + 1);
     }

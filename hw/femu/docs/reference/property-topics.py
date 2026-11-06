@@ -62,7 +62,7 @@ DEVICES = [
                 "title": "LBA formats, metadata and protection",
                 "kind": "static",
                 "props": [
-                    "nlbaf", "atomic_write_lbas", "perf_hints",
+                    "nlbaf", "atomic_write_lbas", "perf_hints", "ocp",
                     "lba_index", "extended", "meta", "mc", "pi",
                     "dpc", "dps", "ms", "ms_max", "dlfeat",
                 ],

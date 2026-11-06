@@ -1944,6 +1944,36 @@ static int nvme_check_rotational_namespaces(FemuCtrl *n,
     return 0;
 }
 
+/*
+ * ocp=on reports media counters of an FTL, so every namespace is bbssd or the
+ * NVM namespace of a CSD controller. C1h has NVM subsystem scope, so a
+ * controller in a femu-subsys, which shares it, does not take the property.
+ */
+static int nvme_check_ocp_namespaces(FemuCtrl *n, const uint8_t *modes,
+                                     Error **errp)
+{
+    if (!n->ocp) {
+        return 0;
+    }
+    if (n->subsys) {
+        error_setg(errp, "ocp is not supported with a femu-subsys");
+        return -1;
+    }
+    /* a deleted namespace would take its media history out of C0h */
+    if (n->ns_mgmt) {
+        error_setg(errp, "ocp is not supported with ns_mgmt");
+        return -1;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] != FEMU_BBSSD_MODE && modes[i] != FEMU_CSD_MODE) {
+            error_setg(errp, "ocp needs bbssd or CSD namespaces; namespace %d "
+                       "is mode %u", i + 1, modes[i]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1960,7 +1990,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     if (nvme_resolve_ns_modes(n, ns_modes, errp) ||
         nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp) ||
         nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp) ||
-        nvme_check_rotational_namespaces(n, ns_modes, errp)) {
+        nvme_check_rotational_namespaces(n, ns_modes, errp) ||
+        nvme_check_ocp_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;
@@ -2340,6 +2371,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
                                  (n->subsys->endgrp.fdp.enabled ?
                                   NVME_CTRATT_FDPS : 0));
         id->endgidmax = cpu_to_le16(1);
+    }
+    if (n->ocp) {
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_UUIDL);
     }
 
     /* an extended self-test takes a minute at most; both complete at once */
@@ -3750,6 +3784,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * namespaces, and it takes the same Error argument, which must not already
      * carry an error.
      */
+    if (n->shared_storage && n->ocp) {
+        error_setg(errp, "ocp is not supported with a femu-subsys");
+        femu_realize_undo(n);
+        return;
+    }
     if (n->shared_storage) {
         n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
         n->namespace_pool_size = n->subsys->storage->namespace_pool_size;
@@ -4129,6 +4168,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
+    DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),
@@ -4924,6 +4964,7 @@ static char *femu_test_oc12_trace(Object *obj, Error **errp)
 static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
+    bool lost = false;
 
     if (!n->power_loss || !DEVICE(obj)->realized) {
         error_setg(errp, "simulated power loss requires a realized "
@@ -4936,8 +4977,12 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     nvme_clear_ctrl(n, false);
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
-            bbssd_power_loss(&n->namespaces[i]);
+            lost |= bbssd_power_loss(&n->namespaces[i]);
         }
+    }
+    /* OCP C0h: a shutdown that did not complete lost buffered data */
+    if (lost && n->ocp_incomplete_shutdowns != UINT32_MAX) {
+        n->ocp_incomplete_shutdowns++;
     }
     n->bar.csts = 0;
     if (n->unsafe_shutdowns[0] != UINT64_MAX ||

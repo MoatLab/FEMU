@@ -148,6 +148,7 @@ enum NvmeFdpEventFlags {
 
 enum NvmeIdCtrlCtratt {
     NVME_CTRATT_ENDGRPS = 1 <<  4,
+    NVME_CTRATT_UUIDL   = 1 <<  9,
     NVME_CTRATT_ELBAS   = 1 << 15,
     NVME_CTRATT_FDPS    = 1 << 19,
 };
@@ -1257,7 +1258,8 @@ enum NvmeLogIdentifier {
     NVME_LOG_CP_PROGRAM_LIST    = 0x82,     /* CP 1.2, 4.1.4 */
     NVME_LOG_CP_PROGRAM_TYPES   = 0x83,
     NVME_LOG_CP_MRS_LIST        = 0x84,
-    NVME_LOG_FEMU_STATS         = 0xc0,
+    NVME_LOG_FEMU_STATS         = 0xc0,    /* OCP SMART Extended with ocp=on */
+    NVME_LOG_OCP_EREC           = 0xc1,    /* OCP Error Recovery, ocp=on */
 };
 
 /* LID Supported and Effects data structure, one per log page identifier */
@@ -1381,6 +1383,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_NS_PRESENT            = 0x11,
     NVME_ID_CNS_NS_CTRL_LIST          = 0x12,
     NVME_ID_CNS_CTRL_LIST             = 0x13,
+    NVME_ID_CNS_UUID_LIST             = 0x17,
     NVME_ID_CNS_ENDGRP_LIST           = 0x19,
     NVME_ID_CNS_CS_NS_PRESENT_LIST    = 0x1a,
     NVME_ID_CNS_CS_NS_PRESENT         = 0x1b,
@@ -2550,6 +2553,8 @@ typedef struct FemuCtrl {
     uint8_t     lba_index;
     uint32_t    atomic_write_lbas; /* namespace atomic write unit; 0 = one */
     bool        perf_hints;     /* NPWG, NPDG, NOWS from the bbssd geometry */
+    bool        ocp;            /* OCP 2.5 C0h and C1h behind the OCP UUID */
+    uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;
@@ -3259,7 +3264,7 @@ static inline void nvme_note_user_write(FemuCtrl *n)
     }
 }
 void bbssd_deallocate_all(NvmeNamespace *ns);
-void bbssd_power_loss(NvmeNamespace *ns);
+bool bbssd_power_loss(NvmeNamespace *ns);
 uint16_t bbssd_flush_all(FemuCtrl *n);
 uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat);
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req);
@@ -3364,6 +3369,12 @@ uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
 uint64_t ssd_map_write_pages(struct ssd *ssd);
 uint64_t ssd_map_read_pages(struct ssd *ssd);
+uint64_t ssd_media_read_pages(struct ssd *ssd);
+uint64_t ssd_recovered_reads(struct ssd *ssd);
+uint64_t ssd_read_errors(struct ssd *ssd);
+void ssd_ocp_blocks(struct ssd *ssd, uint64_t *bad, uint32_t *max_pe,
+                    uint32_t *min_pe, uint64_t *free_lines,
+                    uint64_t *empty_lines, uint64_t *blocks_per_line);
 /* the four counters of the raw bit error model, in C0h order */
 void ssd_rber_counters(struct ssd *ssd, uint64_t out[4]);
 uint64_t ssd_tp_moves(struct ssd *ssd);

@@ -187,6 +187,9 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
     case NVME_ADM_CMD_DIRECTIVE_SEND:
     case NVME_ADM_CMD_DIRECTIVE_RECV:
         return n->streams || nvme_fdp_directive(n) ? NVME_CMD_EFF_CSUPP : 0;
+    case NVME_ADM_CMD_GET_LOG_PAGE:
+        /* USS: the UUID index selects the OCP and FEMU pages (ocp=on) */
+        return NVME_CMD_EFF_CSUPP | (n->ocp ? 1u << 19 : 0);
     default:
         return nvme_cse_acs[opc] | nvme_mode_admin_effects(n, opc);
     }
@@ -354,6 +357,8 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
     case NVME_LOG_MI_EFFECTS:
     case NVME_LOG_FEMU_STATS:
         return NVME_LIDS_LSUPP;
+    case NVME_LOG_OCP_EREC:
+        return n->ocp ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_PERSISTENT_EVENT:
         /* its LID specific parameter: Establish Context and Read Header */
         return NVME_LIDS_LSUPP | 1 << 16;

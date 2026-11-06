@@ -746,6 +746,9 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa)
         gcr.cmd = NAND_READ;
         gcr.stime = 0;
         ssd_advance_status(ssd, ppa, &gcr);
+    } else {
+        /* the page is still read from the media, only not timed */
+        qatomic_set(&ssd->gc_untimed_reads, ssd->gc_untimed_reads + 1);
     }
 }
 
