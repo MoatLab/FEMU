@@ -548,6 +548,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "thermal_r",
       "thermal resistance from the package to ambient, mK per mW (K per W); "
       "needed with thermal_tau_ms" },
+    { "plane_reads",
+      "bbssd, CSD: reads on different planes of one die overlap; a program or "
+      "erase still holds the whole die; plain channel model only (no ONFI, bus "
+      "phases or pe_suspend); no effect with one plane per LUN" },
     { "throttle",
       "bbssd, CSD: thermal throttling on the thermal model (needs "
       "thermal_tau_ms); enables feature 10h (HCTM) and stretches NAND "

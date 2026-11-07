@@ -1351,8 +1351,10 @@ make -C hw/femu/tests check
   reports a temperature; with `throttle=on` it stretches the array time
   of bbssd and CSD media as a device-wide pacing factor. Energy is charged
   when an operation is booked, and the policy stops while the VM pauses.
-- Plane-level parallelism for BBSSD, CSD and KV reads and programs (the rule
-  is per LUN), and the channel bus for OCSSD 2.0.
+- Plane-level parallelism for BBSSD and CSD programs, and for KV reads and
+  programs (the rule is per LUN). `plane_reads=on` lets BBSSD and CSD reads
+  on different planes overlap, with the plain channel model only. The
+  channel bus for OCSSD 2.0.
 - PLC outside ZNS. ZNS accepts PLC with times you supply; BBSSD resets
   `nand_cell_type=5` to 0 and OCSSD refuses `flash_type=5`.
 - Queueing inside the controller other than the link and the single

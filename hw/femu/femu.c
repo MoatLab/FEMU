@@ -3689,6 +3689,46 @@ static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
  * a read-only slot 1 (FWUP-6, FWUP-20). Firmware shared by several
  * controllers, or by a CXL device, is not modelled yet.
  */
+/*
+ * plane_reads: reads on different planes of one die overlap. The first
+ * release covers the plain channel model of bbssd and CSD: the bus phases,
+ * ONFI ordering and read suspend keep state per LUN, so they are refused.
+ */
+static bool femu_plane_reads_check(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+
+    g_autofree uint8_t *modes = NULL;
+
+    if (!n->plane_reads) {
+        return true;
+    }
+    /*
+     * The policy is per media owner: bbssd and CSD namespaces take it, a KV
+     * namespace keeps the LUN rule; other modes have no such media.
+     */
+    modes = g_new0(uint8_t, MAX(n->num_namespaces, 1));
+    if (nvme_resolve_ns_modes(n, modes, errp)) {
+        return false;
+    }
+    for (int i = 0; i < MAX(n->num_namespaces, 1); i++) {
+        if (modes[i] != FEMU_BBSSD_MODE && modes[i] != FEMU_CSD_MODE &&
+            modes[i] != FEMU_KVSSD_MODE) {
+            error_setg(errp, "plane_reads works with bbssd, CSD or KV "
+                       "namespaces only (KV keeps the LUN rule)");
+            return false;
+        }
+    }
+    if (femu_onfi_on(n) || bp->onfi_cache_read || bp->cmd_addr_lat ||
+        bp->pg_xfer_lat || bp->ch_xfer_lat || bp->status_lat ||
+        bp->pe_suspend) {
+        error_setg(errp, "plane_reads needs the plain channel model: no ONFI "
+                   "profile, onfi_cache_read, bus phases or pe_suspend");
+        return false;
+    }
+    return true;
+}
+
 static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
 {
     /*
@@ -3791,7 +3831,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp) ||
-        !femu_fw_resolve(n, errp)) {
+        !femu_fw_resolve(n, errp) || !femu_plane_reads_check(n, errp)) {
         return;
     }
 
@@ -4644,6 +4684,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("thermal_r", FemuCtrl, thermal_r, 0),
     DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
+    DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),
     DEFINE_PROP_UINT32("throttle_heavy_pct", FemuCtrl, throttle_heavy_pct, 300),
     DEFINE_PROP_UINT16("hot_k", FemuCtrl, hot_k, 0),

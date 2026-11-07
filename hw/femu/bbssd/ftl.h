@@ -138,6 +138,7 @@ struct nand_block {
 struct nand_plane {
     struct nand_block *blk;
     int nblks;
+    uint64_t next_pl_avail_time;    /* plane_reads: when this plane is free */
     int spares_used;    /* blocks taken from this plane's spare lines */
 };
 
@@ -156,12 +157,26 @@ struct ssd_mp_batch {
 struct nand_lun {
     struct nand_plane *pl;
     int npls;
+    /* the program/erase barrier with plane_reads, else all array work */
     uint64_t next_lun_avail_time;
     bool busy;
     uint64_t gc_endtime;
     struct ssd_mp_batch mp_prog;  /* programs not yet charged (mp_program) */
     struct ssd_mp_batch mp_rd;    /* reads not yet charged (mp_read) */
 };
+
+/* when all array work on @l ends: the P/E barrier or a plane read (plane_reads) */
+static inline uint64_t nand_lun_end(const struct nand_lun *l)
+{
+    uint64_t end = l->next_lun_avail_time;
+
+    for (int p = 0; p < l->npls; p++) {
+        if (l->pl[p].next_pl_avail_time > end) {
+            end = l->pl[p].next_pl_avail_time;
+        }
+    }
+    return end;
+}
 
 struct ssd_channel {
     struct nand_lun *lun;

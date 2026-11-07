@@ -120,15 +120,20 @@ static uint64_t *bb_lun_avail(void *opaque, const NandLoc *loc)
     struct ssd *ssd = opaque;
     return &ssd->ch[loc->ch].lun[loc->lun].next_lun_avail_time;
 }
+static uint64_t *bb_plane_avail(void *opaque, const NandLoc *loc)
+{
+    struct ssd *ssd = opaque;
+    return &ssd->ch[loc->ch].lun[loc->lun].pl[loc->pl].next_pl_avail_time;
+}
 
 /*
- * plane_avail / lock_lun / unlock_lun are left unset: bbssd runs the flat
- * per-LUN rule under a single FTL thread, so the media never reaches for
- * plane-level state or a lock.
+ * lock_lun / unlock_lun are left unset: bbssd runs under a single FTL
+ * thread. plane_avail serves plane_reads only.
  */
 static const NandTimelineOps bb_timeline_ops = {
     .ch_avail = bb_ch_avail,
     .lun_avail = bb_lun_avail,
+    .plane_avail = bb_plane_avail,
 };
 
 /*
@@ -288,6 +293,17 @@ void bb_nand_media_init(struct ssd *ssd)
      */
     cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
                                cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
+    /*
+     * plane_reads: reads on different planes of a die overlap, P/E keeps
+     * the die. bbssd and CSD media only, the plain channel model, no
+     * suspend; one plane per LUN keeps the LUN rule (realize refuses the
+     * other combinations).
+     */
+    if (ssd->n && ssd->n->plane_reads && cfg.planes_per_lun > 1 &&
+        cfg.policy.channel_mode != NAND_CH_STAGED && !cfg.policy.pe_suspend &&
+        ssd->ns && (NS_BBSSD(ssd->ns) || NS_CSD(ssd->ns))) {
+        cfg.policy.array_contend = NAND_CONTEND_LUN_PE_PLANE_READ;
+    }
     cfg.timeline = &bb_timeline_ops;
     cfg.timeline_opaque = ssd;
     nand_media_init(&ssd->media, &cfg);

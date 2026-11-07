@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 247 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 248 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -198,6 +198,7 @@ Devices:
 | `throttle_light_pct` | `uint32` | `150` | with throttle: NAND array time at the light level, in percent of nominal, 100 to throttle_heavy_pct |
 | `throttle_heavy_pct` | `uint32` | `300` | with throttle: NAND array time at the heavy level, in percent of nominal, up to 1000 |
 | `hot_k` | `uint16` | `0` | with throttle and ocp=off: autonomous protection enters the heavy level at this temperature in kelvin and leaves 2 K below; 0 (default) is off; ocp=on uses 350 K and 348 K |
+| `plane_reads` | `bool` | `off` | bbssd, CSD: reads on different planes of one die overlap; a program or erase still holds the whole die; plain channel model only (no ONFI, bus phases or pe_suspend); no effect with one plane per LUN |
 | `err_read_unc_ppm` | `uint32` | `0` | bbssd, CSD: reads per million that fail as Unrecovered Read Error, injected at a fixed period; 0 disables |
 | `err_write_fail_ppm` | `uint32` | `0` | bbssd, CSD and ZNS: writes per million that fail, injected at a fixed period (a ZNS zone then goes read-only); 0 disables |
 | `read_reclaim_limit` | `int32` | `0` | bbssd, CSD: when a host read finds its block has taken this many reads since its erase, that line is queued and rewritten on a following write, one line at a time (under FDP, its reclaim unit); 0 disables |

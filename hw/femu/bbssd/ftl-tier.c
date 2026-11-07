@@ -608,7 +608,7 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     ssd_gc_move_page(ssd, lpn, src, &dst, &ftl_tier_move_ops, NULL);
     ssd_advance_write_pointer(ssd);
     lun = get_lun(ssd, &dst);
-    lun->gc_endtime = lun->next_lun_avail_time;
+    lun->gc_endtime = nand_lun_end(lun);
     t->fold_pages++;
     return true;
 }
@@ -927,7 +927,7 @@ static void ftl_tier_note_busy(struct ssd *ssd, uint64_t end)
 
     for (int ch = 0; ch < ssd->sp.nchs; ch++) {
         for (int lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
-            busy = MAX(busy, ssd->ch[ch].lun[lun].next_lun_avail_time);
+            busy = MAX(busy, nand_lun_end(&ssd->ch[ch].lun[lun]));
         }
     }
     t->busy_until = MAX(t->busy_until, busy);

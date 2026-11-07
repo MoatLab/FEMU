@@ -116,7 +116,7 @@ DEVICES = [
                     "blk_pe_seed", "spare_lines", "eol_read_only",
                     "energy_read_nj", "energy_prog_nj", "energy_erase_nj", "thermal_tau_ms",
                     "thermal_r", "idle_mw", "thermal_step_ms", "throttle",
-                    "throttle_light_pct", "throttle_heavy_pct", "hot_k",
+                    "throttle_light_pct", "throttle_heavy_pct", "hot_k", "plane_reads",
                     "err_read_unc_ppm",
                     "err_write_fail_ppm", "read_reclaim_limit",
                     "retention_limit_sec", "age_scale",

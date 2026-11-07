@@ -2796,6 +2796,7 @@ typedef struct FemuCtrl {
      * Thermal throttle (femu-thermal.c). The policy runs under the BQL;
      * the media layer reads only throttle_pct_now, atomically.
      */
+    bool            plane_reads;    /* bbssd, CSD: independent plane reads */
     bool            throttle;
     uint32_t        throttle_light_pct;
     uint32_t        throttle_heavy_pct;

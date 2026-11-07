@@ -404,10 +404,57 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     return throttled(m, lat);
 }
 
+/* the timeline of plane @p of the LUN at @loc */
+static uint64_t *plane_of(NandMedia *m, const NandLoc *loc, uint32_t p)
+{
+    NandLoc l = *loc;
+
+    l.pl = p;
+    return m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, &l);
+}
+
+/*
+ * NAND_CONTEND_LUN_PE_PLANE_READ (independent plane reads):
+ *   read:     start after the LUN's P/E barrier and its own plane
+ *   P/E:      start after the barrier and every plane of the LUN
+ * Callers that do not name the operation get the P/E rule, the safe one.
+ */
+static uint64_t pr_start(NandMedia *m, const NandLoc *loc, uint64_t t,
+                         bool read)
+{
+    uint64_t s = mx(t, *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque,
+                                                    loc));
+
+    if (read) {
+        return mx(s, *plane_of(m, loc, loc->pl));
+    }
+    for (uint32_t p = 0; p < m->cfg.planes_per_lun; p++) {
+        s = mx(s, *plane_of(m, loc, p));
+    }
+    return s;
+}
+
+static void pr_commit(NandMedia *m, const NandLoc *loc, uint64_t done,
+                      bool read)
+{
+    if (read) {
+        *plane_of(m, loc, loc->pl) = done;
+        return;
+    }
+    *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = done;
+    for (uint32_t p = 0; p < m->cfg.planes_per_lun; p++) {
+        *plane_of(m, loc, p) = done;
+    }
+}
+
 /* bind the array start to the configured resources (exact bbssd ordering) */
 static uint64_t array_contend_start(NandMedia *m, const NandLoc *loc, uint64_t t)
 {
     uint64_t s = t;
+
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_PE_PLANE_READ) {
+        return pr_start(m, loc, t, false);
+    }
     if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY ||
         m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
@@ -447,6 +494,10 @@ static void array_suspend_extend(NandMedia *m, const NandLoc *loc, uint64_t t,
 
 static void array_commit(NandMedia *m, const NandLoc *loc, uint64_t done)
 {
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_PE_PLANE_READ) {
+        pr_commit(m, loc, done, false);
+        return;
+    }
     if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY ||
         m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = done;
@@ -455,6 +506,26 @@ static void array_commit(NandMedia *m, const NandLoc *loc, uint64_t done)
         m->cfg.policy.array_contend == NAND_CONTEND_LUN_AND_PLANE) {
         *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, loc) = done;
     }
+}
+
+/* the same, with the operation: a read binds only its plane under plane reads */
+static uint64_t array_contend_op(NandMedia *m, const NandLoc *loc, uint64_t t,
+                                 NandMediaOp op)
+{
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_PE_PLANE_READ) {
+        return pr_start(m, loc, t, op == NAND_MEDIA_READ);
+    }
+    return array_contend_start(m, loc, t);
+}
+
+static void array_commit_op(NandMedia *m, const NandLoc *loc, uint64_t done,
+                            NandMediaOp op)
+{
+    if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_PE_PLANE_READ) {
+        pr_commit(m, loc, done, op == NAND_MEDIA_READ);
+        return;
+    }
+    array_commit(m, loc, done);
 }
 
 /*
@@ -973,7 +1044,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
         }
         {
-            uint64_t s = array_contend_start(m, loc, t);
+            uint64_t s = array_contend_op(m, loc, t, op);
             uint64_t rs, shift;
 
             if (op == NAND_MEDIA_READ &&
@@ -986,7 +1057,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 array_suspend_extend(m, loc, t, shift);
             } else {
                 done = s + alat;
-                array_commit(m, loc, done);
+                array_commit_op(m, loc, done, op);
                 suspend_note(m, loc, op, done);
             }
         }
@@ -1206,7 +1277,7 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
      */
     uint64_t start = t;
     for (i = 0; i < nlocs; i++) {
-        start = mx(start, array_contend_start(m, &locs[i], start));
+        start = mx(start, array_contend_op(m, &locs[i], start, op));
     }
     uint64_t alat;
     if (op == NAND_MEDIA_READ) {
@@ -1225,7 +1296,7 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     }
     uint64_t done = start + alat;
     for (i = 0; i < nlocs; i++) {
-        array_commit(m, &locs[i], done);
+        array_commit_op(m, &locs[i], done, op);
         suspend_note(m, &locs[i], op, done);
     }
 

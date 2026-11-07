@@ -706,7 +706,7 @@ uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
 
         lat = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
     }
-    lunp->gc_endtime = lunp->next_lun_avail_time;
+    lunp->gc_endtime = nand_lun_end(lunp);
     return lat;
 }
 
@@ -796,7 +796,7 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa)
         gcw.stime = 0;
         ssd_advance_status(ssd, new_ppa, &gcw);
     }
-    lun->gc_endtime = lun->next_lun_avail_time;
+    lun->gc_endtime = nand_lun_end(lun);
 }
 
 /*
@@ -817,7 +817,7 @@ void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
     if (ssd->sp.enable_gc_delay) {
         ssd_advance_copyback(ssd, old_ppa, new_ppa);
     }
-    lun->gc_endtime = lun->next_lun_avail_time;
+    lun->gc_endtime = nand_lun_end(lun);
     ssd->gc_copyback_pages++;
 }
 
@@ -1654,8 +1654,7 @@ static void note_forced_end(struct ssd *ssd)
         for (lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
             struct nand_lun *l = &ssd->ch[ch].lun[lun];
 
-            ssd->forced_gc_end = MAX(ssd->forced_gc_end,
-                                     l->next_lun_avail_time);
+            ssd->forced_gc_end = MAX(ssd->forced_gc_end, nand_lun_end(l));
         }
     }
 }
@@ -1970,7 +1969,7 @@ uint64_t ssd_media_last_end(struct ssd *ssd)
     for (int ch = 0; ch < spp->nchs; ch++) {
         end = MAX(end, ssd->ch[ch].next_ch_avail_time);
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-            end = MAX(end, ssd->ch[ch].lun[lun].next_lun_avail_time);
+            end = MAX(end, nand_lun_end(&ssd->ch[ch].lun[lun]));
         }
     }
     return end;

@@ -39,6 +39,12 @@ typedef enum NandArrayContend {
     NAND_CONTEND_LUN_ONLY = 0,    /* bbssd, CSD, KV, CXL: one rule per LUN */
     NAND_CONTEND_PLANE_ONLY,      /* ZNS: plane rule, no lun rule */
     NAND_CONTEND_LUN_AND_PLANE,   /* ZNS with zns_lun_contention */
+    /*
+     * bbssd and CSD with plane_reads: a read binds its plane and waits for
+     * the LUN's program/erase barrier; a program or erase binds the LUN and
+     * every plane. Plain channel model only.
+     */
+    NAND_CONTEND_LUN_PE_PLANE_READ,
 } NandArrayContend;
 
 /*

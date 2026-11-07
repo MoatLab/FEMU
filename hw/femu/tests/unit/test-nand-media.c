@@ -830,6 +830,144 @@ static void test_unbounded_windows(void)
     check("unbounded: 40 windows booked", booked, 40);
 }
 
+/* plane_reads: a real timeline per plane, 4 planes per LUN */
+static uint64_t pr_pl[NAND_TEST_LUNS][4];
+static uint64_t *t_prpl(void *o, const NandLoc *l)
+{
+    (void)o;
+    return &pr_pl[(l->ch * 8 + l->lun) % NAND_TEST_LUNS][l->pl % 4];
+}
+static const NandTimelineOps plane_read_timeline = {
+    .ch_avail = t_ch, .lun_avail = t_lun, .plane_avail = t_prpl,
+};
+
+static NandLoc pr_loc(uint32_t lun, uint32_t pl)
+{
+    NandLoc l;
+
+    memset(&l, 0, sizeof(l));
+    l.lun = lun;
+    l.pl = pl;
+    return l;
+}
+
+/*
+ * NAND_CONTEND_LUN_PE_PLANE_READ, tR 10 us: reads on different planes of a
+ * die overlap, on one plane they queue; a program or erase waits for every
+ * read on its die, and reads after it wait for it; a multi-plane read books
+ * only its planes; another LUN is free.
+ */
+static void test_plane_reads(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a, b, c;
+    const uint64_t t0 = 1000000;
+
+    bb_config(&cfg);
+    memset(pr_pl, 0, sizeof(pr_pl));
+    cfg.planes_per_lun = 4;
+    cfg.policy.ecc_on_read = false;
+    cfg.policy.array_contend = NAND_CONTEND_LUN_PE_PLANE_READ;
+    cfg.timeline = &plane_read_timeline;
+    nand_media_init(&m, &cfg);
+
+    a = pr_loc(0, 0);
+    b = pr_loc(0, 1);
+    check("plane reads: P0 at t0", nand_media_op(&m, &a, NAND_MEDIA_READ,
+          t0).done_ns, t0 + 10000);
+    check("plane reads: P1 overlaps P0", nand_media_op(&m, &b,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 10000);
+    check("plane reads: P0 again queues", nand_media_op(&m, &a,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 20000);
+    /* the program waits for the later of the two planes (P0 at +20 us) */
+    c = pr_loc(0, 2);
+    check("plane reads: program waits for every plane",
+          nand_media_op(&m, &c, NAND_MEDIA_PROGRAM, t0).done_ns,
+          t0 + 20000 + 40000);
+    check("plane reads: read after program waits", nand_media_op(&m, &b,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 60000 + 10000);
+    /* an erase waits for that read too */
+    check("plane reads: erase waits for the read",
+          nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0).done_ns,
+          t0 + 70000 + 2000000);
+    /* another LUN is free */
+    c = pr_loc(1, 3);
+    check("plane reads: another LUN is free", nand_media_op(&m, &c,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 10000);
+    nand_media_destroy(&m);
+
+    /* a two-plane read books P0 and P1 only; P2 stays free */
+    memset(pr_pl, 0, sizeof(pr_pl));
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc g[2] = { pr_loc(0, 0), pr_loc(0, 1) };
+
+        g[1].blk = g[0].blk;
+        nand_media_multiplane(&m, g, 2, NAND_MEDIA_READ, t0);
+    }
+    a = pr_loc(0, 1);
+    check("plane reads: P1 is booked by the group", nand_media_op(&m, &a,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 20000);
+    c = pr_loc(0, 2);
+    check("plane reads: a multi-plane read leaves P2 free",
+          nand_media_op(&m, &c, NAND_MEDIA_READ, t0).done_ns, t0 + 10000);
+    a = pr_loc(0, 0);
+    check("plane reads: P0 is booked by the group", nand_media_op(&m, &a,
+          NAND_MEDIA_READ, t0).done_ns, t0 + 20000);
+    nand_media_destroy(&m);
+
+    /* a busy P2 does not delay a P0 and P1 group */
+    memset(pr_pl, 0, sizeof(pr_pl));
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    c = pr_loc(0, 2);
+    nand_media_op(&m, &c, NAND_MEDIA_READ, t0);
+    nand_media_op(&m, &c, NAND_MEDIA_READ, t0);
+    {
+        NandLoc g[2] = { pr_loc(0, 0), pr_loc(0, 1) };
+
+        check("plane reads: a busy P2 does not delay the group",
+              nand_media_multiplane(&m, g, 2, NAND_MEDIA_READ, t0).done_ns,
+              t0 + 10000);
+    }
+    nand_media_destroy(&m);
+
+    /* copyback waits for a read on another plane: 20 + 10 + 40 us */
+    memset(pr_pl, 0, sizeof(pr_pl));
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    c = pr_loc(0, 3);
+    nand_media_op(&m, &c, NAND_MEDIA_READ, t0);
+    nand_media_op(&m, &c, NAND_MEDIA_READ, t0);
+    {
+        NandLoc src = pr_loc(0, 0), dst = pr_loc(0, 0);
+
+        dst.pg = 1;
+        check("plane reads: copyback waits for the die",
+              nand_media_copyback(&m, &src, &dst, t0).done_ns, t0 + 70000);
+    }
+    nand_media_destroy(&m);
+
+    /* copyback holds the whole die, so a read on another plane waits */
+    memset(pr_pl, 0, sizeof(pr_pl));
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc src = pr_loc(0, 0), dst = pr_loc(0, 0);
+        uint64_t end;
+
+        dst.pg = 1;
+        end = nand_media_copyback(&m, &src, &dst, t0).done_ns;
+        c = pr_loc(0, 3);
+        check("plane reads: copyback holds the die",
+              nand_media_op(&m, &c, NAND_MEDIA_READ, t0).done_ns,
+              end + 10000);
+    }
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -849,6 +987,7 @@ int main(void)
     test_pe_suspend();
     test_partial_xfer();
     test_unbounded_windows();
+    test_plane_reads();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

@@ -348,7 +348,7 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
         ssd->cmt.slots[slot].dirty = false;
     }
     ppa = ssd->gtd[tp];
-    get_lun(ssd, &ppa)->gc_endtime = get_lun(ssd, &ppa)->next_lun_avail_time;
+    get_lun(ssd, &ppa)->gc_endtime = nand_lun_end(get_lun(ssd, &ppa));
     ssd->tp_moves++;
     return true;
 }

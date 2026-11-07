@@ -38040,6 +38040,117 @@ static void femu_test_thermal_ocp(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * plane_reads: refused outside bbssd and CSD, and with the channel phases
+ * or suspend whose state is per LUN; a two-plane bbssd device realizes.
+ */
+static void femu_test_plane_reads(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } bad[] = {
+        { "'femu_mode':2", "bbssd, CSD or KV" },
+        { "'femu_mode':1,'onfi_cache_read':1", "plain channel model" },
+        { "'femu_mode':1,'pe_suspend':1", "plain channel model" },
+        { "'femu_mode':1,'status_lat':100", "plain channel model" },
+    };
+    const char *geom = "'devsz_mb':4,'secsz':512,'secs_per_pg':8,"
+                       "'pgs_per_blk':16,'luns_per_ch':1,'nchs':1,"
+                       "'pls_per_lun':2,'blks_per_pl':40,'plane_reads':true";
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'pr','addr':'5',%s,%s}}", geom, bad[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].msg));
+        qobject_unref(rsp);
+    }
+    {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'pr','addr':'5','femu_mode':1,%s}}", geom);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "pr", 5);
+    }
+    qos_invalidate_command_line();
+}
+
+/* field 1 of x-ftl-trace (modelled request time, ns) on device @id */
+static uint64_t femu_model_ns(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-ftl-trace'}}", path);
+    g_auto(GStrv) v = NULL;
+    uint64_t ns;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    ns = g_ascii_strtoull(v[1], NULL, 10);
+    qobject_unref(rsp);
+    return ns;
+}
+
+/*
+ * plane_reads in the real bbssd FTL: one channel, one LUN, two planes, so
+ * the two pages of an 8 KiB write land on planes 0 and 1 of one die. One
+ * 8 KiB read then takes one tR (5 ms) with plane_reads, two without.
+ */
+static void femu_test_plane_reads_timing(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = data ? "prd-on" : "prd-off";
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    NvmeRwCmd rw;
+    uint64_t before, d;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6c, 8192);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 4096 / c.lba_size,
+                                    buf + 4096)), ==, NVME_SUCCESS);
+    before = femu_model_ns(qts, id);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.nlb = cpu_to_le16(8192 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    d = femu_model_ns(qts, id) - before;
+    g_test_message("%s: 8 KiB read modelled %" PRIu64 " ns", id, d);
+    if (data) {
+        g_assert_cmpuint(d, >=, 5000000);
+        g_assert_cmpuint(d, <, 7500000);
+    } else {
+        g_assert_cmpuint(d, >=, 10000000);
+    }
+    guest_free(alloc, raw);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* the throttle properties are refused out of range or without the throttle */
 static void femu_test_throttle_refused(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -52806,6 +52917,20 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=thro,femu_mode=1,devsz_mb=64,ocp=on,"
             "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on",
+    });
+    qos_add_test("plane-reads", "femu", femu_test_plane_reads, NULL);
+    qos_add_test("plane-reads-on", "femu", femu_test_plane_reads_timing,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)1,
+        .edge.extra_device_opts = "id=prd-on,femu_mode=1,devsz_mb=4,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,luns_per_ch=1,nchs=1,"
+            "pls_per_lun=2,blks_per_pl=40,pg_rd_lat=5000000,plane_reads=on",
+    });
+    qos_add_test("plane-reads-off", "femu", femu_test_plane_reads_timing,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=prd-off,femu_mode=1,devsz_mb=4,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,luns_per_ch=1,nchs=1,"
+            "pls_per_lun=2,blks_per_pl=40,pg_rd_lat=5000000",
     });
     qos_add_test("throttle-refused", "femu", femu_test_throttle_refused,
                  NULL);
