@@ -19000,7 +19000,8 @@ static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
                                        buf, 512, 0), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, hdr, sizeof(hdr));
     g_assert_cmpint(hdr[0], ==, FEMU_LOG_TELEMETRY_CTRL);
-    g_assert_cmpint(hdr[380], ==, 1);
+    g_assert_cmpint(hdr[380], ==, 0);                   /* reserved */
+    g_assert_cmpint(hdr[381], ==, 1);                   /* TCS: controller */
     g_assert_cmpint(hdr[382], ==, 0);                   /* no data available */
 
     femu_disable(&c);

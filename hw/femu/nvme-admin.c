@@ -2994,7 +2994,15 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
     }
 
     hdr->lid = lid;
-    hdr->scope = 0x1;
+    /*
+     * Host log (Figure 218): byte 380 is the scope, 381 the generation.
+     * Controller log (Figure 220): byte 380 is reserved, 381 the scope.
+     */
+    if (lid == NVME_LOG_TELEMETRY_CTRL) {
+        hdr->dgn = 0x1;                 /* TCS: the controller */
+    } else {
+        hdr->scope = 0x1;
+    }
     if (lid == NVME_LOG_TELEMETRY_HOST) {
         if (create) {
             nvme_femu_stats_fill(n, &n->telemetry_data);
