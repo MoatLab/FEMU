@@ -28872,6 +28872,85 @@ static void femu_test_pel_file_quit(void *obj, void *data,
     rmdir(dir);
 }
 
+/*
+ * persist_file keeps the data across a hot unplug and across a QEMU quit.
+ * Run 1 writes page 3 and quits; run 2 reads it back, writes page 9 and
+ * unplugs; a device added again reads both. A file of another size fails
+ * realize, and so does a mode that keeps state outside the backend.
+ */
+static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-persist-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    const char *mode = data ? "2" : "1";
+    QDict *rsp;
+    int run;
+
+    for (run = 1; run <= 2; run++) {
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,id=pd,addr=5,devsz_mb=16,"
+            "femu_mode=%s,persist_file=%s", mode, path);
+        QTestState *qts = qs->qts;
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+        FemuCtrlState c = { 0 };
+        uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_create_io_queues(&c);
+        if (run == 1) {
+            femu_ns_page(&c, buf, 1, 3, 0x3c, true);
+            femu_disable(&c);
+            qtest_qmp_send(qts, "{'execute':'quit'}");
+            qtest_set_expected_status(qts, 0);
+            qtest_wait_qemu(qts);
+        } else {
+            femu_ns_page(&c, buf, 1, 3, 0x3c, false);
+            femu_ns_page(&c, buf, 1, 9, 0x9a, true);
+            femu_disable(&c);
+            femu_queue_free(&c, &c.io);
+            qpci_unplug_acpi_device_test(qts, "pd", 5);
+            g_free(pdev);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pd','addr':'5',"
+                            "'devsz_mb':16,'femu_mode':%s,"
+                            "'persist_file':%s}}", mode, path);
+            g_assert_true(qdict_haskey(rsp, "return"));
+            qobject_unref(rsp);
+            pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+            memset(&c, 0, sizeof(c));
+            femu_enable(&c, pdev, &qs->alloc);
+            femu_create_io_queues(&c);
+            femu_ns_page(&c, buf, 1, 3, 0x3c, false);
+            femu_ns_page(&c, buf, 1, 9, 0x9a, false);
+            femu_disable(&c);
+            /* another size or mode does not take this file */
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':32,'femu_mode':%s,"
+                            "'persist_file':%s}}", mode, path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "does not match"));
+            qobject_unref(rsp);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':16,'femu_mode':3,"
+                            "'persist_file':%s}}", path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "not supported with"));
+            qobject_unref(rsp);
+        }
+        /* femu_disable() freed the admin queue */
+        femu_queue_free(&c, &c.io);
+        guest_free(&qs->alloc, buf);
+        g_free(pdev);
+        qtest_pc_shutdown(qs);
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
 static void femu_test_pel_file_invalid(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -51409,6 +51488,9 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-file-invalid", "femu", femu_test_pel_file_invalid, NULL);
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
+    qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
+    qos_add_test("persist-nossd", "femu", femu_test_persist,
+                 &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-file-media", "femu", femu_test_pel_file,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-set-feature", "femu", femu_test_pel_set_feature, NULL);

@@ -7,6 +7,7 @@
 #include "qemu/cutils.h"
 #include "qemu/memalign.h"
 #include "qemu/seqlock.h"
+#include "qemu/notify.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
@@ -2873,6 +2874,10 @@ typedef struct FemuCtrl {
     uint8_t         ts_origin;
     int64_t         clr_ms;             /* realtime of the last reset */
     char            *pel_file;
+    /* persist_file: the data backend kept across QEMU runs */
+    char            *persist_file;
+    Notifier        persist_notifier;
+    bool            persist_active;  /* loaded; saves at unplug or exit */
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
@@ -3433,6 +3438,8 @@ static inline int64_t nvme_power_on_ms(FemuCtrl *n)
 
 typedef struct FemuPel FemuPel;
 bool femu_pel_init(FemuCtrl *n, Error **errp);
+bool femu_persist_init(FemuCtrl *n, Error **errp);
+void femu_persist_exit(FemuCtrl *n);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_power_loss(FemuCtrl *n);

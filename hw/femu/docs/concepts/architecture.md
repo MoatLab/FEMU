@@ -247,6 +247,9 @@ Features that are not modes:
 - **Streams**: `streams=on` (`hw/femu/nvme-streams.c`).
 - **Persistent Event Log**: always on, kept in `pel_file` if set
   (`hw/femu/nvme-pel.c`).
+- **Data persistence**: `persist_file`, bbssd and NoSSD
+  (`hw/femu/femu-persist.c`). The data backend is saved at unplug or QEMU
+  exit and loaded at realize; the FTL state starts fresh.
 
 [Choosing a mode](choosing-a-mode.md) lists which of these combine.
 

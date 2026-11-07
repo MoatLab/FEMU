@@ -3,6 +3,7 @@
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "system/qtest.h"
+#include "system/system.h"
 #include "hw/qdev-properties.h"
 #include "hw/pci/pcie_aer.h"
 #include "qom/qom-qobject.h"
@@ -3084,6 +3085,11 @@ static bool femu_cxl_link_check(FemuCtrl *n, Error **errp)
  */
 static void femu_realize_undo(FemuCtrl *n)
 {
+    /* a device that never came up keeps the file it was given */
+    if (n->persist_active) {
+        qemu_remove_exit_notifier(&n->persist_notifier);
+        n->persist_active = false;
+    }
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;
@@ -4308,7 +4314,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     /* Validate retention before starting threads that would need unwinding. */
-    if (!femu_pel_init(n, errp)) {
+    if (!femu_persist_init(n, errp) || !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
         return;
     }
@@ -4536,6 +4542,7 @@ static void femu_exit(PCIDevice *pci_dev)
      */
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
+    femu_persist_exit(n);
     femu_pel_exit(n);
     femu_fw_exit(n);
     nvme_resv_exit(n);
@@ -4608,6 +4615,7 @@ static void femu_exit(PCIDevice *pci_dev)
 static const Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
+    DEFINE_PROP_STRING("persist_file", FemuCtrl, persist_file),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),

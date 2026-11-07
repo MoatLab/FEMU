@@ -671,6 +671,13 @@ own description allows. A message keeps its format directives (`%s`,
 
 - perf_hints: %s
 
+## `persist_file`
+
+- persist_file '%s' does not match this device: the mode, backend size (%
+- persist_file '%s' is shorter than the device
+- persist_file is not supported with %s
+- persist_file must not be empty
+
 ## `pg_xfer_lat`
 
 - FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat

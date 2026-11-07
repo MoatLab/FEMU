@@ -39,7 +39,7 @@ DEVICES = [
                     "femu_mode", "devsz_mb", "namespaces", "namespace_sizes",
                     "namespace_modes", "namespace_phls", "op_pcent", "subsys",
                     "cxl_ssd",
-                    "pel_file", "serial",
+                    "pel_file", "persist_file", "serial",
                 ],
             },
             {

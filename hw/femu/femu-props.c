@@ -105,6 +105,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Host file that keeps the Persistent Event Log and power cycle count "
       "across runs, created if missing; a corrupt or incompatible file "
       "fails realize" },
+    { "persist_file",
+      "bbssd, NoSSD: host file that keeps the data across runs; realize "
+      "loads it, unplug or the end of QEMU saves it. A file of another "
+      "mode, size or namespace count fails realize. The FTL state is not "
+      "kept. Not with namespace_modes, ns_mgmt, shared namespaces, "
+      "cxl_ssd or metadata" },
     { "subsys",
       "ID of a femu-subsys device to join, created before this controller; "
       "needed for FDP, shared namespaces and the Endurance Group log" },

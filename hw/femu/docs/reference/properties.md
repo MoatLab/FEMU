@@ -38,6 +38,7 @@ Devices:
 | `subsys` | `link<femu-subsys>` | unset | ID of a femu-subsys device to join, created before this controller; needed for FDP, shared namespaces and the Endurance Group log |
 | `cxl_ssd` | `link<femu-cxl-ssd>` | unset | ID of a femu-cxl-ssd, listed before this controller, whose memory and FTL this bbssd controller serves as its one namespace |
 | `pel_file` | `str` | unset | Host file that keeps the Persistent Event Log and power cycle count across runs, created if missing; a corrupt or incompatible file fails realize |
+| `persist_file` | `str` | unset | bbssd, NoSSD: host file that keeps the data across runs; realize loads it, unplug or the end of QEMU saves it. A file of another mode, size or namespace count fails realize. The FTL state is not kept. Not with namespace_modes, ns_mgmt, shared namespaces, cxl_ssd or metadata |
 | `serial` | `str` | unset | No effect, kept for compatibility; Identify Controller reports a serial number FEMU generates. Setting it warns at realize |
 
 ### Queues, pollers and interrupts
