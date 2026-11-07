@@ -117,6 +117,10 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ftl_assert(ssd);
     ssd->n = n;
     ssd->ns = ns;
+    /* bbssd and CSD both build here; either may write back while idle */
+    if (n->bb_params.buffer_low_pcent) {
+        n->buffer_bg = true;
+    }
 
     /* read the data-remanence experiment env vars once (debug only, off by default) */
     exp_load_cfg();

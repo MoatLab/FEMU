@@ -78,6 +78,29 @@ static int buffer_watermark(struct ssd *ssd)
     return wm > 0 ? wm : 1;
 }
 
+/*
+ * Background write-back (buffer_low_pcent): on an idle FTL thread, once
+ * every die has finished its booked work, write back one page per die.
+ * Repeated while idle, this drains the buffer to the low watermark at the
+ * speed of the media, so later reads meet dies that are as busy as the
+ * write-back made them. It returns the latency of the step, 0 for none.
+ */
+uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now)
+{
+    int low = (int)(ssd->sp.buffer_size * ssd->sp.buffer_low_pcent);
+    int dies = ssd->sp.nchs * ssd->sp.luns_per_ch;
+    int before = ssd->write_buffer_cnt;
+    uint64_t lat;
+
+    if (ssd->sp.buffer_low_pcent <= 0 || !ssd_buffer_enabled(ssd) ||
+        before <= low || ssd_media_last_end(ssd) > now) {
+        return 0;
+    }
+    lat = ssd_buffer_destage(ssd, MIN(before - low, dies), now);
+    ssd->buffer_bg_pages += before - ssd->write_buffer_cnt;
+    return lat;
+}
+
 bool ssd_buffer_at_watermark(struct ssd *ssd)
 {
     return ssd->write_buffer_cnt >= buffer_watermark(ssd);

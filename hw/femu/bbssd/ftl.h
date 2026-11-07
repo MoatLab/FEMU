@@ -299,6 +299,7 @@ struct ssdparams {
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
     double buffer_thres_pcent;
+    double buffer_low_pcent;    /* background write-back target, 0 = off */
 
     /* buffer/cache effectiveness; 64-bit, a long run overflows an int */
     uint64_t read_hit_cnt;
@@ -765,6 +766,7 @@ struct ssd {
     uint64_t gc_stalled_writes;     /* host writes that collected first */
     uint64_t gc_stall_passes;       /* forced passes run inside host writes */
     uint64_t buffer_full_destages;  /* writes that emptied a full buffer */
+    uint64_t buffer_bg_pages;       /* pages written back while idle */
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
@@ -893,6 +895,8 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
 uint64_t ssd_media_read_pass(struct ssd *ssd, struct ppa *ppa,
                              const NandLoc *loc, uint64_t t);
 void bb_gc_idle(FemuCtrl *n);
+void bb_buffer_idle(FemuCtrl *n);
+uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);

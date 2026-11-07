@@ -427,6 +427,21 @@ int bb_check_gc_idle(FemuCtrl *n, const char *mode, Error **errp)
  * Runs one step when one is due. The step runs inside ftl_in_sweep, as a
  * request does, so a caller that pauses the controller waits for it.
  */
+/* the idle FTL thread writes buffered pages back (buffer_low_pcent) */
+void bb_buffer_idle(FemuCtrl *n)
+{
+    n->ftl_in_sweep = true;
+    smp_mb();   /* publish the flag before re-reading the pause state */
+    for (uint32_t i = 0; n->dataplane_started && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns))) {
+            ssd_buffer_bg_step(ns->ssd, ssd_now(ns->ssd));
+        }
+    }
+    n->ftl_in_sweep = false;
+}
+
 void bb_gc_idle(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;

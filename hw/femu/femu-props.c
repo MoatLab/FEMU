@@ -715,6 +715,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },
+    { "buffer_low_pcent",
+      "bbssd, CSD: with buffer_size, an idle FTL thread writes buffered "
+      "pages back, one per die once all dies are free, until the fill "
+      "level falls to this percent; below buffer_thres_pcent; 0 "
+      "(default) writes back only when the buffer reaches "
+      "buffer_thres_pcent" },
     { "buffer_thres_pcent",
       "bbssd, CSD: buffer fill level in percent at which buffered pages "
       "are written to NAND, 1 to 100 when buffer_size > 0" },

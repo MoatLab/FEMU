@@ -2456,6 +2456,7 @@ typedef struct BbCtrlParams {
     int pd_open_close_sec;    /* seconds a frontier stays open before a pad */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
+    int buffer_low_pcent;     /* idle write-back stops here; 0 = none */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
     int fdp_trim_erase_all; /* FDP DSM: 1 = reset whole device (test only); 0 = range */
     char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */
@@ -3085,6 +3086,7 @@ typedef struct FemuCtrl {
     bool            test_tp_hold;   /* qtest: publish no pending TP */
     bool            tier_idle;      /* the FTL thread runs idle folds */
     bool            gc_idle;        /* the FTL thread collects when idle */
+    bool            buffer_bg;      /* the FTL thread writes back when idle */
     /* qtest only: the next pSLC fold stops after this many pages, once */
     uint32_t        test_tier_fold_stop;
     /* qtest only: ms Report Zones holds the zone lock before it reports */

@@ -346,6 +346,16 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    /* idle write-back runs down to a level below the foreground one */
+    if (p->buffer_low_pcent &&
+        (p->buffer_size <= 0 || p->buffer_low_pcent < 0 ||
+         p->buffer_low_pcent >= p->buffer_thres_pcent)) {
+        error_setg(errp, "FEMU bbssd: buffer_low_pcent needs buffer_size and "
+                   "must be below buffer_thres_pcent, got %d",
+                   p->buffer_low_pcent);
+        return -1;
+    }
+
     tt_secs = (uint64_t)p->secs_per_pg * p->pgs_per_blk * p->blks_per_pl *
               p->pls_per_lun * p->luns_per_ch * p->nchs;
     if (tt_secs > INT_MAX) {
@@ -433,6 +443,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     /* DRAM write buffer */
     spp->buffer_size = n->bb_params.buffer_size;
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
+    spp->buffer_low_pcent = n->bb_params.buffer_low_pcent / 100.0;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;

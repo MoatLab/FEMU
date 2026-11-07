@@ -2759,12 +2759,15 @@ static void *femu_ftl_thread(void *arg)
          * No request this pass: the pSLC tier may fold, and idle
          * collection may run, in the idle time.
          */
-        if (unlikely(n->tier_idle || n->gc_idle) && !busy) {
+        if (unlikely(n->tier_idle || n->gc_idle || n->buffer_bg) && !busy) {
             if (n->tier_idle) {
                 bb_tier_idle(n);
             }
             if (n->gc_idle) {
                 bb_gc_idle(n);
+            }
+            if (n->buffer_bg) {
+                bb_buffer_idle(n);
             }
         }
     }
@@ -4830,6 +4833,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),
+    DEFINE_PROP_INT32("buffer_low_pcent", FemuCtrl,
+                      bb_params.buffer_low_pcent, 0),
     /* the pSLC tier in front of the dense lines; off unless tier_mode is set */
     DEFINE_PROP_STRING("tier_mode", FemuCtrl, bb_params.tier_mode),
     DEFINE_PROP_STRING("tier_full_policy", FemuCtrl,

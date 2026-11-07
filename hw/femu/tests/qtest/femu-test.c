@@ -4338,6 +4338,43 @@ static void femu_query_check_blocks(QTestState *qts)
     g_assert_cmpuint(sum, >, 0);
 }
 
+/*
+ * Background write-back (buffer_low_pcent=25 of a 64-page buffer, so the
+ * low mark is 16 pages, the high one 57). 40 one-page writes stay below
+ * the high mark, so no write writes back on its own. Idle, the FTL thread
+ * writes 24 pages back and stops at 16. Without buffer_low_pcent (@data
+ * NULL) all 40 stay held.
+ */
+static void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    QDict *rsp;
+    QDict *ns;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int i = 0; i < 40; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (FEMU_DATA_SIZE / c.lba_size),
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    g_usleep(300 * 1000);
+    ns = femu_query_ns(qts, "", &rsp);
+    ctr = qdict_get_qdict(ns, "counters");
+    g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, 40);
+    g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     data ? 24 : 0);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* @lines records from @offset, and where the listing continues (0 = end) */
 static void femu_query_window(QTestState *qts, uint32_t offset, uint32_t limit,
                               uint32_t want, uint32_t next)
@@ -54430,6 +54467,17 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "pi=on,meta=8,mc=3,oncs=0x19f,mdts=1"
     });
     qos_add_test("trace-events", "femu", femu_test_trace_events, NULL);
+    qos_add_test("buffer-bg", "femu", femu_test_buffer_bg,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)1,
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=64,"
+            "buffer_thres_pcent=90,buffer_low_pcent=25",
+    });
+    qos_add_test("buffer-bg-off", "femu", femu_test_buffer_bg,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=64,"
+            "buffer_thres_pcent=90",
+    });
     qos_add_test("pci-pm", "femu", femu_test_pci_pm,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "pci_pm=on"
