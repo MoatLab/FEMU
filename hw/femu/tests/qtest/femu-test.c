@@ -36993,6 +36993,7 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                         NVME_SUCCESS);
         qtest_memread(qts, buf, &ns, sizeof(ns));
         g_assert_cmpuint(ldq_le_p(&p[152]), ==, le64_to_cpu(ns.nuse));
+        g_assert_cmpuint(le64_to_cpu(ns.nuse), ==, 0);  /* nothing written */
     }
     /* 2.7 fields: dies, max temperature, average erases, then reserved */
     g_assert_cmpuint(lduw_le_p(&p[216]), >, 0);
@@ -37028,6 +37029,17 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     /* one 4 KiB page per command, no buffer, no collection on a new device */
     g_assert_cmpuint(w1 - w0, ==, 64 * 4096);
     g_assert_cmpuint(r1 - r0, ==, 64 * 4096);
+    /* NUSE counts written blocks (NUSE-1), and C0h Total NUSE agrees */
+    {
+        NvmeIdNs ns;
+        uint64_t total = ldq_le_p(&p[152]);
+
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmpuint(le64_to_cpu(ns.nuse), ==, 64 * 4096 / c.lba_size);
+        g_assert_cmpuint(total, ==, 64 * 4096 / c.lba_size);
+    }
     femu_queue_free(&c, &c.io);
 
     /* C1h at index 0 and 1: no recovery needed, nothing else */

@@ -812,10 +812,13 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
     if (ns->csi != NVME_CSI_NVM && ns->csi != NVME_CSI_ZONED) {
         return NVME_INVALID_CMD_SET | NVME_DNR;
     }
-    if (nvme_ns_media_ro(ns)) {
+    if (nvme_ns_media_ro(ns) || n->ocp) {
         NvmeIdNs id = ns->id_ns;
 
-        id.nsattr |= NVME_NSATTR_CWP;
+        if (nvme_ns_media_ro(ns)) {
+            id.nsattr |= NVME_NSATTR_CWP;
+        }
+        id.nuse = cpu_to_le64(nvme_ns_nuse(n, ns));
         return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
     }
     return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
@@ -1137,6 +1140,36 @@ static void nvme_ns_uuid(FemuCtrl *n, NvmeNamespace *ns, uint8_t *uuid)
     memcpy(uuid, digest, NVME_NIDL_UUID);
     uuid[6] = (uuid[6] & 0x0f) | 0x80;
     uuid[8] = (uuid[8] & 0x3f) | 0x80;
+}
+
+/*
+ * NUSE. With ocp it counts the blocks that hold data: a write allocates a
+ * block, a deallocate frees it (OCP 2.7 NUSE-1 forbids a fixed value).
+ * Otherwise it is the capacity, as every block counts as in use.
+ */
+/*
+ * Pollers set and clear bits of ns->util with atomic operations, so each
+ * word is read atomically too. The sum is a snapshot that may lag writes
+ * still in flight, as NUSE may.
+ */
+uint64_t nvme_ns_nuse(FemuCtrl *n, NvmeNamespace *ns)
+{
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint64_t words = BITS_TO_LONGS(nsze);
+    uint64_t sum = 0;
+
+    if (!n->ocp || !ns->util) {
+        return le64_to_cpu(ns->id_ns.nuse);
+    }
+    for (uint64_t i = 0; i < words; i++) {
+        unsigned long w = qatomic_read(&ns->util[i]);
+
+        if (i == words - 1 && nsze % BITS_PER_LONG) {
+            w &= BITMAP_LAST_WORD_MASK(nsze);
+        }
+        sum += ctpopl(w);
+    }
+    return sum;
 }
 
 /*
@@ -2657,7 +2690,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         if (!ns->allocated) {
             continue;
         }
-        nuse += le64_to_cpu(ns->id_ns.nuse);
+        nuse += nvme_ns_nuse(n, ns);
         if (!ns->ssd || ns->ssd_shared || !(NS_BBSSD(ns) || NS_CSD(ns))) {
             continue;
         }

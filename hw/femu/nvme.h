@@ -2913,6 +2913,7 @@ typedef struct NvmeDifTuple {
 bool nvme_ns_mgmt_supported(FemuCtrl *n);
 bool nvme_can_sanitize(FemuCtrl *n);
 bool nvme_fid_supported(FemuCtrl *n, uint8_t fid);
+uint64_t nvme_ns_nuse(FemuCtrl *n, NvmeNamespace *ns);
 
 /*
  * The capability registry (nvme-caps.c). Each returns the Commands Supported
