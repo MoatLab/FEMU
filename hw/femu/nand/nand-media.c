@@ -586,26 +586,27 @@ static void prio_slide(NandSuspendState *st, uint64_t from, uint64_t by)
 }
 
 /*
- * Record a program or erase window [start, end) for read_prio, with what
- * it writes: @pg on plane @loc->pl of block @loc->blk, or every page with
- * NAND_PRIO_ALL_PAGES. A full list drops its first window; a read then
- * waits at least for its end, so a dropped window can only make a read
- * later, never overlap it.
+ * Record a program or erase window [start, end) for read_prio and
+ * pe_suspend, with what it writes: pages [@pg, @pg + @npg) on plane
+ * @loc->pl of block @loc->blk (NAND_PRIO_ALL_PAGES: the whole block). A
+ * full list drops its first window; a read then waits at least for its
+ * end, so a dropped window can only make a read later, never overlap it.
  */
 static void prio_note(NandMedia *m, const NandLoc *loc, uint32_t pg,
-                      uint64_t start, uint64_t end)
+                      uint32_t npg, uint64_t start, uint64_t end)
 {
     NandSuspendState *st;
     uint32_t pl = loc->pl < 32 ? 1u << loc->pl : ~0u;
     int i;
 
-    if (!m->cfg.policy.read_prio || !(st = suspend_state(m, loc))) {
+    if (!(st = suspend_state(m, loc))) {
         return;
     }
     /* a multi-plane booking under the LUN rule notes one window per plane */
     for (i = 0; i < st->nwin; i++) {
         if (st->win_start[i] == start && st->win_end[i] == end &&
-            st->win_blk[i] == loc->blk && st->win_pg[i] == pg) {
+            st->win_blk[i] == loc->blk && st->win_pg[i] == pg &&
+            st->win_npg[i] == npg) {
             st->win_planes[i] |= pl;
             return;
         }
@@ -620,6 +621,8 @@ static void prio_note(NandMedia *m, const NandLoc *loc, uint32_t pg,
                 (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_blk[0]));
         memmove(st->win_pg, st->win_pg + 1,
                 (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_pg[0]));
+        memmove(st->win_npg, st->win_npg + 1,
+                (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_npg[0]));
         memmove(st->win_planes, st->win_planes + 1,
                 (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_planes[0]));
         st->nwin--;
@@ -629,12 +632,14 @@ static void prio_note(NandMedia *m, const NandLoc *loc, uint32_t pg,
         st->win_end[i] = st->win_end[i - 1];
         st->win_blk[i] = st->win_blk[i - 1];
         st->win_pg[i] = st->win_pg[i - 1];
+        st->win_npg[i] = st->win_npg[i - 1];
         st->win_planes[i] = st->win_planes[i - 1];
     }
     st->win_start[i] = start;
     st->win_end[i] = end;
     st->win_blk[i] = loc->blk;
     st->win_pg[i] = pg;
+    st->win_npg[i] = npg;
     st->win_planes[i] = pl;
     st->nwin++;
 }
@@ -645,7 +650,21 @@ static bool prio_writes(const NandSuspendState *st, int i, const NandLoc *loc)
     uint32_t pl = loc->pl < 32 ? 1u << loc->pl : ~0u;
 
     return st->win_blk[i] == loc->blk && (st->win_planes[i] & pl) &&
-           (st->win_pg[i] == NAND_PRIO_ALL_PAGES || st->win_pg[i] == loc->pg);
+           loc->pg >= st->win_pg[i] &&
+           loc->pg - st->win_pg[i] < st->win_npg[i];
+}
+
+/* whether a window not yet ended at @t writes the page a read wants */
+static bool prio_depends(NandMedia *m, const NandLoc *loc, uint64_t t)
+{
+    NandSuspendState *st = suspend_state(m, loc);
+
+    for (int i = 0; st && i < st->nwin; i++) {
+        if (st->win_end[i] > t && prio_writes(st, i, loc)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /*
@@ -675,6 +694,7 @@ static bool prio_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
             st->win_end[k] = st->win_end[i];
             st->win_blk[k] = st->win_blk[i];
             st->win_pg[k] = st->win_pg[i];
+            st->win_npg[k] = st->win_npg[i];
             st->win_planes[k++] = st->win_planes[i];
         }
     }
@@ -1178,8 +1198,8 @@ static NandOpCompletion onfi_op(NandMedia *m, const NandLoc *loc,
     return c;
 }
 
-uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint64_t stime,
-                         uint64_t ns)
+uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
+                         uint32_t npg, uint64_t stime, uint64_t ns)
 {
     uint64_t alat = throttled(m, ns);
     uint64_t s, done;
@@ -1204,8 +1224,8 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint64_t stime,
     done = s + alat;
     array_commit_op(m, loc, done, NAND_MEDIA_PROGRAM);
     suspend_note(m, loc, NAND_MEDIA_PROGRAM, done);
-    /* the pass rewrites a wordline of the block: no read goes ahead of it */
-    prio_note(m, loc, NAND_PRIO_ALL_PAGES, s, done);
+    /* no read of the wordline goes ahead of its pass */
+    prio_note(m, loc, pg, npg, s, done);
     if (m->cfg.timeline->unlock_lun) {
         m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, loc);
     }
@@ -1269,7 +1289,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             uint64_t s = array_contend_op(m, loc, t, op);
             uint64_t rs, shift;
 
-            if (op == NAND_MEDIA_READ &&
+            /* a read never suspends the work that writes its page */
+            if (op == NAND_MEDIA_READ && !prio_depends(m, loc, t) &&
                 suspend_read_start(m, loc, t, s, alat, &rs, &shift)) {
                 /*
                  * The read goes ahead of the program or erase, and every guarded
@@ -1287,8 +1308,9 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 array_commit_op(m, loc, done, op);
                 suspend_note(m, loc, op, done);
                 if (op != NAND_MEDIA_READ) {
-                    prio_note(m, loc, op == NAND_MEDIA_ERASE ?
-                              NAND_PRIO_ALL_PAGES : loc->pg, s, done);
+                    prio_note(m, loc, op == NAND_MEDIA_ERASE ? 0 : loc->pg,
+                              op == NAND_MEDIA_ERASE ? NAND_PRIO_ALL_PAGES :
+                              1, s, done);
                 }
             }
         }
@@ -1335,7 +1357,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             uint64_t busy = array_contend_start(m, loc, t);
             uint64_t rs, shift;
 
-            if (suspend_read_start(m, loc, t, busy, alat, &rs, &shift)) {
+            if (!prio_depends(m, loc, t) &&
+                suspend_read_start(m, loc, t, busy, alat, &rs, &shift)) {
                 uint64_t done = rs + alat;
 
                 array_suspend_extend(m, loc, t, shift);
@@ -1363,6 +1386,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
+        prio_note(m, loc, loc->pg, 1, s, done);
         c.done_ns = done;
     } else { /* erase */
         t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
@@ -1370,6 +1394,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         suspend_note(m, loc, op, done);
+        prio_note(m, loc, 0, NAND_PRIO_ALL_PAGES, s, done);
         t = bus_later(m, loc->ch, stime, done, m->cfg.timing.status_ns);
         c.done_ns = t;
     }
@@ -1530,8 +1555,9 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
         array_commit_op(m, &locs[i], done, op);
         suspend_note(m, &locs[i], op, done);
         if (op != NAND_MEDIA_READ) {
-            prio_note(m, &locs[i], op == NAND_MEDIA_ERASE ?
-                      NAND_PRIO_ALL_PAGES : locs[i].pg, start, done);
+            prio_note(m, &locs[i], op == NAND_MEDIA_ERASE ? 0 : locs[i].pg,
+                      op == NAND_MEDIA_ERASE ? NAND_PRIO_ALL_PAGES : 1,
+                      start, done);
         }
     }
 

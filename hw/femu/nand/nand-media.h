@@ -290,7 +290,7 @@ typedef struct NandBusResList {
  */
 /* the program/erase windows read_prio keeps per array position */
 #define NAND_PRIO_WINDOWS 16
-/* a window that writes every page of its block: an erase, a second pass */
+/* the page count of a window that writes its whole block: an erase */
 #define NAND_PRIO_ALL_PAGES UINT32_MAX
 
 typedef struct NandSuspendState {
@@ -303,9 +303,10 @@ typedef struct NandSuspendState {
     uint64_t win_floor;  /* the latest end of a dropped window */
     uint64_t win_start[NAND_PRIO_WINDOWS];
     uint64_t win_end[NAND_PRIO_WINDOWS];
-    /* what each window writes: block, page (NAND_PRIO_ALL_PAGES), planes */
+    /* what each window writes: block, pages [pg, pg + npg), planes */
     uint32_t win_blk[NAND_PRIO_WINDOWS];
     uint32_t win_pg[NAND_PRIO_WINDOWS];
+    uint32_t win_npg[NAND_PRIO_WINDOWS];
     uint32_t win_planes[NAND_PRIO_WINDOWS];
 } NandSuspendState;
 
@@ -334,11 +335,12 @@ void nand_media_destroy(NandMedia *m);
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
 /*
  * Book @ns of array time on @loc from @stime, as a program would, with no
- * bus phase: a second program pass of a wordline whose data the die
- * already holds. Returns when it ends.
+ * bus phase: a second program pass of the wordline of pages [@pg, @pg +
+ * @npg) in @loc's block, whose data the die already holds. Returns when
+ * it ends.
  */
-uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint64_t stime,
-                         uint64_t ns);
+uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
+                         uint32_t npg, uint64_t stime, uint64_t ns);
 
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime);

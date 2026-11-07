@@ -383,7 +383,7 @@ static void ssd_pass2_book(struct ssd *ssd, struct ppa *ppa,
         last = first;
     }
     for (w = MAX(first, 0); w <= last; w++) {
-        done = nand_media_hold(&ssd->media, loc, done,
+        done = nand_media_hold(&ssd->media, loc, w * wlp, wlp, done,
                                ssd->sp.prog_pass2_ns);
         ssd->pass2_programs++;
     }
@@ -416,6 +416,12 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
      * read is only charged for time: it addresses a placeholder block, whose
      * data pages it does not disturb.
      */
+    /* two-pass program: a wordline before its fine pass is in the buffer */
+    if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_READ &&
+        !bb_io_meta(ncmd->type) && ssd_pass2_staged(ssd, ppa)) {
+        ssd->pass2_staged_reads++;
+        return 0;
+    }
     if (op == NAND_MEDIA_READ && !bb_io_meta(ncmd->type)) {
         reads = get_blk(ssd, ppa)->read_cnt++;
     }
@@ -424,12 +430,6 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     /* the thermal model reads these from the main loop */
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
-    /* two-pass program: a wordline before its fine pass is in the buffer */
-    if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_READ &&
-        !bb_io_meta(ncmd->type) && ssd_pass2_staged(ssd, ppa)) {
-        ssd->pass2_staged_reads++;
-        return 0;
-    }
     loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
     c = nand_media_op(&ssd->media, &loc, op, stime);
     if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_PROGRAM &&

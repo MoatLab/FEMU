@@ -597,11 +597,15 @@ static void test_pe_suspend_limits(void)
     NandMediaConfig cfg;
     NandMedia m;
     NandLoc a;
+    NandLoc rd;
     const uint64_t t0 = 1000000000ULL;
     uint64_t lat;
 
     printf("# program/erase suspend limits\n");
     memset(&a, 0, sizeof(a));
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
 
     bb_config(&cfg);
     cfg.policy.pe_suspend = true;
@@ -610,10 +614,10 @@ static void test_pe_suspend_limits(void)
     cfg.policy.max_suspends = 1;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("limit 1: the first read suspends", lat, 5000 + 10000);
     /* the program now ends at t0 + 40 + 10 + 5 + 2 us */
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
     check("limit 1: the second read waits the program out",
           lat, (57000 - 20000) + 10000);
     nand_media_destroy(&m);
@@ -626,9 +630,9 @@ static void test_pe_suspend_limits(void)
     cfg.policy.max_suspends = 1;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 2000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
     check("limit 1: a queued program keeps the budget spent",
           lat, (57000 + 40000 - 20000) + 10000);
     nand_media_destroy(&m);
@@ -640,8 +644,8 @@ static void test_pe_suspend_limits(void)
     cfg.timing.tresume_ns = 2000;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
     check("no limit: the second read suspends", lat, 5000 + 10000);
     /* each suspension cost the program 17 us; a new program queues behind */
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 20000).latency_ns;
@@ -655,17 +659,21 @@ static void test_pe_suspend(void)
     NandMediaConfig cfg;
     NandMedia m;
     NandLoc a;
+    NandLoc rd;
     const uint64_t t0 = 1000000000ULL;
     uint64_t lat;
 
     printf("# program/erase suspend\n");
     memset(&a, 0, sizeof(a));
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
 
     /* lun-only rule, suspend off: the read waits out the program */
     bb_config(&cfg);
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("suspend off: read queues behind the program", lat, (40000 - 1000) + 10000);
     nand_media_destroy(&m);
 
@@ -675,7 +683,7 @@ static void test_pe_suspend(void)
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("suspend on: read = tsusp + array", lat, 5000 + 10000);
     /* the program now ends at t0 + 40000 + 10000 + 5000; a second program
      * issued right after the read queues behind that */
@@ -689,7 +697,7 @@ static void test_pe_suspend(void)
     cfg.policy.pe_suspend = true;
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0).latency_ns;
     check("suspend on, idle LUN: plain read", lat, 10000);
     nand_media_destroy(&m);
 
@@ -710,7 +718,7 @@ static void test_pe_suspend(void)
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("plane rule: read preempts the erase", lat, 5000 + 65000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
     check("plane rule: erase resumes after the read",
@@ -725,8 +733,8 @@ static void test_pe_suspend(void)
     cfg.policy.pe_suspend = true;
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
-    nand_media_op(&m, &a, NAND_MEDIA_READ, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("suspend on: a read queues behind a read",
           lat, (10000 - 1000) + 10000);
     nand_media_destroy(&m);
@@ -740,9 +748,9 @@ static void test_pe_suspend(void)
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("first read in a suspension: tsusp + array", lat, 5000 + 10000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 2000).latency_ns;
     check("second read in the same suspension: behind the first",
           lat, (1000 + 5000 + 10000 - 2000) + 10000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 2000).latency_ns;
@@ -758,9 +766,9 @@ static void test_pe_suspend(void)
     cfg.policy.pe_suspend = true;
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
-    nand_media_op(&m, &a, NAND_MEDIA_READ, t0);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 500);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("read between a read and a queued program: after the read",
           lat, (10000 - 1000) + 10000);
     nand_media_destroy(&m);
@@ -777,6 +785,7 @@ static void test_pe_suspend(void)
         memset(pls, 0, sizeof(pls));
         pls[1].pl = 1;
         nand_media_multiplane(&m, pls, 2, NAND_MEDIA_ERASE, t0);
+        pls[1].blk = 7;
         lat = nand_media_op(&m, &pls[1], NAND_MEDIA_READ, t0 + 1000).latency_ns;
         check("read preempts a multi-plane erase", lat, 5000 + 10000);
     }
@@ -792,7 +801,7 @@ static void test_pe_suspend(void)
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     /* command 300, then suspend 5000 + array 10000, then data-out 20000
      * (the bus is idle: the erase moved no data) and status 100 */
     check("staged: read = cmd + tsusp + array + xfer + status",
@@ -1172,7 +1181,7 @@ static void test_media_hold(void)
     bb_config(&cfg);
     nand_media_init(&m, &cfg);
     done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
-    done = nand_media_hold(&m, &a, done, 30000);
+    done = nand_media_hold(&m, &a, 0, 1, done, 30000);
     check("hold: ends a pass after the program", done - t0, 70000);
     lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0).latency_ns;
     check("hold: a read waits for both", lat, 80000);
@@ -1182,10 +1191,49 @@ static void test_media_hold(void)
     cfg.policy.read_prio = true;
     nand_media_init(&m, &cfg);
     done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
-    nand_media_hold(&m, &a, done, 30000);
+    nand_media_hold(&m, &a, 0, 1, done, 30000);
     lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("hold + read_prio: a read goes ahead of the queued pass", lat,
           (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* the pass of wordline 2 holds pages 2, 3 only; page 0 goes ahead */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p0 = a;
+
+        done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
+        nand_media_hold(&m, &a, 2, 2, done, 30000);
+        lat = nand_media_op(&m, &p0, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check("hold + read_prio: another wordline goes ahead of the pass",
+              lat, (40000 - 1000) + 10000);
+        p0.pg = 3;
+        lat = nand_media_op(&m, &p0, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+        check("hold + read_prio: its own wordline waits for the pass",
+              lat, (80000 - 2000) + 10000);
+    }
+    nand_media_destroy(&m);
+
+    /* pe_suspend: a read never suspends the pass of its own wordline */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p2 = a;
+
+        p2.pg = 2;
+        nand_media_hold(&m, &a, 2, 2, t0, 30000);
+        lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check("hold + pe_suspend: another block's read suspends", lat,
+              5000 + 10000);
+        /* the pass now ends at t0 + 45 us; its own wordline waits for it */
+        lat = nand_media_op(&m, &p2, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check("hold + pe_suspend: a read of the wordline waits", lat,
+              (45000 - 1000) + 10000);
+    }
     nand_media_destroy(&m);
 }
 

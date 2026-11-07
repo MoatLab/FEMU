@@ -9397,17 +9397,23 @@ static int64_t femu_timed_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
 }
 
 /*
- * Two-pass program, end to end, with a 100 ms page read. On, a page whose
- * wordline has had no fine pass reads from the controller buffer at once;
- * the next wordline's program makes its fine pass due, and the read then
- * pays the array time. Off, every read pays it.
+ * Two-pass program, end to end, one LUN, one page per wordline, 1 ms
+ * programs, 50 ms fine passes and a 100 ms page read.
+ *
+ *   lag 1:  w0 w1 [f0] w2 waits for f0      lag 2:  w0 w1 w2 [f0] w3 waits
+ *
+ * The first write whose program queues behind a fine pass takes 50 ms;
+ * the writes before it do not. With lag 1, a read of page 0 before its
+ * fine pass comes from the buffer at once and after it pays the array
+ * read. Off, no write waits and every read pays the array read.
  */
 static void femu_test_prog_pass2(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
-    bool on = g_str_equal(data, "on");
+    bool off = g_str_equal(data, "off");
+    int lag = g_str_equal(data, "lag2") ? 2 : 1;
     FemuCtrlState c = { 0 };
     FemuQueue q;
     NvmeRwCmd rw;
@@ -9424,19 +9430,29 @@ static void femu_test_prog_pass2(void *obj, void *data,
     rw.dptr.prp1 = cpu_to_le64(buf);
     rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
 
-    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 0);
-    us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
-    g_test_message("prog_pass2 %s: staged read %" PRId64 " us",
-                   on ? "on" : "off", us);
-    if (on) {
-        g_assert_cmpint(us, <, 50000);
-    } else {
-        g_assert_cmpint(us, >=, 100000);
+    for (int pg = 0; pg <= 3; pg++) {
+        us = femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, pg);
+        g_test_message("prog_pass2 %s: write %d took %" PRId64 " us",
+                       (char *)data, pg, us);
+        if (!off && pg == lag + 1) {
+            g_assert_cmpint(us, >=, 40000);
+        } else if (off || pg <= lag) {
+            g_assert_cmpint(us, <, 40000);
+        }
+        if (pg == 0 && lag == 1) {
+            us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+            g_test_message("prog_pass2 %s: read before the fine pass %"
+                           PRId64 " us", (char *)data, us);
+            if (off) {
+                g_assert_cmpint(us, >=, 100000);
+            } else {
+                g_assert_cmpint(us, <, 50000);
+            }
+        }
     }
-    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 1);
     us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
     g_test_message("prog_pass2 %s: read after the fine pass %" PRId64 " us",
-                   on ? "on" : "off", us);
+                   (char *)data, us);
     g_assert_cmpint(us, >=, 100000);
 
     guest_free(alloc, buf);
@@ -50676,7 +50692,16 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
             "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=1,"
-            "pg_wr_lat=1000000,pg_rd_lat=100000000,prog_pass2_ns=1000000"
+            "pg_wr_lat=1000000,pg_rd_lat=100000000,prog_pass2_ns=50000000"
+    });
+    qos_add_test("prog-pass2-lag2", "femu", femu_test_prog_pass2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lag2",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=1000000,pg_rd_lat=100000000,prog_pass2_ns=50000000,"
+            "prog_pass2_lag=2"
     });
     /* two 200 ms programs queued on one LUN, then a 40 us read */
     qos_add_test("read-prio-bbssd-off", "femu", femu_test_read_prio,
