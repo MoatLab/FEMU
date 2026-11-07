@@ -1634,7 +1634,6 @@ enum NvmeFeatureIds {
     NVME_HOST_IDENTIFIER            = 0x81,
     NVME_RESV_NOTIFY_MASK           = 0x82,
     NVME_RESV_PERSISTENCE           = 0x83,
-    NVME_OCP_PLP_FAILURE_MODE       = 0xc2,  /* OCP 2.7, ocp=on */
     NVME_OCP_CLEAR_PCIE_ERRORS      = 0xc3,  /* OCP 2.7, ocp=on */
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
     NVME_OCP_PLP_HEALTH_INTERVAL    = 0xc6,  /* OCP 2.7, ocp=on */
@@ -1642,7 +1641,6 @@ enum NvmeFeatureIds {
     NVME_OCP_TELEMETRY_PROFILE      = 0xc8,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
     NVME_OCP_IDLE_WAKE_UP           = 0xca,  /* OCP 2.7, ocp=on */
-    NVME_OCP_MAX_PCIE_CONFIG        = 0xcb,  /* OCP 2.7, ocp=on */
     NVME_FID_MAX                    = 0x100
 };
 
@@ -2774,7 +2772,7 @@ typedef struct FemuCtrl {
     uint8_t     fw_slots;       /* 0 auto: 1, or 3 with ocp */
     uint8_t     ps_max_watts;   /* Maximum Power of power state 0, in watts */
     /*
-     * OCP features that only hold a value (C2h, C6h, C8h, CAh, CBh),
+     * OCP features that only hold a value (C6h, C8h, CAh),
      * indexed by FID - C0h, in their Get Features layout.
      */
     uint32_t    ocp_val[12];

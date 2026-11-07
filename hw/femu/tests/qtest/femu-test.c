@@ -38288,10 +38288,10 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
             }
         }
         /*
-         * OCP value features C2h, C6h, C8h, CAh and CBh: the factory
-         * default, a set that a reset undoes unless saved, reserved bits
-         * and values refused. CBh only changes the saved value; C3h
-         * returns zero and takes only bit 31.
+         * OCP value features C6h, C8h and CAh: the factory default, a set
+         * that a reset undoes unless saved, reserved bits refused. C8h is
+         * saved without SV (TEL-CFG-SF-10). C3h returns zero and takes
+         * only bit 31. Profile B disables C2h and prohibits CBh.
          */
         if (on) {
             static const struct {
@@ -38301,13 +38301,10 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                 uint32_t got;           /* Get Features Dword 0 after it */
                 uint32_t bad;           /* a refused CDW11 */
             } v[] = {
-                { 0xc2, 1, 2u << 30, 2, 0 },
                 { 0xc6, 0, 15u << 16, 15, 1 },
                 { 0xc8, 0, 0x7, 0x7, 0x100 },
                 { 0xca, 0, 500, 500, 1u << 16 },
-                { 0xcb, 0, 0x2, 0, 0x5 },
             };
-            uint32_t r;
 
             for (int i = 0; i < ARRAY_SIZE(v); i++) {
                 g_test_message("OCP feature %02xh", v[i].fid);
@@ -38325,20 +38322,26 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                                 NVME_SUCCESS);
                 g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 0, 1, 0,
                                               &r), ==, NVME_SUCCESS);
-                g_assert_cmphex(r, ==, v[i].fid == 0xcb ? v[i].def :
-                                v[i].got);
+                g_assert_cmphex(r, ==, v[i].got);
             }
-            /* a reset brings back the saved value: CBh's set, others' 0 */
+            /* a reset brings back the saved value: C8h's set, others' 0 */
             femu_disable(&c);
             femu_enable(&c, &femu->dev, alloc);
             for (int i = 0; i < ARRAY_SIZE(v); i++) {
-                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 0, 1, 0,
-                                              &r), ==, NVME_SUCCESS);
-                g_assert_cmphex(r, ==, v[i].def);
-                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 2, 1, 0,
-                                              &r), ==, NVME_SUCCESS);
-                g_assert_cmphex(r, ==, v[i].fid == 0xcb ? 0x2 : v[i].def);
+                uint32_t want = v[i].fid == 0xc8 ? v[i].got : v[i].def;
+
+                for (uint8_t sel = 0; sel <= 2; sel += 2) {
+                    g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, sel,
+                                                  1, 0, &r), ==,
+                                    NVME_SUCCESS);
+                    g_assert_cmphex(r, ==, want);
+                }
             }
+            /* profile B: C2h disabled (DP-CFG-6), CBh prohibited (DP-CFG-13) */
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                            NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xcb, 0, 1, 0x2, NULL),
+                            ==, NVME_INVALID_FIELD);
             /* a saved set stays across a reset */
             g_assert_cmphex(femu_ocp_feat(&c, true, 0xc6, 1, 1, 30u << 16,
                                           NULL), ==, NVME_SUCCESS);

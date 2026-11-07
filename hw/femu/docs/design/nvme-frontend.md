@@ -691,23 +691,21 @@ log 12h lists exactly the identifiers that answer.
 
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
-and C9h configures the DSSD events. C2h, C6h, C8h, CAh and CBh hold one
-value each, with a current, default and saved value. FEMU only stores
-them: it models no PLP circuit, idle mode or PCIe link change.
+and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,
+with a current, default and saved value. FEMU only stores them: it models
+no PLP circuit or idle mode. Device profile B, the only one FEMU takes,
+disables C2h (DP-CFG-6) and prohibits CBh (DP-CFG-13), so both fail.
 
 ```text
  FID  name                         CDW11 bits  default  note
- C2h  EOL/PLP failure mode         31:30       1 (ROM)  0 is reserved
  C3h  clear PCIe error counters    31          -        not saveable; reads 0
  C6h  PLP health check interval    31:16       0        minutes
- C8h  telemetry profile            7:0         0
+ C8h  telemetry profile            7:0         0        saved without SV
  CAh  idle wake up time            15:0        0        ms
- CBh  max PCIe interface config    15:0        0        next power cycle:
-                                                        only the saved value
 ```
 
-The NVM subsystem features (C2h, C6h, C7h, C8h, CAh, CBh) take NSID 0 or
-FFFFFFFFh only.
+The NVM subsystem features (C6h, C7h, C8h, CAh) take NSID 0 or FFFFFFFFh
+only.
 
 With `ocp=on` the PCIe function also has Function Level Reset (OCP PCI-6),
 Advanced Error Reporting (PCI-26) and the Device Serial Number (PCI-25).

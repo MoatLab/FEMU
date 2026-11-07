@@ -36,12 +36,10 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
     [NVME_OCP_DSSD_POWER_STATE]     = true,
-    [NVME_OCP_PLP_FAILURE_MODE]     = true,
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = true,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = true,
     [NVME_OCP_TELEMETRY_PROFILE]    = true,
     [NVME_OCP_IDLE_WAKE_UP]         = true,
-    [NVME_OCP_MAX_PCIE_CONFIG]      = true,
     [NVME_HOST_IDENTIFIER]          = true,
     [NVME_AUTO_PST]                 = true,
     [NVME_RESV_NOTIFY_MASK]         = true,
@@ -82,9 +80,11 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     /* OCP GDSSDPS-2: changeable, saveable, NVM subsystem scope */
     [NVME_OCP_DSSD_POWER_STATE]     = NVME_FEAT_CAP_CHANGE |
                                       NVME_FEAT_CAP_SAVE,
-    /* OCP 4.15: C3h is not saveable; the others are saveable values */
-    [NVME_OCP_PLP_FAILURE_MODE]     = NVME_FEAT_CAP_CHANGE |
-                                      NVME_FEAT_CAP_SAVE,
+    /*
+     * OCP 4.15: C3h is not saveable; the others are saveable values.
+     * Device profile B, the one FEMU takes, disables C2h (DP-CFG-6) and
+     * prohibits CBh (DP-CFG-13), so neither is here.
+     */
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = NVME_FEAT_CAP_CHANGE,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = NVME_FEAT_CAP_CHANGE |
                                       NVME_FEAT_CAP_SAVE,
@@ -92,20 +92,16 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
                                       NVME_FEAT_CAP_SAVE,
     [NVME_OCP_IDLE_WAKE_UP]         = NVME_FEAT_CAP_CHANGE |
                                       NVME_FEAT_CAP_SAVE,
-    [NVME_OCP_MAX_PCIE_CONFIG]      = NVME_FEAT_CAP_CHANGE |
-                                      NVME_FEAT_CAP_SAVE,
 };
 
 /*
- * OCP 2.7 features that hold one value (4.15.5 to 4.15.24): the Set
+ * OCP 2.7 features that hold one value (4.15.13 to 4.15.22): the Set
  * Features CDW11 bits that carry it, where Get Features returns it, and
  * the factory default in that layout.
  *
- *   C2h  set 31:30 -> get 2:0    EOL/PLP failure mode, default 1 (ROM)
  *   C6h  set 31:16 -> get 15:0   PLP health check interval, minutes
- *   C8h  set  7:0  -> get 7:0    telemetry profile
+ *   C8h  set  7:0  -> get 7:0    telemetry profile, saved always
  *   CAh  set 15:0  -> get 15:0   idle wake up time, ms
- *   CBh  set 15:0  -> get 15:0   max PCIe interface configuration
  */
 typedef struct NvmeOcpValFeat {
     uint8_t fid;
@@ -115,11 +111,9 @@ typedef struct NvmeOcpValFeat {
 } NvmeOcpValFeat;
 
 static const NvmeOcpValFeat nvme_ocp_val_feats[] = {
-    { NVME_OCP_PLP_FAILURE_MODE,    30, 0x3,    1 },
     { NVME_OCP_PLP_HEALTH_INTERVAL, 16, 0xffff, 0 },
     { NVME_OCP_TELEMETRY_PROFILE,    0, 0xff,   0 },
     { NVME_OCP_IDLE_WAKE_UP,         0, 0xffff, 0 },
-    { NVME_OCP_MAX_PCIE_CONFIG,      0, 0xffff, 0 },
 };
 
 static const NvmeOcpValFeat *nvme_ocp_val_feat(uint8_t fid)
@@ -155,10 +149,8 @@ void nvme_ocp_val_reset(FemuCtrl *n)
 }
 
 /*
- * Set Features for a value feature: reserved bits are an invalid field,
- * and so is a reserved value. CBh takes effect at the next power cycle
- * (MPCS-14), so its current value stays and the value is kept as the
- * saved one, with or without SV.
+ * Set Features for a value feature: reserved bits are an invalid field.
+ * C8h is saved as if SV were set (TEL-CFG-SF-10).
  */
 static uint16_t nvme_ocp_val_set(FemuCtrl *n, const NvmeOcpValFeat *f,
                                  uint32_t dw11, bool save)
@@ -168,15 +160,8 @@ static uint16_t nvme_ocp_val_set(FemuCtrl *n, const NvmeOcpValFeat *f,
     if (dw11 & ~(f->mask << f->shift)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    /* C2h 00b is reserved; CBh speeds 5h to Fh are reserved */
-    if ((f->fid == NVME_OCP_PLP_FAILURE_MODE && !v) ||
-        (f->fid == NVME_OCP_MAX_PCIE_CONFIG && (v & 0xf) > 4)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    if (f->fid != NVME_OCP_MAX_PCIE_CONFIG) {
-        n->ocp_val[f->fid - 0xc0] = v;
-    }
-    if (save || f->fid == NVME_OCP_MAX_PCIE_CONFIG) {
+    n->ocp_val[f->fid - 0xc0] = v;
+    if (save || f->fid == NVME_OCP_TELEMETRY_PROFILE) {
         n->ocp_val_saved[f->fid - 0xc0] = v;
     }
     return NVME_SUCCESS;
@@ -243,12 +228,10 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
     case NVME_OCP_DSSD_AEN_CONFIG:
     case NVME_OCP_LATENCY_MONITOR:
     case NVME_OCP_DSSD_POWER_STATE:
-    case NVME_OCP_PLP_FAILURE_MODE:
     case NVME_OCP_CLEAR_PCIE_ERRORS:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
-    case NVME_OCP_MAX_PCIE_CONFIG:
         return n->ocp;
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
@@ -1830,11 +1813,9 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         /* the DSSD state of power state 0: its Maximum Power in watts */
         result = n->ps_max_watts;
         break;
-    case NVME_OCP_PLP_FAILURE_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
-    case NVME_OCP_MAX_PCIE_CONFIG:
         result = nvme_ocp_val_feat(fid)->def;
         break;
     default:
@@ -2013,11 +1994,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* the spec gives no value (GPCIE-1); C5h's state is in log C3h */
         cqe->n.result = 0;
         break;
-    case NVME_OCP_PLP_FAILURE_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
-    case NVME_OCP_MAX_PCIE_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_val[fid - 0xc0]);
         break;
     case NVME_FDP_MODE: {
@@ -2391,11 +2370,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         break;
-    case NVME_OCP_PLP_FAILURE_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
-    case NVME_OCP_IDLE_WAKE_UP:
-    case NVME_OCP_MAX_PCIE_CONFIG: {
+    case NVME_OCP_IDLE_WAKE_UP: {
         uint16_t status = nvme_ocp_val_set(n, nvme_ocp_val_feat(fid), dw11,
                                            save);
 
