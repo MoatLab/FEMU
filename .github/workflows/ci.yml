@@ -527,6 +527,7 @@ jobs:
       run: |
         # pure Python, no QEMU: each self-test plants its own cases
         python3 hw/femu/scripts/femu-steady-state.py --self-test
+        python3 hw/femu/scripts/femu-prom.py --self-test
 
     - name: Check build system consistency
       run: |
