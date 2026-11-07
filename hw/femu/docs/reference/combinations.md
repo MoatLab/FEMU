@@ -46,18 +46,18 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `buffer_low_pcent`
 
-- FEMU bbssd: buffer_low_pcent needs buffer_size and must be below buffer_thres_pcent, got %d
+- FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 
 ## `buffer_size`
 
-- FEMU bbssd: buffer_low_pcent needs buffer_size and must be below buffer_thres_pcent, got %d
+- FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - FEMU bbssd: buffer_size must not be negative
-- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size or FDP
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
 - power_loss requires bbssd, buffer_size > 0, and no metadata, namespace management or subsystem
 
 ## `buffer_thres_pcent`
 
-- FEMU bbssd: buffer_low_pcent needs buffer_size and must be below buffer_thres_pcent, got %d
+- FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - FEMU bbssd: buffer_thres_pcent must be between 1 and 100, got %d
 
 ## `cache_evict`
@@ -290,7 +290,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `iu_pages`
 
-- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size or FDP
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
 
 ## `kv_index`
 
@@ -340,7 +340,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `l2p_dram_ns`
 
-- FEMU bbssd: l2p_dram_ns must not be negative
+- FEMU bbssd: l2p_dram_ns must not be negative, and does not work with onfi_cache_read or FDP
 
 ## `lba_index`
 
@@ -419,6 +419,10 @@ own description allows. A message keeps its format directives (`%s`,
 - meta: protection information (dpc, dps) is not supported
 - pif is 0 or 2; 2 needs pi=on and meta of 16 or more
 
+## `mp_program`
+
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
+
 ## `mpsmax`
 
 - mpsmax must be in [mpsmin, 15]
@@ -466,6 +470,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FDP needs namespaces of the NVM command set; namespace 1 is %s
 - FEMU bbssd: a reclaim group must hold every namespace, since a host may place all of its data in one: the namespaces expose %
+- FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - FEMU bbssd: the %u namespaces expose %
 - FEMU: gc_idle_ms is not supported with shared namespaces
 - a rotational subsystem needs NVM namespaces; namespace %d is %s
@@ -572,6 +577,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `onfi_cache_read`
 
+- FEMU bbssd: l2p_dram_ns must not be negative, and does not work with onfi_cache_read or FDP
 - femu: onfi_cache_read is refused with %s
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases or pe_suspend
 
@@ -675,6 +681,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `power_loss`
 
+- FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - csd_slm_size and csd_cp cannot be used with ns_mgmt, power_loss or a CXL link
 - power_loss requires bbssd, buffer_size > 0, and no metadata, namespace management or subsystem
 - power_loss requires page-aligned namespaces and whole LBAs per NAND page
@@ -748,6 +755,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `streams`
 
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
 - streams requires NVM namespaces
 - streams requires bbssd or NoSSD with FDP disabled
 - streams.max must be between 1 and 32

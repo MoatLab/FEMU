@@ -724,18 +724,20 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "l2p_dram_ns",
       "bbssd, CSD: controller DRAM time in ns of each logical-to-physical "
       "lookup, added to the mapping cost of every host page read and "
-      "written, 0 or more; 0 (default) charges none" },
+      "written, 0 or more; not with onfi_cache_read or FDP; 0 (default) "
+      "charges none" },
     { "iu_pages",
       "bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write "
       "that covers part of a unit reads the unit's other mapped pages and "
-      "programs them again (read-modify-write); not with buffer_size or "
-      "FDP; 0 or 1 (default) maps each page" },
+      "programs them again (read-modify-write) on the write path, not for "
+      "Write Zeroes; not with buffer_size, streams, mp_program, "
+      "end-of-life read-only or FDP; 0 or 1 (default) maps each page" },
     { "buffer_low_pcent",
       "bbssd, CSD: with buffer_size, an idle FTL thread writes buffered "
       "pages back, one per die once all dies are free, until the fill "
-      "level falls to this percent; below buffer_thres_pcent; 0 "
-      "(default) writes back only when the buffer reaches "
-      "buffer_thres_pcent" },
+      "level falls to this percent; below buffer_thres_pcent; not with "
+      "shared namespaces or power_loss; 0 (default) writes back only when "
+      "the buffer reaches buffer_thres_pcent" },
     { "buffer_thres_pcent",
       "bbssd, CSD: buffer fill level in percent at which buffered pages "
       "are written to NAND, 1 to 100 when buffer_size > 0" },

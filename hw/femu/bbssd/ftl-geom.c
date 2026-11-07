@@ -355,8 +355,11 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
-    if (p->l2p_dram_ns < 0) {
-        error_setg(errp, "FEMU bbssd: l2p_dram_ns must not be negative");
+    if (p->l2p_dram_ns < 0 ||
+        (p->l2p_dram_ns && (p->onfi_cache_read ||
+                            (n->subsys && n->subsys->params.fdp.enabled)))) {
+        error_setg(errp, "FEMU bbssd: l2p_dram_ns must not be negative, and "
+                   "does not work with onfi_cache_read or FDP");
         return -1;
     }
     /*
@@ -364,18 +367,27 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
      * the direct path; the buffer and FDP take whole pages, so not with them.
      */
     if (p->iu_pages < 0 || p->iu_pages > 64 ||
-        (p->iu_pages > 1 && (p->buffer_size > 0 ||
+        (p->iu_pages > 1 && (p->buffer_size > 0 || n->streams ||
+                             p->mp_program ||
+                             (n->blk_pe_limit && n->eol_read_only) ||
                              (n->subsys && n->subsys->params.fdp.enabled)))) {
         error_setg(errp, "FEMU bbssd: iu_pages is 0 to 64, and above 1 not "
-                   "with buffer_size or FDP");
+                   "with buffer_size, streams, mp_program, end-of-life "
+                   "read-only or FDP");
         return -1;
     }
-    /* idle write-back runs down to a level below the foreground one */
+    /*
+     * Idle write-back runs down to a level below the foreground one. It
+     * runs on one controller's FTL thread, so not on shared namespaces, and
+     * Flush does not wait for it, so not with power_loss.
+     */
     if (p->buffer_low_pcent &&
         (p->buffer_size <= 0 || p->buffer_low_pcent < 0 ||
-         p->buffer_low_pcent >= p->buffer_thres_pcent)) {
-        error_setg(errp, "FEMU bbssd: buffer_low_pcent needs buffer_size and "
-                   "must be below buffer_thres_pcent, got %d",
+         p->buffer_low_pcent >= p->buffer_thres_pcent ||
+         nvme_ns_shared(n) || n->power_loss)) {
+        error_setg(errp, "FEMU bbssd: buffer_low_pcent needs buffer_size, "
+                   "must be below buffer_thres_pcent, and does not work "
+                   "with shared namespaces or power_loss, got %d",
                    p->buffer_low_pcent);
         return -1;
     }
