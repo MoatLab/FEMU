@@ -825,6 +825,32 @@ Realize refuses `read_prio` with the bus phases (`cmd_addr_lat`,
 phases stay booked at the old end of a slid operation. It also refuses
 `gc_copyback`, `plane_reads`, `rber_ppb` and the dynamic pSLC tier.
 
+## Two-pass program
+
+QLC drives program a wordline twice: a coarse pass, then a fine pass after
+later wordlines. The data of a wordline is not readable from the array
+until its fine pass ends, so the controller keeps it in its buffer.
+
+With `prog_pass2_ns` (BBSSD, CSD), the program time of a page is the coarse
+pass. When a program completes a wordline `w`, the FTL books the fine pass
+of wordline `w - prog_pass2_lag` on the same die with `nand_media_hold()`.
+That call books array time only, after the coarse program. A block that
+fills books the fine passes still due. A read of a wordline before its fine
+pass returns at once, as a buffer hit, and the die does no work for it.
+
+```text
+ lag 1, one page per wordline
+ program:  [c0]  [c1][f0]  [c2][f1]  [c3][f2][f3]   block full after c3
+ read wl1 after c1:   buffer, no array time
+ read wl1 after c2:   array read, after f1 on the die
+```
+
+Pages per wordline come from `nand_cell_type` (or `cell_pages`), as for
+the program disturb terms. Realize refuses the paths that program or read
+in batches or through another allocator: `mp_program`, `mp_read`,
+`onfi_cache_read`, `gc_copyback`, KV, FDP, the pSLC tier and the hybrid
+and fast mappings.
+
 ## ECC read time
 
 `ecc_step_ns` adds read time for worn or old data (`ecc_extra_ns()`):

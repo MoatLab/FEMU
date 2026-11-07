@@ -238,6 +238,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `gc_copyback`
 
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - femu: gc_copyback is not supported with %s
 
 ## `gc_frontier`
@@ -395,6 +396,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `mapping`
 
 - FEMU %s: mapping=%s is not supported under FDP: the log-block mappings write and merge through lines that are not FDP-aware; use page or dftl
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - FEMU bbssd: unknown mapping "%s"
 - Streams requires page or dftl mapping
 - femu: pd_open_read_limit and pd_open_close_sec are not supported with mapping=%s
@@ -427,6 +429,11 @@ own description allows. A message keeps its format directives (`%s`,
 ## `mp_program`
 
 - FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
+
+## `mp_read`
+
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 
 ## `mpsmax`
 
@@ -583,6 +590,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `onfi_cache_read`
 
 - FEMU bbssd: l2p_dram_ns must not be negative, and does not work with onfi_cache_read or FDP
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - femu: onfi_cache_read is refused with %s
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 
@@ -704,6 +712,14 @@ own description allows. A message keeps its format directives (`%s`,
 - power_states does not work with ocp yet (OCP C7h maps DSSD power states to PS0)
 - power_states needs 100 <= throttle_light_pct <= throttle_heavy_pct <= 1000
 - power_states works with bbssd or CSD namespaces only
+
+## `prog_pass2_lag`
+
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
+
+## `prog_pass2_ns`
+
+- FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 
 ## `ps_max_watts`
 

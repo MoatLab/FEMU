@@ -5905,6 +5905,39 @@ static void femu_test_read_prio_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* prog_pass2_ns refuses the program paths that skip the fine pass */
+static void femu_test_prog_pass2_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const extra[] = {
+        "'prog_pass2_ns':-1",
+        "'prog_pass2_lag':2",
+        "'prog_pass2_ns':1000,'prog_pass2_lag':17",
+        "'prog_pass2_ns':1000,'mp_program':1",
+        "'prog_pass2_ns':1000,'gc_copyback':true",
+        "'prog_pass2_ns':1000,'mapping':'hybrid'",
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(extra); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'p2-refused','addr':'5','devsz_mb':16,"
+            "'femu_mode':1,%s}", extra[i]);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", extra[i], desc);
+        g_assert_nonnull(strstr(desc, "prog_pass2"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 static bool femu_cq_ready(FemuCtrlState *c, FemuQueue *q);
 static uint16_t femu_aer(FemuCtrlState *c);
 
@@ -9345,6 +9378,66 @@ static void femu_test_read_prio(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(cid[0], ==, first);
     g_assert_cmpuint(cid[1], ==, on ? first + 2 : first + 1);
     g_assert_cmpuint(cid[2], ==, on ? first + 1 : first + 2);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/* one command on @q, and how long it took in microseconds */
+static int64_t femu_timed_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
+                             uint8_t opcode, uint64_t page)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    femu_pe_suspend_rw(c, q, rw, false, opcode, page);
+    femu_zap_ring(c, q);
+    g_assert_cmpint(femu_zap_complete(c, q, NULL), ==, NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * Two-pass program, end to end, with a 100 ms page read. On, a page whose
+ * wordline has had no fine pass reads from the controller buffer at once;
+ * the next wordline's program makes its fine pass due, and the read then
+ * pays the array time. Off, every read pays it.
+ */
+static void femu_test_prog_pass2(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeRwCmd rw;
+    uint64_t buf;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+
+    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 0);
+    us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+    g_test_message("prog_pass2 %s: staged read %" PRId64 " us",
+                   on ? "on" : "off", us);
+    if (on) {
+        g_assert_cmpint(us, <, 50000);
+    } else {
+        g_assert_cmpint(us, >=, 100000);
+    }
+    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 1);
+    us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+    g_test_message("prog_pass2 %s: read after the fine pass %" PRId64 " us",
+                   on ? "on" : "off", us);
+    g_assert_cmpint(us, >=, 100000);
 
     guest_free(alloc, buf);
     femu_queue_free(&c, &q);
@@ -50426,6 +50519,23 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
     });
+    /* one LUN; a 100 ms read shows whether the array was used */
+    qos_add_test("prog-pass2-off", "femu", femu_test_prog_pass2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=1000000,pg_rd_lat=100000000"
+    });
+    qos_add_test("prog-pass2-on", "femu", femu_test_prog_pass2,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=1000000,pg_rd_lat=100000000,prog_pass2_ns=1000000"
+    });
     /* two 200 ms programs queued on one LUN, then a 40 us read */
     qos_add_test("read-prio-bbssd-off", "femu", femu_test_read_prio,
                  &(QOSGraphTestOptions) {
@@ -52223,6 +52333,8 @@ static void femu_register_nodes(void)
     qos_add_test("gc-copyback-refused", "femu", femu_test_gc_copyback_refused,
                  NULL);
     qos_add_test("read-prio-refused", "femu", femu_test_read_prio_refused,
+                 NULL);
+    qos_add_test("prog-pass2-refused", "femu", femu_test_prog_pass2_refused,
                  NULL);
     qos_add_test("tier-refused", "femu", femu_test_tier_refused, NULL);
     qos_add_test("tier-direct", "femu", femu_test_tier_direct,

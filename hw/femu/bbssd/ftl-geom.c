@@ -288,6 +288,28 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
     }
 
     /*
+     * The fine pass follows the order of pages in a block, so it needs the
+     * single-page path of the line allocator: no program or read batches,
+     * no copyback, no FDP or KV allocator, no pSLC lines, no log mappings.
+     */
+    if (p->prog_pass2_ns < 0 || p->prog_pass2_lag > 16 ||
+        (p->prog_pass2_lag && !p->prog_pass2_ns) ||
+        (p->prog_pass2_ns &&
+         (p->mp_program || p->mp_read || p->onfi_cache_read ||
+          p->gc_copyback || KVSSD(n) ||
+          (n->subsys && n->subsys->params.fdp.enabled) ||
+          (p->tier_mode && strcmp(p->tier_mode, "off")) ||
+          (p->mapping_scheme && *p->mapping_scheme &&
+           strcmp(p->mapping_scheme, "page") &&
+           strcmp(p->mapping_scheme, "dftl"))))) {
+        error_setg(errp, "FEMU bbssd: prog_pass2_ns must not be negative, "
+                   "prog_pass2_lag is 0 to 16 and needs it, and neither "
+                   "works with mp_program, mp_read, onfi_cache_read, "
+                   "gc_copyback, KV, FDP, the pSLC tier or a mapping other "
+                   "than page or dftl");
+        return -1;
+    }
+    /*
      * read_prio moves queued array work; the bus phases of that work stay
      * booked at the old time, so it needs the plain channel model.
      */
@@ -480,6 +502,9 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->tsusp_ns = n->bb_params.tsusp_ns;
     spp->pe_suspend_max = n->bb_params.pe_suspend_max;
     spp->read_prio = n->bb_params.read_prio;
+    spp->prog_pass2_ns = n->bb_params.prog_pass2_ns;
+    spp->prog_pass2_lag = MAX(n->bb_params.prog_pass2_lag, 1);
+    spp->wl_pages = bb_pd_wl_pages(n);
     spp->tresume_ns = n->bb_params.tresume_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
     /* with one plane there is nothing to combine, so the flag stays clear */

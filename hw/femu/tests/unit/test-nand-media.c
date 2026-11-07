@@ -1131,6 +1131,38 @@ static void test_read_prio(void)
     nand_media_destroy(&m);
 }
 
+/* a held pass books array time only, and read_prio sees it as queued */
+static void test_media_hold(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t done, lat;
+
+    printf("# second program pass\n");
+    memset(&a, 0, sizeof(a));
+
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
+    done = nand_media_hold(&m, &a, done, 30000);
+    check("hold: ends a pass after the program", done - t0, 70000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    check("hold: a read waits for both", lat, 80000);
+    nand_media_destroy(&m);
+
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
+    nand_media_hold(&m, &a, done, 30000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("hold + read_prio: a read goes ahead of the queued pass", lat,
+          (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -1150,6 +1182,7 @@ int main(void)
     test_pe_suspend();
     test_pe_suspend_limits();
     test_read_prio();
+    test_media_hold();
     test_partial_xfer();
     test_unbounded_windows();
     test_plane_reads();

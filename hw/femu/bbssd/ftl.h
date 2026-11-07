@@ -228,6 +228,9 @@ struct ssdparams {
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
     uint32_t pe_suspend_max;
     int read_prio;    /* reads go ahead of queued programs/erases; 0 = off */
+    int prog_pass2_ns;        /* fine program pass of a wordline; 0 = off */
+    uint32_t prog_pass2_lag;  /* wordlines between coarse and fine, 1 or more */
+    int wl_pages;             /* pages per wordline for the fine pass */
     int tresume_ns;
     bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
     bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */
@@ -803,6 +806,8 @@ struct ssd {
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t pd_open_reclaims;      /* lines rewritten for open-block reads */
     uint64_t pd_pad_pages;          /* pages programmed to close open lines */
+    uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
+    uint64_t pass2_staged_reads;    /* reads served before the fine pass */
     uint64_t pd_pad_closes;         /* lines or units those pads closed */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

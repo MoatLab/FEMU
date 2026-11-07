@@ -162,6 +162,8 @@ Devices:
 | `pe_suspend_max` | `uint32` | `0` | bbssd, CSD, KV: with pe_suspend, the suspensions one program or erase allows; a read past them waits for it; 0 (default) allows any |
 | `tresume_ns` | `int32` | `0` | bbssd, CSD, KV: with pe_suspend, ns added to a suspended program or erase each time it resumes, 0 or more (default 0) |
 | `read_prio` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read go ahead of the programs and erases queued on its LUN; it waits only for the one that runs. Plain channel model only (no bus phases or ONFI) |
+| `prog_pass2_ns` | `int32` | `0` | bbssd, CSD: time in ns of the fine program pass of a wordline; the program time is the coarse pass. The fine pass runs on the die when prog_pass2_lag later wordlines of the block are programmed, or when the block fills; until then a read of the wordline comes from the controller buffer. 0 (default) is one pass |
+| `prog_pass2_lag` | `uint32` | `0` | bbssd, CSD: with prog_pass2_ns, the wordlines programmed after one before its fine pass, 1 to 16; 0 (default) means 1 |
 | `nand_cell_type` | `uint8` | `0` | bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; 1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing (other values fall back to 0) |
 | `cell_pages` | `int32` | `0` | bbssd, CSD, KV: bits per cell (pages per wordline) for the pgtype_lat model, 0 to 5; 0 with pgtype_lat means 3 |
 | `pgtype_lat` | `int32` | `0` | bbssd, CSD, KV: non-zero scales the program time by page type (lower to upper) using cell_pages, when nand_cell_type is 0 |

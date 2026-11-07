@@ -342,6 +342,53 @@ void bb_nand_media_refresh_timing(struct ssd *ssd)
  * ssd_advance_status (same max() ordering). The signature is unchanged so every
  * caller (read, write, GC) is untouched.
  */
+/*
+ * Two-pass program (prog_pass2_ns). A program charges the coarse pass;
+ * the fine pass of a wordline runs once prog_pass2_lag later wordlines of
+ * the block are programmed, or when the block fills. Pages count in the
+ * order they are programmed, which the block write pointer gives.
+ *
+ *   wl:    0     1     2     3        lag 1
+ *   prog: [c0]  [c1 f0] [c2 f1] [c3 f2 f3]   (block full at wl 3)
+ *   read wl 2 before c3: from the buffer, no array time
+ */
+static bool ssd_pass2_staged(struct ssd *ssd, struct ppa *ppa)
+{
+    struct nand_block *blk = get_blk(ssd, ppa);
+    uint64_t wl = ppa->g.pg / ssd->sp.wl_pages;
+
+    return blk->wp < ssd->sp.pgs_per_blk &&
+           (wl + ssd->sp.prog_pass2_lag + 1) * ssd->sp.wl_pages >
+           (uint64_t)blk->wp;
+}
+
+/* book the fine passes the program that ended at @done makes due */
+static void ssd_pass2_book(struct ssd *ssd, struct ppa *ppa,
+                           const NandLoc *loc, uint64_t done)
+{
+    struct nand_block *blk = get_blk(ssd, ppa);
+    int wlp = ssd->sp.wl_pages;
+    int lag = ssd->sp.prog_pass2_lag;
+    bool full = blk->wp >= ssd->sp.pgs_per_blk;
+    int last, first, w;
+
+    if (blk->wp <= 0 || (!full && blk->wp % wlp)) {
+        return;                         /* the wordline is not complete */
+    }
+    /* a full block may end in a part of a wordline */
+    last = (blk->wp + wlp - 1) / wlp - 1;
+    first = last - lag;
+    /* a full block runs the fine passes still due */
+    if (!full) {
+        last = first;
+    }
+    for (w = MAX(first, 0); w <= last; w++) {
+        done = nand_media_hold(&ssd->media, loc, done,
+                               ssd->sp.prog_pass2_ns);
+        ssd->pass2_programs++;
+    }
+}
+
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd)
 {
@@ -377,8 +424,18 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     /* the thermal model reads these from the main loop */
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
+    /* two-pass program: a wordline before its fine pass is in the buffer */
+    if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_READ &&
+        !bb_io_meta(ncmd->type) && ssd_pass2_staged(ssd, ppa)) {
+        ssd->pass2_staged_reads++;
+        return 0;
+    }
     loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
     c = nand_media_op(&ssd->media, &loc, op, stime);
+    if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_PROGRAM &&
+        !bb_io_meta(ncmd->type)) {
+        ssd_pass2_book(ssd, ppa, &loc, c.done_ns);
+    }
     /* retries and soft decode of a host read (rber_ppb) */
     if (unlikely(ssd->sp.rber_ppb) && op == NAND_MEDIA_READ &&
         ncmd->type == USER_IO) {

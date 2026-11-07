@@ -2512,6 +2512,8 @@ typedef struct BbCtrlParams {
     uint32_t pe_suspend_max;  /* suspensions one program/erase allows */
     int tresume_ns;   /* resume cost of a suspended program/erase (ns) */
     int read_prio;    /* reads go ahead of queued programs/erases; 0 = off */
+    int prog_pass2_ns;        /* fine program pass of a wordline; 0 = off */
+    uint32_t prog_pass2_lag;  /* wordlines between coarse and fine; 0 = 1 */
     int mp_program;   /* charge same-page programs on several planes as one; 0 = off */
     int mp_read;      /* charge same-page reads on several planes as one; 0 = off */
     int plane_first;  /* write pointers step the plane before the channel; 0 = off */

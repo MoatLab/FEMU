@@ -326,6 +326,14 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
 void nand_media_destroy(NandMedia *m);
 
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
+/*
+ * Book @ns of array time on @loc from @stime, as a program would, with no
+ * bus phase: a second program pass of a wordline whose data the die
+ * already holds. Returns when it ends.
+ */
+uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint64_t stime,
+                         uint64_t ns);
+
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime);
 

@@ -1142,6 +1142,39 @@ static NandOpCompletion onfi_op(NandMedia *m, const NandLoc *loc,
     return c;
 }
 
+uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint64_t stime,
+                         uint64_t ns)
+{
+    uint64_t alat = throttled(m, ns);
+    uint64_t s, done;
+
+    /* the same single-word rule as nand_media_op()'s lock-free path */
+    if (m->cfg.policy.channel_mode != NAND_CH_STAGED &&
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp) {
+        uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
+        uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
+
+        do {
+            done = mx(stime, old) + alat;
+        } while (!__atomic_compare_exchange_n(lun, &old, done, false,
+                                              __ATOMIC_ACQ_REL,
+                                              __ATOMIC_RELAXED));
+        return done;
+    }
+    if (m->cfg.timeline->lock_lun) {
+        m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
+    }
+    s = array_contend_op(m, loc, stime, NAND_MEDIA_PROGRAM);
+    done = s + alat;
+    array_commit_op(m, loc, done, NAND_MEDIA_PROGRAM);
+    suspend_note(m, loc, NAND_MEDIA_PROGRAM, done);
+    prio_note(m, loc, s, done);
+    if (m->cfg.timeline->unlock_lun) {
+        m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, loc);
+    }
+    return done;
+}
+
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime)
 {

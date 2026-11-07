@@ -476,6 +476,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, KV: non-zero lets a read go ahead of the programs and "
       "erases queued on its LUN; it waits only for the one that runs. "
       "Plain channel model only (no bus phases or ONFI)" },
+    { "prog_pass2_ns",
+      "bbssd, CSD: time in ns of the fine program pass of a wordline; the "
+      "program time is the coarse pass. The fine pass runs on the die when "
+      "prog_pass2_lag later wordlines of the block are programmed, or when "
+      "the block fills; until then a read of the wordline comes from the "
+      "controller buffer. 0 (default) is one pass" },
+    { "prog_pass2_lag",
+      "bbssd, CSD: with prog_pass2_ns, the wordlines programmed after one "
+      "before its fine pass, 1 to 16; 0 (default) means 1" },
     { "nand_cell_type",
       "bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; "
       "1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing "
