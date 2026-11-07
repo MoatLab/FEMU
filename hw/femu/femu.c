@@ -4,6 +4,7 @@
 #include "qemu/error-report.h"
 #include "system/qtest.h"
 #include "hw/qdev-properties.h"
+#include "hw/pci/pcie_aer.h"
 #include "qom/qom-qobject.h"
 #include "qapi/visitor.h"
 #include "qobject/qobject.h"
@@ -2561,6 +2562,17 @@ static void nvme_init_cmb(FemuCtrl *n)
                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->ctrl_mem);
 }
 
+/* the Device Serial Number: a 64-bit FNV-1a hash of the serial string */
+static uint64_t femu_dsn(FemuCtrl *n)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+
+    for (const char *s = n->serial ? n->serial : ""; *s; s++) {
+        h = (h ^ (uint8_t)*s) * 0x100000001b3ULL;
+    }
+    return h;
+}
+
 static void nvme_init_pci(FemuCtrl *n)
 {
     uint8_t *pci_conf = n->parent_obj.config;
@@ -2572,6 +2584,19 @@ static void nvme_init_pci(FemuCtrl *n)
     pci_config_set_device_id(pci_conf, n->did);
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
     pcie_endpoint_cap_init(&n->parent_obj, 0x80);
+    /*
+     * OCP 2.7 PCI-6, PCI-25 and PCI-26: Function Level Reset, the Device
+     * Serial Number and Advanced Error Reporting capabilities.
+     *
+     *   0x100  AER (PCI_ERR_SIZEOF)    0x148  Device Serial Number
+     */
+    if (n->ocp) {
+        pcie_cap_flr_init(&n->parent_obj);
+        pcie_aer_init(&n->parent_obj, PCI_ERR_VER, 0x100, PCI_ERR_SIZEOF,
+                      &error_abort);
+        pcie_dev_ser_num_init(&n->parent_obj, 0x100 + PCI_ERR_SIZEOF,
+                              femu_dsn(n));
+    }
     /*
      * PCI power management (pci_pm=on): D0 and D3hot. The PCI core turns
      * the BARs off outside D0; No_Soft_Reset keeps the controller state
@@ -3059,6 +3084,9 @@ static bool femu_cxl_link_check(FemuCtrl *n, Error **errp)
  */
 static void femu_realize_undo(FemuCtrl *n)
 {
+    /* the AER log, if nvme_init_pci() got that far; exit frees it again */
+    pcie_aer_exit(&n->parent_obj);
+    n->parent_obj.exp.aer_log.log = NULL;
     /*
      * Namespaces that did come up own an FTL and its channel tree, which is
      * the largest allocation here. Every mode's exit tests the state it frees
@@ -4491,6 +4519,9 @@ static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
 
+    pcie_aer_exit(pci_dev);
+    pci_dev->exp.aer_log.log = NULL;
+
     femu_debug("femu_exit starting!\n");
     femu_thermal_stop(n);
 
@@ -5692,6 +5723,39 @@ static void femu_instance_init(Object *obj)
     }
 }
 
+static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
+                                  uint32_t val, int len)
+{
+    pci_default_write_config(dev, addr, val, len);
+    /* a no-op unless pcie_cap_flr_init() made the FLR bit writable */
+    pcie_cap_flr_write_config(dev, addr, val, len);
+}
+
+/*
+ * A Function Level Reset (OCP 2.7 PCI-6) or a system reset, with ocp:
+ * a Controller Level Reset, then the registers the host programs back to
+ * their reset values. Without ocp the controller keeps its state, as it
+ * always has.
+ */
+static void femu_pci_reset(DeviceState *dev)
+{
+    FemuCtrl *n = FEMU(dev);
+
+    if (!n->ocp) {
+        return;
+    }
+    if (NVME_CC_EN(n->bar.cc)) {
+        nvme_write_bar(n, 0x14, 0, 4);
+    }
+    n->bar.cc = 0;
+    n->bar.csts = 0;
+    n->bar.aqa = 0;
+    n->bar.asq = 0;
+    n->bar.acq = 0;
+    n->bar.intms = 0;
+    n->bar.intmc = 0;
+}
+
 static void femu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -5699,6 +5763,7 @@ static void femu_class_init(ObjectClass *oc, const void *data)
 
     pc->realize = femu_realize;
     pc->exit = femu_exit;
+    pc->config_write = femu_pci_write_config;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
     pc->vendor_id = PCI_VENDOR_ID_INTEL;
     pc->device_id = 0x5845;
@@ -5709,6 +5774,7 @@ static void femu_class_init(ObjectClass *oc, const void *data)
     device_class_set_props(dc, femu_props);
     femu_ctrl_describe_props(oc);
     dc->vmsd = &femu_vmstate;
+    device_class_set_legacy_reset(dc, femu_pci_reset);
 }
 
 static const TypeInfo femu_info = {

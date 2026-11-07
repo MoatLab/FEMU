@@ -38095,6 +38095,73 @@ static bool femu_is_ocp_c0(QTestState *qts, uint64_t buf)
  * bytes written and read grow by whole pages with I/O. @data "off": none of
  * that, and the UUID index is ignored.
  */
+/*
+ * OCP PCIe extended capabilities (PCI-25, PCI-26), read through q35's
+ * ECAM window at B0000000h: with ocp, AER at 100h, then the Device Serial
+ * Number at 148h; off, no extended capability.
+ */
+static void femu_test_ocp_extcaps(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    bool on = g_str_equal(data, "on");
+    QTestState *qts = qtest_initf("-machine q35 -m 128M "
+                                  "-device femu,addr=04.0,femu_mode=1,"
+                                  "devsz_mb=64%s", on ? ",ocp=on" : "");
+    uint64_t cfg = 0xb0000000ULL + (4 << 15);
+    uint32_t hdr = qtest_readl(qts, cfg + 0x100);
+
+    g_assert_cmphex(qtest_readw(qts, cfg), !=, 0xffff);    /* the device */
+    g_assert_cmphex(hdr & 0xffff, ==, on ? 0x0001 : 0);        /* AER */
+    if (on) {
+        uint64_t dsn;
+
+        g_assert_cmphex(hdr >> 20, ==, 0x148);
+        g_assert_cmphex(qtest_readl(qts, cfg + 0x148) & 0xffff, ==,
+                        0x0003);                               /* DSN */
+        dsn = qtest_readl(qts, cfg + 0x14c) |
+              (uint64_t)qtest_readl(qts, cfg + 0x150) << 32;
+        g_assert_cmphex(dsn, !=, 0);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * OCP Function Level Reset (PCI-6): with ocp, FLR in Device Capabilities.
+ * An FLR of a running controller clears CC, CSTS and AQA, and the
+ * controller enables again. Off, Device Capabilities has no FLR.
+ */
+static void femu_test_ocp_pcie(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *pdev = &femu->dev;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+
+    g_assert_cmpint(!!(qpci_config_readl(pdev, 0x80 + 4) & (1u << 28)), ==,
+                    on);                                       /* FLR */
+    if (!on) {
+        return;
+    }
+
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c) & 1, ==, 1);
+    /* Device Control bit 15: Initiate Function Level Reset */
+    qpci_config_writew(pdev, 0x80 + 8,
+                       qpci_config_readw(pdev, 0x80 + 8) | 0x8000);
+    qpci_iounmap(pdev, c.bar);
+    femu_queue_free(&c, &c.admin);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x14), ==, 0);   /* CC */
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c), ==, 0);   /* CSTS */
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x24), ==, 0);   /* AQA */
+    qpci_iounmap(pdev, c.bar);
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 0x2d);
+    femu_disable(&c);
+}
+
 static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -54814,6 +54881,20 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=lat-test,femu_mode=1,devsz_mb=64,"
             "ocp=on,pg_rd_lat=40000000",
+    });
+    qos_add_test("ocp-extcaps-on", "femu", femu_test_ocp_extcaps,
+                 &(QOSGraphTestOptions) { .arg = (void *)"on" });
+    qos_add_test("ocp-extcaps-off", "femu", femu_test_ocp_extcaps,
+                 &(QOSGraphTestOptions) { .arg = (void *)"off" });
+    qos_add_test("ocp-pcie-on", "femu", femu_test_ocp_pcie,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,ocp=on",
+        .arg = (void *)"on",
+    });
+    qos_add_test("ocp-pcie-off", "femu", femu_test_ocp_pcie,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64",
+        .arg = (void *)"off",
     });
     qos_add_test("ocp-off", "femu", femu_test_ocp,
                  &(QOSGraphTestOptions) {

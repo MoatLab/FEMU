@@ -708,6 +708,18 @@ them: it models no PLP circuit, idle mode or PCIe link change.
 
 The NVM subsystem features (C2h, C6h, C7h, C8h, CAh, CBh) take NSID 0 or
 FFFFFFFFh only.
+
+With `ocp=on` the PCIe function also has Function Level Reset (OCP PCI-6),
+Advanced Error Reporting (PCI-26) and the Device Serial Number (PCI-25).
+The serial number is a 64-bit FNV-1a hash of `serial`. An FLR, or a
+system reset, is a Controller Level Reset that also clears CC, CSTS, AQA,
+ASQ, ACQ and the interrupt mask. Without `ocp` none of this is there, and
+a system reset leaves the controller as it was.
+
+```text
+ config space   80h PCIe capability (DEVCAP.FLR with ocp)
+                100h AER (48h bytes)  -->  148h Device Serial Number
+```
 Only the FDP features report a saved value: FDP Mode is fixed at realize,
 FDP Events can be changed at run time. A controller reset
 (`nvme_reset_features()`) restores Arbitration, Power Management, the
