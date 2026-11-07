@@ -36102,9 +36102,21 @@ static void femu_caps_identify(FemuCtrlState *c, FemuCaps *k, uint64_t buf)
                   femu_caps_on(acs, 0x84));
     femu_caps_bit(k, "VWC", 1, k->id.vwc & 1, femu_caps_on(k->fis[0], 0x06));
 
-    /* one slot, read only, so nothing downloads or commits firmware */
-    g_assert_cmpint(k->id.frmw & 0xf, ==, 0x3);
-    femu_caps_bit(k, "FRMW", 1, k->id.frmw & 1, !(oacs & (1 << 2)));
+    /*
+     * Slot 1 is read only. One slot means nothing downloads or commits
+     * firmware; more slots mean both commands work, without a reset.
+     */
+    {
+        bool slots = ((k->id.frmw >> 1) & 0x7) > 1;
+
+        femu_caps_bit(k, "FRMW", 1, k->id.frmw & 1, true);
+        femu_caps_bit(k, "FRMW", 1 << 4, k->id.frmw & (1 << 4), slots);
+        femu_caps_bit(k, "OACS", 1 << 2, oacs & (1 << 2),
+                      femu_caps_on(acs, NVME_ADM_CMD_ACTIVATE_FW) &&
+                      femu_caps_on(acs, NVME_ADM_CMD_DOWNLOAD_FW));
+        femu_caps_bit(k, "OACS", 1 << 2, oacs & (1 << 2), slots);
+        femu_caps_bit(k, "FWUG", 1, k->id.fwug == 1, slots);
+    }
 
     for (i = 0; i < FEMU_CAPS_NCSI; i++) {
         bool any = false;
@@ -37306,6 +37318,337 @@ static void femu_test_ocp_latency(void *obj, void *data,
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
+}
+
+/* CRC-32 (IEEE 802.3, as zlib computes it) for FEMU firmware images */
+static uint32_t femu_fw_crc(uint32_t crc, const uint8_t *p, size_t len)
+{
+    crc = ~crc;
+    while (len--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++) {
+            crc = crc & 1 ? (crc >> 1) ^ 0xedb88320u : crc >> 1;
+        }
+    }
+    return ~crc;
+}
+
+/* a FEMU image with revision @fr and security version @svn: 8 KiB */
+static void femu_fw_image(uint8_t *img, const char *fr, uint32_t svn)
+{
+    uint32_t plen = 8192 - 32;
+    uint32_t crc;
+
+    memset(img, 0, 8192);
+    memcpy(img, "FEMUFW01", 8);
+    memset(img + 8, ' ', 8);
+    memcpy(img + 8, fr, strlen(fr));
+    stl_le_p(img + 16, svn);
+    stl_le_p(img + 20, plen);
+    for (uint32_t i = 0; i < plen; i++) {
+        img[32 + i] = i * 7;
+    }
+    crc = femu_fw_crc(0, img, 24);
+    crc = femu_fw_crc(crc, img + 32, plen);
+    stl_le_p(img + 24, crc);
+}
+
+/* Firmware Image Download of @len bytes at byte @off from guest @buf */
+static uint16_t femu_fw_dl(FemuCtrlState *c, uint64_t buf, uint32_t off,
+                           uint32_t len)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DOWNLOAD_FW;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32(len / 4 - 1);
+    cmd.cdw11 = cpu_to_le32(off / 4);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_fw_cmt(FemuCtrlState *c, uint8_t fs, uint8_t ca)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ACTIVATE_FW;
+    cmd.cdw10 = cpu_to_le32(fs | ca << 3);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* download the 8 KiB image @img in two pieces, the second first */
+static void femu_fw_send(FemuCtrlState *c, uint64_t buf, const uint8_t *img)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    qtest_memwrite(qts, buf, img + 4096, 4096);
+    g_assert_cmphex(femu_fw_dl(c, buf, 4096, 4096), ==, NVME_SUCCESS);
+    qtest_memwrite(qts, buf, img, 4096);
+    g_assert_cmphex(femu_fw_dl(c, buf, 0, 4096), ==, NVME_SUCCESS);
+}
+
+/* Identify FR and log 03h: AFI and the revision in slot @slot */
+static void femu_fw_state(FemuCtrlState *c, uint64_t buf, char *fr,
+                          uint8_t *afi, int slot, char *frs)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 64, fr, 8);
+    g_assert_cmphex(femu_log_cmd(c, 0xffffffff, 0x03, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    *afi = qtest_readb(qts, buf);
+    qtest_memread(qts, buf + 8 * slot, frs, 8);
+}
+
+/*
+ * Firmware Image Download and Firmware Commit with fw_slots=3 (Base 2.3,
+ * 5.2.8, 5.2.9): Identify FRMW 17h, FWUG 1, OACS bit 2; misaligned and
+ * overlapping pieces refused; the commit action matrix with exact status;
+ * activation now with the notice, and at the next reset; the security
+ * version floor; Sanitize refused while an activation is pending.
+ */
+static void femu_test_fw_update(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    g_autofree uint8_t *img = g_malloc(8192);
+    char fr0[8], fr[8], frs[8];
+    uint8_t afi;
+    uint32_t res;
+    uint16_t cid, want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FRMW), ==, 0x17);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & (1 << 2), ==, 1 << 2);
+    g_assert_cmphex(qtest_readb(qts, buf + 319), ==, 1);        /* FWUG */
+    g_assert_cmphex(qtest_readw(qts, buf + 270), ==, 1);        /* MTFA */
+    g_assert_cmphex(qtest_readw(qts, buf + 360), ==, 1);        /* MPTFAWR */
+    femu_fw_state(&c, buf, fr0, &afi, 1, frs);
+    g_assert_cmphex(afi, ==, 0x01);
+    g_assert_cmpmem(frs, 8, fr0, 8);
+
+    /* NUMD is zero-based: 4092 bytes is not a 4 KiB multiple */
+    femu_fw_image(img, "FW-2", 2);
+    qtest_memwrite(qts, buf, img, 8192);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4092), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 4, 4096), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 6 * 1024 * 1024, 4096), ==,
+                    NVME_INVALID_FIELD);
+    /* no image staged yet: CA 000b has nothing to store */
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* overlap */
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4096), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 8192), ==, 0x114);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);   /* unit 1 missing */
+    /* a non-ASCII revision, with a CRC that matches */
+    femu_fw_image(img, "F\x01", 2);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+    femu_fw_image(img, "FW-2", 2);
+    /*
+     * A hole: staging still holds every byte of a good image from the last
+     * download, but only unit 0 was sent since, so the image is invalid.
+     */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 9, 0), ==, 0x106);
+    qtest_memwrite(qts, buf, img, 4096);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4096), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* two pieces, the second first; slot 1 is read only; slot 4 is past N */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 0), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 4, 0), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, fr0, 8);                 /* not activated */
+    g_assert_cmphex(afi, ==, 0x01);
+    g_assert_cmpmem(frs, 8, "FW-2    ", 8);
+    /* CA 000b again without a new Download */
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* a bad CRC */
+    img[100] ^= 1;
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, 0x107);
+    img[100] ^= 1;
+
+    /* CA 011b activates slot 2 now, with the notice when bit 9 is on */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1 << 9,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 3), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x030102);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, "FW-2    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+
+    /* CA 000b to the running slot is a sequence error */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, NVME_CMD_SEQ_ERROR);
+    /* security version 1 is below the floor of 2 */
+    femu_fw_image(img, "FW-1", 1);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, 0x113);
+
+    /* CA 001b to FS 0 picks slot 3; it runs only after the next reset */
+    femu_fw_image(img, "FW-3", 3);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 0, 1), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-2    ", 8);
+    g_assert_cmphex(afi, ==, 0x32);
+    g_assert_cmpmem(frs, 8, "FW-3    ", 8);
+    /* Sanitize waits for the reset; its log is untouched (SPROG 0) */
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, 0x111);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SANITIZE, 0, buf,
+                                 512), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 2) & 0x7, ==, 0);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-3    ", 8);
+    g_assert_cmphex(afi, ==, 0x03);
+    /*
+     * Slot 1 can run without a new image, but its factory image (security
+     * version 0) is below the floor of 3. Without ocp nothing refreshes it.
+     */
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, 0x113);
+    femu_fw_state(&c, buf, fr, &afi, 1, frs);
+    g_assert_cmpmem(fr, 8, "FW-3    ", 8);
+    g_assert_cmpmem(frs, 8, fr0, 8);
+    /* slot 1 takes no new image, whatever the action */
+    femu_fw_image(img, "FW-4", 4);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 1), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, 0x106);
+
+    /* CA 011b with a fresh image stores and runs it at once */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 3), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, "FW-4    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+
+    /*
+     * CA 010b refuses slot 3 (FW-3, security version 3) below the floor of
+     * 4; then FW-5 goes to slot 3 and is named for the next reset.
+     */
+    femu_fw_image(img, "FW-5", 5);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 2), ==, 0x113);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 2), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmphex(afi, ==, 0x32);
+    /* power loss runs the pending slot, as a reset does */
+    {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/fw-test',"
+                               "'property':'simulate-power-loss',"
+                               "'value':true}}");
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-5    ", 8);
+    g_assert_cmphex(afi, ==, 0x03);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/*
+ * With ocp=on: three slots by default (FRMW 17h). Running a higher security
+ * version refreshes slot 1 (FWUP-20); C0h reports the running security
+ * version (SMART-22) and the lowest permitted revision (SMART-33).
+ */
+static void femu_test_fw_ocp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    g_autofree uint8_t *img = g_malloc(8192);
+    uint8_t p[512];
+    char fr[8], frs[8];
+    uint8_t afi;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FRMW), ==, 0x17);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(ldq_le_p(&p[144]), ==, 0);
+    g_assert_cmpuint(ldq_le_p(&p[208]), ==, 0);
+
+    femu_fw_image(img, "FW-7", 7);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 0, 3), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 1, frs);
+    g_assert_cmpmem(fr, 8, "FW-7    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+    g_assert_cmpmem(frs, 8, "FW-7    ", 8);         /* slot 1 refreshed */
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(ldq_le_p(&p[144]), ==, 7);
+    g_assert_cmpmem(&p[208], 8, "FW-7    ", 8);
+    /* the refreshed slot 1 now runs: its security version meets the floor */
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, NVME_SUCCESS);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/* fw_slots: at most 7; ocp needs 3; no subsystem */
+static void femu_test_fw_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } bad[] = {
+        { "'fw_slots':8", "0 (auto) to 7" },
+        { "'ocp':true,'fw_slots':2", "fw_slots of 3" },
+        { "'ocp':true,'fw_slots':1", "fw_slots of 3" },
+        { "'fw_slots':2,'subsys':'ocpsub'", "femu-subsys" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'fwr','addr':'5','devsz_mb':64,'femu_mode':1,%s}}",
+            bad[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].msg));
+        qobject_unref(rsp);
+    }
 }
 
 /* ocp is refused without an FTL behind every namespace, and in a subsystem */
@@ -51984,6 +52327,19 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,ocp=on",
         .arg = (void *)"on",
+    });
+    qos_add_test("fw-update", "femu", femu_test_fw_update,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=fw-test,femu_mode=1,devsz_mb=64,"
+            "fw_slots=3,buffer_size=4,power_loss=on",
+    });
+    qos_add_test("fw-ocp", "femu", femu_test_fw_ocp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=fw-ocp,femu_mode=1,devsz_mb=64,ocp=on",
+    });
+    qos_add_test("fw-refused", "femu", femu_test_fw_refused,
+                 &(QOSGraphTestOptions) {
+        .before = femu_ocp_before,
     });
     qos_add_test("ocp-latency", "femu", femu_test_ocp_latency,
                  &(QOSGraphTestOptions) {

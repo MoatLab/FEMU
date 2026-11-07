@@ -866,6 +866,7 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                 nvme_timestamp_set(n, 0, 0);
             }
             n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            femu_fw_reset(n);
             femu_pel_reset(n);
             n->bar.cc = data;
         } else if (!NVME_CC_EN(data)) {
@@ -2420,8 +2421,19 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
-    /* one read-only slot: the firmware log fills one, and nothing updates it */
-    id->frmw         = 1 << 1 | 1;
+    /*
+     * Slot 1 is read only. With fw_slots above 1 the host can download and
+     * commit, and activation without a reset works (bit 4), in 100 ms.
+     */
+    if (n->fw_slots > 1) {
+        id->frmw     = 1 << 4 | n->fw_slots << 1 | 1;
+        id->fwug     = 1;                       /* 4 KiB */
+        id->mtfa     = cpu_to_le16(1);
+        id->mptfawr  = cpu_to_le16(1);
+        id->oaes    |= cpu_to_le32(NVME_AEC_FW_ACTIVATION);
+    } else {
+        id->frmw     = 1 << 1 | 1;
+    }
     /* 64 KiB units: one, or 5 MiB with ocp (OCP 2.7 STD-LOG-22) */
     id->pels         = cpu_to_le32(n->ocp ? 80 : 1);
     id->elpe         = n->elpe;
@@ -3655,6 +3667,32 @@ static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
  * allocation reads it. Section 13 of OCP 2.7 lets a buyer pick A or B per
  * setting; the profile holds those picks.
  */
+/*
+ * fw_slots 0 means 1, or 3 with ocp: OCP asks for two writable slots and
+ * a read-only slot 1 (FWUP-6, FWUP-20). Firmware shared by several
+ * controllers, or by a CXL device, is not modelled yet.
+ */
+static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
+{
+    if (n->fw_slots > 7) {
+        error_setg(errp, "fw_slots must be 0 (auto) to 7");
+        return false;
+    }
+    if (!n->fw_slots) {
+        n->fw_slots = n->ocp ? 3 : 1;
+    }
+    if (n->ocp && n->fw_slots < 3) {
+        error_setg(errp, "ocp needs fw_slots of 3 or more (FWUP-6)");
+        return false;
+    }
+    if (n->fw_slots > 1 && (n->subsys || n->cxl_dev)) {
+        error_setg(errp, "fw_slots above 1%s does not work with a femu-subsys "
+                   "or a CXL device yet", n->ocp ? " (ocp needs 3)" : "");
+        return false;
+    }
+    return true;
+}
+
 static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
 {
     if (!n->ocp) {
@@ -3725,7 +3763,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                    "two clocks would time one FTL");
         return;
     }
-    if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp)) {
+    if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp) ||
+        !femu_fw_resolve(n, errp)) {
         return;
     }
 
@@ -4088,6 +4127,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (n->ocp) {
         femu_ocp_lat_init(n);
     }
+    /* slot 1 holds the revision Identify reports, also from shared storage */
+    femu_fw_init(n);
 
     n->use_ftl_thread = femu_needs_ftl_thread(n);
     if (n->use_ftl_thread) {
@@ -4273,6 +4314,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
     femu_pel_exit(n);
+    femu_fw_exit(n);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -4372,6 +4414,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
+    DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
@@ -5198,6 +5241,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     }
     nvme_timestamp_set(n, 0, 0);
     n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    femu_fw_reset(n);
     femu_pel_reset(n);
     femu_pel_power_loss(n);
     if (n->ocp) {

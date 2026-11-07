@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 241 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 242 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -77,6 +77,7 @@ Devices:
 | `sgl` | `bool` | `off` | Advertise and accept address scatter gather lists for data transfer; OCSSD ignores it |
 | `cmbsz` | `uint32` | `0` | Controller Memory Buffer size register; 0 means no buffer, otherwise the size field times the unit must be a non-zero power of two |
 | `cmbloc` | `uint32` | `0` | Controller Memory Buffer location register; its BAR field must be 2 when cmbsz is set |
+| `fw_slots` | `uint8` | `0` | number of firmware slots, 1 to 7; 0 (default) means 1, or 3 with ocp; slot 1 is read only; with 2 or more, Firmware Image Download and Firmware Commit work and activation needs no reset; not with a femu-subsys or a CXL device |
 
 ### LBA formats, metadata and protection
 

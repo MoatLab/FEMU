@@ -32,6 +32,7 @@
 /* the event types this log records, which its header reports as supported */
 static const uint8_t pel_supported[] = {
     NVME_PEL_SMART_SNAPSHOT,
+    NVME_PEL_FW_COMMIT,
     NVME_PEL_TIMESTAMP_CHANGE,
     NVME_PEL_POWER_ON_RESET,
     NVME_PEL_HW_ERROR,
@@ -619,6 +620,10 @@ static void pel_establish(FemuCtrl *n)
     for (i = 0; i < ARRAY_SIZE(pel_supported); i++) {
         if (pel_supported[i] == NVME_PEL_CHANGE_NS &&
             !nvme_ns_mgmt_supported(n)) {
+            continue;
+        }
+        /* Firmware Commit only where the command exists (fw_slots > 1) */
+        if (pel_supported[i] == NVME_PEL_FW_COMMIT && n->fw_slots <= 1) {
             continue;
         }
         h[480 + pel_supported[i] / 8] |= 1 << (pel_supported[i] % 8);

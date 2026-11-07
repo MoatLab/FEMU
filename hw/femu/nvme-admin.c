@@ -2180,24 +2180,39 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 }
 
 static uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
-                                 uint64_t off)
+                                 uint64_t off, bool rae)
 {
     uint32_t trans_len;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeFwSlotInfoLog fw_log = {0};
+    char *frs[7] = {
+        (char *)fw_log.frs1, (char *)fw_log.frs2, (char *)fw_log.frs3,
+        (char *)fw_log.frs4, (char *)fw_log.frs5, (char *)fw_log.frs6,
+        (char *)fw_log.frs7,
+    };
+    uint16_t status;
 
     if (off >= sizeof(fw_log)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    /* one firmware slot, active, carrying the revision Identify reports */
-    fw_log.afi = 0x1;
-    memcpy(fw_log.frs1, n->id_ctrl.fr, MIN(sizeof(fw_log.frs1),
-                                          sizeof(n->id_ctrl.fr)));
+    /* the running slot and the one for the next reset (nvme-fw.c) */
+    fw_log.afi = femu_fw_afi(n);
+    for (int s = 1; s <= 7; s++) {
+        femu_fw_frs(n, s, frs[s - 1]);
+    }
     trans_len = MIN(sizeof(fw_log) - off, buf_len);
 
-    return dma_read_prp(n, (uint8_t *)&fw_log + off, trans_len, prp1, prp2);
+    status = dma_read_prp(n, (uint8_t *)&fw_log + off, trans_len, prp1, prp2);
+    /* a read without RAE acknowledges Firmware Activation Starting */
+    if (!status && !rae) {
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, NVME_LOG_FW_SLOT_INFO,
+                             0, true);
+        /* posted after this command's own completion, from the bottom half */
+        qemu_bh_schedule(n->aer_bh);
+    }
+    return status;
 }
 
 static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
@@ -2775,6 +2790,9 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                free_lines * 100 / (free_lines + empty_lines) : 0;
     stw_le_p(&log[128], 0xffff);                    /* no PLP */
     nvme_ocp_put(&log[136], 8, unaligned);
+    /* SMART-22 the running security version, SMART-33 the rollback floor */
+    stq_le_p(&log[144], n->fw.running.svn);
+    memcpy(&log[208], n->fw.floor_fr, 8);
     stq_le_p(&log[152], nuse);
     stw_le_p(&log[216], MIN(dies, UINT16_MAX));     /* Total Media Dies */
     /* highest composite temperature since realize, in degrees Celsius */
@@ -3540,6 +3558,13 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     if (!nvme_can_sanitize(n)) {
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
+    /*
+     * Base 8.1.26.1: no sanitize starts while a firmware activation waits
+     * for a reset; checked before anything changes.
+     */
+    if (sanact != 0x1 && femu_fw_pending(n)) {
+        return NVME_FW_REQ_CLR | NVME_DNR;
+    }
 
     switch (sanact) {
     case 0x1:   /* exit failure mode: a sanitize here never fails */
@@ -3747,7 +3772,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         }
         return femu_ocp_lat_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
-        return nvme_fw_log_info(n, cmd, len, off);
+        return nvme_fw_log_info(n, cmd, len, off, rae);
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_changed_ns_log(n, cmd, len, off, rae);
     case NVME_LOG_CMD_EFFECTS:
@@ -4789,7 +4814,15 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         return NVME_NO_COMPLETE;
     case NVME_ADM_CMD_ACTIVATE_FW:
+        if (n->fw_slots > 1) {
+            return femu_fw_commit(n, cmd);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_DOWNLOAD_FW:
+        if (n->fw_slots > 1) {
+            return femu_fw_download(n, cmd);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_SECURITY_SEND:
     case NVME_ADM_CMD_SECURITY_RECV:
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -5056,6 +5089,9 @@ void nvme_process_sq_admin(void *opaque)
         memset(&cqe, 0, sizeof(cqe));
 
         status = aborted ? NVME_CMD_ABORT_REQ : nvme_admin_cmd(n, &cmd, &cqe);
+        if (cmd.opcode == NVME_ADM_CMD_ACTIVATE_FW) {
+            femu_fw_log_commit(n, &cmd, status);
+        }
         if (status == NVME_NO_COMPLETE) {
             /*
              * Held pending: no completion now. An Async Event Request is

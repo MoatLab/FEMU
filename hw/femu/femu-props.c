@@ -219,6 +219,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "block size. The power-fail unit stays one block. bbssd and NoSSD "
       "only; refused with power_loss, ns_mgmt, namespace_modes and a "
       "subsystem" },
+    { "fw_slots",
+      "number of firmware slots, 1 to 7; 0 (default) means 1, or 3 with ocp; "
+      "slot 1 is read only; with 2 or more, Firmware Image Download and "
+      "Firmware Commit work and activation needs no reset; not with a "
+      "femu-subsys or a CXL device" },
     { "ocp",
       "bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error "
       "Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move "

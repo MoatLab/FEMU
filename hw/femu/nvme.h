@@ -1127,6 +1127,9 @@ enum NvmeStatusCodes {
     NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
+    NVME_FW_REQ_CLR             = 0x0111,
+    NVME_FW_ACT_PROHIBITED      = 0x0113,
+    NVME_FW_OVERLAP             = 0x0114,
     NVME_STREAM_RESOURCE_ALLOC_FAILED = 0x017f,
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
@@ -1472,7 +1475,9 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    endgidmax;
     uint8_t     rsvd342[10];
     uint32_t    pels;           /* Persistent Event log size, 64 KiB units */
-    uint8_t     rsvd356[156];
+    uint8_t     rsvd356[4];
+    uint16_t    mptfawr;        /* Max Processing Time for FW Activation w/o Reset */
+    uint8_t     rsvd362[150];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -1534,6 +1539,7 @@ enum NvmeIdCtrlLpa {
 /* Persistent Event log event types (Base 2.3, Figure 233) */
 enum NvmePelEventType {
     NVME_PEL_SMART_SNAPSHOT     = 0x01,
+    NVME_PEL_FW_COMMIT          = 0x02,
     NVME_PEL_TIMESTAMP_CHANGE   = 0x03,
     NVME_PEL_POWER_ON_RESET     = 0x04,
     NVME_PEL_HW_ERROR           = 0x05,
@@ -1768,6 +1774,8 @@ static inline void nvme_check_size(void)
 /* Async Event Configuration, bits 7:0: which SMART warnings raise an event */
 #define NVME_AEC_SMART(aec) ((aec) & 0xff)
 #define NVME_AEC_NS_ATTR    (1u << 8)
+#define NVME_AEC_FW_ACTIVATION (1u << 9)
+#define NVME_AER_INFO_FW_ACT    0x01    /* notice: Firmware Activation Starting */
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 #define NVME_AEC_RGCNS      (1u << 17)  /* Reachability Group Change Notices */
 
@@ -1826,6 +1834,30 @@ typedef struct FemuStageSet {
     QemuSeqLock seq;                /* odd while the poller adds a command */
     FemuStageBand bands[FEMU_STAGE_BUCKETS];
 } FemuStageSet;
+
+/* a firmware image FEMU holds in a slot (nvme-fw.c) */
+typedef struct FemuFwImage {
+    bool valid;
+    char fr[8];
+    uint32_t svn;               /* security version */
+} FemuFwImage;
+
+/* firmware slots, the running image and the staged download */
+typedef struct FemuFw {
+    FemuFwImage slot[8];        /* 1 to fw_slots; slot 1 is host read only */
+    FemuFwImage running;
+    uint8_t running_slot;
+    uint8_t pending;            /* slot to run at the next reset, or 0 */
+    uint32_t floor;             /* lowest security version allowed to run */
+    char floor_fr[8];           /* revision that set it; zeros: no floor */
+    uint8_t *stage;
+    unsigned long *held;        /* 4 KiB units of stage the host sent */
+    bool fresh;                 /* a Download since the last Commit or reset */
+    /* the PEL event of the Commit in progress */
+    bool reached;
+    char old_fr[8];
+    char req_fr[8];
+} FemuFw;
 
 /* one bucket set of the OCP latency monitor: 4 buckets x Read, Write, DSM */
 typedef struct FemuOcpLatSet {
@@ -2632,6 +2664,8 @@ typedef struct FemuCtrl {
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
+    uint8_t     fw_slots;       /* 0 auto: 1, or 3 with ocp */
+    FemuFw      fw;
     bool        ocp_media_ready_sent;   /* since the last Controller Level Reset */
     FemuOcpLat  ocp_lat;        /* OCP latency monitor (C5h, C3h) */
     uint32_t    test_ocp_lat_skew_ms; /* qtest: moves the monitor clock on */
@@ -2965,6 +2999,15 @@ bool nvme_can_sanitize(FemuCtrl *n);
 bool nvme_fid_supported(FemuCtrl *n, uint8_t fid);
 uint64_t nvme_ns_nuse(FemuCtrl *n, NvmeNamespace *ns);
 void femu_ocp_lat_init(FemuCtrl *n);
+void femu_fw_init(FemuCtrl *n);
+void femu_fw_exit(FemuCtrl *n);
+void femu_fw_reset(FemuCtrl *n);
+uint16_t femu_fw_download(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_fw_commit(FemuCtrl *n, NvmeCmd *cmd);
+void femu_fw_log_commit(FemuCtrl *n, NvmeCmd *cmd, uint16_t status);
+uint8_t femu_fw_afi(FemuCtrl *n);
+void femu_fw_frs(FemuCtrl *n, uint8_t slot, char *frs);
+bool femu_fw_pending(FemuCtrl *n);
 void femu_ocp_lat_power_cycle(FemuCtrl *n);
 void femu_ocp_lat_host_ts(FemuCtrl *n, uint64_t value);
 int64_t nvme_timestamp_now_ms(FemuCtrl *n);

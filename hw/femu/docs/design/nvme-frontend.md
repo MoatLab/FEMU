@@ -644,7 +644,7 @@ Namespace Management.
 | Supported Log Pages | 00h | lists the ids the controller advertises (04h only with Namespace Management) |
 | Error Information | 01h | newest `elpe` + 1 entries; each names the command set (byte 30) and opcode (byte 31) of its command, and every entry, an empty one too, has Log Page Version 1h (byte 63); Open-Channel entries keep the 1.4 layout |
 | SMART / Health | 02h | host totals from the pollers, media wear, `temperature` |
-| Firmware Slot | 03h | one slot, read-only; Identify FRMW reports the same |
+| Firmware Slot | 03h | slot 1 read-only; with `fw_slots` above 1, AFI shows the running slot and the slot for the next reset, and FRS2 to FRS7 the committed images; a read without RAE clears the Firmware Activation Starting notice |
 | Changed Namespace List | 04h | namespaces whose attributes changed |
 | Commands Supported and Effects | 05h | per command set (NVM, zoned, KV) |
 | Device Self-test | 06h | tests complete at once |
