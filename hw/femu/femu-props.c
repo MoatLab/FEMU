@@ -294,6 +294,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Offer end-to-end protection information types 1 to 3, in the last 8 "
       "bytes of metadata, when meta is at least 8 bytes, and allow Format "
       "and Create to select them; not with power_loss or cxl_ssd" },
+    { "pci_pm",
+      "a PCI Power Management capability (D0, D3hot) with "
+      "No_Soft_Reset: outside D0 the PCI core turns the BARs off, and "
+      "back in D0 the controller keeps its state; off (default) has no "
+      "PM capability" },
     { "pif",
       "with pi: the protection information guard; 0 (default) is the "
       "16-bit CRC with 8-byte tuples, 2 the 64-bit CRC with 16-byte "

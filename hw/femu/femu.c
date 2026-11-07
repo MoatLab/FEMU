@@ -2557,6 +2557,18 @@ static void nvme_init_pci(FemuCtrl *n)
     pci_config_set_device_id(pci_conf, n->did);
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
     pcie_endpoint_cap_init(&n->parent_obj, 0x80);
+    /*
+     * PCI power management (pci_pm=on): D0 and D3hot. The PCI core turns
+     * the BARs off outside D0; No_Soft_Reset keeps the controller state
+     * across D3hot to D0, as QEMU's NVMe controller does.
+     */
+    if (n->pci_pm) {
+        pci_pm_init(&n->parent_obj, 0x60, &error_abort);
+        pci_set_word(pci_conf + 0x60 + PCI_PM_PMC, PCI_PM_CAP_VER_1_2);
+        pci_set_word(pci_conf + 0x60 + PCI_PM_CTRL, PCI_PM_CTRL_NO_SOFT_RESET);
+        pci_set_word(n->parent_obj.wmask + 0x60 + PCI_PM_CTRL,
+                     PCI_PM_CTRL_STATE_MASK);
+    }
 
     memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
                           n->reg_size);
@@ -4569,6 +4581,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),
     DEFINE_PROP_UINT8("pif", FemuCtrl, pif, 0),
+    DEFINE_PROP_BOOL("pci_pm", FemuCtrl, pci_pm, false),
     DEFINE_PROP_UINT8("dpc", FemuCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", FemuCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", FemuCtrl, mc, 0),

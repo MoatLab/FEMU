@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 255 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 256 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -66,6 +66,7 @@ Devices:
 | --- | --- | --- | --- |
 | `vid` | `uint16` | `7453` | PCI vendor ID, also reported as the Identify Controller PCI Vendor ID |
 | `did` | `uint16` | `7967` | PCI device ID of the controller function |
+| `pci_pm` | `bool` | `off` | a PCI Power Management capability (D0, D3hot) with No_Soft_Reset: outside D0 the PCI core turns the BARs off, and back in D0 the controller keeps its state; off (default) has no PM capability |
 | `acl` | `uint8` | `3` | Abort Command Limit reported in Identify Controller (0's based); an Abort run with more than acl others queued behind it fails |
 | `cqr` | `uint8` | `1` | CAP.CQR: 1 requires physically contiguous queues, 0 allows PRP-list queues |
 | `vwc` | `uint8` | `0` | 1 advertises a volatile write cache, which the host can turn off with feature 06h to stop bbssd buffering writes; 0 advertises none and refuses feature 06h. Flush drains the bbssd write buffer either way. On KV with 1, Flush programs the open page of packed values, and with the cache off each Store programs it; 0 or 1 |

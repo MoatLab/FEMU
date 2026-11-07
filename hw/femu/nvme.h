@@ -2816,6 +2816,7 @@ typedef struct FemuCtrl {
     /* Reservations: the host, its notices (log 80h) and their masks */
     bool            reservations;
     uint8_t         pif;            /* PI guard: 0 16-bit, 2 64-bit */
+    bool            pci_pm;         /* PCI power management capability */
     uint8_t         hostid[16];
     bool            hostid_ext;
     uint32_t        host_epoch;
