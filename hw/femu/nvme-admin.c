@@ -2589,6 +2589,10 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     for (i = 0; i < 256; i++) {
         lids[i] = cpu_to_le32(nvme_log_support(n, csi, i));
     }
+    /* LID specific bit 0 of log 07h: MCDAS (Figure 219) */
+    if (n->telemetry_da4 && lids[NVME_LOG_TELEMETRY_HOST]) {
+        lids[NVME_LOG_TELEMETRY_HOST] |= cpu_to_le32(1u << 16);
+    }
     /* ocp=on: index 1 has the OCP pages, index 2 the FEMU counter page */
     switch (n->ocp ? le32_to_cpu(cmd->cdw14) & 0x7f : 0) {
     case 1:
@@ -2645,7 +2649,13 @@ typedef struct FemuMediaStats {
     uint8_t  percentage_used;   /* most worn namespace */
 } FemuMediaStats;
 
-static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
+/*
+ * The media counters of namespace slot @only, or of all namespaces when
+ * @only is negative. The host command counters are per controller, so a
+ * namespace view leaves them zero.
+ */
+static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
+                                        int only)
 {
     uint32_t p;
     int i;
@@ -2653,7 +2663,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
     memset(st, 0, sizeof(*st));
     st->available_spare = 100;
 
-    for (p = 1; n->poller_ctr && p <= n->nr_pollers; p++) {
+    for (p = 1; only < 0 && n->poller_ctr && p <= n->nr_pollers; p++) {
         st->rd_cmds  += n->poller_ctr[p].nr_host_rd_cmds;
         st->wr_cmds  += n->poller_ctr[p].nr_host_wr_cmds;
         st->rd_bytes += n->poller_ctr[p].nr_host_rd_bytes;
@@ -2667,7 +2677,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         uint64_t reads;
         uint8_t used;
 
-        if (!ns->allocated) {
+        if (!ns->allocated || (only >= 0 && i != only)) {
             continue;
         }
         st->media_errors += zns_media_errors(ns);
@@ -2776,13 +2786,13 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
  * 288 hold the translation page programs and reads of mapping=dftl, which
  * the amplification at byte 0 includes.
  */
-static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
+static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
 {
     FemuStatsLog stats;
     FemuMediaStats st;
 
     memset(&stats, 0x0, sizeof(stats));
-    nvme_collect_media_stats(n, &st);
+    nvme_collect_media_stats_ns(n, &st, only);
 
     /*
      * Amplification needs a host write to divide by; the rest are counts and
@@ -2838,6 +2848,50 @@ static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
     stats.rber_soft_reads = cpu_to_le64(st.rber[2]);
     stats.rber_limit_reads = cpu_to_le64(st.rber[3]);
     *log = stats;
+}
+
+static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
+{
+    nvme_femu_stats_fill_ns(n, log, -1);
+}
+
+static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
+{
+    nvme_collect_media_stats_ns(n, st, -1);
+}
+
+/*
+ * Data Area 4 of a telemetry capture: with telemetry_da4 and ETDAS set by
+ * the host, the counters of each namespace slot, one 512-byte block each,
+ * after the controller block of Data Area 1. Returns the last block of
+ * Data Area 4, or 0 when the capture has none.
+ *
+ *   block 0       1            2         3              1 + NN
+ *        [header][controller][nsid 1][nsid 2] ... [nsid NN]
+ *                 DA1..DA3 ---+
+ *                 DA4 ---------------------------------------+
+ */
+static uint32_t nvme_tel_da4_fill(FemuCtrl *n, uint8_t **buf)
+{
+    /* one block for each NSID up to NN, which ns_mgmt raises */
+    uint32_t nn = MIN(le32_to_cpu(n->id_ctrl.nn), n->namespace_limit);
+    FemuStatsLog s;
+    uint32_t i;
+
+    g_free(*buf);
+    *buf = NULL;
+    if (!n->telemetry_da4 || n->features.host_behavior[1] != 1 ||
+        !n->namespaces || !nn) {
+        return 0;
+    }
+    *buf = g_malloc0((size_t)nn * sizeof(s));
+    for (i = 0; i < nn; i++) {
+        if (n->namespaces[i].allocated) {
+            nvme_femu_stats_fill_ns(n, &s, i);
+            memcpy(*buf + (size_t)i * sizeof(s), &s, sizeof(s));
+        }
+    }
+    return 1 + nn;
 }
 
 static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
@@ -3187,6 +3241,7 @@ void femu_tel_capture(FemuCtrl *n, uint32_t reasons)
     }
     resume = nvme_pause_pollers(n);
     nvme_femu_stats_fill(n, &n->tel_ctrl_data);
+    n->tel_ctrl_da4lb = nvme_tel_da4_fill(n, &n->tel_ctrl_da4);
     nvme_resume_pollers(n, resume);
     rid = g_string_new("FEMU");
     for (int i = 0; i < ARRAY_SIZE(names); i++) {
@@ -3219,15 +3274,60 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
     uint16_t status;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    bool create = (le32_to_cpu(cmd->cdw10) >> 8) & 0x1;
-    uint8_t page[sizeof(NvmeTelemetryLog) + sizeof(FemuStatsLog)] = { 0 };
-    NvmeTelemetryLog *hdr = (NvmeTelemetryLog *)page;
+    uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
+    bool create = (cdw10 >> 8) & 0x1;
+    uint8_t mcda = (cdw10 >> 9) & 0x7;
+    const FemuStatsLog *data = NULL;
+    const uint8_t *da4 = NULL;
+    uint32_t da4lb = 0;
+    g_autofree uint8_t *page = NULL;
+    NvmeTelemetryLog *hdr;
     uint64_t have = sizeof(*hdr);
+
+    QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
 
     if ((off | buf_len) & 511) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* MCDA is defined only where log 00h reports MCDAS (telemetry_da4) */
+    if (lid == NVME_LOG_TELEMETRY_HOST && create && n->telemetry_da4 &&
+        mcda > 4) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
+    if (lid == NVME_LOG_TELEMETRY_HOST) {
+        if (create) {
+            /* both areas of one capture come from one moment */
+            bool resume = n->telemetry_da4 && nvme_pause_pollers(n);
+
+            nvme_femu_stats_fill(n, &n->telemetry_data);
+            n->telemetry_captured = true;
+            n->telemetry_dgn++;
+            /* MCDA 1 to 3 asks for no Data Area 4 */
+            if (n->telemetry_da4 && mcda && mcda < 4) {
+                g_free(n->tel_host_da4);
+                n->tel_host_da4 = NULL;
+                n->tel_host_da4lb = 0;
+            } else {
+                n->tel_host_da4lb = nvme_tel_da4_fill(n, &n->tel_host_da4);
+            }
+            if (n->telemetry_da4) {
+                nvme_resume_pollers(n, resume);
+            }
+        }
+        if (n->telemetry_captured) {
+            data = &n->telemetry_data;
+            da4 = n->tel_host_da4;
+            da4lb = n->tel_host_da4lb;
+        }
+    } else if (n->tel_tcda) {
+        data = &n->tel_ctrl_data;
+        da4 = n->tel_ctrl_da4;
+        da4lb = n->tel_ctrl_da4lb;
+    }
+
+    page = g_malloc0(sizeof(*hdr) + sizeof(FemuStatsLog) * MAX(da4lb, 1));
+    hdr = (NvmeTelemetryLog *)page;
     hdr->lid = lid;
     /*
      * Host log (Figure 218): byte 380 is the scope, 381 the generation.
@@ -3237,40 +3337,34 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
         hdr->dgn = 0x1;                 /* TCS: the controller */
     } else {
         hdr->scope = 0x1;
-    }
-    if (lid == NVME_LOG_TELEMETRY_HOST) {
-        if (create) {
-            nvme_femu_stats_fill(n, &n->telemetry_data);
-            n->telemetry_captured = true;
-            n->telemetry_dgn++;
-        }
         hdr->dgn = n->telemetry_dgn;
-        hdr->tcda = n->tel_tcda;
-        hdr->tcdgn = n->tel_tcdgn;
-        if (n->telemetry_captured) {
-            hdr->da1lb = cpu_to_le16(1);
-            hdr->da2lb = cpu_to_le16(1);
-            hdr->da3lb = cpu_to_le16(1);
-            memcpy(page + sizeof(*hdr), &n->telemetry_data,
-                   sizeof(n->telemetry_data));
-            have = sizeof(page);
-        }
-        /* a capture is an event, carrying the header it made (Figure 251) */
-        if (create) {
-            femu_pel_log(n, NVME_PEL_TELEMETRY_CREATED, 1, hdr, sizeof(*hdr));
-        }
-    } else if (n->tel_tcda) {
+    }
+    if (data) {
         hdr->da1lb = cpu_to_le16(1);
         hdr->da2lb = cpu_to_le16(1);
         hdr->da3lb = cpu_to_le16(1);
-        memcpy(page + sizeof(*hdr), &n->tel_ctrl_data,
-               sizeof(n->tel_ctrl_data));
-        memcpy(hdr->rid, n->tel_rid, sizeof(hdr->rid));
-        have = sizeof(page);
+        memcpy(page + sizeof(*hdr), data, sizeof(*data));
+        have = sizeof(*hdr) + sizeof(*data);
+        /* with DA4S, Data Area 4 is at least Data Area 3 */
+        if (n->telemetry_da4) {
+            hdr->da4lb = cpu_to_le32(MAX(da4lb, 1));
+        }
+        if (da4) {
+            memcpy(page + sizeof(*hdr) + sizeof(*data), da4,
+                   (size_t)(da4lb - 1) * sizeof(*data));
+            have = sizeof(*hdr) + (uint64_t)da4lb * sizeof(*data);
+        }
+        if (lid == NVME_LOG_TELEMETRY_CTRL) {
+            memcpy(hdr->rid, n->tel_rid, sizeof(hdr->rid));
+        }
     }
     /* both logs show the controller-initiated state (bytes 382, 383) */
     hdr->tcda = n->tel_tcda;
     hdr->tcdgn = n->tel_tcdgn;
+    /* a capture is an event, carrying the header it made (Figure 251) */
+    if (lid == NVME_LOG_TELEMETRY_HOST && create) {
+        femu_pel_log(n, NVME_PEL_TELEMETRY_CREATED, 1, hdr, sizeof(*hdr));
+    }
 
     /* every block asked for is sent; those past the page as zeroes */
     status = dma_read_prp_fill(n, page + MIN(off, have),

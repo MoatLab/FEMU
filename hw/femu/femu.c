@@ -1985,6 +1985,19 @@ static int nvme_check_rotational_namespaces(FemuCtrl *n,
  * NVM namespace of a CSD controller. C1h has NVM subsystem scope, so a
  * controller in a femu-subsys, which shares it, does not take the property.
  */
+/*
+ * telemetry_da4 reports each namespace's media counters. FDP namespaces
+ * share one FTL, whose counters belong to no single namespace.
+ */
+static int nvme_check_da4_namespaces(FemuCtrl *n, Error **errp)
+{
+    if (n->telemetry_da4 && n->subsys && n->subsys->params.fdp.enabled) {
+        error_setg(errp, "telemetry_da4 is not supported with FDP");
+        return -1;
+    }
+    return 0;
+}
+
 static int nvme_check_ocp_namespaces(FemuCtrl *n, const uint8_t *modes,
                                      Error **errp)
 {
@@ -2052,6 +2065,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp) ||
         nvme_check_rotational_namespaces(n, ns_modes, errp) ||
         nvme_check_ocp_namespaces(n, ns_modes, errp) ||
+        nvme_check_da4_namespaces(n, errp) ||
         nvme_check_profile_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
@@ -3081,6 +3095,10 @@ static void femu_realize_undo(FemuCtrl *n)
     n->aer_held = NULL;
     g_free(n->elpes);
     n->elpes = NULL;
+    g_free(n->tel_host_da4);
+    n->tel_host_da4 = NULL;
+    g_free(n->tel_ctrl_da4);
+    n->tel_ctrl_da4 = NULL;
     if (!n->shared_storage) {
         g_free(n->namespaces);
     }
@@ -4538,6 +4556,8 @@ static void femu_exit(PCIDevice *pci_dev)
     }
     g_free(n->aer_held);
     g_free(n->elpes);
+    g_free(n->tel_host_da4);
+    g_free(n->tel_ctrl_da4);
     g_free(n->cq);
     g_free(n->sq);
     /*
@@ -4588,6 +4608,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
+    DEFINE_PROP_BOOL("telemetry_da4", FemuCtrl, telemetry_da4, false),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),

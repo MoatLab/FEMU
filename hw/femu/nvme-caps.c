@@ -509,6 +509,9 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
     if (nvme_log_support(n, NVME_CSI_NVM, NVME_LOG_TELEMETRY_HOST) &&
         nvme_log_support(n, NVME_CSI_NVM, NVME_LOG_TELEMETRY_CTRL)) {
         lpa |= NVME_LPA_TELEMETRY;
+        if (n->telemetry_da4) {
+            lpa |= NVME_LPA_DA4;
+        }
     }
     if (nvme_log_support(n, NVME_CSI_NVM, NVME_LOG_PERSISTENT_EVENT)) {
         lpa |= NVME_LPA_PERSISTENT_EVENT;

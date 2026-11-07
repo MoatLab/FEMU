@@ -1557,6 +1557,7 @@ enum NvmeIdCtrlLpa {
     NVME_LPA_EXTENDED = 1 << 2,
     NVME_LPA_TELEMETRY = 1 << 3,
     NVME_LPA_PERSISTENT_EVENT = 1 << 4,
+    NVME_LPA_DA4      = 1 << 6,
 };
 
 /* Persistent Event log event types (Base 2.3, Figure 233) */
@@ -2811,6 +2812,15 @@ typedef struct FemuCtrl {
     bool            tel_tcda;       /* data available, until a read clears it */
     uint8_t         tel_tcdgn;
     char            tel_rid[128];
+    /*
+     * telemetry_da4: Data Area 4 of each capture, one FemuStatsLog per
+     * namespace slot, and its last block (0: the capture has none).
+     */
+    bool            telemetry_da4;
+    uint8_t         *tel_host_da4;
+    uint32_t        tel_host_da4lb;
+    uint8_t         *tel_ctrl_da4;
+    uint32_t        tel_ctrl_da4lb;
     bool            tel_temp_prev;  /* temperature condition, for its edge */
     /*
      * Command and Feature Lockdown: admin opcodes and Set Features FIDs that

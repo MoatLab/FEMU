@@ -19512,6 +19512,117 @@ static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/* a host capture of log 07h with Maximum Created Data Area @mcda */
+static uint16_t femu_tel_mcda(FemuCtrlState *c, uint64_t buf, uint8_t mcda)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_TELEMETRY_HOST | 1u << 8 |
+                            (uint32_t)mcda << 9 | ((512 >> 2) - 1) << 16);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_tel_ctrl(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                              bool rae);
+static void femu_tel_trigger(QTestState *qts);
+
+/*
+ * Telemetry Data Area 4 (telemetry_da4=on): LPA bit 6 and MCDAS in log
+ * 00h. Without ETDAS a capture has no Data Area 4 beyond Data Area 3.
+ * With ETDAS, Data Area 4 ends at block 1 + NN and block 1 + nsid holds
+ * the counters of that namespace; with one namespace they equal the
+ * controller block. MCDA 1 to 3 creates no Data Area 4, and 5 is refused.
+ */
+static void femu_test_telemetry_da4(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t blk[512];
+    uint8_t ns1[512];
+    uint32_t nn;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 261) & (1 << 6), !=, 0);
+    nn = qtest_readl(qts, buf + 516);
+    g_assert_cmpuint(nn, >=, 1);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_HOST),
+                     ==, 1u | 1u << 16);
+
+    /* ETDAS clear: Data Area 4 ends with Data Area 3 */
+    femu_round_trip(&c, 3);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1);
+
+    /* ETDAS set: one block per namespace slot */
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writeb(qts, buf + 1, 1);
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 1024, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, blk, sizeof(blk));
+    qtest_memread(qts, buf + 512, ns1, sizeof(ns1));
+    g_assert_cmpuint(ldq_le_p(ns1 + 8), >, 0);          /* host pages */
+    g_assert_cmpint(memcmp(blk, ns1, sizeof(blk)), ==, 0);
+
+    /* MCDA: up to Data Area 3 creates none; a reserved value is refused */
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 3), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1);
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 4), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 5), ==, NVME_INVALID_FIELD);
+
+    /*
+     * Log 08h: a trigger captures Data Area 4 too; RAE keeps it, a read
+     * without RAE hands it over, and the next trigger captures again.
+     */
+    {
+        uint32_t res = 0;
+        uint16_t cid, want;
+
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0,
+                                                 1u << 10, NULL)), ==,
+                        NVME_SUCCESS);
+        for (int round = 0; round < 2; round++) {
+            want = femu_aer(&c);
+            femu_tel_trigger(qts);
+            g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpint(cid, ==, want);
+            /* header, controller block, namespace 1 */
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 1536, true), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+            qtest_memread(qts, buf + 1024, ns1, sizeof(ns1));
+            g_assert_cmpuint(ldq_le_p(ns1 + 8), >, 0);  /* host pages */
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 0);
+            g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 0);
+            femu_round_trip(&c, 7);
+        }
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* Get Log 08h with RAE set or clear, @len bytes from 0 (one PRP page) */
 static uint16_t femu_tel_ctrl(FemuCtrlState *c, uint64_t buf, uint32_t len,
                               bool rae)
@@ -51050,6 +51161,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("telemetry-da4", "femu", femu_test_telemetry_da4,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "telemetry_da4=on,id=telc"
     });
     qos_add_test("log-length", "femu", femu_test_log_length, NULL);
     qos_add_test("zone-report-length", "femu", femu_test_report_length,

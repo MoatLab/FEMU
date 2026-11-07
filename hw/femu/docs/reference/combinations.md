@@ -796,6 +796,10 @@ own description allows. A message keeps its format directives (`%s`,
 - reservations must be the same on every controller of a femu-subsys
 - sanitize_ms does not work with a femu-subsys yet
 
+## `telemetry_da4`
+
+- telemetry_da4 is not supported with FDP
+
 ## `thermal_r`
 
 - femu: thermal_tau_ms needs thermal_r

@@ -258,6 +258,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "and OACS bit 10; the host can prohibit most admin commands and "
       "changeable Feature Identifiers on the admin queue until QEMU stops; "
       "not with a femu-subsys; off (default)" },
+    { "telemetry_da4",
+      "report Data Area 4 in the telemetry logs (07h, 08h) when the host "
+      "sets ETDAS in Host Behavior Support: one 512-byte counter block per "
+      "namespace after the controller block; also the Maximum Created Data "
+      "Area field of log 07h; not with FDP; off (default)" },
     { "ocp",
       "bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error "
       "Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move "
