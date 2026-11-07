@@ -676,7 +676,8 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     if (n->print_log) {
         femu_debug("%s,req,lba:%lu,lat:%lu\n", n->devname, req->slba, req->reqlat);
     }
-    trace_femu_cqe(cq->cqid, req->cqe.cid, req->status, req->reqlat);
+    trace_femu_cqe(cq->cqid, req->cqe.cid, req->cmd_opcode, req->slba,
+                   req->nlb, req->status, req->reqlat);
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
