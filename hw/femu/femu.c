@@ -1354,6 +1354,12 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "dps needs 8 bytes of metadata and a matching dpc");
         return false;
     }
+    /* the 64-bit guard tuple is 16 bytes (NVM 1.2, PIF 10b) */
+    if (n->pif != 0 && (n->pif != 2 || !n->pi || n->meta < 16)) {
+        error_setg(errp, "pif is 0 or 2; 2 needs pi=on and meta of 16 or "
+                   "more");
+        return false;
+    }
     if (n->mpsmax > 0xf || n->mpsmax < n->mpsmin) {
         error_setg(errp, "mpsmax must be in [mpsmin, 15]");
         return false;
@@ -2437,6 +2443,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
     if (n->ocp) {
         id->ctratt |= cpu_to_le32(NVME_CTRATT_UUIDL);
+    }
+    /* ELBAS: CNS 05h reports the extended formats (the 64-bit guard) */
+    if (n->pif == 2) {
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_ELBAS);
     }
     /* HIDS: a 128-bit Host Identifier, for reservations */
     if (n->reservations) {
@@ -3924,6 +3934,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
         if (storage && (n->femu_mode != storage->femu_mode ||
                         n->meta != storage->meta || n->pi != storage->pi ||
+                        n->pif != storage->pif ||
                         n->mc != storage->mc || n->dpc != storage->dpc ||
                         n->nlbaf != storage->nlbaf ||
                         n->vwc != storage->vwc || n->oncs != storage->oncs)) {
@@ -4557,6 +4568,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),
+    DEFINE_PROP_UINT8("pif", FemuCtrl, pif, 0),
     DEFINE_PROP_UINT8("dpc", FemuCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", FemuCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", FemuCtrl, mc, 0),

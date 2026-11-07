@@ -64,7 +64,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "nlbaf", "atomic_write_lbas", "perf_hints", "ocp", "ocp_profile",
-                    "lba_index", "extended", "meta", "mc", "pi",
+                    "lba_index", "extended", "meta", "mc", "pi", "pif",
                     "dpc", "dps", "ms", "ms_max", "dlfeat",
                 ],
             },

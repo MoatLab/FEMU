@@ -1674,6 +1674,24 @@ typedef struct NvmeLBAF {
 
 #define NVME_NSID_BROADCAST 0xffffffff
 
+/*
+ * The NVM Command Set Identify Namespace data (CNS 05h, CSI 00h; NVM 1.2):
+ * an extended LBA format per format, whose bits 8:7 (PIF) select the
+ * protection information guard.
+ */
+typedef struct QEMU_PACKED FemuIdNsNvm {
+    uint64_t    lbstm;
+    uint8_t     pic;
+    uint8_t     rsvd9[3];
+    uint32_t    elbaf[64];
+    uint32_t    npdgl;
+    uint32_t    nprg;
+    uint32_t    npra;
+    uint32_t    nors;
+    uint32_t    npdal;
+    uint8_t     rsvd288[3808];
+} FemuIdNsNvm;
+
 typedef struct NvmeIdNs {
     uint64_t    nsze;
     uint64_t    ncap;
@@ -2797,6 +2815,7 @@ typedef struct FemuCtrl {
     DECLARE_BITMAP(lock_fid, 256);
     /* Reservations: the host, its notices (log 80h) and their masks */
     bool            reservations;
+    uint8_t         pif;            /* PI guard: 0 16-bit, 2 64-bit */
     uint8_t         hostid[16];
     bool            hostid_ext;
     uint32_t        host_epoch;

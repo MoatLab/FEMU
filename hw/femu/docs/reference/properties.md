@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 254 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 255 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -100,6 +100,7 @@ Devices:
 | `meta` | `uint8` | `0` | Metadata bytes per logical block, NoSSD and bbssd only, not with FDP, dpc or dps; each format is then also offered with metadata |
 | `mc` | `uint8` | `0` | Metadata Capabilities bit mask: bit 0 interleaved (extended LBAs), bit 1 separate buffer; required when meta is set |
 | `pi` | `bool` | `off` | Offer end-to-end protection information types 1 to 3, in the last 8 bytes of metadata, when meta is at least 8 bytes, and allow Format and Create to select them; not with power_loss or cxl_ssd |
+| `pif` | `uint8` | `0` | with pi: the protection information guard; 0 (default) is the 16-bit CRC with 8-byte tuples, 2 the 64-bit CRC with 16-byte tuples and 48-bit reference tags (CTRATT.ELBAS, CNS 05h); 2 needs meta of 16 or more, and Copy is refused on those namespaces |
 | `dpc` | `uint8` | `0` | Data Protection Capabilities reported in Identify Namespace when pi is off; must be 0 with meta, and bit 3 (first 8 bytes) is refused except on OCSSD |
 | `dps` | `uint8` | `0` | Data Protection Type Settings reported in Identify Namespace; a non-zero value needs 8 bytes of metadata, which meta refuses, so leave it 0 and use pi |
 | `ms` | `uint8` | `16` | No effect, kept for compatibility; meta sets the metadata size. A value other than the default warns at realize |

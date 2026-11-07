@@ -871,6 +871,48 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
     return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
 }
 
+/*
+ * CNS 05h for the NVM Command Set. Without pif=2 it is all zero. With it,
+ * every format with metadata reports the 64-bit guard (ELBAF PIF 10b),
+ * and Linux then reads 16-byte PI tuples (CTRATT.ELBAS).
+ */
+QEMU_BUILD_BUG_ON(sizeof(FemuIdNsNvm) != NVME_IDENTIFY_DATA_SIZE);
+
+/*
+ * The extended formats of @id_ns. PIC: 16-bit guard with storage tag
+ * (bit 0) and storage tag check read (bit 2), as NVM 1.2 Figure 118 asks
+ * when a 64-bit guard format exists.
+ */
+static void nvme_fill_ns_nvm(FemuCtrl *n, const NvmeIdNs *id_ns,
+                             FemuIdNsNvm *id)
+{
+    if (n->pif != 2) {
+        return;
+    }
+    id->pic = 0x05;
+    for (int i = 0; i <= id_ns->nlbaf && i < 16; i++) {
+        if (le16_to_cpu(id_ns->lbaf[i].ms) >= 16) {
+            id->elbaf[i] = cpu_to_le32(2 << 7);
+        }
+    }
+}
+
+static uint16_t nvme_identify_ns_nvm(FemuCtrl *n, NvmeCmd *cmd,
+                                     NvmeNamespace *ns)
+{
+    g_autofree FemuIdNsNvm *id = g_new0(FemuIdNsNvm, 1);
+    NvmeIdNs caps;
+
+    /* with no namespace, the formats the controller can make */
+    if (!ns) {
+        nvme_ns_common_identify(n, &caps);
+    }
+    nvme_fill_ns_nvm(n, ns ? &ns->id_ns : &caps, id);
+    return dma_read_prp(n, (uint8_t *)id, sizeof(*id),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
                                   bool present)
 {
@@ -885,8 +927,8 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
         if (c->csi != NVME_CSI_NVM) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        /* Supported NVM formats have no command-set-specific capabilities. */
-        return nvme_rpt_empty_id_struct(n, cmd);
+        /* the extended formats of every namespace the pool can make */
+        return nvme_identify_ns_nvm(n, cmd, NULL);
     }
     if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -898,7 +940,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd,
     }
 
     if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
-        return nvme_rpt_empty_id_struct(n, cmd);
+        return nvme_identify_ns_nvm(n, cmd, ns);
     } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
         /*
          * An Identify data structure is 4096 bytes. This transferred the
@@ -1055,19 +1097,20 @@ static uint16_t nvme_identify_fmt_nvm(FemuCtrl *n, NvmeCmd *cmd)
 
 /*
  * CNS 0Ah with CSI 00h: the NVM Command Set specific structure for a format
- * index. Its CNS 05h counterpart is all zero, so this one is too.
+ * index, with the same extended formats as CNS 05h.
  */
 static uint16_t nvme_identify_fmt_csi_nvm(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
+    g_autofree FemuIdNsNvm *id = g_new0(FemuIdNsNvm, 1);
     NvmeIdNs caps;
 
     if (!nvme_identify_fmt_ok(n, cmd, &caps)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    return dma_read_prp(n, id, sizeof(id), prp1, prp2);
+    nvme_fill_ns_nvm(n, &caps, id);
+    return dma_read_prp(n, (uint8_t *)id, sizeof(*id), prp1, prp2);
 }
 
 static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd,

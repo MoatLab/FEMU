@@ -17377,6 +17377,93 @@ static uint16_t femu_ns_create_pi(FemuCtrlState *c, uint64_t buf,
     return FEMU_SC(femu_admin_result(c, &cmd, nsid));
 }
 
+/* a PI read or write with a 48-bit reference tag: CDW3 bits 15:0, CDW14 */
+static uint16_t femu_pi64_io(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                             uint64_t dbuf, uint64_t mbuf, uint8_t prinfo,
+                             uint64_t ref, uint16_t app)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(1);
+    rw.dptr.prp1 = cpu_to_le64(dbuf);
+    rw.mptr = cpu_to_le64(mbuf);
+    rw.control = cpu_to_le16(prinfo << 10);
+    rw.cdw3 = cpu_to_le32(ref >> 32);
+    rw.reftag = cpu_to_le32(ref);
+    rw.apptag = cpu_to_le16(app);
+    rw.appmask = cpu_to_le16(0xffff);
+    return FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+}
+
+/*
+ * 64-bit guard protection information (pif=2, NVM 1.2 PIF 10b): CTRATT.ELBAS
+ * and the CNS 05h extended formats; a PRACT write makes 16-byte tuples
+ * (CRC64 guard, application tag, 48-bit reference tag from CDW3 and CDW14);
+ * a checked read passes, and a wrong reference tag or guard fails.
+ */
+static void femu_test_pi64(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint64_t mbuf = guest_alloc(alloc, 4096);
+    const uint64_t ref = 0x000700000010ULL;
+    uint8_t d[1024];
+    uint8_t m[32];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, mbuf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, mbuf + 96) & (1u << 15), ==, 1u << 15);
+    /* Type 2: the reference tag is the host's, all 48 bits */
+    g_assert_cmpint(femu_format_dw10(&c, FEMU_MD_NLBAF | 2 << 5), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, 0x05, 0, mbuf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, mbuf + 12 + 4 * FEMU_MD_NLBAF), ==,
+                    0x100);
+    g_assert_cmphex(qtest_readl(qts, mbuf + 12), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, mbuf + 8), ==, 0x05);         /* PIC */
+
+    for (int i = 0; i < sizeof(d); i++) {
+        d[i] = i * 7;
+    }
+    qtest_memwrite(qts, dbuf, d, sizeof(d));
+    g_assert_cmpint(femu_pi64_io(&c, NVME_CMD_WRITE, 16, dbuf, mbuf, 0x8,
+                                 ref, 0x1234), ==, NVME_SUCCESS);
+    qtest_memset(qts, dbuf, 0, 4096);
+    qtest_memset(qts, mbuf, 0, 4096);
+    g_assert_cmpint(femu_pi64_io(&c, NVME_CMD_READ, 16, dbuf, mbuf, 0x7,
+                                 ref, 0x1234), ==, NVME_SUCCESS);
+    qtest_memread(qts, dbuf, d + 512, 512);
+    g_assert_cmpmem(d + 512, 512, d, 512);
+    qtest_memread(qts, mbuf, m, sizeof(m));
+    /* each tuple: guard (8), app tag (2), 48-bit ref tag (6), big endian */
+    /* CRC-64/NVME of the block, computed apart from FEMU */
+    g_assert_cmphex(ldq_be_p(m), ==, 0xd9b1d30702feaed0ULL);
+    g_assert_cmphex(lduw_be_p(m + 8), ==, 0x1234);
+    g_assert_cmphex(lduw_be_p(m + 10), ==, 0x0007);
+    g_assert_cmphex(ldl_be_p(m + 12), ==, 0x10);
+    g_assert_cmphex(ldl_be_p(m + 16 + 12), ==, 0x11);
+    g_assert_cmphex(ldq_be_p(m + 16), ==, 0xd9b1d30702feaed0ULL);
+    /* the upper 16 bits of the tag are checked too */
+    g_assert_cmpint(femu_pi64_io(&c, NVME_CMD_READ, 16, dbuf, mbuf, 0x1,
+                                 ref & 0xffffffff, 0x1234), ==, 0x284);
+    /* a host tuple with a 16-bit style guard fails the 64-bit check */
+    stw_be_p(m, 0xbeef);
+    qtest_memwrite(qts, mbuf, m, sizeof(m));
+    g_assert_cmpint(femu_pi64_io(&c, NVME_CMD_WRITE, 16, dbuf, mbuf, 0x4,
+                                 ref, 0x1234), ==, 0x282);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, mbuf);
+    guest_free(alloc, dbuf);
+}
+
 static void femu_test_pi_rw(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -54220,6 +54307,10 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = GUINT_TO_POINTER(8),
         .edge.extra_device_opts = "pi=on,meta=8,mc=3,oncs=0x19f,mdts=1"
+    });
+    qos_add_test("pi64", "femu", femu_test_pi64,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "pif=2,pi=on,meta=16,mc=3,oncs=0x19f,mdts=1"
     });
     qos_add_test("pi-verify-16", "femu", femu_test_pi_verify,
                  &(QOSGraphTestOptions) {

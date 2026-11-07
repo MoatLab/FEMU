@@ -1247,7 +1247,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (femu_pi_type(ns) && ms == 8 && (ctrl & NVME_RW_PRINFO_PRACT)) {
+    if (femu_pi_type(ns) && ms == femu_pi_size(ns) &&
+        (ctrl & NVME_RW_PRINFO_PRACT)) {
         extended = false;
     }
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
@@ -1515,7 +1516,7 @@ static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         meta = g_malloc((size_t)nlb * nvme_ns_ms(ns));
         femu_pi_snapshot(ns, slba, nlb, data, meta);
         status = femu_pi_check(ns, data, meta, nlb, control, slba,
-                               le32_to_cpu(rw->reftag),
+                               femu_pi_ref(ns, rw),
                                le16_to_cpu(rw->apptag),
                                le16_to_cpu(rw->appmask));
     }
