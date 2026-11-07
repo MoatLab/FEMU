@@ -219,6 +219,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "block size. The power-fail unit stays one block. bbssd and NoSSD "
       "only; refused with power_loss, ns_mgmt, namespace_modes and a "
       "subsystem" },
+    { "ps_max_watts",
+      "Maximum Power of power state 0 in watts, 1 to 127 (default 25); with "
+      "ocp, the lowest valid DSSD power state of C4h and C7h; FEMU does not "
+      "cap its modelled power at it" },
     { "fw_slots",
       "number of firmware slots, 1 to 7; 0 (default) means 1, or 3 with ocp; "
       "slot 1 is read only; with 2 or more, Firmware Image Download and "

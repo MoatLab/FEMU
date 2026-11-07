@@ -1290,6 +1290,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FEMU_STATS         = 0xc0,    /* OCP SMART Extended with ocp=on */
     NVME_LOG_OCP_EREC           = 0xc1,    /* OCP Error Recovery, ocp=on */
     NVME_LOG_OCP_LATENCY        = 0xc3,    /* OCP Latency Monitor, ocp=on */
+    NVME_LOG_OCP_DEVCAP         = 0xc4,    /* OCP Device Capabilities, ocp=on */
 };
 
 /* LID Supported and Effects data structure, one per log page identifier */
@@ -1606,6 +1607,7 @@ enum NvmeFeatureIds {
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
+    NVME_OCP_DSSD_POWER_STATE       = 0xc7,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
     NVME_FID_MAX                    = 0x100
 };
@@ -2665,6 +2667,10 @@ typedef struct FemuCtrl {
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
     uint8_t     fw_slots;       /* 0 auto: 1, or 3 with ocp */
+    uint8_t     ps_max_watts;   /* Maximum Power of power state 0, in watts */
+    uint8_t     ocp_dssd_ps;    /* OCP C7h current DSSD power state */
+    uint8_t     ocp_dssd_ps_saved;
+    uint8_t     power_mgmt_saved;   /* feature 02h saved value (ocp=on) */
     FemuFw      fw;
     bool        ocp_media_ready_sent;   /* since the last Controller Level Reset */
     FemuOcpLat  ocp_lat;        /* OCP latency monitor (C5h, C3h) */

@@ -33,6 +33,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_SPINUP_CONTROL]           = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
+    [NVME_OCP_DSSD_POWER_STATE]     = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -61,7 +62,19 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     /* OCP GETF-5: changeable, saveable, controller scope */
     [NVME_OCP_LATENCY_MONITOR]      = NVME_FEAT_CAP_CHANGE |
                                       NVME_FEAT_CAP_SAVE,
+    /* OCP GDSSDPS-2: changeable, saveable, NVM subsystem scope */
+    [NVME_OCP_DSSD_POWER_STATE]     = NVME_FEAT_CAP_CHANGE |
+                                      NVME_FEAT_CAP_SAVE,
 };
+
+/* the capabilities of @fid here: with ocp, Power Management saves (PWR-5) */
+static uint32_t nvme_feat_cap(FemuCtrl *n, uint8_t fid)
+{
+    if (fid == NVME_POWER_MANAGEMENT && n->ocp) {
+        return nvme_feature_cap[fid] | NVME_FEAT_CAP_SAVE;
+    }
+    return nvme_feature_cap[fid];
+}
 
 /*
  * Whether the controller answers Get and Set Features for @fid: the table says
@@ -106,6 +119,7 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return nvme_subsys_rotational(n->subsys);
     case NVME_OCP_DSSD_AEN_CONFIG:
     case NVME_OCP_LATENCY_MONITOR:
+    case NVME_OCP_DSSD_POWER_STATE:
         return n->ocp;
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
@@ -1630,6 +1644,10 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
     case NVME_OCP_DSSD_AEN_CONFIG:
         result = NVME_OCP_AEN_DEFAULT;
         break;
+    case NVME_OCP_DSSD_POWER_STATE:
+        /* the DSSD state of power state 0: its Maximum Power in watts */
+        result = n->ps_max_watts;
+        break;
     default:
         /* every other feature starts at zero, including an empty event list */
         break;
@@ -1654,7 +1672,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+    /* OCP GETF-4: C7h has NVM subsystem scope, NSID 0 or FFFFFFFFh */
+    if (fid == NVME_OCP_DSSD_POWER_STATE && nsid &&
+        nsid != NVME_NSID_BROADCAST) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (nvme_feat_cap(n, fid) & NVME_FEAT_CAP_NS) {
         /* the events feature says what an all-namespaces NSID returns */
         if (fid == NVME_FDP_EVENTS && nsid == NVME_NSID_BROADCAST) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -1675,12 +1698,20 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (fid == NVME_FDP_MODE || fid == NVME_FDP_EVENTS) {
             break;
         }
+        /* with ocp, 02h and C7h hold a saved value (OCP PWR-5, SDSSDPS-10) */
+        if (fid == NVME_OCP_DSSD_POWER_STATE ||
+            (fid == NVME_POWER_MANAGEMENT && n->ocp)) {
+            cqe->n.result = cpu_to_le32(fid == NVME_POWER_MANAGEMENT ?
+                                        n->power_mgmt_saved :
+                                        n->ocp_dssd_ps_saved);
+            return NVME_SUCCESS;
+        }
         /* nothing else is saved, so the saved value is the default */
         /* fall through */
     case NVME_GETFEAT_SELECT_DEFAULT:
         return nvme_get_feature_default(n, cmd, fid, dw11, cqe);
     case NVME_GETFEAT_SELECT_CAP:
-        cqe->n.result = cpu_to_le32(nvme_feature_cap[fid]);
+        cqe->n.result = cpu_to_le32(nvme_feat_cap(n, fid));
         return NVME_SUCCESS;
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -1701,6 +1732,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_POWER_MANAGEMENT:
         cqe->n.result = cpu_to_le32(n->features.power_mgmt);
+        break;
+    case NVME_OCP_DSSD_POWER_STATE:
+        cqe->n.result = cpu_to_le32(n->ocp_dssd_ps);
         break;
     case NVME_LBA_RANGE_TYPE: {
         /*
@@ -1825,11 +1859,11 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
+    if (save && !(nvme_feat_cap(n, fid) & NVME_FEAT_CAP_SAVE)) {
         return NVME_FID_NOT_SAVEABLE | NVME_DNR;
     }
 
-    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+    if (nvme_feat_cap(n, fid) & NVME_FEAT_CAP_NS) {
         if (nsid != NVME_NSID_BROADCAST) {
             if (!nvme_nsid_valid(n, nsid)) {
                 return NVME_INVALID_NSID | NVME_DNR;
@@ -1839,13 +1873,17 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             }
         }
     } else if (nsid && nsid != NVME_NSID_BROADCAST) {
+        /* OCP GETF-4: C7h takes NSID 0 or FFFFFFFFh, anything else is a field */
+        if (fid == NVME_OCP_DSSD_POWER_STATE) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         if (!nvme_nsid_valid(n, nsid)) {
             return NVME_INVALID_NSID | NVME_DNR;
         }
         return NVME_FID_NOT_NSID_SPEC | NVME_DNR;
     }
 
-    if (!(nvme_feature_cap[fid] & NVME_FEAT_CAP_CHANGE)) {
+    if (!(nvme_feat_cap(n, fid) & NVME_FEAT_CAP_CHANGE)) {
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }
 
@@ -1873,6 +1911,32 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         n->features.power_mgmt = dw11 & 0xff;
+        if (save) {
+            n->power_mgmt_saved = dw11 & 0xff;
+        }
+        /*
+         * Power state 0 is DSSD power state MP of PS0 (OCP 4.8.11). Each
+         * feature keeps its own saved value.
+         */
+        if (n->ocp) {
+            n->ocp_dssd_ps = n->ps_max_watts;
+        }
+        break;
+    case NVME_OCP_DSSD_POWER_STATE:
+        /*
+         * Bits 6:0 hold the DSSD power state; below the minimum valid one
+         * (C4h DCLP-8) is Invalid Field (DSSDPSS-2). Every valid state runs
+         * power state 0, the only one FEMU has.
+         */
+        if ((dw11 & ~0x7fu) || (dw11 & 0x7f) < n->ps_max_watts) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        n->ocp_dssd_ps = dw11 & 0x7f;
+        /* power state 0 runs; the Workload Hint stays */
+        n->features.power_mgmt &= ~0x1fu;
+        if (save) {
+            n->ocp_dssd_ps_saved = dw11 & 0x7f;
+        }
         break;
     case NVME_LBA_RANGE_TYPE:
         if (nsid == NVME_NSID_BROADCAST) {
@@ -2317,11 +2381,12 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
-        } else if (fid == NVME_SPINUP_CONTROL) {
+        } else if (fid == NVME_SPINUP_CONTROL ||
+                   fid == NVME_OCP_DSSD_POWER_STATE) {
             scope = NVME_FID_SCOPE_SUBSYS;
         } else if (fid == NVME_FDP_EVENTS) {
             scope = 0;  /* a reclaim unit handle, which has no FSP bit */
-        } else if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+        } else if (nvme_feat_cap(n, fid) & NVME_FEAT_CAP_NS) {
             scope = NVME_FID_SCOPE_NS;
         } else {
             scope = NVME_FID_SCOPE_CTRL;
@@ -2392,6 +2457,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
         lids[NVME_LOG_FEMU_STATS] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_OCP_EREC] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_OCP_LATENCY] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_OCP_DEVCAP] = cpu_to_le32(NVME_LIDS_LSUPP);
         break;
     case 2:
         memset(lids, 0, sizeof(lids));
@@ -2805,6 +2871,53 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     buf_len = MIN(sizeof(log) - off, buf_len);
     return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
+static const uint8_t nvme_ocp_devcap_guid[16] = {
+    0x97, 0x42, 0x05, 0x0d, 0xd1, 0xe1, 0xc9, 0x98,
+    0x5d, 0x49, 0x58, 0x4b, 0x91, 0x3c, 0x05, 0xb7,
+};
+
+/*
+ * OCP 2.7 Device Capabilities (C4h, version 2, 4096 bytes). Each support
+ * bit follows the command registry; bit 15 ("tested and complies") stays
+ * clear, as FEMU claims no compliance test.
+ *
+ *   1:0 ports  3:2 OOB  5:4 WZ  7:6 Sanitize  9:8 DSM  11:10 WU  13:12 fused
+ *   15:14 lowest valid DSSD state   16+k descriptor of DSSD state k
+ */
+static uint16_t nvme_ocp_devcap_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                                    uint64_t off)
+{
+    g_autofree uint8_t *log = g_malloc0(4096);
+    bool wz = nvme_io_effects(n, NVME_CSI_NVM, NVME_CMD_WRITE_ZEROES) &
+              NVME_CMD_EFF_CSUPP;
+    bool dsm = nvme_io_effects(n, NVME_CSI_NVM, NVME_CMD_DSM) &
+               NVME_CMD_EFF_CSUPP;
+    bool wu = nvme_io_effects(n, NVME_CSI_NVM, NVME_CMD_WRITE_UNCOR) &
+              NVME_CMD_EFF_CSUPP;
+
+    if (off >= 4096) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    stw_le_p(&log[0], 1);                       /* one PCIe port */
+    /* Write Zeroes, DEAC, FUA; NVMe-IO-6 (zeros after DEAC) */
+    stw_le_p(&log[4], wz ? 0x0017 : 0);
+    /* Sanitize, Block Erase, deallocation after it */
+    stw_le_p(&log[6], nvme_can_sanitize(n) ? 0x0015 : 0);
+    stw_le_p(&log[8], dsm ? 0x0003 : 0);        /* DSM with Deallocate */
+    /* single LBA, the maximum range, SMART not counting induced errors */
+    stw_le_p(&log[10], wu ? 0x000f : 0);
+    stw_le_p(&log[14], n->ps_max_watts);        /* DCLP-8 */
+    for (int k = 1; k <= 127; k++) {
+        log[16 + k] = k >= n->ps_max_watts ? 0x80 : 0;   /* valid, PS0 */
+    }
+    stw_le_p(&log[4078], 2);
+    memcpy(&log[4080], nvme_ocp_devcap_guid, 16);
+
+    len = MIN(4096 - off, len);
+    return dma_read_prp(n, log + off, len, le64_to_cpu(cmd->dptr.prp1),
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
@@ -3702,7 +3815,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         if (uidx > 2 ||
             (uidx == 1 && lid != NVME_LOG_SUPPORTED &&
              lid != NVME_LOG_FEMU_STATS && lid != NVME_LOG_OCP_EREC &&
-             lid != NVME_LOG_OCP_LATENCY) ||
+             lid != NVME_LOG_OCP_LATENCY && lid != NVME_LOG_OCP_DEVCAP) ||
             (uidx == 2 && lid != NVME_LOG_SUPPORTED &&
              lid != NVME_LOG_FEMU_STATS)) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -3771,6 +3884,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         return femu_ocp_lat_log(n, cmd, len, off);
+    case NVME_LOG_OCP_DEVCAP:
+        if (!nvme_ocp_nsid_ok(cmd)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return nvme_ocp_devcap_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off, rae);
     case NVME_LOG_CHANGED_NS_LIST:

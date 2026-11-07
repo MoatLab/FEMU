@@ -36961,7 +36961,11 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                         NVME_INVALID_LOG_ID);
         g_assert_cmphex(femu_ocp_log(&c, 0xc3, 0, 0, buf, 512), ==,
                         NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc4, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
         g_assert_cmphex(femu_ocp_feat(&c, false, 0xc5, 0, 0, 0, NULL), ==,
+                        NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, NULL), ==,
                         NVME_INVALID_FIELD);
         goto out;
     }
@@ -36988,7 +36992,7 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                     NVME_SUCCESS);
     for (int lid = 0; lid < 256; lid++) {
         uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1 ||
-                        lid == 0xc3;
+                        lid == 0xc3 || lid == 0xc4;
 
         g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
     }
@@ -37646,6 +37650,149 @@ static void femu_test_fw_ocp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, NVME_SUCCESS);
 
     guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/*
+ * OCP 2.7 Device Capabilities (C4h) and DSSD power states (C7h) with
+ * ocp=on and ps_max_watts=25: version 2 and the GUID; support bits agree
+ * with log 05h; DSSD states below 25 invalid, the rest map to PS0 (80h);
+ * C7h current, saved and default, kept over a reset; Power Management
+ * saveable; CAP.CPS 11b.
+ */
+static void femu_test_ocp_caps(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const uint8_t guid[16] = {
+        0x97, 0x42, 0x05, 0x0d, 0xd1, 0xe1, 0xc9, 0x98,
+        0x5d, 0x49, 0x58, 0x4b, 0x91, 0x3c, 0x05, 0xb7,
+    };
+    g_autofree uint8_t *p = g_malloc(4096);
+    uint32_t acs[256];
+    uint32_t r;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex((qpci_io_readq(c.pdev, c.bar, 0) >> 46) & 3, ==, 3);
+    g_assert_cmphex(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 1024, acs, sizeof(acs));
+    for (uint8_t u = 0; u <= 1; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc4, u, 0, buf, 4096), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, 4096);
+        g_assert_cmpuint(lduw_le_p(&p[0]), ==, 1);
+        g_assert_cmpuint(lduw_le_p(&p[2]), ==, 0);
+        g_assert_cmphex(lduw_le_p(&p[4]), ==,
+                        le32_to_cpu(acs[0x08]) & 1 ? 0x17 : 0);
+        g_assert_cmphex(lduw_le_p(&p[8]), ==,
+                        le32_to_cpu(acs[0x09]) & 1 ? 0x03 : 0);
+        g_assert_cmphex(lduw_le_p(&p[10]), ==,
+                        le32_to_cpu(acs[0x04]) & 1 ? 0x0f : 0);
+        g_assert_cmphex(lduw_le_p(&p[12]), ==, 0);
+        g_assert_cmpuint(lduw_le_p(&p[14]), ==, 25);
+        g_assert_cmphex(p[16], ==, 0);
+        g_assert_cmphex(p[16 + 24], ==, 0);
+        g_assert_cmphex(p[16 + 25], ==, 0x80);
+        g_assert_cmphex(p[16 + 127], ==, 0x80);
+        for (int b = 144; b < 4078; b++) {
+            g_assert_cmphex(p[b], ==, 0);
+        }
+        g_assert_cmpuint(lduw_le_p(&p[4078]), ==, 2);
+        g_assert_cmpmem(&p[4080], 16, guid, 16);
+    }
+
+    /* C7h: default and current 25, capabilities 5h */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 1, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 3, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x5);
+    /* below the minimum, and a reserved bit, are refused */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 24, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 0x80 | 30, NULL), ==,
+                    NVME_INVALID_FIELD);
+    /* saved 40, then current 30 without SV; a reset brings back 40 */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 1, 1, 40, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 30);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    /* the minimum and the top state are valid */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 25, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 127, NULL), ==,
+                    NVME_SUCCESS);
+    /* NSID 1 is an invalid field for an NVM subsystem feature (GETF-4) */
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw10 = cpu_to_le32(0xc7);
+        cmd.cdw11 = cpu_to_le32(30);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+    }
+    /*
+     * Power Management saves with ocp (PWR-5). PS0 with Workload Hint 1
+     * (20h): C7h current becomes 25, and the C7h saved value (40) stays.
+     */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 3, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r & 0x1, ==, 0x1);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0x02, 1, 0, 0x20, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    /* saving C7h 50 keeps the 02h saved value and its current hint */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 1, 1, 50, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    /* an unsaved 02h change, then a reset: both saved values come back */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0x02, 0, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 50);
+    /* Identify MP of PS0: 25 W in 0.01 W units */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 2048), ==, 2500);
+
+    guest_free(alloc, buf);
     femu_disable(&c);
 }
 
@@ -52364,6 +52511,10 @@ static void femu_register_nodes(void)
     qos_add_test("fw-ocp", "femu", femu_test_fw_ocp,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=fw-ocp,femu_mode=1,devsz_mb=64,ocp=on",
+    });
+    qos_add_test("ocp-caps", "femu", femu_test_ocp_caps,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=caps,femu_mode=1,devsz_mb=64,ocp=on",
     });
     qos_add_test("fw-refused", "femu", femu_test_fw_refused,
                  &(QOSGraphTestOptions) {

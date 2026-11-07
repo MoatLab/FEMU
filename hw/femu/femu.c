@@ -560,7 +560,9 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.arbitration     = 0x1f0f0706;
     n->ocp_aen_config           = NVME_OCP_AEN_DEFAULT;
     n->ocp_media_ready_sent     = false;
-    n->features.power_mgmt      = 0;
+    /* with ocp, 02h and C7h come back to their saved values (OCP PWR-5) */
+    n->features.power_mgmt      = n->ocp ? n->power_mgmt_saved : 0;
+    n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
@@ -2457,7 +2459,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->vwc          = n->vwc | (0x2 << 1);
     id->awun         = cpu_to_le16(0);
     id->awupf        = cpu_to_le16(0);
-    id->psd[0].mp    = cpu_to_le16(0x9c4);
+    /* MXPS is 0: Maximum Power counts in 0.01 W */
+    id->psd[0].mp    = cpu_to_le16(n->ps_max_watts * 100);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
 
@@ -2479,6 +2482,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
         NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_CSI_SUPP);
     }
 
+    /* OCP 2.7 NVMe-CFG-12: CPS 11b, NVM subsystem power scope */
+    if (n->ocp) {
+        n->bar.cap |= 3ULL << 46;
+    }
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
     /* 2.x: CC.EN=1 waits for the media; CRTO below gives how long */
@@ -3674,6 +3681,16 @@ static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
  */
 static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
 {
+    /*
+     * Power state 0 and the OCP DSSD power states (C7h) start here: DSSD
+     * states 1 to 127 exist, so a valid one needs a whole watt from 1 up.
+     */
+    if (n->ps_max_watts < 1 || n->ps_max_watts > 127) {
+        error_setg(errp, "ps_max_watts must be 1 to 127");
+        return false;
+    }
+    n->ocp_dssd_ps_saved = n->ps_max_watts;
+    n->power_mgmt_saved = 0;
     if (n->fw_slots > 7) {
         error_setg(errp, "fw_slots must be 0 (auto) to 7");
         return false;
@@ -4415,6 +4432,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
+    DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),

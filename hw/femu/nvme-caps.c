@@ -366,6 +366,7 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return NVME_LIDS_LSUPP;
     case NVME_LOG_OCP_EREC:
     case NVME_LOG_OCP_LATENCY:
+    case NVME_LOG_OCP_DEVCAP:
         return n->ocp ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_PERSISTENT_EVENT:
         /* its LID specific parameter: Establish Context and Read Header */
