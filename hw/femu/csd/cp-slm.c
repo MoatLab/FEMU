@@ -377,6 +377,10 @@ static uint16_t csd_slm_copy_lba_src(FemuCtrl *n, NvmeNamespace *ns,
     if (!(NS_BBSSD(s) || NS_NOSSD(s) || NS_CSD(s))) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* the source is read, so a reservation on it applies (Figure 703) */
+    if (nvme_resv_check(n, s, false)) {
+        return NVME_NS_RESV_CONFLICT;
+    }
     /* stripping protection information is not offered */
     if (femu_pi_type(s)) {
         return NVME_NS_INCOMPATIBLE | NVME_DNR;

@@ -88,6 +88,7 @@ uint16_t kvssd_identify_ns_csi(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     }
     qemu_mutex_lock(&s->lock);
     kvssd_fill_id_ns(s, &id);
+    id.rescap = ns->id_ns.rescap;       /* byte 27, as in the NVM structure */
     qemu_mutex_unlock(&s->lock);
     /* the same sharing and endurance group CNS 08h reports */
     id.nmic = ns->id_ns.nmic;

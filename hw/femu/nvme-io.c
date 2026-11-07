@@ -1665,6 +1665,10 @@ static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
                     !(NS_BBSSD(ns) || NS_NOSSD(ns)))) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* a source is read: its reservation is checked as a read (Figure 703) */
+    if (s != ns && nvme_resv_check(n, s, false)) {
+        return NVME_NS_RESV_CONFLICT;
+    }
     *out = s;
     return NVME_SUCCESS;
 }
@@ -2876,6 +2880,18 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         (cmd->opcode == NVME_CMD_WRITE ||
          nvme_ns_io_effects(n, ns, cmd->opcode))) {
         return NVME_WRITE_TO_RO | NVME_DNR;
+    }
+    /* Reservations (Base 2.3, Figure 703): the read and write groups */
+    if (unlikely(n->reservations) && nvme_resv_ns(n, ns)) {
+        uint16_t status;
+
+        if (nvme_resv_opcode(cmd->opcode)) {
+            return nvme_resv_io(n, ns, cmd);
+        }
+        status = nvme_resv_cmd_check(n, ns, cmd->opcode);
+        if (status) {
+            return status;
+        }
     }
 
     switch (cmd->opcode) {

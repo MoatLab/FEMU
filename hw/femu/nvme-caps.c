@@ -268,6 +268,11 @@ static uint32_t nvme_mode_io_effects(FemuCtrl *n, uint8_t csi, uint8_t mode,
     if (csi == NVME_CSI_CP) {
         return nvme_csi_io_cp[opc];
     }
+    /* Base 2.3, 8.1.24: every command set but Open-Channel */
+    if (nvme_resv_opcode(opc)) {
+        return n->reservations && mode != FEMU_OCSSD_MODE ?
+               NVME_CMD_EFF_CSUPP : 0;
+    }
     eff = nvme_optional_effects(n, csi, opc, &optional);
 
     /*
@@ -375,6 +380,8 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return NVME_LIDS_LSUPP | 1 << 16;
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_ns_mgmt_supported(n) ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_RESV_NOTIFY:
+        return n->reservations ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_LOCKDOWN:
         return n->lockdown ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_SANITIZE:
@@ -459,6 +466,7 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
         { NVME_CMD_WRITE_ZEROES,        NVME_ONCS_WRITE_ZEROS },
         { NVME_CMD_VERIFY,              NVME_ONCS_VERIFY },
         { NVME_CMD_COPY,                NVME_ONCS_COPY },
+        { NVME_CMD_RESV_REGISTER,       NVME_ONCS_RESRVATIONS },
     };
     uint16_t a = 0;
     uint16_t o = n->oncs & NVME_ONCS_FEATURES;

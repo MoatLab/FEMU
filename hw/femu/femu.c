@@ -572,6 +572,7 @@ static void nvme_reset_features(FemuCtrl *n)
     femu_throttle_eval(n);
     /* the next telemetry edge counts from the restored thresholds */
     n->tel_temp_prev = femu_temp_condition(n);
+    nvme_resv_ctrl_reset(n);
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues    = (n->nr_io_queues - 1) |
                                   ((n->nr_io_queues - 1) << 16);
@@ -1519,6 +1520,10 @@ static void nvme_ns_detach_fdp(FemuCtrl *n, NvmeNamespace *ns)
 
 static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
 {
+    /* the slot keeps its reservation state, empty, for the next namespace */
+    NvmeResv *resv = ns->resv;
+
+    nvme_resv_ns_clear(ns);
     nvme_streams_release(ns, true);
     if (ns->ext_ops.ns_exit) {
         ns->ext_ops.ns_exit(n, ns);
@@ -1532,6 +1537,7 @@ static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
         qemu_mutex_destroy(&ns->mdata_lock);
     }
     memset(ns, 0, sizeof(*ns));
+    ns->resv = resv;
 }
 
 static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
@@ -2430,6 +2436,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
     if (n->ocp) {
         id->ctratt |= cpu_to_le32(NVME_CTRATT_UUIDL);
     }
+    /* HIDS: a 128-bit Host Identifier, for reservations */
+    if (n->reservations) {
+        id->ctratt |= cpu_to_le32(1 << 0);
+    }
 
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
@@ -2946,6 +2956,9 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     if (attached && nvme_ns_shared(n)) {
         set_bit(nsid - 1, n->attached_ns);
     }
+    if (n->reservations) {
+        ns->id_ns.rescap = NVME_RESCAP_ALL;
+    }
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);
     return 0;
@@ -3004,6 +3017,7 @@ static void femu_realize_undo(FemuCtrl *n)
     if (n->cxl_dev && femu_cxl_nvme_ops) {
         femu_cxl_nvme_ops->detach(n);
     }
+    nvme_resv_exit(n);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -3838,7 +3852,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp) ||
-        !femu_fw_resolve(n, errp) || !femu_plane_reads_check(n, errp)) {
+        !femu_fw_resolve(n, errp) || !femu_plane_reads_check(n, errp) ||
+        !nvme_resv_check_props(n, errp)) {
         return;
     }
 
@@ -4114,6 +4129,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * shared storage object copies these fields.
      */
     nvme_caps_id_ctrl(n, &n->id_ctrl);
+    /* reservations work on the namespaces that now exist */
+    nvme_resv_realize(n);
 
     nvme_register_extensions(n);
 
@@ -4392,6 +4409,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_stop_ftl_thread(n);
     femu_pel_exit(n);
     femu_fw_exit(n);
+    nvme_resv_exit(n);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -4493,6 +4511,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
+    DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
     DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
@@ -5331,6 +5350,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     /* a power cycle ends a lockdown (Base 2.3, 8.1.5) */
     bitmap_zero(n->lock_opc, 256);
     bitmap_zero(n->lock_fid, 256);
+    nvme_resv_power_loss(n);
     if (n->ocp) {
         femu_ocp_lat_power_cycle(n);
     }
@@ -5461,11 +5481,13 @@ static void femu_instance_finalize(Object *obj)
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
     qemu_mutex_destroy(&n->ocp_lat.lock);
+    qemu_mutex_destroy(&n->rn_lock);
 }
 
 static void femu_instance_init(Object *obj)
 {
     qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
+    qemu_mutex_init(&FEMU(obj)->rn_lock);
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);

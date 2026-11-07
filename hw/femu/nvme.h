@@ -849,6 +849,10 @@ enum NvmeIoCommands {
     NVME_CMD_IO_MGMT_RECV       = 0x12,
     NVME_CMD_COPY               = 0x19,
     NVME_CMD_IO_MGMT_SEND       = 0x1d,
+    NVME_CMD_RESV_REGISTER      = 0x0d,
+    NVME_CMD_RESV_REPORT        = 0x0e,
+    NVME_CMD_RESV_ACQUIRE       = 0x11,
+    NVME_CMD_RESV_RELEASE       = 0x15,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
@@ -1086,6 +1090,7 @@ enum NvmeStatusCodes {
     NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
+    NVME_HOSTID_INCONSISTENT    = 0x0018,   /* 64 and 128 bit at once */
     NVME_INVALID_SGL_SEG_DESCR  = 0x000d,
     NVME_INVALID_NUM_SGL_DESCRS = 0x000e,
     NVME_DATA_SGL_LEN_INVALID   = 0x000f,
@@ -1287,6 +1292,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
+    NVME_LOG_RESV_NOTIFY        = 0x80,
     NVME_LOG_SANITIZE           = 0x81,
     NVME_LOG_CP_PROGRAM_LIST    = 0x82,     /* CP 1.2, 4.1.4 */
     NVME_LOG_CP_PROGRAM_TYPES   = 0x83,
@@ -1612,6 +1618,9 @@ enum NvmeFeatureIds {
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_HOST_IDENTIFIER            = 0x81,
+    NVME_RESV_NOTIFY_MASK           = 0x82,
+    NVME_RESV_PERSISTENCE           = 0x83,
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_POWER_STATE       = 0xc7,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
@@ -1785,6 +1794,7 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_FW_ACTIVATION (1u << 9)
 #define NVME_AEC_TELEMETRY  (1u << 10)  /* Telemetry Log Notices */
 #define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
+#define NVME_AER_INFO_RESV_LOG  0x00    /* I/O specific: log 80h has pages */
 #define NVME_AER_INFO_FW_ACT    0x01    /* notice: Firmware Activation Starting */
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 #define NVME_AEC_RGCNS      (1u << 17)  /* Reachability Group Change Notices */
@@ -2148,6 +2158,40 @@ typedef struct FemuExtCtrlOps {
     uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
 } FemuExtCtrlOps;
 
+/*
+ * A registrant of a namespace (Base 2.3, 8.1.24): a host and its key. With
+ * Host Identifier 0 the host is @ctrl until its reset changes @epoch.
+ */
+typedef struct NvmeRegistrant {
+    bool            used;
+    bool            ext;            /* 128-bit Host Identifier */
+    uint8_t         hostid[16];
+    struct FemuCtrl *ctrl;
+    uint32_t        epoch;
+    uint64_t        key;
+} NvmeRegistrant;
+
+typedef struct NvmeResv {
+    QemuMutex       lock;
+    uint32_t        gen;
+    uint8_t         rtype;          /* 0: no reservation */
+    int             holder;         /* registrant index, -1 for none */
+    bool            ptpl;
+    uint8_t         mask;           /* feature 82h, a namespace setting */
+    int             nr;             /* grows: registrations outlive hosts */
+    NvmeRegistrant  *reg;
+} NvmeResv;
+
+typedef struct NvmeResvNote {
+    uint64_t        lpc;
+    uint8_t         type;
+    uint32_t        nsid;
+} NvmeResvNote;
+
+#define NVME_RESV_NOTES 32
+/* RESCAP: PTPL, the six types, and IEKEY as in Base 1.3 and later */
+#define NVME_RESCAP_ALL 0xff
+
 typedef struct NvmeNamespace {
     struct FemuCtrl *ctrl;
     NvmeIdNs        id_ns;
@@ -2167,6 +2211,7 @@ typedef struct NvmeNamespace {
      * NULL when the format has none.
      */
     uint8_t         *mdata;
+    NvmeResv        *resv;          /* with reservations=on */
     uint64_t        mdata_len;
     /*
      * Held while a block's data and metadata change or are read together, so
@@ -2732,6 +2777,17 @@ typedef struct FemuCtrl {
     bool            lockdown;
     DECLARE_BITMAP(lock_opc, 256);
     DECLARE_BITMAP(lock_fid, 256);
+    /* Reservations: the host, its notices (log 80h) and their masks */
+    bool            reservations;
+    uint8_t         hostid[16];
+    bool            hostid_ext;
+    uint32_t        host_epoch;
+    QemuMutex       rn_lock;
+    NvmeResvNote    rn_queue[NVME_RESV_NOTES];
+    int             rn_head;
+    int             rn_len;
+    uint64_t        rn_lpc;
+    bool            rn_gone;        /* leaving: no more notices */
     NvmeSanitizeState sanitize;
     /*
      * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set
@@ -3305,6 +3361,24 @@ void femu_throttle_eval(FemuCtrl *n);
 #define FEMU_TEL_TEST           (1u << 9)
 void femu_tel_capture(FemuCtrl *n, uint32_t reasons);
 void femu_tel_temp_edge(FemuCtrl *n);
+/* nvme-resv.c */
+bool nvme_resv_opcode(uint8_t opc);
+bool nvme_resv_ns(FemuCtrl *n, NvmeNamespace *ns);
+bool nvme_resv_fid(uint8_t fid);
+uint16_t nvme_resv_io(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd);
+uint16_t nvme_resv_check(FemuCtrl *n, NvmeNamespace *ns, bool write);
+uint16_t nvme_resv_cmd_check(FemuCtrl *n, NvmeNamespace *ns, uint8_t opc);
+uint16_t nvme_resv_admin_check(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t nvme_resv_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t nvme_resv_set_feature(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t nvme_resv_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len, uint64_t off,
+                       bool rae);
+void nvme_resv_ns_clear(NvmeNamespace *ns);
+void nvme_resv_ctrl_reset(FemuCtrl *n);
+void nvme_resv_power_loss(FemuCtrl *n);
+bool nvme_resv_check_props(FemuCtrl *n, Error **errp);
+void nvme_resv_realize(FemuCtrl *n);
+void nvme_resv_exit(FemuCtrl *n);
 bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_temp_condition(FemuCtrl *n);

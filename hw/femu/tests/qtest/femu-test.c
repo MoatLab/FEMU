@@ -19349,6 +19349,213 @@ static void femu_test_lockdown_off(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* a reservation command on namespace 1; @data is 16 bytes in @buf */
+static uint16_t femu_resv(FemuCtrlState *c, uint8_t opc, uint32_t dw10,
+                          uint32_t dw11, uint64_t buf, uint64_t k1,
+                          uint64_t k2)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+
+    qtest_writeq(qts, buf, cpu_to_le64(k1));
+    qtest_writeq(qts, buf + 8, cpu_to_le64(k2));
+    cmd.opcode = opc;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return femu_io(c, &cmd);
+}
+
+/* Reservation Report into @buf: 4 KiB, extended layout if @eds */
+static uint16_t femu_resv_report(FemuCtrlState *c, uint64_t buf, bool eds)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = 0x0e;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1023);
+    cmd.cdw11 = cpu_to_le32(eds);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * Reservations (Base 2.3, 8.1.24) on one controller. Host Identifier 0
+ * makes the controller host X. X registers key A and holds Write
+ * Exclusive. A non-zero Host Identifier then makes the same controller a
+ * new host Y, which does not hold it: writes conflict, reads do not. Y
+ * registers B and preempts A as Write Exclusive - Registrants Only; X's
+ * controller gets a Registration Preempted page in log 80h. Release,
+ * clear, the generation count, PTPL, the mask and the reset of the Host
+ * Identifier follow.
+ */
+static void femu_test_resv(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, FEMU_DATA_SIZE);
+    const uint64_t ka = 0xa1, kb = 0xb2;
+    uint8_t r[128];
+    uint32_t res = 0;
+    uint16_t cntlid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 520) & (1 << 5), ==, 1 << 5);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & 1, ==, 1);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 31), ==, 0xff);
+
+    /* nothing yet */
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 4), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 5), ==, 0);
+
+    /* register A twice; B from the same host conflicts */
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, ka), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, ka), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, kb), ==, 0x083);
+
+    /* acquire WE; again the same type works, another type conflicts */
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, ka, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, ka, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x11, 2 << 8, 0, buf, ka, 0), ==, 0x083);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, kb, 0), ==, 0x083);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8 | 1 << 3, 0, buf, ka, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 48);
+    g_assert_cmpuint(ldl_le_p(r), ==, 2);               /* GEN */
+    g_assert_cmpuint(r[4], ==, 1);                      /* RTYPE: WE */
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmpuint(lduw_le_p(r + 24), ==, cntlid);
+    g_assert_cmpuint(r[26], ==, 1);                     /* holds it */
+    g_assert_cmphex(ldq_le_p(r + 40), ==, ka);
+    /* the holder writes */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+
+    /* a 128-bit Host Identifier: the controller is now host Y */
+    qtest_memset(qts, buf, 0x5a, 16);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x81);
+        cmd.cdw11 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x00c);
+    }
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, 0x018);
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 128);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmphex(lduw_le_p(r + 64), ==, 0xffff);     /* X: no controller */
+    g_assert_cmpuint(r[66], ==, 1);
+
+    /* Y holds nothing: a write conflicts, a read does not */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x083);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, kb), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x083);
+
+    /*
+     * Y preempts A as WERO and X goes. X's controller is now host Y, the
+     * issuer, so no notice is made: log 80h reads empty.
+     */
+    g_assert_cmphex(femu_resv(&c, 0x11, 3 << 8 | 1, 0, buf, kb, ka), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x80, buf, 64, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);     /* empty */
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 128);
+    g_assert_cmpuint(r[4], ==, 3);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmpuint(lduw_le_p(r + 64), ==, cntlid);
+    g_assert_cmphex(ldq_le_p(r + 72), ==, kb);
+    g_assert_cmphex(r[80], ==, 0x5a);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+
+    /* release: the type must match; then nothing is held */
+    g_assert_cmphex(femu_resv(&c, 0x15, 1 << 8, 0, buf, kb, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv(&c, 0x15, 3 << 8, 0, buf, kb, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x15, 3 << 8, 0, buf, kb, 0), ==,
+                    NVME_SUCCESS);
+    /* PTPL by Set Features and by Register; then clear */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x83, false, 1, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x83, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x83, 0, 0xffffffff, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 2u << 30 | 2, 0, buf, kb, kb), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x15, 1, 0, buf, kb, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 64);
+    /* register A, A, B, preempt, replace, clear */
+    g_assert_cmpuint(ldl_le_p(r), ==, 6);
+    g_assert_cmpuint(r[4], ==, 0);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 0);
+    g_assert_cmpuint(r[9], ==, 0);                      /* PTPL cleared */
+
+    /* the mask is namespace state; a reset clears the Host Identifier */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x82, false, 1, 0x2, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x82, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x82, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x2);              /* namespace state stays */
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/* without the property: ONCS bit 5 clear, no commands, no features */
+static void femu_test_resv_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 520) & (1 << 5), ==, 0);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, 1), ==,
+                    NVME_INVALID_OPCODE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x83, 0, 1, 0, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 #define FEMU_ADM_GET_LBA_STATUS  0x86
 #define FEMU_LOG_LBA_STATUS      0x0e
 
@@ -49869,6 +50076,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"
     });
+    qos_add_test("resv", "femu", femu_test_resv,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "reservations=on,femu_mode=1,devsz_mb=64",
+    });
+    qos_add_test("resv-off", "femu", femu_test_resv_off, NULL);
     qos_add_test("lockdown", "femu", femu_test_lockdown,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "lockdown=on",

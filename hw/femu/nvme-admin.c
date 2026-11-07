@@ -35,6 +35,9 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
     [NVME_OCP_DSSD_POWER_STATE]     = true,
+    [NVME_HOST_IDENTIFIER]          = true,
+    [NVME_RESV_NOTIFY_MASK]         = true,
+    [NVME_RESV_PERSISTENCE]         = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -52,6 +55,9 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_HCTM]                     = NVME_FEAT_CAP_CHANGE,
+    [NVME_HOST_IDENTIFIER]          = NVME_FEAT_CAP_CHANGE,
+    [NVME_RESV_NOTIFY_MASK]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    [NVME_RESV_PERSISTENCE]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
@@ -118,6 +124,10 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->subsys && n->subsys->endgrp.fdp.enabled;
     case NVME_HCTM:
         return femu_hctm_supported(n);
+    case NVME_HOST_IDENTIFIER:
+    case NVME_RESV_NOTIFY_MASK:
+    case NVME_RESV_PERSISTENCE:
+        return n->reservations;
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1675,6 +1685,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    if (nvme_resv_fid(fid)) {
+        return nvme_resv_get_feature(n, cmd, cqe);
+    }
 
     /* OCP GETF-4: C7h has NVM subsystem scope, NSID 0 or FFFFFFFFh */
     if (fid == NVME_OCP_DSSD_POWER_STATE && nsid &&
@@ -1865,6 +1878,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     /* an identifier the controller does not support is an invalid field */
     if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (nvme_resv_fid(fid)) {
+        return nvme_resv_set_feature(n, cmd);
     }
 
     if (save && !(nvme_feat_cap(n, fid) & NVME_FEAT_CAP_SAVE)) {
@@ -4045,6 +4061,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fid_effects(n, cmd, csi, len, off);
     case NVME_LOG_MI_EFFECTS:
         return nvme_mi_effects(n, cmd, len, off);
+    case NVME_LOG_RESV_NOTIFY:
+        if (!n->reservations) {
+            return NVME_INVALID_LOG_ID | NVME_DNR;
+        }
+        return nvme_resv_log(n, cmd, len, off, rae);
     case NVME_LOG_LOCKDOWN:
         if (!n->lockdown) {
             return NVME_INVALID_LOG_ID | NVME_DNR;
@@ -5117,6 +5138,13 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (nvme_locked_out(n, cmd)) {
         return NVME_CMD_PROHIBITED | NVME_DNR;
+    }
+    if (n->reservations) {
+        uint16_t status = nvme_resv_admin_check(n, cmd);
+
+        if (status) {
+            return status;
+        }
     }
 
     switch (cmd->opcode) {

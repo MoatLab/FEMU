@@ -659,6 +659,7 @@ Namespace Management.
 | NVMe-MI Commands Supported and Effects | 13h | all zero: no NVMe-MI Send or Receive |
 | Command and Feature Lockdown | 14h | with `lockdown=on`: what the Lockdown command (24h) can prohibit, and what the admin queue refuses now; no Management Endpoint, so Contents 10b is Invalid Field |
 | FDP Configurations, RUH Usage, Statistics, Events | 20h-23h | with FDP |
+| Reservation Notification | 80h | with `reservations=on`: the oldest notice of the queue (32 pages), which the read removes; an empty queue reads as zeroes |
 | Sanitize Status | 81h | |
 | Changed Zone List | BFh | ZNS, from the mode |
 | Chunk Information | CAh | Open-Channel 2.0, from the mode |

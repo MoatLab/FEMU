@@ -228,6 +228,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slot 1 is read only; with 2 or more, Firmware Image Download and "
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
+    { "reservations",
+      "Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire and Release, the Host Identifier (81h), Reservation Notification Mask (82h) and Reservation Persistence (83h) features, and log 80h; ONCS bit 5; not with Open-Channel; off (default)" },
     { "lockdown",
       "Command and Feature Lockdown: the Lockdown command (24h), log 14h "
       "and OACS bit 10; the host can prohibit most admin commands and "
