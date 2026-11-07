@@ -448,7 +448,8 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
     };
     uint16_t a = 0;
     uint16_t o = n->oncs & NVME_ONCS_FEATURES;
-    uint8_t lpa = NVME_LPA_NS_SMART | NVME_LPA_EXTENDED;
+    /* OCP 2.7 STD-LOG-18: no SMART per namespace */
+    uint8_t lpa = (n->ocp ? 0 : NVME_LPA_NS_SMART) | NVME_LPA_EXTENDED;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(oacs); i++) {

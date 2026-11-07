@@ -1525,7 +1525,7 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
             result = 0;
             break;
         }
-        result = NVME_TEMPERATURE_WARNING;
+        result = n->ocp ? NVME_OCP_WCTEMP : NVME_TEMPERATURE_WARNING;
         break;
     case NVME_VOLATILE_WRITE_CACHE:
         /* only a controller that reports a write cache has the feature */
@@ -1877,7 +1877,13 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          * unwritten block is an error, so change it with the dataplane
          * stopped, as the write cache setting alongside does.
          */
-        bool resume = nvme_pause_pollers(n);
+        bool resume;
+
+        /* with ocp NSFEAT.DAE is clear, so DULBE (bit 16) is not offered */
+        if (n->ocp && (dw11 & (1 << 16))) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        resume = nvme_pause_pollers(n);
 
         if (nsid == NVME_NSID_BROADCAST) {
             for (uint32_t i = 0; i < n->namespace_limit; i++) {
@@ -2838,6 +2844,10 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      */
     if (nsid && nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
         return NVME_INVALID_NSID | NVME_DNR;
+    }
+    /* with ocp, LPA bit 0 is clear: the page is the controller's only */
+    if (n->ocp && nsid && nsid != NVME_NSID_BROADCAST) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     /*

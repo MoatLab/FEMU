@@ -559,7 +559,8 @@ static void nvme_reset_features(FemuCtrl *n)
 
     n->features.arbitration     = 0x1f0f0706;
     n->features.power_mgmt      = 0;
-    n->features.temp_thresh     = NVME_TEMPERATURE_WARNING;
+    n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
+                                           NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues    = (n->nr_io_queues - 1) |
@@ -855,8 +856,13 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             nvme_clear_ctrl(n, shutdown);
             n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED |
                              (CSTS_SHST_MASK << CSTS_SHST_SHIFT));
-            /* the Timestamp is not kept across a Controller Level Reset */
-            nvme_timestamp_set(n, 0, 0);
+            /*
+             * The Timestamp is not kept across a Controller Level Reset,
+             * except with ocp (OCP 2.7 NVMe-OPT-4).
+             */
+            if (!n->ocp) {
+                nvme_timestamp_set(n, 0, 0);
+            }
             n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
             femu_pel_reset(n);
             n->bar.cc = data;
@@ -1405,6 +1411,10 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
     id_ns->nsfeat        |= (0x4 | 0x10);
+    /* OCP 2.7 NVMe-AD-28: no Deallocated or Unwritten Logical Block error */
+    if (n->ocp) {
+        id_ns->nsfeat &= ~0x4;
+    }
     /*
      * atomic_write_lbas: the normal atomic unit, in boundaries of the same
      * size from block 0. NAWUPF 0 keeps the controller's one-block power-fail
@@ -1960,6 +1970,12 @@ static int nvme_check_ocp_namespaces(FemuCtrl *n, const uint8_t *modes,
         error_setg(errp, "ocp is not supported with a femu-subsys");
         return -1;
     }
+    /* CAP.CSS has the NVM command set only, so no CSI-selected namespace */
+    if (CSD_SLM(n) || CSD_CP(n)) {
+        error_setg(errp, "ocp is not supported with the CSD memory or "
+                   "program namespaces (csd_slm_size, csd_cp)");
+        return -1;
+    }
     /* a deleted namespace would take its media history out of C0h */
     if (n->ns_mgmt) {
         error_setg(errp, "ocp is not supported with ns_mgmt");
@@ -2370,8 +2386,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->rab          = 6;
     id->cntrltype    = 0x1;     /* an I/O controller */
-    id->wctemp       = cpu_to_le16(NVME_TEMPERATURE_WARNING);
-    id->cctemp       = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
+    id->wctemp       = cpu_to_le16(n->ocp ? NVME_OCP_WCTEMP :
+                                            NVME_TEMPERATURE_WARNING);
+    id->cctemp       = cpu_to_le16(n->ocp ? NVME_OCP_CCTEMP :
+                                            NVME_TEMPERATURE_CRITICAL);
     id->ieee[0]      = 0x00;
     id->ieee[1]      = 0x02;
     id->ieee[2]      = 0xb3;
@@ -2441,7 +2459,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     /* NVM plus sets chosen by CSI; NOIOCSS would claim no I/O set at all */
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_CSI_SUPP);
+    /* OCP 2.7 NVMe-CFG-13: the NVM command set only, no CSI selection */
+    if (!n->ocp) {
+        NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_CSI_SUPP);
+    }
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);

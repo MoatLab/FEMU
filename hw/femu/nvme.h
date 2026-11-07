@@ -332,6 +332,13 @@ typedef struct NvmeSubsystem {
     } params;
 } NvmeSubsystem;
 
+/*
+ * The temperature thresholds Identify reports. OCP 2.7 fixes them at 77 C
+ * and 85 C (TTHROTTLE-9, TTHROTTLE-10).
+ */
+#define NVME_OCP_WCTEMP     0x15e
+#define NVME_OCP_CCTEMP     0x166
+
 static inline bool nvme_subsys_rotational(NvmeSubsystem *subsys)
 {
     return subsys && subsys->params.rotational;

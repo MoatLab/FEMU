@@ -36784,6 +36784,41 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(qtest_readl(qts, buf + 4 * NVME_ADM_CMD_GET_LOG_PAGE),
                     ==, on ? 1 | 1u << 19 : 1);
 
+    /*
+     * The values OCP 2.7 fixes where base NVMe leaves a choice: CAP.CSS
+     * bit 6, NSFEAT.DAE, LPA bit 0, WCTEMP and CCTEMP; then DULBE and SMART
+     * per namespace refused, and the Timestamp kept over a reset.
+     */
+    {
+        uint64_t cap = qpci_io_readq(c.pdev, c.bar, 0);
+        NvmeIdNs ns;
+        uint64_t ts = 0x123456789aULL;
+
+        g_assert_cmpuint((cap >> 37) & 0x40, ==, on ? 0 : 0x40);
+        g_assert_cmpuint(id.lpa & 1, ==, on ? 0 : 1);
+        g_assert_cmphex(le16_to_cpu(id.wctemp), ==, on ? 0x15e : FEMU_WCTEMP);
+        g_assert_cmphex(le16_to_cpu(id.cctemp), ==, on ? 0x166 : 0x175);
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmphex(ns.nsfeat & 0x4, ==, on ? 0 : 0x4);
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, NVME_ERROR_RECOVERY,
+                                                 false, 1, 1 << 16, NULL)),
+                        ==, on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log_ns(&c, 0x02, 0, 1, 0, buf, 512), ==,
+                        on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+        qtest_writeq(qts, buf, ts);
+        g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==,
+                        NVME_SUCCESS);
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        qtest_memset(qts, buf, 0, 8);
+        g_assert_cmphex(femu_timestamp(&c, false, 0, 0, buf), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint((qtest_readq(qts, buf) & 0xffffffffffffULL) >= ts, ==,
+                        on);
+    }
+
     if (!on) {
         /* no UUID selection: the index is ignored, C0h is the FEMU page */
         for (uint8_t u = 0; u <= 1; u++) {
@@ -36961,6 +36996,7 @@ static void femu_test_ocp_refused(void *obj, void *data,
         "'femu_mode':0,'lver':1",
         "'femu_mode':1,'subsys':'ocpsub'",
         "'femu_mode':1,'ns_mgmt':true",
+        "'femu_mode':4,'fdm_size':16,'csd_slm_size':4",
         "'femu_mode':1,'namespaces':2,'namespace_modes':'bbssd,,znssd,',"
         "'secsz':512,'secs_per_pg':8,'pgs_per_blk':64,'blks_per_pl':80,"
         "'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
