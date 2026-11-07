@@ -21513,6 +21513,25 @@ static uint64_t femu_vm_size_kb(QTestState *qts)
     return g_ascii_strtoull(line + strlen("VmSize:"), NULL, 10);
 }
 
+/*
+ * The process's resident memory from smaps_rollup, in KiB, for the log:
+ * VmSize is the check, as a leaked backend is address space even when its
+ * pages were never touched or could not be locked.
+ */
+static uint64_t femu_rss_kb(QTestState *qts)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%d/smaps_rollup",
+                                            qtest_pid(qts));
+    g_autofree char *text = NULL;
+    const char *line;
+
+    if (!g_file_get_contents(path, &text, NULL, NULL)) {
+        return 0;
+    }
+    line = strstr(text, "\nRss:");
+    return line ? g_ascii_strtoull(line + strlen("\nRss:"), NULL, 10) : 0;
+}
+
 #define FEMU_LIFECYCLE_CYCLES  4
 #define FEMU_LIFECYCLE_MB      256
 #define FEMU_LIFECYCLE_SLOT    9
@@ -21568,9 +21587,12 @@ static void femu_test_lifecycle(void *obj, void *data, QGuestAllocator *alloc)
         if (i == 0) {
             base = now;
         }
-        g_test_message("cycle %d: VmSize %" PRIu64 " KiB", i, now);
+        g_test_message("cycle %d: VmSize %" PRIu64 " KiB (%+" PRId64
+                       "), Rss %" PRIu64 " KiB", i, now,
+                       (int64_t)now - (int64_t)base, femu_rss_kb(qts));
+        /* stop at the first cycle past the bound, before more leaks pile up */
+        g_assert_cmpuint(now, <, base + 64 * 1024);
     }
-    g_assert_cmpuint(now, <, base + 64 * 1024);
 }
 
 /*
@@ -51630,6 +51652,9 @@ static void femu_register_nodes(void)
         .arg = (void *)"\"femu_mode\":4,\"fdm_size\":64" });
     qos_add_test("lifecycle-ocssd", "femu", femu_test_lifecycle,
                  &(QOSGraphTestOptions) { .arg = (void *)"\"femu_mode\":0" });
+    qos_add_test("lifecycle-ocssd12", "femu", femu_test_lifecycle,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"\"femu_mode\":0,\"lver\":1" });
     qos_add_test("gc-seed-d-choice", "femu", femu_test_gc_seed,
                  &(QOSGraphTestOptions) { .arg = (void *)"d-choice" });
     qos_add_test("gc-seed-random", "femu", femu_test_gc_seed,
