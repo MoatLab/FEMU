@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "ftl.h"
 #include "ftl-internal.h"
+#include "../trace.h"
 
 /* victim-line priority-queue callbacks */
 static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
@@ -730,6 +731,8 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
         blk->erase_cnt++;
     }
     ssd->total_erases++;
+    trace_femu_erase(ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk,
+                     blk->erase_cnt);
     blk->read_cnt = 0; /* the stress an erase clears */
     blk->wp = 0;
     if (exp_watch_blk[ppa->g.blk])
@@ -1688,6 +1691,7 @@ int do_gc(struct ssd *ssd, bool force)
     if (!victim_line) {
         return -1;
     }
+    trace_femu_gc_victim(victim_line->id, victim_line->vpc, victim_line->ipc);
 
     if (ssd->n->streams && victim_line->vpc && !ssd->lm.free_line_cnt) {
         pqueue_insert(ssd->lm.victim_line_pq, victim_line);

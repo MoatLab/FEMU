@@ -24,6 +24,7 @@
  */
 
 #include "./nvme.h"
+#include "trace.h"
 
 #define FEMU_NPSS           3
 #define FEMU_PS_NONOP       3
@@ -144,6 +145,7 @@ static void femu_power_advance(FemuCtrl *n, int64_t now)
             break;
         }
         base += itpt;
+        trace_femu_power_state(n->ps_cur, itps);
         n->ps_cur = itps;
         n->ps_entered = base;
     }
@@ -151,6 +153,7 @@ static void femu_power_advance(FemuCtrl *n, int64_t now)
 
 static void femu_power_enter(FemuCtrl *n, uint8_t ps, int64_t now)
 {
+    trace_femu_power_state(n->ps_cur, ps);
     n->ps_cur = ps;
     n->ps_entered = now;
     if (ps != FEMU_PS_NONOP) {

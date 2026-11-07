@@ -2,6 +2,7 @@
 #include "nvme-pi.h"
 #include "csd/csd.h"
 #include "kvssd/kvssd.h"
+#include "trace.h"
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
@@ -675,6 +676,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     if (n->print_log) {
         femu_debug("%s,req,lba:%lu,lat:%lu\n", n->devname, req->slba, req->reqlat);
     }
+    trace_femu_cqe(cq->cqid, req->cqe.cid, req->status, req->reqlat);
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
@@ -1020,6 +1022,8 @@ void *nvme_poller(void *arg)
     int index = ((NvmePollerThreadArgument *)arg)->index;
     int i;
 
+    /* the log trace backend reads its file under RCU */
+    rcu_register_thread();
     switch (n->multipoller_enabled) {
     case 1:
         while (!n->poller_stopping) {
@@ -1121,6 +1125,7 @@ void *nvme_poller(void *arg)
 
     n->poller_in_sweep[index] = false;
 
+    rcu_unregister_thread();
     return NULL;
 }
 
@@ -2852,6 +2857,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
+    trace_femu_io_cmd(cmd->cid, nsid, cmd->opcode);
     req->ns = ns = nvme_ns(n, nsid);
     if (!ns) {
         if (nvme_ns_mgmt_supported(n) && nsid && nsid <= n->namespace_limit) {

@@ -2648,6 +2648,8 @@ static void *femu_ftl_thread(void *arg)
         usleep(100000);
     }
 
+    /* the log trace backend reads its file under RCU */
+    rcu_register_thread();
     while (!n->ftl_stopping) {
         /*
          * Pair with nvme_pause_pollers(): publish that this pass is running,
@@ -2767,6 +2769,7 @@ static void *femu_ftl_thread(void *arg)
         }
     }
 
+    rcu_unregister_thread();
     return NULL;
 }
 

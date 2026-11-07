@@ -17458,6 +17458,46 @@ static void femu_test_pci_pm(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/*
+ * QEMU trace points (hw/femu/trace-events): QMP lists the eight femu_*
+ * events, one turns on, and commands still run with it on.
+ */
+static void femu_test_trace_events(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QList *list;
+    bool io = false;
+    QListEntry *e;
+
+    rsp = qtest_qmp(qts, "{'execute':'trace-event-get-state','arguments':"
+                    "{'name':'femu_*'}}");
+    list = qdict_get_qlist(rsp, "return");
+    g_assert_cmpuint(qlist_size(list), ==, 8);
+    QLIST_FOREACH_ENTRY(list, e) {
+        QDict *ev = qobject_to(QDict, qlist_entry_obj(e));
+
+        io |= !strcmp(qdict_get_str(ev, "name"), "femu_io_cmd");
+    }
+    g_assert_true(io);
+    qobject_unref(rsp);
+    qtest_qmp_assert_success(qts, "{'execute':'trace-event-set-state',"
+                             "'arguments':{'name':'femu_admin_cmd',"
+                             "'enable':true}}");
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    qtest_qmp_assert_success(qts, "{'execute':'trace-event-set-state',"
+                             "'arguments':{'name':'femu_admin_cmd',"
+                             "'enable':false}}");
+    guest_free(alloc, buf);
+}
+
 /* a PI read or write with a 48-bit reference tag: CDW3 bits 15:0, CDW14 */
 static uint16_t femu_pi64_io(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
                              uint64_t dbuf, uint64_t mbuf, uint8_t prinfo,
@@ -54389,6 +54429,7 @@ static void femu_register_nodes(void)
         .arg = GUINT_TO_POINTER(8),
         .edge.extra_device_opts = "pi=on,meta=8,mc=3,oncs=0x19f,mdts=1"
     });
+    qos_add_test("trace-events", "femu", femu_test_trace_events, NULL);
     qos_add_test("pci-pm", "femu", femu_test_pci_pm,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "pci_pm=on"

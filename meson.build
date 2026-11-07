@@ -3684,6 +3684,7 @@ if have_system
     'hw/char',
     'hw/display',
     'hw/dma',
+    'hw/femu',
     'hw/fsi',
     'hw/hyperv',
     'hw/i2c',

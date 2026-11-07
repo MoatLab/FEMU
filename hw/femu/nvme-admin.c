@@ -3,6 +3,7 @@
 #include "./kvssd/kvssd.h"
 #include "./ocssd/oc-timing.h"
 #include "system/qtest.h"
+#include "trace.h"
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
@@ -3992,6 +3993,7 @@ static uint16_t nvme_sanitize_finish(FemuCtrl *n)
     stw_le_p(ev + 2, qatomic_read(&sanitize->sstat));
     stl_le_p(ev + 8, NVME_NSID_BROADCAST);
     femu_pel_log(n, NVME_PEL_SANITIZE_COMPLETION, 2, ev, 12);
+    trace_femu_sanitize(sanitize->cdw10, true);
     if (n->sanitize_ms) {
         nvme_enqueue_event(n, NVME_AER_TYPE_IO_SPECIFIC,
                            unexpected ? NVME_AER_INFO_SANITIZED_DEALLOC :
@@ -4058,6 +4060,7 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     /* a new operation clears the completion event of the last one */
     nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE, 0,
                          true);
+    trace_femu_sanitize(dw10, false);
     sanitize->cdw10 = dw10;
     sanitize->cdw11 = le32_to_cpu(cmd->cdw11);
     if (!n->sanitize_ms) {
@@ -5364,6 +5367,7 @@ static bool nvme_sanitize_allows(NvmeCmd *cmd)
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
+    trace_femu_admin_cmd(cmd->cid, cmd->opcode);
     /* admin data is always moved by PRP over PCIe */
     if (cmd->psdt != NVME_PSDT_PRP) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -5606,6 +5610,7 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
     NvmeAsyncEvent *dup;
     uint32_t ctrl_queued = 0;
 
+    trace_femu_aer_enqueue(event_type, event_info, log_page, nsid);
     event = g_new0(NvmeAsyncEvent, 1);
     event->result.event_type = event_type;
     event->result.event_info = event_info;
