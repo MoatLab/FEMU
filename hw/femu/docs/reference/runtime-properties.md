@@ -25,6 +25,12 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | --- | --- | --- |
 | `simulate-power-loss` | `bool` | Write-only: setting true on a realized controller with power_loss=on drops the write buffer and resets the controller as a power cut would |
 
+### ANA path state
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `ana-state` | `string` | with ana=on: "g:s" sets the ANA state of group g (the namespace ID) through this controller: 1 Optimized, 2 Non-Optimized, 3 Inaccessible, 4 Persistent Loss; reading lists every group |
+
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
 ### Cache tunables (also accepted on -device)

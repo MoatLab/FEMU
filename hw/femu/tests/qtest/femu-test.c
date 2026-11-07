@@ -38722,6 +38722,167 @@ static void femu_test_plane_reads_timing(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* qom-set the ANA state "g:s" of device "anac" */
+static void femu_ana_set(QTestState *qts, const char *gs)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/anac',"
+                             "'property':'ana-state','value':%s}}", gs);
+}
+
+/* Get Log 0Ch, 4 KiB, RGO as asked, RAE clear */
+static uint16_t femu_ana_log(FemuCtrlState *c, uint64_t buf, bool rgo)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(0xffffffff);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c | (rgo ? 1u << 8 : 0) | 1023u << 16);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * ANA reporting (Base 2.3, 8.1.1): the Identify fields, log 0Ch with one
+ * group per namespace, RGO, and a path change through ana-state: the ANA
+ * Change notice, the Change Counts, and I/O status 302h (Inaccessible) and
+ * 301h (Persistent Loss). A reset restarts the counts and keeps the state.
+ */
+static void femu_test_ana(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    uint8_t l[64];
+    uint32_t res = 0;
+    uint16_t cid, want;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 76) & 8, ==, 8);         /* CMIC */
+    g_assert_cmpuint(qtest_readb(qts, buf + 342), ==, 10);          /* ANATT */
+    g_assert_cmphex(qtest_readb(qts, buf + 343), ==, 0x0f);
+    g_assert_cmpuint(qtest_readl(qts, buf + 344), >=, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf + 348), ==,
+                     qtest_readl(qts, buf + 344));
+    g_assert_cmphex(qtest_readl(qts, buf + 92) & (1u << 11), ==, 1u << 11);
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 92), ==, 1);            /* group */
+
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 0);
+    g_assert_cmpuint(lduw_le_p(l + 8), ==, 1);
+    g_assert_cmpuint(ldl_le_p(l + 16), ==, 1);                      /* AGID */
+    g_assert_cmpuint(ldl_le_p(l + 20), ==, 1);                      /* NNV */
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 1);
+    g_assert_cmpuint(l[32], ==, 1);                                 /* Opt */
+    g_assert_cmpuint(ldl_le_p(l + 48), ==, 1);                      /* NSID */
+    /* RGO: the reply is shorter, so clear what the last read left */
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_ana_log(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldl_le_p(l + 20), ==, 0);
+    g_assert_cmpuint(ldl_le_p(l + 48), ==, 0);
+
+    /* Inaccessible: the notice comes, the counts move, I/O gets 302h */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 11,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_ana_set(qts, "1:3");
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x0c0302);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==, 0x302);
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 1);
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 2);
+    g_assert_cmpuint(l[32], ==, 3);
+    /* admin commands still run */
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+
+    /* back to Non-Optimized: reads work */
+    femu_ana_set(qts, "1:2");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    /* a bad value is refused */
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state','value':'1:5'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    /*
+     * Notices off, a change, notices on: the change not yet read is
+     * reported then (Base 2.3, 5.2.26.1.5).
+     */
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_ana_set(qts, "1:1");
+    want = femu_aer(&c);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 11,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x0c0302);
+    /* Persistent Loss: 301h, and the state is final */
+    femu_ana_set(qts, "1:4");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x301);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state','value':'1:1'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state'}}");
+    g_assert_cmpstr(qdict_get_str(rsp, "return"), ==, "1:4");
+    qobject_unref(rsp);
+
+    /* a reset: Change Counts restart, the state stays */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 0);
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 1);
+    g_assert_cmpuint(l[32], ==, 4);
+    /* the group in the command set independent structure (CNS 08h) */
+    g_assert_cmphex(femu_identify(&c, 1, 0x08, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 1);
+
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/* without the property: no ANA reporting, no log 0Ch */
+static void femu_test_ana_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 76) & 8, ==, 0);
+    g_assert_cmpuint(qtest_readl(qts, buf + 344), ==, 0);
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, 0x109);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* Set Features 0Ch: APSTE and a table whose entry 0 is @e0, entry @i is @ei */
 static uint16_t femu_apst(FemuCtrlState *c, uint64_t buf, bool on,
                           uint64_t e0, int i, uint64_t ei)
@@ -53673,6 +53834,11 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=thro,femu_mode=1,devsz_mb=64,ocp=on,"
             "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on",
     });
+    qos_add_test("ana", "femu", femu_test_ana,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=anac,ana=on,femu_mode=1,devsz_mb=64",
+    });
+    qos_add_test("ana-off", "femu", femu_test_ana_off, NULL);
     qos_add_test("power-states", "femu", femu_test_power_states,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=pwr,femu_mode=1,devsz_mb=64,"

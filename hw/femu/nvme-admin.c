@@ -1279,6 +1279,8 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
         id[1] = ns->id_ns.nmic;
         id[2] = ns->id_ns.rescap;
         id[3] = ns->id_ns.fpi;
+        /* ANAGRPID: Linux reads the group from this structure */
+        memcpy(&id[4], &ns->id_ns.anagrpid, 4);
         if (nvme_ns_media_ro(ns)) {
             id[8] = NVME_NSATTR_CWP;        /* NSATTR */
         }
@@ -2189,6 +2191,12 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE,
                                  NVME_LOG_TELEMETRY_CTRL, 0, true);
             n->aer_mask = mask;
+        }
+        /* ANA Change Notices: a change not yet read goes out on enable */
+        if ((dw11 & NVME_AEC_ANA_CHANGE) && n->ana_pending &&
+            !(n->features.async_config & NVME_AEC_ANA_CHANGE)) {
+            nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE,
+                               NVME_AER_INFO_ANA_CHANGE, NVME_LOG_ANA);
         }
         n->features.async_config = dw11;
         /* enabling temperature events during an excursion reports it */
@@ -4083,6 +4091,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fid_effects(n, cmd, csi, len, off);
     case NVME_LOG_MI_EFFECTS:
         return nvme_mi_effects(n, cmd, len, off);
+    case NVME_LOG_ANA:
+        if (!n->ana) {
+            return NVME_INVALID_LOG_ID | NVME_DNR;
+        }
+        return nvme_ana_log(n, cmd, len, off, rae);
     case NVME_LOG_RESV_NOTIFY:
         if (!n->reservations) {
             return NVME_INVALID_LOG_ID | NVME_DNR;

@@ -380,6 +380,8 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return NVME_LIDS_LSUPP | 1 << 16;
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_ns_mgmt_supported(n) ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_ANA:
+        return n->ana ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_RESV_NOTIFY:
         return n->reservations ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_LOCKDOWN:

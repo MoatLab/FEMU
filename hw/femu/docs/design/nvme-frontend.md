@@ -650,6 +650,7 @@ Namespace Management.
 | Device Self-test | 06h | tests complete at once |
 | Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: the counters captured when a SMART warning, the temperature condition or thermal protection begins, kept until a read without RAE (header only with `ocp=on`) |
 | Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID, and the Endurance Group List, CNS 19h) with it |
+| Asymmetric Namespace Access | 0Ch | with `ana=on`: one group per namespace; the state comes from the runtime property `ana-state`; RGO leaves out the namespace lists |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
 | OCP Latency Monitor | C3h | with `ocp=on`: 512 bytes, version 0005h, configured by Feature C5h; bytes 512 to 4095 read as zeros |
 | OCP SMART / Health Extended, Error Recovery | C0h, C1h | with `ocp=on`: OCP 2.7 layouts at UUID index 0 and 1 (CNS 17h lists the OCP UUID, then the FEMU UUID `2ff92965-47be-4ce0-923d-649d30079203`); the FEMU counters at C0h, UUID index 2. Fields FEMU does not model are 0, capacitor health is FFFFh (no PLP) |

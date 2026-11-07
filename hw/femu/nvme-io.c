@@ -2860,6 +2860,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
+    /* a path that cannot reach the namespace fails its I/O (8.1.1) */
+    if (unlikely(n->ana)) {
+        uint16_t status = nvme_ana_io_check(n, ns);
+
+        if (status) {
+            return status;
+        }
+    }
     /*
      * The memory and compute command sets reuse NVM opcodes (Memory Fill is
      * 04h, Memory Write 05h), so their namespaces are served before the NVM

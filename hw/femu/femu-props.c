@@ -228,6 +228,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slot 1 is read only; with 2 or more, Firmware Image Download and "
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
+    { "ana",
+      "ANA reporting (Base 2.3, 8.1.1): one ANA group per namespace, log 0Ch, CMIC bit 3 and the ANA Change notice; the runtime property ana-state sets a group's state through this controller; must match on every controller of a femu-subsys; off (default)" },
     { "power_states",
       "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is non-operational, and an I/O command wakes it 5 ms later; Autonomous Power State Transition (0Ch); not with ocp; off (default) keeps one power state" },
     { "reservations",
@@ -992,6 +994,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
 };
 
 static const FemuPropDesc femu_ctrl_runtime_descs[] = {
+    { "ana-state",
+      "with ana=on: \"g:s\" sets the ANA state of group g (the namespace "
+      "ID) through this controller: 1 Optimized, 2 Non-Optimized, 3 "
+      "Inaccessible, 4 Persistent Loss; reading lists every group" },
     { "simulate-power-loss",
       "Write-only: setting true on a realized controller with power_loss=on "
       "drops the write buffer and resets the controller as a power cut "

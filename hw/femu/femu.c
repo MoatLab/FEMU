@@ -563,6 +563,7 @@ static void nvme_reset_features(FemuCtrl *n)
     /* with ocp, 02h and C7h come back to their saved values (OCP PWR-5) */
     n->features.power_mgmt      = n->ocp ? n->power_mgmt_saved : 0;
     femu_power_reset(n);
+    nvme_ana_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
@@ -2965,6 +2966,7 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     if (n->reservations) {
         ns->id_ns.rescap = NVME_RESCAP_ALL;
     }
+    nvme_ana_ns(n, ns);
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);
     return 0;
@@ -3859,7 +3861,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
     if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp) ||
         !femu_fw_resolve(n, errp) || !femu_plane_reads_check(n, errp) ||
-        !nvme_resv_check_props(n, errp)) {
+        !nvme_resv_check_props(n, errp) || !nvme_ana_check_props(n, errp)) {
         return;
     }
 
@@ -4135,8 +4137,14 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * shared storage object copies these fields.
      */
     nvme_caps_id_ctrl(n, &n->id_ctrl);
-    /* reservations work on the namespaces that now exist */
+    /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
+    nvme_ana_id(n, &n->id_ctrl);
+    for (uint32_t i = 1; n->ana && i <= n->namespace_limit; i++) {
+        if (nvme_ns_allocated(n, i)) {
+            nvme_ana_ns(n, nvme_ns_allocated(n, i));
+        }
+    }
 
     nvme_register_extensions(n);
 
@@ -4519,6 +4527,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
     DEFINE_PROP_BOOL("power_states", FemuCtrl, power_states, false),
+    DEFINE_PROP_BOOL("ana", FemuCtrl, ana, false),
     DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
@@ -5500,6 +5509,7 @@ static void femu_instance_init(Object *obj)
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
+    nvme_ana_add_props(obj);
     femu_ctrl_describe_runtime(obj);
     if (qtest_enabled()) {
         object_property_add_bool(obj, "x-oc12-clock", NULL,

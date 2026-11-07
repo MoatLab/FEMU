@@ -1126,6 +1126,8 @@ enum NvmeStatusCodes {
     NVME_NS_THIN_PROVISION      = 0x011b,
     NVME_CTRL_LIST_INVALID      = 0x011c,
     NVME_ANA_GROUP_INVALID      = 0x0124,
+    NVME_ANA_PERSISTENT_LOSS    = 0x0301,   /* path related */
+    NVME_ANA_INACCESSIBLE       = 0x0302,
     NVME_PROHIBIT_NOT_SUPPORTED = 0x0128,   /* Lockdown: not prohibitable */
     NVME_IOCS_NOT_SUPPORTED     = 0x0129,
     NVME_INVALID_FORMAT         = 0x010a,
@@ -1278,6 +1280,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_TELEMETRY_HOST = 0x07,
     NVME_LOG_TELEMETRY_CTRL = 0x08,
+    NVME_LOG_ANA            = 0x0c,
     NVME_LOG_PERSISTENT_EVENT = 0x0d,
     NVME_LOG_LBA_STATUS     = 0x0e,
     NVME_LOG_FID_EFFECTS    = 0x12,
@@ -1484,7 +1487,10 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     rsvd332[6];
     uint16_t    nsetidmax;
     uint16_t    endgidmax;
-    uint8_t     rsvd342[10];
+    uint8_t     anatt;          /* ANA Transition Time, s */
+    uint8_t     anacap;
+    uint32_t    anagrpmax;
+    uint32_t    nanagrpid;
     uint32_t    pels;           /* Persistent Event log size, 64 KiB units */
     uint8_t     rsvd356[4];
     uint16_t    mptfawr;        /* Max Processing Time for FW Activation w/o Reset */
@@ -1694,7 +1700,9 @@ typedef struct NvmeIdNs {
     uint16_t    mssrl;          /* Copy: blocks in one source range */
     uint32_t    mcl;            /* Copy: blocks in one command */
     uint8_t     msrc;           /* Copy: source ranges, 0's based */
-    uint8_t     rsvd81[18];
+    uint8_t     rsvd81[11];
+    uint32_t    anagrpid;       /* bytes 95:92 */
+    uint8_t     rsvd96[3];
     uint8_t     nsattr;         /* bit 0: Currently Write Protected */
     uint16_t    nvmsetid;
     uint16_t    endgid;
@@ -1794,6 +1802,8 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_NS_ATTR    (1u << 8)
 #define NVME_AEC_FW_ACTIVATION (1u << 9)
 #define NVME_AEC_TELEMETRY  (1u << 10)  /* Telemetry Log Notices */
+#define NVME_AEC_ANA_CHANGE (1u << 11)  /* ANA Change Notices */
+#define NVME_AER_INFO_ANA_CHANGE 0x03   /* notice: ANA Change */
 #define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
 #define NVME_AER_INFO_RESV_LOG  0x00    /* I/O specific: log 80h has pages */
 #define NVME_AER_INFO_FW_ACT    0x01    /* notice: Firmware Activation Starting */
@@ -2790,6 +2800,12 @@ typedef struct FemuCtrl {
     int             rn_len;
     uint64_t        rn_lpc;
     bool            rn_gone;        /* leaving: no more notices */
+    /* ANA (nvme-ana.c): one group per namespace, states through this path */
+    bool            ana;
+    uint8_t         ana_state[NVME_MAX_NAMESPACES];
+    uint64_t        ana_chgc;
+    bool            ana_pending;    /* a change the host has not read */
+    uint64_t        ana_gchgc[NVME_MAX_NAMESPACES];
     NvmeSanitizeState sanitize;
     /*
      * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set
@@ -3387,6 +3403,15 @@ uint32_t femu_power_get(FemuCtrl *n);
 uint16_t femu_apst_set(FemuCtrl *n, NvmeCmd *cmd);
 uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res);
 void femu_power_reset(FemuCtrl *n);
+/* nvme-ana.c */
+bool nvme_ana_check_props(FemuCtrl *n, Error **errp);
+void nvme_ana_id(FemuCtrl *n, NvmeIdCtrl *id);
+void nvme_ana_ns(FemuCtrl *n, NvmeNamespace *ns);
+uint16_t nvme_ana_io_check(FemuCtrl *n, NvmeNamespace *ns);
+uint16_t nvme_ana_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len, uint64_t off,
+                      bool rae);
+void nvme_ana_reset(FemuCtrl *n);
+void nvme_ana_add_props(Object *obj);
 /* nvme-resv.c */
 bool nvme_resv_opcode(uint8_t opc);
 bool nvme_resv_ns(FemuCtrl *n, NvmeNamespace *ns);
