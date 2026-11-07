@@ -10,6 +10,8 @@ it lists every property with the description `-device <type>,help` prints:
   properties and counters read or set with `qom-get` and `qom-set`.
 - [reference/log-pages-and-counters.md](reference/log-pages-and-counters.md):
   the vendor log page C0h and the telemetry snapshot.
+- [reference/combinations.md](reference/combinations.md): for each property,
+  the combinations realize refuses, generated from the code.
 
 The sections of the old page map to these:
 

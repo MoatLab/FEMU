@@ -516,6 +516,13 @@ jobs:
         python3 hw/femu/scripts/check-property-tests.py --self-test
         python3 hw/femu/scripts/check-property-tests.py
 
+    - name: Check the supported-combination page
+      run: |
+        # reference/combinations.md lists the refusal messages per property;
+        # a message changed without regenerating the page fails here
+        python3 hw/femu/scripts/gen-combinations.py --self-test
+        python3 hw/femu/scripts/gen-combinations.py --check
+
     - name: Check the host analysis tools
       run: |
         # pure Python, no QEMU: each self-test plants its own cases

@@ -218,6 +218,7 @@ explains each.
 | Script | Arguments |
 | --- | --- |
 | `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md` and `runtime-properties.md` from the binary; `--check` compares instead of writing (`--qemu` is still required) |
+| `gen-combinations.py` | rewrites `reference/combinations.md` from the refusal messages in `hw/femu`; `--check` compares instead of writing; `--self-test` checks the parser |
 | `gen-mode-table.py` | rewrites the mode tables from `docs/modes.py`; `--check` compares and checks `modes.py` against the code |
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |
 | `check-changelog-hashes.py` | `[--head COMMIT] [FILE]`; checks that every commit the CHANGELOG names is in the history of `--head` (needs a full clone) |
