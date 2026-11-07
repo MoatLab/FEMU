@@ -826,6 +826,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_ACTIVATE_FW    = 0x10,
     NVME_ADM_CMD_DOWNLOAD_FW    = 0x11,
     NVME_ADM_CMD_DEV_SELF_TEST  = 0x14,
+    NVME_ADM_CMD_LOCKDOWN       = 0x24,
     NVME_ADM_CMD_SANITIZE       = 0x84,
     NVME_ADM_CMD_GET_LBA_STATUS = 0x86,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
@@ -1090,6 +1091,7 @@ enum NvmeStatusCodes {
     NVME_DATA_SGL_LEN_INVALID   = 0x000f,
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
+    NVME_CMD_PROHIBITED         = 0x0023,   /* by Command and Feature Lockdown */
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
     NVME_IOCS_COMBINATION_REJECTED = 0x012b,
@@ -1119,6 +1121,7 @@ enum NvmeStatusCodes {
     NVME_NS_THIN_PROVISION      = 0x011b,
     NVME_CTRL_LIST_INVALID      = 0x011c,
     NVME_ANA_GROUP_INVALID      = 0x0124,
+    NVME_PROHIBIT_NOT_SUPPORTED = 0x0128,   /* Lockdown: not prohibitable */
     NVME_IOCS_NOT_SUPPORTED     = 0x0129,
     NVME_INVALID_FORMAT         = 0x010a,
     NVME_FW_REQ_RESET           = 0x010b,
@@ -1274,6 +1277,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_LBA_STATUS     = 0x0e,
     NVME_LOG_FID_EFFECTS    = 0x12,
     NVME_LOG_MI_EFFECTS     = 0x13,
+    NVME_LOG_LOCKDOWN       = 0x14,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_ROTATIONAL     = 0x16,
     NVME_LOG_REACH_GROUPS   = 0x1a,
@@ -1510,6 +1514,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_DIRECTIVES    = 1 << 5,
     NVME_OACS_DBBUF         = 1 << 8,
     NVME_OACS_GLSS          = 1 << 9,
+    NVME_OACS_CFLS          = 1 << 10,
 };
 
 enum NvmeIdCtrlOncs {
@@ -2719,6 +2724,14 @@ typedef struct FemuCtrl {
     uint8_t         tel_tcdgn;
     char            tel_rid[128];
     bool            tel_temp_prev;  /* temperature condition, for its edge */
+    /*
+     * Command and Feature Lockdown: admin opcodes and Set Features FIDs that
+     * the Admin Submission Queue refuses. A reset keeps them; only a new
+     * QEMU (the power cycle) clears them.
+     */
+    bool            lockdown;
+    DECLARE_BITMAP(lock_opc, 256);
+    DECLARE_BITMAP(lock_fid, 256);
     NvmeSanitizeState sanitize;
     /*
      * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set

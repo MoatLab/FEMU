@@ -3754,6 +3754,11 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
         error_setg(errp, "ocp needs fw_slots of 3 or more (FWUP-6)");
         return false;
     }
+    /* the lockdown state is per controller, so not across a subsystem */
+    if (n->lockdown && n->subsys) {
+        error_setg(errp, "lockdown does not work with a femu-subsys yet");
+        return false;
+    }
     if (n->fw_slots > 1 && (n->subsys || n->cxl_dev)) {
         error_setg(errp, "fw_slots above 1%s does not work with a femu-subsys "
                    "or a CXL device yet", n->ocp ? " (ocp needs 3)" : "");
@@ -4487,6 +4492,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
+    DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
@@ -5322,6 +5328,9 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     femu_fw_reset(n);
     femu_pel_reset(n);
     femu_pel_power_loss(n);
+    /* a power cycle ends a lockdown (Base 2.3, 8.1.5) */
+    bitmap_zero(n->lock_opc, 256);
+    bitmap_zero(n->lock_fid, 256);
     if (n->ocp) {
         femu_ocp_lat_power_cycle(n);
     }

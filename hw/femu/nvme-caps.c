@@ -189,6 +189,8 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
         return n->streams || nvme_fdp_directive(n) ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_ADM_CMD_DOWNLOAD_FW:
         return n->fw_slots > 1 ? NVME_CMD_EFF_CSUPP : 0;
+    case NVME_ADM_CMD_LOCKDOWN:
+        return n->lockdown ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_ADM_CMD_ACTIVATE_FW:
         /* an activation changes FR in Identify Controller */
         return n->fw_slots > 1 ? NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_CCC : 0;
@@ -373,6 +375,8 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return NVME_LIDS_LSUPP | 1 << 16;
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_ns_mgmt_supported(n) ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_LOCKDOWN:
+        return n->lockdown ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_SANITIZE:
         return nvme_can_sanitize(n) ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_ENDGRP:
@@ -447,6 +451,7 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
         { NVME_ADM_CMD_DIRECTIVE_SEND,  NVME_OACS_DIRECTIVES },
         { NVME_ADM_CMD_SET_DB_MEMORY,   NVME_OACS_DBBUF },
         { NVME_ADM_CMD_GET_LBA_STATUS,  NVME_OACS_GLSS },
+        { NVME_ADM_CMD_LOCKDOWN,        NVME_OACS_CFLS },
     }, oncs[] = {
         { NVME_CMD_COMPARE,             NVME_ONCS_COMPARE },
         { NVME_CMD_WRITE_UNCOR,         NVME_ONCS_WRITE_UNCORR },

@@ -3907,6 +3907,9 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
+static uint16_t nvme_lockdown_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                  uint64_t off);
+
 static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -3941,9 +3944,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     /*
      * ocp=on lists two UUIDs (CNS 17h). Index 1 (OCP) answers 00h, C0h and
      * C1h; index 2 (FEMU) answers 00h and the FEMU counters at C0h. With
-     * ocp=off there is no UUID selection, and the index is ignored.
+     * ocp=off there is no UUID selection, and the index is ignored. The
+     * Lockdown log (14h) ignores it too: its lists are the same for every
+     * UUID (Base 2.3, 5.2.12.1.20).
      */
-    if (n->ocp) {
+    if (n->ocp && lid != NVME_LOG_LOCKDOWN) {
         uint8_t uidx = le32_to_cpu(cmd->cdw14) & 0x7f;
 
         if (uidx > 2 ||
@@ -4040,6 +4045,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fid_effects(n, cmd, csi, len, off);
     case NVME_LOG_MI_EFFECTS:
         return nvme_mi_effects(n, cmd, len, off);
+    case NVME_LOG_LOCKDOWN:
+        if (!n->lockdown) {
+            return NVME_INVALID_LOG_ID | NVME_DNR;
+        }
+        return nvme_lockdown_log(n, cmd, len, off);
     case NVME_LOG_PERSISTENT_EVENT:
         return femu_pel_get_log(n, cmd, len, off);
     case NVME_LOG_SANITIZE:
@@ -4982,11 +4992,131 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
+/*
+ * Command and Feature Lockdown (Base 2.3, 8.1.5). Which commands can be
+ * prohibited is vendor specific. FEMU keeps the commands a host needs to
+ * see and undo a lockdown: queues, Identify, Get Log Page, Get Features,
+ * Abort, AER, Doorbell Buffer Config and Lockdown itself. Vendor opcodes
+ * (C0h and up) stay out too. Every other supported admin command can be
+ * prohibited, and so can every changeable Feature Identifier.
+ */
+static bool nvme_lockable_opc(FemuCtrl *n, uint8_t opc)
+{
+    switch (opc) {
+    case NVME_ADM_CMD_DELETE_SQ:
+    case NVME_ADM_CMD_CREATE_SQ:
+    case NVME_ADM_CMD_GET_LOG_PAGE:
+    case NVME_ADM_CMD_DELETE_CQ:
+    case NVME_ADM_CMD_CREATE_CQ:
+    case NVME_ADM_CMD_IDENTIFY:
+    case NVME_ADM_CMD_ABORT:
+    case NVME_ADM_CMD_GET_FEATURES:
+    case NVME_ADM_CMD_ASYNC_EV_REQ:
+    case NVME_ADM_CMD_SET_DB_MEMORY:
+    case NVME_ADM_CMD_LOCKDOWN:
+        return false;
+    }
+    return opc < 0xc0 && (nvme_admin_effects(n, opc) & NVME_CMD_EFF_CSUPP);
+}
+
+static bool nvme_lockable_fid(FemuCtrl *n, uint8_t fid)
+{
+    return nvme_fid_supported(n, fid) &&
+           (nvme_feat_cap(n, fid) & NVME_FEAT_CAP_CHANGE);
+}
+
+/* the Admin Submission Queue refuses a prohibited command or FID */
+static bool nvme_locked_out(FemuCtrl *n, NvmeCmd *cmd)
+{
+    if (!n->lockdown) {
+        return false;
+    }
+    if (test_bit(cmd->opcode, n->lock_opc)) {
+        return true;
+    }
+    return cmd->opcode == NVME_ADM_CMD_SET_FEATURES &&
+           test_bit(le32_to_cpu(cmd->cdw10) & 0xff, n->lock_fid);
+}
+
+/*
+ * Lockdown (Base 2.3, 5.2.15). FEMU has no Management Endpoint, so only
+ * IFC 00b (the Admin Submission Queue) is valid. Scope 0h names an admin
+ * opcode, 2h a Feature Identifier; an MI opcode (3h) cannot be prohibited
+ * on the admin queue. CDW14 (UUID Index) is not used: the effects log does
+ * not claim UUID selection for this command.
+ */
+static uint16_t nvme_lockdown(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint8_t scp = dw10 & 0xf;
+    bool prhbt = dw10 & (1 << 4);
+    uint8_t ifc = (dw10 >> 5) & 0x3;
+    uint8_t ofi = (dw10 >> 8) & 0xff;
+    unsigned long *map;
+
+    if (ifc != 0 || scp == 1 || scp > 4 || scp == 4) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (scp == 3) {
+        return NVME_PROHIBIT_NOT_SUPPORTED | NVME_DNR;
+    }
+    if (scp == 0 ? !nvme_lockable_opc(n, ofi) : !nvme_lockable_fid(n, ofi)) {
+        return NVME_PROHIBIT_NOT_SUPPORTED | NVME_DNR;
+    }
+    map = scp == 0 ? n->lock_opc : n->lock_fid;
+    if (prhbt) {
+        set_bit(ofi, map);
+    } else {
+        clear_bit(ofi, map);
+    }
+    return NVME_SUCCESS;
+}
+
+/*
+ * Command and Feature Lockdown log (14h, Base 2.3 Figure 271). LSP bits
+ * 3:0 are the Scope, bits 5:4 the Contents: 00b what can be prohibited,
+ * 01b what the admin queue refuses now. Contents 10b asks about a
+ * Management Endpoint, which FEMU does not have. The list is in order.
+ */
+static uint16_t nvme_lockdown_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                  uint64_t off)
+{
+    uint8_t lsp = (le32_to_cpu(cmd->cdw10) >> 8) & 0x7f;
+    uint8_t scp = lsp & 0xf;
+    uint8_t cnt = (lsp >> 4) & 0x3;
+    uint8_t log[512] = { 0 };
+    int len = 0;
+
+    if (cnt > 1 || scp == 1 || scp > 4 || off >= sizeof(log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    log[0] = cnt << 4 | scp;
+    for (int v = 0; v < 256 && (scp == 0 || scp == 2); v++) {
+        bool in;
+
+        if (scp == 0) {
+            in = cnt ? test_bit(v, n->lock_opc) : nvme_lockable_opc(n, v);
+        } else {
+            in = cnt ? test_bit(v, n->lock_fid) : nvme_lockable_fid(n, v);
+        }
+        if (in) {
+            log[4 + len++] = v;
+        }
+    }
+    log[3] = len;
+    return dma_read_prp(n, log + off, MIN(sizeof(log) - off, buf_len),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     /* admin data is always moved by PRP over PCIe */
     if (cmd->psdt != NVME_PSDT_PRP) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (nvme_locked_out(n, cmd)) {
+        return NVME_CMD_PROHIBITED | NVME_DNR;
     }
 
     switch (cmd->opcode) {
@@ -5000,6 +5130,11 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_ns_mgmt(n, cmd, cqe);
     case NVME_ADM_CMD_NS_ATTACHMENT:
         return nvme_ns_attachment(n, cmd);
+    case NVME_ADM_CMD_LOCKDOWN:
+        if (!n->lockdown) {
+            return NVME_INVALID_OPCODE | NVME_DNR;
+        }
+        return nvme_lockdown(n, cmd);
     case NVME_ADM_CMD_FEMU_DEBUG:
         /* only the Open-Channel timing model has these times; log 05h agrees */
         if (!OCSSD(n)) {

@@ -228,6 +228,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slot 1 is read only; with 2 or more, Firmware Image Download and "
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
+    { "lockdown",
+      "Command and Feature Lockdown: the Lockdown command (24h), log 14h "
+      "and OACS bit 10; the host can prohibit most admin commands and "
+      "changeable Feature Identifiers on the admin queue until QEMU stops; "
+      "not with a femu-subsys; off (default)" },
     { "ocp",
       "bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error "
       "Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move "

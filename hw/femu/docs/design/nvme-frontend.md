@@ -648,7 +648,7 @@ Namespace Management.
 | Changed Namespace List | 04h | namespaces whose attributes changed |
 | Commands Supported and Effects | 05h | per command set (NVM, zoned, KV) |
 | Device Self-test | 06h | tests complete at once |
-| Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: header only |
+| Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: the counters captured when a SMART warning, the temperature condition or thermal protection begins, kept until a read without RAE (header only with `ocp=on`) |
 | Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID, and the Endurance Group List, CNS 19h) with it |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
 | OCP Latency Monitor | C3h | with `ocp=on`: 512 bytes, version 0005h, configured by Feature C5h; bytes 512 to 4095 read as zeros |
@@ -657,6 +657,7 @@ Namespace Management.
 | LBA Status | 0Eh | |
 | Feature Identifiers Supported and Effects | 12h | built from the check Get and Set Features use; per command set (CSI) when CC.CSS is 110b |
 | NVMe-MI Commands Supported and Effects | 13h | all zero: no NVMe-MI Send or Receive |
+| Command and Feature Lockdown | 14h | with `lockdown=on`: what the Lockdown command (24h) can prohibit, and what the admin queue refuses now; no Management Endpoint, so Contents 10b is Invalid Field |
 | FDP Configurations, RUH Usage, Statistics, Events | 20h-23h | with FDP |
 | Sanitize Status | 81h | |
 | Changed Zone List | BFh | ZNS, from the mode |

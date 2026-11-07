@@ -19179,6 +19179,176 @@ static void femu_test_telemetry_ctrl(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* Lockdown (24h): SCP in bits 3:0, PRHBT bit 4, IFC 6:5, OFI 15:8 */
+static uint16_t femu_lockdown(FemuCtrlState *c, uint8_t scp, bool prhbt,
+                              uint8_t ifc, uint8_t ofi)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = 0x24;
+    cmd.cdw10 = cpu_to_le32(scp | (prhbt ? 1u << 4 : 0) | ifc << 5 |
+                            ofi << 8);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* Get Log 14h with LSP Contents @cnt and Scope @scp, 512 bytes */
+static uint16_t femu_lockdown_log(FemuCtrlState *c, uint64_t buf,
+                                  uint8_t cnt, uint8_t scp)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x14 | (scp | cnt << 4) << 8 | 127u << 16);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static bool femu_list_has(const uint8_t *log, uint8_t v)
+{
+    for (int i = 0; i < log[3]; i++) {
+        if (log[4 + i] == v) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Command and Feature Lockdown (Base 2.3, 8.1.5): OACS bit 10; log 14h
+ * lists what can be prohibited, in order, and what is prohibited now; a
+ * prohibited opcode or Set Features FID fails with 23h, Get Features does
+ * not; a reset keeps the state; allow undoes it. Commands FEMU keeps
+ * open, a Management Endpoint and reserved scopes are refused.
+ */
+static void femu_test_lockdown(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & (1 << 10), ==, 1 << 10);
+    /* log 00h: entry 14h is exactly LSUPP */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x14 * 4), ==, 1);
+
+    /* what can be prohibited: Set Features, not Identify; in order */
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 0, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    g_assert_cmphex(log[0], ==, 0x00);
+    g_assert_cmpuint(log[3], >, 0);
+    g_assert_true(femu_list_has(log, 0x09));
+    g_assert_false(femu_list_has(log, 0x06));
+    g_assert_false(femu_list_has(log, 0x24));
+    for (int i = 1; i < log[3]; i++) {
+        g_assert_cmpuint(log[4 + i - 1], <, log[4 + i]);
+    }
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 0, 2), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    g_assert_cmphex(log[0], ==, 0x02);
+    g_assert_true(femu_list_has(log, 0x0b));
+    /* nothing is prohibited yet */
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 3), ==, 0);
+
+    /* prohibit FID 0Bh: Set fails and changes nothing, Get works */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 8,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lockdown(&c, 2, true, 0, 0x0b), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, 0x023);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x0b, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 1u << 8);
+    /* a high FID (80h) and another opcode (Device Self-test, 14h) too */
+    g_assert_cmphex(femu_lockdown(&c, 2, true, 0, 0x80), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x80, false, 0, 0, NULL)),
+                    ==, 0x023);
+    g_assert_cmphex(femu_lockdown(&c, 2, false, 0, 0x80), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 0, 0x14), ==, NVME_SUCCESS);
+    {
+        NvmeCmd dst = { 0 };
+
+        dst.opcode = 0x14;
+        dst.nsid = cpu_to_le32(0xffffffff);
+        dst.cdw10 = cpu_to_le32(0xf);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &dst)), ==, 0x023);
+    }
+    g_assert_cmphex(femu_lockdown(&c, 0, false, 0, 0x14), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 1, 2), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    g_assert_cmphex(log[0], ==, 0x12);
+    g_assert_cmpuint(log[3], ==, 1);
+    g_assert_cmphex(log[4], ==, 0x0b);
+
+    /* prohibit Set Features as a whole; a reset keeps both */
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 0, 0x09), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0e, false, 0, 0, NULL)),
+                    ==, 0x023);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0e, false, 0, 0, NULL)),
+                    ==, 0x023);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 1, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, log, sizeof(log));
+    g_assert_cmpuint(log[3], ==, 1);
+    g_assert_cmphex(log[4], ==, 0x09);
+
+    /* allow undoes each; allowing twice is not an error */
+    g_assert_cmphex(femu_lockdown(&c, 0, false, 0, 0x09), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_lockdown(&c, 0, false, 0, 0x09), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, 0x023);
+    g_assert_cmphex(femu_lockdown(&c, 2, false, 0, 0x0b), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+
+    /* refusals */
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 0, 0x06), ==, 0x128);
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 0, 0x24), ==, 0x128);
+    g_assert_cmphex(femu_lockdown(&c, 2, true, 0, 0x00), ==, 0x128);
+    g_assert_cmphex(femu_lockdown(&c, 3, true, 0, 0x01), ==, 0x128);
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 1, 0x09), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown(&c, 0, true, 2, 0x09), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown(&c, 1, true, 0, 0x09), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown(&c, 4, true, 0, 0x09), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 2, 0), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 0, 1), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 3), ==, 0);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* without the property there is no Lockdown command and no log 14h */
+static void femu_test_lockdown_off(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & (1 << 10), ==, 0);
+    g_assert_cmphex(femu_lockdown(&c, 2, true, 0, 0x0b), ==,
+                    NVME_INVALID_OPCODE);
+    g_assert_cmphex(femu_lockdown_log(&c, buf, 0, 0), ==, 0x109);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 #define FEMU_ADM_GET_LBA_STATUS  0x86
 #define FEMU_LOG_LBA_STATUS      0x0e
 
@@ -49699,6 +49869,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"
     });
+    qos_add_test("lockdown", "femu", femu_test_lockdown,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "lockdown=on",
+    });
+    qos_add_test("lockdown-off", "femu", femu_test_lockdown_off, NULL);
     qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=telc,femu_mode=1,devsz_mb=64",
