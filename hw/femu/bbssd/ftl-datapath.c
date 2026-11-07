@@ -320,6 +320,8 @@ bool bbssd_power_loss(NvmeNamespace *ns)
     uint8_t shift = ns->id_ns.lbaf[idx].lbads;
     uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
 
+    /* OCP SMART-21 resets on a power cycle */
+    qatomic_set(&ssd->unaligned_writes, 0);
     QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
         uint64_t offset = entry->lpn * page_size - ns->backend_offset;
         uint64_t slba = offset >> shift;

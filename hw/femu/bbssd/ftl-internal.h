@@ -433,6 +433,13 @@ static inline void ssd_count_partial_pages(struct ssd *ssd, NvmeRequest *req,
     if (!nlb) {
         return;
     }
+    /*
+     * OCP SMART-21: a write that starts off a page boundary, saturating.
+     * One FTL thread writes it; C0h reads it from the vCPU thread.
+     */
+    if (start % pg && ssd->unaligned_writes != UINT64_MAX) {
+        qatomic_set(&ssd->unaligned_writes, ssd->unaligned_writes + 1);
+    }
     if (start / pg == (end - 1) / pg) {
         ssd->partial_page_writes += start % pg || end % pg;
         return;

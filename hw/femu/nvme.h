@@ -3537,6 +3537,7 @@ uint64_t ssd_gc_copyback_pages(struct ssd *ssd);
 void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
                     uint64_t *takeovers);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);
+uint64_t ssd_unaligned_writes(struct ssd *ssd);
 uint64_t ssd_plane_ops(struct ssd *ssd, int op);
 void ssd_stall_stats(struct ssd *ssd, uint64_t *writes, uint64_t *passes,
                      uint64_t *destages);

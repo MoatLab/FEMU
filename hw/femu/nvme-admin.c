@@ -2689,7 +2689,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     uint8_t log[512] = {};
     uint64_t wr_pages = 0, rd_pages = 0, bad = 0, uncorr = 0, soft = 0;
     uint64_t refresh = 0, free_lines = 0, empty_lines = 0, nuse = 0;
-    uint64_t erase_sum = 0, blocks = 0, dies = 0;
+    uint64_t erase_sum = 0, blocks = 0, dies = 0, unaligned = 0;
     uint32_t max_pe = 0, min_pe = UINT32_MAX, page_size = 0;
     uint16_t max_temp_k = MAX(n->ocp_max_temp_k, n->temperature);
     FemuMediaStats st;
@@ -2722,6 +2722,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         soft = nvme_ocp_add(soft, ssd_recovered_reads(ns->ssd));
         ssd_ocp_blocks(ns->ssd, &ob);
         bad = nvme_ocp_add(bad, ob.bad);
+        unaligned = nvme_ocp_add(unaligned, ssd_unaligned_writes(ns->ssd));
         free_lines = nvme_ocp_add(free_lines, ob.free_lines);
         empty_lines = nvme_ocp_add(empty_lines, ob.empty_lines);
         erase_sum = nvme_ocp_add(erase_sum, ob.erase_sum);
@@ -2753,14 +2754,15 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     log[120] = free_lines + empty_lines ?
                free_lines * 100 / (free_lines + empty_lines) : 0;
     stw_le_p(&log[128], 0xffff);                    /* no PLP */
-    /* host writes that covered a NAND page in part */
-    nvme_ocp_put(&log[136], 8, st.partial_page_writes);
+    nvme_ocp_put(&log[136], 8, unaligned);
     stq_le_p(&log[152], nuse);
     stw_le_p(&log[216], MIN(dies, UINT16_MAX));     /* Total Media Dies */
     /* highest composite temperature since realize, in degrees Celsius */
     log[222] = max_temp_k > 273 ? MIN(max_temp_k - 273, 255) : 0;
     nvme_ocp_put(&log[224], 8, blocks ? erase_sum / blocks : 0);
-    nvme_ocp_put(&log[358], 8, bad);    /* Dies In Use Bad NAND Blocks */
+    /* Dies In Use Bad NAND Blocks: 6-byte count, then spare percentage */
+    nvme_ocp_put(&log[358], 6, bad);
+    stw_le_p(&log[364], st.available_spare);
     nvme_ocp_trailer(log, 6, nvme_ocp_smart_guid);
 
     buf_len = MIN(sizeof(log) - off, buf_len);

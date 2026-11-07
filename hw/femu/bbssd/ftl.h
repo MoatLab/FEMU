@@ -746,6 +746,7 @@ struct ssd {
     uint64_t pace_lines;            /* lines paced steps finished */
     uint64_t pace_takeovers;        /* paced lines a forced pass finished */
     uint64_t partial_page_writes;   /* NAND pages host writes covered in part */
+    uint64_t unaligned_writes;      /* host writes that start inside a page */
     uint64_t gc_stalled_writes;     /* host writes that collected first */
     uint64_t gc_stall_passes;       /* forced passes run inside host writes */
     uint64_t buffer_full_destages;  /* writes that emptied a full buffer */

@@ -30,6 +30,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->pace_takeovers = 0;
     ssd->wl_on = false;
     ssd->partial_page_writes = 0;
+    ssd->unaligned_writes = 0;
     ssd->grown_bad_blocks = 0;
     ssd->sacrificed_blocks = 0;
     ssd->spare_lines = limit ? n->spare_lines : 0;
@@ -654,6 +655,11 @@ void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
 uint64_t ssd_partial_page_writes(struct ssd *ssd)
 {
     return ssd->partial_page_writes;
+}
+
+uint64_t ssd_unaligned_writes(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->unaligned_writes);
 }
 
 /* the three ways a host write waits for the device to make room */

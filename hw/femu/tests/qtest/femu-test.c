@@ -37006,7 +37006,10 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(lduw_le_p(&p[216]), >, 0);
     g_assert_cmpuint(p[222], >, 0);
     g_assert_cmpuint(ldq_le_p(&p[224]), ==, 0);     /* a new device */
-    g_assert_cmpuint(ldq_le_p(&p[358]), ==, 0);
+    /* SMART-52: 6-byte raw count 0, normalized spare 100% from the factory */
+    g_assert_cmpuint(ldq_le_p(&p[358]) & 0xffffffffffffULL, ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[364]), ==, 100);
+    g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);     /* no unaligned write */
     for (int b = 366; b < 494; b++) {
         g_assert_cmpuint(p[b], ==, 0);
     }
@@ -37036,6 +37039,7 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     /* one 4 KiB page per command, no buffer, no collection on a new device */
     g_assert_cmpuint(w1 - w0, ==, 64 * 4096);
     g_assert_cmpuint(r1 - r0, ==, 64 * 4096);
+    g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);     /* aligned writes only */
     /* NUSE counts written blocks (NUSE-1), and C0h Total NUSE agrees */
     {
         NvmeIdNs ns;
@@ -37046,6 +37050,36 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
         qtest_memread(qts, buf, &ns, sizeof(ns));
         g_assert_cmpuint(le64_to_cpu(ns.nuse), ==, 64 * 4096 / c.lba_size);
         g_assert_cmpuint(total, ==, 64 * 4096 / c.lba_size);
+    }
+    /*
+     * SMART-21 counts by start address only: one write that starts one LBA
+     * into a page and ends inside the next counts once.
+     */
+    if (c.lba_size < 4096) {
+        NvmeRwCmd rw;
+        uint16_t cid;
+
+        /* one block at an aligned start ends inside the page: no count */
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(66 * 4096 / c.lba_size);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);
+
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64 * 4096 /
+                                        c.lba_size + 1, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        g_assert_cmpuint(ldq_le_p(&p[136]), ==, 1);
     }
     femu_queue_free(&c, &c.io);
 
