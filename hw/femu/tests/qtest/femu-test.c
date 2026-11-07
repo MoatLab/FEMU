@@ -16523,6 +16523,34 @@ static void femu_test_verify(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 16), ==,
                     NVME_SUCCESS);
 
+    /*
+     * Write Zeroes with Deallocate repairs its own blocks, which then read
+     * zeros; a marked block past its range stays marked.
+     */
+    qtest_memset(qts, buf, 0x5a, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 8, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 8, 16), ==,
+                    NVME_SUCCESS);
+    {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE_ZEROES;
+        rw.nsid = cpu_to_le32(1);
+        rw.slba = cpu_to_le64(8);
+        rw.nlb = cpu_to_le16(7);
+        rw.control = cpu_to_le16(1 << 9);           /* DEAC */
+        g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 16), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 16, 8), ==,
+                    FEMU_UNRECOVERED_READ);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 8, buf), ==, NVME_SUCCESS);
+    for (int i = 0; i < 4096; i += 512) {
+        g_assert_cmphex(qtest_readb(qts, buf + i), ==, 0);
+    }
+
     g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
                     ==, NVME_SUCCESS);
     g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * FEMU_CMD_VERIFY) & 1,
@@ -52786,7 +52814,7 @@ static void femu_register_nodes(void)
     qos_add_test("self-test", "femu", femu_test_self_test, NULL);
     qos_add_test("verify", "femu", femu_test_verify,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "oncs=0x86"
+        .edge.extra_device_opts = "oncs=0x8e"
     });
     qos_add_test("abort", "femu", femu_test_abort,
                  &(QOSGraphTestOptions) {

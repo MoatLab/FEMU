@@ -2249,6 +2249,13 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      */
     if (deac) {
         nvme_deallocate_range(n, ns, slba, nlb);
+        /*
+         * The blocks read back zeros now, also ones Write Uncorrectable
+         * marked (OCP NVMe-IO-6): a Write Zeroes modifies them.
+         */
+        if (ns->uncorrectable) {
+            bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
+        }
     } else {
         nvme_deallocate_range(n, ns, slba, nlb);
         nvme_mark_written(ns, slba, nlb);
