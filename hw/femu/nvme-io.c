@@ -474,6 +474,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         eol = -1;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = req->t_submit = fetched;
+        /* a controller in PS3 wakes first: the command starts EXLAT later */
+        req->wake_ns = 0;
+        if (unlikely(n->power_states)) {
+            req->wake_ns = femu_power_io(n, fetched);
+            req->expire_time = req->stime = fetched + req->wake_ns;
+        }
         req->link_early = false;
         req->t_handoff = 0;
         req->t_return = 0;

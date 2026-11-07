@@ -1610,6 +1610,7 @@ enum NvmeFeatureIds {
     NVME_INTERRUPT_VECTOR_CONF      = 0x9,
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
+    NVME_AUTO_PST                   = 0xc,
     NVME_TIMESTAMP                  = 0xe,
     NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
@@ -1953,6 +1954,7 @@ typedef struct NvmeRequest {
     int64_t                 stime;
     /* the submit time; stime moves past it when a write books the link */
     int64_t                 t_submit;
+    int64_t                 wake_ns;    /* PS3 exit latency first */
     /* the write paid its host-link transfer before the media */
     bool                    link_early;
     /* io_stages: when the poller handed it to the FTL ring, and got it back */
@@ -2883,7 +2885,20 @@ typedef struct FemuCtrl {
     uint32_t        throttle_light_pct;
     uint32_t        throttle_heavy_pct;
     uint16_t        hot_k;          /* autonomous protection; 0 = off */
-    uint32_t        throttle_pct_now;
+    uint32_t        throttle_pct_now; /* max of the two below */
+    uint32_t        thermal_pct;
+    uint32_t        ps_pct;         /* the power state's cap */
+    /* power states (femu-power.c) */
+    bool            power_states;
+    QemuMutex       ps_lock;
+    uint8_t         ps_cur;
+    uint8_t         ps_op;          /* the last operational state */
+    int64_t         ps_entered;     /* when ps_cur began */
+    int64_t         ps_ready_at;    /* a wake from PS3 ends */
+    int64_t         ps_last_io;     /* fetch of the last I/O command */
+    int64_t         ps_busy_until;  /* end of the work booked so far */
+    bool            apste;
+    uint64_t        apst[32];
     uint16_t        hctm_tmt1;      /* feature 10h, 0 = that level off */
     uint16_t        hctm_tmt2;
     uint8_t         hctm_level;     /* 0 none, 1 light, 2 heavy (HCTM) */
@@ -3361,6 +3376,17 @@ void femu_throttle_eval(FemuCtrl *n);
 #define FEMU_TEL_TEST           (1u << 9)
 void femu_tel_capture(FemuCtrl *n, uint32_t reasons);
 void femu_tel_temp_edge(FemuCtrl *n);
+/* femu-power.c */
+bool femu_power_check(FemuCtrl *n, Error **errp);
+void femu_power_id(FemuCtrl *n, NvmeIdCtrl *id);
+void femu_actuator_set(FemuCtrl *n);
+void femu_power_busy(FemuCtrl *n, int64_t end);
+int64_t femu_power_io(FemuCtrl *n, int64_t now);
+void femu_power_set(FemuCtrl *n, uint8_t ps);
+uint32_t femu_power_get(FemuCtrl *n);
+uint16_t femu_apst_set(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res);
+void femu_power_reset(FemuCtrl *n);
 /* nvme-resv.c */
 bool nvme_resv_opcode(uint8_t opc);
 bool nvme_resv_ns(FemuCtrl *n, NvmeNamespace *ns);

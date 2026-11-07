@@ -228,6 +228,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slot 1 is read only; with 2 or more, Firmware Image Download and "
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
+    { "power_states",
+      "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is non-operational, and an I/O command wakes it 5 ms later; Autonomous Power State Transition (0Ch); not with ocp; off (default) keeps one power state" },
     { "reservations",
       "Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire and Release, the Host Identifier (81h), Reservation Notification Mask (82h) and Reservation Persistence (83h) features, and log 80h; ONCS bit 5; not with Open-Channel; off (default)" },
     { "lockdown",

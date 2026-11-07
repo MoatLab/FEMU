@@ -38722,6 +38722,173 @@ static void femu_test_plane_reads_timing(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* Set Features 0Ch: APSTE and a table whose entry 0 is @e0, entry @i is @ei */
+static uint16_t femu_apst(FemuCtrlState *c, uint64_t buf, bool on,
+                          uint64_t e0, int i, uint64_t ei)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+
+    qtest_memset(qts, buf, 0, 256);
+    qtest_writeq(qts, buf, cpu_to_le64(e0));
+    if (i) {
+        qtest_writeq(qts, buf + 8 * i, cpu_to_le64(ei));
+    }
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    cmd.cdw11 = cpu_to_le32(on);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* the modelled time of one 4 KiB read at LBA 0 on device "pwr" */
+static uint64_t femu_pwr_read_ns(FemuCtrlState *c, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t before = femu_model_ns(qts, "pwr");
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    return femu_model_ns(qts, "pwr") - before;
+}
+
+static uint32_t femu_ps_now(FemuCtrlState *c)
+{
+    uint32_t res = 0;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, 0x02, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    return res & 0x1f;
+}
+
+/*
+ * Power states (Base 2.3, 8.1.18): four descriptors and APSTA; PS2 stretches
+ * the array time by throttle_heavy_pct; APST takes an idle controller to
+ * PS3 after ITPT, and the next read pays the 5 ms exit latency, as it does
+ * after the host sets PS3. Feature 0Ch refuses an operational target and a
+ * state past NPSS; a reset clears it.
+ */
+static void femu_test_power_states(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    const uint64_t to3 = 50u << 8 | 3u << 3;
+    uint64_t d0, d;
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, 3);       /* NPSS */
+    g_assert_cmpuint(qtest_readb(qts, buf + 265) & 1, ==, 1);   /* APSTA */
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048 + 32), ==, 1500);
+    g_assert_cmpuint(qtest_readb(qts, buf + 2048 + 96 + 3) & 2, ==, 2);
+    g_assert_cmpuint(qtest_readl(qts, buf + 2048 + 96 + 8), ==, 5000);
+    g_assert_cmpuint(qtest_readb(qts, buf + 2048 + 64 + 3) & 2, ==, 0);
+
+    qtest_memset(qts, io, 0x5e, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    d0 = femu_pwr_read_ns(&c, io);
+    g_test_message("PS0 read %" PRIu64 " ns", d0);
+    g_assert_cmpuint(d0, >=, 1000000);
+    g_assert_cmpuint(d0, <, 1500000);
+
+    /* PS2: the array time triples */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 2, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    d = femu_pwr_read_ns(&c, io);
+    g_test_message("PS2 read %" PRIu64 " ns", d);
+    g_assert_cmpuint(d, >=, 3000000);
+    g_assert_cmpuint(d, <, 3500000);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_pwr_read_ns(&c, io), ==, d0);
+
+    /* bad tables change nothing */
+    g_assert_cmphex(femu_apst(&c, buf, true, 50u << 8 | 1u << 3, 0, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 5, to3), ==,
+                    NVME_INVALID_FIELD);
+
+    /* APST: PS0 to PS3 after 50 ms idle; a read wakes it, 5 ms later */
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 0, 0), ==, NVME_SUCCESS);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x0c);
+        qtest_memset(qts, buf, 0xff, 256);
+        g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &res)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res & 1, ==, 1);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, to3);
+        g_assert_cmphex(qtest_readq(qts, buf + 8), ==, 0);
+    }
+    g_usleep(120 * 1000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    d = femu_pwr_read_ns(&c, io);
+    g_test_message("read after APST %" PRIu64 " ns", d);
+    g_assert_cmpuint(d, ==, d0 + 5000000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* the host sets PS3: the same wake */
+    g_assert_cmphex(femu_apst(&c, buf, false, 0, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    g_assert_cmpuint(femu_pwr_read_ns(&c, io), ==, d0 + 5000000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* a reset turns APST off */
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 0, 0), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x0c);
+        g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &res)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, 0);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/* without the property: one power state, no APST */
+static void femu_test_power_states_off(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 265), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x0c, 0, 0, 0, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* the throttle properties are refused out of range or without the throttle */
 static void femu_test_throttle_refused(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -53506,6 +53673,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=thro,femu_mode=1,devsz_mb=64,ocp=on,"
             "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on",
     });
+    qos_add_test("power-states", "femu", femu_test_power_states,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=pwr,femu_mode=1,devsz_mb=64,"
+            "power_states=on,pg_rd_lat=1000000",
+    });
+    qos_add_test("power-states-off", "femu", femu_test_power_states_off,
+                 NULL);
     qos_add_test("plane-reads", "femu", femu_test_plane_reads, NULL);
     qos_add_test("plane-reads-on", "femu", femu_test_plane_reads_timing,
                  &(QOSGraphTestOptions) {

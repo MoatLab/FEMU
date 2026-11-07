@@ -56,7 +56,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "vid", "did", "acl", "cqr", "vwc", "temperature", "mpsmin",
-                    "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "lockdown", "reservations", "ps_max_watts",
+                    "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "power_states", "lockdown", "reservations", "ps_max_watts",
                 ],
             },
             {

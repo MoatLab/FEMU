@@ -36,6 +36,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_OCP_LATENCY_MONITOR]      = true,
     [NVME_OCP_DSSD_POWER_STATE]     = true,
     [NVME_HOST_IDENTIFIER]          = true,
+    [NVME_AUTO_PST]                 = true,
     [NVME_RESV_NOTIFY_MASK]         = true,
     [NVME_RESV_PERSISTENCE]         = true,
 };
@@ -56,6 +57,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_HCTM]                     = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_IDENTIFIER]          = NVME_FEAT_CAP_CHANGE,
+    [NVME_AUTO_PST]                 = NVME_FEAT_CAP_CHANGE,
     [NVME_RESV_NOTIFY_MASK]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_RESV_PERSISTENCE]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
@@ -128,6 +130,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
     case NVME_RESV_NOTIFY_MASK:
     case NVME_RESV_PERSISTENCE:
         return n->reservations;
+    case NVME_AUTO_PST:
+        return n->power_states;
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1578,6 +1582,14 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         return dma_read_prp(n, hbs, sizeof(hbs), le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
+    /* APST defaults to off with an empty table */
+    if (fid == NVME_AUTO_PST) {
+        uint32_t res;
+        uint16_t status = femu_apst_get(n, cmd, true, &res);
+
+        cqe->n.result = cpu_to_le32(res);
+        return status;
+    }
     /* the Timestamp a Controller Level Reset leaves: zero, origin 000b */
     if (fid == NVME_TIMESTAMP) {
         uint8_t ts[8] = { 0 };
@@ -1748,8 +1760,15 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         cqe->n.result = cpu_to_le32(n->features.arbitration);
         break;
     case NVME_POWER_MANAGEMENT:
-        cqe->n.result = cpu_to_le32(n->features.power_mgmt);
+        cqe->n.result = cpu_to_le32(femu_power_get(n));
         break;
+    case NVME_AUTO_PST: {
+        uint32_t res;
+        uint16_t status = femu_apst_get(n, cmd, false, &res);
+
+        cqe->n.result = cpu_to_le32(res);
+        return status;
+    }
     case NVME_OCP_DSSD_POWER_STATE:
         cqe->n.result = cpu_to_le32(n->ocp_dssd_ps);
         break;
@@ -1929,12 +1948,15 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ARBITRATION:
         n->features.arbitration = dw11;
         break;
+    case NVME_AUTO_PST:
+        return femu_apst_set(n, cmd);
     case NVME_POWER_MANAGEMENT:
         /* a power state the controller does not describe (Figure 405) */
         if ((dw11 & 0x1f) > n->id_ctrl.npss) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         n->features.power_mgmt = dw11 & 0xff;
+        femu_power_set(n, dw11 & 0x1f);
         if (save) {
             n->power_mgmt_saved = dw11 & 0xff;
         }

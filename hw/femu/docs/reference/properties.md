@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 250 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 251 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -78,6 +78,7 @@ Devices:
 | `cmbsz` | `uint32` | `0` | Controller Memory Buffer size register; 0 means no buffer, otherwise the size field times the unit must be a non-zero power of two |
 | `cmbloc` | `uint32` | `0` | Controller Memory Buffer location register; its BAR field must be 2 when cmbsz is set |
 | `fw_slots` | `uint8` | `0` | number of firmware slots, 1 to 7; 0 (default) means 1, or 3 with ocp; slot 1 is read only; with 2 or more, Firmware Image Download and Firmware Commit work and activation needs no reset; not with a femu-subsys or a CXL device |
+| `power_states` | `bool` | `off` | bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is non-operational, and an I/O command wakes it 5 ms later; Autonomous Power State Transition (0Ch); not with ocp; off (default) keeps one power state |
 | `lockdown` | `bool` | `off` | Command and Feature Lockdown: the Lockdown command (24h), log 14h and OACS bit 10; the host can prohibit most admin commands and changeable Feature Identifiers on the admin queue until QEMU stops; not with a femu-subsys; off (default) |
 | `reservations` | `bool` | `off` | Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire and Release, the Host Identifier (81h), Reservation Notification Mask (82h) and Reservation Persistence (83h) features, and log 80h; ONCS bit 5; not with Open-Channel; off (default) |
 | `ps_max_watts` | `uint8` | `25` | Maximum Power of power state 0 in watts, 1 to 127 (default 25); with ocp, the lowest valid DSSD power state of C4h and C7h; FEMU does not cap its modelled power at it |

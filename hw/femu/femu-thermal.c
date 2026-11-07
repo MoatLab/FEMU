@@ -40,6 +40,8 @@ bool femu_thermal_check(FemuCtrl *n, Error **errp)
     const char *why = NULL;
 
     n->throttle_pct_now = 100;
+    n->thermal_pct = 100;
+    n->ps_pct = 100;
     /*
      * The throttle stretches bbssd media (also under CSD). Other modes book
      * no energy or have no NAND timing to stretch, so they are refused.
@@ -199,8 +201,11 @@ void femu_throttle_eval(FemuCtrl *n)
         n->ocp_throttle_events++;
     }
     n->throttle_level = level;
-    qatomic_set(&n->throttle_pct_now, level == 2 ? n->throttle_heavy_pct :
-                                      level == 1 ? n->throttle_light_pct : 100);
+    qemu_mutex_lock(&n->ps_lock);
+    n->thermal_pct = level == 2 ? n->throttle_heavy_pct :
+                     level == 1 ? n->throttle_light_pct : 100;
+    qemu_mutex_unlock(&n->ps_lock);
+    femu_actuator_set(n);
 
     /*
      * With ocp, entering and leaving protection each send the temperature

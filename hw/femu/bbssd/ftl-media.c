@@ -307,8 +307,11 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timeline = &bb_timeline_ops;
     cfg.timeline_opaque = ssd;
     nand_media_init(&ssd->media, &cfg);
-    /* the controller's thermal throttle stretches this media's array time */
-    if (ssd->n && ssd->n->throttle) {
+    /*
+     * The controller's thermal throttle and power state cap stretch this
+     * media's array time.
+     */
+    if (ssd->n && (ssd->n->throttle || ssd->n->power_states)) {
         ssd->media.throttle_pct = &ssd->n->throttle_pct_now;
     }
 }

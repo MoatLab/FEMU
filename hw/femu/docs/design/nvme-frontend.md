@@ -676,7 +676,8 @@ With FDP off there is no FDP capability, so the FDP pages are neither
 listed nor answered.
 
 Get and Set Features answer Arbitration (01h), Power Management (02h, one
-power state), LBA Range Type (03h), Temperature Threshold (04h), Error
+power state, or four with `power_states=on`, which adds Autonomous Power
+State Transition, 0Ch), LBA Range Type (03h), Temperature Threshold (04h), Error
 Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),

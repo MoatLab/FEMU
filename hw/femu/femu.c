@@ -562,6 +562,7 @@ static void nvme_reset_features(FemuCtrl *n)
     n->ocp_media_ready_sent     = false;
     /* with ocp, 02h and C7h come back to their saved values (OCP PWR-5) */
     n->features.power_mgmt      = n->ocp ? n->power_mgmt_saved : 0;
+    femu_power_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
@@ -2485,6 +2486,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->psd[0].mp    = cpu_to_le16(n->ps_max_watts * 100);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
+    femu_power_id(n, id);
 
     n->features.sw_prog_marker  = 0;
     nvme_reset_features(n);
@@ -2713,8 +2715,12 @@ static void *femu_ftl_thread(void *arg)
             if (nvme_ns_shared(n)) {
                 qemu_mutex_unlock(&n->subsys->ns_lock);
             }
-            req->reqlat = lat;
+            /* the modelled time the host sees includes a wake from PS3 */
+            req->reqlat = lat + req->wake_ns;
             req->expire_time += lat;
+            if (unlikely(n->power_states)) {
+                femu_power_busy(n, req->expire_time);
+            }
 
             rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
             if (rc != 1) {
@@ -3971,7 +3977,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_check_multiplane_props(n, errp)) {
         return;
     }
-    if (!femu_thermal_check(n, errp)) {
+    if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -4512,6 +4518,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
+    DEFINE_PROP_BOOL("power_states", FemuCtrl, power_states, false),
     DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
@@ -5482,12 +5489,14 @@ static void femu_instance_finalize(Object *obj)
     n->nand_profile_name = NULL;
     qemu_mutex_destroy(&n->ocp_lat.lock);
     qemu_mutex_destroy(&n->rn_lock);
+    qemu_mutex_destroy(&n->ps_lock);
 }
 
 static void femu_instance_init(Object *obj)
 {
     qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
     qemu_mutex_init(&FEMU(obj)->rn_lock);
+    qemu_mutex_init(&FEMU(obj)->ps_lock);
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
