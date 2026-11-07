@@ -31,6 +31,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_TIMESTAMP]                = true,
     [NVME_SPINUP_CONTROL]           = true,
+    [NVME_HCTM]                     = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
     [NVME_OCP_DSSD_POWER_STATE]     = true,
@@ -50,6 +51,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
+    [NVME_HCTM]                     = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
@@ -114,6 +116,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
          * capability (CTRATT.FDPS clear) and no FDP features.
          */
         return n->subsys && n->subsys->endgrp.fdp.enabled;
+    case NVME_HCTM:
+        return femu_hctm_supported(n);
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1799,6 +1803,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* fixed off: no capability bit is set, so a Set cannot change it */
         cqe->n.result = 0;
         break;
+    case NVME_HCTM:
+        cqe->n.result = cpu_to_le32((uint32_t)n->hctm_tmt1 << 16 |
+                                    n->hctm_tmt2);
+        break;
     case NVME_OCP_DSSD_AEN_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_aen_config);
         break;
@@ -1922,6 +1930,26 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             n->ocp_dssd_ps = n->ps_max_watts;
         }
         break;
+    case NVME_HCTM: {
+        /*
+         * TMT1 in bits 31:16, TMT2 in 15:0 (kelvin). 0 turns a level off;
+         * a nonzero one must sit in MNTMT..MXTMT, and TMT1 < TMT2 when
+         * both are on (Base 2.3, Figure 417). The level follows at once.
+         */
+        uint16_t t1 = dw11 >> 16;
+        uint16_t t2 = dw11 & 0xffff;
+        uint16_t lo = le16_to_cpu(n->id_ctrl.mntmt);
+        uint16_t hi = le16_to_cpu(n->id_ctrl.mxtmt);
+
+        if ((t1 && (t1 < lo || t1 > hi)) || (t2 && (t2 < lo || t2 > hi)) ||
+            (t1 && t2 && t1 >= t2)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        n->hctm_tmt1 = t1;
+        n->hctm_tmt2 = t2;
+        femu_throttle_eval(n);
+        break;
+    }
     case NVME_OCP_DSSD_POWER_STATE:
         /*
          * Bits 6:0 hold the DSSD power state; below the minimum valid one
@@ -2848,6 +2876,8 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     nvme_ocp_put(&log[81], 7, refresh);
     stl_le_p(&log[88], max_pe);
     stl_le_p(&log[92], min_pe == UINT32_MAX ? 0 : min_pe);
+    log[96] = n->ocp_throttle_events;   /* throttle episodes, saturating */
+    log[97] = n->throttle_level;        /* 0 none, 1 light, 2 heavy */
     stw_le_p(&log[101], 7);                         /* DSSD 2.7 */
     log[103] = 2;
     stl_le_p(&log[112], n->ocp_incomplete_shutdowns);
@@ -3057,6 +3087,13 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     }
     if (femu_temp_condition(n)) {
         smart.critical_warning |= NVME_SMART_TEMPERATURE;
+    }
+    /* bytes 216 to 231: HCTM transitions and seconds in each level */
+    if (n->throttle) {
+        stl_le_p(&smart.reserved2[24], n->hctm_count[0]);
+        stl_le_p(&smart.reserved2[28], n->hctm_count[1]);
+        stl_le_p(&smart.reserved2[32], n->hctm_ms[0] / 1000);
+        stl_le_p(&smart.reserved2[36], n->hctm_ms[1] / 1000);
     }
 
     *smart_out = smart;

@@ -697,6 +697,16 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
 {
     int64_t cdw10 = le64_to_cpu(cmd->cdw10);
 
+    /*
+     * The thermal throttle needs timed media: untimed collection books no
+     * energy, and zero delays leave nothing to stretch.
+     */
+    if (n->throttle && (cdw10 == FEMU_DISABLE_GC_DELAY ||
+                        cdw10 == FEMU_DISABLE_DELAY_EMU)) {
+        femu_log("%s,FEMU delay toggle ignored: throttle=on\n", n->devname);
+        return;
+    }
+
     switch (cdw10) {
     case FEMU_ENABLE_GC_DELAY:
         bb_flip_apply(n, cdw10);

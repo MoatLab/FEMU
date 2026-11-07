@@ -37796,6 +37796,250 @@ static void femu_test_ocp_caps(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* qom-set @prop of device @id to @v */
+static void femu_qom_u32(QTestState *qts, const char *id, const char *prop,
+                         uint32_t v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':%s,'property':%s,'value':%u}}",
+                             path, prop, v);
+}
+
+/* one 4 KiB read at LBA 0, in microseconds of host time */
+static int64_t femu_read_us(FemuCtrlState *c, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/* SMART bytes 216 to 231: HCTM transitions and seconds per level */
+static void femu_hctm_smart(FemuCtrlState *c, uint64_t buf, uint32_t *v)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_log_cmd(c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 4; i++) {
+        v[i] = qtest_readl(qts, buf + 216 + 4 * i);
+    }
+}
+
+/*
+ * Thermal throttling with HCTM (feature 10h) on a bbssd device whose page
+ * read takes 50 ms, ambient 300 K, thermal_r 1 mK/mW. HCTMA, MNTMT and
+ * MXTMT; the 0-means-off rules; light and heavy levels from idle power;
+ * a heavy read takes 3x; SMART counts and seconds; turning HCTM off
+ * gives back the nominal time.
+ */
+static void femu_test_thermal_throttle(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t r;
+    uint32_t v[4];
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 322), ==, 1);       /* HCTMA */
+    g_assert_cmpuint(qtest_readw(qts, buf + 324), ==, 273);     /* MNTMT */
+    g_assert_cmpuint(qtest_readw(qts, buf + 326), ==,
+                     qtest_readw(qts, buf + 268));              /* = CCTEMP */
+
+    /* 0 turns a level off; both on need TMT1 < TMT2; inside MNTMT..MXTMT */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 320, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             320u << 16 | 310, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16 | 310, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             272u << 16, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x10, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 320);                /* the refusals changed nothing */
+    /* both halves come back; one past MXTMT is refused */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16 | 330, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x10, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 310u << 16 | 330);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             qtest_readw(qts, buf + 326) + 1,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+
+    qtest_memset(qts, buf, 0x33, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    /* nominal 50 ms; the host adds polling and scheduling on top */
+    us = femu_read_us(&c, buf);
+    g_test_message("nominal read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 45000);
+    g_assert_cmpint(us, <, 100000);
+    /* the vendor command that zeroes the delays (EFh, 4) is ignored here */
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = 0xef;
+        cmd.cdw10 = cpu_to_le32(4);
+        femu_admin(&c, &cmd);
+    }
+    g_assert_cmpint(femu_read_us(&c, buf), >=, 45000);
+
+    /* 320 K: light (TMT1 310), 75 ms; then 340 K: heavy (TMT2 330), 150 ms */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 20000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_test_message("light read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 70000);
+    g_assert_cmpint(us, <, 130000);
+    femu_qom_u32(qts, "thr", "x-idle-mw", 40000);
+    qtest_clock_step(qts, 3000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_test_message("heavy read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 145000);
+    g_assert_cmpint(us, <, 260000);
+    femu_hctm_smart(&c, buf, v);
+    g_assert_cmpuint(v[0], ==, 1);              /* one light transition */
+    g_assert_cmpuint(v[1], ==, 1);              /* one heavy transition */
+    g_assert_cmpuint(v[2], >=, 1);
+    g_assert_cmpuint(v[3], >=, 2);
+
+    /* cooling to 300 K releases both levels with HCTM still set */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 0);
+    qtest_clock_step(qts, 3000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_assert_cmpint(us, <, 100000);
+    /* hot again, then HCTM off: nominal at once; the counts stay */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 40000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    us = femu_read_us(&c, buf);
+    g_assert_cmpint(us, <, 100000);
+    femu_hctm_smart(&c, buf, v);
+    g_assert_cmpuint(v[1], ==, 2);              /* the second heavy entry */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * With ocp=on the throttle protects autonomously: heavy at 350 K, released
+ * below 348 K, with the SMART temperature warning set and cleared with it;
+ * C0h byte 96 counts the episode and byte 97 shows the level. HCTM is off
+ * all along.
+ */
+static void femu_test_thermal_ocp(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t p[512];
+
+    uint32_t v[4];
+    uint32_t res = 0;
+    uint16_t cid, want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /*
+     * Feature 04h over threshold at 340 K, SMART temperature events on.
+     * At 345 K the threshold warns first; the host reads the log.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 340, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0x2, NULL)),
+                    ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 45000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    /*
+     * 355 K: autonomous entry sends its own event (TTHROTTLE-2), although
+     * the temperature warning was already on.
+     */
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 55000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020101);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0x2);
+    /* writes go on while protected; HCTM statistics stay zero */
+    qtest_memset(qts, buf, 0x44, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_hctm_smart(&c, buf, v);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[i], ==, 0);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[96], ==, 1);
+    g_assert_cmpuint(p[97], ==, 2);
+    /* 349 K: still protected (hysteresis), still warned */
+    femu_qom_u32(qts, "thro", "x-idle-mw", 49000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[97], ==, 2);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0x2);
+    /* 335 K: released with an event (TTHROTTLE-7); the count stays */
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 35000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020101);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[96], ==, 1);
+    g_assert_cmpuint(p[97], ==, 0);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /* fw_slots: at most 7; ocp needs 3; no subsystem */
 static void femu_test_fw_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -52515,6 +52759,17 @@ static void femu_register_nodes(void)
     qos_add_test("ocp-caps", "femu", femu_test_ocp_caps,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=caps,femu_mode=1,devsz_mb=64,ocp=on",
+    });
+    qos_add_test("thermal-throttle", "femu", femu_test_thermal_throttle,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=thr,femu_mode=1,devsz_mb=64,"
+            "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on,"
+            "pg_rd_lat=50000000",
+    });
+    qos_add_test("thermal-ocp", "femu", femu_test_thermal_ocp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=thro,femu_mode=1,devsz_mb=64,ocp=on,"
+            "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on",
     });
     qos_add_test("fw-refused", "femu", femu_test_fw_refused,
                  &(QOSGraphTestOptions) {

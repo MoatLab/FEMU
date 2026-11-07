@@ -566,6 +566,10 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
+    /* HCTM is not saveable: a reset turns both levels off */
+    n->hctm_tmt1 = 0;
+    n->hctm_tmt2 = 0;
+    femu_throttle_eval(n);
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues    = (n->nr_io_queues - 1) |
                                   ((n->nr_io_queues - 1) << 16);
@@ -2395,6 +2399,12 @@ static void nvme_init_ctrl(FemuCtrl *n)
                                             NVME_TEMPERATURE_WARNING);
     id->cctemp       = cpu_to_le16(n->ocp ? NVME_OCP_CCTEMP :
                                             NVME_TEMPERATURE_CRITICAL);
+    /* HCTM: the host may set TMT1 and TMT2 from 0 C to the critical level */
+    if (n->throttle) {
+        id->hctma    = cpu_to_le16(1);
+        id->mntmt    = cpu_to_le16(273);
+        id->mxtmt    = id->cctemp;
+    }
     id->ieee[0]      = 0x00;
     id->ieee[1]      = 0x02;
     id->ieee[2]      = 0xb3;
@@ -4633,6 +4643,10 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("thermal_tau_ms", FemuCtrl, thermal_tau_ms, 0),
     DEFINE_PROP_UINT32("thermal_r", FemuCtrl, thermal_r, 0),
     DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
+    DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
+    DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),
+    DEFINE_PROP_UINT32("throttle_heavy_pct", FemuCtrl, throttle_heavy_pct, 300),
+    DEFINE_PROP_UINT16("hot_k", FemuCtrl, hot_k, 0),
     DEFINE_PROP_UINT32("thermal_step_ms", FemuCtrl, thermal_step_ms, 100),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
@@ -5435,6 +5449,8 @@ static void femu_instance_init(Object *obj)
                                        OBJ_PROP_FLAG_READWRITE);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
+        /* heats or cools the thermal model without I/O */
+        femu_test_add_u32(obj, "x-idle-mw", &FEMU(obj)->idle_mw, true);
         object_property_add_uint32_ptr(obj, "x-stage-hold-ms",
                                        &FEMU(obj)->test_stage_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);

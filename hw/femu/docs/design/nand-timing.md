@@ -1346,9 +1346,11 @@ make -C hw/femu/tests check
   copyback changes only timing.
 - Program suspend for programs, or erase suspend by another erase. Only reads
   suspend.
-- Per-die power or thermal limits, and temperature-dependent timing. The
-  package thermal model (`thermal_tau_ms`, `thermal_r`) reports a
-  temperature but does not slow the NAND.
+- Per-die power or thermal limits, and temperature-dependent NAND
+  physics. The package thermal model (`thermal_tau_ms`, `thermal_r`)
+  reports a temperature; with `throttle=on` it stretches the array time
+  of bbssd and CSD media as a device-wide pacing factor. Energy is charged
+  when an operation is booked, and the policy stops while the VM pauses.
 - Plane-level parallelism for BBSSD, CSD and KV reads and programs (the rule
   is per LUN), and the channel bus for OCSSD 2.0.
 - PLC outside ZNS. ZNS accepts PLC with times you supply; BBSSD resets

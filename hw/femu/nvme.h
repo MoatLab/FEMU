@@ -1600,6 +1600,7 @@ enum NvmeFeatureIds {
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
     NVME_TIMESTAMP                  = 0xe,
+    NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SPINUP_CONTROL             = 0x1a,
@@ -2791,6 +2792,25 @@ typedef struct FemuCtrl {
     int64_t         thermal_last_ns;
     int64_t         thermal_deadline;
     uint64_t        *thermal_ops;   /* plane ops priced, 3 per namespace */
+    /*
+     * Thermal throttle (femu-thermal.c). The policy runs under the BQL;
+     * the media layer reads only throttle_pct_now, atomically.
+     */
+    bool            throttle;
+    uint32_t        throttle_light_pct;
+    uint32_t        throttle_heavy_pct;
+    uint16_t        hot_k;          /* autonomous protection; 0 = off */
+    uint32_t        throttle_pct_now;
+    uint16_t        hctm_tmt1;      /* feature 10h, 0 = that level off */
+    uint16_t        hctm_tmt2;
+    uint8_t         hctm_level;     /* 0 none, 1 light, 2 heavy (HCTM) */
+    bool            auto_hot;       /* autonomous protection active */
+    uint8_t         throttle_level; /* the level the actuator runs */
+    int64_t         hctm_since_ns;  /* virtual clock: start of hctm_level */
+    uint32_t        hctm_count[2];  /* SMART 216, 220 */
+    uint64_t        hctm_ms[2];     /* SMART 224, 228, in milliseconds */
+    uint64_t        hctm_rem_ns[2]; /* time below one millisecond */
+    uint8_t         ocp_throttle_events;    /* OCP C0h byte 96 */
     bool            temp_cond_prev; /* condition seen with events enabled */
     uint32_t        spare_lines;    /* lines held back as spare blocks */
     /*
@@ -3248,6 +3268,8 @@ void femu_pel_temp_warning(FemuCtrl *n, bool on);
 void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits);
 bool femu_thermal_check(FemuCtrl *n, Error **errp);
 void femu_thermal_start(FemuCtrl *n);
+void femu_throttle_eval(FemuCtrl *n);
+bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_temp_condition(FemuCtrl *n);
 void femu_temp_eval(FemuCtrl *n);

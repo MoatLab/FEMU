@@ -288,6 +288,11 @@ typedef struct NandMedia {
     NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
     NandBusResList *ca_res;    /* nchs CA buses; NULL unless ca_separate */
     NandSuspendState *susp;    /* NULL unless policy.pe_suspend */
+    /*
+     * Thermal throttle: array time in percent of nominal, read atomically;
+     * NULL means 100. The controller publishes it (femu-thermal.c).
+     */
+    const uint32_t *throttle_pct;
 } NandMedia;
 
 uint64_t nand_media_last_end(const NandMedia *m);

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 243 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 247 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -194,6 +194,10 @@ Devices:
 | `thermal_r` | `uint32` | `0` | thermal resistance from the package to ambient, mK per mW (K per W); needed with thermal_tau_ms |
 | `idle_mw` | `uint32` | `0` | power with no NAND operations, mW, for the thermal model |
 | `thermal_step_ms` | `uint32` | `100` | how often the thermal model updates the temperature, ms, 1 to 60000; 100 (default) |
+| `throttle` | `bool` | `off` | bbssd, CSD: thermal throttling on the thermal model (needs thermal_tau_ms); enables feature 10h (HCTM) and stretches NAND array time at the light or heavy level |
+| `throttle_light_pct` | `uint32` | `150` | with throttle: NAND array time at the light level, in percent of nominal, 100 to throttle_heavy_pct |
+| `throttle_heavy_pct` | `uint32` | `300` | with throttle: NAND array time at the heavy level, in percent of nominal, up to 1000 |
+| `hot_k` | `uint16` | `0` | with throttle and ocp=off: autonomous protection enters the heavy level at this temperature in kelvin and leaves 2 K below; 0 (default) is off; ocp=on uses 350 K and 348 K |
 | `err_read_unc_ppm` | `uint32` | `0` | bbssd, CSD: reads per million that fail as Unrecovered Read Error, injected at a fixed period; 0 disables |
 | `err_write_fail_ppm` | `uint32` | `0` | bbssd, CSD and ZNS: writes per million that fail, injected at a fixed period (a ZNS zone then goes read-only); 0 disables |
 | `read_reclaim_limit` | `int32` | `0` | bbssd, CSD: when a host read finds its block has taken this many reads since its erase, that line is queued and rewritten on a following write, one line at a time (under FDP, its reclaim unit); 0 disables |
@@ -453,7 +457,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

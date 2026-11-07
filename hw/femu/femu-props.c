@@ -548,6 +548,20 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "thermal_r",
       "thermal resistance from the package to ambient, mK per mW (K per W); "
       "needed with thermal_tau_ms" },
+    { "throttle",
+      "bbssd, CSD: thermal throttling on the thermal model (needs "
+      "thermal_tau_ms); enables feature 10h (HCTM) and stretches NAND "
+      "array time at the light or heavy level" },
+    { "throttle_light_pct",
+      "with throttle: NAND array time at the light level, in percent of "
+      "nominal, 100 to throttle_heavy_pct" },
+    { "throttle_heavy_pct",
+      "with throttle: NAND array time at the heavy level, in percent of "
+      "nominal, up to 1000" },
+    { "hot_k",
+      "with throttle and ocp=off: autonomous protection enters the heavy "
+      "level at this temperature in kelvin and leaves 2 K below; 0 "
+      "(default) is off; ocp=on uses 350 K and 348 K" },
     { "idle_mw",
       "power with no NAND operations, mW, for the thermal model" },
     { "thermal_step_ms",
