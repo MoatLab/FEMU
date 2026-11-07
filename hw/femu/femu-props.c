@@ -229,15 +229,30 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
     { "sanitize_ms",
-      "bbssd, NoSSD: a Sanitize runs in the background for this many ms; while it runs, I/O and most admin commands fail with Sanitize In Progress, and its end sends Sanitize Operation Completed; up to 3600000; not with a femu-subsys; 0 (default) finishes before the command completes" },
+      "bbssd, NoSSD: a Sanitize runs in the background for this many ms; "
+      "while it runs, I/O and most admin commands fail with Sanitize In "
+      "Progress, and its end sends Sanitize Operation Completed; up to "
+      "3600000; not with a femu-subsys or power_loss; 0 (default) finishes "
+      "before the command completes" },
     { "sanitize_ops",
-      "with Sanitize: also Crypto Erase and Overwrite (SANICAP CES, OWS); off (default) offers Block Erase only" },
+      "with Sanitize: also Crypto Erase and Overwrite (SANICAP CES, OWS); not "
+      "with power_loss; off (default) offers Block Erase only" },
     { "ana",
-      "ANA reporting (Base 2.3, 8.1.1): one ANA group per namespace, log 0Ch, CMIC bit 3 and the ANA Change notice; the runtime property ana-state sets a group's state through this controller; must match on every controller of a femu-subsys; off (default)" },
+      "ANA reporting (Base 2.3, 8.1.1): one ANA group per namespace, log 0Ch, "
+      "CMIC bit 3 and the ANA Change notice; the runtime property ana-state "
+      "sets a group's state through this controller; must match on every "
+      "controller of a femu-subsys; off (default)" },
     { "power_states",
-      "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is non-operational, and an I/O command wakes it 5 ms later; Autonomous Power State Transition (0Ch); not with ocp; off (default) keeps one power state" },
+      "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch "
+      "NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is "
+      "non-operational, and an I/O command wakes it 5 ms later; Autonomous "
+      "Power State Transition (0Ch); not with ocp or a femu-subsys; off "
+      "(default) keeps one power state" },
     { "reservations",
-      "Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire and Release, the Host Identifier (81h), Reservation Notification Mask (82h) and Reservation Persistence (83h) features, and log 80h; ONCS bit 5; not with Open-Channel; off (default)" },
+      "Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire "
+      "and Release, the Host Identifier (81h), Reservation Notification Mask "
+      "(82h) and Reservation Persistence (83h) features, and log 80h; ONCS "
+      "bit 5; not with Open-Channel; off (default)" },
     { "lockdown",
       "Command and Feature Lockdown: the Lockdown command (24h), log 14h "
       "and OACS bit 10; the host can prohibit most admin commands and "

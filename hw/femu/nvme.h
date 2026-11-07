@@ -1100,7 +1100,7 @@ enum NvmeStatusCodes {
     NVME_DATA_SGL_LEN_INVALID   = 0x000f,
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
-    NVME_CMD_PROHIBITED         = 0x0023,   /* by Command and Feature Lockdown */
+    NVME_CMD_PROHIBITED         = 0x0023,   /* by Lockdown */
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
     NVME_IOCS_COMBINATION_REJECTED = 0x012b,
