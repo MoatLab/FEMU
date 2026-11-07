@@ -38220,6 +38220,78 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                 femu_enable(&c, &femu->dev, alloc);
             }
         }
+        /*
+         * OCP value features C2h, C6h, C8h, CAh and CBh: the factory
+         * default, a set that a reset undoes unless saved, reserved bits
+         * and values refused. CBh only changes the saved value; C3h
+         * returns zero and takes only bit 31.
+         */
+        if (on) {
+            static const struct {
+                uint8_t fid;
+                uint32_t def;
+                uint32_t set;           /* Set Features CDW11 */
+                uint32_t got;           /* Get Features Dword 0 after it */
+                uint32_t bad;           /* a refused CDW11 */
+            } v[] = {
+                { 0xc2, 1, 2u << 30, 2, 0 },
+                { 0xc6, 0, 15u << 16, 15, 1 },
+                { 0xc8, 0, 0x7, 0x7, 0x100 },
+                { 0xca, 0, 500, 500, 1u << 16 },
+                { 0xcb, 0, 0x2, 0, 0x5 },
+            };
+            uint32_t r;
+
+            for (int i = 0; i < ARRAY_SIZE(v); i++) {
+                g_test_message("OCP feature %02xh", v[i].fid);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 1, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].def);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 3, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, 0x5);    /* CHANG and SAVE */
+                g_assert_cmphex(femu_ocp_feat(&c, true, v[i].fid, 0, 1,
+                                              v[i].bad, NULL), ==,
+                                NVME_INVALID_FIELD);
+                g_assert_cmphex(femu_ocp_feat(&c, true, v[i].fid, 0, 1,
+                                              v[i].set, NULL), ==,
+                                NVME_SUCCESS);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 0, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].fid == 0xcb ? v[i].def :
+                                v[i].got);
+            }
+            /* a reset brings back the saved value: CBh's set, others' 0 */
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            for (int i = 0; i < ARRAY_SIZE(v); i++) {
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 0, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].def);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 2, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].fid == 0xcb ? 0x2 : v[i].def);
+            }
+            /* a saved set stays across a reset */
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc6, 1, 1, 30u << 16,
+                                          NULL), ==, NVME_SUCCESS);
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc6, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 30);
+            /* C3h: no value, bit 31 only, not saveable */
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 0, 1, 1u << 31,
+                                          NULL), ==, NVME_SUCCESS);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 0, 1, 1, NULL),
+                            ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 1, 1, 1u << 31,
+                                          NULL), ==, NVME_FID_NOT_SAVEABLE);
+            r = 0xdead;
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc3, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 0);
+        }
         /* Get and Set Features have USS with ocp (log 05h, bit 19) */
         g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
                         NVME_SUCCESS);

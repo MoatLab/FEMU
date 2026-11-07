@@ -1634,9 +1634,15 @@ enum NvmeFeatureIds {
     NVME_HOST_IDENTIFIER            = 0x81,
     NVME_RESV_NOTIFY_MASK           = 0x82,
     NVME_RESV_PERSISTENCE           = 0x83,
+    NVME_OCP_PLP_FAILURE_MODE       = 0xc2,  /* OCP 2.7, ocp=on */
+    NVME_OCP_CLEAR_PCIE_ERRORS      = 0xc3,  /* OCP 2.7, ocp=on */
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
+    NVME_OCP_PLP_HEALTH_INTERVAL    = 0xc6,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_POWER_STATE       = 0xc7,  /* OCP 2.7, ocp=on */
+    NVME_OCP_TELEMETRY_PROFILE      = 0xc8,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
+    NVME_OCP_IDLE_WAKE_UP           = 0xca,  /* OCP 2.7, ocp=on */
+    NVME_OCP_MAX_PCIE_CONFIG        = 0xcb,  /* OCP 2.7, ocp=on */
     NVME_FID_MAX                    = 0x100
 };
 
@@ -2767,6 +2773,12 @@ typedef struct FemuCtrl {
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
     uint8_t     fw_slots;       /* 0 auto: 1, or 3 with ocp */
     uint8_t     ps_max_watts;   /* Maximum Power of power state 0, in watts */
+    /*
+     * OCP features that only hold a value (C2h, C6h, C8h, CAh, CBh),
+     * indexed by FID - C0h, in their Get Features layout.
+     */
+    uint32_t    ocp_val[12];
+    uint32_t    ocp_val_saved[12];
     uint8_t     ocp_dssd_ps;    /* OCP C7h current DSSD power state */
     uint8_t     ocp_dssd_ps_saved;
     uint8_t     power_mgmt_saved;   /* feature 02h saved value (ocp=on) */
@@ -3206,6 +3218,8 @@ void femu_ocp_lat_note(FemuCtrl *n, NvmeRequest *req, int64_t post);
 uint16_t femu_ocp_lat_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                           uint64_t off);
 uint16_t femu_ocp_lat_set(FemuCtrl *n, NvmeCmd *cmd);
+void nvme_ocp_val_init(FemuCtrl *n);
+void nvme_ocp_val_reset(FemuCtrl *n);
 
 /*
  * The capability registry (nvme-caps.c). Each returns the Commands Supported

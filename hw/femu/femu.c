@@ -565,6 +565,7 @@ static void nvme_reset_features(FemuCtrl *n)
     femu_power_reset(n);
     nvme_ana_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
+    nvme_ocp_val_reset(n);
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
@@ -3819,6 +3820,7 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
     }
     n->ocp_dssd_ps_saved = n->ps_max_watts;
     n->power_mgmt_saved = 0;
+    nvme_ocp_val_init(n);
     if (n->fw_slots > 7) {
         error_setg(errp, "fw_slots must be 0 (auto) to 7");
         return false;

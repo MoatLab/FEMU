@@ -688,6 +688,26 @@ Timestamp (0Eh), Host Behavior Support (16h), Command Set Profile (19h), FDP
 a KV namespace) and Software Progress Marker (80h). Any other identifier, or
 one of these without what it needs, fails with Invalid Field in Command, and
 log 12h lists exactly the identifiers that answer.
+
+With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
+4.15). C5h configures the latency monitor, C7h selects a DSSD power state
+and C9h configures the DSSD events. C2h, C6h, C8h, CAh and CBh hold one
+value each, with a current, default and saved value. FEMU only stores
+them: it models no PLP circuit, idle mode or PCIe link change.
+
+```text
+ FID  name                         CDW11 bits  default  note
+ C2h  EOL/PLP failure mode         31:30       1 (ROM)  0 is reserved
+ C3h  clear PCIe error counters    31          -        not saveable; reads 0
+ C6h  PLP health check interval    31:16       0        minutes
+ C8h  telemetry profile            7:0         0
+ CAh  idle wake up time            15:0        0        ms
+ CBh  max PCIe interface config    15:0        0        next power cycle:
+                                                        only the saved value
+```
+
+The NVM subsystem features (C2h, C6h, C7h, C8h, CAh, CBh) take NSID 0 or
+FFFFFFFFh only.
 Only the FDP features report a saved value: FDP Mode is fixed at realize,
 FDP Events can be changed at run time. A controller reset
 (`nvme_reset_features()`) restores Arbitration, Power Management, the
