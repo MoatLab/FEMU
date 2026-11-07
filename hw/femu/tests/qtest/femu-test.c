@@ -36748,7 +36748,7 @@ static bool femu_is_ocp_c0(QTestState *qts, uint64_t buf)
     uint8_t p[512];
 
     qtest_memread(qts, buf, p, sizeof(p));
-    return lduw_le_p(&p[494]) == 4 && !memcmp(&p[496], femu_ocp_c0_guid, 16);
+    return lduw_le_p(&p[494]) == 6 && !memcmp(&p[496], femu_ocp_c0_guid, 16);
 }
 
 /*
@@ -36886,7 +36886,7 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(ldq_le_p(&p[48]), ==, 0);      /* XOR recovery */
     g_assert_cmpuint(p[98], ==, 0);
     g_assert_cmpuint(lduw_le_p(&p[99]), ==, 0);
-    g_assert_cmpuint(lduw_le_p(&p[101]), ==, 5);
+    g_assert_cmpuint(lduw_le_p(&p[101]), ==, 7);    /* DSSD 2.7 */
     g_assert_cmpuint(p[103], ==, 2);
     g_assert_cmpuint(lduw_le_p(&p[128]), ==, 0xffff);
     {
@@ -36897,7 +36897,12 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
         qtest_memread(qts, buf, &ns, sizeof(ns));
         g_assert_cmpuint(ldq_le_p(&p[152]), ==, le64_to_cpu(ns.nuse));
     }
-    for (int b = 216; b < 494; b++) {
+    /* 2.7 fields: dies, max temperature, average erases, then reserved */
+    g_assert_cmpuint(lduw_le_p(&p[216]), >, 0);
+    g_assert_cmpuint(p[222], >, 0);
+    g_assert_cmpuint(ldq_le_p(&p[224]), ==, 0);     /* a new device */
+    g_assert_cmpuint(ldq_le_p(&p[358]), ==, 0);
+    for (int b = 366; b < 494; b++) {
         g_assert_cmpuint(p[b], ==, 0);
     }
     w0 = ldq_le_p(&p[0]);

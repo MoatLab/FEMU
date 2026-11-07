@@ -147,6 +147,7 @@ static void femu_thermal_tick(void *opaque)
         if (isfinite(t)) {
             n->thermal_t = t;
             n->temperature = (uint16_t)lround(MIN(MAX(t, 0.0), 65535.0));
+            n->ocp_max_temp_k = MAX(n->ocp_max_temp_k, n->temperature);
         }
         n->thermal_last_ns = now;
         femu_temp_eval(n);

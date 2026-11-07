@@ -2555,6 +2555,7 @@ typedef struct FemuCtrl {
     bool        perf_hints;     /* NPWG, NPDG, NOWS from the bbssd geometry */
     bool        ocp;            /* OCP 2.5 C0h and C1h behind the OCP UUID */
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
+    uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;
@@ -3374,9 +3375,18 @@ uint64_t ssd_map_read_pages(struct ssd *ssd);
 uint64_t ssd_media_read_pages(struct ssd *ssd);
 uint64_t ssd_recovered_reads(struct ssd *ssd);
 uint64_t ssd_read_errors(struct ssd *ssd);
-void ssd_ocp_blocks(struct ssd *ssd, uint64_t *bad, uint32_t *max_pe,
-                    uint32_t *min_pe, uint64_t *free_lines,
-                    uint64_t *empty_lines, uint64_t *blocks_per_line);
+typedef struct FemuOcpBlocks {
+    uint64_t bad;           /* retired blocks: worn out and sacrificed */
+    uint32_t max_pe;        /* highest erase count of any block */
+    uint32_t min_pe;        /* lowest erase count of a block in service */
+    uint64_t erase_sum;     /* erases of all blocks */
+    uint64_t blocks;        /* all blocks */
+    uint64_t dies;          /* LUNs */
+    uint64_t free_lines;
+    uint64_t empty_lines;   /* no valid page, waiting for an erase */
+    uint64_t blocks_per_line;
+} FemuOcpBlocks;
+void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *b);
 /* the four counters of the raw bit error model, in C0h order */
 void ssd_rber_counters(struct ssd *ssd, uint64_t out[4]);
 uint64_t ssd_tp_moves(struct ssd *ssd);

@@ -220,7 +220,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "only; refused with power_loss, ns_mgmt, namespace_modes and a "
       "subsystem" },
     { "ocp",
-      "bbssd, CSD: report the OCP 2.5 SMART Extended (C0h) and Error "
+      "bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error "
       "Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move "
       "to UUID index 2; not with a femu-subsys; off (default) keeps C0h as "
       "the FEMU counters" },

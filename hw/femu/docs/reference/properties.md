@@ -85,7 +85,7 @@ Devices:
 | `nlbaf` | `uint8` | `5` | Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte blocks doubling with each format |
 | `atomic_write_lbas` | `uint32` | `0` | Namespace atomic write unit in blocks: NAWUN and the boundary NABSN become N - 1, from block 0. 0 (default) keeps one block; else a power of two from 2 to 65536 that fits MDTS at the largest block size. The power-fail unit stays one block. bbssd and NoSSD only; refused with power_loss, ns_mgmt, namespace_modes and a subsystem |
 | `perf_hints` | `bool` | `off` | bbssd, CSD: report the optimal write and deallocate granularity (NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, for the format in use; off (default) reports 0 (one block). Refused with FDP and ns_mgmt |
-| `ocp` | `bool` | `off` | bbssd, CSD: report the OCP 2.5 SMART Extended (C0h) and Error Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move to UUID index 2; not with a femu-subsys; off (default) keeps C0h as the FEMU counters |
+| `ocp` | `bool` | `off` | bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move to UUID index 2; not with a femu-subsys; off (default) keeps C0h as the FEMU counters |
 | `lba_index` | `uint8` | `0` | LBA format the namespaces boot with, below nlbaf; ZNS needs a block size of 4 KiB or less |
 | `extended` | `uint8` | `0` | 1 boots with metadata interleaved with the data (extended LBAs); needs bit 0 of mc; 0 or 1 |
 | `meta` | `uint8` | `0` | Metadata bytes per logical block, NoSSD and bbssd only, not with FDP, dpc or dps; each format is then also offered with metadata |

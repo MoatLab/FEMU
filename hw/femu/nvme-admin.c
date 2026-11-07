@@ -2590,7 +2590,7 @@ static const uint8_t nvme_ocp_erec_guid[16] = {
 };
 
 /*
- * OCP 2.5 SMART / Health Information Extended (C0h, version 4). Every FTL
+ * OCP 2.7 SMART / Health Information Extended (C0h, version 6). Every FTL
  * namespace adds its media figures. A field FEMU does not model is 0, or
  * the value OCP gives for "not present" (capacitor health FFFFh: no PLP).
  */
@@ -2600,7 +2600,9 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     uint8_t log[512] = {};
     uint64_t wr_pages = 0, rd_pages = 0, bad = 0, uncorr = 0, soft = 0;
     uint64_t refresh = 0, free_lines = 0, empty_lines = 0, nuse = 0;
+    uint64_t erase_sum = 0, blocks = 0, dies = 0;
     uint32_t max_pe = 0, min_pe = UINT32_MAX, page_size = 0;
+    uint16_t max_temp_k = MAX(n->ocp_max_temp_k, n->temperature);
     FemuMediaStats st;
 
     if (off >= sizeof(log) || !nvme_ocp_nsid_ok(cmd)) {
@@ -2609,8 +2611,8 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     nvme_collect_media_stats(n, &st);
     for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        uint64_t b, fl, el, bpl, r, pads, cl, rr;
-        uint32_t hi, lo;
+        uint64_t r, pads, cl, rr;
+        FemuOcpBlocks ob;
 
         if (!ns->allocated) {
             continue;
@@ -2629,16 +2631,19 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         rd_pages = nvme_ocp_add(rd_pages, ssd_media_read_pages(ns->ssd));
         uncorr = nvme_ocp_add(uncorr, ssd_read_errors(ns->ssd));
         soft = nvme_ocp_add(soft, ssd_recovered_reads(ns->ssd));
-        ssd_ocp_blocks(ns->ssd, &b, &hi, &lo, &fl, &el, &bpl);
-        bad = nvme_ocp_add(bad, b);
-        free_lines = nvme_ocp_add(free_lines, fl);
-        empty_lines = nvme_ocp_add(empty_lines, el);
-        max_pe = MAX(max_pe, hi);
-        min_pe = MIN(min_pe, lo);
+        ssd_ocp_blocks(ns->ssd, &ob);
+        bad = nvme_ocp_add(bad, ob.bad);
+        free_lines = nvme_ocp_add(free_lines, ob.free_lines);
+        empty_lines = nvme_ocp_add(empty_lines, ob.empty_lines);
+        erase_sum = nvme_ocp_add(erase_sum, ob.erase_sum);
+        blocks = nvme_ocp_add(blocks, ob.blocks);
+        dies = nvme_ocp_add(dies, ob.dies);
+        max_pe = MAX(max_pe, ob.max_pe);
+        min_pe = MIN(min_pe, ob.min_pe);
         /* integrity rewrites, in blocks: read, retention, open block */
         rr = nvme_ocp_add(nvme_ocp_add(ssd_read_reclaims(ns->ssd),
                                        ssd_retention_refreshes(ns->ssd)), r);
-        refresh = nvme_ocp_add(refresh, nvme_ocp_mul(rr, bpl));
+        refresh = nvme_ocp_add(refresh, nvme_ocp_mul(rr, ob.blocks_per_line));
     }
 
     nvme_ocp_put_bytes(&log[0], wr_pages, page_size);   /* PMUW */
@@ -2652,15 +2657,22 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     nvme_ocp_put(&log[81], 7, refresh);
     stl_le_p(&log[88], max_pe);
     stl_le_p(&log[92], min_pe == UINT32_MAX ? 0 : min_pe);
-    stw_le_p(&log[101], 5);                         /* DSSD 2.5 */
+    stw_le_p(&log[101], 7);                         /* DSSD 2.7 */
     log[103] = 2;
     stl_le_p(&log[112], n->ocp_incomplete_shutdowns);
     /* erased lines over erased and emptied lines that wait for an erase */
     log[120] = free_lines + empty_lines ?
                free_lines * 100 / (free_lines + empty_lines) : 0;
     stw_le_p(&log[128], 0xffff);                    /* no PLP */
+    /* host writes that covered a NAND page in part */
+    nvme_ocp_put(&log[136], 8, st.partial_page_writes);
     stq_le_p(&log[152], nuse);
-    nvme_ocp_trailer(log, 4, nvme_ocp_smart_guid);
+    stw_le_p(&log[216], MIN(dies, UINT16_MAX));     /* Total Media Dies */
+    /* highest composite temperature since realize, in degrees Celsius */
+    log[222] = max_temp_k > 273 ? MIN(max_temp_k - 273, 255) : 0;
+    nvme_ocp_put(&log[224], 8, blocks ? erase_sum / blocks : 0);
+    nvme_ocp_put(&log[358], 8, bad);    /* Dies In Use Bad NAND Blocks */
+    nvme_ocp_trailer(log, 6, nvme_ocp_smart_guid);
 
     buf_len = MIN(sizeof(log) - off, buf_len);
     return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
