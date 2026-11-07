@@ -4290,6 +4290,54 @@ static void femu_query_check_lines(QTestState *qts, const char *path,
     g_assert_cmpuint(mapped, ==, want_valid);
 }
 
+/*
+ * Kind blocks, paged to the end: one record per flash block, in channel,
+ * LUN, plane, block order, whose erase counts sum to block-erases.
+ */
+static void femu_query_check_blocks(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *geo = qdict_get_qdict(ns, "geometry");
+    uint64_t bpp = qdict_get_int(geo, "blocks-per-plane");
+    uint64_t total = qdict_get_int(geo, "channels") *
+                     qdict_get_int(geo, "luns-per-channel") *
+                     qdict_get_int(geo, "planes-per-lun") * bpp;
+    uint64_t erases = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "block-erases");
+    uint64_t sum = 0;
+    uint64_t seen = 0;
+    uint32_t offset = 0;
+    bool more = true;
+
+    qobject_unref(rsp);
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", offset);
+        QList *blocks;
+        QListEntry *e;
+
+        ns = femu_query_ns(qts, args, &rsp);
+        blocks = qdict_get_qlist(ns, "blocks");
+        QLIST_FOREACH_ENTRY(blocks, e) {
+            QDict *b = qobject_to(QDict, qlist_entry_obj(e));
+
+            g_assert_cmpuint(qdict_get_int(b, "block"), ==, seen % bpp);
+            sum += qdict_get_int(b, "erase-count");
+            seen++;
+        }
+        more = qdict_haskey(ns, "next-offset");
+        if (more) {
+            offset = qdict_get_int(ns, "next-offset");
+            g_assert_cmpuint(offset, ==, seen);
+        }
+        qobject_unref(rsp);
+    }
+    g_assert_cmpuint(seen, ==, total);
+    g_assert_cmpuint(sum, ==, erases);
+    g_assert_cmpuint(sum, >, 0);
+}
+
 /* @lines records from @offset, and where the listing continues (0 = end) */
 static void femu_query_window(QTestState *qts, uint32_t offset, uint32_t limit,
                               uint32_t want, uint32_t next)
@@ -4398,6 +4446,9 @@ static void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
     femu_query_window(qts, 18, 1, 1, 0);
     femu_query_window(qts, 0, 4096, 19, 0);
     femu_query_fails(qts, "'kind':'lines','offset':19", "past its last line");
+    femu_query_check_blocks(qts);
+    femu_query_fails(qts, "'kind':'blocks','offset':4000000",
+                     "past its last block");
     femu_query_fails(qts, "'kind':'lines','limit':0", "limit must be");
     femu_query_fails(qts, "'kind':'lines','limit':4097", "limit must be");
     femu_query_fails(qts, "'offset':1", "only to kind");

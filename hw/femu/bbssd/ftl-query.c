@@ -234,6 +234,35 @@ uint32_t ssd_owner_nsid(struct ssd *ssd)
     return ssd->ns ? ssd->ns->id : 0;
 }
 
+/* the window of blocks from q->offset, in channel, LUN, plane order */
+static void ssd_query_blocks(struct ssd *ssd, FemuQueryNs *q)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint32_t per_lun = spp->pls_per_lun * spp->blks_per_pl;
+    uint32_t per_ch = spp->luns_per_ch * per_lun;
+    uint32_t end;
+
+    q->tt_blocks = spp->nchs * per_ch;
+    q->nr_blocks = 0;
+    if (!q->blocks || q->offset >= q->tt_blocks) {
+        return;
+    }
+    end = MIN(q->tt_blocks, q->offset + q->max_blocks);
+    for (uint32_t i = q->offset; i < end; i++) {
+        FemuQueryBlock *out = &q->blocks[q->nr_blocks++];
+        struct nand_block *blk;
+
+        out->ch = i / per_ch;
+        out->lun = i % per_ch / per_lun;
+        out->pl = i % per_lun / spp->blks_per_pl;
+        out->blk = i % spp->blks_per_pl;
+        blk = &ssd->ch[out->ch].lun[out->lun].pl[out->pl].blk[out->blk];
+        out->erase_cnt = blk->erase_cnt;
+        out->pe_limit = blk->pe_limit;
+        out->overworn = blk->overworn;
+    }
+}
+
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -269,6 +298,7 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
         q->eol_reqs = (w & ~(1ULL << 63)) >> 32;
     }
 
+    ssd_query_blocks(ssd, q);
     q->fdp = ssd->fdp_enabled;
     if (q->fdp) {
         ssd_query_fdp(ssd, q);

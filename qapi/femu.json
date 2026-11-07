@@ -52,10 +52,41 @@
 #     window of units.  Blackbox namespaces with flexible data placement
 #     only.
 #
+# @blocks: the summary and one record per flash block, for a window of
+#     blocks.  Blackbox namespaces only.
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuQueryKind',
-  'data': [ 'summary', 'lines', 'zones', 'reclaim-units' ] }
+  'data': [ 'summary', 'lines', 'zones', 'reclaim-units', 'blocks' ] }
+
+##
+# @FemuBlockInfo:
+#
+# The wear of one flash block.  Blocks are listed in the order channel,
+# LUN, plane, block, so block i of the listing is block (i mod
+# blocks per plane) of its plane.
+#
+# @channel: the channel
+#
+# @lun: the LUN in its channel
+#
+# @plane: the plane in its LUN
+#
+# @block: the block in its plane
+#
+# @erase-count: erases of the block
+#
+# @pe-limit: erases the block survives, 0 when blocks do not wear out
+#
+# @overworn: the block is past @pe-limit and still in service
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuBlockInfo',
+  'data': { 'channel': 'uint32', 'lun': 'uint32', 'plane': 'uint32',
+            'block': 'uint32', 'erase-count': 'uint32',
+            'pe-limit': 'uint32', 'overworn': 'bool' } }
 
 ##
 # @FemuLineState:
@@ -871,11 +902,14 @@
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
 #
-# @offset: with kind @lines or @reclaim-units, the index of the first
-#     record in the listing
+# @blocks: with kind @blocks, the flash blocks from @offset, at most
+#     limit of them
 #
-# @next-offset: with kind @lines or @reclaim-units, the offset that
-#     continues the listing.  Absent after the last record.
+# @offset: with kind @lines, @reclaim-units or @blocks, the index of the
+#     first record in the listing
+#
+# @next-offset: with kind @lines, @reclaim-units or @blocks, the offset
+#     that continues the listing.  Absent after the last record.
 #
 # Since: 10.1
 ##
@@ -885,7 +919,8 @@
             'media': 'FemuMediaTiming',
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*end-of-life': 'FemuEolInfo',
-            '*lines': [ 'FemuLineInfo' ], '*offset': 'uint32',
+            '*lines': [ 'FemuLineInfo' ],
+            '*blocks': [ 'FemuBlockInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 
 ##

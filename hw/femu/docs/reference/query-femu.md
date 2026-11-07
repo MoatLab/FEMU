@@ -390,6 +390,23 @@ namespace. It needs no enabled controller.
 To read all lines, call again with `offset` set to `next-offset` until the
 reply has no `next-offset`.
 
+Kind `blocks` pages through every flash block of a BlackBox namespace in
+the same way. Blocks come in channel, LUN, plane and block order. Each
+record has the erase count, the block's P/E limit and whether it is
+overworn. The erase counts of all blocks add up to `block-erases`.
+
+```json
+{"execute": "query-femu", "arguments": {"kind": "blocks", "offset": 0, "limit": 2}}
+```
+
+```json
+  "blocks": [{"channel": 0, "lun": 0, "plane": 0, "block": 0, "erase-count": 3,
+              "pe-limit": 0, "overworn": false},
+             {"channel": 0, "lun": 0, "plane": 0, "block": 1, "erase-count": 2,
+              "pe-limit": 0, "overworn": false}],
+  "offset": 0, "next-offset": 2
+```
+
 An FDP namespace with four handles, just after the guest enabled it.
 Each handle has one unit open:
 

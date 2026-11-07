@@ -210,7 +210,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
         FemuQueryZoned *q = &zoned[*nr_zoned];
 
         if (kind == FEMU_QUERY_KIND_LINES ||
-            kind == FEMU_QUERY_KIND_RECLAIM_UNITS) {
+            kind == FEMU_QUERY_KIND_RECLAIM_UNITS ||
+            kind == FEMU_QUERY_KIND_BLOCKS) {
             error_setg(errp, "namespace %u: kind '%s' applies only to "
                        "bbssd namespaces", ns->id, FemuQueryKind_str(kind));
             return false;
@@ -264,6 +265,20 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
 
         q->nsid = ns->id;
         q->generation = ns->creation_generation;
+        if (kind == FEMU_QUERY_KIND_BLOCKS) {
+            struct ssdparams *spp = &ns->ssd->sp;
+            uint32_t total = spp->nchs * spp->luns_per_ch * spp->pls_per_lun *
+                             spp->blks_per_pl;
+
+            if (offset >= total) {
+                error_setg(errp, "namespace %u: offset %u is past its last "
+                           "block (%u blocks)", ns->id, offset, total);
+                return false;
+            }
+            q->offset = offset;
+            q->max_blocks = limit;
+            q->blocks = g_new0(FemuQueryBlock, limit);
+        }
         if (ns->ssd->fdp_enabled) {
             struct ssd *ssd = ns->ssd;
             uint32_t total = ssd->rg ? ssd->nrg * ssd->rg[0].tt_nru : 0;
@@ -320,6 +335,7 @@ static void femu_query_free(FemuQueryReq *req)
 {
     for (uint32_t i = 0; i < req->nr_ns; i++) {
         g_free(req->ns[i].lines);
+        g_free(req->ns[i].blocks);
         g_free(req->ns[i].state);
         g_free(req->ns[i].ruhs);
         g_free(req->ns[i].rgs);
@@ -682,6 +698,30 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         eol->held_pages = q->eol_pages;
         eol->held_requests = q->eol_reqs;
         info->end_of_life = eol;
+    }
+    /* kind blocks: the window of flash blocks and where it continues */
+    if (q->blocks) {
+        FemuBlockInfoList **tail = &info->blocks;
+
+        info->has_blocks = true;
+        for (uint32_t i = 0; i < q->nr_blocks; i++) {
+            FemuBlockInfo *bi = g_new0(FemuBlockInfo, 1);
+
+            bi->channel = q->blocks[i].ch;
+            bi->lun = q->blocks[i].lun;
+            bi->plane = q->blocks[i].pl;
+            bi->block = q->blocks[i].blk;
+            bi->erase_count = q->blocks[i].erase_cnt;
+            bi->pe_limit = q->blocks[i].pe_limit;
+            bi->overworn = q->blocks[i].overworn;
+            QAPI_LIST_APPEND(tail, bi);
+        }
+        info->has_offset = true;
+        info->offset = q->offset;
+        if (q->offset + q->nr_blocks < q->tt_blocks) {
+            info->has_next_offset = true;
+            info->next_offset = q->offset + q->nr_blocks;
+        }
     }
     if (q->fdp) {
         g_free(cnt);

@@ -23,6 +23,16 @@ typedef struct FemuQueryLine {
     FemuLineState state;
 } FemuQueryLine;
 
+typedef struct FemuQueryBlock {
+    uint32_t ch;
+    uint32_t lun;
+    uint32_t pl;
+    uint32_t blk;
+    uint32_t erase_cnt;
+    uint32_t pe_limit;
+    bool overworn;
+} FemuQueryBlock;
+
 typedef struct FemuQueryRuh {
     uint32_t id;
     FemuRuHandleType type;
@@ -98,6 +108,10 @@ typedef struct FemuQueryNs {
     FemuQueryLine *lines;       /* max_lines entries, or NULL for a summary */
     uint8_t *state;             /* state_cap entries, or NULL for a summary */
     uint32_t state_cap;
+    uint32_t tt_blocks;
+    uint32_t max_blocks;
+    uint32_t nr_blocks;
+    FemuQueryBlock *blocks;     /* max_blocks entries, kind blocks only */
 
     bool fdp;
     uint32_t nrg;
