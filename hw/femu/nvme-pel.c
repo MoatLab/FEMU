@@ -17,10 +17,11 @@
 #include "system/system.h"
 #include "nvme.h"
 
-#define PEL_SIZE            (64 * KiB)  /* PELS: one 64 KiB unit */
+#define PEL_UNIT            (64 * KiB)  /* PELS counts 64 KiB units */
 #define PEL_HDR_SIZE        512
 #define PEL_EV_HDR_SIZE     24
-#define PEL_EVENTS_SIZE     (PEL_SIZE - PEL_HDR_SIZE)
+/* one unit, or 80 (5 MiB, OCP 2.7 STD-LOG-22) with ocp=on */
+#define PEL_UNITS(n)        ((n)->ocp ? 80 : 1)
 #define PEL_SNAPSHOT_MS     (24 * 60 * 60 * 1000LL)
 
 #define PEL_ACT_READ        0
@@ -63,7 +64,8 @@ struct FemuPel {
     bool        closed;        /* exit has ended event collection */
     Notifier    exit_notifier;
     FemuCtrl    *ctrl;
-    uint8_t     events[PEL_EVENTS_SIZE];
+    uint8_t     *events;
+    uint32_t    cap;            /* event bytes: PELS units less the header */
     uint32_t    used;
     uint32_t    nev;
     uint16_t    gnum;
@@ -104,7 +106,7 @@ static void pel_file_digest(const uint8_t *buf, size_t len, uint8_t *digest)
 static bool pel_file_load(FemuCtrl *n, Error **errp)
 {
     FemuPel *pel = n->pel;
-    g_autofree uint8_t *buf = g_malloc(PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE + 1);
+    g_autofree uint8_t *buf = g_malloc(PEL_FILE_HDR_SIZE + pel->cap + 1);
     uint8_t digest[32];
     size_t len = 0;
     uint32_t off;
@@ -122,15 +124,15 @@ static bool pel_file_load(FemuCtrl *n, Error **errp)
     }
     do {
         got = read(fd, buf + len,
-                   PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE + 1 - len);
+                   PEL_FILE_HDR_SIZE + pel->cap + 1 - len);
         if (got > 0) {
             len += got;
         }
-    } while ((got > 0 && len <= PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE) ||
+    } while ((got > 0 && len <= PEL_FILE_HDR_SIZE + pel->cap) ||
              (got < 0 && errno == EINTR));
     close(fd);
     if (got < 0 || len < PEL_FILE_HDR_SIZE ||
-        len > PEL_FILE_HDR_SIZE + PEL_EVENTS_SIZE ||
+        len > PEL_FILE_HDR_SIZE + pel->cap ||
         memcmp(buf, "FEMUPEL\0", 8) || ldl_le_p(buf + 8) != 1 ||
         ldl_le_p(buf + 12) != len - PEL_FILE_HDR_SIZE) {
         goto invalid;
@@ -268,7 +270,7 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
     uint32_t size = PEL_EV_HDR_SIZE + len;
     uint8_t *e;
 
-    if (!pel || size > PEL_EVENTS_SIZE) {
+    if (!pel || size > pel->cap) {
         return;
     }
 
@@ -277,7 +279,7 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
         qemu_mutex_unlock(&pel->lock);
         return;
     }
-    while (pel->used + size > PEL_EVENTS_SIZE) {
+    while (pel->used + size > pel->cap) {
         uint32_t first = pel_event_len(pel->events);
 
         memmove(pel->events, pel->events + first, pel->used - first);
@@ -503,6 +505,8 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
 {
     FemuPel *pel = g_new0(FemuPel, 1);
 
+    pel->cap = PEL_UNITS(n) * PEL_UNIT - PEL_HDR_SIZE;
+    pel->events = g_malloc0(pel->cap);
     qemu_mutex_init(&pel->lock);
     qemu_mutex_init(&pel->warn_lock);
     for (int i = 0; i < ARRAY_SIZE(pel->media_tokens); i++) {
@@ -516,6 +520,7 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
             n->pel = NULL;
             qemu_mutex_destroy(&pel->lock);
             qemu_mutex_destroy(&pel->warn_lock);
+            g_free(pel->events);
             g_free(pel);
             return false;
         }
@@ -556,6 +561,7 @@ void femu_pel_exit(FemuCtrl *n)
     qemu_mutex_destroy(&pel->lock);
     qemu_mutex_destroy(&pel->warn_lock);
     g_free(pel->ctx);
+    g_free(pel->events);
     g_free(pel);
 }
 

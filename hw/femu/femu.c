@@ -2421,7 +2421,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->aerl         = n->aerl;
     /* one read-only slot: the firmware log fills one, and nothing updates it */
     id->frmw         = 1 << 1 | 1;
-    id->pels         = cpu_to_le32(1);
+    /* 64 KiB units: one, or 5 MiB with ocp (OCP 2.7 STD-LOG-22) */
+    id->pels         = cpu_to_le32(n->ocp ? 80 : 1);
     id->elpe         = n->elpe;
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;

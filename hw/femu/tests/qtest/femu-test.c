@@ -36812,6 +36812,8 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
 
         g_assert_cmpuint((cap >> 37) & 0x40, ==, on ? 0 : 0x40);
         g_assert_cmpuint(id.lpa & 1, ==, on ? 0 : 1);
+        /* PELS in 64 KiB units: 5 MiB with ocp (STD-LOG-22) */
+        g_assert_cmpuint(ldl_le_p((uint8_t *)&id + 352), ==, on ? 80 : 1);
         g_assert_cmphex(le16_to_cpu(id.wctemp), ==, on ? 0x15e : FEMU_WCTEMP);
         g_assert_cmphex(le16_to_cpu(id.cctemp), ==, on ? 0x166 : 0x175);
         g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
