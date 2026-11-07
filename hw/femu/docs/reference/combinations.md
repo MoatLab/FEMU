@@ -338,6 +338,10 @@ own description allows. A message keeps its format directives (`%s`,
 - kv_timing=model and kv_model_coeffs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_timing=model and kv_model_coeffs need a key-value namespace; shared namespaces are NoSSD or bbssd
 
+## `l2p_dram_ns`
+
+- FEMU bbssd: l2p_dram_ns must not be negative
+
 ## `lba_index`
 
 - nlbaf must be in [1, 16] and lba_index below it

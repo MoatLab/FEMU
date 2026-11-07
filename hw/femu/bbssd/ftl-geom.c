@@ -355,6 +355,10 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    if (p->l2p_dram_ns < 0) {
+        error_setg(errp, "FEMU bbssd: l2p_dram_ns must not be negative");
+        return -1;
+    }
     /*
      * A write smaller than the indirection unit rewrites the rest of it on
      * the direct path; the buffer and FDP take whole pages, so not with them.
@@ -467,6 +471,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
     spp->buffer_low_pcent = n->bb_params.buffer_low_pcent / 100.0;
     spp->iu_pages = MAX(n->bb_params.iu_pages, 1);
+    spp->l2p_dram_ns = n->bb_params.l2p_dram_ns;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;

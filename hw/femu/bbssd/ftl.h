@@ -303,6 +303,7 @@ struct ssdparams {
     double buffer_thres_pcent;
     double buffer_low_pcent;    /* background write-back target, 0 = off */
     int iu_pages;               /* indirection unit, pages; 1 = per page */
+    int l2p_dram_ns;            /* DRAM time of one mapping lookup, ns */
 
     /* buffer/cache effectiveness; 64-bit, a long run overflows an int */
     uint64_t read_hit_cnt;

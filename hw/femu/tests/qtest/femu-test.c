@@ -39464,6 +39464,40 @@ static void femu_test_power_states_off(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/*
+ * l2p_dram_ns: each mapping lookup costs controller DRAM time, and a read
+ * starts its NAND read after it. With 2 ms of lookup (@data set) a read's
+ * modelled time is 2 ms longer than without it.
+ */
+static void femu_test_l2p_dram(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = data ? "l2p-on" : "l2p-off";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t before, d;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2a, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    before = femu_model_ns(qts, id);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    d = femu_model_ns(qts, id) - before;
+    g_test_message("%s: read modelled %" PRIu64 " ns", id, d);
+    if (data) {
+        g_assert_cmpuint(d, >=, 2000000 + 40000);
+    } else {
+        g_assert_cmpuint(d, <, 2000000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* the throttle properties are refused out of range or without the throttle */
 static void femu_test_throttle_refused(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -54263,6 +54297,16 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=anac,ana=on,femu_mode=1,devsz_mb=64",
     });
     qos_add_test("ana-off", "femu", femu_test_ana_off, NULL);
+    qos_add_test("l2p-dram-on", "femu", femu_test_l2p_dram,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)1,
+        .edge.extra_device_opts = "id=l2p-on,femu_mode=1,devsz_mb=64,"
+            "l2p_dram_ns=2000000",
+    });
+    qos_add_test("l2p-dram-off", "femu", femu_test_l2p_dram,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=l2p-off,femu_mode=1,devsz_mb=64",
+    });
     qos_add_test("power-states", "femu", femu_test_power_states,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=pwr,femu_mode=1,devsz_mb=64,"

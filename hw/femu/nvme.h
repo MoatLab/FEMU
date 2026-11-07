@@ -2458,6 +2458,7 @@ typedef struct BbCtrlParams {
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int buffer_low_pcent;     /* idle write-back stops here; 0 = none */
     int iu_pages;             /* mapping unit in pages; 0 or 1 = a page */
+    int l2p_dram_ns;          /* controller DRAM time of a mapping lookup */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
     int fdp_trim_erase_all; /* FDP DSM: 1 = reset whole device (test only); 0 = range */
     char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */

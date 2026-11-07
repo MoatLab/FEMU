@@ -721,6 +721,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },
+    { "l2p_dram_ns",
+      "bbssd, CSD: controller DRAM time in ns of each logical-to-physical "
+      "lookup, added to the mapping cost of every host page read and "
+      "written, 0 or more; 0 (default) charges none" },
     { "iu_pages",
       "bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write "
       "that covers part of a unit reads the unit's other mapped pages and "

@@ -4839,6 +4839,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("buffer_low_pcent", FemuCtrl,
                       bb_params.buffer_low_pcent, 0),
     DEFINE_PROP_INT32("iu_pages", FemuCtrl, bb_params.iu_pages, 0),
+    DEFINE_PROP_INT32("l2p_dram_ns", FemuCtrl, bb_params.l2p_dram_ns, 0),
     /* the pSLC tier in front of the dense lines; off unless tier_mode is set */
     DEFINE_PROP_STRING("tier_mode", FemuCtrl, bb_params.tier_mode),
     DEFINE_PROP_STRING("tier_full_policy", FemuCtrl,

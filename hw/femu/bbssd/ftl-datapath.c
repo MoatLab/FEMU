@@ -543,16 +543,18 @@ static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd)
 static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                             bool is_write)
 {
+    /* the controller DRAM access of the lookup itself (l2p_dram_ns) */
+    uint64_t dram = ssd->sp.l2p_dram_ns;
     uint64_t t;
 
     if (!ssd->cmt.capacity) {
-        return 0;
+        return dram;
     }
     if (!ssd->tp_on) {
-        return cmt_touch(ssd, lpn, stime, is_write);
+        return dram + cmt_touch(ssd, lpn, stime, is_write);
     }
     t = stime ? stime : ssd_now(ssd);
-    return cmt_access(ssd, lpn, t, is_write) - t;
+    return dram + cmt_access(ssd, lpn, t, is_write) - t;
 }
 
 /*
@@ -911,8 +913,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          */
         map = ssd_map_lat(ssd, lpn, base, false);
         maxlat = (map > maxlat) ? map : maxlat;
-        dstart = ssd->tp_on ? base + map : base;
-        wait = ssd->tp_on ? map : 0;
+        /* the media read follows the DRAM lookup (l2p_dram_ns, default 0) */
+        dstart = base + (ssd->tp_on ? map : ssd->sp.l2p_dram_ns);
+        wait = ssd->tp_on ? map : ssd->sp.l2p_dram_ns;
 
         ppa = ssd->mapping->translate(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {

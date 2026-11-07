@@ -131,7 +131,7 @@ DEVICES = [
                     "gc_copyback", "mapping", "mapping_cache_mb",
                     "read_cache_mb", "cache_evict", "hot_cold_sep",
                     "gc_frontier", "gc_idle_ms", "gc_idle_pcent",
-                    "buffer_size", "iu_pages", "buffer_low_pcent", "buffer_thres_pcent", "fdp_trim_erase_all",
+                    "buffer_size", "l2p_dram_ns", "iu_pages", "buffer_low_pcent", "buffer_thres_pcent", "fdp_trim_erase_all",
                     "debug_ftl",
                 ],
             },
