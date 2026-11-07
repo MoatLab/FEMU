@@ -4185,6 +4185,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
     nvme_ana_id(n, &n->id_ctrl);
+    /* OCP C6h: the device is "born" when it is realized */
+    {
+        g_autoptr(GDateTime) now = g_date_time_new_now_local();
+        g_autofree char *day = g_date_time_format(now, "%m%d%Y");
+
+        pstrcpy(n->born_on, sizeof(n->born_on), day);
+    }
     if (n->sanitize_ms) {
         /* guest-visible state: it runs on the virtual clock */
         n->san_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,

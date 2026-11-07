@@ -37977,7 +37977,7 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                     NVME_SUCCESS);
     for (int lid = 0; lid < 256; lid++) {
         uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1 ||
-                        lid == 0xc3 || lid == 0xc4;
+                        lid == 0xc3 || lid == 0xc4 || lid == 0xc6;
 
         g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
     }
@@ -38645,6 +38645,66 @@ static void femu_test_fw_ocp(void *obj, void *data, QGuestAllocator *alloc)
  * C7h current, saved and default, kept over a reset; Power Management
  * saveable; CAP.CPS 11b.
  */
+/*
+ * OCP Hardware Component log (C6h): version 2, the GUID, the size in bytes
+ * 47:32; descriptors from byte 64 with no gap up to the size; the
+ * controller, NAND, DRAM, PMIC and PCB, then serial number, country of
+ * origin (no text), hardware revision and an MMDDYYYY born-on date.
+ */
+static void femu_test_ocp_hwcomp(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const uint8_t guid[16] = {
+        0xdc, 0x57, 0x0f, 0x9f, 0xb9, 0x31, 0x6b, 0xb7,
+        0xd0, 0x4e, 0xcd, 0x30, 0x1f, 0x82, 0xb6, 0xbc,
+    };
+    static const uint32_t want[] = { 1, 2, 3, 4, 5, 9, 10, 11, 12 };
+    g_autofree uint8_t *p = g_malloc(4096);
+    uint64_t size, pos = 64;
+    int i = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc6, 1, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 4096);
+    g_assert_cmpuint(lduw_le_p(&p[0]), ==, 2);
+    g_assert_cmpmem(&p[16], 16, guid, 16);
+    size = ldq_le_p(&p[32]);
+    g_assert_cmpuint(size, >, 64);
+    g_assert_cmpuint(size, <=, 4096);
+    while (pos < size) {
+        uint64_t lot = ldq_le_p(&p[pos]);
+        uint64_t add = ldq_le_p(&p[pos + 8]);
+        uint32_t id = ldl_le_p(&p[pos + 16]);
+
+        g_assert_cmpint(i, <, ARRAY_SIZE(want));
+        g_assert_cmpuint(id, ==, want[i]);
+        if (id == 12) {                          /* MMDDYYYY */
+            g_assert_cmpuint(add, ==, 2);
+            for (int k = 0; k < 8; k++) {
+                g_assert_true(g_ascii_isdigit(p[pos + 44 + lot * 4 + k]));
+            }
+        }
+        if (id == 10) {
+            g_assert_cmpuint(add, ==, 0);        /* not available */
+        }
+        pos += 44 + lot * 4 + add * 4;
+        i++;
+    }
+    g_assert_cmpuint(pos, ==, size);
+    g_assert_cmpint(i, ==, ARRAY_SIZE(want));
+    /* the OCP UUID lists it in log 00h */
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 1, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0xc6 * 4) & 1, ==, 1);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 static void femu_test_ocp_caps(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -54275,6 +54335,10 @@ static void femu_register_nodes(void)
     qos_add_test("fw-ocp", "femu", femu_test_fw_ocp,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=fw-ocp,femu_mode=1,devsz_mb=64,ocp=on",
+    });
+    qos_add_test("ocp-hwcomp", "femu", femu_test_ocp_hwcomp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=hwc,femu_mode=1,devsz_mb=64,ocp=on",
     });
     qos_add_test("ocp-caps", "femu", femu_test_ocp_caps,
                  &(QOSGraphTestOptions) {

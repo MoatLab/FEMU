@@ -2598,6 +2598,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
         lids[NVME_LOG_OCP_EREC] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_OCP_LATENCY] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_OCP_DEVCAP] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_OCP_HWCOMP] = cpu_to_le32(NVME_LIDS_LSUPP);
         break;
     case 2:
         memset(lids, 0, sizeof(lids));
@@ -3014,6 +3015,81 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     buf_len = MIN(sizeof(log) - off, buf_len);
     return dma_read_prp(n, log + off, buf_len, le64_to_cpu(cmd->dptr.prp1),
                         le64_to_cpu(cmd->dptr.prp2));
+}
+
+/* the OCP Hardware Component log GUID BCB6821F30CD4ED0B76B31B99F0F57DCh */
+static const uint8_t nvme_ocp_hwcomp_guid[16] = {
+    0xdc, 0x57, 0x0f, 0x9f, 0xb9, 0x31, 0x6b, 0xb7,
+    0xd0, 0x4e, 0xcd, 0x30, 0x1f, 0x82, 0xb6, 0xbc,
+};
+
+/*
+ * One component descriptor (OCP 2.7, 4.8.13.1): no date/lot code; the
+ * identifier; manufacturer and revision as 8 ASCII bytes; a manufacturer
+ * code; then @info, if any, as additional information in whole dwords.
+ */
+static void hwcomp_add(GByteArray *log, uint32_t id, const char *mfr,
+                       const char *rev, uint64_t code, const char *info)
+{
+    size_t len = info ? strlen(info) : 0;
+    uint64_t dws = DIV_ROUND_UP(len, 4);
+    uint8_t d[44] = { 0 };
+    g_autofree uint8_t *add = g_malloc0(dws * 4 + 1);
+
+    stq_le_p(&d[8], dws);
+    stl_le_p(&d[16], id);
+    if (mfr) {
+        strpadcpy((char *)&d[20], 8, mfr, ' ');
+    }
+    if (rev) {
+        strpadcpy((char *)&d[28], 8, rev, ' ');
+    }
+    stq_le_p(&d[36], code);
+    g_byte_array_append(log, d, sizeof(d));
+    memcpy(add, info ? info : "", len);
+    g_byte_array_append(log, add, dws * 4);
+}
+
+/*
+ * Hardware Component log (C6h, OCP 2.7 4.8.13): the emulated controller,
+ * NAND, DRAM, PMIC and board, then the serial number, the country of
+ * origin (not available, so no text), the hardware revision and the born-on
+ * date (the day the device was realized). Descriptors start at byte 64 and
+ * follow each other with no gap.
+ */
+static uint16_t nvme_ocp_hwcomp_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                                    uint64_t off)
+{
+    g_autoptr(GByteArray) log = g_byte_array_sized_new(1024);
+    g_autofree char *nand = g_strdup_printf("%d ch x %d LUN x %d plane",
+                                            n->bb_params.nchs,
+                                            n->bb_params.luns_per_ch,
+                                            n->bb_params.pls_per_lun);
+    g_autofree char *dram = g_strdup_printf("%" PRIu64 " MiB",
+                                            (uint64_t)n->memsz);
+    char fr[9] = { 0 };
+    uint8_t hdr[64] = { 0 };
+
+    memcpy(fr, n->id_ctrl.fr, 8);
+    g_byte_array_append(log, hdr, sizeof(hdr));
+    hwcomp_add(log, 0x0001, "FEMU", fr, n->vid, "emulated controller");
+    hwcomp_add(log, 0x0002, "FEMU", "NAND", 0, nand);
+    hwcomp_add(log, 0x0003, "FEMU", "DRAM", 0, dram);
+    hwcomp_add(log, 0x0004, "FEMU", "PMIC", 0, "emulated");
+    hwcomp_add(log, 0x0005, "FEMU", "PCB", 0, "emulated");
+    hwcomp_add(log, 0x0009, NULL, NULL, 0, n->serial);
+    hwcomp_add(log, 0x000a, NULL, NULL, 0, NULL);
+    hwcomp_add(log, 0x000b, NULL, NULL, 0, fr);
+    hwcomp_add(log, 0x000c, NULL, NULL, 0, n->born_on);
+    stw_le_p(&log->data[0], 2);                 /* version 0002h */
+    memcpy(&log->data[16], nvme_ocp_hwcomp_guid, 16);
+    stq_le_p(&log->data[32], log->len);         /* size, bytes 47:32 */
+    if (off >= log->len) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    return dma_read_prp_fill(n, log->data + off, MIN(log->len - off, len),
+                             len, le64_to_cpu(cmd->dptr.prp1),
+                             le64_to_cpu(cmd->dptr.prp2));
 }
 
 static const uint8_t nvme_ocp_devcap_guid[16] = {
@@ -4168,7 +4244,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         if (uidx > 2 ||
             (uidx == 1 && lid != NVME_LOG_SUPPORTED &&
              lid != NVME_LOG_FEMU_STATS && lid != NVME_LOG_OCP_EREC &&
-             lid != NVME_LOG_OCP_LATENCY && lid != NVME_LOG_OCP_DEVCAP) ||
+             lid != NVME_LOG_OCP_LATENCY && lid != NVME_LOG_OCP_DEVCAP &&
+             lid != NVME_LOG_OCP_HWCOMP) ||
             (uidx == 2 && lid != NVME_LOG_SUPPORTED &&
              lid != NVME_LOG_FEMU_STATS)) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -4242,6 +4319,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         return nvme_ocp_devcap_log(n, cmd, len, off);
+    case NVME_LOG_OCP_HWCOMP:
+        if (!nvme_ocp_nsid_ok(cmd)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return nvme_ocp_hwcomp_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off, rae);
     case NVME_LOG_CHANGED_NS_LIST:

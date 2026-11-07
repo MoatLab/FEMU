@@ -652,6 +652,7 @@ Namespace Management.
 | Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID, and the Endurance Group List, CNS 19h) with it |
 | Asymmetric Namespace Access | 0Ch | with `ana=on`: one group per namespace; the state comes from the runtime property `ana-state`; RGO leaves out the namespace lists |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
+| OCP Hardware Component | C6h | with `ocp=on`: the emulated controller, NAND, DRAM, PMIC and board, then the serial number, the country of origin (not available), the hardware revision and the born-on date, the day the device was realized |
 | OCP Latency Monitor | C3h | with `ocp=on`: 512 bytes, version 0005h, configured by Feature C5h; bytes 512 to 4095 read as zeros |
 | OCP SMART / Health Extended, Error Recovery | C0h, C1h | with `ocp=on`: OCP 2.7 layouts at UUID index 0 and 1 (CNS 17h lists the OCP UUID, then the FEMU UUID `2ff92965-47be-4ce0-923d-649d30079203`); the FEMU counters at C0h, UUID index 2. Fields FEMU does not model are 0, capacitor health is FFFFh (no PLP) |
 | Rotational Media Information | 16h | with `femu-subsys,rotational=on`: one actuator, one spinup and one load per QEMU run; Spinup Control (Feature 1Ah) is fixed off |

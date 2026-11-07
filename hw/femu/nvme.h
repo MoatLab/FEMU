@@ -1308,6 +1308,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_OCP_EREC           = 0xc1,    /* OCP Error Recovery, ocp=on */
     NVME_LOG_OCP_LATENCY        = 0xc3,    /* OCP Latency Monitor, ocp=on */
     NVME_LOG_OCP_DEVCAP         = 0xc4,    /* OCP Device Capabilities, ocp=on */
+    NVME_LOG_OCP_HWCOMP         = 0xc6,    /* OCP Hardware Component, ocp=on */
 };
 
 /* LID Supported and Effects data structure, one per log page identifier */
@@ -2822,6 +2823,7 @@ typedef struct FemuCtrl {
     bool            reservations;
     uint8_t         pif;            /* PI guard: 0 16-bit, 2 64-bit */
     bool            pci_pm;         /* PCI power management capability */
+    char            born_on[9];     /* MMDDYYYY of realize, OCP log C6h */
     uint8_t         hostid[16];
     bool            hostid_ext;
     uint32_t        host_epoch;
