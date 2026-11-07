@@ -70,6 +70,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `ch_xfer_lat`
 
+- FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat
 - OC 1.2 ch_xfer_lat must be nonnegative
 
 ## `cmbloc`
@@ -79,6 +80,10 @@ own description allows. A message keeps its format directives (`%s`,
 ## `cmbsz`
 
 - cmbsz describes a %
+
+## `cmd_addr_lat`
+
+- FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat
 
 ## `cqr`
 
@@ -579,7 +584,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: l2p_dram_ns must not be negative, and does not work with onfi_cache_read or FDP
 - femu: onfi_cache_read is refused with %s
-- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases or pe_suspend
+- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 
 ## `onfi_mode`
 
@@ -590,6 +595,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: onfi_mode needs an even page size on the bus (secsz * secs_per_pg + onfi_spare_bytes)
 - femu: onfi_mode needs bbssd, CSD or KV namespaces; namespace %u is not one
 - femu: pe_suspend is refused with onfi_mode
+- femu: read_prio is refused with onfi_mode
 
 ## `onfi_mts`
 
@@ -647,7 +653,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: pe_suspend_max and tresume_ns need pe_suspend
 - femu: pe_suspend is refused with onfi_mode
-- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases or pe_suspend
+- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 
 ## `pe_suspend_max`
 
@@ -656,6 +662,10 @@ own description allows. A message keeps its format directives (`%s`,
 ## `perf_hints`
 
 - perf_hints: %s
+
+## `pg_xfer_lat`
+
+- FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat
 
 ## `pgs_per_blk`
 
@@ -672,7 +682,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `plane_reads`
 
-- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases or pe_suspend
+- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 - plane_reads works with bbssd, CSD or KV namespaces only (KV keeps the LUN rule)
 
 ## `poller_ratio`
@@ -710,6 +720,12 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU %s: rber_ppb is not supported with %s
 - FEMU: rber_ppb is not supported with %s
 - x-rber-u requires rber_ppb
+
+## `read_prio`
+
+- FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat
+- femu: read_prio is refused with onfi_mode
+- plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 
 ## `read_reclaim_limit`
 
@@ -752,6 +768,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu: spare_lines (%u) must be below blks_per_pl (%d)
 - femu: spare_lines needs blk_pe_limit
+
+## `status_lat`
+
+- FEMU bbssd: read_prio needs the plain channel model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or status_lat
 
 ## `streams`
 

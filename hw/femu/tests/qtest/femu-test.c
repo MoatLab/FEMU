@@ -5851,6 +5851,7 @@ static void femu_test_gc_copyback_refused(void *obj, void *data,
     } cases[] = {
         { "'femu_mode':1,'gc_pace':true", "with gc_pace" },
         { "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
+        { "'femu_mode':1,'read_prio':1", "with read_prio" },
         { "'femu_mode':1,'mapping':'hybrid'",
           "a mapping other than page or dftl" },
         { "'femu_mode':0", "a mode other than bbssd or CSD" },
@@ -5871,6 +5872,34 @@ static void femu_test_gc_copyback_refused(void *obj, void *data,
         g_test_message("%s: %s", cases[i].extra, desc);
         g_assert_nonnull(strstr(desc, "gc_copyback"));
         g_assert_nonnull(strstr(desc, cases[i].why));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* read_prio refuses the bus phases it would leave behind */
+static void femu_test_read_prio_refused(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const phases[] = {
+        "cmd_addr_lat", "pg_xfer_lat", "ch_xfer_lat", "status_lat",
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(phases); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'rp-refused','addr':'5','devsz_mb':16,"
+            "'femu_mode':1,'read_prio':1,'%s':1000}", phases[i]);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", phases[i], desc);
+        g_assert_nonnull(strstr(desc, "read_prio needs the plain channel"));
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
@@ -6950,6 +6979,8 @@ static void femu_test_onfi_refused(void *obj, void *data,
         { "'femu_mode':1,'onfi_mode':26,'ns_mgmt':true", "ns_mgmt or shared" },
         { "'femu_mode':1,'onfi_mode':26,'pe_suspend':1",
           "pe_suspend is refused with onfi_mode" },
+        { "'femu_mode':1,'onfi_mode':26,'read_prio':1",
+          "read_prio is refused with onfi_mode" },
         { "'femu_mode':3,'onfi_mode':26", "namespace 1 is not" },
         { "'femu_mode':2,'onfi_mode':26", "namespace 1 is not" },
         { "'femu_mode':0,'onfi_mode':26", "namespace 1 is not" },
@@ -9255,6 +9286,65 @@ static void femu_test_pe_suspend(void *obj, void *data,
     /* the write took cid c.cid - 2 and the read c.cid - 1 */
     g_assert_cmpuint(cid[0], ==, on ? c.cid - 1 : c.cid - 2);
     g_assert_cmpuint(cid[1], ==, on ? c.cid - 2 : c.cid - 1);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/*
+ * Read priority, end to end. On one LUN, two writes that each program NAND
+ * and a read of a page written before go in one doorbell ring. Off, the
+ * read waits for both programs and completes last; on, it waits only for
+ * the program that runs and completes between the two writes. @data is
+ * "on" when the device has read_prio turned on.
+ */
+static void femu_test_read_prio(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint16_t cid[3];
+    uint16_t first;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 0);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+
+    first = c.cid;
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 1);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 2);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_READ, 0);
+    femu_zap_ring(&c, &q);
+    for (i = 0; i < 3; i++) {
+        uint64_t slot = q.cq_addr + q.cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+    }
+    g_test_message("read_prio %s: cids %u %u %u", on ? "on" : "off",
+                   cid[0], cid[1], cid[2]);
+    /* the writes took cids first and first + 1, the read first + 2 */
+    g_assert_cmpuint(cid[0], ==, first);
+    g_assert_cmpuint(cid[1], ==, on ? first + 2 : first + 1);
+    g_assert_cmpuint(cid[2], ==, on ? first + 1 : first + 2);
 
     guest_free(alloc, buf);
     femu_queue_free(&c, &q);
@@ -39101,6 +39191,7 @@ static void femu_test_plane_reads(void *obj, void *data,
         { "'femu_mode':2", "bbssd, CSD or KV" },
         { "'femu_mode':1,'onfi_cache_read':1", "plain channel model" },
         { "'femu_mode':1,'pe_suspend':1", "plain channel model" },
+        { "'femu_mode':1,'read_prio':1", "plain channel model" },
         { "'femu_mode':1,'status_lat':100", "plain channel model" },
     };
     const char *geom = "'devsz_mb':4,'secsz':512,'secs_per_pg':8,"
@@ -50224,6 +50315,23 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
     });
+    /* two 200 ms programs queued on one LUN, then a 40 us read */
+    qos_add_test("read-prio-bbssd-off", "femu", femu_test_read_prio,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=40000"
+    });
+    qos_add_test("read-prio-bbssd-on", "femu", femu_test_read_prio,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=40000,read_prio=1"
+    });
     /* one suspension allowed, with a resume cost: the read still preempts */
     qos_add_test("pe-suspend-bbssd-limit", "femu", femu_test_pe_suspend,
                  &(QOSGraphTestOptions) {
@@ -51995,6 +52103,8 @@ static void femu_register_nodes(void)
             "pg_xfer_lat=2000000,gc_copyback=on"
     });
     qos_add_test("gc-copyback-refused", "femu", femu_test_gc_copyback_refused,
+                 NULL);
+    qos_add_test("read-prio-refused", "femu", femu_test_read_prio_refused,
                  NULL);
     qos_add_test("tier-refused", "femu", femu_test_tier_refused, NULL);
     qos_add_test("tier-direct", "femu", femu_test_tier_direct,

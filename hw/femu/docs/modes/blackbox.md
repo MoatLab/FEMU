@@ -92,6 +92,8 @@ How the time is computed: [timing model](../concepts/timing-model.md#nand-operat
   shared channel bus. It is modelled only when one of them is non-zero.
 - `pe_suspend` and `tsusp_ns` let a read suspend a program or erase on its
   LUN.
+- `read_prio` lets a read go ahead of the programs and erases queued on its
+  LUN; it waits only for the one that runs.
 - `trim_lat_ns` charges each Dataset Management deallocate range.
 
 ### Garbage collection

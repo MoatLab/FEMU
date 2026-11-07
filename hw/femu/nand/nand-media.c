@@ -71,8 +71,8 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
             }
         }
     }
-    /* suspend needs the geometry to keep its per-position state */
-    if (cfg->policy.pe_suspend &&
+    /* suspend and read_prio need the geometry for per-position state */
+    if ((cfg->policy.pe_suspend || cfg->policy.read_prio) &&
         cfg->nchs && cfg->luns_per_ch && cfg->planes_per_lun) {
         m->susp = calloc((size_t)cfg->nchs * cfg->luns_per_ch *
                          cfg->planes_per_lun, sizeof(*m->susp));
@@ -566,6 +566,134 @@ static void suspend_note(NandMedia *m, const NandLoc *loc, NandMediaOp op,
 }
 
 /*
+ * Slide the program/erase windows that read_prio keeps by @by: a window that
+ * runs past @from ends later, and one that starts at or after @from starts
+ * later.
+ */
+static void prio_slide(NandSuspendState *st, uint64_t from, uint64_t by)
+{
+    if (st->win_floor > from) {
+        st->win_floor += by;
+    }
+    for (int i = 0; i < st->nwin; i++) {
+        if (st->win_end[i] > from) {
+            st->win_end[i] += by;
+        }
+        if (st->win_start[i] >= from) {
+            st->win_start[i] += by;
+        }
+    }
+}
+
+/*
+ * Record a program or erase window [start, end) for read_prio. A full list
+ * drops its first window; a read then waits at least for its end, so a
+ * dropped window can only make a read later, never overlap it.
+ */
+static void prio_note(NandMedia *m, const NandLoc *loc, uint64_t start,
+                      uint64_t end)
+{
+    NandSuspendState *st;
+    int i;
+
+    if (!m->cfg.policy.read_prio || !(st = suspend_state(m, loc))) {
+        return;
+    }
+    /* a multi-plane booking under the LUN rule notes one window per plane */
+    for (i = 0; i < st->nwin; i++) {
+        if (st->win_start[i] == start && st->win_end[i] == end) {
+            return;
+        }
+    }
+    if (st->nwin == NAND_PRIO_WINDOWS) {
+        st->win_floor = mx(st->win_floor, st->win_end[0]);
+        memmove(st->win_start, st->win_start + 1,
+                (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_start[0]));
+        memmove(st->win_end, st->win_end + 1,
+                (NAND_PRIO_WINDOWS - 1) * sizeof(st->win_end[0]));
+        st->nwin--;
+    }
+    for (i = st->nwin; i > 0 && st->win_start[i - 1] > start; i--) {
+        st->win_start[i] = st->win_start[i - 1];
+        st->win_end[i] = st->win_end[i - 1];
+    }
+    st->win_start[i] = start;
+    st->win_end[i] = end;
+    st->nwin++;
+}
+
+/*
+ * Where a read starts under read_prio, given the time the array is busy
+ * until. The read waits for the program or erase that runs when it can
+ * start, and for the reads that went ahead before it; the programs and
+ * erases queued after that slide as far as its array time @alat pushes
+ * them. *slide is how far the last window moved. Returns false to leave
+ * the read to the ordinary rule, when no queued window starts after the
+ * read could.
+ */
+static bool prio_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
+                            uint64_t busy_until, uint64_t alat,
+                            uint64_t *start, uint64_t *slide)
+{
+    NandSuspendState *st = suspend_state(m, loc);
+    uint64_t rs, cur, carry = 0;
+    bool queued = false;
+    int i, k;
+
+    if (!m->cfg.policy.read_prio || !st || t >= busy_until) {
+        return false;
+    }
+    for (i = 0, k = 0; i < st->nwin; i++) {
+        if (st->win_end[i] > t) {
+            st->win_start[k] = st->win_start[i];
+            st->win_end[k++] = st->win_end[i];
+        }
+    }
+    st->nwin = k;
+    /*
+     * A window runs if it started before the read could, or starts as the
+     * read arrives; a window that starts where an earlier one ends is queued.
+     */
+    rs = mx(mx(t, st->rd_end), st->win_floor);
+    for (i = 0; i < st->nwin; i++) {
+        if (st->win_start[i] < rs ||
+            (st->win_start[i] == t && rs == t)) {
+            rs = mx(rs, st->win_end[i]);
+        } else {
+            queued = true;
+        }
+    }
+    if (!queued || rs >= busy_until) {
+        return false;
+    }
+    /*
+     * Push each queued window only as far as the work before it now ends:
+     * a gap absorbs the delay, so a window far in the future stays put.
+     */
+    cur = rs + alat;
+    for (i = 0; i < st->nwin; i++) {
+        if (st->win_start[i] < rs) {
+            continue;
+        }
+        carry = st->win_start[i] < cur ? cur - st->win_start[i] : 0;
+        st->win_start[i] += carry;
+        st->win_end[i] += carry;
+        cur = st->win_end[i];
+    }
+    if (st->pe_end > rs) {
+        st->pe_end += carry;
+    }
+    if (st->budget_end > rs) {
+        st->budget_end += carry;
+    }
+    st->rd_end = rs + alat;
+    *start = rs;
+    *slide = carry;
+
+    return true;
+}
+
+/*
  * Where a read starts under program/erase suspend, given the time the array is
  * busy until. Only a program or erase is suspended: a read that finds the array
  * busy with other reads queues behind them, and one that finds a suspension
@@ -584,6 +712,9 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
 {
     NandSuspendState *st = suspend_state(m, loc);
 
+    if (!m->cfg.policy.pe_suspend) {
+        return false;
+    }
     if (!st || t >= busy_until || t >= st->pe_end) {
         /*
          * No program or erase in flight: the next one starts a new budget.
@@ -614,6 +745,7 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
     st->pe_end += *shift;
     st->budget_end = st->pe_end;
     st->rd_end = *start + alat;
+    prio_slide(st, t, *shift);
 
     return true;
 }
@@ -1075,10 +1207,18 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                  */
                 done = rs + alat;
                 array_suspend_extend(m, loc, t, shift);
+            } else if (op == NAND_MEDIA_READ &&
+                       prio_read_start(m, loc, t, s, alat, &rs, &shift)) {
+                /* the read goes ahead of the queued programs and erases */
+                done = rs + alat;
+                array_suspend_extend(m, loc, rs, shift);
             } else {
                 done = s + alat;
                 array_commit_op(m, loc, done, op);
                 suspend_note(m, loc, op, done);
+                if (op != NAND_MEDIA_READ) {
+                    prio_note(m, loc, s, done);
+                }
             }
         }
         if (m->cfg.timeline->unlock_lun) {
@@ -1318,6 +1458,9 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     for (i = 0; i < nlocs; i++) {
         array_commit_op(m, &locs[i], done, op);
         suspend_note(m, &locs[i], op, done);
+        if (op != NAND_MEDIA_READ) {
+            prio_note(m, &locs[i], start, done);
+        }
     }
 
     t = done;

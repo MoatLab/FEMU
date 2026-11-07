@@ -287,6 +287,17 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    /*
+     * read_prio moves queued array work; the bus phases of that work stay
+     * booked at the old time, so it needs the plain channel model.
+     */
+    if (p->read_prio && (p->cmd_addr_lat || p->pg_xfer_lat ||
+                         p->ch_xfer_lat || p->status_lat)) {
+        error_setg(errp, "FEMU bbssd: read_prio needs the plain channel "
+                   "model: no cmd_addr_lat, pg_xfer_lat, ch_xfer_lat or "
+                   "status_lat");
+        return -1;
+    }
     /* a negative overhead would start a preempting read before it arrived */
     if ((p->pe_suspend_max || p->tresume_ns) && !p->pe_suspend) {
         error_setg(errp, "FEMU bbssd: pe_suspend_max and tresume_ns need "
@@ -468,6 +479,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pe_suspend = n->bb_params.pe_suspend;
     spp->tsusp_ns = n->bb_params.tsusp_ns;
     spp->pe_suspend_max = n->bb_params.pe_suspend_max;
+    spp->read_prio = n->bb_params.read_prio;
     spp->tresume_ns = n->bb_params.tresume_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
     /* with one plane there is nothing to combine, so the flag stays clear */

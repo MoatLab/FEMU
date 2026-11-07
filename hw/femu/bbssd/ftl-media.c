@@ -167,6 +167,7 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.tsusp_ns = spp->tsusp_ns;
     cfg.timing.tresume_ns = spp->tresume_ns;
     cfg.policy.max_suspends = spp->pe_suspend_max;
+    cfg.policy.read_prio = (spp->read_prio != 0);
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
@@ -303,6 +304,7 @@ void bb_nand_media_init(struct ssd *ssd)
      */
     if (ssd->n && ssd->n->plane_reads && cfg.planes_per_lun > 1 &&
         cfg.policy.channel_mode != NAND_CH_STAGED && !cfg.policy.pe_suspend &&
+        !cfg.policy.read_prio &&
         ssd->ns && (NS_BBSSD(ssd->ns) || NS_CSD(ssd->ns))) {
         cfg.policy.array_contend = NAND_CONTEND_LUN_PE_PLANE_READ;
     }

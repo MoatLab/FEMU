@@ -168,6 +168,9 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (p->pe_suspend) {
         return "pe_suspend";
     }
+    if (p->read_prio) {
+        return "read_prio";
+    }
     /* the ECC wear tiers count a pSLC erase as a dense one */
     if (p->ecc_step_ns) {
         return "ecc_step_ns";

@@ -227,6 +227,7 @@ struct ssdparams {
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
     uint32_t pe_suspend_max;
+    int read_prio;    /* reads go ahead of queued programs/erases; 0 = off */
     int tresume_ns;
     bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
     bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */

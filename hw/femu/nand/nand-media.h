@@ -167,6 +167,7 @@ typedef struct NandMediaPolicy {
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the
                                    * LUN/plane (all rules, staged or plain channel) */
     uint32_t        max_suspends; /* suspensions one program/erase allows; 0 = any */
+    bool            read_prio;    /* a read goes ahead of queued P/E */
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
     /*
@@ -287,18 +288,26 @@ typedef struct NandBusResList {
  * ends. Program/erase suspend needs both to let a read preempt only a program
  * or erase. One per LUN, or per plane under a plane-only rule.
  */
+/* the program/erase windows read_prio keeps per array position */
+#define NAND_PRIO_WINDOWS 16
+
 typedef struct NandSuspendState {
     uint64_t pe_end;
     uint64_t rd_end;
     uint32_t nsusp;     /* suspensions of the program/erase in flight */
     uint64_t budget_end; /* the end of the work those suspensions shifted */
+    /* read_prio: the queued program/erase windows, sorted by start */
+    uint8_t nwin;
+    uint64_t win_floor;  /* the latest end of a dropped window */
+    uint64_t win_start[NAND_PRIO_WINDOWS];
+    uint64_t win_end[NAND_PRIO_WINDOWS];
 } NandSuspendState;
 
 typedef struct NandMedia {
     NandMediaConfig cfg;
     NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
     NandBusResList *ca_res;    /* nchs CA buses; NULL unless ca_separate */
-    NandSuspendState *susp;    /* NULL unless policy.pe_suspend */
+    NandSuspendState *susp;    /* NULL unless pe_suspend or read_prio */
     /*
      * Thermal throttle: array time in percent of nominal, read atomically;
      * NULL means 100. The controller publishes it (femu-thermal.c).

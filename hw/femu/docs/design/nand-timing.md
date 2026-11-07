@@ -788,6 +788,43 @@ serialized. BBSSD and ZNS run them on the single FTL thread. A device
 with suspend on also leaves the lock-free fast path described in
 [Concurrency](#concurrency).
 
+## Read priority
+
+With `read_prio` (BBSSD, CSD, KV), a read goes ahead of the programs and
+erases queued on its LUN. It waits only for the one that runs when it
+arrives, and for reads that went ahead before it. The layer keeps, per
+position, up to 16 program and erase windows `[start, end)`, sorted by
+start. `prio_read_start()` decides:
+
+```text
+ read arrives at t, rule busy until B
+ drop windows with end <= t
+ rs = max(t, rd_end, end of the windows the full list dropped)
+ for each window: start < rs (or start == t == rs)  ->  rs = max(rs, end)
+ no window starts at or after rs, or rs >= B:  ordinary rule
+ else: done = rs + tR; cur = done
+       each later window: push it to start at cur if it starts before;
+                          cur = its end (a gap absorbs the push)
+       every rule busy-until > rs += the push of the last window
+       rd_end = done
+```
+
+```text
+ off:  [P1 run][P2][P3][R]          read waits 3 programs
+ on:   [P1 run][R][P2][P3]          read waits P1; P2, P3 slide by tR
+ on:   [R]..gap..[P1]               the gap absorbs the read; P1 stays
+```
+
+With `pe_suspend` on as well, a suspension comes first. Read priority
+takes the read only when the suspend rule declines it, for example past
+`pe_suspend_max`. A slid program keeps the completion time the host was
+given, as with a suspension. Multi-plane reads keep the ordinary rule.
+
+Realize refuses `read_prio` with the bus phases (`cmd_addr_lat`,
+`pg_xfer_lat`, `ch_xfer_lat`, `status_lat`) and ONFI timing. Their status
+phases stay booked at the old end of a slid operation. It also refuses
+`gc_copyback`, `plane_reads`, `rber_ppb` and the dynamic pSLC tier.
+
 ## ECC read time
 
 `ecc_step_ns` adds read time for worn or old data (`ecc_extra_ns()`):

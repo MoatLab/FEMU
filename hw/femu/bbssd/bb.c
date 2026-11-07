@@ -328,6 +328,8 @@ int bb_check_rber(FemuCtrl *n, const char *mode, Error **errp)
         why = "ONFI timing";
     } else if (p->pe_suspend) {
         why = "pe_suspend";
+    } else if (p->read_prio) {
+        why = "read_prio";
     } else if (p->mp_read || p->onfi_cache_read) {
         why = "mp_read or onfi_cache_read";
     } else if (p->gc_copyback) {

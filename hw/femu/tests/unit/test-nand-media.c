@@ -1031,6 +1031,106 @@ static void test_plane_reads(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * Read priority over queued programs. tR 10 us, tPROG 40 us. Three programs
+ * queue on one LUN at t0; a read at t0 + 1 us waits for the first only, and
+ * the other two slide by tR.
+ */
+static void test_read_prio(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t lat;
+    int i;
+
+    printf("# read priority over queued programs\n");
+    memset(&a, 0, sizeof(a));
+
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    for (i = 0; i < 3; i++) {
+        nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    }
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("off: the read waits for three programs",
+          lat, (120000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    for (i = 0; i < 3; i++) {
+        nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    }
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("on: the read waits for the running program", lat,
+          (40000 - 1000) + 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+    check("on: a second read follows the first", lat,
+          (50000 - 2000) + 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 3000).latency_ns;
+    check("on: a new program queues after the slid backlog", lat,
+          (140000 - 3000) + 40000);
+    nand_media_destroy(&m);
+
+    /* an idle gap before a queued program: the read starts at once */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 50000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    check("on: a read in an idle gap starts at once", lat, 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).latency_ns;
+    check("on: the gap absorbs the read; the program stays",
+          lat, 90000 + 40000);
+    nand_media_destroy(&m);
+
+    /* a gap after the read's push stops the slide */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 40000);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 200000);
+    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("on: a window past a gap does not move",
+          lat, (240000 - 1000) + 40000);
+    nand_media_destroy(&m);
+
+    /* more windows than the list holds: a read never enters a dropped one */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    for (i = 0; i < NAND_PRIO_WINDOWS + 2; i++) {
+        nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    }
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    /* two windows dropped: the read waits for both, then skips the rest */
+    check("on: overflow keeps the dropped windows as a floor",
+          lat, (2 * 40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* with a spent suspend budget the next read still skips the queue */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.policy.read_prio = true;
+    cfg.timing.tsusp_ns = 5000;
+    cfg.policy.max_suspends = 1;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("both: the first read suspends", lat, 5000 + 10000);
+    /* P1 now ends at t0 + 55 us, P2 at t0 + 95 us */
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("both: the second read waits for P1 only", lat,
+          (55000 - 20000) + 10000);
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -1049,6 +1149,7 @@ int main(void)
     test_copyback();
     test_pe_suspend();
     test_pe_suspend_limits();
+    test_read_prio();
     test_partial_xfer();
     test_unbounded_windows();
     test_plane_reads();

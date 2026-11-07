@@ -391,8 +391,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, KV: ONFI 6.0 NV-LPDDR4 timing mode 0 to 26; the channel "
       "bus phases then follow the spec for that mode and pg_rd_lat, "
       "pg_wr_lat and blk_er_lat stay the array times; -1 (default) is off. "
-      "Refused with cmd_addr_lat, pg_xfer_lat, ch_xfer_lat, status_lat or "
-      "pe_suspend" },
+      "Refused with cmd_addr_lat, pg_xfer_lat, ch_xfer_lat, status_lat, "
+      "pe_suspend or read_prio" },
     { "onfi_mts",
       "bbssd, CSD, KV: with onfi_mode, the page payload rate in MT/s in "
       "place of the mode's own rate, 1 to 100000; 0 (default) uses the mode" },
@@ -467,6 +467,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "tresume_ns",
       "bbssd, CSD, KV: with pe_suspend, ns added to a suspended program or "
       "erase each time it resumes, 0 or more (default 0)" },
+    { "read_prio",
+      "bbssd, CSD, KV: non-zero lets a read go ahead of the programs and "
+      "erases queued on its LUN; it waits only for the one that runs. "
+      "Plain channel model only (no bus phases or ONFI)" },
     { "nand_cell_type",
       "bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; "
       "1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing "
@@ -490,7 +494,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd: fresh raw bit error rate of host reads in parts per 10^9; "
       "it adds read-retry and soft decode time to host reads. 0 "
       "(default) turns the model off. At most 10^9; refused with bus "
-      "phase or ONFI timing, pe_suspend, mp_read, onfi_cache_read, "
+      "phase or ONFI timing, pe_suspend, read_prio, mp_read, onfi_cache_read, "
       "gc_copyback, ecc_step_ns, the pSLC tier and cxl_ssd" },
     { "rber_pe_double",
       "bbssd with rber_ppb: block erases that double the raw bit error "
@@ -597,7 +601,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "plane_reads",
       "bbssd, CSD: reads on different planes of one die overlap; a program or "
       "erase still holds the whole die; plain channel model only (no ONFI, bus "
-      "phases or pe_suspend); no effect with one plane per LUN" },
+      "phases, pe_suspend or read_prio); no effect with one plane per LUN" },
     { "throttle",
       "bbssd, CSD: thermal throttling on the thermal model (needs "
       "thermal_tau_ms); enables feature 10h (HCTM) and stretches NAND "
@@ -662,8 +666,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "copybacks. FEMU models no bit errors, so here only the timing "
       "changes. For that reason a page whose read has extra ECC time, and "
       "every read reclaim or retention refresh, moves off-chip. Not for "
-      "KV. Refused with gc_pace, pe_suspend, cxl_ssd, namespace_modes, "
-      "ns_mgmt, shared namespaces and the hybrid and fast mappings; off "
+      "KV. Refused with gc_pace, pe_suspend, read_prio, cxl_ssd, "
+      "namespace_modes, ns_mgmt, shared namespaces and the hybrid and fast mappings; off "
       "(default)" },
     { "age_scale",
       "bbssd, CSD: data ages this many times faster than wall time, for "

@@ -3587,6 +3587,10 @@ static bool femu_check_onfi_props(FemuCtrl *n, Error **errp)
         error_setg(errp, "femu: pe_suspend is refused with onfi_mode");
         return false;
     }
+    if (bp->read_prio) {
+        error_setg(errp, "femu: read_prio is refused with onfi_mode");
+        return false;
+    }
     if (bp->onfi_cache_read && !femu_check_cache_read(n, errp)) {
         return false;
     }
@@ -3632,6 +3636,8 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
     } else if (bp->pe_suspend) {
         /* a suspend would move the array, not the booked program command */
         why = "pe_suspend";
+    } else if (bp->read_prio) {
+        why = "read_prio";
     } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
         why = "a mapping other than page or dftl";
     }
@@ -3774,9 +3780,10 @@ static bool femu_plane_reads_check(FemuCtrl *n, Error **errp)
     }
     if (femu_onfi_on(n) || bp->onfi_cache_read || bp->cmd_addr_lat ||
         bp->pg_xfer_lat || bp->ch_xfer_lat || bp->status_lat ||
-        bp->pe_suspend) {
+        bp->pe_suspend || bp->read_prio) {
         error_setg(errp, "plane_reads needs the plain channel model: no ONFI "
-                   "profile, onfi_cache_read, bus phases or pe_suspend");
+                   "profile, onfi_cache_read, bus phases, pe_suspend or "
+                   "read_prio");
         return false;
     }
     return true;
@@ -4782,6 +4789,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("pe_suspend_max", FemuCtrl, bb_params.pe_suspend_max,
                        0),
     DEFINE_PROP_INT32("tresume_ns", FemuCtrl, bb_params.tresume_ns, 0),
+    DEFINE_PROP_INT32("read_prio", FemuCtrl, bb_params.read_prio, 0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
     DEFINE_PROP_UINT32("blk_pe_limit", FemuCtrl, blk_pe_limit, 0),
     DEFINE_PROP_UINT32("blk_pe_spread", FemuCtrl, blk_pe_spread, 0),
