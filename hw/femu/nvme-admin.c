@@ -31,6 +31,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_TIMESTAMP]                = true,
     [NVME_SPINUP_CONTROL]           = true,
+    [NVME_OCP_DSSD_AEN_CONFIG]      = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -54,6 +55,8 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
                                       NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_KV_FEAT_CONFIG]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
+    /* OCP GETF-5: changeable, controller scope, not saveable */
+    [NVME_OCP_DSSD_AEN_CONFIG]      = NVME_FEAT_CAP_CHANGE,
 };
 
 /*
@@ -62,6 +65,22 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
  * configure. Both commands and the FID Supported and Effects log ask here, so
  * the log cannot claim a feature the commands refuse.
  */
+/*
+ * OCP UUID-2 and UUID-3: with ocp=on, Get and Set Features take a UUID
+ * index. Index 0 or 1 (the OCP UUID) reaches the OCP features; the FEMU
+ * UUID (index 2) has no features, and an index past the list is invalid.
+ * With ocp off there is no UUID selection, and the index is ignored.
+ */
+static bool nvme_feature_uidx_ok(FemuCtrl *n, NvmeCmd *cmd, uint8_t fid)
+{
+    uint8_t uidx = le32_to_cpu(cmd->cdw14) & 0x7f;
+
+    if (!n->ocp || !uidx) {
+        return true;
+    }
+    return uidx == 1 && fid >= 0xc0 && fid <= 0xcb;
+}
+
 bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
 {
     if (!nvme_feature_support[fid]) {
@@ -81,6 +100,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
+    case NVME_OCP_DSSD_AEN_CONFIG:
+        return n->ocp;
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
             if (n->namespaces[i].allocated && NS_KVSSD(&n->namespaces[i])) {
@@ -1558,6 +1579,9 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         /* one combination, index zero, holding every command set at once */
         result = 0;
         break;
+    case NVME_OCP_DSSD_AEN_CONFIG:
+        result = NVME_OCP_AEN_DEFAULT;
+        break;
     default:
         /* every other feature starts at zero, including an empty event list */
         break;
@@ -1578,7 +1602,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t sel = NVME_GETFEAT_SELECT(dw10);
 
-    if (!nvme_fid_supported(n, fid)) {
+    if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1693,6 +1717,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* fixed off: no capability bit is set, so a Set cannot change it */
         cqe->n.result = 0;
         break;
+    case NVME_OCP_DSSD_AEN_CONFIG:
+        cqe->n.result = cpu_to_le32(n->ocp_aen_config);
+        break;
     case NVME_FDP_MODE: {
         uint32_t result;
         uint16_t status = nvme_get_feature_fdp(n, dw11, false, &result);
@@ -1742,7 +1769,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
 
     /* an identifier the controller does not support is an invalid field */
-    if (!nvme_fid_supported(n, fid)) {
+    if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1971,6 +1998,13 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
+        break;
+    case NVME_OCP_DSSD_AEN_CONFIG:
+        /* SDAEC-13: bits 31:2 are reserved */
+        if (dw11 & ~0x3u) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        n->ocp_aen_config = dw11;
         break;
     case NVME_FDP_MODE:
         if (!n->subsys || (dw11 & 0xffff) != 1) {

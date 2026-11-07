@@ -36725,6 +36725,22 @@ static uint16_t femu_ocp_log(FemuCtrlState *c, uint8_t lid, uint8_t uidx,
     return femu_ocp_log_ns(c, lid, uidx, NVME_NSID_BROADCAST, off, buf, len);
 }
 
+/* Get (or Set) Features @fid with UUID index @uidx; dword 0 into @result */
+static uint16_t femu_ocp_feat(FemuCtrlState *c, bool set, uint8_t fid,
+                              uint8_t sel_or_sv, uint8_t uidx, uint32_t dw11,
+                              uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(fid | (set ? (uint32_t)sel_or_sv << 31 :
+                                         (uint32_t)sel_or_sv << 8));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw14 = cpu_to_le32(uidx);
+    return FEMU_SC(femu_admin_result(c, &cmd, result));
+}
+
 static const uint8_t femu_ocp_uuid[16] = {
     0xc1, 0x94, 0xd5, 0x5b, 0xe0, 0x94, 0x47, 0x94,
     0xa2, 0x1d, 0x29, 0x99, 0x8f, 0x56, 0xbe, 0x6f,
@@ -36817,6 +36833,52 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
                         NVME_SUCCESS);
         g_assert_cmpint((qtest_readq(qts, buf) & 0xffffffffffffULL) >= ts, ==,
                         on);
+    }
+
+    /*
+     * OCP feature C9h, DSSD Asynchronous Event Configuration, through the
+     * UUID index (UUID-2, UUID-3): default 1 (error AENs), not saveable,
+     * bits 31:2 reserved, back to the default after a reset.
+     */
+    {
+        uint32_t r = 0xdead;
+
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r), ==,
+                        on ? NVME_SUCCESS : NVME_INVALID_FIELD);
+        if (on) {
+            g_assert_cmphex(r, ==, 1);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x2, NULL),
+                            ==, NVME_SUCCESS);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 0, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 2);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x4, NULL),
+                            ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 1, 1, 0x1, NULL),
+                            ==, NVME_FID_NOT_SAVEABLE);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 1, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 1);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 3, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 0x4);            /* CHANG only */
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 2, 0, &r), ==,
+                            NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0x06 + 1, 0, 1, 0, &r),
+                            ==, NVME_INVALID_FIELD);
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 1);
+        }
+        /* Get and Set Features have USS with ocp (log 05h, bit 19) */
+        g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x0a), ==,
+                        on ? 1 | 1u << 19 : 1);
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09), ==,
+                        on ? 1 | 1u << 19 : 1);
     }
 
     if (!on) {

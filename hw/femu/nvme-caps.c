@@ -188,7 +188,9 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
     case NVME_ADM_CMD_DIRECTIVE_RECV:
         return n->streams || nvme_fdp_directive(n) ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_ADM_CMD_GET_LOG_PAGE:
-        /* USS: the UUID index selects the OCP and FEMU pages (ocp=on) */
+    case NVME_ADM_CMD_GET_FEATURES:
+    case NVME_ADM_CMD_SET_FEATURES:
+        /* USS: the UUID index selects OCP pages and features (ocp=on) */
         return NVME_CMD_EFF_CSUPP | (n->ocp ? 1u << 19 : 0);
     default:
         return nvme_cse_acs[opc] | nvme_mode_admin_effects(n, opc);

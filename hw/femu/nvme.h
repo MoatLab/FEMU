@@ -338,6 +338,11 @@ typedef struct NvmeSubsystem {
  */
 #define NVME_OCP_WCTEMP     0x15e
 #define NVME_OCP_CCTEMP     0x166
+/*
+ * C9h after a Controller Level Reset: Error Reporting AENs on (GDAEC-2),
+ * Media Ready AENs off (GDAEC-3).
+ */
+#define NVME_OCP_AEN_DEFAULT    0x1
 
 static inline bool nvme_subsys_rotational(NvmeSubsystem *subsys)
 {
@@ -1579,6 +1584,7 @@ enum NvmeFeatureIds {
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
     NVME_FID_MAX                    = 0x100
 };
 
@@ -2563,6 +2569,7 @@ typedef struct FemuCtrl {
     bool        ocp;            /* OCP 2.5 C0h and C1h behind the OCP UUID */
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
+    uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;

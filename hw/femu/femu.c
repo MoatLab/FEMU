@@ -558,6 +558,7 @@ static void nvme_reset_features(FemuCtrl *n)
     int i;
 
     n->features.arbitration     = 0x1f0f0706;
+    n->ocp_aen_config           = NVME_OCP_AEN_DEFAULT;
     n->features.power_mgmt      = 0;
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
