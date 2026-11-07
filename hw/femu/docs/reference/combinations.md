@@ -52,6 +52,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: buffer_low_pcent needs buffer_size and must be below buffer_thres_pcent, got %d
 - FEMU bbssd: buffer_size must not be negative
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size or FDP
 - power_loss requires bbssd, buffer_size > 0, and no metadata, namespace management or subsystem
 
 ## `buffer_thres_pcent`
@@ -286,6 +287,10 @@ own description allows. A message keeps its format directives (`%s`,
 ## `io_stages`
 
 - the femu device does not time I/O stages; set io_stages=on
+
+## `iu_pages`
+
+- FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size or FDP
 
 ## `kv_index`
 

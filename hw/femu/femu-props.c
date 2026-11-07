@@ -721,6 +721,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },
+    { "iu_pages",
+      "bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write "
+      "that covers part of a unit reads the unit's other mapped pages and "
+      "programs them again (read-modify-write); not with buffer_size or "
+      "FDP; 0 or 1 (default) maps each page" },
     { "buffer_low_pcent",
       "bbssd, CSD: with buffer_size, an idle FTL thread writes buffered "
       "pages back, one per die once all dies are free, until the fill "

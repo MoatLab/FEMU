@@ -4375,6 +4375,40 @@ static void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/*
+ * Indirection unit of 4 pages (iu_pages=4): one 16 KiB write fills unit 0
+ * and programs 4 pages. A 4 KiB write to page 1 then reads pages 0, 2 and
+ * 3 and programs them again with it: 4 more NAND pages for 1 host page.
+ * Without iu_pages (@data NULL) it programs 1.
+ */
+static void femu_test_iu_rmw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5d, 4 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 4, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, 5);
+    g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     data ? 8 : 5);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
 /* @lines records from @offset, and where the listing continues (0 = end) */
 static void femu_query_window(QTestState *qts, uint32_t offset, uint32_t limit,
                               uint32_t want, uint32_t next)
@@ -54477,6 +54511,15 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "pi=on,meta=8,mc=3,oncs=0x19f,mdts=1"
     });
     qos_add_test("trace-events", "femu", femu_test_trace_events, NULL);
+    qos_add_test("iu-rmw", "femu", femu_test_iu_rmw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)1,
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,iu_pages=4",
+    });
+    qos_add_test("iu-rmw-off", "femu", femu_test_iu_rmw,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64",
+    });
     qos_add_test("buffer-bg", "femu", femu_test_buffer_bg,
                  &(QOSGraphTestOptions) {
         .arg = (void *)1,

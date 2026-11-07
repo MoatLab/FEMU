@@ -302,6 +302,7 @@ struct ssdparams {
     int buffer_size;
     double buffer_thres_pcent;
     double buffer_low_pcent;    /* background write-back target, 0 = off */
+    int iu_pages;               /* indirection unit, pages; 1 = per page */
 
     /* buffer/cache effectiveness; 64-bit, a long run overflows an int */
     uint64_t read_hit_cnt;
@@ -769,6 +770,7 @@ struct ssd {
     uint64_t gc_stall_passes;       /* forced passes run inside host writes */
     uint64_t buffer_full_destages;  /* writes that emptied a full buffer */
     uint64_t buffer_bg_pages;       /* pages written back while idle */
+    uint64_t iu_rmw_pages;          /* pages rewritten to complete an IU */
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */

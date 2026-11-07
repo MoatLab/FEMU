@@ -565,6 +565,58 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                                 uint64_t base, int stream);
 
 static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
+                                    uint64_t stime, int stream);
+static uint64_t ssd_gc_until_clear(struct ssd *ssd);
+
+/*
+ * An indirection unit of iu_pages pages (QLC drives map 16 KiB or more):
+ * a write that covers only part of a unit reads the unit's other mapped
+ * pages and programs them again with it. The reads go first; the programs
+ * of the kept pages start when they end. Returns the latency, 0 when the
+ * write covers whole units.
+ */
+static uint64_t ssd_iu_rmw(struct ssd *ssd, uint64_t start_lpn,
+                           uint64_t end_lpn, uint64_t stime, int stream)
+{
+    uint64_t iu = ssd->sp.iu_pages;
+    uint64_t first = start_lpn / iu * iu;
+    uint64_t last = MIN((end_lpn / iu + 1) * iu, (uint64_t)ssd->sp.tt_pgs) - 1;
+    uint64_t rd = 0;
+    uint64_t maxlat = 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint64_t lpn = first; lpn <= last; lpn++) {
+            struct ppa ppa;
+
+            if (lpn >= start_lpn && lpn <= end_lpn) {
+                continue;
+            }
+            ppa = get_maptbl_ent(ssd, lpn);
+            if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                continue;
+            }
+            if (pass == 0) {
+                struct nand_cmd r = {
+                    .type = GC_IO, .cmd = NAND_READ, .stime = stime,
+                };
+
+                rd = MAX(rd, ssd_advance_status(ssd, &ppa, &r));
+            } else {
+                if (ssd_host_out_of_lines(ssd)) {
+                    break;
+                }
+                maxlat = MAX(maxlat, ssd_gc_until_clear(ssd));
+                maxlat = MAX(maxlat, rd + ssd_map_and_program(ssd, lpn,
+                                                              stime + rd,
+                                                              stream));
+                ssd->iu_rmw_pages++;
+            }
+        }
+    }
+    return maxlat;
+}
+
+static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
                                     uint64_t stime, int stream)
 {
     uint64_t map = ssd_map_lat(ssd, lpn, stime, true);
@@ -1029,6 +1081,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             curlat = ssd_buffer_destage(ssd, 0, req->stime);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
         }
+    }
+
+    /* a partial indirection unit: read and rewrite the rest of it */
+    if (unlikely(spp->iu_pages > 1)) {
+        curlat = ssd_iu_rmw(ssd, start_lpn, end_lpn, req->stime, stream);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {

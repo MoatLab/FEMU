@@ -355,6 +355,17 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    /*
+     * A write smaller than the indirection unit rewrites the rest of it on
+     * the direct path; the buffer and FDP take whole pages, so not with them.
+     */
+    if (p->iu_pages < 0 || p->iu_pages > 64 ||
+        (p->iu_pages > 1 && (p->buffer_size > 0 ||
+                             (n->subsys && n->subsys->params.fdp.enabled)))) {
+        error_setg(errp, "FEMU bbssd: iu_pages is 0 to 64, and above 1 not "
+                   "with buffer_size or FDP");
+        return -1;
+    }
     /* idle write-back runs down to a level below the foreground one */
     if (p->buffer_low_pcent &&
         (p->buffer_size <= 0 || p->buffer_low_pcent < 0 ||
@@ -455,6 +466,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_size = n->bb_params.buffer_size;
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
     spp->buffer_low_pcent = n->bb_params.buffer_low_pcent / 100.0;
+    spp->iu_pages = MAX(n->bb_params.iu_pages, 1);
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;
