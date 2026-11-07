@@ -1330,6 +1330,7 @@ void ssd_enter_read_only(struct ssd *ssd)
     }
     ssd_pel_wear(ssd);
     qatomic_or(&ssd->n->health_pending, bits);
+    qatomic_or(&ssd->n->tel_req, bits);
     qemu_bh_schedule(ssd->n->aer_bh);
 }
 
@@ -1369,6 +1370,7 @@ void ssd_wear_events(struct ssd *ssd, uint8_t spare, uint64_t overworn)
     }
     if (bits) {
         qatomic_or(&ssd->n->health_pending, bits);
+        qatomic_or(&ssd->n->tel_req, bits);
         qemu_bh_schedule(ssd->n->aer_bh);
     }
 }

@@ -2022,6 +2022,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             femu_temp_eval(n);
             break;
         }
+        femu_tel_temp_edge(n);
         femu_pel_warning(n, nvme_critical_warning(n));
         /*
          * Crossing a threshold raises a SMART event once, pointing the host
@@ -2134,6 +2135,23 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         n->features.write_atomicity = dw11;
         break;
     case NVME_ASYNCHRONOUS_EVENT_CONF:
+        /*
+         * Telemetry Log Notices: enabled while a capture is held, the notice
+         * goes out now (the AEC rule); turned off, an unsent one is dropped.
+         */
+        if ((dw11 & NVME_AEC_TELEMETRY) && n->tel_tcda && !n->ocp &&
+            !(n->features.async_config & NVME_AEC_TELEMETRY)) {
+            nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE,
+                               NVME_AER_INFO_TELEMETRY,
+                               NVME_LOG_TELEMETRY_CTRL);
+        } else if (!(dw11 & NVME_AEC_TELEMETRY)) {
+            /* a sent notice stays unacknowledged until the log is read */
+            uint8_t mask = n->aer_mask;
+
+            nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE,
+                                 NVME_LOG_TELEMETRY_CTRL, 0, true);
+            n->aer_mask = mask;
+        }
         n->features.async_config = dw11;
         /* enabling temperature events during an excursion reports it */
         if (n->thermal_timer) {
@@ -2972,16 +2990,62 @@ static uint16_t nvme_ocp_erec_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 }
 
 /*
+ * Controller-initiated telemetry (Base 2.3, Figure 220): capture the FEMU
+ * statistics once for @reasons, with the pollers paused for a coherent
+ * copy. A held capture (TCDA 1) is kept until a read without RAE clears
+ * it. With ocp the OCP layout is not built yet, so nothing is captured.
+ */
+void femu_tel_capture(FemuCtrl *n, uint32_t reasons)
+{
+    static const struct {
+        uint32_t bit;
+        const char *name;
+    } names[] = {
+        { FEMU_TEL_SPARE, "spare" },
+        { FEMU_TEL_TEMPERATURE, "temperature" },
+        { FEMU_TEL_RELIABILITY, "reliability" },
+        { FEMU_TEL_READ_ONLY, "read-only" },
+        { FEMU_TEL_PROTECTION, "thermal-protection" },
+        { FEMU_TEL_TEST, "test" },
+    };
+    GString *rid;
+    bool resume;
+
+    if (!reasons || n->ocp || n->tel_tcda) {
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    nvme_femu_stats_fill(n, &n->tel_ctrl_data);
+    nvme_resume_pollers(n, resume);
+    rid = g_string_new("FEMU");
+    for (int i = 0; i < ARRAY_SIZE(names); i++) {
+        if (reasons & names[i].bit) {
+            g_string_append_printf(rid, " %s", names[i].name);
+        }
+    }
+    memset(n->tel_rid, 0, sizeof(n->tel_rid));
+    memcpy(n->tel_rid, rid->str, MIN(rid->len, sizeof(n->tel_rid)));
+    g_string_free(rid, true);
+    n->tel_tcdgn++;                     /* FFh rolls over to 0 */
+    n->tel_tcda = true;
+    if (n->features.async_config & NVME_AEC_TELEMETRY) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, NVME_AER_INFO_TELEMETRY,
+                           NVME_LOG_TELEMETRY_CTRL);
+    }
+}
+
+/*
  * Telemetry Host-Initiated (07h) and Controller-Initiated (08h) logs (Base
- * 2.3, 5.2.12.1.8-9). A host-initiated capture takes the media counters of
- * the vendor page as Data Area 1, one block, and keeps them until the next
- * capture; Data Areas 2 and 3 end where it does. The controller never
- * captures on its own, so its log is a header saying so. Both are read in
- * whole blocks, and a block past the last one reads as zeroes.
+ * 2.3, 5.2.12.1.8-9). Each capture takes the media counters of the vendor
+ * page as Data Area 1, one block; Data Areas 2 and 3 end where it does. A
+ * host capture stays until the next one; a controller capture stays until
+ * a read of 08h without RAE. Both are read in whole blocks, and a block
+ * past the last one reads as zeroes.
  */
 static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
-                                   uint32_t buf_len, uint64_t off)
+                                   uint32_t buf_len, uint64_t off, bool rae)
 {
+    uint16_t status;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     bool create = (le32_to_cpu(cmd->cdw10) >> 8) & 0x1;
@@ -3010,6 +3074,8 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
             n->telemetry_dgn++;
         }
         hdr->dgn = n->telemetry_dgn;
+        hdr->tcda = n->tel_tcda;
+        hdr->tcdgn = n->tel_tcdgn;
         if (n->telemetry_captured) {
             hdr->da1lb = cpu_to_le16(1);
             hdr->da2lb = cpu_to_le16(1);
@@ -3022,12 +3088,35 @@ static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
         if (create) {
             femu_pel_log(n, NVME_PEL_TELEMETRY_CREATED, 1, hdr, sizeof(*hdr));
         }
+    } else if (n->tel_tcda) {
+        hdr->da1lb = cpu_to_le16(1);
+        hdr->da2lb = cpu_to_le16(1);
+        hdr->da3lb = cpu_to_le16(1);
+        memcpy(page + sizeof(*hdr), &n->tel_ctrl_data,
+               sizeof(n->tel_ctrl_data));
+        memcpy(hdr->rid, n->tel_rid, sizeof(hdr->rid));
+        have = sizeof(page);
     }
+    /* both logs show the controller-initiated state (bytes 382, 383) */
+    hdr->tcda = n->tel_tcda;
+    hdr->tcdgn = n->tel_tcdgn;
 
     /* every block asked for is sent; those past the page as zeroes */
-    return dma_read_prp_fill(n, page + MIN(off, have),
-                             MIN(have - MIN(off, have), buf_len), buf_len,
-                             prp1, prp2);
+    status = dma_read_prp_fill(n, page + MIN(off, have),
+                               MIN(have - MIN(off, have), buf_len), buf_len,
+                               prp1, prp2);
+    /*
+     * A read of log 08h without RAE that worked hands the capture over:
+     * the log is header only from then, and the notice clears. The next
+     * event is posted from the bottom half, after this completion.
+     */
+    if (!status && !rae && lid == NVME_LOG_TELEMETRY_CTRL && n->tel_tcda) {
+        n->tel_tcda = false;
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, NVME_LOG_TELEMETRY_CTRL,
+                             0, true);
+        qemu_bh_schedule(n->aer_bh);
+    }
+    return status;
 }
 
 /*
@@ -3944,7 +4033,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_dst_log(n, cmd, len, off);
     case NVME_LOG_TELEMETRY_HOST:
     case NVME_LOG_TELEMETRY_CTRL:
-        return nvme_telemetry_log(n, cmd, lid, len, off);
+        return nvme_telemetry_log(n, cmd, lid, len, off, rae);
     case NVME_LOG_LBA_STATUS:
         return nvme_lba_status_log(n, cmd, len, off);
     case NVME_LOG_FID_EFFECTS:

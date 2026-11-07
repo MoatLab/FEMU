@@ -18995,7 +18995,7 @@ static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
                                        buf, 512, 256), ==, NVME_INVALID_FIELD);
 
-    /* the controller never captures on its own */
+    /* no controller trigger has run in this test */
     g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_CTRL, false,
                                        buf, 512, 0), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, hdr, sizeof(hdr));
@@ -19006,6 +19006,177 @@ static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_disable(&c);
     guest_free(alloc, buf);
+}
+
+/* Get Log 08h with RAE set or clear, @len bytes from 0 (one PRP page) */
+static uint16_t femu_tel_ctrl(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                              bool rae)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x08 | (rae ? 1u << 15 : 0) |
+                            (((len >> 2) - 1) << 16));
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static void femu_tel_trigger(QTestState *qts)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/telc',"
+                             "'property':'x-telemetry-trigger',"
+                             "'value':true}}");
+}
+
+/*
+ * Controller-initiated telemetry (log 08h, Base 2.3 Figure 220): empty
+ * at first; a trigger captures once (TCDA 1, TCDGN 1, reason, data
+ * areas) and sends Telemetry Log Changed when AEC bit 10 is on; both logs
+ * show TCDA and TCDGN at 382 and 383; RAE keeps the capture, a read
+ * without RAE hands it over; a held capture is not overwritten; a reset
+ * keeps it; enabling bit 10 later sends the notice for a held capture.
+ * The capture holds the statistics of its moment. Turning bit 10 off and on
+ * does not resend a notice the host has not acknowledged. A temperature
+ * threshold crossed without the thermal model triggers too, also after a
+ * reset that moved the threshold back.
+ */
+static void femu_test_telemetry_ctrl(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    uint8_t h[1024];
+    uint8_t snap[512];
+    uint64_t hw1;
+    uint32_t res = 0;
+    uint16_t cid, want;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8,
+                                        buf + 32768)), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 512);
+    g_assert_cmpuint(h[381], ==, 1);
+    g_assert_cmpuint(h[382], ==, 0);
+    g_assert_cmpuint(h[383], ==, 0);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 0);
+
+    /* AEC bit 10 on, an AER out, then a trigger: the notice comes */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_tel_trigger(qts);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x080202);
+    /* the host log shows the same state */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 1);
+    /* RAE keeps it: header, reason, data areas */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 1);
+    g_assert_cmpmem(&h[384], 9, "FEMU test", 9);
+    /* data area 1: the statistics, as a host capture of now shows them */
+    g_assert_cmpuint(ldq_le_p(&h[512 + 8]), >, 0);  /* host_write_pages */
+    memcpy(snap, &h[512], sizeof(snap));
+    hw1 = ldq_le_p(&snap[8]);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 1024, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 512, h, 512);
+    g_assert_cmpmem(h, 512, snap, 512);
+    /* later writes and a second trigger leave the held capture as it was */
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64 + i * 8,
+                                        buf + 32768)), ==, NVME_SUCCESS);
+    }
+    femu_tel_trigger(qts);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpmem(&h[512], 512, snap, 512);
+    /*
+     * The notice went out and is not acknowledged: bit 10 off and on again
+     * sends nothing, so the next completion is this command's own.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    /* without RAE the capture goes; the log is header only */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 0);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 0);
+
+    /* the next capture is generation 2; a held one is not overwritten */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_tel_trigger(qts);
+    femu_tel_trigger(qts);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 2);
+    qtest_memread(qts, buf + 512, snap, sizeof(snap));
+    g_assert_cmpuint(ldq_le_p(&snap[8]), >, hw1);
+
+    /* a reset keeps it, data included; enabling bit 10 sends the notice */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 2);
+    g_assert_cmpmem(&h[512], 512, snap, 512);
+    want = femu_aer(&c);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x080202);
+
+    /*
+     * No thermal model: a threshold below the temperature is a trigger.
+     * The reset restores the threshold, so lowering it again is a new one.
+     */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 200,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 512);
+    g_assert_cmpuint(h[383], ==, 3);
+    g_assert_cmpmem(&h[384], 16, "FEMU temperature", 16);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 200,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 4);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
 }
 
 #define FEMU_ADM_GET_LBA_STATUS  0x86
@@ -49527,6 +49698,10 @@ static void femu_register_nodes(void)
     qos_add_test("persistent-event-log-events", "femu", femu_test_pel_events,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"
+    });
+    qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=telc,femu_mode=1,devsz_mb=64",
     });
     qos_add_test("telemetry", "femu", femu_test_telemetry,
                  &(QOSGraphTestOptions) {

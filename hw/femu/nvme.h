@@ -1778,6 +1778,8 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_SMART(aec) ((aec) & 0xff)
 #define NVME_AEC_NS_ATTR    (1u << 8)
 #define NVME_AEC_FW_ACTIVATION (1u << 9)
+#define NVME_AEC_TELEMETRY  (1u << 10)  /* Telemetry Log Notices */
+#define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
 #define NVME_AER_INFO_FW_ACT    0x01    /* notice: Firmware Activation Starting */
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 #define NVME_AEC_RGCNS      (1u << 17)  /* Reachability Group Change Notices */
@@ -2706,6 +2708,17 @@ typedef struct FemuCtrl {
     FemuStatsLog    telemetry_data;
     bool            telemetry_captured;
     uint8_t         telemetry_dgn;
+    /*
+     * Controller-initiated telemetry (log 08h). Workers set tel_req bits and
+     * schedule aer_bh; the capture runs there, under the BQL. A Controller
+     * Level Reset keeps all of it.
+     */
+    uint32_t        tel_req;        /* FEMU_TEL_* reasons not yet captured */
+    FemuStatsLog    tel_ctrl_data;
+    bool            tel_tcda;       /* data available, until a read clears it */
+    uint8_t         tel_tcdgn;
+    char            tel_rid[128];
+    bool            tel_temp_prev;  /* temperature condition, for its edge */
     NvmeSanitizeState sanitize;
     /*
      * Timestamp feature: the value at ts_anchor, in ms, and its origin. Set
@@ -3270,6 +3283,15 @@ void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits);
 bool femu_thermal_check(FemuCtrl *n, Error **errp);
 void femu_thermal_start(FemuCtrl *n);
 void femu_throttle_eval(FemuCtrl *n);
+/* controller-initiated telemetry reasons; the SMART bits keep their values */
+#define FEMU_TEL_SPARE          (1u << 0)
+#define FEMU_TEL_TEMPERATURE    (1u << 1)
+#define FEMU_TEL_RELIABILITY    (1u << 2)
+#define FEMU_TEL_READ_ONLY      (1u << 3)
+#define FEMU_TEL_PROTECTION     (1u << 8)
+#define FEMU_TEL_TEST           (1u << 9)
+void femu_tel_capture(FemuCtrl *n, uint32_t reasons);
+void femu_tel_temp_edge(FemuCtrl *n);
 bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_temp_condition(FemuCtrl *n);

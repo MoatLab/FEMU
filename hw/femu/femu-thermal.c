@@ -115,6 +115,20 @@ bool femu_temp_condition(FemuCtrl *n)
            (n->ocp && n->auto_hot);
 }
 
+/*
+ * The temperature condition starting is a controller-initiated telemetry
+ * trigger, whatever events the host enabled.
+ */
+void femu_tel_temp_edge(FemuCtrl *n)
+{
+    bool cond = femu_temp_condition(n);
+
+    if (cond && !n->tel_temp_prev) {
+        femu_tel_capture(n, FEMU_TEL_TEMPERATURE);
+    }
+    n->tel_temp_prev = cond;
+}
+
 /* HCTMA: the throttle is on, so feature 10h has an effect */
 bool femu_hctm_supported(FemuCtrl *n)
 {
@@ -176,6 +190,9 @@ void femu_throttle_eval(FemuCtrl *n)
     } else {
         n->auto_hot = false;
     }
+    if (!was_hot && n->auto_hot) {
+        femu_tel_capture(n, FEMU_TEL_PROTECTION);
+    }
     level = n->auto_hot ? 2 : hl;
     /* OCP C0h byte 96 counts episodes, from none to any level */
     if (level && !n->throttle_level && n->ocp_throttle_events != UINT8_MAX) {
@@ -216,6 +233,7 @@ void femu_temp_eval(FemuCtrl *n)
                NVME_SMART_TEMPERATURE;
 
     femu_pel_temp_warning(n, cond);
+    femu_tel_temp_edge(n);
     if (cond && aec && !n->temp_cond_prev) {
         nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
                            NVME_AER_INFO_SMART_TEMP_THRESH,

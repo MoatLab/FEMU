@@ -570,6 +570,8 @@ static void nvme_reset_features(FemuCtrl *n)
     n->hctm_tmt1 = 0;
     n->hctm_tmt2 = 0;
     femu_throttle_eval(n);
+    /* the next telemetry edge counts from the restored thresholds */
+    n->tel_temp_prev = femu_temp_condition(n);
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues    = (n->nr_io_queues - 1) |
                                   ((n->nr_io_queues - 1) << 16);
@@ -4313,6 +4315,9 @@ static void femu_aer_bh(void *opaque)
     uint32_t bits = qatomic_xchg(&n->health_pending, 0);
     uint32_t aec = NVME_AEC_SMART(n->features.async_config);
 
+    /* a warning that began is a controller-initiated telemetry trigger too */
+    femu_tel_capture(n, qatomic_xchg(&n->tel_req, 0));
+
     if (bits & aec & NVME_SMART_SPARE) {
         nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
                            NVME_AER_INFO_SMART_SPARE_THRESH,
@@ -5430,6 +5435,15 @@ static void femu_test_eol_enter(Object *obj, bool value, Error **errp)
     nvme_resume_pollers(n, resume);
 }
 
+/* qtest only: a telemetry trigger, through the request path a worker uses */
+static void femu_test_telemetry_trigger(Object *obj, bool value, Error **errp)
+{
+    if (value) {
+        qatomic_or(&FEMU(obj)->tel_req, FEMU_TEL_TEST);
+        qemu_bh_schedule(FEMU(obj)->aer_bh);
+    }
+}
+
 /* what realize allocates outside the device's own teardown */
 static void femu_instance_finalize(Object *obj)
 {
@@ -5490,6 +5504,8 @@ static void femu_instance_init(Object *obj)
                                        OBJ_PROP_FLAG_READWRITE);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
+        object_property_add_bool(obj, "x-telemetry-trigger", NULL,
+                                 femu_test_telemetry_trigger);
         /* heats or cools the thermal model without I/O */
         femu_test_add_u32(obj, "x-idle-mw", &FEMU(obj)->idle_mw, true);
         object_property_add_uint32_ptr(obj, "x-stage-hold-ms",
