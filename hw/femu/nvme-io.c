@@ -359,6 +359,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     bool aborted;
     int eol = -1;
     uint32_t eol_pages = 0;
+    int64_t fetched = 0;
 
     /*
      * Inline completion fast path (NoSSD only). NoSSD has a no-op timing model
@@ -420,6 +421,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                                   n->sqe_size);
             nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         }
+        /* the SQ fetch: the start of the latency a host sees */
+        fetched = femu_io_now(n);
         /*
          * A write that finds no room in the end-of-life reserve stays in the
          * queue, untouched, until the FTL gives credits back.
@@ -470,7 +473,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->eol_ro = eol == FEMU_EOL_READ_ONLY;
         eol = -1;
         /* Coperd: record req->stime at earliest convenience */
-        req->expire_time = req->stime = req->t_submit = femu_io_now(n);
+        req->expire_time = req->stime = req->t_submit = fetched;
         req->link_early = false;
         req->t_handoff = 0;
         req->t_return = 0;
