@@ -290,6 +290,8 @@ typedef struct NandBusResList {
  */
 /* the program/erase windows read_prio keeps per array position */
 #define NAND_PRIO_WINDOWS 16
+/* a window that writes every page of its block: an erase, a second pass */
+#define NAND_PRIO_ALL_PAGES UINT32_MAX
 
 typedef struct NandSuspendState {
     uint64_t pe_end;
@@ -301,6 +303,10 @@ typedef struct NandSuspendState {
     uint64_t win_floor;  /* the latest end of a dropped window */
     uint64_t win_start[NAND_PRIO_WINDOWS];
     uint64_t win_end[NAND_PRIO_WINDOWS];
+    /* what each window writes: block, page (NAND_PRIO_ALL_PAGES), planes */
+    uint32_t win_blk[NAND_PRIO_WINDOWS];
+    uint32_t win_pg[NAND_PRIO_WINDOWS];
+    uint32_t win_planes[NAND_PRIO_WINDOWS];
 } NandSuspendState;
 
 typedef struct NandMedia {

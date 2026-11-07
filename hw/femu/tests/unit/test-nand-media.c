@@ -1041,19 +1041,23 @@ static void test_read_prio(void)
     NandMediaConfig cfg;
     NandMedia m;
     NandLoc a;
+    NandLoc rd;
     const uint64_t t0 = 1000000000ULL;
     uint64_t lat;
     int i;
 
     printf("# read priority over queued programs\n");
     memset(&a, 0, sizeof(a));
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
 
     bb_config(&cfg);
     nand_media_init(&m, &cfg);
     for (i = 0; i < 3; i++) {
         nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     }
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("off: the read waits for three programs",
           lat, (120000 - 1000) + 10000);
     nand_media_destroy(&m);
@@ -1064,10 +1068,10 @@ static void test_read_prio(void)
     for (i = 0; i < 3; i++) {
         nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     }
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("on: the read waits for the running program", lat,
           (40000 - 1000) + 10000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 2000).latency_ns;
     check("on: a second read follows the first", lat,
           (50000 - 2000) + 10000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 3000).latency_ns;
@@ -1080,7 +1084,7 @@ static void test_read_prio(void)
     cfg.policy.read_prio = true;
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 50000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0).latency_ns;
     check("on: a read in an idle gap starts at once", lat, 10000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).latency_ns;
     check("on: the gap absorbs the read; the program stays",
@@ -1094,7 +1098,7 @@ static void test_read_prio(void)
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 40000);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 200000);
-    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
     lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
     check("on: a window past a gap does not move",
           lat, (240000 - 1000) + 40000);
@@ -1107,10 +1111,28 @@ static void test_read_prio(void)
     for (i = 0; i < NAND_PRIO_WINDOWS + 2; i++) {
         nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     }
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     /* two windows dropped: the read waits for both, then skips the rest */
     check("on: overflow keeps the dropped windows as a floor",
           lat, (2 * 40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* a read never goes ahead of the program of its own page */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p1 = a, p2 = a;
+
+        p1.pg = 1;
+        p2.pg = 5;
+        nand_media_op(&m, &p1, NAND_MEDIA_PROGRAM, t0);
+        nand_media_op(&m, &p2, NAND_MEDIA_PROGRAM, t0);
+        nand_media_op(&m, &p1, NAND_MEDIA_PROGRAM, t0);
+        lat = nand_media_op(&m, &p2, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check("on: a read waits for the program of its page", lat,
+              (80000 - 1000) + 10000);
+    }
     nand_media_destroy(&m);
 
     /* with a spent suspend budget the next read still skips the queue */
@@ -1122,10 +1144,10 @@ static void test_read_prio(void)
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("both: the first read suspends", lat, 5000 + 10000);
     /* P1 now ends at t0 + 55 us, P2 at t0 + 95 us */
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
     check("both: the second read waits for P1 only", lat,
           (55000 - 20000) + 10000);
     nand_media_destroy(&m);
@@ -1137,18 +1159,22 @@ static void test_media_hold(void)
     NandMediaConfig cfg;
     NandMedia m;
     NandLoc a;
+    NandLoc rd;
     const uint64_t t0 = 1000000000ULL;
     uint64_t done, lat;
 
     printf("# second program pass\n");
     memset(&a, 0, sizeof(a));
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
 
     bb_config(&cfg);
     nand_media_init(&m, &cfg);
     done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
     done = nand_media_hold(&m, &a, done, 30000);
     check("hold: ends a pass after the program", done - t0, 70000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0).latency_ns;
     check("hold: a read waits for both", lat, 80000);
     nand_media_destroy(&m);
 
@@ -1157,7 +1183,7 @@ static void test_media_hold(void)
     nand_media_init(&m, &cfg);
     done = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
     nand_media_hold(&m, &a, done, 30000);
-    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
     check("hold + read_prio: a read goes ahead of the queued pass", lat,
           (40000 - 1000) + 10000);
     nand_media_destroy(&m);
