@@ -617,6 +617,16 @@ static bool nvme_is_ns_notice(const NvmeAsyncEvent *event)
            event->result.log_page == NVME_LOG_CHANGED_NS_LIST;
 }
 
+/*
+ * The OCP 2.7 Media Ready event (DSSD-AEN-2): vendor type, information
+ * 01h, log 00h. It is a One-Shot event, so posting it masks nothing.
+ */
+static bool nvme_is_one_shot(const NvmeAsyncEvent *event)
+{
+    return event->result.event_type == NVME_AER_TYPE_VENDOR_SPECIFIC &&
+           event->result.event_info == 0x01 && event->result.log_page == 0;
+}
+
 static void nvme_ns_changed(FemuCtrl *n, uint32_t nsid, bool notify)
 {
     uint32_t i;
@@ -2050,6 +2060,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         n->ocp_aen_config = dw11;
+        /*
+         * SDAEC-18: FEMU media is ready when CC.EN is set, before a host
+         * can enable this event. So enabling it reports that event, once
+         * per Controller Level Reset. No error event exists: C1h clears
+         * Error Reporting AEN Supported (EREC-5).
+         */
+        if ((dw11 & 0x2) && !n->ocp_media_ready_sent) {
+            n->ocp_media_ready_sent = true;
+            nvme_enqueue_event(n, NVME_AER_TYPE_VENDOR_SPECIFIC, 0x01, 0);
+        }
         break;
     case NVME_FDP_MODE:
         if (!n->subsys || (dw11 & 0xffff) != 1) {
@@ -4861,6 +4881,7 @@ void nvme_process_aers(FemuCtrl *n)
                 break;          /* nothing to complete it with */
             }
             if (nvme_is_ns_notice(cand) ? n->ns_notice_masked :
+                !nvme_is_one_shot(cand) &&
                 n->aer_mask & (1 << cand->result.event_type)) {
                 continue;       /* already reported, awaiting the log read */
             }
@@ -4877,7 +4898,7 @@ void nvme_process_aers(FemuCtrl *n)
 
         if (nvme_is_ns_notice(event)) {
             n->ns_notice_masked = true;
-        } else {
+        } else if (!nvme_is_one_shot(event)) {
             n->aer_mask |= 1 << event->result.event_type;
             n->aer_shown[event->result.event_type].log_page =
                 event->result.log_page;

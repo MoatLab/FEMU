@@ -2632,6 +2632,7 @@ typedef struct FemuCtrl {
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
+    bool        ocp_media_ready_sent;   /* since the last Controller Level Reset */
     FemuOcpLat  ocp_lat;        /* OCP latency monitor (C5h, C3h) */
     uint32_t    test_ocp_lat_skew_ms; /* qtest: moves the monitor clock on */
     uint8_t     mpsmin;

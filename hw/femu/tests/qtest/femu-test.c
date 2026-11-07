@@ -36873,6 +36873,33 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
             g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r), ==,
                             NVME_SUCCESS);
             g_assert_cmphex(r, ==, 1);
+            /*
+             * SDAEC-18: enabling Media Ready AENs reports the event once
+             * per reset (DSSD-AEN-2: type 7, information 01h, log 00h).
+             */
+            {
+                uint16_t want;
+                uint16_t cid;
+                uint32_t res = 0;
+
+                /* enabled before any AER: the event waits in the queue */
+                g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x3,
+                                              NULL), ==, NVME_SUCCESS);
+                want = femu_aer(&c);
+                g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                                NVME_SUCCESS);
+                g_assert_cmpint(cid, ==, want);
+                g_assert_cmphex(res & 0xffffff, ==, 0x000107);
+                /* a second enable reports nothing: the AER stays open */
+                femu_aer(&c);
+                g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x3,
+                                              NULL), ==, NVME_SUCCESS);
+                g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r),
+                                ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, 3);
+                femu_disable(&c);
+                femu_enable(&c, &femu->dev, alloc);
+            }
         }
         /* Get and Set Features have USS with ocp (log 05h, bit 19) */
         g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
