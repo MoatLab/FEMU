@@ -37065,6 +37065,57 @@ static void femu_test_ocp_refused(void *obj, void *data,
     };
     QDict *csd;
 
+    /*
+     * ocp_profile: 13 letters A or B, only with ocp=on; DP-CFG-7 B turns
+     * on Write Uncorrectable (ONCS bit 1).
+     */
+    {
+        static const struct {
+            const char *opts;
+            const char *msg;
+        } bad[] = {
+            { "'ocp':true,'ocp_profile':'BAAB'", "13 letters" },
+            { "'ocp':true,'ocp_profile':'BAABABAAAABAC'", "13 letters" },
+            { "'ocp':false,'ocp_profile':'BAABABAAAABAB'", "needs ocp=on" },
+        };
+        QPCIDevice *pdev;
+        FemuCtrlState c = { 0 };
+        uint64_t buf;
+        NvmeIdCtrl id;
+
+        for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'ocp','addr':'5','devsz_mb':64,'femu_mode':1,%s}}",
+                bad[i].opts);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                                                  "error"), "desc"),
+                                    bad[i].msg));
+            qobject_unref(rsp);
+        }
+        csd = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                        "'driver':'femu','id':'ocp','addr':'5',"
+                        "'devsz_mb':64,'femu_mode':1,'ocp':true,"
+                        "'ocp_profile':'BAABABBAAABAB'}}");
+        g_assert_true(qdict_haskey(csd, "return"));
+        qobject_unref(csd);
+        pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+        g_assert_nonnull(pdev);
+        femu_enable(&c, pdev, alloc);
+        buf = guest_alloc(alloc, 4096);
+        g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &id, sizeof(id));
+        g_assert_cmphex(le16_to_cpu(id.oncs) & 0x2, ==, 0x2);
+        guest_free(alloc, buf);
+        femu_disable(&c);
+        qpci_unplug_acpi_device_test(qts, "ocp", 5);
+        g_free(pdev);
+    }
+
     /* a CSD controller takes it */
     csd = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                     "'driver':'femu','id':'ocp','addr':'5','devsz_mb':64,"

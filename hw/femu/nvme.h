@@ -343,6 +343,20 @@ typedef struct NvmeSubsystem {
  * Media Ready AENs off (GDAEC-3).
  */
 #define NVME_OCP_AEN_DEFAULT    0x1
+/*
+ * OCP 2.7 section 13: one A or B choice for each of DP-CFG-1 to DP-CFG-13.
+ * The default picks what FEMU meets: B for the 512-byte factory sector
+ * size (1), no Basic Management (4), C2h disabled (6), no in-band
+ * Lockdown (11) and no CBh (13); A elsewhere.
+ */
+#define NVME_OCP_PROFILE_LEN        13
+#define NVME_OCP_PROFILE_DEFAULT    "BAABABAAAABAB"
+
+/* the A or B choice of DP-CFG-@cfg (1 to 13) */
+static inline char nvme_ocp_choice(const char *profile, int cfg)
+{
+    return (profile ? profile : NVME_OCP_PROFILE_DEFAULT)[cfg - 1];
+}
 
 static inline bool nvme_subsys_rotational(NvmeSubsystem *subsys)
 {
@@ -2566,7 +2580,8 @@ typedef struct FemuCtrl {
     uint8_t     lba_index;
     uint32_t    atomic_write_lbas; /* namespace atomic write unit; 0 = one */
     bool        perf_hints;     /* NPWG, NPDG, NOWS from the bbssd geometry */
-    bool        ocp;            /* OCP 2.5 C0h and C1h behind the OCP UUID */
+    bool        ocp;            /* OCP 2.7 feature set (optional) */
+    char        *ocp_profile;   /* section 13: A or B for DP-CFG-1 to 13 */
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */

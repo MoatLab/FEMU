@@ -3648,6 +3648,36 @@ static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * OCP phase 1: the effective OCP configuration, before any check or
+ * allocation reads it. Section 13 of OCP 2.7 lets a buyer pick A or B per
+ * setting; the profile holds those picks.
+ */
+static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
+{
+    if (!n->ocp) {
+        if (n->ocp_profile) {
+            error_setg(errp, "ocp_profile needs ocp=on");
+            return false;
+        }
+        return true;
+    }
+    if (n->ocp_profile) {
+        if (strlen(n->ocp_profile) != NVME_OCP_PROFILE_LEN ||
+            strspn(n->ocp_profile, "AB") != NVME_OCP_PROFILE_LEN) {
+            error_setg(errp, "ocp_profile must be %d letters, each A or B "
+                       "(DP-CFG-1 to DP-CFG-%d)", NVME_OCP_PROFILE_LEN,
+                       NVME_OCP_PROFILE_LEN);
+            return false;
+        }
+    }
+    /* DP-CFG-7: B requires Write Uncorrectable, A leaves it optional */
+    if (nvme_ocp_choice(n->ocp_profile, 7) == 'B') {
+        n->oncs |= NVME_ONCS_WRITE_UNCORR;
+    }
+    return true;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -3664,7 +3694,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                    "two clocks would time one FTL");
         return;
     }
-    if (!femu_apply_nand_profile(n, errp)) {
+    if (!femu_apply_nand_profile(n, errp) || !femu_ocp_resolve(n, errp)) {
         return;
     }
 
@@ -4306,6 +4336,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
+    DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_BOOL("pi", FemuCtrl, pi, false),
