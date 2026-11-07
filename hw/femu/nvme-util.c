@@ -204,7 +204,7 @@ void nvme_resume_pollers(FemuCtrl *n, bool was_started)
  * could show the new phase beside the previous command identifier.
  */
 /* the guest reads the Timestamp as a clock, so it runs on the device clock */
-static int64_t nvme_timestamp_now_ms(FemuCtrl *n)
+int64_t nvme_timestamp_now_ms(FemuCtrl *n)
 {
     return femu_dev_now(n) / SCALE_MS;
 }

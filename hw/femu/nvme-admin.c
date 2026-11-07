@@ -32,6 +32,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = true,
     [NVME_SPINUP_CONTROL]           = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
+    [NVME_OCP_LATENCY_MONITOR]      = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -57,6 +58,9 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
     /* OCP GETF-5: changeable, controller scope, not saveable */
     [NVME_OCP_DSSD_AEN_CONFIG]      = NVME_FEAT_CAP_CHANGE,
+    /* OCP GETF-5: changeable, saveable, controller scope */
+    [NVME_OCP_LATENCY_MONITOR]      = NVME_FEAT_CAP_CHANGE |
+                                      NVME_FEAT_CAP_SAVE,
 };
 
 /*
@@ -101,6 +105,7 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
     case NVME_OCP_DSSD_AEN_CONFIG:
+    case NVME_OCP_LATENCY_MONITOR:
         return n->ocp;
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
@@ -1753,6 +1758,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_OCP_DSSD_AEN_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_aen_config);
         break;
+    case NVME_OCP_LATENCY_MONITOR:
+        /* the spec gives no value; the state is in log C3h */
+        cqe->n.result = 0;
+        break;
     case NVME_FDP_MODE: {
         uint32_t result;
         uint16_t status = nvme_get_feature_fdp(n, dw11, false, &result);
@@ -2032,6 +2041,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
         break;
+    case NVME_OCP_LATENCY_MONITOR:
+        /* the payload holds the configuration; SV is accepted (LMSF-10) */
+        return femu_ocp_lat_set(n, cmd);
     case NVME_OCP_DSSD_AEN_CONFIG:
         /* SDAEC-13: bits 31:2 are reserved */
         if (dw11 & ~0x3u) {
@@ -2088,6 +2100,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         stq_le_p(ev, nvme_timestamp(n) & ((1ULL << 48) - 1));
         stq_le_p(ev + 8, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - n->clr_ms);
         nvme_timestamp_set(n, ldq_le_p(ts), 1);
+        if (n->ocp) {
+            femu_ocp_lat_host_ts(n, ldq_le_p(ts));
+        }
         femu_pel_log(n, NVME_PEL_TIMESTAMP_CHANGE, 1, ev, sizeof(ev));
         break;
     }
@@ -2341,6 +2356,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
         lids[NVME_LOG_SUPPORTED] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_FEMU_STATS] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_OCP_EREC] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_OCP_LATENCY] = cpu_to_le32(NVME_LIDS_LSUPP);
         break;
     case 2:
         memset(lids, 0, sizeof(lids));
@@ -3638,7 +3654,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 
         if (uidx > 2 ||
             (uidx == 1 && lid != NVME_LOG_SUPPORTED &&
-             lid != NVME_LOG_FEMU_STATS && lid != NVME_LOG_OCP_EREC) ||
+             lid != NVME_LOG_FEMU_STATS && lid != NVME_LOG_OCP_EREC &&
+             lid != NVME_LOG_OCP_LATENCY) ||
             (uidx == 2 && lid != NVME_LOG_SUPPORTED &&
              lid != NVME_LOG_FEMU_STATS)) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -3702,6 +3719,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_femu_stats_info(n, cmd, len, off);
     case NVME_LOG_OCP_EREC:
         return nvme_ocp_erec_log(n, cmd, len, off);
+    case NVME_LOG_OCP_LATENCY:
+        if (!nvme_ocp_nsid_ok(cmd)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return femu_ocp_lat_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off);
     case NVME_LOG_CHANGED_NS_LIST:

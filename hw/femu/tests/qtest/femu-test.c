@@ -36890,6 +36890,10 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
         }
         g_assert_cmphex(femu_ocp_log(&c, 0xc1, 0, 0, buf, 512), ==,
                         NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc3, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc5, 0, 0, 0, NULL), ==,
+                        NVME_INVALID_FIELD);
         goto out;
     }
 
@@ -36914,7 +36918,8 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(femu_ocp_log(&c, 0x00, 1, 0, buf, 1024), ==,
                     NVME_SUCCESS);
     for (int lid = 0; lid < 256; lid++) {
-        uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1;
+        uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1 ||
+                        lid == 0xc3;
 
         g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
     }
@@ -37056,6 +37061,187 @@ static void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
 
 out:
     guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* Set Features C5h with the 13 payload bytes @cfg; the rest is zero */
+static uint16_t femu_ocp_lat_set(FemuCtrlState *c, uint64_t buf,
+                                 const uint8_t *cfg)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd;
+
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, cfg, 13);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0xc5);
+    cmd.cdw14 = cpu_to_le32(1);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* x-ocp-lat-skew-ms of device lat-test */
+static void femu_ocp_lat_skew(QTestState *qts, uint32_t ms)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/lat-test',"
+                             "'property':'x-ocp-lat-skew-ms','value':%u}}",
+                             ms);
+}
+
+/*
+ * The OCP 2.7 latency monitor (log C3h, feature C5h) on a device whose page
+ * read takes 40 ms. Defaults: status 07h, timer threshold 07E0h, A to D
+ * 05h 13h 1Eh 2Eh (30, 100, 155, 235 ms), configuration 0FFFh, window 0Ah,
+ * stamps all ones. A read counts in bucket 0, a fast write nowhere. A new
+ * configuration clears the counts; thresholds must rise; discard (02h)
+ * changes nothing. After one 5-minute interval the active set moves to the
+ * static set; after the next, empty interval the static set is empty.
+ */
+static void femu_test_ocp_latency(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t data_buf = guest_alloc(alloc, 4096);
+    static const uint8_t def[13] = {
+        0x07, 0x00, 0x00, 0x00, 0xe0, 0x07, 0x05, 0x13, 0x1e, 0x2e, 0xff,
+        0x0f, 0x0a,
+    };
+    /* timer 1 interval, A to D 5 10 15 20 ms, mode 0, no window, enabled */
+    const uint8_t cfg[13] = { 0x01, 0x00, 0x00, 0x01, 0x02, 0x03, 0, 0, 0,
+                              0, 0, 0, 0x01 };
+    uint8_t p[4096];
+    uint32_t r;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpmem(p, 13, def, 13);
+    for (int b = 96; b < 192; b++) {
+        g_assert_cmphex(p[b], ==, 0xff);
+    }
+    g_assert_cmphex(lduw_le_p(&p[460]), ==, 0xca);
+    g_assert_cmphex(lduw_le_p(&p[494]), ==, 5);
+    g_assert_cmphex(p[496], ==, 0x92);
+    g_assert_cmphex(p[511], ==, 0x85);
+    for (int b = 512; b < 4096; b++) {
+        g_assert_cmphex(p[b], ==, 0);
+    }
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc5, 3, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x5);                    /* CHANG and SVBL */
+
+    /* a 40 ms read lands in bucket 0 (30 to 100 ms) */
+    qtest_memset(qts, data_buf, 0x5a, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[44]), ==, 1);      /* bucket 0 Read */
+    /* a host thread can stall a write past 30 ms, so it is only reported */
+    g_test_message("bucket 0 write: count %u, latency %u ms",
+                   (unsigned)ldl_le_p(&p[40]), (unsigned)lduw_le_p(&p[212]));
+    g_assert_cmpuint(lduw_le_p(&p[214]), >=, 40);
+    g_assert_cmpuint(lduw_le_p(&p[214]), <, 100);
+    g_assert_cmphex(ldq_le_p(&p[184]), !=, UINT64_MAX);
+    /* the bucket 0 Write stamp is set exactly when that count is */
+    g_assert_cmpint(ldq_le_p(&p[176]) == UINT64_MAX, ==,
+                    ldl_le_p(&p[40]) == 0);
+
+    /* thresholds must rise, and the enable byte is 0 or 1 */
+    {
+        uint8_t bad[13];
+
+        memcpy(bad, cfg, 13);
+        bad[3] = 0x00;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, bad), ==,
+                        NVME_INVALID_FIELD);
+        memcpy(bad, cfg, 13);
+        bad[12] = 0x02;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, bad), ==,
+                        NVME_INVALID_FIELD);
+    }
+    /* with A at 1205 ms (F0h), a 40 ms read counts nowhere */
+    {
+        uint8_t hi[13];
+
+        memcpy(hi, cfg, 13);
+        hi[2] = 0xf0;
+        hi[3] = 0xf1;
+        hi[4] = 0xf2;
+        hi[5] = 0xf3;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, hi), ==, NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, 512);
+        for (int b = 32; b < 96; b += 4) {
+            g_assert_cmpuint(ldl_le_p(&p[b]), ==, 0);
+        }
+    }
+    /* a new configuration clears both sets; the read now hits bucket 3 */
+    g_assert_cmphex(femu_ocp_lat_set(&c, buf, cfg), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmphex(lduw_le_p(&p[4]), ==, 1);
+    g_assert_cmpuint(ldl_le_p(&p[44]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 1);      /* bucket 3 Read */
+    /* discard (02h) with an otherwise empty payload changes nothing */
+    {
+        const uint8_t discard[13] = { [11] = 0x02 };
+
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, discard), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 1);
+    g_assert_cmphex(p[0], ==, 0x07);
+
+    /* one interval later the count is static; one more, and static is empty */
+    femu_ocp_lat_skew(qts, 300 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 1);
+    femu_ocp_lat_skew(qts, 600 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 0);
+    /*
+     * A count in the active set, then a jump over two intervals with no
+     * read between: the last interval was empty, so both sets are empty.
+     */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    femu_ocp_lat_skew(qts, 1200 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 0);
+    femu_ocp_lat_skew(qts, 0);
+
+    guest_free(alloc, data_buf);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -51727,6 +51913,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,ocp=on",
         .arg = (void *)"on",
+    });
+    qos_add_test("ocp-latency", "femu", femu_test_ocp_latency,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=lat-test,femu_mode=1,devsz_mb=64,"
+            "ocp=on,pg_rd_lat=40000000",
     });
     qos_add_test("ocp-off", "femu", femu_test_ocp,
                  &(QOSGraphTestOptions) {

@@ -681,6 +681,10 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         nvme_write_cqe(n, cq, cqe);
     }
     nvme_inc_cq_tail(cq);
+    /* OCP latency monitor: SQ fetch to CQE write, I/O queues only */
+    if (unlikely(n->ocp) && cq->cqid) {
+        femu_ocp_lat_note(n, req, femu_io_now(n));
+    }
 
     /*
      * Nothing to count with coalescing off, on the admin queue, or on a

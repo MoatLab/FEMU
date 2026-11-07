@@ -3675,6 +3675,7 @@ static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
     if (nvme_ocp_choice(n->ocp_profile, 7) == 'B') {
         n->oncs |= NVME_ONCS_WRITE_UNCORR;
     }
+    femu_ocp_lat_init(n);
     return true;
 }
 
@@ -4051,6 +4052,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      */
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->attach(n, &n->namespaces[0]);
+    }
+
+    /* after the namespaces, so the epoch reads the clock pollers will read */
+    if (n->ocp) {
+        femu_ocp_lat_init(n);
     }
 
     n->use_ftl_thread = femu_needs_ftl_thread(n);
@@ -5164,6 +5170,9 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     n->clr_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     femu_pel_reset(n);
     femu_pel_power_loss(n);
+    if (n->ocp) {
+        femu_ocp_lat_power_cycle(n);
+    }
 }
 
 /*
@@ -5281,10 +5290,13 @@ static void femu_instance_finalize(Object *obj)
 
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
+    qemu_mutex_destroy(&n->ocp_lat.lock);
 }
 
 static void femu_instance_init(Object *obj)
 {
+    qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
+    seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
     femu_ctrl_describe_runtime(obj);
@@ -5329,6 +5341,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-ftl-hold",
                                        &FEMU(obj)->test_ftl_hold,
                                        OBJ_PROP_FLAG_READWRITE);
+        femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
+                          &FEMU(obj)->test_ocp_lat_skew_ms, true);
         object_property_add_uint32_ptr(obj, "x-stage-hold-ms",
                                        &FEMU(obj)->test_stage_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);

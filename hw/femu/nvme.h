@@ -1286,6 +1286,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_CP_MRS_LIST        = 0x84,
     NVME_LOG_FEMU_STATS         = 0xc0,    /* OCP SMART Extended with ocp=on */
     NVME_LOG_OCP_EREC           = 0xc1,    /* OCP Error Recovery, ocp=on */
+    NVME_LOG_OCP_LATENCY        = 0xc3,    /* OCP Latency Monitor, ocp=on */
 };
 
 /* LID Supported and Effects data structure, one per log page identifier */
@@ -1598,6 +1599,7 @@ enum NvmeFeatureIds {
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
     NVME_OCP_DSSD_AEN_CONFIG        = 0xc9,  /* OCP 2.7, ocp=on */
     NVME_FID_MAX                    = 0x100
 };
@@ -1824,6 +1826,51 @@ typedef struct FemuStageSet {
     QemuSeqLock seq;                /* odd while the poller adds a command */
     FemuStageBand bands[FEMU_STAGE_BUCKETS];
 } FemuStageSet;
+
+/* one bucket set of the OCP latency monitor: 4 buckets x Read, Write, DSM */
+typedef struct FemuOcpLatSet {
+    uint32_t count[4][3];
+    uint64_t stamp[4][3];       /* NVMe Timestamp at completion, or all ones */
+    uint16_t lat_ms[4][3];      /* measured latency in ms; 0 is invalid */
+    uint16_t units;             /* bit per pair: 1 = host Timestamp basis */
+    /* not in the log: full-resolution latency, completion time, window end */
+    int64_t lat_ns[4][3];
+    int64_t done_ns[4][3];
+    int64_t win_end[4][3];
+} FemuOcpLatSet;
+
+/* the host Timestamp baseline of the latency stamps (OCP 2.7 22.2.3.4) */
+typedef struct FemuOcpLatBase {
+    bool set;                   /* a host Timestamp arrived */
+    uint64_t ms;                /* the value the host set */
+    int64_t anchor_ms;          /* power-on milliseconds at that set */
+    int64_t t;                  /* monitor clock at that set */
+} FemuOcpLatBase;
+
+/* the state a log read copies */
+typedef struct FemuOcpLatState {
+    bool enabled;
+    uint16_t timer_threshold;   /* 5-minute steps; 0 = never move to static */
+    uint8_t thr[4];             /* A to D: (v + 1) x 5 ms */
+    uint16_t config;            /* bit per pair: 0 first event, 1 largest */
+    uint8_t min_window;         /* 100 ms steps, mode 1 only */
+    uint16_t debug_enable;
+    int64_t epoch_ns;           /* start of the active interval */
+    int64_t cfg_t;              /* the last C5h; older completions drop */
+    int64_t pon_ms;             /* power-on time, for stamps without a host base */
+    FemuOcpLatBase base, prev;  /* the latest host baseline, the one before */
+    FemuOcpLatSet act, st;
+} FemuOcpLatState;
+
+/*
+ * The OCP 2.7 latency monitor of one controller (feature C5h, log C3h).
+ * Writers take @lock, then write under @seq; a log read only reads @seq.
+ */
+typedef struct FemuOcpLat {
+    QemuMutex lock;
+    QemuSeqLock seq;
+    FemuOcpLatState s;
+} FemuOcpLat;
 
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
@@ -2585,6 +2632,8 @@ typedef struct FemuCtrl {
     uint32_t    ocp_incomplete_shutdowns; /* cuts that dropped buffered pages */
     uint16_t    ocp_max_temp_k; /* highest composite temperature seen, K */
     uint32_t    ocp_aen_config; /* OCP C9h: bit 0 error, bit 1 media ready */
+    FemuOcpLat  ocp_lat;        /* OCP latency monitor (C5h, C3h) */
+    uint32_t    test_ocp_lat_skew_ms; /* qtest: moves the monitor clock on */
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     ms;
@@ -2914,6 +2963,14 @@ bool nvme_ns_mgmt_supported(FemuCtrl *n);
 bool nvme_can_sanitize(FemuCtrl *n);
 bool nvme_fid_supported(FemuCtrl *n, uint8_t fid);
 uint64_t nvme_ns_nuse(FemuCtrl *n, NvmeNamespace *ns);
+void femu_ocp_lat_init(FemuCtrl *n);
+void femu_ocp_lat_power_cycle(FemuCtrl *n);
+void femu_ocp_lat_host_ts(FemuCtrl *n, uint64_t value);
+int64_t nvme_timestamp_now_ms(FemuCtrl *n);
+void femu_ocp_lat_note(FemuCtrl *n, NvmeRequest *req, int64_t post);
+uint16_t femu_ocp_lat_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                          uint64_t off);
+uint16_t femu_ocp_lat_set(FemuCtrl *n, NvmeCmd *cmd);
 
 /*
  * The capability registry (nvme-caps.c). Each returns the Commands Supported
