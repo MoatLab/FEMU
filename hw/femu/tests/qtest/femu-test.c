@@ -38040,6 +38040,41 @@ static void femu_test_thermal_ocp(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* the throttle properties are refused out of range or without the throttle */
+static void femu_test_throttle_refused(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } bad[] = {
+        { "'hot_k':360", "hot_k needs throttle=on" },
+        { "'throttle':true", "throttle needs thermal_tau_ms" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_light_pct':90", "throttle_light_pct" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_light_pct':200,'throttle_heavy_pct':150",
+          "throttle_light_pct" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_heavy_pct':2000", "throttle_light_pct" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'thr-bad','addr':'5','devsz_mb':64,'femu_mode':1,%s}}",
+            bad[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].msg));
+        qobject_unref(rsp);
+    }
+}
+
 /* fw_slots: at most 7; ocp needs 3; no subsystem */
 static void femu_test_fw_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -52764,6 +52799,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=thr,femu_mode=1,devsz_mb=64,"
             "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on,"
+            "throttle_light_pct=150,throttle_heavy_pct=300,"
             "pg_rd_lat=50000000",
     });
     qos_add_test("thermal-ocp", "femu", femu_test_thermal_ocp,
@@ -52771,6 +52807,8 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=thro,femu_mode=1,devsz_mb=64,ocp=on,"
             "temperature=300,thermal_tau_ms=100,thermal_r=1,throttle=on",
     });
+    qos_add_test("throttle-refused", "femu", femu_test_throttle_refused,
+                 NULL);
     qos_add_test("fw-refused", "femu", femu_test_fw_refused,
                  &(QOSGraphTestOptions) {
         .before = femu_ocp_before,
