@@ -288,6 +288,15 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
     }
 
     /* a negative overhead would start a preempting read before it arrived */
+    if ((p->pe_suspend_max || p->tresume_ns) && !p->pe_suspend) {
+        error_setg(errp, "FEMU bbssd: pe_suspend_max and tresume_ns need "
+                   "pe_suspend");
+        return -1;
+    }
+    if (p->tresume_ns < 0) {
+        error_setg(errp, "FEMU bbssd: tresume_ns must not be negative");
+        return -1;
+    }
     if (p->tsusp_ns < 0) {
         error_setg(errp, "FEMU bbssd: tsusp_ns must not be negative");
         return -1;
@@ -431,6 +440,8 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->trcbsy = n->bb_params.trcbsy;
     spp->pe_suspend = n->bb_params.pe_suspend;
     spp->tsusp_ns = n->bb_params.tsusp_ns;
+    spp->pe_suspend_max = n->bb_params.pe_suspend_max;
+    spp->tresume_ns = n->bb_params.tresume_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
     /* with one plane there is nothing to combine, so the flag stays clear */
     spp->mp_program = n->bb_params.mp_program && spp->pls_per_lun > 1;

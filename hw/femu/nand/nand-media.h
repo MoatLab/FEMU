@@ -157,6 +157,8 @@ typedef struct NandMediaTiming {
     /* program/erase suspend overhead (ns) paid by a read that preempts an
      * in-flight P/E on its LUN/plane (policy.pe_suspend); 0 = free suspend */
     int64_t tsusp_ns;
+    /* added to the suspended program/erase when it resumes; 0 = none */
+    int64_t tresume_ns;
 } NandMediaTiming;
 
 typedef struct NandMediaPolicy {
@@ -164,6 +166,7 @@ typedef struct NandMediaPolicy {
     NandChannelMode channel_mode;
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the
                                    * LUN/plane (all rules, staged or plain channel) */
+    uint32_t        max_suspends; /* suspensions one program/erase allows; 0 = any */
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
     /*
@@ -287,6 +290,8 @@ typedef struct NandBusResList {
 typedef struct NandSuspendState {
     uint64_t pe_end;
     uint64_t rd_end;
+    uint32_t nsusp;     /* suspensions of the program/erase in flight */
+    uint64_t budget_end; /* the end of the work those suspensions shifted */
 } NandSuspendState;
 
 typedef struct NandMedia {

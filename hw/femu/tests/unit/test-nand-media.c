@@ -587,6 +587,69 @@ static void test_copyback(void)
  * rule has to hold on the lock-free LUN rule (bbssd), the plane rule (ZNS)
  * and the staged channel path, which is why each is checked.
  */
+/*
+ * Suspend limits: max_suspends caps the suspensions of one program, and
+ * tresume_ns adds a resume cost each time the program goes on. tR 10 us,
+ * tPROG 40 us, tsusp 5 us, tresume 2 us, one suspension allowed.
+ */
+static void test_pe_suspend_limits(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t lat;
+
+    printf("# program/erase suspend limits\n");
+    memset(&a, 0, sizeof(a));
+
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    cfg.timing.tresume_ns = 2000;
+    cfg.policy.max_suspends = 1;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("limit 1: the first read suspends", lat, 5000 + 10000);
+    /* the program now ends at t0 + 40 + 10 + 5 + 2 us */
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("limit 1: the second read waits the program out",
+          lat, (57000 - 20000) + 10000);
+    nand_media_destroy(&m);
+
+    /* a program queued behind the suspended one does not refill the budget */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    cfg.timing.tresume_ns = 2000;
+    cfg.policy.max_suspends = 1;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 2000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("limit 1: a queued program keeps the budget spent",
+          lat, (57000 + 40000 - 20000) + 10000);
+    nand_media_destroy(&m);
+
+    /* without a limit the second read suspends too */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    cfg.timing.tresume_ns = 2000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("no limit: the second read suspends", lat, 5000 + 10000);
+    /* each suspension cost the program 17 us; a new program queues behind */
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 20000).latency_ns;
+    check("two resumes: the program ends 34 us late",
+          lat, (40000 + 2 * 17000 - 20000) + 40000);
+    nand_media_destroy(&m);
+}
+
 static void test_pe_suspend(void)
 {
     NandMediaConfig cfg;
@@ -985,6 +1048,7 @@ int main(void)
     test_multiplane_program_read();
     test_copyback();
     test_pe_suspend();
+    test_pe_suspend_limits();
     test_partial_xfer();
     test_unbounded_windows();
     test_plane_reads();

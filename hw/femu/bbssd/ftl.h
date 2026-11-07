@@ -226,6 +226,8 @@ struct ssdparams {
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
+    uint32_t pe_suspend_max;
+    int tresume_ns;
     bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
     bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */
     bool plane_first; /* write pointers step the plane before the channel */

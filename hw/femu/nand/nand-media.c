@@ -570,8 +570,10 @@ static void suspend_note(NandMedia *m, const NandLoc *loc, NandMediaOp op,
  * busy until. Only a program or erase is suspended: a read that finds the array
  * busy with other reads queues behind them, and one that finds a suspension
  * already open joins it behind the reads in it without paying the overhead a
- * second time. Returns false to leave the read to the ordinary rule; otherwise
- * sets *start, and *shift, how far the suspended work slides.
+ * second time. A program or erase allows max_suspends suspensions (0: any);
+ * past them a read waits. Resuming adds tresume_ns to the suspended work.
+ * Returns false to leave the read to the ordinary rule; otherwise sets
+ * *start, and *shift, how far the suspended work slides.
  *
  * The state is read and written without a lock, so the caller must serialize
  * the operations on a position -- bbssd and ZNS run them on one FTL thread.
@@ -583,16 +585,34 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
     NandSuspendState *st = suspend_state(m, loc);
 
     if (!st || t >= busy_until || t >= st->pe_end) {
+        /*
+         * No program or erase in flight: the next one starts a new budget.
+         * Programs queued back to back share one, so a queued program
+         * cannot refill the budget of the one that runs.
+         */
+        if (st && t >= st->pe_end) {
+            st->nsusp = 0;
+        }
         return false;
     }
     if (st->rd_end > t) {
         *start = st->rd_end;
         *shift = alat;
     } else {
+        /* a new suspension: within the budget, it costs entry and resume */
+        if (t >= st->budget_end) {
+            st->nsusp = 0;      /* the suspended work ended: a new budget */
+        }
+        if (m->cfg.policy.max_suspends &&
+            st->nsusp >= m->cfg.policy.max_suspends) {
+            return false;
+        }
+        st->nsusp++;
         *start = t + m->cfg.timing.tsusp_ns;
-        *shift = alat + m->cfg.timing.tsusp_ns;
+        *shift = alat + m->cfg.timing.tsusp_ns + m->cfg.timing.tresume_ns;
     }
     st->pe_end += *shift;
+    st->budget_end = st->pe_end;
     st->rd_end = *start + alat;
 
     return true;

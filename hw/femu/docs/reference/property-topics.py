@@ -96,7 +96,7 @@ DEVICES = [
                     "tplrbsy", "tplebsy", "mp_program", "mp_read",
                     "plane_first",
                     "trcbsy", "trim_lat_ns",
-                    "pe_suspend", "tsusp_ns", "nand_cell_type", "cell_pages",
+                    "pe_suspend", "tsusp_ns", "pe_suspend_max", "tresume_ns", "nand_cell_type", "cell_pages",
                     "pgtype_lat",
                 ],
             },

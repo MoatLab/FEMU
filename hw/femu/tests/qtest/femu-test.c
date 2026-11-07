@@ -50096,6 +50096,16 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
     });
+    /* one suspension allowed, with a resume cost: the read still preempts */
+    qos_add_test("pe-suspend-bbssd-limit", "femu", femu_test_pe_suspend,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1,"
+            "pe_suspend_max=1,tresume_ns=1000"
+    });
     qos_add_test("pe-suspend-csd-off", "femu", femu_test_pe_suspend,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"off",

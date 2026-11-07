@@ -461,6 +461,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "tsusp_ns",
       "bbssd, CSD, KV: overhead in ns added to a read that suspends a "
       "program or erase, 0 or more" },
+    { "pe_suspend_max",
+      "bbssd, CSD, KV: with pe_suspend, the suspensions one program or "
+      "erase allows; a read past them waits for it; 0 (default) allows any" },
+    { "tresume_ns",
+      "bbssd, CSD, KV: with pe_suspend, ns added to a suspended program or "
+      "erase each time it resumes, 0 or more (default 0)" },
     { "nand_cell_type",
       "bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; "
       "1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing "

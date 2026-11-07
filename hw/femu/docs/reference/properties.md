@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 257 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 259 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -158,6 +158,8 @@ Devices:
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range, with or without FDP |
 | `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
 | `tsusp_ns` | `int32` | `0` | bbssd, CSD, KV: overhead in ns added to a read that suspends a program or erase, 0 or more |
+| `pe_suspend_max` | `uint32` | `0` | bbssd, CSD, KV: with pe_suspend, the suspensions one program or erase allows; a read past them waits for it; 0 (default) allows any |
+| `tresume_ns` | `int32` | `0` | bbssd, CSD, KV: with pe_suspend, ns added to a suspended program or erase each time it resumes, 0 or more (default 0) |
 | `nand_cell_type` | `uint8` | `0` | bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; 1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing (other values fall back to 0) |
 | `cell_pages` | `int32` | `0` | bbssd, CSD, KV: bits per cell (pages per wordline) for the pgtype_lat model, 0 to 5; 0 with pgtype_lat means 3 |
 | `pgtype_lat` | `int32` | `0` | bbssd, CSD, KV: non-zero scales the program time by page type (lower to upper) using cell_pages, when nand_cell_type is 0 |

@@ -2505,6 +2505,8 @@ typedef struct BbCtrlParams {
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
     int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
     int tsusp_ns;     /* suspend overhead per preempting read (ns) */
+    uint32_t pe_suspend_max;  /* suspensions one program/erase allows */
+    int tresume_ns;   /* resume cost of a suspended program/erase (ns) */
     int mp_program;   /* charge same-page programs on several planes as one; 0 = off */
     int mp_read;      /* charge same-page reads on several planes as one; 0 = off */
     int plane_first;  /* write pointers step the plane before the channel; 0 = off */
