@@ -3026,6 +3026,7 @@ static void femu_realize_undo(FemuCtrl *n)
         femu_cxl_nvme_ops->detach(n);
     }
     nvme_resv_exit(n);
+    g_clear_pointer(&n->san_timer, timer_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -3776,6 +3777,21 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
         error_setg(errp, "ocp needs fw_slots of 3 or more (FWUP-6)");
         return false;
     }
+    /* the background timer lives on the controller that starts it */
+    if (n->sanitize_ms && n->subsys) {
+        error_setg(errp, "sanitize_ms does not work with a femu-subsys yet");
+        return false;
+    }
+    /* power_loss admits I/O apart from the checks, and keeps undo copies */
+    if ((n->sanitize_ms || n->sanitize_ops) && n->power_loss) {
+        error_setg(errp, "sanitize_ms and sanitize_ops do not work with "
+                   "power_loss yet");
+        return false;
+    }
+    if (n->sanitize_ms > 3600000) {
+        error_setg(errp, "sanitize_ms is at most 3600000 (one hour)");
+        return false;
+    }
     /* the lockdown state is per controller, so not across a subsystem */
     if (n->lockdown && n->subsys) {
         error_setg(errp, "lockdown does not work with a femu-subsys yet");
@@ -4140,6 +4156,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
     nvme_ana_id(n, &n->id_ctrl);
+    if (n->sanitize_ms) {
+        /* guest-visible state: it runs on the virtual clock */
+        n->san_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                    nvme_sanitize_timer_cb, n);
+    }
     for (uint32_t i = 1; n->ana && i <= n->namespace_limit; i++) {
         if (nvme_ns_allocated(n, i)) {
             nvme_ana_ns(n, nvme_ns_allocated(n, i));
@@ -4424,6 +4445,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_pel_exit(n);
     femu_fw_exit(n);
     nvme_resv_exit(n);
+    g_clear_pointer(&n->san_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -4528,6 +4550,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
     DEFINE_PROP_BOOL("power_states", FemuCtrl, power_states, false),
     DEFINE_PROP_BOOL("ana", FemuCtrl, ana, false),
+    DEFINE_PROP_UINT32("sanitize_ms", FemuCtrl, sanitize_ms, 0),
+    DEFINE_PROP_BOOL("sanitize_ops", FemuCtrl, sanitize_ops, false),
     DEFINE_PROP_UINT8("ps_max_watts", FemuCtrl, ps_max_watts, 25),
     DEFINE_PROP_STRING("ocp_profile", FemuCtrl, ocp_profile),
     DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),

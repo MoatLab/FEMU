@@ -2895,6 +2895,10 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
          nvme_ns_io_effects(n, ns, cmd->opcode))) {
         return NVME_WRITE_TO_RO | NVME_DNR;
     }
+    /* a sanitize in progress refuses every I/O command but Flush */
+    if (unlikely(nvme_sanitize_busy(n)) && cmd->opcode != NVME_CMD_FLUSH) {
+        return NVME_SANITIZE_IN_PROGRESS;
+    }
     /* Reservations (Base 2.3, Figure 703): the read and write groups */
     if (unlikely(n->reservations) && nvme_resv_ns(n, ns)) {
         uint16_t status;

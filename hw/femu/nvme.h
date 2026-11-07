@@ -297,6 +297,9 @@ typedef struct QEMU_PACKED NvmeEndGrpLog {
 typedef struct NvmeSanitizeState {
     uint16_t sstat;
     uint32_t cdw10;
+    uint32_t cdw11;                 /* OVRPAT of the running operation */
+    bool     active;                /* in progress (sanitize_ms > 0) */
+    int64_t  start_ms;              /* realtime clock */
 } NvmeSanitizeState;
 
 typedef struct NvmeSubsystem {
@@ -1090,6 +1093,7 @@ enum NvmeStatusCodes {
     NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
+    NVME_SANITIZE_IN_PROGRESS   = 0x001d,
     NVME_HOSTID_INCONSISTENT    = 0x0018,   /* 64 and 128 bit at once */
     NVME_INVALID_SGL_SEG_DESCR  = 0x000d,
     NVME_INVALID_NUM_SGL_DESCRS = 0x000e,
@@ -1806,6 +1810,8 @@ static inline void nvme_check_size(void)
 #define NVME_AER_INFO_ANA_CHANGE 0x03   /* notice: ANA Change */
 #define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
 #define NVME_AER_INFO_RESV_LOG  0x00    /* I/O specific: log 80h has pages */
+#define NVME_AER_INFO_SANITIZED 0x01    /* I/O specific: sanitize done */
+#define NVME_AER_INFO_SANITIZED_DEALLOC 0x02 /* ... with unexpected dealloc */
 #define NVME_AER_INFO_FW_ACT    0x01    /* notice: Firmware Activation Starting */
 #define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 #define NVME_AEC_RGCNS      (1u << 17)  /* Reachability Group Change Notices */
@@ -2906,6 +2912,10 @@ typedef struct FemuCtrl {
     uint32_t        ps_pct;         /* the power state's cap */
     /* power states (femu-power.c) */
     bool            power_states;
+    /* sanitize in the background, and its extra actions */
+    uint32_t        sanitize_ms;
+    bool            sanitize_ops;
+    QEMUTimer       *san_timer;
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */
@@ -3428,6 +3438,8 @@ void nvme_resv_ns_clear(NvmeNamespace *ns);
 void nvme_resv_ctrl_reset(FemuCtrl *n);
 void nvme_resv_power_loss(FemuCtrl *n);
 bool nvme_resv_check_props(FemuCtrl *n, Error **errp);
+bool nvme_sanitize_busy(FemuCtrl *n);
+void nvme_sanitize_timer_cb(void *opaque);
 void nvme_resv_realize(FemuCtrl *n);
 void nvme_resv_exit(FemuCtrl *n);
 bool femu_hctm_supported(FemuCtrl *n);

@@ -16738,6 +16738,141 @@ static uint16_t femu_sanitize(FemuCtrlState *c, uint32_t dw10)
     return FEMU_SC(femu_admin(c, &cmd));
 }
 
+/* Sanitize with CDW11 (OVRPAT) */
+static uint16_t femu_sanitize2(FemuCtrlState *c, uint32_t dw10, uint32_t dw11)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* SSTAT and SPROG from log 81h (RAE clear) */
+static uint16_t femu_sstat(FemuCtrlState *c, uint64_t buf, uint16_t *sprog)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, 0x81, buf, 512, 0)), ==,
+                    NVME_SUCCESS);
+    if (sprog) {
+        *sprog = qtest_readw(qts, buf);
+    }
+    return qtest_readw(qts, buf + 2);
+}
+
+/*
+ * Sanitize in the background (sanitize_ms=300) with Crypto Erase and
+ * Overwrite (sanitize_ops): SANICAP, the in-progress state (SSTAT 010b,
+ * SPROG below FFFFh), I/O and Format refused with 1Dh while Identify runs,
+ * the completion event (type 6, info 01h, log 81h), a reset that does not
+ * stop it, and the data each action leaves with and without NDAS.
+ */
+static void femu_test_sanitize_bg(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint32_t res = 0;
+    uint16_t cid, want, sprog = 0;
+    NvmeCmd fmt = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 328), ==, 0x7);    /* SANICAP */
+
+    qtest_memset(qts, io, 0x77, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sstat(&c, buf, &sprog) & 0x7, ==, 0x2);
+    g_assert_cmpuint(sprog, <, 0xffff);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==, 0x01d);
+    fmt.opcode = 0x80;
+    fmt.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &fmt)), ==, 0x01d);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, 0x01d);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sstat(&c, buf, &sprog), ==, 0x101);
+    g_assert_cmphex(sprog, ==, 0xffff);
+    qtest_memset(qts, io, 0xee, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0);
+
+    /* a reset does not stop it */
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL) & 0x7, ==, 0x2);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL) & 0x7, ==, 0x1);
+
+    /* Overwrite, one pass, NDAS: the pattern reads back */
+    qtest_memset(qts, io, 0x77, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 1u << 4 | 0x3, 0xdeadbeef),
+                    ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x109);  /* OPC 1 */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, io + 512), ==, 0xdeadbeef);
+    /*
+     * Two passes with OIPBP: the first pass is inverted, so the last one
+     * is OVRPAT again (Figure 705); OWPASS 0 counts as 16 passes.
+     */
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 1u << 8 | 2u << 4 | 0x3,
+                                   0x12345678), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x111);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0x12345678);
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 0x3, 0xdeadbeef), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x181);   /* OPC 16 */
+
+    /* Crypto Erase with NDAS: completed (001b), not the old data */
+    g_assert_cmphex(femu_sanitize(&c, 1u << 9 | 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x101);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), !=, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, io), !=, 0);
+    g_assert_cmphex(femu_sanitize(&c, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x101);
+    qtest_memset(qts, io, 0xee, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
 /*
  * Sanitize block erase (Base 2.3, 5.2.24) on a device of block namespaces:
  * SANICAP offers it, Global Data Erased holds until a write and again after
@@ -53915,6 +54050,11 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,oncs=0x104,"
             "subsys=fdpsub"
+    });
+    qos_add_test("sanitize-bg", "femu", femu_test_sanitize_bg,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,sanitize_ms=300,"
+            "sanitize_ops=on",
     });
     qos_add_test("sanitize", "femu", femu_test_sanitize,
                  &(QOSGraphTestOptions) {

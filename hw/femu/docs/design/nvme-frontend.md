@@ -661,7 +661,7 @@ Namespace Management.
 | Command and Feature Lockdown | 14h | with `lockdown=on`: what the Lockdown command (24h) can prohibit, and what the admin queue refuses now; no Management Endpoint, so Contents 10b is Invalid Field |
 | FDP Configurations, RUH Usage, Statistics, Events | 20h-23h | with FDP |
 | Reservation Notification | 80h | with `reservations=on`: the oldest notice of the queue (32 pages), which the read removes; an empty queue reads as zeroes |
-| Sanitize Status | 81h | |
+| Sanitize Status | 81h | SPROG while a background sanitize (`sanitize_ms`) runs, estimated times, and a read without RAE clears Sanitize Operation Completed |
 | Changed Zone List | BFh | ZNS, from the mode |
 | Chunk Information | CAh | Open-Channel 2.0, from the mode |
 | FEMU media counters | C0h | WAF and FTL counters |

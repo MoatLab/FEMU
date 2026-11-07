@@ -130,6 +130,11 @@ static void femu_power_advance(FemuCtrl *n, int64_t now)
     int64_t base = MAX(n->ps_entered, MAX(n->ps_last_io,
                                           qatomic_read(&n->ps_busy_until)));
 
+    /* a sanitize in progress suspends autonomous transitions (8.1.26.5) */
+    if (nvme_sanitize_busy(n)) {
+        return;
+    }
+
     for (int hops = 0; n->apste && hops <= FEMU_NPSS; hops++) {
         uint64_t e = n->apst[n->ps_cur];
         int64_t itpt = (int64_t)((e >> 8) & 0xffffff) * SCALE_MS;

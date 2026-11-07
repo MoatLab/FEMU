@@ -228,6 +228,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slot 1 is read only; with 2 or more, Firmware Image Download and "
       "Firmware Commit work and activation needs no reset; not with a "
       "femu-subsys or a CXL device" },
+    { "sanitize_ms",
+      "bbssd, NoSSD: a Sanitize runs in the background for this many ms; while it runs, I/O and most admin commands fail with Sanitize In Progress, and its end sends Sanitize Operation Completed; up to 3600000; not with a femu-subsys; 0 (default) finishes before the command completes" },
+    { "sanitize_ops",
+      "with Sanitize: also Crypto Erase and Overwrite (SANICAP CES, OWS); off (default) offers Block Erase only" },
     { "ana",
       "ANA reporting (Base 2.3, 8.1.1): one ANA group per namespace, log 0Ch, CMIC bit 3 and the ANA Change notice; the runtime property ana-state sets a group's state through this controller; must match on every controller of a femu-subsys; off (default)" },
     { "power_states",

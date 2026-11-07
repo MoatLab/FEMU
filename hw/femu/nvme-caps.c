@@ -525,7 +525,8 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
         id->ocfs |= cpu_to_le16(1 << 2 | 1 << 4);
     }
     id->lpa = lpa;
-    /* block erase only */
+    /* block erase; with sanitize_ops crypto erase and overwrite too */
     id->sanicap = cpu_to_le32(nvme_admin_effects(n, NVME_ADM_CMD_SANITIZE) ?
-                              1 << 1 : 0);
+                              1 << 1 | (n->sanitize_ops ? 1 << 0 | 1 << 2 :
+                                        0) : 0);
 }

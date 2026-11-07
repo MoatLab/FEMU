@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 252 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 254 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -78,6 +78,8 @@ Devices:
 | `cmbsz` | `uint32` | `0` | Controller Memory Buffer size register; 0 means no buffer, otherwise the size field times the unit must be a non-zero power of two |
 | `cmbloc` | `uint32` | `0` | Controller Memory Buffer location register; its BAR field must be 2 when cmbsz is set |
 | `fw_slots` | `uint8` | `0` | number of firmware slots, 1 to 7; 0 (default) means 1, or 3 with ocp; slot 1 is read only; with 2 or more, Firmware Image Download and Firmware Commit work and activation needs no reset; not with a femu-subsys or a CXL device |
+| `sanitize_ms` | `uint32` | `0` | bbssd, NoSSD: a Sanitize runs in the background for this many ms; while it runs, I/O and most admin commands fail with Sanitize In Progress, and its end sends Sanitize Operation Completed; up to 3600000; not with a femu-subsys; 0 (default) finishes before the command completes |
+| `sanitize_ops` | `bool` | `off` | with Sanitize: also Crypto Erase and Overwrite (SANICAP CES, OWS); off (default) offers Block Erase only |
 | `ana` | `bool` | `off` | ANA reporting (Base 2.3, 8.1.1): one ANA group per namespace, log 0Ch, CMIC bit 3 and the ANA Change notice; the runtime property ana-state sets a group's state through this controller; must match on every controller of a femu-subsys; off (default) |
 | `power_states` | `bool` | `off` | bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is non-operational, and an I/O command wakes it 5 ms later; Autonomous Power State Transition (0Ch); not with ocp; off (default) keeps one power state |
 | `lockdown` | `bool` | `off` | Command and Feature Lockdown: the Lockdown command (24h), log 14h and OACS bit 10; the host can prohibit most admin commands and changeable Feature Identifiers on the admin queue until QEMU stops; not with a femu-subsys; off (default) |

@@ -2402,6 +2402,10 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         if (!OCSSD(n)) {
             log[i].lpver = 1;
         }
+        /* a sanitize in progress hides the LBAs (Base 2.3, Figure 143) */
+        if (nvme_sanitize_busy(n)) {
+            log[i].lba = 0;
+        }
     }
     qemu_spin_unlock(&n->elp_lock);
 
@@ -2998,8 +3002,9 @@ static uint16_t nvme_ocp_devcap_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     stw_le_p(&log[0], 1);                       /* one PCIe port */
     /* Write Zeroes, DEAC, FUA; NVMe-IO-6 (zeros after DEAC) */
     stw_le_p(&log[4], wz ? 0x0017 : 0);
-    /* Sanitize, Block Erase, deallocation after it */
-    stw_le_p(&log[6], nvme_can_sanitize(n) ? 0x0015 : 0);
+    /* Sanitize, Block Erase, deallocation after it; crypto, overwrite */
+    stw_le_p(&log[6], nvme_can_sanitize(n) ?
+                      0x0015 | (n->sanitize_ops ? 0x000a : 0) : 0);
     stw_le_p(&log[8], dsm ? 0x0003 : 0);        /* DSM with Deallocate */
     /* single LBA, the maximum range, SMART not counting induced errors */
     stw_le_p(&log[10], wu ? 0x000f : 0);
@@ -3838,68 +3843,54 @@ static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
                         prp1, prp2);
 }
 
-static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
+/* whether a sanitize operation is in progress (Base 2.3, 8.1.26.5) */
+bool nvme_sanitize_busy(FemuCtrl *n)
 {
-    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
-    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    return qatomic_read(&nvme_sanitize_state(n)->active);
+}
+
+/*
+ * The data a sanitize leaves (pollers paused). Without NDAS every action
+ * deallocates all media. With NDAS a crypto erase leaves data no one can
+ * read back as it was, and an overwrite leaves its last pass (Figure 705).
+ */
+static void nvme_sanitize_apply(FemuCtrl *n, uint32_t dw10, uint32_t dw11)
+{
     uint8_t sanact = dw10 & 0x7;
     bool ndas = dw10 & (1 << 9);
-    bool emvs = dw10 & (1 << 10);
-    bool resume;
-    uint8_t ev[16] = { 0 };
-
-    if (!nvme_can_sanitize(n)) {
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    }
+    bool keep = ndas && (sanact == 0x3 || sanact == 0x4);
     /*
-     * Base 8.1.26.1: no sanitize starts while a firmware activation waits
-     * for a reset; checked before anything changes.
+     * Overwrite: whatever OIPBP and the pass count, the last pass writes
+     * OVRPAT (Figure 705), little endian. Crypto erase: a fixed stand-in for
+     * data under a new key.
      */
-    if (sanact != 0x1 && femu_fw_pending(n)) {
-        return NVME_FW_REQ_CLR | NVME_DNR;
-    }
-
-    switch (sanact) {
-    case 0x1:   /* exit failure mode: a sanitize here never fails */
-        return NVME_SUCCESS;
-    case 0x2:   /* block erase */
-        if (emvs) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-        break;
-    default:
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    /* Sanitize Start (Figure 247): the whole subsystem is the target */
-    stl_le_p(ev, le32_to_cpu(n->id_ctrl.sanicap));
-    stl_le_p(ev + 4, dw10);
-    stl_le_p(ev + 8, le32_to_cpu(cmd->cdw11));
-    stl_le_p(ev + 12, NVME_NSID_BROADCAST);
-    femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
-
-    resume = nvme_pause_pollers(n);
-    if (n->power_loss) {
-        uint16_t status = bbssd_flush_all(n);
-
-        if (status) {
-            nvme_resume_pollers(n, resume);
-            return status;
-        }
-    }
-    if (n->ns_mgmt && n->mbe && n->mbe->logical_space) {
+    uint32_t pat = sanact == 0x3 ? dw11 : 0x5a3c96e1;
+    if (!keep && n->ns_mgmt && n->mbe && n->mbe->logical_space) {
         /* The pool includes deleted extents, but excludes spare capacity. */
         memset(n->mbe->logical_space, 0, n->namespace_pool_size);
     }
     for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
+        uint8_t *data = NULL;
 
         if (!ns->allocated) {
             continue;
         }
-        if (!n->ns_mgmt && n->mbe && n->mbe->logical_space) {
-            memset(n->mbe->logical_space + ns->backend_offset, 0,
-                   ns->extent_size);
+        if (n->mbe && n->mbe->logical_space) {
+            data = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
+        }
+        if (keep) {
+            for (uint64_t b = 0; data && b + 4 <= ns->extent_size; b += 4) {
+                stl_le_p(data + b, pat);
+            }
+            bitmap_zero(ns->uncorrectable, ns->ns_blks);
+            if (ns->mdata) {
+                memset(ns->mdata, 0, ns->mdata_len);
+            }
+            continue;
+        }
+        if (!n->ns_mgmt && data) {
+            memset(data, 0, ns->extent_size);
         }
         bitmap_zero(ns->util, ns->ns_blks);
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
@@ -3910,29 +3901,139 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
             bbssd_deallocate_all(ns);
         }
     }
-    sanitize->cdw10 = dw10;
-    /*
-     * Completed, 001b, or 100b when the host asked for no deallocation. Set
-     * before the pollers resume: a write clears GDE, and one that ran first
-     * would leave the status claiming no data was written since.
-     */
-    qatomic_set(&sanitize->sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
+}
 
+/*
+ * The operation ends: the data changes and SSTAT says completed with GDE.
+ * A Block Erase with NDAS still deallocates: that is completed with
+ * unexpected deallocation (100b, event 02h); otherwise 001b (event 01h).
+ * An overwrite also reports its passes (OPC). With sanitize_ms the
+ * starting controller sends the event.
+ */
+static uint16_t nvme_sanitize_finish(FemuCtrl *n)
+{
+    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
+    uint8_t sanact = sanitize->cdw10 & 0x7;
+    bool unexpected = (sanitize->cdw10 & (1 << 9)) && sanact == 0x2;
+    uint16_t opc = 0;
+    uint8_t ev[16] = { 0 };
+    bool resume;
+
+    if (sanact == 0x3) {
+        uint8_t passes = (sanitize->cdw10 >> 4) & 0xf;
+
+        opc = (passes ? passes : 16) << 3;      /* OWPASS 0 is 16 passes */
+    }
+
+    resume = nvme_pause_pollers(n);
+    /* buffered writes reach the media first, so they are sanitized too */
+    if (n->power_loss) {
+        uint16_t status = bbssd_flush_all(n);
+
+        if (status) {
+            nvme_resume_pollers(n, resume);
+            return status;
+        }
+    }
+    nvme_sanitize_apply(n, sanitize->cdw10, sanitize->cdw11);
+    /*
+     * Set before the pollers resume: a write clears GDE, and one that ran
+     * first would leave the status claiming no data was written since.
+     */
+    qatomic_set(&sanitize->sstat,
+                NVME_SSTAT_GDE | opc | (unexpected ? 0x4 : 0x1));
+    qatomic_set(&sanitize->active, false);
+    nvme_resume_pollers(n, resume);
     /* Sanitize Completion (Figure 248): progress FFFFh, done */
-    memset(ev, 0, sizeof(ev));
     stw_le_p(ev, 0xffff);
     stw_le_p(ev + 2, qatomic_read(&sanitize->sstat));
     stl_le_p(ev + 8, NVME_NSID_BROADCAST);
     femu_pel_log(n, NVME_PEL_SANITIZE_COMPLETION, 2, ev, 12);
-    nvme_resume_pollers(n, resume);
+    if (n->sanitize_ms) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_IO_SPECIFIC,
+                           unexpected ? NVME_AER_INFO_SANITIZED_DEALLOC :
+                           NVME_AER_INFO_SANITIZED, NVME_LOG_SANITIZE);
+    }
+    return NVME_SUCCESS;
+}
 
+/*
+ * The background operation ends. It cannot fail: sanitize_ms is refused
+ * with power_loss, the one path whose flush can.
+ */
+void nvme_sanitize_timer_cb(void *opaque)
+{
+    nvme_sanitize_finish(opaque);
+}
+
+static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
+{
+    NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint8_t sanact = dw10 & 0x7;
+    bool emvs = dw10 & (1 << 10);
+    uint8_t ev[16] = { 0 };
+
+    if (!nvme_can_sanitize(n)) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+    /* only Exit Media Verification runs while one is in progress */
+    if (nvme_sanitize_busy(n) && sanact != 0x5) {
+        return NVME_SANITIZE_IN_PROGRESS;
+    }
+    /*
+     * Base 8.1.26.1: no sanitize starts while a firmware activation waits
+     * for a reset; checked before anything changes.
+     */
+    if (sanact != 0x1 && femu_fw_pending(n)) {
+        return NVME_FW_REQ_CLR | NVME_DNR;
+    }
+    switch (sanact) {
+    case 0x1:   /* exit failure mode: a sanitize here never fails */
+        return NVME_SUCCESS;
+    case 0x2:   /* block erase */
+        break;
+    case 0x3:   /* overwrite */
+    case 0x4:   /* crypto erase */
+        if (!n->sanitize_ops) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* no Media Verification state (VERS 0) */
+    if (emvs) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* Sanitize Start (Figure 247): the whole subsystem is the target */
+    stl_le_p(ev, le32_to_cpu(n->id_ctrl.sanicap));
+    stl_le_p(ev + 4, dw10);
+    stl_le_p(ev + 8, le32_to_cpu(cmd->cdw11));
+    stl_le_p(ev + 12, NVME_NSID_BROADCAST);
+    femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
+    /* a new operation clears the completion event of the last one */
+    nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE, 0,
+                         true);
+    sanitize->cdw10 = dw10;
+    sanitize->cdw11 = le32_to_cpu(cmd->cdw11);
+    if (!n->sanitize_ms) {
+        return nvme_sanitize_finish(n);
+    }
+    /* in the background: SSTAT 010b, I/O and most admin commands refused */
+    sanitize->start_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    qatomic_set(&sanitize->sstat,
+                (qatomic_read(&sanitize->sstat) & NVME_SSTAT_GDE) | 0x2);
+    qatomic_set(&sanitize->active, true);
+    timer_mod(n->san_timer, sanitize->start_ms + n->sanitize_ms);
     return NVME_SUCCESS;
 }
 
 /* Sanitize Status (81h): progress, status and the command that ran */
 static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
-                                  uint64_t off)
+                                  uint64_t off, bool rae)
 {
+    uint16_t status;
     NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
     uint8_t log[512] = {};
     uint32_t trans_len;
@@ -3940,17 +4041,38 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     if (off >= sizeof(log)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    stw_le_p(log, 0xffff);                      /* SPROG: none in progress */
+    if (nvme_sanitize_busy(n)) {
+        int64_t done = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
+                       sanitize->start_ms;
+
+        /* SPROG: the fraction done, in 1/65536; FFFFh only when done */
+        stw_le_p(log, MIN(MAX(done, 0) * 65536 / n->sanitize_ms, 0xfffe));
+    } else {
+        stw_le_p(log, 0xffff);                  /* none in progress */
+    }
     stw_le_p(log + 2, qatomic_read(&sanitize->sstat));
     stl_le_p(log + 4, sanitize->cdw10);
-    /* the estimated times, not reported */
-    for (int i = 8; i < 32; i += 4) {
-        stl_le_p(log + i, 0xffffffff);
+    /*
+     * Estimated times in seconds, FFFFFFFFh when not reported: overwrite,
+     * block erase, crypto erase, then the same three with No-Deallocate.
+     */
+    for (int i = 0; i < 6; i++) {
+        bool op = i % 3 == 1 || n->sanitize_ops;
+
+        stl_le_p(log + 8 + 4 * i, n->sanitize_ms && op ?
+                 DIV_ROUND_UP(n->sanitize_ms, 1000) : 0xffffffff);
     }
     trans_len = MIN(sizeof(log) - off, buf_len);
-
-    return dma_read_prp(n, log + off, trans_len, le64_to_cpu(cmd->dptr.prp1),
-                        le64_to_cpu(cmd->dptr.prp2));
+    status = dma_read_prp(n, log + off, trans_len,
+                          le64_to_cpu(cmd->dptr.prp1),
+                          le64_to_cpu(cmd->dptr.prp2));
+    /* a read without RAE clears Sanitize Operation Completed */
+    if (!status && !rae) {
+        nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE,
+                             0, true);
+        qemu_bh_schedule(n->aer_bh);
+    }
+    return status;
 }
 
 static uint16_t nvme_lockdown_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
@@ -4112,7 +4234,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         if (!nvme_can_sanitize(n)) {
             return NVME_INVALID_LOG_ID | NVME_DNR;
         }
-        return nvme_sanitize_log(n, cmd, len, off);
+        return nvme_sanitize_log(n, cmd, len, off, rae);
     case NVME_LOG_ENDGRP:
         return nvme_endgrp_info(n, len, off, cmd);
     case NVME_LOG_ROTATIONAL:
@@ -5165,6 +5287,38 @@ static uint16_t nvme_lockdown_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
+/*
+ * The admin commands an NVM subsystem sanitize in progress allows (Base
+ * 2.3, Figure 143); Sanitize checks its own action.
+ */
+static bool nvme_sanitize_allows(NvmeCmd *cmd)
+{
+    uint8_t lid = le32_to_cpu(cmd->cdw10) & 0xff;
+
+    switch (cmd->opcode) {
+    case NVME_ADM_CMD_ABORT:
+    case NVME_ADM_CMD_ASYNC_EV_REQ:
+    case NVME_ADM_CMD_CREATE_CQ:
+    case NVME_ADM_CMD_CREATE_SQ:
+    case NVME_ADM_CMD_DELETE_CQ:
+    case NVME_ADM_CMD_DELETE_SQ:
+    case NVME_ADM_CMD_GET_FEATURES:
+    case NVME_ADM_CMD_IDENTIFY:
+    case NVME_ADM_CMD_SANITIZE:
+    case 0x18:                          /* Keep Alive */
+        return true;
+    case NVME_ADM_CMD_SET_FEATURES:
+        /* not Namespace Write Protection Config */
+        return (le32_to_cpu(cmd->cdw10) & 0xff) != 0x84;
+    case NVME_ADM_CMD_GET_LOG_PAGE:
+        return lid == NVME_LOG_ERROR_INFO || lid == NVME_LOG_SMART_INFO ||
+               lid == NVME_LOG_CHANGED_NS_LIST || lid == NVME_LOG_ANA ||
+               lid == NVME_LOG_RESV_NOTIFY || lid == NVME_LOG_SANITIZE;
+    default:
+        return false;
+    }
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     /* admin data is always moved by PRP over PCIe */
@@ -5173,6 +5327,9 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (nvme_locked_out(n, cmd)) {
         return NVME_CMD_PROHIBITED | NVME_DNR;
+    }
+    if (unlikely(nvme_sanitize_busy(n)) && !nvme_sanitize_allows(cmd)) {
+        return NVME_SANITIZE_IN_PROGRESS;
     }
     if (n->reservations) {
         uint16_t status = nvme_resv_admin_check(n, cmd);
