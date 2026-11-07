@@ -203,6 +203,7 @@ void bb_nand_media_init(struct ssd *ssd)
         }
         cfg.timing.er_table_ns[ft] = get_blk_erase_latency(ft);
         cfg.policy.use_flat_timing = false;
+        cfg.flash_row = ft;
         cfg.timing.pgtype_lat = false; /* the table path already carries pairing */
     }
     if (unlikely(ssd->tier)) {

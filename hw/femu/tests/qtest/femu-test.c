@@ -38518,6 +38518,265 @@ static void femu_test_perf_hints(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* a NAND profile file with @text, in the temporary directory */
+static char *femu_np_file(const char *text)
+{
+    GError *err = NULL;
+    char *path;
+    int fd = g_file_open_tmp("femu-np-XXXXXX", &path, &err);
+
+    g_assert_no_error(err);
+    g_assert_cmpint(write(fd, text, strlen(text)), ==, strlen(text));
+    close(fd);
+    return path;
+}
+
+#define FEMU_NP_DEFAULT \
+    "femu_nand_profile = 1\nname = bbssd-flat-default\nnand_type = none\n" \
+    "read_ns = 40000\nprogram_ns = 200000\nerase_ns = 2000000\n" \
+    "cmd_addr_ns = 0\nxfer_ns = 0\nstatus_ns = 0\n"
+#define FEMU_NP_CUSTOM \
+    "; a chip with every value away from the defaults\n" \
+    "femu_nand_profile = 1\nname = custom\nnand_type = tlc\n" \
+    "read_ns = 51000\nprogram_ns = 210000\nerase_ns = 2100000\n" \
+    "cmd_addr_ns = 11\nxfer_ns = 22\nstatus_ns = 33\n"
+#define FEMU_NP_BB "'secsz':512,'secs_per_pg':8,'pgs_per_blk':32," \
+    "'blks_per_pl':12,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'devsz_mb':1"
+
+/* add femu @id at @addr with @opts, which must realize */
+static void femu_np_add(QTestState *qts, const char *id, int addr,
+                        const char *opts)
+{
+    g_autofree char *cmd = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'%s',"
+        "'addr':'%x',%s}}", id, addr, opts);    /* QEMU reads addr as hex */
+    QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("%s refused: %s", id,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_false(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+}
+
+/*
+ * The media member of device @id at @slot: base times, timing and profile.
+ * query-femu needs an enabled controller, so this enables it around the
+ * query.
+ */
+static void femu_np_check(QFemu *femu, QGuestAllocator *alloc, const char *id,
+                          int slot, uint64_t rd, uint64_t wr, uint64_t er,
+                          const char *timing, const char *name,
+                          const char *file)
+{
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *arg = g_strdup_printf("'path':'/machine/peripheral/%s'",
+                                           id);
+    QPCIDevice *pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(slot, 0));
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *md;
+
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    md = qdict_get_qdict(femu_query_ns(qts, arg, &rsp), "media");
+
+    g_assert_cmpuint(qdict_get_int(md, "read-ns"), ==, rd);
+    g_assert_cmpuint(qdict_get_int(md, "program-ns"), ==, wr);
+    g_assert_cmpuint(qdict_get_int(md, "erase-ns"), ==, er);
+    g_assert_cmpstr(qdict_get_str(md, "array-timing"), ==, timing);
+    if (name) {
+        g_assert_cmpstr(qdict_get_str(md, "nand-profile"), ==, name);
+        g_assert_cmpstr(qdict_get_str(md, "nand-profile-file"), ==, file);
+    } else {
+        g_assert_false(qdict_haskey(md, "nand-profile"));
+        g_assert_false(qdict_haskey(md, "nand-profile-file"));
+    }
+    if (g_str_equal(id, "np2") || g_str_equal(id, "np3")) {
+        /* all three bus keys of the custom profile reach bbssd and ZNS */
+        g_assert_true(qdict_get_bool(md, "staged-bus"));
+        g_assert_cmpuint(qdict_get_int(md, "read-command-ns"), ==, 11);
+        g_assert_cmpuint(qdict_get_int(md, "page-transfer-ns"), ==, 22);
+        g_assert_cmpuint(qdict_get_int(md, "status-ns"), ==, 33);
+    }
+    qobject_unref(rsp);
+    femu_disable(&c);
+    g_free(pdev);
+}
+
+/*
+ * A profile file in hw/femu/profiles. The qtests run in the build
+ * directory, one level below the source tree, or in the source tree.
+ */
+static char *femu_np_shipped(const char *name)
+{
+    char *p = g_strdup_printf("../hw/femu/profiles/%s", name);
+
+    if (!g_file_test(p, G_FILE_TEST_EXISTS)) {
+        g_free(p);
+        p = g_strdup_printf("hw/femu/profiles/%s", name);
+    }
+    g_assert_true(g_file_test(p, G_FILE_TEST_EXISTS));
+    return p;
+}
+
+/*
+ * nand_profile. In one QEMU: bbssd with no profile, with the default
+ * profile and with a custom one, ZNS with the custom one (its program
+ * covers a QLC wordline: 4 pages), and bbssd with a NAND type table. Each
+ * keeps its own times, read back from the live media.
+ */
+static void femu_test_nand_profile(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *def = femu_np_file(FEMU_NP_DEFAULT);
+    g_autofree char *cus = femu_np_file(FEMU_NP_CUSTOM);
+    g_autofree char *o1 = g_strdup_printf("'femu_mode':1,%s,'nand_profile':"
+                                          "'%s'", FEMU_NP_BB, def);
+    g_autofree char *o2 = g_strdup_printf("'femu_mode':1,%s,'nand_profile':"
+                                          "'%s'", FEMU_NP_BB, cus);
+    g_autofree char *o3 = g_strdup_printf("'femu_mode':3,'devsz_mb':64,"
+                                          "'nand_profile':'%s'", cus);
+
+    femu_np_add(qts, "np0", 5, "'femu_mode':1," FEMU_NP_BB);
+    femu_np_add(qts, "np1", 6, o1);
+    femu_np_add(qts, "np2", 7, o2);
+    femu_np_add(qts, "np3", 8, o3);
+    femu_np_add(qts, "np4", 9, "'femu_mode':1,'nand_cell_type':3,"
+                FEMU_NP_BB);
+    {
+        g_autofree char *sb = femu_np_shipped("bbssd-flat-default.nprof");
+        g_autofree char *sz = femu_np_shipped("qlc-zns-default.nprof");
+        g_autofree char *o5 = g_strdup_printf("'femu_mode':1,%s,"
+                                              "'nand_profile':'%s'",
+                                              FEMU_NP_BB, sb);
+        g_autofree char *o6 = g_strdup_printf("'femu_mode':3,'devsz_mb':64,"
+                                              "'nand_profile':'%s'", sz);
+        g_autofree char *o7 = g_strdup_printf("'femu_mode':4,'fdm_size':16,"
+                                              "%s,'nand_profile':'%s'",
+                                              FEMU_NP_BB, cus);
+
+        femu_np_add(qts, "np5", 10, o5);
+        femu_np_add(qts, "np6", 11, o6);
+        femu_np_add(qts, "np7", 12, o7);
+        femu_np_add(qts, "np8", 13, "'femu_mode':1,'pgtype_lat':1,"
+                    "'cell_pages':3," FEMU_NP_BB);
+        /* the shipped files give exactly today's defaults */
+        femu_np_check(femu, alloc, "np5", 10, 40000, 200000, 2000000, "flat",
+                      "bbssd-flat-default", sb);
+        femu_np_check(femu, alloc, "np6", 11, 85000, 12196000, 3000000,
+                      "table", "qlc-zns-default", sz);
+        /* CSD runs the bbssd FTL, so it takes a profile too */
+        femu_np_check(femu, alloc, "np7", 12, 51000, 210000, 2100000, "flat",
+                      "custom", cus);
+        /* page types: program times vary, page 0 is 0.6 of pg_wr_lat */
+        femu_np_check(femu, alloc, "np8", 13, 40000, 120000, 2000000,
+                      "page-type", NULL, NULL);
+        for (int a = 10; a <= 13; a++) {
+            g_autofree char *id = g_strdup_printf("np%d", a - 5);
+
+            qpci_unplug_acpi_device_test(qts, id, a);
+        }
+    }
+    /* a profile with the old defaults gives exactly the old times */
+    femu_np_check(femu, alloc, "np0", 5, 40000, 200000, 2000000, "flat",
+                  NULL, NULL);
+    femu_np_check(femu, alloc, "np1", 6, 40000, 200000, 2000000, "flat",
+                  "bbssd-flat-default", def);
+    femu_np_check(femu, alloc, "np2", 7, 51000, 210000, 2100000, "flat",
+                  "custom", cus);
+    femu_np_check(femu, alloc, "np3", 8, 51000, 4 * 210000, 2100000, "table",
+                  "custom", cus);
+    femu_np_check(femu, alloc, "np4", 9, 56500, 820500, 3000000, "table",
+                  NULL, NULL);
+    for (int a = 5; a <= 9; a++) {
+        g_autofree char *id = g_strdup_printf("np%d", a - 5);
+
+        qpci_unplug_acpi_device_test(qts, id, a);
+    }
+    unlink(def);
+    unlink(cus);
+}
+
+/* each rule of nand_profile alone, with the specific message, and a control */
+static void femu_test_nand_profile_refused(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *text;
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { FEMU_NP_DEFAULT "speed = 1\n", NULL, "unknown key 'speed'" },
+        { FEMU_NP_DEFAULT "read_ns = 1\n", NULL, "given twice" },
+        { "femu_nand_profile = 1\nname = x\n", NULL, "missing key" },
+        { "femu_nand_profile = 2\n", NULL, "version '2'" },
+        { "name = x\n", NULL, "first key" },
+        { "femu_nand_profile = 1\nname = x\nnand_type = plc\n", NULL,
+          "nand_type" },
+        { "femu_nand_profile = 1\nread_ns = 0\n", NULL, "read_ns" },
+        { "femu_nand_profile = 1\nread_ns = 2147483648\n", NULL, "read_ns" },
+        { "femu_nand_profile = 1\nread_ns = 4294967297\n", NULL, "read_ns" },
+        { "femu_nand_profile = 1\nread_ns = 40000x\n", NULL, "read_ns" },
+        { FEMU_NP_DEFAULT, "'pg_rd_lat':41000", "pg_rd_lat must keep" },
+        { FEMU_NP_DEFAULT, "'pgtype_lat':1", "pgtype_lat must keep" },
+        { FEMU_NP_DEFAULT, "'ch_xfer_lat':5", "ch_xfer_lat must keep" },
+    };
+    static const char *const modes[] = { "'femu_mode':2", "'femu_mode':0" };
+    g_autofree char *good = femu_np_file(FEMU_NP_DEFAULT);
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *f = femu_np_file(cases[i].text);
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu','id':'npr',"
+            "'addr':'5','femu_mode':1,%s,'nand_profile':'%s'%s%s}}",
+            FEMU_NP_BB, f, cases[i].opts ? "," : "",
+            cases[i].opts ? cases[i].opts : "");
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("case %d: %s", i, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+        unlink(f);
+    }
+    for (int i = 0; i < ARRAY_SIZE(modes); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu','id':'npr',"
+            "'addr':'5','devsz_mb':64,%s,'nand_profile':'%s'}}", modes[i],
+            good);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), "nand_profile needs"));
+        qobject_unref(rsp);
+    }
+    /* the control: the same device line and a good file */
+    {
+        g_autofree char *o = g_strdup_printf("'femu_mode':1,%s,'nand_profile'"
+                                             ":'%s'", FEMU_NP_BB, good);
+        /* a timing property given at its default value is no conflict */
+        g_autofree char *od = g_strdup_printf("'femu_mode':1,%s,"
+                                              "'pg_rd_lat':40000,"
+                                              "'nand_profile':'%s'",
+                                              FEMU_NP_BB, good);
+
+        femu_np_add(qts, "npr", 5, o);
+        qpci_unplug_acpi_device_test(qts, "npr", 5);
+        femu_np_add(qts, "npr", 5, od);
+        qpci_unplug_acpi_device_test(qts, "npr", 5);
+    }
+    unlink(good);
+}
+
 /* perf_hints is refused where the geometry does not set the write layout */
 static void femu_test_perf_hints_refused(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -47191,6 +47450,9 @@ static void femu_register_nodes(void)
             "femu_mode=1,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "perf_hints=on" });
+    qos_add_test("nand-profile", "femu", femu_test_nand_profile, NULL);
+    qos_add_test("nand-profile-refused", "femu",
+                 femu_test_nand_profile_refused, NULL);
     qos_add_test("perf-hints-refused", "femu", femu_test_perf_hints_refused,
                  NULL);
     qos_add_test("rw-atomic-split-write", "femu", femu_test_rw_atomic_split,

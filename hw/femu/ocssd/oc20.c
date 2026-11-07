@@ -1632,6 +1632,7 @@ static void oc20_media_init(FemuCtrl *n)
     cfg.policy.use_flat_timing = !n->oc_params.page_types;
     if (n->oc_params.page_types) {
         oc20_fill_tables(n, &cfg.timing);
+        cfg.flash_row = n->flash_type;
     }
     cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
     cfg.policy.channel_mode = NAND_CH_OFF;

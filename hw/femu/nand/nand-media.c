@@ -1535,6 +1535,19 @@ void nand_media_phases(const NandMedia *m, NandMediaPhases *out)
     uint64_t ca = t->cmd_addr_ns;
 
     memset(out, 0, sizeof(*out));
+    out->flat_timing = p->use_flat_timing && !t->pgtype_lat;
+    out->pgtype_timing = p->use_flat_timing && t->pgtype_lat;
+    if (p->use_flat_timing) {
+        out->rd_base_ns = t->rd_ns;
+        /* page type 0 with pgtype_lat: the multiplier is in thousandths */
+        out->wr_base_ns = t->pgtype_lat ?
+                          t->wr_ns * t->pgtype_mult[0] / 1000 : t->wr_ns;
+        out->er_base_ns = t->er_ns;
+    } else if (m->cfg.flash_row < NAND_MEDIA_MAX_FLASH) {
+        out->rd_base_ns = t->rd_table_ns[m->cfg.flash_row][0];
+        out->wr_base_ns = t->wr_table_ns[m->cfg.flash_row][0];
+        out->er_base_ns = t->er_table_ns[m->cfg.flash_row];
+    }
     out->tplrbsy_ns = t->tplrbsy_ns;
     out->tplpbsy_ns = t->tplpbsy_ns;
     out->tplebsy_ns = t->tplebsy_ns;

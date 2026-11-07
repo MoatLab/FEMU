@@ -493,6 +493,22 @@
             '*reclaim-units': [ 'FemuReclaimUnitInfo' ] } }
 
 ##
+# @FemuArrayTiming:
+#
+# How a NAND medium times its array operations.
+#
+# @flat: one read, program and erase time for every page
+#
+# @table: per NAND type and page type, from a table
+#
+# @page-type: one read and erase time, and a program time per page type
+#     (pgtype_lat)
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuArrayTiming', 'data': [ 'flat', 'table', 'page-type' ] }
+
+##
 # @FemuMediaTiming:
 #
 # The NAND bus timing a namespace charges.  The values are the ones
@@ -590,6 +606,22 @@
 # @status-per-plane: a multi-plane program or erase reads one status
 #     for each plane
 #
+# @array-timing: how the media times its array operations
+#
+# @read-ns: the base page read time the media uses, before ECC and
+#     other additions.  With table or page-type timing, page 0.
+#
+# @program-ns: the base program time, as @read-ns.  A ZNS program
+#     covers the pages of a wordline.
+#
+# @erase-ns: the base block erase time
+#
+# @nand-profile: the name in the controller's NAND profile file
+#     (nand_profile).  Absent without a profile.
+#
+# @nand-profile-file: the profile file as given.  Absent without a
+#     profile.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuMediaTiming',
@@ -610,7 +642,10 @@
             'cache-read': 'bool', 'read-cache-busy-ns': 'uint64',
             'cache-step-ns': 'uint64', 'cache-select-ns': 'uint64',
             'onfi-order': 'bool',
-            'page-register-hold': 'bool', 'status-per-plane': 'bool' } }
+            'page-register-hold': 'bool', 'status-per-plane': 'bool',
+            'array-timing': 'FemuArrayTiming', 'read-ns': 'uint64',
+            'program-ns': 'uint64', 'erase-ns': 'uint64',
+            '*nand-profile': 'str', '*nand-profile-file': 'str' } }
 
 ##
 # @FemuMediaInfo:

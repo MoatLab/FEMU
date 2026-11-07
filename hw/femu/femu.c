@@ -13,6 +13,7 @@
 #include "./kvssd/kvssd.h"
 #include "./bbssd/ftl.h"
 #include "./nand/onfi.h"
+#include "./nand/nand-profile.h"
 #include "./femu-props.h"
 #include "./femu-query.h"
 
@@ -1974,6 +1975,24 @@ static int nvme_check_ocp_namespaces(FemuCtrl *n, const uint8_t *modes,
     return 0;
 }
 
+/* a NAND profile times the media of an FTL or of ZNS: not NoSSD or OCSSD */
+static int nvme_check_profile_namespaces(FemuCtrl *n, const uint8_t *modes,
+                                         Error **errp)
+{
+    if (!n->nand_profile) {
+        return 0;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] == FEMU_NOSSD_MODE || modes[i] == FEMU_OCSSD_MODE) {
+            error_setg(errp, "nand_profile needs bbssd, CSD, KV or ZNS "
+                       "namespaces; namespace %d is %s", i + 1,
+                       modes[i] == FEMU_NOSSD_MODE ? "nossd" : "ocssd");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -1991,7 +2010,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         nvme_resolve_ns_sizes(n, n->ns_capacity, ns_modes, ns_sizes, errp) ||
         nvme_check_fdp_namespaces(n, ns_modes, ns_sizes, errp) ||
         nvme_check_rotational_namespaces(n, ns_modes, errp) ||
-        nvme_check_ocp_namespaces(n, ns_modes, errp)) {
+        nvme_check_ocp_namespaces(n, ns_modes, errp) ||
+        nvme_check_profile_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
         return 1;
@@ -3516,6 +3536,96 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * nand_profile: read the file and write its base timing into the timing
+ * properties of each mode, before any check reads them. Every property a
+ * profile sets, or that would change the same times another way, must hold
+ * its default, so a profile never silently overrides a property.
+ */
+static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
+{
+    const struct {
+        const char *name;
+        bool is_default;
+    } native[] = {
+        { "pg_rd_lat", n->bb_params.pg_rd_lat == 40000 },
+        { "pg_wr_lat", n->bb_params.pg_wr_lat == 200000 },
+        { "blk_er_lat", n->bb_params.blk_er_lat == 2000000 },
+        { "ch_xfer_lat", !n->bb_params.ch_xfer_lat },
+        { "cmd_addr_lat", !n->bb_params.cmd_addr_lat },
+        { "pg_xfer_lat", !n->bb_params.pg_xfer_lat },
+        { "status_lat", !n->bb_params.status_lat },
+        { "nand_cell_type", !n->nand_cell_type },
+        { "cell_pages", !n->bb_params.cell_pages },
+        { "pgtype_lat", !n->bb_params.pgtype_lat },
+        { "onfi_param_page", !n->bb_params.onfi_param_page },
+        { "pe_cycles_rated", !n->pe_cycles_rated },
+        { "zns_pg_rd_lat", !n->zns_params.zns_pg_rd_lat },
+        { "zns_pg_wr_lat", !n->zns_params.zns_pg_wr_lat },
+        { "zns_blk_er_lat", !n->zns_params.zns_blk_er_lat },
+        { "zns_cmd_addr_lat", !n->zns_params.zns_cmd_addr_lat },
+        { "zns_pg_xfer_lat", !n->zns_params.zns_pg_xfer_lat },
+        { "zns_status_lat", !n->zns_params.zns_status_lat },
+        { "zns_page_types", !n->zns_params.zns_page_types },
+    };
+    g_autofree char *buf = NULL;
+    g_autofree char *err = NULL;
+    g_autoptr(GError) gerr = NULL;
+    int64_t wordline;
+    gsize len;
+    NandProfile p;
+
+    if (!n->nand_profile) {
+        return true;
+    }
+    if (nvme_ns_shared(n) || n->cxl_dev) {
+        error_setg(errp, "nand_profile needs a controller that owns its "
+                   "media; a shared or CXL linked FTL takes its timing "
+                   "elsewhere");
+        return false;
+    }
+    for (int i = 0; i < ARRAY_SIZE(native); i++) {
+        if (!native[i].is_default) {
+            error_setg(errp, "nand_profile sets the base timing, so %s must "
+                       "keep its default", native[i].name);
+            return false;
+        }
+    }
+    if (!g_file_get_contents(n->nand_profile, &buf, &len, &gerr)) {
+        error_setg(errp, "nand_profile: %s", gerr->message);
+        return false;
+    }
+    /* a NUL byte would hide the rest of the file from the key checks */
+    if (strlen(buf) != len) {
+        error_setg(errp, "nand_profile: %s holds a NUL byte",
+                   n->nand_profile);
+        return false;
+    }
+    if (!nand_profile_parse(n->nand_profile, buf, &p, &err)) {
+        error_setg(errp, "nand_profile: %s", err);
+        return false;
+    }
+
+    n->bb_params.pg_rd_lat = p.read_ns;
+    n->bb_params.pg_wr_lat = p.program_ns;
+    n->bb_params.blk_er_lat = p.erase_ns;
+    n->bb_params.cmd_addr_lat = p.cmd_addr_ns;
+    n->bb_params.pg_xfer_lat = p.xfer_ns;
+    n->bb_params.status_lat = p.status_ns;
+    /* a ZNS program covers a wordline: one page per bit each NAND site holds */
+    wordline = MAX(n->zns_params.zns_flash_type, 1);
+    n->zns_params.zns_pg_rd_lat = p.read_ns;
+    n->zns_params.zns_pg_wr_lat = p.program_ns * wordline;
+    n->zns_params.zns_blk_er_lat = p.erase_ns;
+    n->zns_params.zns_cmd_addr_lat = p.cmd_addr_ns;
+    n->zns_params.zns_pg_xfer_lat = p.xfer_ns;
+    n->zns_params.zns_status_lat = p.status_ns;
+    n->pe_cycles_rated = p.nand_type ? get_rated_pe_cycles(p.nand_type) : 0;
+    g_free(n->nand_profile_name);
+    n->nand_profile_name = g_strdup(p.name);
+    return true;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -3530,6 +3640,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (n->csd_params.pause && nvme_ns_shared(n)) {
         error_setg(errp, "csd_pause cannot be used with shared namespaces: "
                    "two clocks would time one FTL");
+        return;
+    }
+    if (!femu_apply_nand_profile(n, errp)) {
         return;
     }
 
@@ -3970,6 +4083,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
     n->poller_ctr = NULL;
     g_free(n->stage_sets);
     n->stage_sets = NULL;
+    g_free(n->nand_profile_name);
+    n->nand_profile_name = NULL;
 }
 
 /*
@@ -4313,6 +4428,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("mapping_cache_mb", FemuCtrl, mapping_cache_mb, 0),
     DEFINE_PROP_UINT8("nand_cell_type", FemuCtrl, nand_cell_type, 0),
     DEFINE_PROP_UINT32("pe_cycles_rated", FemuCtrl, pe_cycles_rated, 0),
+    DEFINE_PROP_STRING("nand_profile", FemuCtrl, nand_profile),
     DEFINE_PROP_INT32("cell_pages", FemuCtrl, bb_params.cell_pages, 0),
     DEFINE_PROP_INT32("pgtype_lat", FemuCtrl, bb_params.pgtype_lat, 0),
     DEFINE_PROP_INT32("ecc_step_ns", FemuCtrl, bb_params.ecc_step_ns, 0),
@@ -5105,6 +5221,15 @@ static void femu_test_eol_enter(Object *obj, bool value, Error **errp)
     nvme_resume_pollers(n, resume);
 }
 
+/* what realize allocates outside the device's own teardown */
+static void femu_instance_finalize(Object *obj)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    g_free(n->nand_profile_name);
+    n->nand_profile_name = NULL;
+}
+
 static void femu_instance_init(Object *obj)
 {
     object_property_add_bool(obj, "simulate-power-loss", NULL,
@@ -5207,6 +5332,7 @@ static const TypeInfo femu_info = {
     .instance_size = sizeof(FemuCtrl),
     .class_init    = femu_class_init,
     .instance_init = femu_instance_init,
+    .instance_finalize = femu_instance_finalize,
     .interfaces = (InterfaceInfo[]) {
         { INTERFACE_PCIE_DEVICE },
         { }

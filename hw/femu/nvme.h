@@ -2650,6 +2650,8 @@ typedef struct FemuCtrl {
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
     /* program/erase cycles the media is rated for; 0 takes the cell type's */
     uint32_t        pe_cycles_rated;
+    char            *nand_profile;      /* profile file; NULL = none */
+    char            *nand_profile_name; /* its name, once loaded */
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */

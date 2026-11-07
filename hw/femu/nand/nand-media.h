@@ -221,6 +221,7 @@ typedef struct NandMediaConfig {
     uint32_t luns_per_ch;
     uint32_t planes_per_lun;
     uint32_t secs_per_page;   /* divides NandLoc.xfer_secs; 0 = whole pages */
+    uint8_t  flash_row;       /* the timing table row a query reports */
     NandMediaTiming  timing;
     NandMediaPolicy  policy;
     const NandTimelineOps *timeline;
@@ -409,6 +410,15 @@ typedef struct NandMediaPhases {
     uint64_t tplrbsy_ns;
     uint64_t tplpbsy_ns;
     uint64_t tplebsy_ns;
+    /*
+     * Base array times the media uses, before ECC and other additions:
+     * the scalars with flat timing, else page 0 of the flash_row table row.
+     */
+    bool     flat_timing;
+    bool     pgtype_timing;       /* flat, with per-page-type program times */
+    uint64_t rd_base_ns;
+    uint64_t wr_base_ns;
+    uint64_t er_base_ns;
 } NandMediaPhases;
 
 void nand_media_phases(const NandMedia *m, NandMediaPhases *out);

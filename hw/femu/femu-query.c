@@ -135,6 +135,8 @@ typedef struct FemuQuerySel {
     int onfi_col;               /* address cycles of the profile */
     int onfi_row;
     NandMediaPhases media;
+    const char *profile_name;   /* the controller's NAND profile, or NULL */
+    const char *profile_file;
     bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
     FemuKvLsmSnap lsm;
     bool has_pack;              /* a kvssd namespace with kv_pack=on */
@@ -184,6 +186,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
     sel->nsid = ns->id;
     if (media) {
         nand_media_phases(media, &sel->media);
+        sel->profile_name = n->nand_profile_name;
+        sel->profile_file = n->nand_profile;
     }
 
     if (media && (NS_CSD(ns) || NS_KVSSD(ns) || NS_OCSSD(ns))) {
@@ -497,6 +501,16 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
     const NandMediaPhases *ph = &sel->media;
 
     mt->staged_bus = ph->staged;
+    mt->array_timing = ph->flat_timing ? FEMU_ARRAY_TIMING_FLAT :
+                       ph->pgtype_timing ? FEMU_ARRAY_TIMING_PAGE_TYPE :
+                                           FEMU_ARRAY_TIMING_TABLE;
+    mt->read_ns = ph->rd_base_ns;
+    mt->program_ns = ph->wr_base_ns;
+    mt->erase_ns = ph->er_base_ns;
+    if (sel->profile_name) {
+        mt->nand_profile = g_strdup(sel->profile_name);
+        mt->nand_profile_file = g_strdup(sel->profile_file);
+    }
     mt->onfi_profile = sel->onfi_mode >= 0;
     mt->has_onfi_mode = mt->onfi_profile;
     mt->onfi_mode = mt->onfi_profile ? sel->onfi_mode : 0;

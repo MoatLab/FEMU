@@ -1,0 +1,11 @@
+; The bbssd, CSD and KV defaults: flat timing, no bus phases.
+; -device femu,femu_mode=1,nand_profile=hw/femu/profiles/bbssd-flat-default.nprof
+femu_nand_profile = 1
+name = bbssd-flat-default
+nand_type = none
+read_ns = 40000
+program_ns = 200000
+erase_ns = 2000000
+cmd_addr_ns = 0
+xfer_ns = 0
+status_ns = 0

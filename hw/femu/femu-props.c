@@ -224,6 +224,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move "
       "to UUID index 2; not with a femu-subsys; off (default) keeps C0h as "
       "the FEMU counters" },
+    { "nand_profile",
+      "bbssd, CSD, KV, ZNS: file of a versioned NAND profile (base read, "
+      "program and erase times and bus phases), relative to the working "
+      "directory; the timing properties it sets must keep their defaults; "
+      "unset (default) uses the properties" },
     { "perf_hints",
       "bbssd, CSD: report the optimal write and deallocate granularity "
       "(NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, "

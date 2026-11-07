@@ -1249,6 +1249,7 @@ static void oc12_media_init(FemuCtrl *n)
     cfg.secs_per_page = n->oc_params.secs_per_pg;
     oc12_fill_timing(n, &cfg.timing);
     cfg.policy.use_flat_timing = false;
+    cfg.flash_row = n->flash_type;
     cfg.policy.array_contend = NAND_CONTEND_LUN_ONLY;
     cfg.policy.channel_mode = n->oc_params.channel_timing ? NAND_CH_STAGED :
                                                             NAND_CH_OFF;

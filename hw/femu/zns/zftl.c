@@ -144,6 +144,7 @@ void zns_nand_media_init(struct zns_ssd *zns)
     cfg.timing.ecc_max_tiers = NAND_ECC_MAX_TIERS;
     cfg.policy.ecc_on_read = true;
     cfg.policy.use_flat_timing = false;
+    cfg.flash_row = zns->flash_type;
     /*
      * By default each plane runs on its own, as before. zns_lun_contention
      * also holds the LUN, so the planes of one die take turns.

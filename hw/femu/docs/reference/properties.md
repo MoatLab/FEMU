@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 239 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 240 properties of its own and 1 QOM property listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -177,6 +177,7 @@ Devices:
 | `pd_open_read_limit` | `int32` | `0` | bbssd, CSD, FDP: program disturb, reads of a part-programmed block that queue its line or reclaim unit; the next Write rewrites it, after it seals a frontier line or retires a frontier unit with its free pages unprogrammed; not above a non-zero read_reclaim_limit; 0 (default) turns it off |
 | `pd_open_close_sec` | `int32` | `0` | bbssd, CSD, FDP: program disturb, seconds of device time (age_scale) a frontier line or reclaim unit may stay open after its first program; the next request pads its free pages and closes it; under FDP the handle gets a fresh unit and event 1h; 0 (default) turns it off |
 | `pe_cycles_rated` | `uint32` | `0` | bbssd, CSD, KV, ZNS: rated program/erase cycles used for SMART Percentage Used; 0 takes the rating of nand_cell_type (ZNS: zns_flash_type), or reports none |
+| `nand_profile` | `str` | unset | bbssd, CSD, KV, ZNS: file of a versioned NAND profile (base read, program and erase times and bus phases), relative to the working directory; the timing properties it sets must keep their defaults; unset (default) uses the properties |
 | `nand_bad_blocks` | `uint32` | `0` | bbssd, CSD, KV: blocks marked bad at start, capped at the block count, which lowers SMART Available Spare |
 | `blk_pe_limit` | `uint32` | `0` | bbssd, CSD, also FDP: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. When no block can replace a worn-out one, the media goes read-only (eol_read_only). Under FDP a worn-out block retires its reclaim unit |
 | `blk_pe_spread` | `uint32` | `0` | bbssd, CSD, also FDP: how far each block's limit varies from blk_pe_limit, in percent, 0 to 90 |

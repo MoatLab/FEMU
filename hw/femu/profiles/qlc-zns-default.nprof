@@ -1,0 +1,12 @@
+; The ZNS QLC defaults. A ZNS program covers a wordline of 4 pages, so the
+; device programs for 4 x 3049000 = 12196000 ns.
+; -device femu,femu_mode=3,nand_profile=hw/femu/profiles/qlc-zns-default.nprof
+femu_nand_profile = 1
+name = qlc-zns-default
+nand_type = qlc
+read_ns = 85000
+program_ns = 3049000
+erase_ns = 3000000
+cmd_addr_ns = 0
+xfer_ns = 0
+status_ns = 0
