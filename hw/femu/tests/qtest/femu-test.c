@@ -37277,6 +37277,14 @@ static void femu_test_ocp_refused(void *obj, void *data,
             { "'ocp':true,'ocp_profile':'BAAB'", "13 letters" },
             { "'ocp':true,'ocp_profile':'BAABABAAAABAC'", "13 letters" },
             { "'ocp':false,'ocp_profile':'BAABABAAAABAB'", "needs ocp=on" },
+            /* DP-CFG-1 B: namespaces boot in LBA format 0 (NSM-3) */
+            { "'ocp':true,'lba_index':3", "lba_index 0" },
+            /* A choices that need a function FEMU does not have */
+            { "'ocp':true,'ocp_profile':'AAABABAAAABAB'", "DP-CFG-1 A" },
+            { "'ocp':true,'ocp_profile':'BAAAABAAAABAB'", "DP-CFG-4 A" },
+            { "'ocp':true,'ocp_profile':'BAABAAAAAABAB'", "DP-CFG-6 A" },
+            { "'ocp':true,'ocp_profile':'BAABABAAAAAAB'", "DP-CFG-11 A" },
+            { "'ocp':true,'ocp_profile':'BAABABAAAABAA'", "DP-CFG-13 A" },
         };
         QPCIDevice *pdev;
         FemuCtrlState c = { 0 };

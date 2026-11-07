@@ -232,7 +232,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "ocp_profile",
       "with ocp=on: 13 letters, A or B, one per OCP 2.7 device profile "
       "setting DP-CFG-1 to DP-CFG-13; unset (default) is BAABABAAAABAB, the "
-      "settings FEMU meets; B for DP-CFG-7 turns on Write Uncorrectable" },
+      "settings FEMU meets; B for DP-CFG-7 turns on Write Uncorrectable; A "
+      "for DP-CFG-1, 4, 6, 11 or 13 is refused, and ocp needs lba_index 0" },
     { "perf_hints",
       "bbssd, CSD: report the optimal write and deallocate granularity "
       "(NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, "

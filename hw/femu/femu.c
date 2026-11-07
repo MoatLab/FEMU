@@ -3672,11 +3672,39 @@ static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
             return false;
         }
     }
+    /*
+     * DP-CFG-1 B: the factory sector size is 512 bytes, and NSM-3 puts it
+     * in LBA format 0, so namespaces boot in format 0. FEMU lists 512 bytes
+     * first, so A (4096 bytes in format 0) is not possible yet.
+     */
+    if (n->lba_index != 0) {
+        error_setg(errp, "ocp needs lba_index 0: the factory sector size is "
+                   "LBA format 0 (DP-CFG-1 B, NSM-3)");
+        return false;
+    }
+    /* the A choices that need a function FEMU does not have yet */
+    static const struct {
+        int cfg;
+        const char *what;
+    } missing[] = {
+        { 1, "a 4096-byte LBA format 0" },
+        { 4, "NVMe Basic Management" },
+        { 6, "the EOL/PLP failure mode (C2h)" },
+        { 11, "in-band Lockdown" },
+        { 13, "Max PCIe Interface Configuration (CBh)" },
+    };
+    for (int i = 0; i < ARRAY_SIZE(missing); i++) {
+        if (nvme_ocp_choice(n->ocp_profile, missing[i].cfg) == 'A') {
+            error_setg(errp, "ocp_profile DP-CFG-%d A needs %s, which FEMU "
+                       "does not support; use B", missing[i].cfg,
+                       missing[i].what);
+            return false;
+        }
+    }
     /* DP-CFG-7: B requires Write Uncorrectable, A leaves it optional */
     if (nvme_ocp_choice(n->ocp_profile, 7) == 'B') {
         n->oncs |= NVME_ONCS_WRITE_UNCORR;
     }
-    femu_ocp_lat_init(n);
     return true;
 }
 
