@@ -599,7 +599,8 @@ static void prio_note(NandMedia *m, const NandLoc *loc, uint32_t pg,
     uint32_t pl = loc->pl < 32 ? 1u << loc->pl : ~0u;
     int i;
 
-    if (!(st = suspend_state(m, loc))) {
+    if (!(m->cfg.policy.read_prio || m->cfg.policy.page_deps) ||
+        !(st = suspend_state(m, loc))) {
         return;
     }
     /* a multi-plane booking under the LUN rule notes one window per plane */
@@ -654,11 +655,17 @@ static bool prio_writes(const NandSuspendState *st, int i, const NandLoc *loc)
            loc->pg - st->win_pg[i] < st->win_npg[i];
 }
 
-/* whether a window not yet ended at @t writes the page a read wants */
+/*
+ * Whether a window not yet ended at @t writes the page a read wants. A
+ * dropped window that has not ended may have written it, so it counts.
+ */
 static bool prio_depends(NandMedia *m, const NandLoc *loc, uint64_t t)
 {
     NandSuspendState *st = suspend_state(m, loc);
 
+    if (st && st->win_floor > t) {
+        return true;
+    }
     for (int i = 0; st && i < st->nwin; i++) {
         if (st->win_end[i] > t && prio_writes(st, i, loc)) {
             return true;

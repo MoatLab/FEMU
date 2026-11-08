@@ -168,6 +168,7 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.tresume_ns = spp->tresume_ns;
     cfg.policy.max_suspends = spp->pe_suspend_max;
     cfg.policy.read_prio = (spp->read_prio != 0);
+    cfg.policy.page_deps = (spp->prog_pass2_ns != 0);
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;

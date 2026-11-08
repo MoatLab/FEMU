@@ -1216,9 +1216,30 @@ static void test_media_hold(void)
     }
     nand_media_destroy(&m);
 
+    /* past a full window list, a read of any page waits: it may depend */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.policy.page_deps = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc p = a;
+
+        for (int k = 0; k <= NAND_PRIO_WINDOWS; k++) {
+            p.pg = k;
+            nand_media_op(&m, &p, NAND_MEDIA_PROGRAM, t0);
+        }
+        p.pg = 0;
+        lat = nand_media_op(&m, &p, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check_lt("overflow: a read does not suspend past a dropped window",
+                 15000, lat);
+    }
+    nand_media_destroy(&m);
+
     /* pe_suspend: a read never suspends the pass of its own wordline */
     bb_config(&cfg);
     cfg.policy.pe_suspend = true;
+    cfg.policy.page_deps = true;
     cfg.timing.tsusp_ns = 5000;
     nand_media_init(&m, &cfg);
     {

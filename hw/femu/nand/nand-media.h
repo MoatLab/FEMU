@@ -168,6 +168,13 @@ typedef struct NandMediaPolicy {
                                    * LUN/plane (all rules, staged or plain channel) */
     uint32_t        max_suspends; /* suspensions one program/erase allows; 0 = any */
     bool            read_prio;    /* a read goes ahead of queued P/E */
+    /*
+     * Track which pages queued program/erase work writes, so that no read
+     * suspends or overtakes the work that writes its own page. read_prio
+     * implies it; the two-pass program sets it. Off, pe_suspend keeps its
+     * older rule.
+     */
+    bool            page_deps;
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
     /*
