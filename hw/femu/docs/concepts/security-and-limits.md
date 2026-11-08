@@ -91,7 +91,10 @@ These are chosen on the host, not by the guest:
 - `persist_file` keeps every byte the guest wrote to a bbssd or NoSSD
   device in a host file, readable by anyone who can read that file.
   Unplug or the end of QEMU writes it; a QEMU that is killed writes
-  nothing, and the file keeps the data of the last clean end.
+  nothing, and the file keeps the data of the last clean end. With
+  `persist_ftl`, a load checks every FTL record (mapping owners, page,
+  block and line counts, list membership, the write pointer, a CRC)
+  before it changes the FTL, so a damaged file fails realize.
 - `FEMU_DUMP_LPN` (BlackBox) hex-dumps the contents of one logical page to
   QEMU's standard error on every read, which `run-blackbox.sh` copies into
   its log file. `FEMU_EXP_LOG` traces only the addresses of pages that

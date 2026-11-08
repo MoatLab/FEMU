@@ -249,7 +249,8 @@ Features that are not modes:
   (`hw/femu/nvme-pel.c`).
 - **Data persistence**: `persist_file`, bbssd and NoSSD
   (`hw/femu/femu-persist.c`). The data backend is saved at unplug or QEMU
-  exit and loaded at realize; the FTL state starts fresh.
+  exit and loaded at realize; the FTL state starts fresh. `persist_ftl`
+  keeps a page-mapped bbssd FTL too (`hw/femu/bbssd/ftl-persist.c`).
 
 [Choosing a mode](choosing-a-mode.md) lists which of these combine.
 

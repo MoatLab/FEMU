@@ -583,6 +583,9 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
                 }
                 if (req->sq != sq) {
                     kept[nkept++] = req;
+                } else if (r == 0) {
+                    /* its data is in the backend; the FTL never saw it */
+                    n->persist_torn = true;
                 }
             }
             /* put the survivors back in the order they were taken */

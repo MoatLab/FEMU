@@ -110,9 +110,16 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "and uncorrectable blocks across runs; realize loads it, unplug or "
       "the end of QEMU saves it. A file of another mode, size, namespace "
       "layout or LBA format fails realize, and FILE.lock keeps a second "
-      "user out. Format NVM keeps the LBA format. The FTL state is not "
-      "kept. Not with namespace_modes, ns_mgmt, shared namespaces, "
-      "cxl_ssd, metadata or sanitize_ms" },
+      "user out. Format NVM keeps the LBA format. The FTL state is kept "
+      "only with persist_ftl. Not with namespace_modes, ns_mgmt, shared "
+      "namespaces, cxl_ssd, metadata or sanitize_ms" },
+    { "persist_ftl",
+      "bbssd with mapping=page: persist_file keeps the FTL state too "
+      "(mapping, page and block state, lines, write pointer, counters), "
+      "so a restarted drive continues as it was; a file of other geometry, "
+      "mapping, GC or NAND timing properties fails realize. Not with "
+      "FDP or the FTL features whose state it does not keep (realize "
+      "names the property); off (default)" },
     { "subsys",
       "ID of a femu-subsys device to join, created before this controller; "
       "needed for FDP, shared namespaces and the Endurance Group log" },

@@ -5,13 +5,19 @@
  * The data backend holds every byte the host wrote, addressed by LBA, so
  * the data survives a restart once the backend survives it. Realize loads
  * the file; a device unplug or the end of QEMU saves it, with the workers
- * stopped. The FTL state is not kept: a restarted bbssd device times its
- * first accesses as a fresh drive does, but every read returns the data
- * that was written, and deallocated or uncorrectable blocks stay so.
+ * stopped. Without persist_ftl the FTL state is not kept: a restarted bbssd
+ * device times its first accesses as a fresh drive does, but every read
+ * returns the data that was written, and deallocated or uncorrectable
+ * blocks stay so. With persist_ftl (version 3) the bbssd FTL state of each
+ * namespace follows, and the restarted drive continues where it stopped.
  *
  *   file: header (64 B) | one 32 B record per namespace | backend bytes |
- *         per namespace: allocation bitmap, uncorrectable bitmap
+ *         per namespace: allocation bitmap, uncorrectable bitmap |
+ *         version 3 with flag 1: per namespace, u64 length + FTL section
  *   save: file.XXXXXX, write, fsync, rename, fsync the directory
+ *
+ * The FTL state must match the data: before a save with persist_ftl, the
+ * requests already fetched must leave the FTL (persist_drain()).
  *
  * The header and records name the mode, the backend size and each
  * namespace's slice and LBA format; a file that differs is refused, so
@@ -22,6 +28,11 @@
 
 #include "qemu/osdep.h"
 #include <sys/file.h>
+#include "qom/qom-qobject.h"
+#include "qobject/qbool.h"
+#include "qobject/qjson.h"
+#include "qobject/qnum.h"
+#include "qobject/qstring.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "system/system.h"
@@ -29,8 +40,11 @@
 
 #define PERSIST_MAGIC     "FEMUDATA"
 #define PERSIST_VERSION   2
+#define PERSIST_V_FTL     3       /* adds the FTL sections */
+#define PERSIST_F_FTL     0x1     /* header byte 28: FTL sections follow */
 #define PERSIST_HDR_SIZE  64
 #define PERSIST_NS_SIZE   32
+#define PERSIST_DRAIN_MS  10000
 
 static size_t persist_meta_len(FemuCtrl *n)
 {
@@ -38,12 +52,13 @@ static size_t persist_meta_len(FemuCtrl *n)
 }
 
 /* the header and namespace records that describe this device's layout */
-static uint8_t *persist_meta(FemuCtrl *n)
+static uint8_t *persist_meta(FemuCtrl *n, uint32_t version, uint32_t flags)
 {
     uint8_t *m = g_malloc0(persist_meta_len(n));
 
     memcpy(m, PERSIST_MAGIC, 8);
-    stl_le_p(m + 8, PERSIST_VERSION);
+    stl_le_p(m + 8, version);
+    stl_le_p(m + 28, flags);
     stl_le_p(m + 12, n->femu_mode);
     stq_le_p(m + 16, n->mbe->size);
     stl_le_p(m + 24, n->num_namespaces);
@@ -90,15 +105,186 @@ static bool persist_read(int fd, void *buf, size_t len, off_t off)
     return true;
 }
 
+/*
+ * The properties an FTL section depends on: the layout, the mapping, the
+ * GC choices and the NAND times. Each enters as "name=<JSON value>;", so
+ * a section loads only into an FTL that would have built the same state.
+ */
+static const char *const persist_ftl_props[] = {
+    "femu_mode", "devsz_mb", "namespaces", "namespace_sizes", "secsz",
+    "secs_per_pg", "pgs_per_blk", "blks_per_pl", "pls_per_lun",
+    "luns_per_ch", "nchs", "mapping", "op_pcent", "gc_policy",
+    "gc_strategy", "gc_thres_pcent", "gc_thres_pcent_high", "gc_seed",
+    "pg_rd_lat", "pg_wr_lat", "blk_er_lat", "ch_xfer_lat",
+    "cmd_addr_lat", "pg_xfer_lat", "status_lat", "tplpbsy", "tplrbsy",
+    "tplebsy", "trcbsy", "ecc_step_ns", "onfi_mode", "onfi_mts",
+    "onfi_spare_bytes", "onfi_tccs_ns", "onfi_sca", "flash_type",
+    "nand_cell_type", "cell_pages", "pgtype_lat", "lba_index",
+};
+
+static uint64_t persist_digest(FemuCtrl *n)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+
+    for (size_t i = 0; i < ARRAY_SIZE(persist_ftl_props); i++) {
+        const char *name = persist_ftl_props[i];
+        QObject *v = object_property_get_qobject(OBJECT(n), name, NULL);
+        g_autoptr(GString) s = g_string_new(name);
+
+        g_string_append_c(s, '=');
+        /* an unset mapping or GC policy is the default one */
+        if (v && qobject_type(v) == QTYPE_QSTRING &&
+            !*qstring_get_str(qobject_to(QString, v))) {
+            qobject_unref(v);
+            v = NULL;
+            g_string_append(s, !strcmp(name, "mapping") ? "\"page\"" :
+                               !strcmp(name, "gc_policy") ? "\"greedy\"" :
+                               "\"\"");
+        }
+        if (v) {
+            g_autoptr(GString) js = qobject_to_json(v);
+
+            g_string_append(s, js->str);
+            qobject_unref(v);
+        }
+        g_string_append_c(s, ';');
+        for (size_t k = 0; k < s->len; k++) {
+            h = (h ^ (uint8_t)s->str[k]) * 0x100000001b3ULL;
+        }
+    }
+    return h;
+}
+
+/* the namespaces whose FTL a version 3 file holds, in namespace order */
+static bool persist_ftl_ns(NvmeNamespace *ns)
+{
+    return ns->ssd && !ns->ssd_shared && NS_BBSSD(ns);
+}
+
+/* the properties a version 1 FTL section cannot carry the state of */
+static const char *const persist_ftl_refused[] = {
+    "streams", "tier_mode", "buffer_size", "hot_cold_sep", "gc_frontier",
+    "gc_pace", "gc_idle_ms", "gc_copyback", "blk_pe_limit", "spare_lines",
+    "wl_spread", "read_reclaim_limit", "retention_limit_sec",
+    "ecc_retention_sec", "pd_open_read_limit", "pd_open_close_sec",
+    "pd_open_age", "rber_ppb", "err_read_unc_ppm", "err_write_fail_ppm",
+    "die_parity", "read_cache_mb", "prog_pass2_ns", "onfi_param_page",
+    "nand_profile", "mp_program", "mp_read", "onfi_cache_read",
+    "pe_suspend", "read_prio", "iu_pages", "plane_first", "power_loss",
+};
+
+/* whether property @name holds anything but 0, false or an empty string */
+static bool persist_prop_set(FemuCtrl *n, const char *name)
+{
+    QObject *v = object_property_get_qobject(OBJECT(n), name, NULL);
+    bool set = false;
+
+    if (!v) {
+        return false;
+    }
+    switch (qobject_type(v)) {
+    case QTYPE_QBOOL:
+        set = qbool_get_bool(qobject_to(QBool, v));
+        break;
+    case QTYPE_QNUM: {
+        uint64_t u;
+
+        set = qnum_get_try_uint(qobject_to(QNum, v), &u) ? u != 0 : true;
+        break;
+    }
+    case QTYPE_QSTRING:
+        set = *qstring_get_str(qobject_to(QString, v)) != '\0';
+        break;
+    default:
+        break;
+    }
+    qobject_unref(v);
+    return set;
+}
+
+static bool persist_ftl_check(FemuCtrl *n, Error **errp)
+{
+    const char *map = n->bb_params.mapping_scheme;
+
+    if (n->femu_mode != FEMU_BBSSD_MODE) {
+        error_setg(errp, "persist_ftl needs femu_mode=1 (bbssd)");
+        return false;
+    }
+    if (map && *map && strcmp(map, "page")) {
+        error_setg(errp, "persist_ftl needs mapping=page");
+        return false;
+    }
+    if (n->subsys && n->subsys->params.fdp.enabled) {
+        error_setg(errp, "persist_ftl is not supported with FDP");
+        return false;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(persist_ftl_refused); i++) {
+        if (persist_prop_set(n, persist_ftl_refused[i])) {
+            error_setg(errp, "persist_ftl is not supported with %s",
+                       persist_ftl_refused[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* the rings of fetched requests are empty: no request is on its way in */
+static bool persist_rings_empty(FemuCtrl *n)
+{
+    for (int i = 1; n->to_ftl && i <= n->nr_pollers; i++) {
+        if (n->to_ftl[i] && femu_ring_count(n->to_ftl[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Hold the workers with every fetched request through the FTL, so the
+ * data and the FTL state agree. A request on the to_ftl ring has changed
+ * the backend already; the FTL must take it before the save. The workers
+ * run between tries. On success the workers stay paused: the caller
+ * resumes them with *resume.
+ */
+static bool persist_drain(FemuCtrl *n, bool *resume, Error **errp)
+{
+    int64_t end = g_get_monotonic_time() + PERSIST_DRAIN_MS * 1000;
+
+    for (;;) {
+        *resume = nvme_pause_pollers(n);
+        if (persist_rings_empty(n)) {
+            return true;
+        }
+        nvme_resume_pollers(n, *resume);
+        if (g_get_monotonic_time() >= end || !*resume) {
+            error_setg(errp, "persist_ftl: fetched requests stayed on the "
+                       "FTL queue; nothing saved");
+            return false;
+        }
+        g_usleep(1000);
+    }
+}
+
 static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
 {
-    g_autofree uint8_t *meta = persist_meta(n);
+    g_autofree uint8_t *meta = persist_meta(n, n->persist_ftl ?
+                                               PERSIST_V_FTL :
+                                               PERSIST_VERSION,
+                                           n->persist_ftl ? PERSIST_F_FTL :
+                                                            0);
     g_autofree char *tmp = g_strconcat(path, ".XXXXXX", NULL);
     g_autofree char *dir = g_path_get_dirname(path);
-    int fd = g_mkstemp(tmp);
+    int fd;
     int saved_errno;
     bool ok;
 
+    if (n->persist_ftl && n->persist_torn) {
+        error_setg(errp, "persist_ftl: a fetched request left without "
+                   "reaching the FTL (a queue deleted or a reset under I/O, "
+                   "or a drain that timed out); nothing saved");
+        return false;
+    }
+    fd = g_mkstemp(tmp);
     if (fd < 0) {
         error_setg_errno(errp, errno, "persist_file: cannot create '%s'",
                          tmp);
@@ -111,6 +297,18 @@ static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
 
         ok = persist_write(fd, ns->util, persist_bitmap_len(ns)) &&
              persist_write(fd, ns->uncorrectable, persist_bitmap_len(ns));
+    }
+    for (uint32_t i = 0; ok && n->persist_ftl && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        g_autoptr(GByteArray) sec = NULL;
+        uint8_t len[8];
+
+        if (!persist_ftl_ns(ns)) {
+            continue;
+        }
+        sec = ssd_persist_save(ns->ssd, persist_digest(n));
+        stq_le_p(len, sec->len);
+        ok = persist_write(fd, len, 8) && persist_write(fd, sec->data, sec->len);
     }
     if (!ok || fsync(fd) < 0) {
         saved_errno = errno;
@@ -153,8 +351,17 @@ static void persist_exit_notify(Notifier *notifier, void *data)
 {
     FemuCtrl *n = container_of(notifier, FemuCtrl, persist_notifier);
     Error *err = NULL;
+    bool resume;
 
-    nvme_pause_pollers(n);
+    /* QEMU ends here: the workers stay paused */
+    if (n->persist_ftl) {
+        if (!persist_drain(n, &resume, &err)) {
+            error_report_err(err);
+            return;
+        }
+    } else {
+        nvme_pause_pollers(n);
+    }
     if (!persist_save(n, &err)) {
         error_report_err(err);
     }
@@ -182,7 +389,7 @@ static bool persist_check(FemuCtrl *n, Error **errp)
         error_setg(errp, "persist_file is not supported with %s", why);
         return false;
     }
-    return true;
+    return !n->persist_ftl || persist_ftl_check(n, errp);
 }
 
 /*
@@ -291,14 +498,105 @@ static bool persist_probe_dir(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * The FTL sections at @off, one per FTL namespace: every one is checked
+ * before any FTL changes, so a bad section leaves every FTL fresh.
+ */
+static bool persist_load_ftl(FemuCtrl *n, int fd, off_t off, Error **errp)
+{
+    uint64_t digest = persist_digest(n);
+    g_autoptr(GPtrArray) secs = g_ptr_array_new_with_free_func(
+                                    (GDestroyNotify)g_byte_array_unref);
+    struct stat st;
+    uint32_t k;
+
+    if (fstat(fd, &st) < 0) {
+        error_setg_errno(errp, errno, "persist_file: cannot stat '%s'",
+                         n->persist_path);
+        return false;
+    }
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        GByteArray *sec;
+        uint8_t lb[8];
+        uint64_t len;
+
+        if (!persist_ftl_ns(&n->namespaces[i])) {
+            continue;
+        }
+        if (!persist_read(fd, lb, 8, off)) {
+            goto short_file;
+        }
+        len = ldq_le_p(lb);
+        off += 8;
+        if (len > ssd_persist_max_len(n->namespaces[i].ssd)) {
+            error_setg(errp, "persist_file '%s', namespace %u: the FTL "
+                       "section is longer than this FTL's", n->persist_path,
+                       i + 1);
+            return false;
+        }
+        if (len > (uint64_t)st.st_size || off > st.st_size - (off_t)len) {
+            goto short_file;
+        }
+        sec = g_byte_array_sized_new(len);
+        g_byte_array_set_size(sec, len);
+        g_ptr_array_add(secs, sec);
+        if (!persist_read(fd, sec->data, len, off)) {
+            goto short_file;
+        }
+        off += len;
+    }
+    if (off != st.st_size) {
+        error_setg(errp, "persist_file '%s' has bytes past its FTL state",
+                   n->persist_path);
+        return false;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        k = 0;
+        for (uint32_t i = 0; i < n->num_namespaces; i++) {
+            NvmeNamespace *ns = &n->namespaces[i];
+            GByteArray *sec;
+            Error *local = NULL;
+
+            if (!persist_ftl_ns(ns)) {
+                continue;
+            }
+            sec = g_ptr_array_index(secs, k++);
+            if (!ssd_persist_load(ns->ssd, sec->data, sec->len, digest,
+                                  pass == 1, &local)) {
+                error_setg(errp, "persist_file '%s', namespace %u: %s",
+                           n->persist_path, i + 1, error_get_pretty(local));
+                error_free(local);
+                return false;
+            }
+        }
+    }
+    return true;
+
+short_file:
+    error_setg(errp, "persist_file '%s' has a short FTL section",
+               n->persist_path);
+    return false;
+}
+
 static bool persist_load(FemuCtrl *n, int fd, Error **errp)
 {
     size_t len = persist_meta_len(n);
-    g_autofree uint8_t *want = persist_meta(n);
+    g_autofree uint8_t *want = NULL;
     g_autofree uint8_t *got = g_malloc0(len);
+    uint32_t version = 0, flags = 0;
     off_t off = len;
 
-    if (!persist_read(fd, got, len, 0) || memcmp(got, want, len)) {
+    if (persist_read(fd, got, len, 0)) {
+        version = ldl_le_p(got + 8);
+        flags = ldl_le_p(got + 28);
+    }
+    /* version 2 has no flags; version 3 has the FTL flag or none */
+    if ((version != PERSIST_VERSION || flags) &&
+        (version != PERSIST_V_FTL || (flags & ~PERSIST_F_FTL))) {
+        version = 0;
+    }
+    want = persist_meta(n, version, flags);
+    if (!version || memcmp(got, want, len)) {
         error_setg(errp, "persist_file '%s' does not match this device: the "
                    "mode, the backend size (%" PRId64 " bytes), or a "
                    "namespace's slice or LBA format differs", n->persist_path,
@@ -318,6 +616,14 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
             goto short_file;
         }
         off += 2 * blen;
+    }
+    /*
+     * A file without FTL state leaves the FTL fresh; with persist_ftl off,
+     * a file's FTL state is not read, and the next save drops it.
+     */
+    if (n->persist_ftl && (flags & PERSIST_F_FTL) &&
+        !persist_load_ftl(n, fd, off, errp)) {
+        return false;
     }
     /* the device holds data again: not globally erased */
     qatomic_set(&nvme_sanitize_state(n)->sstat,
@@ -340,6 +646,10 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
 
     n->persist_lock_fd = -1;
     if (!n->persist_file) {
+        if (n->persist_ftl) {
+            error_setg(errp, "persist_ftl needs persist_file");
+            return false;
+        }
         return true;
     }
     if (!*n->persist_file) {
@@ -348,6 +658,15 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
     }
     if (!persist_check(n, errp)) {
         return false;
+    }
+    for (uint32_t i = 0; n->persist_ftl && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (persist_ftl_ns(ns) && ssd_persist_max_len(ns->ssd) > G_MAXUINT) {
+            error_setg(errp, "persist_ftl: namespace %u has an FTL larger "
+                       "than 4 GiB to save", i + 1);
+            return false;
+        }
     }
     n->persist_path = persist_resolve(n->persist_file, errp);
     if (!n->persist_path) {
@@ -394,6 +713,25 @@ void femu_persist_abort(FemuCtrl *n)
         n->persist_active = false;
     }
     persist_unlock(n);
+}
+
+/*
+ * Unplug, before the workers stop: with persist_ftl the fetched requests
+ * must pass the FTL first, or the save would hold data the FTL never saw.
+ * The workers stay paused for femu_exit() to stop.
+ */
+void femu_persist_quiesce(FemuCtrl *n)
+{
+    Error *err = NULL;
+    bool resume;
+
+    if (!n->persist_active || !n->persist_ftl) {
+        return;
+    }
+    if (!persist_drain(n, &resume, &err)) {
+        error_report_err(err);
+        n->persist_torn = true;
+    }
 }
 
 /* Unplug: the workers are stopped; save now, and not again at QEMU's end */
@@ -470,9 +808,16 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
             return false;
         }
     }
-    resume = nvme_pause_pollers(n);
-    ok = persist_save_to(n, path, errp);
-    nvme_resume_pollers(n, resume);
+    if (n->persist_ftl) {
+        ok = persist_drain(n, &resume, errp);
+    } else {
+        resume = nvme_pause_pollers(n);
+        ok = true;
+    }
+    if (ok) {
+        ok = persist_save_to(n, path, errp);
+        nvme_resume_pollers(n, resume);
+    }
     /* the lock file stays: removing it lets two later users lock apart */
     if (fd >= 0) {
         close(fd);

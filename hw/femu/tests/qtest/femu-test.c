@@ -29329,6 +29329,191 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/* query-femu @kind entries 0 to @limit - 1 of device pd, as JSON text */
+static char *femu_ftl_dump(QTestState *qts, const char *kind, int limit)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'path':'/machine/peripheral/pd','kind':'%s','offset':0,'limit':%d",
+        kind, limit);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    GString *js = qobject_to_json(qdict_get(ns, kind));
+
+    qobject_unref(rsp);
+    return g_string_free(js, false);
+}
+
+/* the write counters of device pd, as one line of text */
+static char *femu_ftl_counters(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'path':'/machine/peripheral/pd'", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+    char *s = g_strdup_printf("host %" PRId64 " nand %" PRId64 " gc %"
+                              PRId64 " erases %" PRId64,
+                              qdict_get_int(ctr, "host-write-pages"),
+                              qdict_get_int(ctr, "nand-write-pages"),
+                              qdict_get_int(ctr, "gc-write-pages"),
+                              qdict_get_int(ctr, "block-erases"));
+
+    qobject_unref(rsp);
+    return s;
+}
+
+static char *femu_save_data(QTestState *qts, const char *id,
+                            const char *file);
+
+/* valid pages of all 40 lines of device pd: one per mapped LPN */
+static uint64_t femu_ftl_vpc_sum(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'path':'/machine/peripheral/pd',"
+                              "'kind':'lines','offset':0,'limit':40", &rsp);
+    QListEntry *e;
+    uint64_t sum = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "lines"), e) {
+        sum += qdict_get_int(qobject_to(QDict, qlist_entry_obj(e)), "vpc");
+    }
+    qobject_unref(rsp);
+    return sum;
+}
+
+#define FEMU_PFTL_OPTS \
+    "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,persist_ftl=on"
+
+/*
+ * persist_ftl: run 1 writes 1024 pages and overwrites 640, so collection
+ * runs, then overwrites 11 more pages so victim lines wait in the heap,
+ * and quits. Run 2 starts with the same lines, blocks and counters,
+ * reads the data, and its next write lands on the open line of run 1. That
+ * write replaces a mapped page: the valid pages stay 1024, one per LPN, as
+ * the mapping came back. femu-save-data saves the live FTL. The file then
+ * refuses another gc_policy and read_cache_mb.
+ */
+static void femu_test_persist_ftl(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pftl-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    g_autofree char *lines = NULL;
+    g_autofree char *blocks = NULL;
+    g_autofree char *ctrs = NULL;
+    QDict *rsp;
+
+    for (int run = 1; run <= 2; run++) {
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,id=pd,addr=5,"
+            FEMU_PFTL_OPTS ",persist_file=%s", path);
+        QTestState *qts = qs->qts;
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+        FemuCtrlState c = { 0 };
+        uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_create_io_queues(&c);
+        if (run == 1) {
+            for (int i = 0; i < 1024 + 640; i++) {
+                qtest_memset(qts, buf, (i % 1024) & 0xff, 4096);
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                                (i % 1024) * 8, buf)), ==,
+                                NVME_SUCCESS);
+            }
+            /* a page in each of many full lines: victims to restore */
+            for (int i = 0; i < 1024; i += 97) {
+                qtest_memset(qts, buf, i & 0xff, 4096);
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8,
+                                                buf)), ==, NVME_SUCCESS);
+            }
+            lines = femu_ftl_dump(qts, "lines", 40);
+            g_assert_nonnull(strstr(lines, "\"victim\""));
+            blocks = femu_ftl_dump(qts, "blocks", 80);
+            ctrs = femu_ftl_counters(qts);
+            g_test_message("persist_ftl: run 1 %s", ctrs);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            g_assert_null(strstr(ctrs, "gc 0 "));
+            femu_disable(&c);
+            femu_queue_free(&c, &c.io);
+            qtest_qmp_send(qts, "{'execute':'quit'}");
+            qtest_set_expected_status(qts, 0);
+            qtest_wait_qemu(qts);
+        } else {
+            g_autofree char *l2 = femu_ftl_dump(qts, "lines", 40);
+            g_autofree char *b2 = femu_ftl_dump(qts, "blocks", 80);
+            g_autofree char *c2 = femu_ftl_counters(qts);
+            uint8_t got;
+            int open = -1;
+            uint64_t vpc, vpc2;
+
+            g_assert_cmpstr(l2, ==, lines);
+            g_assert_cmpstr(b2, ==, blocks);
+            g_assert_cmpstr(c2, ==, ctrs);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            for (int i = 0; i < 1024; i += 97) {
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, i * 8,
+                                                buf)), ==, NVME_SUCCESS);
+                got = qtest_readb(qts, buf);
+                g_assert_cmpuint(got, ==, i & 0xff);
+            }
+            /* the next program goes to the open line of run 1 */
+            for (int i = 0; i < 40 && open < 0; i++) {
+                g_autofree char *st = femu_line_state(
+                    qts, "/machine/peripheral/pd", i, &vpc);
+
+                if (!strcmp(st, "open")) {
+                    open = i;
+                }
+            }
+            g_assert_cmpint(open, >=, 0);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1023 * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            g_free(femu_line_state(qts, "/machine/peripheral/pd", open,
+                                   &vpc2));
+            g_assert_true(vpc2 == vpc + 1 || vpc + 1 == 32);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            {
+                g_autofree char *p2 = g_build_filename(dir, "ckpt", NULL);
+                g_autofree char *l2k = g_strconcat(p2, ".lock", NULL);
+                g_autofree char *err = femu_save_data(qts, "pd", p2);
+
+                g_assert_null(err);
+                unlink(p2);
+                unlink(l2k);
+            }
+            femu_disable(&c);
+            femu_queue_free(&c, &c.io);
+            qpci_unplug_acpi_device_test(qts, "pd", 5);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':4,'femu_mode':1,'secsz':512,"
+                            "'secs_per_pg':8,'pgs_per_blk':16,"
+                            "'blks_per_pl':40,'pls_per_lun':1,"
+                            "'luns_per_ch':1,'nchs':2,'persist_ftl':true,"
+                            "'gc_policy':'fifo','persist_file':%s}}", path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "other FTL properties"));
+            qobject_unref(rsp);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':4,'femu_mode':1,'persist_ftl':true,"
+                            "'read_cache_mb':1,'persist_file':%s}}", path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "read_cache_mb"));
+            qobject_unref(rsp);
+        }
+        guest_free(&qs->alloc, buf);
+        g_free(pdev);
+        qtest_pc_shutdown(qs);
+    }
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* QMP femu-save-data for @id into @file; the error text, or NULL */
 static char *femu_save_data(QTestState *qts, const char *id, const char *file)
 {
@@ -52219,6 +52404,7 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file-invalid", "femu", femu_test_pel_file_invalid, NULL);
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
+    qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
     qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });

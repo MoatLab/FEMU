@@ -1406,6 +1406,7 @@ never changes in a mode means the mode is not reached.
 | `hw/femu/bbssd/ftl-datapath.c` | read, write, write buffer, deallocate, Write Zeroes, power-loss rollback |
 | `hw/femu/bbssd/ftl-line-gc.c` | lines, write pointers, Streams pointers, GC, victim policies, read reclaim |
 | `hw/femu/bbssd/ftl-map.c` | `maptbl`, `rmap`, page and DFTL schemes, scheme registry |
+| `hw/femu/bbssd/ftl-persist.c` | `persist_ftl`: the FTL section of a persist file, its checks and its load |
 | `hw/femu/bbssd/ftl-map-cmt.c` | DFTL cached mapping table |
 | `hw/femu/bbssd/ftl-map-tp.c` | DFTL translation pages on flash: GTD, TP pointer, publication, TP moves, checks |
 | `hw/femu/bbssd/ftl-map-hybrid.c` | BAST log-block scheme and its C0h counters |

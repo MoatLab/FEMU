@@ -2887,6 +2887,9 @@ typedef struct FemuCtrl {
     char            *persist_file;
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
+    bool            persist_ftl;     /* the file holds the bbssd FTL too */
+    /* a fetched request left without the FTL: no FTL save this run */
+    bool            persist_torn;
     char            *persist_path;   /* persist_file, absolute and resolved */
     /*
      * Host Memory Buffer (hmb_mb): the host's last Set Features 0Dh, and
@@ -3477,6 +3480,7 @@ static inline int64_t nvme_power_on_ms(FemuCtrl *n)
 typedef struct FemuPel FemuPel;
 bool femu_pel_init(FemuCtrl *n, Error **errp);
 bool femu_persist_init(FemuCtrl *n, Error **errp);
+void femu_persist_quiesce(FemuCtrl *n);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);
 bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp);
@@ -3808,6 +3812,10 @@ uint64_t ssd_media_read_pages(struct ssd *ssd);
 uint64_t ssd_recovered_reads(struct ssd *ssd);
 uint64_t ssd_read_errors(struct ssd *ssd);
 uint64_t ssd_degraded_reads(struct ssd *ssd);
+uint64_t ssd_persist_max_len(struct ssd *ssd);
+GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest);
+bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,
+                      uint64_t digest, bool commit, Error **errp);
 void ssd_set_offline_die(struct ssd *ssd, int die);
 void nvme_ocp_inj_read_done(FemuCtrl *n);
 void nvme_ocp_inj_clear(FemuCtrl *n);

@@ -4597,6 +4597,7 @@ static void femu_exit(PCIDevice *pci_dev)
      * consumer first leaves them enqueueing into a ring nothing drains, which
      * fills and then complains once per request.
      */
+    femu_persist_quiesce(n);
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
     femu_persist_exit(n);
@@ -4674,6 +4675,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
     DEFINE_PROP_STRING("persist_file", FemuCtrl, persist_file),
+    DEFINE_PROP_BOOL("persist_ftl", FemuCtrl, persist_ftl, false),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),

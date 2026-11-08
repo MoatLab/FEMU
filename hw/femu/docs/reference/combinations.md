@@ -230,6 +230,7 @@ own description allows. A message keeps its format directives (`%s`,
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_timing=model and kv_model_coeffs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
+- persist_ftl needs femu_mode=1 (bbssd)
 
 ## `flash_type`
 
@@ -429,6 +430,8 @@ own description allows. A message keeps its format directives (`%s`,
 - Streams requires page or dftl mapping
 - femu: pd_open_read_limit and pd_open_close_sec are not supported with mapping=%s
 - hmb_mb %u MiB is smaller than the mapping table of this device (8 bytes per page)
+- persist_ftl needs mapping=page
+- the FTL section comes from other FTL properties (geometry, mapping, GC or NAND timing)
 
 ## `max_cqes`
 
@@ -719,12 +722,28 @@ own description allows. A message keeps its format directives (`%s`,
 
 - persist_file '%s' cannot be read in full
 - persist_file '%s' does not match this device: the mode, the backend size (%
+- persist_file '%s' has a short FTL section
+- persist_file '%s' has bytes past its FTL state
 - persist_file '%s' is in use by another device
+- persist_file '%s', namespace %u: %s
+- persist_file '%s', namespace %u: the FTL section is longer than this FTL's
 - persist_file and pel_file name one file
 - persist_file is not supported with %s
 - persist_file must not be empty
 - persist_file: '%s' ends in .lock, which names a lock file
 - persist_file: '%s' is a link to nothing
+- persist_ftl needs persist_file
+
+## `persist_ftl`
+
+- persist_ftl is not supported with %s
+- persist_ftl is not supported with FDP
+- persist_ftl needs femu_mode=1 (bbssd)
+- persist_ftl needs mapping=page
+- persist_ftl needs persist_file
+- persist_ftl: a fetched request left without reaching the FTL (a queue deleted or a reset under I/O, or a drain that timed out); nothing saved
+- persist_ftl: fetched requests stayed on the FTL queue; nothing saved
+- persist_ftl: namespace %u has an FTL larger than 4 GiB to save
 
 ## `pg_xfer_lat`
 

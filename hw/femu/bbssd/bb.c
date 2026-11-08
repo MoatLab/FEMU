@@ -710,7 +710,7 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
     nvme_resume_pollers(n, resume);
 }
 
-static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t bb_flip(FemuCtrl *n, NvmeCmd *cmd)
 {
     int64_t cdw10 = le64_to_cpu(cmd->cdw10);
 
@@ -721,13 +721,21 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
     if (n->throttle && (cdw10 == FEMU_DISABLE_GC_DELAY ||
                         cdw10 == FEMU_DISABLE_DELAY_EMU)) {
         femu_log("%s,FEMU delay toggle ignored: throttle=on\n", n->devname);
-        return;
+        return NVME_SUCCESS;
+    }
+    /* a persist_ftl file holds the FTL of the properties, not of a toggle */
+    if (n->persist_ftl && (cdw10 == FEMU_ENABLE_GC_DELAY ||
+                           cdw10 == FEMU_DISABLE_GC_DELAY ||
+                           cdw10 == FEMU_ENABLE_DELAY_EMU ||
+                           cdw10 == FEMU_DISABLE_DELAY_EMU)) {
+        femu_log("%s,FEMU toggle refused: persist_ftl=on\n", n->devname);
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* untimed collection would skip the parity programs it makes due */
     if (n->bb_params.die_parity && cdw10 == FEMU_DISABLE_GC_DELAY) {
         femu_log("%s,FEMU GC delay toggle ignored: die_parity=1\n",
                  n->devname);
-        return;
+        return NVME_SUCCESS;
     }
 
     switch (cdw10) {
@@ -772,6 +780,7 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
     default:
         printf("FEMU:%s,Not implemented flip cmd (%lu)\n", n->devname, cdw10);
     }
+    return NVME_SUCCESS;
 }
 
 /*
@@ -852,8 +861,7 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
     switch (cmd->opcode) {
     case NVME_ADM_CMD_FEMU_FLIP:
-        bb_flip(n, cmd);
-        return NVME_SUCCESS;
+        return bb_flip(n, cmd);
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
