@@ -20329,6 +20329,21 @@ static void femu_test_resv(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x82, 0, 1, 0, &res)), ==,
                     NVME_SUCCESS);
     g_assert_cmphex(res, ==, 0x2);              /* namespace state stays */
+    /* a Controller Level Reset clears the Host Identifier */
+    {
+        NvmeCmd cmd = { 0 };
+        uint8_t hid[16];
+        static const uint8_t zero[16];
+
+        qtest_memset(qts, buf, 0xff, 16);
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x81);
+        cmd.cdw11 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, hid, sizeof(hid));
+        g_assert_cmpmem(hid, sizeof(hid), zero, sizeof(zero));
+    }
 
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
