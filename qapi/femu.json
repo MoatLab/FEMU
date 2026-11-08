@@ -1380,3 +1380,29 @@
 { 'command': 'query-femu-stages',
   'data': { '*path': 'str', '*reset': 'bool' },
   'returns': 'FemuIoStages' }
+
+##
+# @femu-save-data:
+#
+# Write a checkpoint of a femu device's data in the persist_file format:
+# the data, the namespace layout and LBA format, and the deallocated
+# and uncorrectable blocks.  The device's I/O pauses for the write.  A
+# later run loads the file with -device femu,persist_file=FILE.  The
+# device must be bbssd or NoSSD, as persist_file needs.
+#
+# @path: QOM path of the femu device.  May be omitted when there is
+#     only one.
+#
+# @file: host file to write.  It must not be the persist_file of
+#     another device.
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "femu-save-data",
+#          "arguments": { "file": "/vm/femu-ckpt" } }
+#     <- { "return": {} }
+##
+{ 'command': 'femu-save-data',
+  'data': { '*path': 'str', 'file': 'str' } }

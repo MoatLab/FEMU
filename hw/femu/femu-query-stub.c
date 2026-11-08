@@ -20,3 +20,8 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
     error_setg(errp, "this QEMU is built without the femu device");
     return NULL;
 }
+
+void qmp_femu_save_data(const char *path, const char *file, Error **errp)
+{
+    error_setg(errp, "this QEMU is built without the femu device");
+}

@@ -3446,6 +3446,7 @@ bool femu_pel_init(FemuCtrl *n, Error **errp);
 bool femu_persist_init(FemuCtrl *n, Error **errp);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);
+bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_power_loss(FemuCtrl *n);

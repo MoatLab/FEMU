@@ -90,11 +90,11 @@ static bool persist_read(int fd, void *buf, size_t len, off_t off)
     return true;
 }
 
-static bool persist_save(FemuCtrl *n, Error **errp)
+static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
 {
     g_autofree uint8_t *meta = persist_meta(n);
-    g_autofree char *tmp = g_strconcat(n->persist_path, ".XXXXXX", NULL);
-    g_autofree char *dir = g_path_get_dirname(n->persist_path);
+    g_autofree char *tmp = g_strconcat(path, ".XXXXXX", NULL);
+    g_autofree char *dir = g_path_get_dirname(path);
     int fd = g_mkstemp(tmp);
     int saved_errno;
     bool ok;
@@ -117,14 +117,14 @@ static bool persist_save(FemuCtrl *n, Error **errp)
         close(fd);
         unlink(tmp);
         error_setg_errno(errp, saved_errno, "persist_file: cannot write '%s'",
-                         n->persist_path);
+                         path);
         return false;
     }
-    if (close(fd) < 0 || rename(tmp, n->persist_path) < 0) {
+    if (close(fd) < 0 || rename(tmp, path) < 0) {
         saved_errno = errno;
         unlink(tmp);
         error_setg_errno(errp, saved_errno, "persist_file: cannot save '%s'",
-                         n->persist_path);
+                         path);
         return false;
     }
     /* the rename is durable only once the directory is */
@@ -138,6 +138,11 @@ static bool persist_save(FemuCtrl *n, Error **errp)
     }
     close(fd);
     return true;
+}
+
+static bool persist_save(FemuCtrl *n, Error **errp)
+{
+    return persist_save_to(n, n->persist_path, errp);
 }
 
 /*
@@ -191,13 +196,19 @@ static char *persist_resolve(const char *file, Error **errp)
     g_autofree char *dir = g_path_get_dirname(abs);
     g_autofree char *base = g_path_get_basename(abs);
     char *real = realpath(abs, NULL);
+    struct stat st;
     char *rdir;
     char *path;
 
     if (real) {
         path = g_strdup(real);
         free(real);
-        return path;
+        goto check;
+    }
+    /* a link whose target is missing would be replaced, not followed */
+    if (lstat(abs, &st) == 0 && S_ISLNK(st.st_mode)) {
+        error_setg(errp, "persist_file: '%s' is a link to nothing", abs);
+        return NULL;
     }
     rdir = realpath(dir, NULL);
     if (!rdir) {
@@ -206,7 +217,29 @@ static char *persist_resolve(const char *file, Error **errp)
     }
     path = g_build_filename(rdir, base, NULL);
     free(rdir);
+check:
+    /* FILE.lock guards FILE: a data file of that name would replace it */
+    if (g_str_has_suffix(path, ".lock")) {
+        error_setg(errp, "persist_file: '%s' ends in .lock, which names a "
+                   "lock file", path);
+        g_free(path);
+        return NULL;
+    }
     return path;
+}
+
+/* the pel_file of every femu device, resolved, against @path */
+static int persist_pel_match(Object *obj, void *opaque)
+{
+    const char *path = opaque;
+    FemuCtrl *n = (FemuCtrl *)object_dynamic_cast(obj, TYPE_NVME);
+    g_autofree char *pel = NULL;
+
+    if (!n || !n->pel_file) {
+        return 0;
+    }
+    pel = persist_resolve(n->pel_file, NULL);
+    return pel && !strcmp(pel, path);
 }
 
 /* hold FILE.lock for the device's life; another holder fails realize */
@@ -377,4 +410,72 @@ void femu_persist_exit(FemuCtrl *n)
         error_report_err(err);
     }
     persist_unlock(n);
+}
+
+/*
+ * QMP femu-save-data: a checkpoint of the data in the persist_file format,
+ * with the workers paused so no copy tears it. A later run loads it with
+ * persist_file. The file's lock keeps out a file another device keeps;
+ * this device's own persist_file is covered by the lock it holds.
+ *
+ * The write runs under the BQL, so the whole QEMU main loop waits for it,
+ * not only this device. Commands queued but not yet run may or may not be
+ * in the file; a completed write is in it.
+ */
+bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
+{
+    g_autofree char *path = NULL;
+    g_autofree char *lock = NULL;
+    int fd = -1;
+    bool resume;
+    bool ok;
+
+    if (!persist_check(n, errp)) {
+        return false;
+    }
+    path = persist_resolve(file, errp);
+    if (!path) {
+        return false;
+    }
+    if (object_child_foreach_recursive(object_get_root(), persist_pel_match,
+                                       path)) {
+        error_setg(errp, "femu-save-data: '%s' is a device's pel_file", path);
+        return false;
+    }
+    /*
+     * The file must load into a device of the same properties, which set
+     * one LBA format for every namespace: a namespace formatted to another
+     * one cannot be restored.
+     */
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        if (NVME_ID_NS_FLBAS_INDEX(n->namespaces[i].id_ns.flbas) !=
+            n->lba_index) {
+            error_setg(errp, "femu-save-data: namespace %u is formatted to "
+                       "LBA format %u, not lba_index %u; a later run could "
+                       "not load the file", i + 1,
+                       NVME_ID_NS_FLBAS_INDEX(n->namespaces[i].id_ns.flbas),
+                       n->lba_index);
+            return false;
+        }
+    }
+    if (!n->persist_path || strcmp(path, n->persist_path)) {
+        lock = g_strconcat(path, ".lock", NULL);
+        fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) < 0) {
+            error_setg(errp, "femu-save-data: '%s' is in use by a device",
+                       path);
+            if (fd >= 0) {
+                close(fd);
+            }
+            return false;
+        }
+    }
+    resume = nvme_pause_pollers(n);
+    ok = persist_save_to(n, path, errp);
+    nvme_resume_pollers(n, resume);
+    /* the lock file stays: removing it lets two later users lock apart */
+    if (fd >= 0) {
+        close(fd);
+    }
+    return ok;
 }

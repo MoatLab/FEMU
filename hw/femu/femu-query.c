@@ -1020,6 +1020,15 @@ static void femu_query_stage_copy(FemuStageSet *set, FemuStageSet *out)
     } while (seqlock_read_retry(&set->seq, seq));
 }
 
+void qmp_femu_save_data(const char *path, const char *file, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+
+    if (n) {
+        femu_persist_checkpoint(n, file, errp);
+    }
+}
+
 FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
                                     bool reset, Error **errp)
 {

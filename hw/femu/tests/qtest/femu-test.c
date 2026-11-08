@@ -29063,6 +29063,107 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/* QMP femu-save-data for @id into @file; the error text, or NULL */
+static char *femu_save_data(QTestState *qts, const char *id, const char *file)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'femu-save-data','arguments':"
+                           "{'path':%s,'file':%s}}", path, file);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_test_message("femu-save-data %s: %s", id, err);
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/* hot-add a 16 MiB femu device @id at slot @slot with @extra JSON members */
+static void femu_ckpt_add(QTestState *qts, const char *id, int slot,
+                          const char *extra)
+{
+    g_autofree char *args = g_strdup_printf(
+        "{'driver':'femu','id':'%s','addr':'%d','devsz_mb':16%s}", id, slot,
+        extra);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           qobject_from_json(args, &error_abort));
+
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("device_add %s: %s", id, qdict_get_str(
+                       qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * femu-save-data: page 2 is written, a checkpoint taken, page 2 written
+ * again, and the device removed. A device added with the checkpoint as
+ * persist_file reads the first data. A device with metadata cannot take
+ * a checkpoint, and a file another device keeps cannot take one.
+ */
+static void femu_test_checkpoint(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-ckpt-XXXXXX", NULL);
+    g_autofree char *file = g_build_filename(dir, "ckpt", NULL);
+    g_autofree char *lock = g_strconcat(file, ".lock", NULL);
+    g_autofree char *extra = g_strdup_printf(",'femu_mode':1,"
+                                             "'persist_file':'%s'", file);
+    uint64_t buf = guest_alloc(alloc, 4096);
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    char *err;
+
+    femu_ckpt_add(qts, "ck", 5, ",'femu_mode':1");
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_ns_page(&c, buf, 1, 2, 0x21, true);
+    g_assert_null(femu_save_data(qts, "ck", file));
+    femu_ns_page(&c, buf, 1, 2, 0x77, true);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, "ck", 5);
+    g_free(pdev);
+
+    memset(&c, 0, sizeof(c));
+    femu_ckpt_add(qts, "ck2", 5, extra);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_ns_page(&c, buf, 1, 2, 0x21, false);
+    /* ck2 keeps the file: another device cannot write it */
+    femu_ckpt_add(qts, "cx", 6, ",'femu_mode':1");
+    err = femu_save_data(qts, "cx", file);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "cx", 6);
+    /* ck2 can write its own file, but not over a lock file */
+    g_assert_null(femu_save_data(qts, "ck2", file));
+    err = femu_save_data(qts, "ck2", lock);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, ".lock"));
+    g_free(err);
+    femu_ckpt_add(qts, "cz", 6, ",'femu_mode':2,'meta':8,'mc':2");
+    err = femu_save_data(qts, "cz", file);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "not supported with"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "cz", 6);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, "ck2", 5);
+    g_free(pdev);
+    guest_free(alloc, buf);
+    unlink(lock);
+    unlink(file);
+    rmdir(dir);
+}
+
 static void femu_test_pel_file_invalid(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -51640,6 +51741,7 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file-invalid", "femu", femu_test_pel_file_invalid, NULL);
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
+    qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-file-media", "femu", femu_test_pel_file,
