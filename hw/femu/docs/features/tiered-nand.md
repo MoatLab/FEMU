@@ -293,6 +293,11 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
 - bbssd only, with one namespace and `page` or `dftl` mapping.
 - With `dftl`, translation pages stay on dense lines. They do not count in
   the fill, and the dense room for host pages leaves their lines out.
+- With `dftl`, a fold changes mappings, so translation pages wait to be
+  written. After a request, the request writes them. After an idle or
+  upkeep fold step, the step writes at most as many as there are LUNs, and
+  the next step waits for these programs. If no page is free for them, the
+  step tries again after a quiet time.
 - Realize refuses the tier with FDP, KV, ZNS, CSD, OCSSD, `mapping` other
   than `page` or `dftl`, `power_loss`, Streams, `hot_cold_sep`,
   `gc_pace` and `gc_copyback`.

@@ -1112,6 +1112,8 @@ void bb_tier_upkeep(FemuCtrl *n)
     n->ftl_in_sweep = false;
 }
 
+static bool ftl_tier_publish_step(struct ssd *ssd, uint64_t now);
+
 /**
  * ftl_tier_idle_step - one bounded step of an idle fold
  * @ssd: the FTL
@@ -1132,7 +1134,9 @@ void ftl_tier_idle_step(struct ssd *ssd, uint64_t now)
     uint64_t done;
 
     if (!ftl_tier_idle_wants(ssd)) {
-        t->idle_quiet = true;
+        if (!ftl_tier_publish_step(ssd, now)) {
+            t->idle_quiet = true;
+        }
         return;
     }
     if (now < t->idle_fence) {
@@ -1143,6 +1147,7 @@ void ftl_tier_idle_step(struct ssd *ssd, uint64_t now)
                            QTAILQ_FIRST(&t->closed), now, true);
     t->idle_pages += t->fold_pages - pages;
     t->idle_folds += t->folds - folds;
+    ftl_tier_publish_step(ssd, now);
     if (!done && t->fold_pages + t->fold_stale == seen) {
         /* the dense lines had no page: try again after a quiet time */
         t->idle_fence = MAX(t->idle_fence, now + t->idle_ns);
@@ -1303,7 +1308,9 @@ void ftl_tier_upkeep_step(struct ssd *ssd, uint64_t now)
 
     victim = ftl_tier_upkeep_victim(ssd, &why);
     if (!victim) {
-        t->upkeep_due = false;
+        if (!ftl_tier_publish_step(ssd, now)) {
+            t->upkeep_due = false;
+        }
         return;
     }
     t->upkeep_why = why;
@@ -1313,10 +1320,38 @@ void ftl_tier_upkeep_step(struct ssd *ssd, uint64_t now)
         t->rule_b_folds += why == FTL_TIER_UPKEEP_RULE_B;
         t->rule_c_folds += why == FTL_TIER_UPKEEP_RULE_C;
     }
+    ftl_tier_publish_step(ssd, now);
     if (t->folds == folds && t->fold_pages + t->fold_stale == seen) {
         t->idle_fence = MAX(t->idle_fence,
                             now + (t->idle_ns ? t->idle_ns : 1000000));
     }
+}
+
+/*
+ * dftl: an idle or upkeep fold moved mappings, and their translation pages
+ * wait as a request's would. Write at most as many as there are LUNs, the
+ * bound of a fold step; the next step waits for these too. Returns true
+ * while pages still wait, so a step with no fold left keeps running. A
+ * call that wrote none (no page at the reserve, or a test hold) tries
+ * again after a quiet time, or 1 ms with idle folds off.
+ */
+static bool ftl_tier_publish_step(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t before = ssd->tp_fifo_cnt;
+    uint64_t end;
+
+    if (!ssd->tp_on || !ssd->tp_fifo_cnt || ssd->pace_line) {
+        return false;
+    }
+    end = tp_publish_n(ssd, now, ssd->sp.enable_gc_delay,
+                       (uint64_t)ssd->sp.nchs * ssd->sp.luns_per_ch);
+    t->idle_fence = MAX(t->idle_fence, end);
+    if (ssd->tp_fifo_cnt && ssd->tp_fifo_cnt >= before) {
+        t->idle_fence = MAX(t->idle_fence,
+                            now + (t->idle_ns ? t->idle_ns : 1000000));
+    }
+    return ssd->tp_fifo_cnt > 0;
 }
 
 /* add 1 to the count of @line in @seen, and 1 to *@bad if it is not @want */

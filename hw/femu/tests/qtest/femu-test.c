@@ -50515,6 +50515,56 @@ static void femu_test_tier_dftl(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * Idle folds with mapping=dftl (tier_idle_ms=2000, eager, a 2-entry
+ * mapping cache). 220 random writes close three pool lines. Right after
+ * the last write no fold has run, so every fold below runs with no host
+ * request after it. The folds move mappings of translation pages that are
+ * not cached, so those go pending. The idle steps write them out, so none
+ * waits at the end and the translation pages are right.
+ */
+static void femu_test_tier_dftl_idle(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t tv[7];
+    uint32_t seed = 11;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x75, 4096);
+    for (i = 0; i < 220; i++) {
+        seed = seed * 1103515245 + 12345;
+        femu_tier_write(&c, (seed >> 8) % 4096, 1, 1, buf, list);
+    }
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    for (i = 0; i < 1000; i++) {
+        femu_tier_check(qts, v);
+        femu_tp_check(qts, "/machine/peripheral/gc-test", tv);
+        if (v[TIER_CLOSED] == 0 && !v[TIER_FOLD_OPEN] && tv[6] == 0) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_test_message("idle folds %" PRIu64 ", pending TPs %" PRIu64,
+                   v[TIER_IDLE_FOLDS], tv[6]);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], >=, 3);
+    g_assert_cmpuint(tv[6], ==, 0);
+    g_assert_cmpuint(tv[1] + tv[2] + tv[4], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
  * The pSLC tier with mp_program on 2 planes (TLC blocks of 96 pages, so a
  * pool line holds 4 LUNs x 2 planes x 32 = 256 pages, and tier_static_mb=1
  * is that one line). Three-page commands fill the line, and the command
@@ -54335,6 +54385,13 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=dynamic,tier_static_mb=1,mapping=dftl,x-cmt-slots=2,"
             "tier_shrink_pct=99"
+    });
+    qos_add_test("tier-dftl-idle", "femu", femu_test_tier_dftl_idle,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,mapping=dftl,x-cmt-slots=2,"
+            "tier_idle_ms=2000"
     });
     qos_add_test("tier-mp", "femu", femu_test_tier_mp,
                  &(QOSGraphTestOptions) {

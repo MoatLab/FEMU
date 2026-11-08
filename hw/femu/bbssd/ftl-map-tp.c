@@ -273,25 +273,28 @@ bool tp_pending(struct ssd *ssd, uint64_t tp)
 }
 
 /**
- * tp_publish - write the pending TPs, one read-modify-write each
+ * tp_publish_n - write at most @max pending TPs, one read-modify-write each
  * @ssd: the device
  * @stime: when the batch starts (0: now)
  * @timed: charge the reads and programs
+ * @max: the most TPs to write; the rest stay pending, in order
  *
  * Stops at the first TP with no page to go to, which stays pending at the
  * head for the next call. The TPs run in parallel: each program waits only
  * for its own read. Returns the time the last one ends.
  */
-uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
+uint64_t tp_publish_n(struct ssd *ssd, uint64_t stime, bool timed,
+                      uint64_t max)
 {
     uint64_t end = tp_now(ssd, stime);
+    uint64_t written = 0;
 
     /* a test holds them, as the forced reserve would */
     if (ssd->n && ssd->n->test_tp_hold) {
         return end;
     }
 
-    for (uint64_t n = ssd->tp_fifo_cnt; n; n--) {
+    for (uint64_t n = ssd->tp_fifo_cnt; n && written < max; n--) {
         uint64_t tp = tp_queue_pop(ssd);
         uint64_t rd;
         uint64_t done;
@@ -311,8 +314,15 @@ uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
         }
         clear_bit(tp, ssd->tp_pending);
         end = MAX(end, done);
+        written++;
     }
     return end;
+}
+
+/* tp_publish_n() with no limit: every pending TP */
+uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
+{
+    return tp_publish_n(ssd, stime, timed, UINT64_MAX);
 }
 
 /**
