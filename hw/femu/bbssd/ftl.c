@@ -1062,10 +1062,17 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          */
         lat = ssd_buffer_destage(ssd, 0, req->stime);
         /*
-         * Pages still held had no room on the media. Under FDP a handle
-         * with no free unit is a state the host can reach, so say so.
+         * Pages the idle write-back or a cache disable took out may still be
+         * programming. A suspend can move such a program past its booked end,
+         * so wait for all media work while one is due.
          */
-        if ((n->power_loss || ssd->fdp_enabled) && ssd->write_buffer_cnt) {
+        if (ssd->buffer_bg_fence > req->stime) {
+            uint64_t end = MAX(ssd->buffer_bg_fence, ssd_media_last_end(ssd));
+
+            lat = MAX(lat, end - req->stime);
+        }
+        /* pages still held had no room on the media: say so */
+        if (ssd->write_buffer_cnt) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
         }
         break;

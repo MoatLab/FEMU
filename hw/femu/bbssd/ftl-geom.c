@@ -461,8 +461,8 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
     }
     /*
      * Idle write-back runs down to a level below the foreground one. It
-     * runs on one controller's FTL thread, so not on shared namespaces, and
-     * Flush does not wait for it, so not with power_loss.
+     * runs on one controller's FTL thread, so not on shared namespaces. A
+     * power cut does not undo the programs it booked, so not with power_loss.
      */
     if (p->buffer_low_pcent &&
         (p->buffer_size <= 0 || p->buffer_low_pcent < 0 ||

@@ -98,6 +98,8 @@ uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now)
     }
     lat = ssd_buffer_destage(ssd, MIN(before - low, dies), now);
     ssd->buffer_bg_pages += before - ssd->write_buffer_cnt;
+    /* the pages left the buffer, but a Flush must still wait for them */
+    ssd->buffer_bg_fence = MAX(ssd->buffer_bg_fence, now + lat);
     return lat;
 }
 
@@ -325,9 +327,18 @@ uint16_t bbssd_flush_all(FemuCtrl *n)
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->allocated && ns->ssd) {
-            ssd_buffer_destage(ns->ssd, 0, now);
-            if (ns->ssd->write_buffer_cnt) {
+        /*
+         * A KV namespace has an ssd for timing, but no buffer or lines. A
+         * shared namespace has the buffer of the controller that made it.
+         */
+        if (ns->allocated && ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns)) &&
+            ns->ssd->sp.buffer_size > 0) {
+            struct ssd *ssd = ns->ssd;
+            uint64_t lat = ssd_buffer_destage(ssd, 0, now);
+
+            /* no command waits for these programs; a later Flush does */
+            ssd->buffer_bg_fence = MAX(ssd->buffer_bg_fence, now + lat);
+            if (ssd->write_buffer_cnt) {
                 return NVME_CAP_EXCEEDED | NVME_DNR;
             }
         }
@@ -1399,6 +1410,8 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
         ssd_deallocate_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
         /* the translation pages go with the data, unwritten */
         tp_discard_all(ssd);
+        /* the data a pending write-back held is gone: Flush owes it nothing */
+        ssd->buffer_bg_fence = 0;
     }
 }
 

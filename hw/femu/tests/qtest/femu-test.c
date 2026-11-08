@@ -4376,6 +4376,101 @@ static void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * A Flush waits for the programs of the idle write-back. 1 s programs and
+ * a low mark of 0: the idle step takes the one buffered page out and books
+ * its program. The buffer is then empty, but a Flush must still take the
+ * rest of that program, most of the second.
+ */
+static void femu_test_buffer_flush_fence(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t nand = 0;
+    int64_t t0;
+    uint16_t got;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 100 && !nand; i++) {
+        QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp),
+                                     "counters");
+
+        nand = qdict_get_int(ctr, "nand-write-pages");
+        qobject_unref(rsp);
+        if (!nand) {
+            g_usleep(10 * 1000);
+        }
+    }
+    g_assert_cmpint(nand, ==, 1);
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("flush after idle write-back: %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 300000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Disabling the volatile write cache drains the buffer (vwc=1, 1 s
+ * programs). A held page is programmed before Set Features completes, so a
+ * host that only reads after it does not leave the page in DRAM. A Flush
+ * right after still waits for that program.
+ */
+static void femu_test_buffer_vwc_drain(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t t0;
+    uint16_t got;
+    QDict *rsp;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5f, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpint(qdict_get_int(ctr, "nand-write-pages"), ==, 0);
+    qobject_unref(rsp);
+    g_assert_cmphex(femu_set_feature(&c, 0x06, false, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpint(qdict_get_int(ctr, "nand-write-pages"), ==, 1);
+    qobject_unref(rsp);
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("flush after cache disable: %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 300000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
  * Indirection unit of 4 pages (iu_pages=4): one 16 KiB write fills unit 0
  * and programs 4 pages. A 4 KiB write to page 1 then reads pages 0, 2 and
  * 3 and programs them again with it: 4 more NAND pages for 1 host page.
@@ -56567,6 +56662,16 @@ static void femu_register_nodes(void)
         .arg = (void *)1,
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=64,"
             "buffer_thres_pcent=90,buffer_low_pcent=25",
+    });
+    qos_add_test("buffer-flush-fence", "femu", femu_test_buffer_flush_fence,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=16,"
+            "buffer_thres_pcent=90,buffer_low_pcent=1,pg_wr_lat=1000000000",
+    });
+    qos_add_test("buffer-vwc-drain", "femu", femu_test_buffer_vwc_drain,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=16,"
+            "vwc=1,pg_wr_lat=1000000000",
     });
     qos_add_test("buffer-bg-off", "femu", femu_test_buffer_bg,
                  &(QOSGraphTestOptions) {

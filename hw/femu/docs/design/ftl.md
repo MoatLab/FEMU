@@ -851,10 +851,16 @@ handle's reclaim unit (`fdp_buffer_destage()` in
 - **Deallocate** drops buffered copies before unmapping, so discarded data is
   never programmed later.
 - **Flush** reaches the FTL like any other command and writes back the whole
-  buffer, charged to the Flush.
+  buffer, charged to the Flush. It also waits for the programs that the idle
+  write-back (`buffer_low_pcent`) or a cache disable booked. While one of
+  them is due, the Flush waits for all booked media work, since a suspend
+  can move a program past its booked end. If a page finds no line, the
+  Flush fails with Capacity Exceeded.
 - **Volatile write cache.** With `vwc=1` the controller advertises a cache.
   When the host turns it off with feature 06h, the buffer stops accepting
-  writes and the next write drains it. With `vwc=0` the buffer still works,
+  writes and Set Features writes back every buffered page first. If a page
+  finds no line, the cache stays on and Set Features fails with Capacity
+  Exceeded. With `vwc=0` the buffer still works,
   and the host has no way to turn it off; Linux sends no Flush to a
   controller that advertises no cache.
 

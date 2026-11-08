@@ -2413,12 +2413,10 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          */
         resume = nvme_pause_pollers(n);
         /*
-         * A disabled cache may not hold pages. Under FDP a write-back can
-         * find no room, so drain here and keep the cache on if it fails.
+         * A disabled cache may not hold pages, and no later write may come
+         * to drain it. Drain here; if a page finds no room, keep the cache on.
          */
-        if ((n->power_loss || (n->subsys && n->subsys->endgrp.fdp.enabled &&
-                               n->bb_params.buffer_size > 0)) &&
-            !(dw11 & 1)) {
+        if (!(dw11 & 1)) {
             uint16_t status = bbssd_flush_all(n);
 
             if (status) {

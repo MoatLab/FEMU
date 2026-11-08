@@ -781,6 +781,7 @@ struct ssd {
     uint64_t gc_stall_passes;       /* forced passes run inside host writes */
     uint64_t buffer_full_destages;  /* writes that emptied a full buffer */
     uint64_t buffer_bg_pages;       /* pages written back while idle */
+    uint64_t buffer_bg_fence;       /* end of write-backs no command waits for */
     uint64_t iu_rmw_pages;          /* pages rewritten to complete an IU */
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
