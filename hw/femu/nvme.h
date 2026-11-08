@@ -1976,7 +1976,7 @@ typedef struct NvmeRequest {
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
-    uint16_t                nlb;
+    uint32_t                nlb;
     /* a Write Zeroes that only deallocates programs no data */
     bool                    wz_deac;
     /*

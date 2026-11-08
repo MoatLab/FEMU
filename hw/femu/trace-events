@@ -2,7 +2,7 @@
 
 # nvme-io.c
 femu_io_cmd(uint16_t cid, uint32_t nsid, uint8_t opcode) "cid %"PRIu16" nsid %"PRIu32" opc 0x%"PRIx8
-femu_cqe(uint16_t cqid, uint16_t cid, uint8_t opcode, uint64_t slba, uint16_t nlb, uint16_t status, int64_t model_ns) "cq %"PRIu16" cid %"PRIu16" opc 0x%"PRIx8" slba %"PRIu64" nlb %"PRIu16" status 0x%"PRIx16" model %"PRId64" ns"
+femu_cqe(uint16_t cqid, uint16_t cid, uint8_t opcode, uint64_t slba, uint32_t nlb, uint16_t status, int64_t model_ns) "cq %"PRIu16" cid %"PRIu16" opc 0x%"PRIx8" slba %"PRIu64" nlb %"PRIu32" status 0x%"PRIx16" model %"PRId64" ns"
 
 # nvme-admin.c
 femu_admin_cmd(uint16_t cid, uint8_t opcode) "cid %"PRIu16" opc 0x%"PRIx8
