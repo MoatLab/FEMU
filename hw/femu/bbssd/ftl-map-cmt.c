@@ -166,11 +166,17 @@ uint64_t cmt_access(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                     bool is_write)
 {
     uint64_t tp = lpn / ssd->cmt.lpn_per_tp;
-    int32_t slot = cmt_lookup(ssd, tp);
+    int32_t slot;
     struct cmt_slot *v;
     uint32_t victim;
     uint64_t ready;
 
+    /*
+     * Every lookup comes here: requests, Copy sources, write-back. After
+     * the HMB went off, mark what changed under it before reading any TP.
+     */
+    tp_hmb_reconcile(ssd);
+    slot = cmt_lookup(ssd, tp);
     if (slot >= 0) {
         ssd->cmt.slots[slot].ref = true;
         if (is_write) {

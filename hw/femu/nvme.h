@@ -2919,6 +2919,7 @@ typedef struct FemuCtrl {
     uint32_t        hmb_mb;
     int32_t         hmb_ns;
     bool            hmb_active;
+    uint32_t        hmb_epoch;  /* times the HMB went off: FTLs reconcile */
     uint32_t        hmb_hsize;
     uint64_t        hmb_dla;
     uint32_t        hmb_dlec;
@@ -3373,6 +3374,19 @@ static inline uint16_t nvme_ns_ms(NvmeNamespace *ns)
 static inline bool NS_OCSSD(NvmeNamespace *ns)
 {
     return (ns->femu_mode == FEMU_OCSSD_MODE);
+}
+
+/*
+ * Turn the Host Memory Buffer off. The epoch rises first, so an FTL thread
+ * that sees the buffer off also sees the new epoch and takes the mapping
+ * changes made under it back before its next translation page lookup.
+ */
+static inline void femu_hmb_off(FemuCtrl *n)
+{
+    if (qatomic_read(&n->hmb_active)) {
+        qatomic_inc(&n->hmb_epoch);
+        qatomic_set(&n->hmb_active, false);
+    }
 }
 
 static inline bool NS_BBSSD(NvmeNamespace *ns)

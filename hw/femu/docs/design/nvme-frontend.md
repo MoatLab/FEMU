@@ -728,9 +728,15 @@ and writes move no translation page. A disable, a Controller Level Reset
 or a system reset returns the lookups to the DFTL cache. FEMU stores
 nothing in the buffer.
 
+When the buffer goes off, the controller owns the table again. Each
+translation page whose mappings changed while it was on goes dirty in the
+cache, or pending if the cache does not hold it. The next request writes
+the pending ones, as for any other change.
+
 ```text
  lookup, HMB off: CMT hit, or a translation page read from flash on a miss
  lookup, HMB on:  hmb_ns (PCIe round trip), no flash read
+ HMB on --> off:  TPs changed under the HMB --> dirty (cached) or pending
 ```
 
 With `ocp=on` the PCIe function also has Function Level Reset (OCP PCI-6),

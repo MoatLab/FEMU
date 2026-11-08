@@ -9850,6 +9850,29 @@ static void femu_test_hmb(void *obj, void *data, QGuestAllocator *alloc)
 
     g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
     g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    /*
+     * The HMB is off: the three translation pages changed under it are the
+     * controller's again. The next request writes them, and none is left
+     * with a version that is neither dirty nor pending.
+     */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        int64_t tp0 = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "map-write-pages");
+        uint64_t tv[7];
+
+        qobject_unref(rsp);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+        ns = femu_query_ns(qts, "", &rsp);
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                      "map-write-pages"), >=, tp0 + 3);
+        qobject_unref(rsp);
+        femu_tp_check(qts, "/machine/peripheral/hmb", tv);
+        g_assert_cmpuint(tv[4], ==, 0);
+        g_assert_cmpuint(tv[6], ==, 0);
+    }
     g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==, NVME_SUCCESS);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -52466,7 +52489,7 @@ static void femu_register_nodes(void)
     qos_add_test("hmb", "femu", femu_test_hmb,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=64,"
+            "id=hmb,devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=64,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_rd_lat=50000000,mapping=dftl,x-cmt-slots=1,hmb_mb=1,"
             "hmb_ns=1000000"

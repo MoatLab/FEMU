@@ -709,6 +709,7 @@ struct ssd {
     struct ppa *gtd;         /* tp -> ppa, or UNMAPPED_PPA */
     uint32_t *tp_ver;
     uint32_t *gtd_ver;
+    uint32_t hmb_seen;       /* the hmb_epoch the TPs were reconciled at */
     uint64_t *tp_done;       /* end of the last program of each TP */
     unsigned long *tp_pending; /* changed TPs with no CMT slot */
     unsigned long *tp_queued;  /* TPs that have an entry in tp_fifo */

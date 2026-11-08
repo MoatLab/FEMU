@@ -405,6 +405,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Data correctness
 
+- `hmb_mb`: when the host turns the Host Memory Buffer off, or a reset does, the translation pages changed while it was on are written again. Before, their flash copies stayed stale with no record of the change.
 - Write buffer: a page leaves the buffer only after it finds a place on the media. Before, a failed placement dropped the page. An FUA write or a Write Zeroes whose page finds no place now fails with Capacity Exceeded.
 - Write buffer: a Flush now waits for the programs of the idle write-back, and it fails when a page finds no line. Disabling the volatile write cache writes back the buffer first.
 - A CXL memory device (`cxl-type3` and `femu-cxl-ssd`) disables its media while a Sanitize command runs, as the CXL specification says. The media check read the first mailbox register instead of the memory device status, so media was never disabled; it now reads the status atomically, so `femu-cxl-ssd` fault exits without the BQL read it without a data race.

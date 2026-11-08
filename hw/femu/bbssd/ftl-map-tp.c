@@ -261,6 +261,44 @@ void tp_note(struct ssd *ssd, uint64_t lpn)
     tp_queue_push(ssd, tp, false);
 }
 
+/**
+ * tp_hmb_reconcile - take back the mapping changes made while the HMB was on
+ * @ssd: the device; runs on the FTL thread
+ *
+ * With the table in the Host Memory Buffer, tp_note() records nothing, so
+ * a TP whose mappings changed has a version its flash copy lacks and no
+ * dirty or pending mark. Once the HMB goes off (Set Features or a reset),
+ * the controller owns the table again: such a TP goes dirty in the CMT or
+ * pending, to be written as any other change.
+ */
+void tp_hmb_reconcile(struct ssd *ssd)
+{
+    uint32_t epoch;
+
+    if (!ssd->tp_on || !ssd->n) {
+        return;
+    }
+    epoch = qatomic_read(&ssd->n->hmb_epoch);
+    if (epoch == ssd->hmb_seen || qatomic_read(&ssd->n->hmb_active)) {
+        return;
+    }
+    ssd->hmb_seen = epoch;
+    for (uint64_t tp = 0; tp < ssd->n_tps; tp++) {
+        int32_t slot;
+
+        if (ssd->tp_ver[tp] == ssd->gtd_ver[tp]) {
+            continue;
+        }
+        slot = cmt_slot_of(ssd, tp);
+        if (slot >= 0) {
+            ssd->cmt.slots[slot].dirty = true;
+        } else if (!test_bit(tp, ssd->tp_pending)) {
+            set_bit(tp, ssd->tp_pending);
+            tp_queue_push(ssd, tp, false);
+        }
+    }
+}
+
 /* the pending changes of @tp now live elsewhere: a CMT slot or a new copy */
 void tp_pending_drop(struct ssd *ssd, uint64_t tp)
 {

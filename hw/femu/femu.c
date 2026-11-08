@@ -568,7 +568,8 @@ static void nvme_reset_features(FemuCtrl *n)
     nvme_ana_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     nvme_ocp_val_reset(n);
-    qatomic_set(&n->hmb_active, false);   /* a reset disables the HMB */
+    /* a reset disables the HMB; the FTL takes the table back */
+    femu_hmb_off(n);
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
@@ -5904,7 +5905,7 @@ static void femu_pci_reset(DeviceState *dev)
     FemuCtrl *n = FEMU(dev);
 
     /* the host's memory is its own again after any reset */
-    qatomic_set(&n->hmb_active, false);
+    femu_hmb_off(n);
     if (!n->ocp) {
         return;
     }

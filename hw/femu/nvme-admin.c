@@ -239,8 +239,11 @@ static uint16_t nvme_hmb_set(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!(dw11 & 0x1)) {
-        /* disabling a disabled buffer succeeds and does nothing */
-        qatomic_set(&n->hmb_active, false);
+        /*
+         * Disabling a disabled buffer succeeds and does nothing. Otherwise
+         * the FTL thread takes the table back at its next request.
+         */
+        femu_hmb_off(n);
         return NVME_SUCCESS;
     }
     if (qatomic_read(&n->hmb_active)) {

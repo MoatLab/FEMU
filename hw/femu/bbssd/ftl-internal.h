@@ -279,6 +279,7 @@ void tp_note(struct ssd *ssd, uint64_t lpn);
 void tp_pending_drop(struct ssd *ssd, uint64_t tp);
 bool tp_pending(struct ssd *ssd, uint64_t tp);
 uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed);
+void tp_hmb_reconcile(struct ssd *ssd);
 uint64_t tp_publish_n(struct ssd *ssd, uint64_t stime, bool timed,
                       uint64_t max);
 bool tp_move(struct ssd *ssd, struct ppa *old_ppa);
