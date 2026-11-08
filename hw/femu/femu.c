@@ -2563,15 +2563,27 @@ static void nvme_init_cmb(FemuCtrl *n)
                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->ctrl_mem);
 }
 
-/* the Device Serial Number: a 64-bit FNV-1a hash of the serial string */
+/*
+ * The Device Serial Number: a 64-bit FNV-1a hash of the Identify serial
+ * number, which differs per device, and the PCI function. The serial is
+ * set after nvme_init_pci(), so realize writes the capability again then.
+ */
 static uint64_t femu_dsn(FemuCtrl *n)
 {
     uint64_t h = 0xcbf29ce484222325ULL;
 
-    for (const char *s = n->serial ? n->serial : ""; *s; s++) {
-        h = (h ^ (uint8_t)*s) * 0x100000001b3ULL;
+    for (size_t i = 0; i < sizeof(n->id_ctrl.sn); i++) {
+        h = (h ^ n->id_ctrl.sn[i]) * 0x100000001b3ULL;
     }
-    return h;
+    return (h ^ n->parent_obj.devfn) * 0x100000001b3ULL;
+}
+
+static void femu_dsn_update(FemuCtrl *n)
+{
+    if (n->ocp) {
+        pci_set_quad(n->parent_obj.config + 0x100 + PCI_ERR_SIZEOF + 4,
+                     femu_dsn(n));
+    }
 }
 
 static void nvme_init_pci(FemuCtrl *n)
@@ -2593,6 +2605,7 @@ static void nvme_init_pci(FemuCtrl *n)
      */
     if (n->ocp) {
         pcie_cap_flr_init(&n->parent_obj);
+        pcie_cap_deverr_init(&n->parent_obj);
         pcie_aer_init(&n->parent_obj, PCI_ERR_VER, 0x100, PCI_ERR_SIZEOF,
                       &error_abort);
         pcie_dev_ser_num_init(&n->parent_obj, 0x100 + PCI_ERR_SIZEOF,
@@ -4313,6 +4326,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->ext_ops.init_ctrl_name(n, NULL);
     }
 
+    /* the serial number is final now */
+    femu_dsn_update(n);
+
     /* Validate retention before starting threads that would need unwinding. */
     if (!femu_persist_init(n, errp) || !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
@@ -5735,6 +5751,10 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
                                   uint32_t val, int len)
 {
     pci_default_write_config(dev, addr, val, len);
+    /* AER keeps its first-error pointer and header log with the status */
+    if (pcie_find_capability(dev, PCI_EXT_CAP_ID_ERR)) {
+        pcie_aer_write_config(dev, addr, val, len);
+    }
     /* a no-op unless pcie_cap_flr_init() made the FLR bit writable */
     pcie_cap_flr_write_config(dev, addr, val, len);
 }

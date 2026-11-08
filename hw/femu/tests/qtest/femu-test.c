@@ -38201,11 +38201,19 @@ static void femu_test_ocp_extcaps(void *obj, void *data,
     bool on = g_str_equal(data, "on");
     QTestState *qts = qtest_initf("-machine q35 -m 128M "
                                   "-device femu,addr=04.0,femu_mode=1,"
-                                  "devsz_mb=64%s", on ? ",ocp=on" : "");
+                                  "devsz_mb=64%s -device femu,addr=05.0,"
+                                  "femu_mode=1,devsz_mb=64%s",
+                                  on ? ",ocp=on" : "", on ? ",ocp=on" : "");
     uint64_t cfg = 0xb0000000ULL + (4 << 15);
-    uint32_t hdr = qtest_readl(qts, cfg + 0x100);
+    uint32_t hdr;
 
-    g_assert_cmphex(qtest_readw(qts, cfg), !=, 0xffff);    /* the device */
+    /* turn on q35's ECAM window: PCIEXBAR (host bridge 60h), enable bit */
+    qtest_outl(qts, 0xcf8, 0x80000000 | 0x60);
+    qtest_outl(qts, 0xcfc, 0xb0000001);
+    g_assert_cmphex(qtest_readw(qts, 0xb0000000ULL), ==, 0x8086);
+    hdr = qtest_readl(qts, cfg + 0x100);
+    /* the device: its class code is NVMe (010802h) */
+    g_assert_cmphex(qtest_readl(qts, cfg + 8) >> 8, ==, 0x010802);
     g_assert_cmphex(hdr & 0xffff, ==, on ? 0x0001 : 0);        /* AER */
     if (on) {
         uint64_t dsn;
@@ -38216,6 +38224,20 @@ static void femu_test_ocp_extcaps(void *obj, void *data,
         dsn = qtest_readl(qts, cfg + 0x14c) |
               (uint64_t)qtest_readl(qts, cfg + 0x150) << 32;
         g_assert_cmphex(dsn, !=, 0);
+        /* a second device has its own number (PCI-25) */
+        {
+            uint64_t cfg2 = 0xb0000000ULL + (5 << 15);
+            uint64_t dsn2 = qtest_readl(qts, cfg2 + 0x14c) |
+                            (uint64_t)qtest_readl(qts, cfg2 + 0x150) << 32;
+
+            g_assert_cmphex(qtest_readl(qts, cfg2 + 0x148) & 0xffff, ==,
+                            0x0003);
+            g_assert_cmphex(dsn2, !=, dsn);
+        }
+        /* Device Control error enables are writable with AER */
+        qtest_writew(qts, cfg + 0x80 + 8,
+                     qtest_readw(qts, cfg + 0x80 + 8) | 0xf);
+        g_assert_cmphex(qtest_readw(qts, cfg + 0x80 + 8) & 0xf, ==, 0xf);
     }
     qtest_quit(qts);
 }
