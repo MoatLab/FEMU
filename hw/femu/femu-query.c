@@ -682,11 +682,17 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         ctr->has_map_read_pages = true;
         ctr->map_read_pages = q->map_reads;
     }
+    if (q->parity_on) {
+        ctr->has_parity_write_pages = true;
+        ctr->parity_write_pages = q->parity_pages;
+        ctr->has_degraded_reads = true;
+        ctr->degraded_reads = q->degraded_reads;
+    }
     if (q->host_pages) {
         ctr->has_waf = true;
         ctr->waf = ((double)q->nand_pages + (double)q->gc_pages +
-                    (double)q->map_pages + (double)q->pad_pages) /
-                   (double)q->host_pages;
+                    (double)q->map_pages + (double)q->pad_pages +
+                    (double)q->parity_pages) / (double)q->host_pages;
     }
     info->counters = ctr;
 

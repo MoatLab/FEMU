@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 266 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 269 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -165,6 +165,9 @@ Devices:
 | `read_prio` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read go ahead of the programs and erases queued on its LUN; it waits only for the one that runs. Plain channel model only (no bus phases or ONFI) |
 | `prog_pass2_ns` | `int32` | `0` | bbssd, CSD: time in ns of the fine program pass of a wordline; the program time is the coarse pass. The fine pass runs on the die when prog_pass2_lag later wordlines of the block are programmed, or when the block fills; until then a read of the wordline comes from the controller buffer. 0 (default) is one pass |
 | `prog_pass2_lag` | `uint32` | `0` | bbssd, CSD: with prog_pass2_ns, the wordlines programmed after one before its fine pass, 1 to 16; 0 (default) means 1 |
+| `die_parity` | `int32` | `0` | bbssd, CSD: non-zero books one parity program per full stripe, one page per die at a plane and page index, on a die that rotates with the page; it costs die time and counts in WAF, not space. Needs two dies and mapping=page; not with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP. 0 (default) is off |
+| `parity_xor_ns` | `int32` | `0` | bbssd, CSD: with die_parity, controller time in ns before each parity program and added to a read of the failed die; 0 (default) |
+| `failed_die` | `int32` | `-1` | bbssd, CSD: with die_parity, the die (channel * luns_per_ch + LUN) that has failed: a host read there reads the other dies of its stripe in parallel; -1 (default) is none |
 | `nand_cell_type` | `uint8` | `0` | bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; 1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing (other values fall back to 0) |
 | `cell_pages` | `int32` | `0` | bbssd, CSD, KV: bits per cell (pages per wordline) for the pgtype_lat model, 0 to 5; 0 with pgtype_lat means 3 |
 | `pgtype_lat` | `int32` | `0` | bbssd, CSD, KV: non-zero scales the program time by page type (lower to upper) using cell_pages, when nand_cell_type is 0 |

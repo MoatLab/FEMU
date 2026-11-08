@@ -150,6 +150,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - the FTL thread did not take the query; the controller may be paused or disabled
 
+## `die_parity`
+
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
+
 ## `dpc`
 
 - dpc: bit 3 (protection information in the first eight bytes of metadata) is not allowed by NVM 1.1
@@ -185,6 +189,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - meta/extended need a matching metadata capability (mc)
 - vwc, intc, cqr and extended are single bits
+
+## `failed_die`
+
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 
 ## `fdm_size`
 
@@ -238,6 +246,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `gc_copyback`
 
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - femu: gc_copyback is not supported with %s
 
@@ -396,6 +405,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `mapping`
 
 - FEMU %s: mapping=%s is not supported under FDP: the log-block mappings write and merge through lines that are not FDP-aware; use page or dftl
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - FEMU bbssd: unknown mapping "%s"
 - Streams requires page or dftl mapping
@@ -428,11 +438,13 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `mp_program`
 
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 
 ## `mp_read`
 
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 
 ## `mpsmax`
@@ -453,6 +465,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `namespace_modes`
 
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_max_keys needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
@@ -589,6 +602,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `onfi_cache_read`
 
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: l2p_dram_ns must not be negative, and does not work with onfi_cache_read or FDP
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - femu: onfi_cache_read is refused with %s
@@ -622,6 +636,10 @@ own description allows. A message keeps its format directives (`%s`,
 ## `onfi_tccs_ns`
 
 - femu: onfi_spare_bytes and onfi_tccs_ns must not be negative
+
+## `parity_xor_ns`
+
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 
 ## `pd_edge_tiers`
 
@@ -747,6 +765,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `rber_ppb`
 
 - FEMU %s: rber_ppb is not supported with %s
+- FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes, FDP or FEMU_DISABLE_GC_DELAY; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU: rber_ppb is not supported with %s
 - x-rber-u requires rber_ppb
 

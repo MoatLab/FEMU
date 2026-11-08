@@ -174,9 +174,16 @@
 # @map-read-pages: translation pages read from flash.  Present under
 #     the same condition as @map-write-pages.
 #
+# @parity-write-pages: die parity programs, one per full stripe.
+#     Present only with die_parity.
+#
+# @degraded-reads: reads of the failed die, served from the other dies
+#     of its stripe.  Present only with die_parity.
+#
 # @waf: write amplification factor, (@nand-write-pages +
-#     @gc-write-pages + @map-write-pages + @pad-write-pages) /
-#     @host-write-pages.  Absent until the host has written a page.
+#     @gc-write-pages + @map-write-pages + @pad-write-pages +
+#     @parity-write-pages) / @host-write-pages.  Absent until the host
+#     has written a page.
 #
 # Since: 10.1
 ##
@@ -184,7 +191,8 @@
   'data': { 'host-write-pages': 'uint64', 'nand-write-pages': 'uint64',
             'gc-write-pages': 'uint64', 'block-erases': 'uint64',
             '*pad-write-pages': 'uint64', '*map-write-pages': 'uint64',
-            '*map-read-pages': 'uint64', '*waf': 'number' } }
+            '*map-read-pages': 'uint64', '*parity-write-pages': 'uint64',
+            '*degraded-reads': 'uint64', '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:

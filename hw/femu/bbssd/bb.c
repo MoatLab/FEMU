@@ -723,6 +723,12 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         femu_log("%s,FEMU delay toggle ignored: throttle=on\n", n->devname);
         return;
     }
+    /* untimed collection would skip the parity programs it makes due */
+    if (n->bb_params.die_parity && cdw10 == FEMU_DISABLE_GC_DELAY) {
+        femu_log("%s,FEMU GC delay toggle ignored: die_parity=1\n",
+                 n->devname);
+        return;
+    }
 
     switch (cdw10) {
     case FEMU_ENABLE_GC_DELAY:

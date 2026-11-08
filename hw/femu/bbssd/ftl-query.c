@@ -282,6 +282,9 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->nand_pages = ssd->nand_write_pages;
     q->gc_pages = ssd->gc_write_pages;
     q->pad_pages = ssd->pd_pad_pages;
+    q->parity_on = ssd->sp.die_parity != 0;
+    q->parity_pages = ssd->parity_pages;
+    q->degraded_reads = ssd->degraded_reads;
     q->map_pages = ssd->map_write_pages;
     q->map_reads = ssd->map_read_pages;
     q->tp_on = ssd->tp_on;

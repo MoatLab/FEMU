@@ -493,6 +493,20 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "prog_pass2_lag",
       "bbssd, CSD: with prog_pass2_ns, the wordlines programmed after one "
       "before its fine pass, 1 to 16; 0 (default) means 1" },
+    { "die_parity",
+      "bbssd, CSD: non-zero books one parity program per full stripe, one "
+      "page per die at a plane and page index, on a die that rotates with "
+      "the page; it costs die time and counts in WAF, not space. Needs two "
+      "dies and mapping=page; not with mp_program, mp_read, "
+      "onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP. "
+      "0 (default) is off" },
+    { "parity_xor_ns",
+      "bbssd, CSD: with die_parity, controller time in ns before each "
+      "parity program and added to a read of the failed die; 0 (default)" },
+    { "failed_die",
+      "bbssd, CSD: with die_parity, the die (channel * luns_per_ch + LUN) "
+      "that has failed: a host read there reads the other dies of its "
+      "stripe in parallel; -1 (default) is none" },
     { "nand_cell_type",
       "bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; "
       "1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing "

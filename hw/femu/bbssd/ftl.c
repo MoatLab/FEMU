@@ -320,7 +320,8 @@ uint32_t ssd_waf_x1000(struct ssd *ssd)
 {
     uint64_t host = ssd->host_write_pages;
     uint64_t total = ssd->nand_write_pages + ssd->gc_write_pages +
-                     ssd->map_write_pages + ssd->pd_pad_pages;
+                     ssd->map_write_pages + ssd->pd_pad_pages +
+                     ssd->parity_pages;
 
     if (host == 0) {
         return 1000;

@@ -390,6 +390,70 @@ static void ssd_pass2_book(struct ssd *ssd, struct ppa *ppa,
     }
 }
 
+/*
+ * Die parity (die_parity). A stripe is one page per die at a plane and
+ * page index of a line. The write pointer steps the channel, then the LUN,
+ * so a program on the last die completes its stripe; the parity program
+ * then runs on die (pg + pl) % dies, after the XOR time. It takes die
+ * time and counts in WAF, not a page.
+ *
+ *   ch0/lun0 ch1/lun0 ... chN/lunM   <- a program here completes (pl, pg)
+ *                                    --> parity on die (pg + pl) % dies
+ */
+static void ssd_parity_book(struct ssd *ssd, struct ppa *ppa, uint64_t done)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int dies = spp->nchs * spp->luns_per_ch;
+    int die = (ppa->g.pg + ppa->g.pl) % dies;
+    struct ppa p = *ppa;
+    NandLoc loc;
+
+    if (ppa->g.ch != spp->nchs - 1 || ppa->g.lun != spp->luns_per_ch - 1) {
+        return;
+    }
+    p.g.ch = die / spp->luns_per_ch;
+    p.g.lun = die % spp->luns_per_ch;
+    loc = bb_decode_loc(ssd, &p, done, false);
+    ssd->media_ops[NAND_MEDIA_PROGRAM]++;
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM]) + 1);
+    nand_media_op(&ssd->media, &loc, NAND_MEDIA_PROGRAM,
+                  done + spp->parity_xor_ns);
+    ssd->parity_pages++;
+}
+
+/*
+ * A read of the failed die (failed_die): the other dies of its stripe are
+ * read at once, in parallel, and their XOR gives the page. Returns when
+ * the page is ready. The survivors' blocks take no read count.
+ */
+static uint64_t ssd_parity_read(struct ssd *ssd, struct ppa *ppa,
+                                uint64_t stime)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int dies = spp->nchs * spp->luns_per_ch;
+    uint64_t done = stime;
+
+    for (int d = 0; d < dies; d++) {
+        struct ppa p = *ppa;
+        NandLoc loc;
+
+        if (d == spp->failed_die) {
+            continue;
+        }
+        p.g.ch = d / spp->luns_per_ch;
+        p.g.lun = d % spp->luns_per_ch;
+        loc = bb_decode_loc(ssd, &p, stime, true);
+        ssd->media_ops[NAND_MEDIA_READ]++;
+        qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_READ],
+                    qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_READ]) + 1);
+        done = MAX(done, nand_media_op(&ssd->media, &loc, NAND_MEDIA_READ,
+                                       stime).done_ns);
+    }
+    ssd->degraded_reads++;
+    return done + spp->parity_xor_ns;
+}
+
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd)
 {
@@ -423,6 +487,11 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ssd->pass2_staged_reads++;
         return 0;
     }
+    if (unlikely(ssd->sp.failed_die >= 0) && op == NAND_MEDIA_READ &&
+        !bb_io_meta(ncmd->type) &&
+        ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == ssd->sp.failed_die) {
+        return ssd_parity_read(ssd, ppa, stime) - stime;
+    }
     if (op == NAND_MEDIA_READ && !bb_io_meta(ncmd->type)) {
         reads = get_blk(ssd, ppa)->read_cnt++;
     }
@@ -436,6 +505,10 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_PROGRAM &&
         !bb_io_meta(ncmd->type)) {
         ssd_pass2_book(ssd, ppa, &loc, c.done_ns);
+    }
+    if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_PROGRAM &&
+        !bb_io_meta(ncmd->type)) {
+        ssd_parity_book(ssd, ppa, c.done_ns);
     }
     /* retries and soft decode of a host read (rber_ppb) */
     if (unlikely(ssd->sp.rber_ppb) && op == NAND_MEDIA_READ &&

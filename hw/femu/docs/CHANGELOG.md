@@ -188,6 +188,7 @@ listed one by one.
 - With `ocp=on`, OCP features C3h, C6h, C8h and CAh answer Get and Set Features with current, default and saved values. FEMU stores the values; it models no PLP circuit or idle mode.
 - Data persistence (`persist_file`, unset by default): bbssd and NoSSD keep their data in a host file across QEMU runs. Realize loads it; unplug or the end of QEMU saves it. The FTL state is not kept.
 - Telemetry Data Area 4 (`telemetry_da4`, off by default): with ETDAS set by the host, a telemetry capture adds one counter block per namespace. Log 07h also takes the Maximum Created Data Area field.
+- Die parity (`die_parity`, `parity_xor_ns`, `failed_die`, all off by default): each full stripe of one page per die books a parity program on a rotating die, which costs die time and counts in WAF. A read of a failed die reads the rest of its stripe in parallel.
 - Two-pass program (`prog_pass2_ns`, `prog_pass2_lag`, both 0 by default): the program time is the coarse pass, and a fine pass of each wordline runs on the die once later wordlines are programmed. Until then a read of that wordline comes from the controller buffer, as on QLC drives.
 - Read priority (`read_prio`, 0 by default): a read goes ahead of the programs and erases queued on its die. It waits only for the one that runs, and the queued ones slide by its array time.
 - Suspend limits (`pe_suspend_max`, `tresume_ns`, both 0 by default): a program or erase allows that many suspensions, then reads wait for it; each resume adds `tresume_ns` to it.

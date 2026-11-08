@@ -231,6 +231,9 @@ struct ssdparams {
     int prog_pass2_ns;        /* fine program pass of a wordline; 0 = off */
     uint32_t prog_pass2_lag;  /* wordlines between coarse and fine, 1 or more */
     int wl_pages;             /* pages per wordline for the fine pass */
+    int die_parity;           /* a parity program per full die stripe */
+    int parity_xor_ns;        /* controller time per parity page */
+    int failed_die;           /* die read through its stripe; -1 = none */
     int tresume_ns;
     bool mp_program;  /* multi-plane programs: mp_program set and pls_per_lun > 1 */
     bool mp_read;     /* multi-plane reads: mp_read set and pls_per_lun > 1 */
@@ -808,6 +811,8 @@ struct ssd {
     uint64_t pd_pad_pages;          /* pages programmed to close open lines */
     uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
     uint64_t pass2_staged_reads;    /* reads served before the fine pass */
+    uint64_t parity_pages;          /* die parity programs (die_parity) */
+    uint64_t degraded_reads;        /* host reads of the failed die */
     uint64_t pd_pad_closes;         /* lines or units those pads closed */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */

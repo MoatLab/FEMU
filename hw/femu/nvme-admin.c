@@ -2765,6 +2765,7 @@ typedef struct FemuMediaStats {
     uint64_t wl_pages;
     uint64_t gc_copyback_pages;
     uint64_t pd[3];             /* open reclaims, pad pages, pad closes */
+    uint64_t parity;            /* die parity programs */
     uint64_t pace[3];           /* copies, lines, takeovers */
     uint64_t partial_page_writes;
     uint64_t plane_ops[3];      /* read, program, erase */
@@ -2852,10 +2853,12 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
             st->pd[0] += r;
             st->pd[1] += pads;
             st->pd[2] += cl;
-            /* pad and translation pages are media writes too */
+            st->parity += ns->ssd->parity_pages;
+            /* pad, translation and parity pages are media writes too */
             st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
                                 ssd_gc_write_pages(ns->ssd) + pads +
-                                ssd_map_write_pages(ns->ssd)) *
+                                ssd_map_write_pages(ns->ssd) +
+                                ns->ssd->parity_pages) *
                                (uint64_t)ssd_page_size(ns->ssd);
         }
         /*
@@ -2927,7 +2930,8 @@ static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
      */
     if (st.host_pages) {
         stats.waf_x1000 = cpu_to_le32((uint32_t)
-            (((st.nand_pages + st.gc_pages + st.map_pages + st.pd[1]) *
+            (((st.nand_pages + st.gc_pages + st.map_pages + st.pd[1] +
+               st.parity) *
               1000ull) / st.host_pages));
     }
     stats.host_write_pages = cpu_to_le64(st.host_pages);

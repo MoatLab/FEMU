@@ -310,6 +310,33 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
     /*
+     * Die parity: a stripe is one page per die, so two dies at least; its
+     * hooks sit in the single-page media path, which batches skip; FDP
+     * windows and the KV allocator do not follow the stripe.
+     */
+    if (p->parity_xor_ns < 0 || p->failed_die < -1 ||
+        p->failed_die >= p->nchs * p->luns_per_ch ||
+        ((p->parity_xor_ns || p->failed_die >= 0) && !p->die_parity) ||
+        (p->die_parity &&
+         (p->nchs * p->luns_per_ch < 2 || p->mp_program || p->mp_read ||
+          p->onfi_cache_read || p->gc_copyback || KVSSD(n) ||
+          n->namespace_modes || p->rber_ppb ||
+          (p->mapping_scheme && *p->mapping_scheme &&
+           strcmp(p->mapping_scheme, "page")) ||
+          (n->subsys && n->subsys->params.fdp.enabled)))) {
+        /*
+         * The parity hook sits in the timed media path: translation pages
+         * of DFTL can skip it, and degraded reads take no retry model, so
+         * those are refused too; bb_flip() keeps GC timed.
+         */
+        error_setg(errp, "FEMU bbssd: die_parity needs two dies at least and "
+                   "mapping=page, and does not work with mp_program, "
+                   "mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, "
+                   "namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - "
+                   "1) need die_parity");
+        return -1;
+    }
+    /*
      * read_prio moves queued array work; the bus phases of that work stay
      * booked at the old time, so it needs the plain channel model.
      */
@@ -505,6 +532,9 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->prog_pass2_ns = n->bb_params.prog_pass2_ns;
     spp->prog_pass2_lag = MAX(n->bb_params.prog_pass2_lag, 1);
     spp->wl_pages = bb_pd_wl_pages(n);
+    spp->die_parity = n->bb_params.die_parity;
+    spp->parity_xor_ns = n->bb_params.parity_xor_ns;
+    spp->failed_die = n->bb_params.failed_die;
     spp->tresume_ns = n->bb_params.tresume_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
     /* with one plane there is nothing to combine, so the flag stays clear */

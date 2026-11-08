@@ -825,6 +825,30 @@ Realize refuses `read_prio` with the bus phases (`cmd_addr_lat`,
 phases stay booked at the old end of a slid operation. It also refuses
 `gc_copyback`, `plane_reads`, `rber_ppb` and the dynamic pSLC tier.
 
+## Die parity
+
+Datacenter drives keep one parity page per stripe across dies, so a
+failed die loses no data. With `die_parity` (BBSSD, CSD), a stripe is one
+page per die at a plane and page index of a line. The write pointer steps
+the channel first, then the LUN, so a program on the last die completes
+the stripe. The FTL then books a parity program on die `(pg + pl) % dies`,
+after `parity_xor_ns`.
+
+```text
+ page pg, plane pl:  ch0/lun0  ch1/lun0 ... chN/lunM
+                     data      data         data   <- completes the stripe
+                     parity program on die (pg + pl) % dies, + XOR time
+```
+
+The parity program takes die time and counts in WAF (log C0h). It takes
+no page: the over-provisioning stays as configured. With `failed_die`, a
+read of that die reads the same page of every other die in parallel and
+adds `parity_xor_ns`. Those reads add no read count to their blocks. The
+data itself stays in the backend, so a failed die loses nothing in FEMU.
+`failed_die` is set at device creation; there is no runtime failure yet.
+`query-femu` reports `parity-write-pages` and `degraded-reads`, and its
+WAF counts the parity programs.
+
 ## Two-pass program
 
 QLC drives program a wordline twice: a coarse pass, then a fine pass after

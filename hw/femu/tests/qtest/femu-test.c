@@ -9465,6 +9465,78 @@ static void femu_test_prog_pass2(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* the die parity counters of the device's only namespace */
+static void femu_parity_counters(QTestState *qts, uint64_t *parity,
+                                 uint64_t *degraded, double *waf)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+
+    *parity = qdict_get_int(ctr, "parity-write-pages");
+    *degraded = qdict_get_int(ctr, "degraded-reads");
+    *waf = qdict_get_double(ctr, "waf");
+    qobject_unref(rsp);
+}
+
+/*
+ * Die parity, one plane. On two dies ("waf") every stripe is two pages and
+ * takes one parity program: a fill of distinct pages reads WAF 1.5 in log
+ * C0h and in query-femu, with 32 parity programs for 64 pages. On three
+ * dies with die 1 failed ("degraded"), 100 ms reads and a 50 ms XOR time,
+ * a read on die 1 reads dies 0 and 2 at once: 150 ms, below the 250 ms a
+ * serial pair would take, and one degraded read. A read on die 0 is not.
+ */
+static void femu_test_die_parity(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool degraded = g_str_equal(data, "degraded");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t parity, nread;
+    double waf;
+    int64_t t0, us;
+    int pages = degraded ? 3 : 64;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (int i = 0; i < pages; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!degraded) {
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                             512, 0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readl(qts, buf), ==, 1500);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 32);
+        g_assert_cmpuint(nread, ==, 0);
+        g_assert_cmpfloat(waf, ==, 1.5);
+    } else {
+        /* LBA page 1 went to channel 1, die 1 */
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                        NVME_SUCCESS);
+        us = g_get_monotonic_time() - t0;
+        g_test_message("die_parity: failed-die read %" PRId64 " us", us);
+        g_assert_cmpint(us, >=, 150000);
+        g_assert_cmpint(us, <, 230000);
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        us = g_get_monotonic_time() - t0;
+        g_test_message("die_parity: healthy read %" PRId64 " us", us);
+        g_assert_cmpint(us, <, 140000);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 1);
+        g_assert_cmpuint(nread, ==, 1);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /*
  * Firmware time per opcode and per core, on NoSSD so nothing else adds time.
  * @data names the case: "read" charges reads only, "other" charges commands
@@ -50802,6 +50874,23 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
+    });
+    qos_add_test("die-parity-waf", "femu", femu_test_die_parity,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"waf",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,"
+            "die_parity=1"
+    });
+    qos_add_test("die-parity-degraded", "femu", femu_test_die_parity,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"degraded",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=3,"
+            "pg_rd_lat=100000000,die_parity=1,parity_xor_ns=50000000,"
+            "failed_die=1"
     });
     /* one LUN; a 100 ms read shows whether the array was used */
     qos_add_test("prog-pass2-off", "femu", femu_test_prog_pass2,
