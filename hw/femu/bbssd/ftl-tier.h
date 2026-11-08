@@ -23,6 +23,23 @@ enum ftl_tier_policy {
     FTL_TIER_THROUGH = 1,   /* fold a pool line first, then use the pool */
 };
 
+/* what the next host page would get; see ftl_tier_place_query() */
+enum ftl_tier_place {
+    FTL_TIER_PLACE_PSLC = 0,    /* a pool page */
+    FTL_TIER_PLACE_DENSE,       /* the dense frontier */
+    FTL_TIER_PLACE_WAIT,        /* a pool page once an erase ends */
+    FTL_TIER_PLACE_FOLD,        /* a fold must run first */
+};
+
+/* why upkeep folds a line, kept while the fold runs */
+enum ftl_tier_upkeep {
+    FTL_TIER_UPKEEP_NONE = 0,
+    FTL_TIER_UPKEEP_RULE_B,     /* the dense lines need room for a page */
+    FTL_TIER_UPKEEP_RULE_C,     /* the fill allows fewer borrowed lines */
+    FTL_TIER_UPKEEP_REFILL,     /* a full direct pool takes a line back */
+    FTL_TIER_UPKEEP_THROUGH,    /* a full through pool owes a write-back */
+};
+
 /* the state of a line, by line id; a line the tier does not own is dense */
 enum ftl_tier_line_state {
     FTL_TIER_LINE_DENSE = 0,
@@ -90,6 +107,17 @@ struct ftl_tier {
     uint64_t idle_pages;    /* pages idle steps moved */
     uint64_t idle_early;    /* steps that started before idle_fence */
 
+    /*
+     * Upkeep: a fold the pool owes, which no idle policy may skip. Rule C
+     * shrink, Rule B room, or a full pool. A write-back sets it; the idle
+     * FTL thread runs it one bounded step at a time.
+     */
+    bool upkeep_due;
+    bool upkeep_through;    /* an idle write-back found a full through pool */
+    int upkeep_why;         /* enum ftl_tier_upkeep of the fold under way */
+    uint64_t upkeep_steps;
+    uint64_t bg_defers;     /* idle write-backs that stopped for a fold */
+
     uint64_t valid;         /* valid pages in pool lines */
     uint64_t dense_valid;   /* valid pages in dense lines */
     uint64_t host_pslc;     /* host pages programmed in the pool */
@@ -151,5 +179,10 @@ void ftl_tier_place_failed(struct ssd *ssd);
 void ftl_tier_tick(struct ssd *ssd, uint64_t end);
 bool ftl_tier_idle_due(struct ssd *ssd, uint64_t now);
 void ftl_tier_idle_step(struct ssd *ssd, uint64_t now);
+enum ftl_tier_place ftl_tier_place_query(struct ssd *ssd, uint64_t now);
+void ftl_tier_destaged(struct ssd *ssd, uint64_t end, bool booked);
+void ftl_tier_bg_deferred(struct ssd *ssd);
+bool ftl_tier_upkeep_due(struct ssd *ssd, uint64_t now);
+void ftl_tier_upkeep_step(struct ssd *ssd, uint64_t now);
 
 #endif /* __FEMU_BBSSD_FTL_TIER_H */

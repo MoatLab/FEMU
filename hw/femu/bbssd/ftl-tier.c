@@ -127,9 +127,6 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (n->power_loss) {
         return "power_loss";
     }
-    if (p->buffer_size > 0) {
-        return "buffer_size";
-    }
     if (n->streams) {
         return "Streams";
     }
@@ -327,6 +324,10 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     t->lazy_pct = p->tier_lazy_pct;
     if (t->idle_ns) {
         n->tier_idle = true;
+    }
+    /* a buffer in front of the pool can leave it owing a fold */
+    if (p->buffer_size > 0) {
+        n->tier_upkeep = true;
     }
     t->user_pgs = DIV_ROUND_UP(ssd->ns->size,
                                (uint64_t)p->secs_per_pg * p->secsz);
@@ -779,6 +780,12 @@ static uint64_t ftl_tier_fold_n(struct ssd *ssd, struct line *victim,
         t->free_cnt++;
     }
     t->fold_line = NULL;
+    /*
+     * A finished fold frees the room a through write-back asked for, and
+     * ends the reason upkeep had for it, whoever finished it.
+     */
+    t->upkeep_through = false;
+    t->upkeep_why = FTL_TIER_UPKEEP_NONE;
     t->folds++;
     t->last_fold_ns = done - t->fold_start;
     t->last_fold_prog_ns = fence - t->fold_start;
@@ -914,6 +921,8 @@ void ftl_tier_advance(struct ssd *ssd)
  */
 void ftl_tier_place_failed(struct ssd *ssd)
 {
+    /* host_dense counts placed pages, and this one found no place */
+    ssd->tier->host_dense--;
     if (!ssd->tier->place_fail++) {
         ftl_err("pSLC tier: no pool page and no dense page for a host page\n");
     }
@@ -1046,10 +1055,40 @@ void bb_tier_idle(FemuCtrl *n)
     if (!ftl_tier_idle_due(ssd, now)) {
         return;
     }
+    /* buffered host data goes to the media before an optional fold */
+    if (n->buffer_bg && ssd_buffer_bg_wants(ssd)) {
+        return;
+    }
     n->ftl_in_sweep = true;
     smp_mb();   /* publish the flag before re-reading the pause state */
     if (n->dataplane_started) {
         ftl_tier_idle_step(ssd, now);
+    }
+    n->ftl_in_sweep = false;
+}
+
+/**
+ * bb_tier_upkeep - the owed folds of the FTL thread
+ * @n: the controller; its tier namespace is the only one (realize checks)
+ *
+ * Runs one upkeep step when one is due, inside ftl_in_sweep as a request.
+ */
+void bb_tier_upkeep(FemuCtrl *n)
+{
+    struct ssd *ssd = n->ssd;
+    uint64_t now;
+
+    if (!ssd || !ssd->tier) {
+        return;
+    }
+    now = ssd_now(ssd);
+    if (!ftl_tier_upkeep_due(ssd, now)) {
+        return;
+    }
+    n->ftl_in_sweep = true;
+    smp_mb();   /* publish the flag before re-reading the pause state */
+    if (n->dataplane_started) {
+        ftl_tier_upkeep_step(ssd, now);
     }
     n->ftl_in_sweep = false;
 }
@@ -1088,6 +1127,164 @@ void ftl_tier_idle_step(struct ssd *ssd, uint64_t now)
     if (!done && t->fold_pages + t->fold_stale == seen) {
         /* the dense lines had no page: try again after a quiet time */
         t->idle_fence = MAX(t->idle_fence, now + t->idle_ns);
+    }
+}
+
+/**
+ * ftl_tier_place_query - what ftl_tier_host_page() would do at @now
+ * @ssd: the FTL
+ * @now: the device time
+ *
+ * Changes nothing: no fold, no line taken, no counter. Rule B comes first,
+ * as in ftl_tier_host_page(): a page that would leave the dense lines too
+ * little room needs a fold even when the open line has a free page.
+ */
+enum ftl_tier_place ftl_tier_place_query(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+    struct line *line = QTAILQ_FIRST(&t->free_lines);
+
+    if (t->dyn_cnt &&
+        ftl_tier_live(t) + 1 > ftl_tier_cap(ssd, t->dyn_cnt)) {
+        return FTL_TIER_PLACE_FOLD;
+    }
+    if (t->wp.curline || (line && t->ready[line->id] <= now) ||
+        ftl_tier_may_borrow(ssd)) {
+        return FTL_TIER_PLACE_PSLC;
+    }
+    if (t->policy != FTL_TIER_THROUGH) {
+        return FTL_TIER_PLACE_DENSE;
+    }
+    if (line) {
+        return FTL_TIER_PLACE_WAIT;
+    }
+    return t->closed_cnt ? FTL_TIER_PLACE_FOLD : FTL_TIER_PLACE_DENSE;
+}
+
+/*
+ * The line upkeep folds next and why, or NULL when the pool owes no fold:
+ * a stopped fold first, then a borrowed line that Rule C or Rule B gives
+ * back, then the oldest closed line of a full pool. A full direct pool
+ * takes a line back as ftl_tier_tick() would. A full through pool folds
+ * only once an idle write-back asked for room.
+ */
+static struct line *ftl_tier_upkeep_victim(struct ssd *ssd, int *why)
+{
+    struct ftl_tier *t = ssd->tier;
+    bool full = !t->wp.curline && !t->free_cnt && t->closed_cnt &&
+                !ftl_tier_may_borrow(ssd);
+
+    if (!full) {
+        t->upkeep_through = false;
+    }
+    /* a fold another caller started has no upkeep reason: NONE */
+    if (t->fold_line) {
+        *why = t->upkeep_why;
+        return t->fold_line;
+    }
+    if (t->dyn_cnt) {
+        int open = t->wp.curline && t->dyn[t->wp.curline->id];
+        struct line *dyn = ftl_tier_oldest_dyn(ssd);
+
+        if (dyn && (uint64_t)(t->dyn_cnt - open) > ftl_tier_allowed(ssd)) {
+            *why = FTL_TIER_UPKEEP_RULE_C;
+            return dyn;
+        }
+        if (dyn && ftl_tier_live(t) + 1 > ftl_tier_cap(ssd, t->dyn_cnt)) {
+            *why = FTL_TIER_UPKEEP_RULE_B;
+            return dyn;
+        }
+    }
+    if (full && t->policy == FTL_TIER_DIRECT) {
+        *why = FTL_TIER_UPKEEP_REFILL;
+        return QTAILQ_FIRST(&t->closed);
+    }
+    if (full && t->upkeep_through) {
+        *why = FTL_TIER_UPKEEP_THROUGH;
+        return QTAILQ_FIRST(&t->closed);
+    }
+    *why = FTL_TIER_UPKEEP_NONE;
+    return NULL;
+}
+
+/**
+ * ftl_tier_destaged - a buffer write-back ended
+ * @ssd: the FTL
+ * @end: when its booked work ends
+ * @booked: it booked media work: a placed page, GC or a fold
+ *
+ * Booked work is host work for the idle time, and a placed page may close
+ * a line, so an idle fold that went quiet looks again. A write-back that
+ * booked nothing leaves the quiet time alone. Either may leave the pool
+ * owing a fold.
+ */
+void ftl_tier_destaged(struct ssd *ssd, uint64_t end, bool booked)
+{
+    struct ftl_tier *t = ssd->tier;
+    int why;
+
+    if (booked && t->idle_ns) {
+        ftl_tier_note_busy(ssd, end);
+    }
+    if (ftl_tier_upkeep_victim(ssd, &why)) {
+        t->upkeep_due = true;
+    }
+}
+
+/* an idle write-back stopped: the next page needs a fold */
+void ftl_tier_bg_deferred(struct ssd *ssd)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    t->bg_defers++;
+    t->upkeep_through = t->policy == FTL_TIER_THROUGH;
+    t->upkeep_due = true;
+}
+
+/* upkeep is owed, and the work of the media and of the last step ended */
+bool ftl_tier_upkeep_due(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    return t && t->upkeep_due && now >= t->idle_fence &&
+           ssd_media_last_end(ssd) <= now;
+}
+
+/**
+ * ftl_tier_upkeep_step - one bounded step of an owed fold
+ * @ssd: the FTL
+ * @now: the device time
+ *
+ * As an idle step: at most one page of each LUN, no forced dense GC, and
+ * the erase once the line is empty. It runs whatever tier_idle_ms and
+ * tier_lazy_pct say, until the pool owes nothing. A step that moves
+ * nothing waits a quiet time, or 1 ms with idle folds off. A borrowed
+ * line given back counts for the rule that chose it.
+ */
+void ftl_tier_upkeep_step(struct ssd *ssd, uint64_t now)
+{
+    struct ftl_tier *t = ssd->tier;
+    uint64_t seen = t->fold_pages + t->fold_stale;
+    uint64_t folds = t->folds;
+    int before = t->dyn_cnt;
+    struct line *victim;
+    int why;
+
+    victim = ftl_tier_upkeep_victim(ssd, &why);
+    if (!victim) {
+        t->upkeep_due = false;
+        return;
+    }
+    t->upkeep_why = why;
+    t->upkeep_steps++;
+    ftl_tier_fold_n(ssd, victim, now, true);
+    if (t->dyn_cnt < before) {
+        t->rule_b_folds += why == FTL_TIER_UPKEEP_RULE_B;
+        t->rule_c_folds += why == FTL_TIER_UPKEEP_RULE_C;
+    }
+    if (t->folds == folds && t->fold_pages + t->fold_stale == seen) {
+        t->idle_fence = MAX(t->idle_fence,
+                            now + (t->idle_ns ? t->idle_ns : 1000000));
     }
 }
 
@@ -1373,7 +1570,7 @@ char *ssd_tier_report(struct ssd *ssd)
                            " %" PRIu64 " %" PRIu64 " %d %d %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                           " %" PRIu64 " %d",
+                           " %" PRIu64 " %d %" PRIu64 " %" PRIu64,
                            t->nlines, t->line_pgs, t->free_cnt, t->closed_cnt,
                            t->wp.curline != NULL, t->valid, t->host_pslc,
                            t->host_dense, t->fold_pages, t->folds,
@@ -1387,5 +1584,6 @@ char *ssd_tier_report(struct ssd *ssd)
                            ftl_tier_check_dyn(ssd), t->cap_fail,
                            t->rule_b_folds, t->rule_c_folds, t->idle_steps,
                            t->idle_folds, t->idle_pages, t->idle_early,
-                           t->fold_line != NULL);
+                           t->fold_line != NULL, t->upkeep_steps,
+                           t->bg_defers);
 }

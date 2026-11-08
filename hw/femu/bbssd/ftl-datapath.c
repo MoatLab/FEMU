@@ -78,12 +78,25 @@ static int buffer_watermark(struct ssd *ssd)
     return wm > 0 ? wm : 1;
 }
 
+static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
+                               bool bg);
+
+/* the idle write-back has pages to write: the buffer is above its low mark */
+bool ssd_buffer_bg_wants(struct ssd *ssd)
+{
+    int low = (int)(ssd->sp.buffer_size * ssd->sp.buffer_low_pcent);
+
+    return ssd->sp.buffer_low_pcent > 0 && ssd_buffer_enabled(ssd) &&
+           ssd->write_buffer_cnt > low;
+}
+
 /*
  * Background write-back (buffer_low_pcent): on an idle FTL thread, once
- * every die has finished its booked work, write back one page per die.
- * Repeated while idle, this drains the buffer to the low watermark at the
- * speed of the media, so later reads meet dies that are as busy as the
- * write-back made them. It returns the latency of the step, 0 for none.
+ * every die has finished its booked work, write back as many pages as
+ * there are dies. Repeated while idle, this drains the buffer to the low
+ * watermark at the speed of the media, so later reads meet dies that are
+ * as busy as the write-back made them. It returns the latency of the
+ * step, 0 for none.
  */
 uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now)
 {
@@ -92,11 +105,10 @@ uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now)
     int before = ssd->write_buffer_cnt;
     uint64_t lat;
 
-    if (ssd->sp.buffer_low_pcent <= 0 || !ssd_buffer_enabled(ssd) ||
-        before <= low || ssd_media_last_end(ssd) > now) {
+    if (!ssd_buffer_bg_wants(ssd) || ssd_media_last_end(ssd) > now) {
         return 0;
     }
-    lat = ssd_buffer_destage(ssd, MIN(before - low, dies), now);
+    lat = buffer_destage(ssd, MIN(before - low, dies), now, true);
     ssd->buffer_bg_pages += before - ssd->write_buffer_cnt;
     /* the pages left the buffer, but a Flush must still wait for them */
     ssd->buffer_bg_fence = MAX(ssd->buffer_bg_fence, now + lat);
@@ -794,12 +806,14 @@ static uint64_t ssd_gc_until_clear(struct ssd *ssd)
  * The returned latency is charged to whichever event forced the progress: a
  * host write that found the buffer full, a flush, or teardown of the cache.
  */
-uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
+static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
+                               bool bg)
 {
     struct buffer_entry *victim;
     uint64_t maxlat = 0, curlat;
     bool placed;
     int done = 0;
+    uint64_t media0 = unlikely(ssd->tier) ? ssd_media_last_end(ssd) : 0;
 
     /* under FDP each page goes to the unit of its own placement handle */
     if (ssd->fdp_enabled) {
@@ -810,6 +824,26 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         /* no line left: nothing can be placed */
         if (ssd_out_of_lines(ssd)) {
             break;
+        }
+        /*
+         * An idle write-back with the pSLC tier stays bounded: it runs no
+         * forced GC and no fold. If the next page needs one, it stops and
+         * leaves the fold to upkeep, or the GC to a later write.
+         */
+        if (bg && unlikely(ssd->tier)) {
+            enum ftl_tier_place where;
+
+            if (should_gc_high(ssd)) {
+                break;
+            }
+            where = ftl_tier_place_query(ssd, stime);
+            if (where == FTL_TIER_PLACE_FOLD) {
+                ftl_tier_bg_deferred(ssd);
+                break;
+            }
+            if (where == FTL_TIER_PLACE_WAIT) {
+                break;
+            }
         }
 
         /*
@@ -857,7 +891,18 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
+    if (unlikely(ssd->tier)) {
+        uint64_t end = ssd_media_last_end(ssd);
+
+        ftl_tier_destaged(ssd, MAX(end, (stime ? stime : ssd_now(ssd)) +
+                                        maxlat), done > 0 || end > media0);
+    }
     return maxlat;
+}
+
+uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
+{
+    return buffer_destage(ssd, budget, stime, false);
 }
 
 /*

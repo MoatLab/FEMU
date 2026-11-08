@@ -175,6 +175,34 @@ quiet time:
 -device femu,femu_mode=1,devsz_mb=4096,nchs=8,luns_per_ch=8,pgs_per_blk=256,blks_per_pl=256,nand_cell_type=3,tier_mode=static,tier_static_mb=512,tier_idle_ms=100
 ```
 
+## Write buffer
+
+With `buffer_size`, host pages wait in DRAM first. A write-back places
+each page as a direct write does: in the pool when it has room, else by
+`tier_full_policy`. A buffered page leaves DRAM only after it has a place.
+
+```
+ host write --> DRAM buffer --> write-back --> pool page (pSLC)
+                                          \-> dense page (full pool, direct)
+ idle write-back: next page needs a fold --> stop, upkeep owed
+ idle FTL thread: upkeep step (one page per LUN) --> pool room --> write-back
+```
+
+- The fill counts mapped pages only. A buffered page with no mapping counts
+  once a write-back places it. A buffered overwrite of a mapped page counts
+  once, as before.
+- The idle write-back (`buffer_low_pcent`) runs no fold and no forced
+  garbage collection. When the next page needs a fold, it stops and the
+  pool owes an upkeep fold.
+- Upkeep runs on the idle FTL thread whatever `tier_idle_ms` and
+  `tier_lazy_pct` say. Each step moves at most one page of each LUN, as an
+  idle fold does. It folds a stopped fold first, then a borrowed line that
+  Rule B or Rule C gives back, then the oldest closed line of a full pool.
+- An optional idle fold waits while the idle write-back has pages to write.
+- A Flush and a foreground write-back may fold, as a direct write does.
+- x-tier-check reports the upkeep steps and the idle write-backs that
+  stopped for a fold.
+
 ## Capacity
 
 The exported capacity does not change. Realize checks that the dense lines
@@ -264,7 +292,7 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
 
 - bbssd only, with one namespace and page mapping.
 - Realize refuses the tier with FDP, KV, ZNS, CSD, OCSSD, `mapping` other
-  than `page`, `buffer_size`, `power_loss`, Streams, `hot_cold_sep`,
+  than `page`, `power_loss`, Streams, `hot_cold_sep`,
   `gc_pace` and `gc_copyback`.
 - Realize also refuses it with `blk_pe_limit`, `wl_spread`,
   `read_reclaim_limit`, `retention_limit_sec`, the `pd_*` properties,

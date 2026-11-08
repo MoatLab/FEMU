@@ -888,6 +888,7 @@ uint64_t bb_tier_pool_lines(FemuCtrl *n);
 bool bb_tier_check_props(FemuCtrl *n, Error **errp);
 /* one idle fold step of the pSLC tier, when one is due (tier_idle_ms) */
 void bb_tier_idle(FemuCtrl *n);
+void bb_tier_upkeep(FemuCtrl *n);
 /* the pSLC tier state and its broken rules, for x-tier-check */
 char *ssd_tier_report(struct ssd *ssd);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
@@ -922,6 +923,7 @@ uint64_t ssd_media_read_pass(struct ssd *ssd, struct ppa *ppa,
 void bb_gc_idle(FemuCtrl *n);
 void bb_buffer_idle(FemuCtrl *n);
 uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now);
+bool ssd_buffer_bg_wants(struct ssd *ssd);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);

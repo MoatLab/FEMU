@@ -50289,6 +50289,7 @@ enum {
     TIER_BUSY, TIER_DYN, TIER_ALLOWED, TIER_BAD_LIVE, TIER_BAD_DYN,
     TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_IDLE_STEPS,
     TIER_IDLE_FOLDS, TIER_IDLE_PAGES, TIER_IDLE_EARLY, TIER_FOLD_OPEN,
+    TIER_UPKEEP_STEPS, TIER_BG_DEFERS,
     TIER_FIELDS,
 };
 
@@ -50412,8 +50413,6 @@ static void femu_test_tier_refused(void *obj, void *data,
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'mapping':'dftl'", "a mapping other than page" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
-          "'buffer_size':16", "buffer_size" },
-        { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'hot_cold_sep':true", "hot_cold_sep" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'gc_pace':true", "gc_pace" },
@@ -50447,6 +50446,101 @@ static void femu_test_tier_refused(void *obj, void *data,
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
+}
+
+/*
+ * The pSLC tier behind a write buffer (64 pages, write-back at 57). 32
+ * buffered pages reach no media and no pool page. A Flush places all 32 in
+ * the pool, none dense.
+ */
+static void femu_test_tier_buffer_flush(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x71, 4096);
+    femu_tier_write(&c, 0, 32, 8, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 32);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 32);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 32);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 32);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * tier_full_policy=through with the idle write-back (low mark 0). Eight
+ * rounds of 32 pages and a Flush fill the 256-page pool. 16 more pages
+ * wait in DRAM: the idle write-back finds that the next page needs a fold,
+ * so it stops and the pool owes upkeep. Upkeep folds a line one bounded
+ * step at a time, with idle folds off, and the write-back then places all
+ * 16 pages in the pool.
+ */
+static void femu_test_tier_buffer_upkeep(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x72, 4096);
+    for (i = 0; i < 8; i++) {
+        femu_tier_write(&c, i * 32, 32, 8, buf, list);
+        g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    }
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 256);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    /* a full through pool folds only once a write-back asks for room */
+    g_usleep(50000);
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_UPKEEP_STEPS], ==, 0);
+    femu_tier_write(&c, 256, 16, 8, buf, list);
+    for (i = 0; i < 500; i++) {
+        femu_tier_check(qts, v);
+        if (v[TIER_HOST_PSLC] == 272) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 272);
+    /* one fold of a full line: 16 steps of one page on each of 4 LUNs */
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_UPKEEP_STEPS], ==, 16);
+    g_assert_cmpuint(v[TIER_BG_DEFERS], >=, 1);
+    g_assert_cmpuint(v[TIER_VALID], ==, 208);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
 }
 
 /*
@@ -54112,6 +54206,20 @@ static void femu_register_nodes(void)
     qos_add_test("prog-pass2-refused", "femu", femu_test_prog_pass2_refused,
                  NULL);
     qos_add_test("tier-refused", "femu", femu_test_tier_refused, NULL);
+    qos_add_test("tier-buffer-flush", "femu", femu_test_tier_buffer_flush,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,buffer_size=64,"
+            "buffer_thres_pcent=90"
+    });
+    qos_add_test("tier-buffer-upkeep", "femu", femu_test_tier_buffer_upkeep,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_full_policy=through,"
+            "buffer_size=64,buffer_thres_pcent=90,buffer_low_pcent=1"
+    });
     qos_add_test("tier-direct", "femu", femu_test_tier_direct,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

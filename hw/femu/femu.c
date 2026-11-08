@@ -2886,7 +2886,11 @@ static void *femu_ftl_thread(void *arg)
          * No request this pass: the pSLC tier may fold, and idle
          * collection may run, in the idle time.
          */
-        if (unlikely(n->tier_idle || n->gc_idle || n->buffer_bg) && !busy) {
+        if (unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
+                     n->tier_upkeep) && !busy) {
+            if (n->tier_upkeep) {
+                bb_tier_upkeep(n);
+            }
             if (n->tier_idle) {
                 bb_tier_idle(n);
             }

@@ -3177,6 +3177,7 @@ typedef struct FemuCtrl {
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
     bool            tier_idle;      /* the FTL thread runs idle folds */
+    bool            tier_upkeep;    /* the FTL thread runs owed pool folds */
     bool            gc_idle;        /* the FTL thread collects when idle */
     bool            buffer_bg;      /* the FTL thread writes back when idle */
     /* qtest only: the next pSLC fold stops after this many pages, once */
