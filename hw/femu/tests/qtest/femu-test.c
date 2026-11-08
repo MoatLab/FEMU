@@ -50419,7 +50419,7 @@ static void femu_test_tier_refused(void *obj, void *data,
         { 3, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1",
           "a mode other than bbssd" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
-          "'mapping':'dftl'", "a mapping other than page" },
+          "'mapping':'hybrid'", "a mapping other than page or dftl" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'hot_cold_sep':true", "hot_cold_sep" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
@@ -50454,6 +50454,64 @@ static void femu_test_tier_refused(void *obj, void *data,
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
+}
+
+/*
+ * The pSLC tier with mapping=dftl and a 2-entry mapping cache, so writes
+ * spread over the device evict dirty translation pages to flash. The
+ * translation pages count apart from host pages: the live count matches
+ * the mapping table (x-tier-check), the translation pages are right
+ * (x-ftl-check), and folds keep both right.
+ *
+ * @data NULL: a static pool and 600 random writes, which fold.
+ * @data set: a dynamic pool with tier_shrink_pct=99 and 1408 sequential
+ * pages. The dense room for host pages is (23 - borrowed) lines of 192
+ * pages: 32 lines less 4 static, 2 forced-GC, 2 translation-page lines and
+ * the frontier. The pool grows until Rule B gives lines back; the mapped
+ * pages must fit that room, computed here and not by the device.
+ */
+static void femu_test_tier_dftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t tv[7];
+    uint64_t mapped;
+    uint32_t seed = 7;
+    QDict *rsp;
+    QDict *ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x74, 8 * 4096);
+    if (data) {
+        femu_tier_write(&c, 0, 1408, 8, buf, list);
+    } else {
+        for (int i = 0; i < 600; i++) {
+            seed = seed * 1103515245 + 12345;
+            femu_tier_write(&c, (seed >> 8) % 4096, 1, 1, buf, list);
+        }
+    }
+    mapped = femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_FOLDS], >=, 1);
+    if (data) {
+        g_assert_cmpuint(mapped, ==, 1408);
+        g_assert_cmpuint(v[TIER_RULE_B], >, 0);
+        g_assert_cmpuint(mapped, <=, (23 - v[TIER_DYN]) * 192);
+    }
+    femu_tp_check(qts, "/machine/peripheral/gc-test", tv);
+    g_assert_cmpuint(tv[1] + tv[2] + tv[4], ==, 0);
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                  "map-write-pages"), >, 0);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
 }
 
 /*
@@ -54263,6 +54321,20 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=static,tier_static_mb=1,tier_full_policy=through,"
             "buffer_size=64,buffer_thres_pcent=90,buffer_low_pcent=1"
+    });
+    qos_add_test("tier-dftl", "femu", femu_test_tier_dftl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,mapping=dftl,x-cmt-slots=2"
+    });
+    qos_add_test("tier-dftl-dyn", "femu", femu_test_tier_dftl,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)1,
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=dynamic,tier_static_mb=1,mapping=dftl,x-cmt-slots=2,"
+            "tier_shrink_pct=99"
     });
     qos_add_test("tier-mp", "femu", femu_test_tier_mp,
                  &(QOSGraphTestOptions) {

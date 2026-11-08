@@ -264,7 +264,7 @@ Devices:
 
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
-| `tier_mode` | `str` | unset | bbssd: off (unset), static or dynamic; static keeps a pool of lines in pSLC mode in front of the dense lines, and host writes go there first. dynamic also borrows free dense lines for the pool while the device has room. Needs nand_cell_type 2, 3 or 4 and page mapping; refused with FDP, more than one namespace, buffer_size, Streams and the wear, refresh and pd_* features |
+| `tier_mode` | `str` | unset | bbssd: off (unset), static or dynamic; static keeps a pool of lines in pSLC mode in front of the dense lines, and host writes go there first. dynamic also borrows free dense lines for the pool while the device has room. Needs nand_cell_type 2, 3 or 4 and page or dftl mapping; refused with FDP, more than one namespace, Streams and the wear, refresh and pd_* features |
 | `tier_full_policy` | `str` | unset | bbssd with a tier_mode: what a host page does when the pool has no free page; direct (unset) writes it to the dense lines, through folds the oldest pool line first and writes it to the pool |
 | `tier_static_mb` | `uint32` | `0` | bbssd with a tier_mode: host data in MiB the static pSLC pool holds; the pool takes enough whole lines out of the over-provisioning, and realize refuses a pool that leaves the namespace too little room. Above 0 for static and for through; with dynamic it is the floor the pool keeps |
 | `tier_pslc_read_ns` | `uint64` | `25000` | bbssd with a tier_mode: time in ns of one pSLC page read, at most 10 s |

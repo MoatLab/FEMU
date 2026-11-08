@@ -121,8 +121,8 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (n->cxl_dev) {
         return "cxl_ssd";
     }
-    if (map && *map && strcmp(map, "page")) {
-        return "a mapping other than page";
+    if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
+        return "a mapping other than page or dftl";
     }
     if (n->power_loss) {
         return "power_loss";
@@ -328,6 +328,8 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     }
     t->user_pgs = DIV_ROUND_UP(ssd->ns->size,
                                (uint64_t)p->secs_per_pg * p->secsz);
+    /* dftl: the lines its translation pages take, as realize reserves */
+    t->tp_lines = bb_tp_reserve_lines(n, ssd->ns);
     QTAILQ_INIT(&t->free_lines);
     QTAILQ_INIT(&t->closed);
     t->read_ns = p->tier_pslc_read_ns;
@@ -414,7 +416,12 @@ bool ftl_tier_invalidate(struct ssd *ssd, struct line *line)
     struct ftl_tier *t = ssd->tier;
 
     if (t->state[line->id] == FTL_TIER_LINE_DENSE) {
-        t->dense_valid--;
+        /* a translation page is not host data: it does not fill the device */
+        if (line->kind == LINE_TP) {
+            t->dense_tp--;
+        } else {
+            t->dense_valid--;
+        }
         return false;
     }
     line->ipc++;
@@ -427,7 +434,11 @@ bool ftl_tier_invalidate(struct ssd *ssd, struct line *line)
 void ftl_tier_validate(struct ssd *ssd, struct line *line)
 {
     if (ssd->tier->state[line->id] == FTL_TIER_LINE_DENSE) {
-        ssd->tier->dense_valid++;
+        if (line->kind == LINE_TP) {
+            ssd->tier->dense_tp++;
+        } else {
+            ssd->tier->dense_valid++;
+        }
     }
 }
 
@@ -439,15 +450,17 @@ static uint64_t ftl_tier_live(struct ftl_tier *t)
 
 /*
  * The dense pages that may hold host data while the pool has @k borrowed
- * lines: the dense lines less the static pool, the reserves, the forced
- * collection threshold and the dense frontier.
+ * lines: the dense lines less the static pool, the reserves, the lines of
+ * the translation pages (dftl), the forced collection threshold and the
+ * dense frontier.
  */
 static uint64_t ftl_tier_cap(struct ssd *ssd, int k)
 {
     struct line_mgmt *lm = &ssd->lm;
     int64_t dense = (int64_t)lm->tt_lines - ssd->tier->nlines - k -
                     ssd->spare_lines - ssd->eol_reserve_lines -
-                    lm->retired_line_cnt - ssd->sp.gc_thres_lines_high - 1;
+                    lm->retired_line_cnt - ssd->tier->tp_lines -
+                    ssd->sp.gc_thres_lines_high - 1;
 
     return dense > 0 ? (uint64_t)dense * ssd->sp.pgs_per_line : 0;
 }
@@ -1419,15 +1432,25 @@ static uint64_t ftl_tier_check_live(struct ssd *ssd)
     uint64_t dense = 0;
     uint64_t mapped = 0;
 
+    uint64_t tp = 0;
+
     for (int i = 0; i < ssd->lm.tt_lines; i++) {
-        if (t->state[i] == FTL_TIER_LINE_DENSE) {
-            dense += ssd->lm.lines[i].vpc;
+        struct line *line = &ssd->lm.lines[i];
+
+        if (t->state[i] != FTL_TIER_LINE_DENSE) {
+            continue;
+        }
+        if (line->kind == LINE_TP) {
+            tp += line->vpc;
+        } else {
+            dense += line->vpc;
         }
     }
     for (uint64_t lpn = 0; lpn < (uint64_t)ssd->sp.tt_pgs; lpn++) {
         mapped += mapped_ppa(&ssd->maptbl[lpn]);
     }
-    return (dense != t->dense_valid) + (mapped != ftl_tier_live(t));
+    return (dense != t->dense_valid) + (tp != t->dense_tp) +
+           (mapped != ftl_tier_live(t));
 }
 
 /*

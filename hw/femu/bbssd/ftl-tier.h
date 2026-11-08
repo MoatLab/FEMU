@@ -123,7 +123,9 @@ struct ftl_tier {
     uint64_t fold_held;     /* fold reads of a page still held: a bug */
 
     uint64_t valid;         /* valid pages in pool lines */
-    uint64_t dense_valid;   /* valid pages in dense lines */
+    uint64_t dense_valid;   /* valid host pages in dense lines */
+    uint64_t dense_tp;      /* valid translation pages (dftl) */
+    int tp_lines;           /* lines the translation pages may take */
     uint64_t host_pslc;     /* host pages programmed in the pool */
     uint64_t host_dense;    /* host pages the full policy sent to dense */
     uint64_t fold_pages;    /* pages folds moved, also in gc_write_pages */

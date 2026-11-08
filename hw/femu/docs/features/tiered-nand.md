@@ -290,9 +290,11 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
 
 ## Limits
 
-- bbssd only, with one namespace and page mapping.
+- bbssd only, with one namespace and `page` or `dftl` mapping.
+- With `dftl`, translation pages stay on dense lines. They do not count in
+  the fill, and the dense room for host pages leaves their lines out.
 - Realize refuses the tier with FDP, KV, ZNS, CSD, OCSSD, `mapping` other
-  than `page`, `power_loss`, Streams, `hot_cold_sep`,
+  than `page` or `dftl`, `power_loss`, Streams, `hot_cold_sep`,
   `gc_pace` and `gc_copyback`.
 - Realize also refuses it with `blk_pe_limit`, `wl_spread`,
   `read_reclaim_limit`, `retention_limit_sec`, the `pd_*` properties,
