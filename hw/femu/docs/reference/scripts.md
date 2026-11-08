@@ -219,7 +219,7 @@ explains each.
 
 | Script | Arguments |
 | --- | --- |
-| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md` and `runtime-properties.md` from the binary; `--check` compares instead of writing (`--qemu` is still required) |
+| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md` and `runtime-properties.md` from the binary; `--check` compares instead of writing (`--qemu` is still required); `--schema FILE` also writes a JSON Schema (draft 2020-12) of each device's own properties: JSON type, integer range, default, description, QOM type and topic |
 | `gen-combinations.py` | rewrites `reference/combinations.md` from the refusal messages in `hw/femu`; `--check` compares instead of writing; `--self-test` checks the parser |
 | `gen-mode-table.py` | rewrites the mode tables from `docs/modes.py`; `--check` compares and checks `modes.py` against the code |
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |

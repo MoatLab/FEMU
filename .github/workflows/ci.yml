@@ -126,7 +126,18 @@ jobs:
         # Fails on a property with no or a placeholder description, and on a
         # committed hw/femu/docs/reference/*.md that differs from a fresh run.
         python3 hw/femu/scripts/gen-property-docs.py --check \
-          --qemu build-femu/qemu-system-x86_64
+          --qemu build-femu/qemu-system-x86_64 \
+          --schema /tmp/femu-properties.schema.json
+        # the JSON Schema loads, holds as many femu properties as the
+        # reference counts, and gives each a type
+        python3 -c "import json, re, sys; \
+          p = json.load(open('/tmp/femu-properties.schema.json'))['\$defs']['femu']['properties']; \
+          doc = open('hw/femu/docs/reference/properties.md').read(); \
+          m = re.search(r'-device femu. has (\d+) properties of its own and (\d+) QOM', doc); \
+          want = int(m.group(1)) + int(m.group(2)); \
+          bad = [n for n, v in p.items() if 'type' not in v]; \
+          print('schema: femu has %d properties, the reference %d' % (len(p), want)); \
+          sys.exit(1 if len(p) != want or bad else 0)"
 
     - name: Check the documentation links
       run: |
