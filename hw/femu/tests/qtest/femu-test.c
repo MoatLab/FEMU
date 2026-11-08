@@ -11083,7 +11083,14 @@ static void femu_test_intc_shared(void *obj, void *data,
     t0 = g_get_monotonic_time();
     femu_read_posted(&c, &c.io, buf);
     femu_read_posted(&c, &q2, buf);
-    g_assert_false(qpci_msix_pending(dev, 1));
+    /*
+     * Two of three completions: nothing fires before the 25.5 ms time.
+     * A slow host (a sanitizer build) can take that long for two reads,
+     * and then the time has rightly fired the vector.
+     */
+    if ((g_get_monotonic_time() - t0) / 1000 < 20) {
+        g_assert_false(qpci_msix_pending(dev, 1));
+    }
     if (del) {
         memset(&cmd, 0, sizeof(cmd));
         cmd.opcode = NVME_ADM_CMD_DELETE_SQ;
