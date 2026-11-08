@@ -2878,6 +2878,8 @@ typedef struct FemuCtrl {
     char            *persist_file;
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
+    char            *persist_path;   /* persist_file, absolute and resolved */
+    int             persist_lock_fd; /* holds persist_path.lock */
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
@@ -3440,6 +3442,7 @@ typedef struct FemuPel FemuPel;
 bool femu_pel_init(FemuCtrl *n, Error **errp);
 bool femu_persist_init(FemuCtrl *n, Error **errp);
 void femu_persist_exit(FemuCtrl *n);
+void femu_persist_abort(FemuCtrl *n);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_power_loss(FemuCtrl *n);

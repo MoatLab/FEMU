@@ -4882,6 +4882,11 @@ static uint16_t nvme_format_check_ns(FemuCtrl *n, NvmeNamespace *ns,
         return lba_idx || meta_loc || pil || pi ?
                NVME_INVALID_FORMAT | NVME_DNR : NVME_SUCCESS;
     }
+    /* persist_file keeps the data in the LBA format the device started with */
+    if (n->persist_file &&
+        lba_idx != NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
     status = nvme_format_check(n, &ns->id_ns, ns->femu_mode, lba_idx,
                                meta_loc, pil, pi);
     if (status == NVME_SUCCESS && nvme_fdp_format_block_bad(n, ns, lba_idx)) {

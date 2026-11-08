@@ -667,14 +667,20 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: pe_suspend_max and tresume_ns need pe_suspend
 
+## `pel_file`
+
+- persist_file and pel_file name one file
+
 ## `perf_hints`
 
 - perf_hints: %s
 
 ## `persist_file`
 
-- persist_file '%s' does not match this device: the mode, backend size (%
-- persist_file '%s' is shorter than the device
+- persist_file '%s' cannot be read in full
+- persist_file '%s' does not match this device: the mode, the backend size (%
+- persist_file '%s' is in use by another device
+- persist_file and pel_file name one file
 - persist_file is not supported with %s
 - persist_file must not be empty
 

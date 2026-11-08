@@ -3099,10 +3099,7 @@ static bool femu_cxl_link_check(FemuCtrl *n, Error **errp)
 static void femu_realize_undo(FemuCtrl *n)
 {
     /* a device that never came up keeps the file it was given */
-    if (n->persist_active) {
-        qemu_remove_exit_notifier(&n->persist_notifier);
-        n->persist_active = false;
-    }
+    femu_persist_abort(n);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;

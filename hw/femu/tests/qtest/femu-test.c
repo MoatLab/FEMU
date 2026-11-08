@@ -9402,6 +9402,8 @@ static int64_t femu_timed_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
  *
  *   lag 1:  w0 w1 [f0] w2 waits for f0      lag 2:  w0 w1 w2 [f0] w3 waits
  *
+ * An untimed first write takes wordline 0, so host page pg is wordline
+ * pg + 1.
  * The first write whose program queues behind a fine pass takes 50 ms;
  * the writes before it do not. With lag 1, a read of page 0 before its
  * fine pass comes from the buffer at once and after it pays the array
@@ -9430,13 +9432,16 @@ static void femu_test_prog_pass2(void *obj, void *data,
     rw.dptr.prp1 = cpu_to_le64(buf);
     rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
 
+    /* the first I/O pays a start cost: an untimed write takes wordline 0 */
+    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 7);
     for (int pg = 0; pg <= 3; pg++) {
         us = femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, pg);
         g_test_message("prog_pass2 %s: write %d took %" PRId64 " us",
                        (char *)data, pg, us);
-        if (!off && pg == lag + 1) {
+        /* page pg sits on wordline pg + 1; wordline lag completes first */
+        if (!off && pg == lag) {
             g_assert_cmpint(us, >=, 40000);
-        } else if (off || pg <= lag) {
+        } else if (off || pg < lag) {
             g_assert_cmpint(us, <, 40000);
         }
         if (pg == 0 && lag == 1) {
@@ -28882,14 +28887,15 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-persist-XXXXXX", NULL);
     g_autofree char *path = g_build_filename(dir, "data", NULL);
-    const char *mode = data ? "2" : "1";
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    int mode = data ? 2 : 1;
     QDict *rsp;
     int run;
 
     for (run = 1; run <= 2; run++) {
         QOSState *qs = qtest_pc_boot(
             "-machine pc -nodefaults -device femu,id=pd,addr=5,devsz_mb=16,"
-            "femu_mode=%s,persist_file=%s", mode, path);
+            "femu_mode=%d,persist_file=%s", mode, path);
         QTestState *qts = qs->qts;
         QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
         FemuCtrlState c = { 0 };
@@ -28912,8 +28918,12 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
             g_free(pdev);
             rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                             "'driver':'femu','id':'pd','addr':'5',"
-                            "'devsz_mb':16,'femu_mode':%s,"
+                            "'devsz_mb':16,'femu_mode':%d,"
                             "'persist_file':%s}}", mode, path);
+            if (qdict_haskey(rsp, "error")) {
+                g_test_message("device_add: %s", qdict_get_str(
+                               qdict_get_qdict(rsp, "error"), "desc"));
+            }
             g_assert_true(qdict_haskey(rsp, "return"));
             qobject_unref(rsp);
             pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
@@ -28923,10 +28933,22 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
             femu_ns_page(&c, buf, 1, 3, 0x3c, false);
             femu_ns_page(&c, buf, 1, 9, 0x9a, false);
             femu_disable(&c);
-            /* another size or mode does not take this file */
+            /* a second device cannot take a file in use */
             rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
                             "'driver':'femu','id':'pe','addr':'6',"
-                            "'devsz_mb':32,'femu_mode':%s,"
+                            "'devsz_mb':16,'femu_mode':%d,"
+                            "'persist_file':%s}}", mode, path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "in use"));
+            qobject_unref(rsp);
+            /* once it is free, another size does not take this file */
+            femu_queue_free(&c, &c.io);
+            qpci_unplug_acpi_device_test(qts, "pd", 5);
+            memset(&c, 0, sizeof(c));
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':32,'femu_mode':%d,"
                             "'persist_file':%s}}", mode, path);
             g_assert_true(qdict_haskey(rsp, "error"));
             g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
@@ -28941,12 +28963,15 @@ static void femu_test_persist(void *obj, void *data, QGuestAllocator *alloc)
                              "error"), "desc"), "not supported with"));
             qobject_unref(rsp);
         }
-        /* femu_disable() freed the admin queue */
-        femu_queue_free(&c, &c.io);
+        /* femu_disable() freed the admin queue; run 2 freed the I/O queue */
+        if (run == 1) {
+            femu_queue_free(&c, &c.io);
+        }
         guest_free(&qs->alloc, buf);
         g_free(pdev);
         qtest_pc_shutdown(qs);
     }
+    unlink(lock);
     unlink(path);
     rmdir(dir);
 }
