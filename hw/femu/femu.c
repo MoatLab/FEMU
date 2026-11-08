@@ -1619,13 +1619,50 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 /* map a namespace_modes token to a femu_mode; returns -1 on an unknown token */
 static int nvme_mode_from_token(const char *tok)
 {
-    if (!strcmp(tok, "nossd"))  return FEMU_NOSSD_MODE;
-    if (!strcmp(tok, "bbssd"))  return FEMU_BBSSD_MODE;
-    if (!strcmp(tok, "znssd"))  return FEMU_ZNSSD_MODE;
-    if (!strcmp(tok, "ocssd"))  return FEMU_OCSSD_MODE;
-    if (!strcmp(tok, "csd"))    return FEMU_CSD_MODE;
-    if (!strcmp(tok, "kvssd"))  return FEMU_KVSSD_MODE;
+    static const struct {
+        const char *name;
+        int mode;
+    } names[] = {
+        { "nossd", FEMU_NOSSD_MODE }, { "bbssd", FEMU_BBSSD_MODE },
+        { "znssd", FEMU_ZNSSD_MODE }, { "zns", FEMU_ZNSSD_MODE },
+        { "ocssd", FEMU_OCSSD_MODE }, { "csd", FEMU_CSD_MODE },
+        { "kvssd", FEMU_KVSSD_MODE }, { "kv", FEMU_KVSSD_MODE },
+    };
+
+    /* any letter case, as the ssd-config.sh mode= key takes it */
+    for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+        if (!g_ascii_strcasecmp(tok, names[i].name)) {
+            return names[i].mode;
+        }
+    }
     return -1;
+}
+
+/*
+ * mode=NAME sets femu_mode by name. femu_mode stays a number, which QMP
+ * device_add sends as one. A femu_mode other than its default must name the
+ * same mode; FEMU cannot tell an explicit femu_mode=2 from the default.
+ */
+static bool femu_mode_resolve(FemuCtrl *n, Error **errp)
+{
+    int m;
+
+    if (!n->mode_name) {
+        return true;
+    }
+    m = nvme_mode_from_token(n->mode_name);
+    if (m < 0) {
+        error_setg(errp, "mode '%s' is not one of ocssd, bbssd, nossd, zns, "
+                   "csd or kv", n->mode_name);
+        return false;
+    }
+    if (n->femu_mode != FEMU_NOSSD_MODE && n->femu_mode != m) {
+        error_setg(errp, "mode=%s and femu_mode=%u name different modes",
+                   n->mode_name, n->femu_mode);
+        return false;
+    }
+    n->femu_mode = m;
+    return true;
 }
 
 /*
@@ -4000,6 +4037,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     int64_t bs_size;
     uint64_t nand_cap = 0;
 
+    if (!femu_mode_resolve(n, errp)) {
+        return;
+    }
     /*
      * csd_pause times the controller on a clock of its own, and a shared
      * namespace takes the FTL of another controller. Refuse it before the
@@ -4781,6 +4821,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
+    DEFINE_PROP_STRING("mode", FemuCtrl, mode_name),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,

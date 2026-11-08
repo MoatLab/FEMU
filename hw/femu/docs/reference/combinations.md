@@ -229,6 +229,7 @@ own description allows. A message keeps its format directives (`%s`,
 - kv_max_keys needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_timing=model and kv_model_coeffs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
+- mode=%s and femu_mode=%u name different modes
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
 - persist_ftl needs femu_mode=1 (bbssd)
 
@@ -457,6 +458,25 @@ own description allows. A message keeps its format directives (`%s`,
 - meta: not supported with placement (fdp)
 - meta: protection information (dpc, dps) is not supported
 - pif is 0 or 2; 2 needs pi=on and meta of 16 or more
+
+## `mode`
+
+- CSD mode requires fdm_size to be non-zero
+- FDP with more than one namespace needs every namespace in bbssd mode or every one in nossd mode
+- FEMU kvssd: gc_policy=%s is not supported; KV mode always reclaims the emptiest line
+- csd_pause: namespace %d runs a mode other than bbssd or CSD
+- der=cylon requires cylon-kernel-ack=on after reviewing the host dual-mode leaf lifetime fix
+- meta: namespace %d runs a mode without metadata support (block or no-SSD only)
+- mode '%s' is not one of ocssd, bbssd, nossd, zns, csd or kv
+- mode=%s and femu_mode=%u name different modes
+- namespace lifecycle is unsupported for this mode
+- namespace lifecycle requires a homogeneous mode
+- namespace_modes: unknown mode '%s'
+- ocp needs bbssd or CSD namespaces; namespace %d is mode %u
+- ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
+- persist_file '%s' does not match this device: the mode, the backend size (%
+- shared namespace mode and capabilities must match
+- test-storm is threads,pages,iters,mode,seed with at most one thread per vCPU
 
 ## `mp_program`
 

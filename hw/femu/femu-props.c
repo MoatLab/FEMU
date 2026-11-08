@@ -74,6 +74,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Emulated SSD type: 0 OCSSD (Open-Channel), 1 bbssd (black-box "
       "FTL), 2 NoSSD (no media timing), 3 ZNS, 4 CSD (computational), 5 "
       "KV; other values fail realize" },
+    { "mode",
+      "the emulated SSD type by name: ocssd, bbssd, nossd, zns (or znssd), "
+      "csd or kv (or kvssd); it sets femu_mode, and a femu_mode other than "
+      "2 must name the same type; unset (default) leaves femu_mode" },
     { "devsz_mb",
       "Size of the host memory backend in MiB, split across namespaces "
       "unless namespace_sizes is set; bbssd with op_pcent sizes from the "
@@ -86,9 +90,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "such as 4G,2G), one non-empty entry per namespace, summing to at most "
       "the backend; unset splits the backend evenly" },
     { "namespace_modes",
-      "Comma-separated mode of each namespace from nossd, bbssd, znssd, "
-      "ocssd, csd and kvssd, one entry per namespace; unset gives every "
-      "namespace femu_mode" },
+      "Comma-separated mode of each namespace from nossd, bbssd, znssd (or "
+      "zns), ocssd, csd and kvssd (or kv), one entry per namespace; unset "
+      "gives every namespace femu_mode" },
     { "namespace_phls",
       "FDP placement handle list of each namespace: comma-separated entries, "
       "one per namespace, each a ':'-separated list of reclaim unit handle "

@@ -22,6 +22,13 @@ Any other value fails realize with "femu_mode must be 0 (OpenChannel), 1
 (black-box), 2 (no-SSD), 3 (zoned), 4 (computational storage) or 5
 (key-value)". With `femu_mode=0`, an `lver` other than 1 or 2 fails too.
 
+`mode` takes the name instead of the number: `ocssd`, `bbssd`, `nossd`,
+`zns`, `csd` or `kv` (`znssd` and `kvssd` work too), in any letter case.
+So `mode=bbssd` is `femu_mode=1`. A `femu_mode` other than 2 must name
+the same mode as `mode`. FEMU cannot tell an explicit `femu_mode=2` from
+the default, so `femu_mode=2` never overrides `mode`. query-femu reports
+the modes as `znssd` and `kvssd`.
+
 ## Decision table
 
 Settings are added to `-device femu,...` unless the row says otherwise. Each

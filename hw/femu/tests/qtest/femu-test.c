@@ -29514,6 +29514,60 @@ static void femu_test_persist_ftl(void *obj, void *data,
     rmdir(dir);
 }
 
+/* device_add a femu device at slot 6 with @members; its error text */
+static char *femu_mode_add(QTestState *qts, const char *members)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'driver':'femu','id':'mx','addr':'6','devsz_mb':16,%s}", members);
+    QObject *args = qobject_from_json(json, &error_abort);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           args);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/*
+ * mode=bbssd (the device line of this test) builds a bbssd device: its
+ * FTL answers query-femu. mode=bogus fails with the list of names, and
+ * mode=zns with femu_mode=1 fails as two modes. Through QMP, a matching
+ * pair in another letter case works, and femu_mode reads 1.
+ */
+static void femu_test_mode_names(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *ns;
+    g_autofree char *e1 = NULL;
+    g_autofree char *e2 = NULL;
+
+    /* query-femu answers an enabled controller */
+    femu_enable(&c, &femu->dev, alloc);
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/mode-test',"
+                       "'kind':'lines','offset':0,'limit':1", &rsp);
+    g_assert_nonnull(qdict_get_qlist(ns, "lines"));
+    qobject_unref(rsp);
+    femu_disable(&c);
+    e1 = femu_mode_add(qts, "'mode':'bogus'");
+    g_assert_nonnull(e1);
+    g_assert_nonnull(strstr(e1, "is not one of ocssd, bbssd"));
+    e2 = femu_mode_add(qts, "'mode':'zns','femu_mode':1");
+    g_assert_nonnull(e2);
+    g_assert_nonnull(strstr(e2, "name different modes"));
+    g_assert_null(femu_mode_add(qts, "'mode':'BBSSD','femu_mode':1"));
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/mx','property':'femu_mode'}}");
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 1);
+    qobject_unref(rsp);
+}
+
 /* QMP femu-save-data for @id into @file; the error text, or NULL */
 static char *femu_save_data(QTestState *qts, const char *id, const char *file)
 {
@@ -52580,6 +52634,10 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("mode-names", "femu", femu_test_mode_names,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=mode-test,mode=bbssd,devsz_mb=16"
+    });
     qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });

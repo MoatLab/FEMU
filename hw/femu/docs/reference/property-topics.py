@@ -36,7 +36,8 @@ DEVICES = [
                 "title": "Mode, capacity and namespaces",
                 "kind": "static",
                 "props": [
-                    "femu_mode", "devsz_mb", "namespaces", "namespace_sizes",
+                    "femu_mode", "mode", "devsz_mb", "namespaces",
+                    "namespace_sizes",
                     "namespace_modes", "namespace_phls", "op_pcent", "subsys",
                     "cxl_ssd",
                     "pel_file", "persist_file", "persist_ftl", "serial",

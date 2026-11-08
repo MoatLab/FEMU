@@ -2889,6 +2889,7 @@ typedef struct FemuCtrl {
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
     bool            persist_ftl;     /* the file holds the bbssd FTL too */
+    char            *mode_name;      /* mode=NAME, resolved into femu_mode */
     /*
      * Read Recovery Level (rrl, Feature 12h): the level the FTL thread
      * applies to host reads through the retry model; 4 is the default.

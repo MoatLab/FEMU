@@ -22,17 +22,18 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 275 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 276 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `femu_mode` | `uint8` | `2` | Emulated SSD type: 0 OCSSD (Open-Channel), 1 bbssd (black-box FTL), 2 NoSSD (no media timing), 3 ZNS, 4 CSD (computational), 5 KV; other values fail realize |
+| `mode` | `str` | unset | the emulated SSD type by name: ocssd, bbssd, nossd, zns (or znssd), csd or kv (or kvssd); it sets femu_mode, and a femu_mode other than 2 must name the same type; unset (default) leaves femu_mode |
 | `devsz_mb` | `uint32` | `1024` | Size of the host memory backend in MiB, split across namespaces unless namespace_sizes is set; bbssd with op_pcent sizes from the NAND geometry instead |
 | `namespaces` | `uint32` | `1` | Number of namespaces created at boot, 1 to 256; OCSSD supports only 1, and FDP more than 1 only when all are bbssd or all nossd |
 | `namespace_sizes` | `str` | unset | Comma-separated size in bytes of each namespace (QEMU size syntax such as 4G,2G), one non-empty entry per namespace, summing to at most the backend; unset splits the backend evenly |
-| `namespace_modes` | `str` | unset | Comma-separated mode of each namespace from nossd, bbssd, znssd, ocssd, csd and kvssd, one entry per namespace; unset gives every namespace femu_mode |
+| `namespace_modes` | `str` | unset | Comma-separated mode of each namespace from nossd, bbssd, znssd (or zns), ocssd, csd and kvssd (or kv), one entry per namespace; unset gives every namespace femu_mode |
 | `namespace_phls` | `str` | unset | FDP placement handle list of each namespace: comma-separated entries, one per namespace, each a ':'-separated list of reclaim unit handle IDs such as 0:1,,2 (placement handle i selects entry i); needs fdp=on, and unset gives every namespace every handle |
 | `op_pcent` | `uint32` | `0` | Over-provisioning in percent for bbssd: back the device with the full NAND capacity and expose capacity/(1 + op_pcent/100); 0 keeps devsz_mb sizing, not with cxl_ssd |
 | `subsys` | `link<femu-subsys>` | unset | ID of a femu-subsys device to join, created before this controller; needed for FDP, shared namespaces and the Endurance Group log |

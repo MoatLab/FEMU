@@ -516,10 +516,18 @@ def femu_io(val):
     props = dict(p.split("=", 1) if "=" in p else (p, "on")
                  for p in re.split(r"(?<!,),(?!,)", val)[1:])
     first = props.get("namespace_modes", "").replace(",,", ",").split(",")[0]
-    by_name = {"nossd": 2, "bbssd": 1, "znssd": 3, "ocssd": 0, "csd": 4,
-               "kvssd": 5}
+    first = first.lower()
+    # the names nvme_mode_from_token() takes, with their aliases
+    by_name = {"nossd": 2, "bbssd": 1, "znssd": 3, "zns": 3, "ocssd": 0,
+               "csd": 4, "kvssd": 5, "kv": 5}
+    named = props.get("mode", "").lower()
     try:
-        mode = by_name[first] if first in by_name else int(props.get("femu_mode", 2))
+        if first in by_name:
+            mode = by_name[first]
+        elif named in by_name:
+            mode = by_name[named]
+        else:
+            mode = int(props.get("femu_mode", 2))
     except ValueError:
         return "rw"
     return MODE_IO.get(mode, "rw")
