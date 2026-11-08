@@ -2890,6 +2890,17 @@ typedef struct FemuCtrl {
     bool            persist_active;  /* loaded; saves at unplug or exit */
     bool            persist_ftl;     /* the file holds the bbssd FTL too */
     char            *mode_name;      /* mode=NAME, resolved into femu_mode */
+    /* io_trace: one CSV line per posted I/O completion (femu-iotrace.c) */
+    char            *io_trace;
+    char            *iotrace_path;   /* io_trace as an absolute path */
+    FILE            *iotrace_f;
+    char            *iotrace_buf;    /* the stdio buffer, freed after close */
+    QemuMutex       iotrace_lock;    /* orders lines, final flush, close */
+    Notifier        iotrace_notifier;
+    bool            iotrace_on;      /* read by the pollers without the lock */
+    bool            iotrace_closed;
+    bool            iotrace_failed;
+    uint64_t        iotrace_dropped;
     /*
      * Read Recovery Level (rrl, Feature 12h): the level the FTL thread
      * applies to host reads through the retry model; 4 is the default.
@@ -3489,6 +3500,12 @@ typedef struct FemuPel FemuPel;
 bool femu_pel_init(FemuCtrl *n, Error **errp);
 bool femu_persist_init(FemuCtrl *n, Error **errp);
 void femu_persist_quiesce(FemuCtrl *n);
+bool femu_iotrace_init(FemuCtrl *n, Error **errp);
+char *femu_path_resolve(const char *file);
+bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only);
+void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now);
+void femu_iotrace_exit(FemuCtrl *n);
+void femu_iotrace_abort(FemuCtrl *n);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);
 bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp);

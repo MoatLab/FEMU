@@ -321,6 +321,14 @@ own description allows. A message keeps its format directives (`%s`,
 
 - the femu device does not time I/O stages; set io_stages=on
 
+## `io_trace`
+
+- femu-save-data: '%s' is a device's io_trace
+- io_trace must not be empty
+- io_trace: '%s' is a persist_file, pel_file or io_trace of a device
+- io_trace: cannot write '%s'
+- io_trace: no directory for '%s'
+
 ## `iu_pages`
 
 - FEMU bbssd: iu_pages is 0 to 64, and above 1 not with buffer_size, streams, mp_program, end-of-life read-only or FDP
@@ -732,6 +740,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `pel_file`
 
 - femu-save-data: '%s' is a device's pel_file
+- io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - persist_file and pel_file name one file
 
 ## `perf_hints`
@@ -741,6 +750,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `persist_file`
 
 - FEMU: rrl is not supported with persist_file
+- io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - persist_file '%s' cannot be read in full
 - persist_file '%s' does not match this device: the mode, the backend size (%
 - persist_file '%s' has a short FTL section

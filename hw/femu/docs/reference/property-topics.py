@@ -40,7 +40,8 @@ DEVICES = [
                     "namespace_sizes",
                     "namespace_modes", "namespace_phls", "op_pcent", "subsys",
                     "cxl_ssd",
-                    "pel_file", "persist_file", "persist_ftl", "serial",
+                    "pel_file", "persist_file", "persist_ftl", "io_trace",
+                    "serial",
                 ],
             },
             {

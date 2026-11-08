@@ -29363,6 +29363,81 @@ static char *femu_ftl_counters(QTestState *qts)
 static char *femu_save_data(QTestState *qts, const char *id,
                             const char *file);
 
+/*
+ * io_trace on a NoSSD device: two writes and a read, then quit. The file
+ * holds the header and one line per I/O command, in order, with the
+ * opcode, the range and status 0; the admin commands are not in it. A
+ * second device cannot take the file: the first one traces to it.
+ */
+static void femu_test_io_trace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-iotrace-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "trace.csv", NULL);
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=pd,addr=5,devsz_mb=16,"
+        "femu_mode=2,io_trace=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    QDict *rsp;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 16, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 16, buf)), ==,
+                    NVME_SUCCESS);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'pe','addr':'6','devsz_mb':16,"
+                    "'io_trace':%s}}", path);
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "io_trace of a device"));
+    qobject_unref(rsp);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", 0);
+    for (int i = 0; lines[i]; i++) {
+        g_test_message("io_trace: %s", lines[i]);
+    }
+    g_assert_cmpuint(g_strv_length(lines), ==, 5);    /* 4 lines, then "" */
+    g_assert_cmpstr(lines[0], ==, "t_submit_ns,t_cqe_ns,sqid,cid,nsid,"
+                    "opcode,slba,nlb,status");
+    for (int i = 1; i <= 3; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[i], ",", 0);
+        static const char *const want[4][3] = {
+            { NULL }, { "0x01", "0", "8" }, { "0x01", "16", "8" },
+            { "0x02", "16", "8" },
+        };
+
+        g_assert_cmpuint(g_strv_length(f), ==, 9);
+        g_assert_cmpuint(g_ascii_strtoull(f[1], NULL, 10), >=,
+                         g_ascii_strtoull(f[0], NULL, 10));
+        g_assert_cmpstr(f[2], ==, "1");
+        g_assert_cmpstr(f[4], ==, "1");
+        g_assert_cmpstr(f[5], ==, want[i][0]);
+        g_assert_cmpstr(f[6], ==, want[i][1]);
+        g_assert_cmpstr(f[7], ==, want[i][2]);
+        g_assert_cmpstr(f[8], ==, "0x0");
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
+
 /* valid pages of all 40 lines of device pd: one per mapped LPN */
 static uint64_t femu_ftl_vpc_sum(QTestState *qts)
 {
@@ -52634,6 +52709,7 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=mode-test,mode=bbssd,devsz_mb=16"

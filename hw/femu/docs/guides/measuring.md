@@ -205,6 +205,38 @@ QMP member names. The tool exits with status 2 when it cannot connect, finds
 no `femu` device, or loses the connection. On a terminal it redraws the
 screen; in a pipe it prints one block per sample.
 
+## Per-command I/O trace (io_trace)
+
+`io_trace=FILE` writes one CSV line for each I/O command whose completion
+FEMU posts, in every mode. FEMU creates the file and refuses one that
+exists, so it never writes over a file.
+
+```text
+t_submit_ns,t_cqe_ns,sqid,cid,nsid,opcode,slba,nlb,status
+1053200417,1053313090,1,7,1,0x01,0,8,0x0
+ |          |          | |  | |    | |  status: SCT and SC, with DNR
+ |          |          | |  | |    | +- blocks (Read, Write, Compare,
+ |          |          | |  | |    +--- SLBA     Write Zeroes, Verify)
+ |          |          | |  | +-------- opcode
+ |          |          | |  +---------- NSID of the command
+ |          |          | +------------- command ID
+ |          |          +--------------- submission queue
+ |          +-------------------------- CQE written (device clock, ns)
+ +------------------------------------- command fetched (device clock, ns)
+```
+
+`t_cqe_ns - t_submit_ns` runs from the fetch of the command to the CQE
+write, every model stage included. Time in the SQ before the fetch and
+the interrupt after the CQE are not in it. Only NVM and zoned namespaces
+get a range. Admin commands are not in the trace.
+
+The file is written through a 1 MiB buffer. QEMU exit flushes it, and
+lines that come after are dropped and counted. Unplug closes it. A
+device refuses a trace path that is any device's `persist_file`,
+`pel_file` or `io_trace`. `femu-trace2csv.py` in
+[scripts](../reference/scripts.md) gives another format from QEMU
+tracing: no NSID and no submit time.
+
 ## CXL SSD counters
 
 The `femu-cxl-ssd` counters are QOM properties, read on the host through

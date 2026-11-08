@@ -3173,6 +3173,7 @@ static void femu_realize_undo(FemuCtrl *n)
 {
     /* a device that never came up keeps the file it was given */
     femu_persist_abort(n);
+    femu_iotrace_abort(n);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;
@@ -4433,7 +4434,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     /* Validate retention before starting threads that would need unwinding. */
-    if (!femu_persist_init(n, errp) || !femu_pel_init(n, errp)) {
+    /* the trace first: its failure leaves nothing of the others to undo */
+    if (!femu_iotrace_init(n, errp) || !femu_persist_init(n, errp) ||
+        !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
         return;
     }
@@ -4662,6 +4665,8 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_persist_quiesce(n);
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
+    /* no poller posts a completion now */
+    femu_iotrace_exit(n);
     femu_persist_exit(n);
     femu_pel_exit(n);
     femu_fw_exit(n);
@@ -4822,6 +4827,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
     DEFINE_PROP_STRING("mode", FemuCtrl, mode_name),
+    DEFINE_PROP_STRING("io_trace", FemuCtrl, io_trace),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,
@@ -5773,6 +5779,7 @@ static void femu_instance_finalize(Object *obj)
     n->nand_profile_name = NULL;
     qemu_mutex_destroy(&n->ocp_lat.lock);
     qemu_mutex_destroy(&n->ocp_inj_lock);
+    qemu_mutex_destroy(&n->iotrace_lock);
     qemu_mutex_destroy(&n->rn_lock);
     qemu_mutex_destroy(&n->ps_lock);
 }
@@ -5781,6 +5788,7 @@ static void femu_instance_init(Object *obj)
 {
     qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
     qemu_mutex_init(&FEMU(obj)->ocp_inj_lock);
+    qemu_mutex_init(&FEMU(obj)->iotrace_lock);
     qemu_mutex_init(&FEMU(obj)->rn_lock);
     qemu_mutex_init(&FEMU(obj)->ps_lock);
     seqlock_init(&FEMU(obj)->ocp_lat.seq);

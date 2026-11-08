@@ -731,6 +731,13 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         nvme_write_cqe(n, cq, cqe);
     }
     nvme_inc_cq_tail(cq);
+    /*
+     * io_trace takes the CQE time before the OCP latency monitor, which
+     * may wait for its lock, adds to it.
+     */
+    if (unlikely(qatomic_read(&n->iotrace_on)) && cq->cqid) {
+        femu_iotrace_note(n, req, femu_io_now(n));
+    }
     /* OCP latency monitor: SQ fetch to CQE write, I/O queues only */
     if (unlikely(n->ocp) && cq->cqid) {
         femu_ocp_lat_note(n, req, femu_io_now(n));

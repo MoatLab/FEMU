@@ -449,6 +449,53 @@ static int persist_pel_match(Object *obj, void *opaque)
     return pel && !strcmp(pel, path);
 }
 
+/* @path as persist_file resolves it; NULL when its directory is missing */
+char *femu_path_resolve(const char *file)
+{
+    return persist_resolve(file, NULL);
+}
+
+typedef struct FemuPathUse {
+    FemuCtrl *self;
+    const char *path;
+    bool traces_only;
+} FemuPathUse;
+
+static int persist_path_match(Object *obj, void *opaque)
+{
+    FemuPathUse *u = opaque;
+    FemuCtrl *n = (FemuCtrl *)object_dynamic_cast(obj, TYPE_NVME);
+    g_autofree char *persist = NULL;
+    g_autofree char *pel = NULL;
+
+    if (!n) {
+        return 0;
+    }
+    if (n != u->self && n->iotrace_path && !strcmp(n->iotrace_path, u->path)) {
+        return 1;
+    }
+    if (u->traces_only) {
+        return 0;
+    }
+    persist = n->persist_file ? persist_resolve(n->persist_file, NULL) : NULL;
+    pel = n->pel_file ? persist_resolve(n->pel_file, NULL) : NULL;
+    return (persist && !strcmp(persist, u->path)) ||
+           (pel && !strcmp(pel, u->path));
+}
+
+/*
+ * Whether @path is a file a femu device keeps: another device's io_trace,
+ * or (unless @traces_only) any device's persist_file or pel_file, @self
+ * included. Those files are saved by rename, which would replace a trace.
+ */
+bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only)
+{
+    FemuPathUse u = { .self = self, .path = path, .traces_only = traces_only };
+
+    return object_child_foreach_recursive(object_get_root(),
+                                          persist_path_match, &u);
+}
+
 /* hold FILE.lock for the device's life; another holder fails realize */
 static bool persist_lock(FemuCtrl *n, Error **errp)
 {
@@ -778,6 +825,10 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     if (object_child_foreach_recursive(object_get_root(), persist_pel_match,
                                        path)) {
         error_setg(errp, "femu-save-data: '%s' is a device's pel_file", path);
+        return false;
+    }
+    if (femu_path_in_use(NULL, path, true)) {
+        error_setg(errp, "femu-save-data: '%s' is a device's io_trace", path);
         return false;
     }
     /*

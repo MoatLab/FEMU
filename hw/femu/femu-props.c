@@ -122,6 +122,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "9 and 15). Level 4 (default) recovers as the retry model does; 9 "
       "skips soft decode and 15 (Fast Fail) makes one hard decode, and a "
       "codeword they leave uncorrected fails the read; off (default)" },
+    { "io_trace",
+      "host file for an I/O trace: one CSV line per completed I/O command "
+      "(t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), "
+      "in every mode; the file must not exist; unset (default) is off" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
       "(mapping, page and block state, lines, write pointer, counters), "
