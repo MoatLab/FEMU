@@ -155,9 +155,6 @@ static const char *bb_tier_refused(FemuCtrl *n)
         p->pd_open_age || p->pd_open_read_limit || p->pd_open_close_sec) {
         return "the pd_* properties";
     }
-    if (p->mp_program) {
-        return "mp_program";
-    }
     if (p->onfi_cache_read) {
         return "onfi_cache_read";
     }
@@ -602,6 +599,10 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
         return false;
     }
 
+    lun = get_lun(ssd, src);
+    for (int i = 0; i < lun->mp_prog.n; i++) {
+        t->fold_held += lun->mp_prog.ppa[i].ppa == src->ppa;
+    }
     /* each end counts from the start the command got */
     lat = ssd_advance_status(ssd, src, &rd);
     ready = rd.stime + lat;
@@ -685,6 +686,11 @@ static uint64_t ftl_tier_fold_n(struct ssd *ssd, struct line *victim,
     if (!victim) {
         return 0;
     }
+    /*
+     * A held multi-plane program has a mapping but no charge yet. Charge
+     * them first, so no fold read comes before the program it reads.
+     */
+    t->mp_drain_lat = MAX(t->mp_drain_lat, ssd_mp_drain_programs(ssd));
     t->fold_line = victim;
     if (!t->fold_start) {
         t->fold_start = now;
@@ -1231,6 +1237,18 @@ void ftl_tier_destaged(struct ssd *ssd, uint64_t end, bool booked)
     }
 }
 
+/*
+ * What draining held programs for a fold cost the request that holds
+ * them, once: the caller adds it to that request's latency.
+ */
+uint64_t ftl_tier_take_drain(struct ssd *ssd)
+{
+    uint64_t lat = ssd->tier->mp_drain_lat;
+
+    ssd->tier->mp_drain_lat = 0;
+    return lat;
+}
+
 /* an idle write-back stopped: the next page needs a fold */
 void ftl_tier_bg_deferred(struct ssd *ssd)
 {
@@ -1570,7 +1588,8 @@ char *ssd_tier_report(struct ssd *ssd)
                            " %" PRIu64 " %" PRIu64 " %d %d %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                           " %" PRIu64 " %d %" PRIu64 " %" PRIu64,
+                           " %" PRIu64 " %d %" PRIu64 " %" PRIu64
+                           " %" PRIu64,
                            t->nlines, t->line_pgs, t->free_cnt, t->closed_cnt,
                            t->wp.curline != NULL, t->valid, t->host_pslc,
                            t->host_dense, t->fold_pages, t->folds,
@@ -1585,5 +1604,5 @@ char *ssd_tier_report(struct ssd *ssd)
                            t->rule_b_folds, t->rule_c_folds, t->idle_steps,
                            t->idle_folds, t->idle_pages, t->idle_early,
                            t->fold_line != NULL, t->upkeep_steps,
-                           t->bg_defers);
+                           t->bg_defers, t->fold_held);
 }

@@ -528,6 +528,21 @@ static uint64_t ssd_mp_add(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
 }
 
 /* charge every held page of one kind; returns the longest latency */
+static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd);
+
+/**
+ * ssd_mp_drain_programs - charge every held multi-plane program now
+ * @ssd: the FTL
+ *
+ * For a pSLC fold, which reads and erases pool pages: a page whose program
+ * is still held would be read before it is written. Returns the latency
+ * from the start of the request that holds them; 0 without mp_program.
+ */
+uint64_t ssd_mp_drain_programs(struct ssd *ssd)
+{
+    return ssd_mp_flush(ssd, NAND_WRITE);
+}
+
 static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -716,7 +731,8 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
             if (ssd_out_of_lines(ssd)) {
                 ftl_tier_place_failed(ssd);
                 *placed = false;
-                return stime > base ? stime - base : 0;
+                return MAX(stime > base ? stime - base : 0,
+                           ftl_tier_take_drain(ssd));
             }
             ppa = get_new_page_class(ssd, plan.target_class);
         }
@@ -755,6 +771,10 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         swr.cmd = NAND_WRITE;
         swr.stime = stime;
         lat = ssd_advance_status(ssd, &ppa, &swr) + (stime - base);
+    }
+    /* held programs a fold for this page charged belong to this request */
+    if (unlikely(ssd->tier)) {
+        lat = MAX(lat, ftl_tier_take_drain(ssd));
     }
     /* A full logical log cannot accept another program in this command. */
     if (ssd->mapping->reclaim_per_page &&

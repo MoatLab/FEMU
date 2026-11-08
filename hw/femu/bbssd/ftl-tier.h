@@ -118,6 +118,10 @@ struct ftl_tier {
     uint64_t upkeep_steps;
     uint64_t bg_defers;     /* idle write-backs that stopped for a fold */
 
+    /* mp_program: what draining held programs before a fold cost */
+    uint64_t mp_drain_lat;
+    uint64_t fold_held;     /* fold reads of a page still held: a bug */
+
     uint64_t valid;         /* valid pages in pool lines */
     uint64_t dense_valid;   /* valid pages in dense lines */
     uint64_t host_pslc;     /* host pages programmed in the pool */
@@ -182,6 +186,7 @@ void ftl_tier_idle_step(struct ssd *ssd, uint64_t now);
 enum ftl_tier_place ftl_tier_place_query(struct ssd *ssd, uint64_t now);
 void ftl_tier_destaged(struct ssd *ssd, uint64_t end, bool booked);
 void ftl_tier_bg_deferred(struct ssd *ssd);
+uint64_t ftl_tier_take_drain(struct ssd *ssd);
 bool ftl_tier_upkeep_due(struct ssd *ssd, uint64_t now);
 void ftl_tier_upkeep_step(struct ssd *ssd, uint64_t now);
 

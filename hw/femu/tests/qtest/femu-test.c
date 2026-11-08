@@ -50289,17 +50289,17 @@ enum {
     TIER_BUSY, TIER_DYN, TIER_ALLOWED, TIER_BAD_LIVE, TIER_BAD_DYN,
     TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_IDLE_STEPS,
     TIER_IDLE_FOLDS, TIER_IDLE_PAGES, TIER_IDLE_EARLY, TIER_FOLD_OPEN,
-    TIER_UPKEEP_STEPS, TIER_BG_DEFERS,
+    TIER_UPKEEP_STEPS, TIER_BG_DEFERS, TIER_FOLD_HELD,
     TIER_FIELDS,
 };
 
 /*
  * x-tier-check of device gc-test into @v, with every tier rule and the
- * mapping rules of x-ftl-check holding, and @lines static pool lines.
- * Returns the mapped pages.
+ * mapping rules of x-ftl-check holding, @lines static pool lines of
+ * @line_pgs pages. Returns the mapped pages.
  */
-static uint64_t femu_tier_check_lines(QTestState *qts, uint64_t *v,
-                                      uint64_t lines)
+static uint64_t femu_tier_check_geo(QTestState *qts, uint64_t *v,
+                                    uint64_t lines, uint64_t line_pgs)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
                            "'path':'/machine/peripheral/gc-test',"
@@ -50326,14 +50326,22 @@ static uint64_t femu_tier_check_lines(QTestState *qts, uint64_t *v,
     }
     /* an idle step never starts before the work of the last one ended */
     g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
+    /* a fold never reads a page whose multi-plane program is still held */
+    g_assert_cmpuint(v[TIER_FOLD_HELD], ==, 0);
     g_assert_cmpuint(v[TIER_LINES], ==, lines);
-    g_assert_cmpuint(v[TIER_LINE_PGS], ==, 64);
+    g_assert_cmpuint(v[TIER_LINE_PGS], ==, line_pgs);
     g_assert_cmpuint(v[TIER_FREE] + v[TIER_CLOSED] + v[TIER_OPEN], ==,
                      lines + v[TIER_DYN]);
     femu_ftl_check(qts, &mapped, &lost, &orphans);
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
     return mapped;
+}
+
+static uint64_t femu_tier_check_lines(QTestState *qts, uint64_t *v,
+                                      uint64_t lines)
+{
+    return femu_tier_check_geo(qts, v, lines, 64);
 }
 
 /* femu_tier_check_lines() for the 4-line static pool of the S1 tests */
@@ -50446,6 +50454,42 @@ static void femu_test_tier_refused(void *obj, void *data,
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
+}
+
+/*
+ * The pSLC tier with mp_program on 2 planes (TLC blocks of 96 pages, so a
+ * pool line holds 4 LUNs x 2 planes x 32 = 256 pages, and tier_static_mb=1
+ * is that one line). Three-page commands fill the line, and the command
+ * that crosses its end holds programs in the per-LUN batches when the
+ * next page folds the line (through). The fold charges them first, so it
+ * never reads a page that is not programmed yet.
+ */
+static void femu_test_tier_mp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 3 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x73, 3 * 4096);
+    femu_tier_write(&c, 0, 255, 3, buf, list);
+    femu_tier_check_geo(qts, v, 1, 256);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 255);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    femu_tier_write(&c, 255, 9, 3, buf, list);
+    g_assert_cmpuint(femu_tier_check_geo(qts, v, 1, 256), ==, 264);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 256);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 264);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
 }
 
 /*
@@ -54219,6 +54263,14 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=static,tier_static_mb=1,tier_full_policy=through,"
             "buffer_size=64,buffer_thres_pcent=90,buffer_low_pcent=1"
+    });
+    qos_add_test("tier-mp", "femu", femu_test_tier_mp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=96,blks_per_pl=32,pls_per_lun=2,luns_per_ch=2,"
+            "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
+            "tier_full_policy=through,mp_program=1"
     });
     qos_add_test("tier-direct", "femu", femu_test_tier_direct,
                  &(QOSGraphTestOptions) {

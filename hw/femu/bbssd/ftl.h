@@ -924,6 +924,7 @@ void bb_gc_idle(FemuCtrl *n);
 void bb_buffer_idle(FemuCtrl *n);
 uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now);
 bool ssd_buffer_bg_wants(struct ssd *ssd);
+uint64_t ssd_mp_drain_programs(struct ssd *ssd);
 int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);

@@ -296,7 +296,11 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
   `gc_pace` and `gc_copyback`.
 - Realize also refuses it with `blk_pe_limit`, `wl_spread`,
   `read_reclaim_limit`, `retention_limit_sec`, the `pd_*` properties,
-  `mp_program`, `onfi_cache_read`, `pe_suspend` and `ecc_step_ns`.
+  `onfi_cache_read`, `pe_suspend` and `ecc_step_ns`.
+- With `mp_program`, pool pages program as multi-plane commands, as dense
+  pages do. A fold first charges the programs that the multi-plane batches
+  still hold, so it never reads a page before its program. That charge
+  goes to the request that holds them.
 - With `pe_suspend`, a read could move the end of a fold program past the
   time the erase waits for, so the tier refuses it.
 - `tier_full_policy=through` needs `tier_static_mb` above 0. A static pool
