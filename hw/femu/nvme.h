@@ -3181,6 +3181,7 @@ typedef struct FemuCtrl {
     bool            buffer_bg;      /* the FTL thread writes back when idle */
     /* qtest only: the next pSLC fold stops after this many pages, once */
     uint32_t        test_tier_fold_stop;
+    uint32_t        test_place_fail;    /* qtest: the next N placements fail */
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */

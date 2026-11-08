@@ -402,6 +402,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Data correctness
 
+- Write buffer: a page leaves the buffer only after it finds a place on the media. Before, a failed placement dropped the page. An FUA write or a Write Zeroes whose page finds no place now fails with Capacity Exceeded.
 - Write buffer: a Flush now waits for the programs of the idle write-back, and it fails when a page finds no line. Disabling the volatile write cache writes back the buffer first.
 - A CXL memory device (`cxl-type3` and `femu-cxl-ssd`) disables its media while a Sanitize command runs, as the CXL specification says. The media check read the first mailbox register instead of the memory device status, so media was never disabled; it now reads the status atomically, so `femu-cxl-ssd` fault exits without the BQL read it without a data race.
 - With more than one poller, a read no longer sees a write, a Copy destination or a Write Zeroes range half done. Each NVMe access to the memory backend now holds the locks of the 4 KiB granules it touches, so a write is atomic as AWUN 0 promises. CXL.mem accesses of a `femu-cxl-ssd` medium do not take these locks.

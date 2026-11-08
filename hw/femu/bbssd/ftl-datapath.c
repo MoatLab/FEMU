@@ -123,25 +123,16 @@ int ssd_buffer_batch(struct ssd *ssd)
     return batch > 0 ? batch : 1;
 }
 
-/* take the least recently written page out of the buffer */
-static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
+/* free a buffer entry once its page no longer needs the buffer */
+static void buffer_remove(struct ssd *ssd, struct buffer_entry *entry)
 {
-    struct buffer_entry *victim = QTAILQ_FIRST(&ssd->write_buffer);
-
-    if (!victim) {
-        return false;
-    }
-
-    *lpn = victim->lpn;
-    QTAILQ_REMOVE(&ssd->write_buffer, victim, b_entry);
-    g_tree_remove(ssd->wb_tree, victim);
-    g_free(victim->undo);
-    g_free(victim->lba_state);
-    g_free(victim->written);
-    g_free(victim);
+    QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
+    g_tree_remove(ssd->wb_tree, entry);
+    g_free(entry->undo);
+    g_free(entry->lba_state);
+    g_free(entry->written);
+    g_free(entry);
     ssd->write_buffer_cnt--;
-
-    return true;
 }
 
 /*
@@ -200,13 +191,7 @@ void ssd_buffer_discard(struct ssd *ssd, uint64_t lpn)
         return;
     }
 
-    QTAILQ_REMOVE(&ssd->write_buffer, held, b_entry);
-    g_tree_remove(ssd->wb_tree, held);
-    g_free(held->undo);
-    g_free(held->lba_state);
-    g_free(held->written);
-    g_free(held);
-    ssd->write_buffer_cnt--;
+    buffer_remove(ssd, held);
 }
 
 /* a read served from the buffer does not reach the media */
@@ -585,10 +570,10 @@ static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
  * otherwise the two run in parallel and the later one ends the page.
  */
 static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
-                                uint64_t base, int stream);
+                                uint64_t base, int stream, bool *placed);
 
 static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
-                                    uint64_t stime, int stream);
+                                    uint64_t stime, int stream, bool *placed);
 static uint64_t ssd_gc_until_clear(struct ssd *ssd);
 
 /*
@@ -628,10 +613,16 @@ static uint64_t ssd_iu_rmw(struct ssd *ssd, uint64_t start_lpn,
                 if (ssd_host_out_of_lines(ssd)) {
                     break;
                 }
+                bool placed;
+
                 maxlat = MAX(maxlat, ssd_gc_until_clear(ssd));
                 maxlat = MAX(maxlat, rd + ssd_map_and_program(ssd, lpn,
                                                               stime + rd,
-                                                              stream));
+                                                              stream, &placed));
+                /* an unplaced page keeps its old mapping, which still reads */
+                if (!placed) {
+                    break;
+                }
                 ssd->iu_rmw_pages++;
             }
         }
@@ -640,15 +631,16 @@ static uint64_t ssd_iu_rmw(struct ssd *ssd, uint64_t start_lpn,
 }
 
 static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
-                                    uint64_t stime, int stream)
+                                    uint64_t stime, int stream, bool *placed)
 {
     uint64_t map = ssd_map_lat(ssd, lpn, stime, true);
     uint64_t t = stime ? stime : ssd_now(ssd);
 
+    /* a translation program is not the data page: @placed is the program's */
     if (ssd->tp_on && ssd->sp.hot_cold_sep && map) {
-        return ssd_program_lpn(ssd, lpn, t + map, t, stream);
+        return ssd_program_lpn(ssd, lpn, t + map, t, stream, placed);
     }
-    return MAX(map, ssd_program_lpn(ssd, lpn, stime, stime, stream));
+    return MAX(map, ssd_program_lpn(ssd, lpn, stime, stime, stream, placed));
 }
 
 /*
@@ -659,7 +651,7 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
  * to wait for the translation; the latency counts from @base.
  */
 static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
-                                uint64_t base, int stream)
+                                uint64_t base, int stream, bool *placed)
 {
     struct map_write_plan plan;
     struct nand_cmd swr;
@@ -673,6 +665,21 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         if (mapped_ppa(&old))
             EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
                     lpn, PPA_ARG(&old));
+    }
+
+    /* x-place-fail: qtest makes this page find no place, before any change */
+    if (unlikely(ssd->n && qatomic_read(&ssd->n->test_place_fail))) {
+        uint32_t *left = &ssd->n->test_place_fail;
+        uint32_t v = qatomic_read(left);
+
+        /* take one count; a qom-set to 0 in between takes none */
+        while (v && qatomic_cmpxchg(left, v, v - 1) != v) {
+            v = qatomic_read(left);
+        }
+        if (v) {
+            *placed = false;
+            return stime > base ? stime - base : 0;
+        }
     }
 
     /* mapping scheme picks placement (page/dftl: data class, no reclaim) */
@@ -696,12 +703,19 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         if (unlikely(ssd->tier) && !mapped_ppa(&ppa)) {
             if (ssd_out_of_lines(ssd)) {
                 ftl_tier_place_failed(ssd);
+                *placed = false;
                 return stime > base ? stime - base : 0;
             }
             ppa = get_new_page_class(ssd, plan.target_class);
         }
     }
     ssd->mapping->commit_write(ssd, lpn, &ppa);
+    /*
+     * Placed: the mapping names a new page and its program is booked. A
+     * program held for a multi-plane batch counts; the caller's
+     * ssd_mp_flush() charges it.
+     */
+    *placed = true;
 
     mark_page_valid(ssd, &ppa);
     ssd->nand_write_pages++; /* write amplification: a user page programmed */
@@ -782,8 +796,9 @@ static uint64_t ssd_gc_until_clear(struct ssd *ssd)
  */
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
 {
+    struct buffer_entry *victim;
     uint64_t maxlat = 0, curlat;
-    uint64_t lpn;
+    bool placed;
     int done = 0;
 
     /* under FDP each page goes to the unit of its own placement handle */
@@ -792,11 +807,7 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     }
 
     while (budget <= 0 || done < budget) {
-        /*
-         * Tested before a victim is chosen: selecting one removes it from the
-         * buffer, and a page taken out but not programmed would be lost from
-         * the occupancy count for nothing.
-         */
+        /* no line left: nothing can be placed */
         if (ssd_out_of_lines(ssd)) {
             break;
         }
@@ -808,22 +819,27 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
          */
         curlat = ssd_gc_until_clear(ssd);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
-        /*
-         * The collection above can consume the last line, so ask again, and
-         * only then take a page out of the buffer: one taken out with nowhere
-         * to program it would never reach the media or the mapping.
-         */
+        /* the collection above can consume the last line, so ask again */
         if (ssd_out_of_lines(ssd)) {
             break;
         }
 
-        if (!buffer_select_victim(ssd, &lpn)) {
+        victim = QTAILQ_FIRST(&ssd->write_buffer);
+        if (!victim) {
             break;
         }
 
         /* with dftl, the translation goes with the program */
-        curlat = ssd_map_and_program(ssd, lpn, stime, -1);
+        curlat = ssd_map_and_program(ssd, victim->lpn, stime, -1, &placed);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+        /*
+         * The entry leaves only once its page is placed. One with nowhere
+         * to go keeps its place at the head and the write-back stops.
+         */
+        if (!placed) {
+            break;
+        }
+        buffer_remove(ssd, victim);
         done++;
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
@@ -1034,6 +1050,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     bool wl_done;
     uint64_t passes = ssd->gc_stall_passes;
     bool buffer_full = false;
+    bool placed;
+    bool drain;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -1086,17 +1104,20 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
              * also bounds the latency a single command can absorb.
              */
             if (!ssd_buffer_hit(ssd, lpn) && ssd_buffer_at_watermark(ssd)) {
+                int before = ssd->write_buffer_cnt;
+
                 buffer_full = true;
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
                 /*
                  * The write-back could not free anything, so the buffer is at
-                 * its limit and the media is full. Accepting more here would
-                 * grow it past its configured size and report success for
-                 * pages that can never be programmed; the direct path tells
-                 * the host instead, and so does this one.
+                 * its limit and no page found a place. Accepting more here
+                 * would grow it past its configured size and report success
+                 * for pages that can never be programmed; the direct path
+                 * tells the host instead, and so does this one.
                  */
-                if (ssd_out_of_lines(ssd) && ssd_buffer_at_watermark(ssd)) {
+                if (ssd->write_buffer_cnt >= before &&
+                    ssd_buffer_at_watermark(ssd)) {
                     req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                     break;
                 }
@@ -1123,25 +1144,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     /*
      * Going direct while pages are still buffered: either the host disabled
      * the write cache, or this is an FUA write. Anything the buffer holds for
-     * a page this request also writes has to go first -- programming it
-     * afterwards would put the older version on the media. Dropping the entry
-     * is enough, since the program below writes the newer version anyway.
+     * a page this request also writes must not be programmed after it, as
+     * that would put the older version on the media. Each such entry goes
+     * once its page is placed below; one whose page finds no place stays
+     * owed. A disabled cache then writes back the rest.
      */
-    if (ssd->write_buffer_cnt) {
-        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-            if (!ssd->n->power_loss) {
-                ssd_buffer_discard(ssd, lpn);
-            }
-        }
-        /*
-         * A disabled write cache must not keep pages back at all, so drain the
-         * rest too. An FUA write only owes its own pages and leaves them.
-         */
-        if (!ssd_buffer_enabled(ssd)) {
-            curlat = ssd_buffer_destage(ssd, 0, req->stime);
-            maxlat = (curlat > maxlat) ? curlat : maxlat;
-        }
-    }
+    drain = ssd->write_buffer_cnt && !ssd_buffer_enabled(ssd);
 
     /* a partial indirection unit: read and rewrite the rest of it */
     if (unlikely(spp->iu_pages > 1)) {
@@ -1174,13 +1182,21 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
         }
 
-        if (ssd->n->power_loss) {
-            ssd_buffer_discard(ssd, lpn);
-        }
+        /*
+         * Under power_loss a buffered copy keeps its undo record until this
+         * page is placed: a cut after a failed placement restores it.
+         */
         buffer_write_data(ssd, req, lpn, false);
         /* with dftl, the translation goes with the program */
-        curlat = ssd_map_and_program(ssd, lpn, req->stime, stream);
+        curlat = ssd_map_and_program(ssd, lpn, req->stime, stream, &placed);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+        if (!placed) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            break;
+        }
+        if (ssd->write_buffer_cnt) {
+            ssd_buffer_discard(ssd, lpn);
+        }
 
         /*
          * Wear levelling needs the data pointer on a fresh line, and a long
@@ -1195,10 +1211,15 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             }
         }
     }
-    /* the write waited for collection to make room */
-    ssd_note_gc_stall(ssd, passes);
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;
+    /* a disabled write cache must not keep pages back at all */
+    if (drain && ssd->write_buffer_cnt) {
+        curlat = ssd_buffer_destage(ssd, 0, req->stime);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+    /* the write waited for collection to make room */
+    ssd_note_gc_stall(ssd, passes);
 
     /*
      * Let schemes without per-page reclaim collect once the writes have
@@ -1312,6 +1333,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         uint64_t lpn, curlat, maxlat = 0;
         uint64_t passes = ssd->gc_stall_passes;
         bool wl_done;
+        bool placed;
 
         /*
          * Without the bit the blocks hold written zeros rather than becoming
@@ -1341,19 +1363,6 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         ssd_count_partial_pages(ssd, req, le64_to_cpu(rw->slba),
                                 le16_to_cpu(rw->nlb) + 1);
 
-        /*
-         * This goes straight to the media, so anything the buffer is holding
-         * for these pages has to go first, exactly as the direct write path
-         * does: leaving it there programs the superseded version afterwards,
-         * which is one more program per page than the media owes and shows up
-         * as amplification the workload did not cause.
-         */
-        if (ssd->write_buffer_cnt) {
-            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-                ssd_buffer_discard(ssd, lpn);
-            }
-        }
-
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             /* per page, for the reason ssd_write() gives */
             curlat = ssd_gc_until_clear(ssd);
@@ -1363,8 +1372,20 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
                 break;
             }
             /* with dftl, the translation goes with the program */
-            curlat = ssd_map_and_program(ssd, lpn, req->stime, -1);
+            curlat = ssd_map_and_program(ssd, lpn, req->stime, -1, &placed);
             maxlat = (curlat > maxlat) ? curlat : maxlat;
+            if (!placed) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                break;
+            }
+            /*
+             * This goes straight to the media, so a buffered copy of the page
+             * goes once the page is placed, as on the direct write path:
+             * left there, it programs the superseded version afterwards.
+             */
+            if (ssd->write_buffer_cnt) {
+                ssd_buffer_discard(ssd, lpn);
+            }
             /* the pages are programmed, so wear levelling sees them too */
             if (spp->wl_spread) {
                 ssd->wl_credit = MIN(ssd->wl_credit + 1,

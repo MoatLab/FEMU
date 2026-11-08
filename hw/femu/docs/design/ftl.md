@@ -845,9 +845,13 @@ handle's reclaim unit (`fdp_buffer_destage()` in
   that pays differs.
 - **Reads.** A read of a buffered page costs one DRAM access and does not
   reach NAND, even when the buffer has stopped accepting writes.
-- **FUA and stream writes** program directly. A direct write first drops any
-  buffered copy of its own pages, so an older version is never programmed
-  after the newer one.
+- **FUA and stream writes** program directly. Once a direct write places a
+  page, it drops any buffered copy of that page, so an older version is
+  never programmed after the newer one. If a page finds no place, the write
+  fails with Capacity Exceeded and the buffered copy stays owed.
+- **Placement.** A write-back takes the oldest page and removes it from the
+  buffer only once the page has a new mapping and a booked program. A page
+  that finds no place keeps its place at the head, and the write-back stops.
 - **Deallocate** drops buffered copies before unmapping, so discarded data is
   never programmed later.
 - **Flush** reaches the FTL like any other command and writes back the whole

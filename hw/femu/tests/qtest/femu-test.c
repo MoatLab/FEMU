@@ -4470,6 +4470,96 @@ static void femu_test_buffer_vwc_drain(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* x-place-fail: the next @n data pages of device @id find no place */
+static void femu_place_fail_id(QTestState *qts, const char *id, uint32_t n)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,"
+                           "'property':'x-place-fail','value':%u}}", path, n);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_place_fail(QTestState *qts, uint32_t n)
+{
+    femu_place_fail_id(qts, "bp", n);
+}
+
+static int64_t femu_nand_pages(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    int64_t v = qdict_get_int(ctr, "nand-write-pages");
+
+    qobject_unref(rsp);
+    return v;
+}
+
+static uint16_t femu_flush_sc(FemuCtrlState *c)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t got;
+
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, &got, NULL));
+}
+
+/*
+ * A buffered page whose program finds no place stays in the buffer. Three
+ * pages are held; the first placement fails, so the Flush fails and
+ * programs nothing. A second Flush programs all three. Then a held page
+ * meets an FUA write whose placement fails: the write fails, and the held
+ * page is still owed, so the next Flush programs it.
+ */
+static void femu_test_buffer_place_fail(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2b, 4096);
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    femu_place_fail(qts, 1);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+    femu_place_fail(qts, 1);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_CAP_EXCEEDED);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 4);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /*
  * Indirection unit of 4 pages (iu_pages=4): one 16 KiB write fills unit 0
  * and programs 4 pages. A 4 KiB write to page 1 then reads pages 0, 2 and
@@ -28434,6 +28524,40 @@ static void femu_power_flush(FemuCtrlState *c, uint32_t nsid)
     NvmeCmd cmd = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(nsid) };
 
     g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/*
+ * power_loss: an FUA write whose page finds no place leaves the buffered
+ * copy and its undo record. A is durable, B is buffered over it, and C
+ * (FUA) fails. A cut then restores A. Had the FUA dropped B first, the
+ * page would read C, which no command made durable.
+ */
+static void femu_test_power_fua_place_fail(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_place_fail_id(c.pdev->bus->qts, "power", 1);
+    qtest_memset(c.pdev->bus->qts, buf, 0xc3, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    NVME_CAP_EXCEEDED);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
 }
 
 /* Bound the QMP wait even if the device holds up the main loop. */
@@ -55220,6 +55344,13 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=4,fdm_size=1,mapping=dftl,x-cmt-slots=1"
     });
+    qos_add_test("power-fua-place-fail", "femu", femu_test_power_fua_place_fail,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on"
+    });
     qos_add_test("dftl-power", "femu", femu_test_dftl_power,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -56672,6 +56803,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=64,buffer_size=16,"
             "vwc=1,pg_wr_lat=1000000000",
+    });
+    qos_add_test("buffer-place-fail", "femu", femu_test_buffer_place_fail,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=bp,femu_mode=1,devsz_mb=64,"
+            "buffer_size=16,buffer_thres_pcent=90",
     });
     qos_add_test("buffer-bg-off", "femu", femu_test_buffer_bg,
                  &(QOSGraphTestOptions) {

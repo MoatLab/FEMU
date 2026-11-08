@@ -5849,6 +5849,8 @@ static void femu_instance_init(Object *obj)
                                        OBJ_PROP_FLAG_READWRITE);
         femu_test_add_u32(obj, "x-tier-fold-stop",
                           &FEMU(obj)->test_tier_fold_stop, true);
+        femu_test_add_u32(obj, "x-place-fail",
+                          &FEMU(obj)->test_place_fail, true);
         femu_test_add_u32(obj, "x-zone-lock-hold-ms",
                           &FEMU(obj)->test_zone_lock_hold_ms, true);
         femu_test_add_u32(obj, "x-zone-draining",
