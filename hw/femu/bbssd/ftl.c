@@ -127,6 +127,19 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     ssd_init_params(spp, n);
     /*
+     * failed_die counts only with die_parity: the CXL SSD builds its FTL
+     * from a zeroed controller. A namespace made while an injected die is
+     * offline loses it too; only an ocp=on controller injects.
+     */
+    ssd->fail_die = spp->die_parity ? spp->failed_die + 1 : 0;
+    if (n->ocp) {
+        qemu_mutex_lock(&n->ocp_inj_lock);
+        if (n->ocp_inj_set && !n->ocp_inj_reads) {
+            ssd->fail_die = n->bb_params.inject_die + 1;
+        }
+        qemu_mutex_unlock(&n->ocp_inj_lock);
+    }
+    /*
      * The controller mode allowed plane_first; a KV namespace on it keeps the
      * default order, because KV counts the room left in a line by that order.
      */
@@ -377,6 +390,23 @@ uint64_t ssd_recovered_reads(struct ssd *ssd)
 uint64_t ssd_read_errors(struct ssd *ssd)
 {
     return qatomic_read(&ssd->err_read_injected);
+}
+
+/* reads of the offline die that its stripe answered (OCP SMART-5) */
+uint64_t ssd_degraded_reads(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->degraded_reads);
+}
+
+/*
+ * Take @die offline (OCP event 0016h), or with -1 bring back the die of
+ * failed_die. The FTL thread reads it on every media read.
+ */
+void ssd_set_offline_die(struct ssd *ssd, int die)
+{
+    int base = ssd->sp.die_parity ? ssd->sp.failed_die : -1;
+
+    qatomic_set(&ssd->fail_die, 1 + (die >= 0 ? die : base));
 }
 
 /*
@@ -1087,7 +1117,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          * Optional media error on every Nth read. The counter makes a run
          * reproducible, unlike a random draw.
          */
-        if (ssd->err_read_unc_period &&
+        if (ssd->err_read_unc_period && req->status == NVME_SUCCESS &&
             (++ssd->err_read_counter % ssd->err_read_unc_period) == 0) {
             req->status = NVME_UNRECOVERED_READ | NVME_DNR;
             ssd->err_read_injected++;

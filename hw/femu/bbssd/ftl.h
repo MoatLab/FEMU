@@ -812,7 +812,12 @@ struct ssd {
     uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
     uint64_t pass2_staged_reads;    /* reads served before the fine pass */
     uint64_t parity_pages;          /* die parity programs (die_parity) */
-    uint64_t degraded_reads;        /* host reads of the failed die */
+    uint64_t degraded_reads;        /* reads of the failed die (atomic) */
+    /*
+     * The offline die now, plus one, so that a zeroed FTL has none; atomic.
+     * ssd_offline_die() reads it.
+     */
+    int fail_die;
     uint64_t pd_pad_closes;         /* lines or units those pads closed */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
@@ -989,5 +994,11 @@ uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
     if ((ssd)->fdp_debug) \
         fprintf(stderr, "[FEMU] FDP-Trace: " fmt, ## __VA_ARGS__); \
 } while (0)
+
+/* the die that is offline now, failed or injected; -1 when none is */
+static inline int ssd_offline_die(struct ssd *ssd)
+{
+    return qatomic_read(&ssd->fail_die) - 1;
+}
 
 #endif

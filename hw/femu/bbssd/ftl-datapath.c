@@ -874,6 +874,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     g_autofree NandLoc *pend = NULL;
     uint32_t npend = 0;
     uint64_t seq_stime = 0;
+    /* an offline die with no parity has lost its pages (OCP event 0016h) */
+    int lost_die = spp->die_parity ? -1 : ssd_offline_die(ssd);
+    bool lost = false;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -936,6 +939,17 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             continue;
         }
+        /*
+         * A page on the lost die does not decode, unless the fine pass of
+         * its wordline has not run and the buffer still holds it. The
+         * failed read leaves nothing in the read cache.
+         */
+        if (unlikely(lost_die >= 0) &&
+            ppa.g.ch * spp->luns_per_ch + ppa.g.lun == lost_die &&
+            !(spp->prog_pass2_ns && ssd_pass2_staged(ssd, &ppa))) {
+            lost = true;
+            rcache_invalidate(ssd, lpn);
+        }
 
         if (ssd_mp_reads(ssd)) {
             sublat = ssd_mp_add(ssd, &ppa, dstart, base, NAND_READ);
@@ -962,6 +976,11 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     if (npend) {
         sublat = ssd_read_seq_charge(ssd, pend, npend, seq_stime);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
+    }
+    /* the media was read and its pages did not decode */
+    if (unlikely(lost)) {
+        req->status = NVME_UNRECOVERED_READ | NVME_DNR;
+        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
     }
 
     return maxlat;

@@ -38651,6 +38651,199 @@ static const uint8_t femu_ocp_c1_guid[16] = {
     0xab, 0x4d, 0xfd, 0x3d, 0xba, 0x83, 0x19, 0x5a,
 };
 
+/*
+ * Event Injection (Feature C0h) through the OCP UUID index; @buf is the
+ * 4 KiB data buffer of both Set and Get.
+ */
+static uint16_t femu_inj(FemuCtrlState *c, bool set, uint8_t sel_or_sv,
+                         uint32_t dw11, uint64_t buf, uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0xc0 | (set ? (uint32_t)sel_or_sv << 31 :
+                                          (uint32_t)sel_or_sv << 8));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw14 = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    return FEMU_SC(femu_admin_result(c, &cmd, result));
+}
+
+/* one Event Injection entry of @type at @buf, the rest of 4 KiB zero */
+static void femu_inj_entry(QTestState *qts, uint64_t buf, uint16_t type,
+                           uint16_t nrtde)
+{
+    uint8_t e[32] = { 0x3 };
+
+    stw_le_p(e + 2, type);
+    stw_le_p(e + 4, nrtde);
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, e, sizeof(e));
+}
+
+/* the 8-byte field at @off of OCP log C0h */
+static uint64_t femu_ocp_c0h_field(FemuCtrlState *c, uint64_t buf, int off)
+{
+    uint8_t page[512];
+
+    g_assert_cmphex(femu_ocp_log(c, 0xc0, 1, 0, buf, sizeof(page)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, page, sizeof(page));
+    return ldq_le_p(page + off);
+}
+
+/*
+ * OCP event 0016h, NAND Die Offline, takes die inject_die=3 offline. Four
+ * dies, two channels of two LUNs; LBA page 3 sits on channel 1, LUN 1,
+ * die 3. @data names the case. "parity": 100 ms page reads, die parity
+ * with 50 ms of XOR time; the event waits for two reads, then a read of
+ * page 3 reads the three other dies in parallel (about 150 ms, not 350)
+ * and counts in SMART-5 and degraded-reads; NUME 0 brings the die back.
+ * "noparity", with a read cache: a read of page 3 fails with Unrecovered
+ * Read Error, again on a retry, and counts in SMART-6; a failed Read
+ * counts toward NRTDE. "off": without ocp, Feature C0h does not exist.
+ */
+static void femu_test_ocp_die_offline(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint8_t got[32];
+    uint32_t res;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_inj_entry(qts, ibuf, 0x0016, 0);
+    if (g_str_equal(mode, "off")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_INVALID_FIELD);
+        femu_disable(&c);
+        guest_free(alloc, ibuf);
+        guest_free(alloc, buf);
+        return;
+    }
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+
+    /* ERRI-5, SERRI-10, SERRI-14, UUID-3 */
+    femu_inj_entry(qts, ibuf, 0x0001, 0);
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                    NVME_INVALID_FIELD);
+    femu_inj_entry(qts, ibuf, 0x0016, 0);
+    g_assert_cmphex(femu_inj(&c, true, 1, 1, ibuf, NULL), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(femu_inj(&c, true, 0, 2, ibuf, NULL), ==,
+                    NVME_INVALID_FIELD);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(0xc0);
+        cmd.cdw11 = cpu_to_le32(1);
+        cmd.cdw14 = cpu_to_le32(2);
+        cmd.dptr.prp1 = cpu_to_le64(ibuf);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_inj(&c, false, 3, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x4);              /* changeable only */
+
+    if (g_str_equal(mode, "noparity")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        for (int i = 0; i < 2; i++) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                            NVME_UNRECOVERED_READ);
+        }
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 56), ==, 2);
+
+        /* a new injection waits; a failed Read counts toward NRTDE */
+        femu_inj_entry(qts, ibuf, 0x0016, 2);
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 1);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 1ull << 40, buf)),
+                        !=, NVME_SUCCESS);
+        g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                        NVME_SUCCESS);
+        femu_disable(&c);
+        guest_free(alloc, ibuf);
+        guest_free(alloc, buf);
+        return;
+    }
+
+    /* the event waits for two successful reads */
+    femu_inj_entry(qts, ibuf, 0x0016, 2);
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: read before the event %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 140000);
+    femu_timed_read(&c, 0, buf);
+    g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 0);
+    qtest_memread(qts, ibuf, got, sizeof(got));
+    g_assert_cmphex(got[0], ==, 0x3);
+    g_assert_cmphex(lduw_le_p(got + 2), ==, 0x0016);
+    g_assert_cmphex(lduw_le_p(got + 4), ==, 2);
+
+    /* die 3 is offline: the three other dies answer, in parallel */
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: degraded read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 150000);
+    g_assert_cmpint(us, <, 230000);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48), ==, 1);
+    {
+        uint64_t parity, nread;
+        double waf;
+
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(nread, ==, 1);
+    }
+
+    /* NUME 0 brings it back; default and current are empty again */
+    g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==, NVME_SUCCESS);
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: read after the clear %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 140000);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48), ==, 1);
+    for (uint8_t sel = 0; sel < 2; sel++) {
+        qtest_memset(qts, ibuf, 0xa5, 4096);
+        g_assert_cmphex(femu_inj(&c, false, sel, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        qtest_memread(qts, ibuf, got, sizeof(got));
+        for (size_t i = 0; i < sizeof(got); i++) {
+            g_assert_cmphex(got[i], ==, 0);
+        }
+    }
+    femu_disable(&c);
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+}
+
 /* the 512-byte page at @buf is OCP C0h: version 4, its GUID, OCP 2.5 */
 static bool femu_is_ocp_c0(QTestState *qts, uint64_t buf)
 {
@@ -55448,6 +55641,30 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,devsz_mb=64,pg_rd_lat=3000000,io_stages=on",
         .arg = (void *)"3ms",
+    });
+    qos_add_test("ocp-die-offline", "femu", femu_test_ocp_die_offline,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"parity",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pg_rd_lat=100000000,die_parity=1,parity_xor_ns=50000000,"
+            "ocp=on,inject_die=3"
+    });
+    qos_add_test("ocp-die-offline-noparity", "femu",
+                 femu_test_ocp_die_offline, &(QOSGraphTestOptions) {
+        .arg = (void *)"noparity",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "read_cache_mb=1,ocp=on,inject_die=3"
+    });
+    qos_add_test("ocp-die-offline-off", "femu", femu_test_ocp_die_offline,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,inject_die=3"
     });
     qos_add_test("ocp-on", "femu", femu_test_ocp,
                  &(QOSGraphTestOptions) {

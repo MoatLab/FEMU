@@ -1637,6 +1637,7 @@ enum NvmeFeatureIds {
     NVME_HOST_IDENTIFIER            = 0x81,
     NVME_RESV_NOTIFY_MASK           = 0x82,
     NVME_RESV_PERSISTENCE           = 0x83,
+    NVME_OCP_EVENT_INJECTION        = 0xc0,  /* OCP 2.7, ocp=on */
     NVME_OCP_CLEAR_PCIE_ERRORS      = 0xc3,  /* OCP 2.7, ocp=on */
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
     NVME_OCP_PLP_HEALTH_INTERVAL    = 0xc6,  /* OCP 2.7, ocp=on */
@@ -2525,6 +2526,7 @@ typedef struct BbCtrlParams {
     int die_parity;           /* a parity program per full die stripe */
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
+    int inject_die;           /* die that OCP event 0016h takes offline */
     uint32_t prog_pass2_lag;  /* wordlines between coarse and fine; 0 = 1 */
     int mp_program;   /* charge same-page programs on several planes as one; 0 = off */
     int mp_read;      /* charge same-page reads on several planes as one; 0 = off */
@@ -2897,6 +2899,15 @@ typedef struct FemuCtrl {
     uint32_t        hmb_hsize;
     uint64_t        hmb_dla;
     uint32_t        hmb_dlec;
+    /*
+     * OCP Event Injection (FID C0h): the host's entry, whether one is set,
+     * and the Read completions still to come before the event (0: none
+     * pending). The pollers count under ocp_inj_lock, as Set Features does.
+     */
+    QemuMutex       ocp_inj_lock;
+    uint8_t         ocp_inj_entry[32];
+    bool            ocp_inj_set;
+    uint32_t        ocp_inj_reads;
     int             persist_lock_fd; /* holds persist_path.lock */
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
@@ -3245,6 +3256,9 @@ void femu_ocp_lat_note(FemuCtrl *n, NvmeRequest *req, int64_t post);
 uint16_t femu_ocp_lat_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                           uint64_t off);
 uint16_t femu_ocp_lat_set(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_ocp_inj_set(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_ocp_inj_get(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe,
+                          bool current);
 void nvme_ocp_val_init(FemuCtrl *n);
 void nvme_ocp_val_reset(FemuCtrl *n);
 
@@ -3793,6 +3807,10 @@ uint64_t ssd_map_read_pages(struct ssd *ssd);
 uint64_t ssd_media_read_pages(struct ssd *ssd);
 uint64_t ssd_recovered_reads(struct ssd *ssd);
 uint64_t ssd_read_errors(struct ssd *ssd);
+uint64_t ssd_degraded_reads(struct ssd *ssd);
+void ssd_set_offline_die(struct ssd *ssd, int die);
+void nvme_ocp_inj_read_done(FemuCtrl *n);
+void nvme_ocp_inj_clear(FemuCtrl *n);
 typedef struct FemuOcpBlocks {
     uint64_t bad;           /* retired blocks: worn out and sacrificed */
     uint32_t max_pe;        /* highest erase count of any block */

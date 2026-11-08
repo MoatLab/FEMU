@@ -845,7 +845,28 @@ no page: the over-provisioning stays as configured. With `failed_die`, a
 read of that die reads the same page of every other die in parallel and
 adds `parity_xor_ns`. Those reads add no read count to their blocks. The
 data itself stays in the backend, so a failed die loses nothing in FEMU.
-`failed_die` is set at device creation; there is no runtime failure yet.
+`failed_die` is set at device creation. With `ocp=on`, OCP event
+injection 0016h (NAND Die Offline, Feature C0h) takes a die offline while
+the guest runs. The die is `inject_die`, and the clear brings it back:
+
+```
+ Set Features C0h, NUME=1, type 0016h, NRTDE n
+   --> after n Read commands complete: die inject_die offline
+       die_parity on:  reads of the die take the stripe, as above
+       die_parity off: a host read of the die fails (Unrecovered Read
+                       Error) and counts as a media error
+ Set Features C0h, NUME=0, or simulate-power-loss --> die back
+```
+
+The event fails only host Read, Compare and Verify commands. Programs to
+an offline die still run. Garbage collection, Copy source reads,
+translation pages and CSD transfers to device memory still read it. A
+page in the write buffer, the read cache or a staged wordline still
+reads.
+
+Log C0h counts the degraded reads as XOR Recovery Count (SMART-5).
+FEMU refuses the event on a controller whose namespaces live in shared
+subsystem storage, and when `failed_die` names another die.
 `query-femu` reports `parity-write-pages` and `degraded-reads`, and its
 WAF counts the parity programs.
 

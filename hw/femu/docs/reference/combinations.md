@@ -307,6 +307,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu: hot_k needs throttle=on
 
+## `inject_die`
+
+- FEMU bbssd: inject_die must be 0 to dies - 1
+
 ## `intc`
 
 - vwc, intc, cqr and extended are single bits

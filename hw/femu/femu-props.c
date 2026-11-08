@@ -522,6 +522,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: with die_parity, the die (channel * luns_per_ch + LUN) "
       "that has failed: a host read there reads the other dies of its "
       "stripe in parallel; -1 (default) is none" },
+    { "inject_die",
+      "bbssd, CSD: with ocp=on, the die (channel * luns_per_ch + LUN) that "
+      "OCP event injection 0016h (NAND Die Offline) takes offline; 0 "
+      "(default)" },
     { "nand_cell_type",
       "bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; "
       "1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing "

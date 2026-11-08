@@ -350,6 +350,11 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
                    "1) need die_parity");
         return -1;
     }
+    /* the die that OCP event 0016h (NAND Die Offline) takes offline */
+    if (p->inject_die < 0 || p->inject_die >= p->nchs * p->luns_per_ch) {
+        error_setg(errp, "FEMU bbssd: inject_die must be 0 to dies - 1");
+        return -1;
+    }
     /*
      * read_prio moves queued array work; the bus phases of that work stay
      * booked at the old time, so it needs the plain channel model.

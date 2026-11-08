@@ -343,3 +343,159 @@ uint16_t femu_ocp_lat_set(FemuCtrl *n, NvmeCmd *cmd)
     lm_write_end(lm);
     return NVME_SUCCESS;
 }
+
+/*
+ * OCP 2.7 Event Injection (FID C0h, 4.15.3 and 4.15.4). FEMU supports one
+ * event: 0016h NAND Die Offline (recovery type 3). The die inject_die of
+ * every bbssd and CSD FTL goes offline after NRTDE Read commands complete.
+ * One lock orders the count, the event, Set, clear and Get, so a clear
+ * never sees the event of the injection it ends come after it.
+ *
+ *   Set NUME=1 {03h, 0, 0016h, NRTDE}  NRTDE 0: offline now
+ *                                      else:   ocp_inj_reads = NRTDE
+ *   an NVM Read completes              ocp_inj_reads 1 --> 0: offline
+ *   Set NUME=0, or a power cycle       the die comes back
+ */
+#define OCP_INJ_DIE_OFFLINE     0x0016
+
+static bool femu_ocp_inj_ftl(NvmeNamespace *ns)
+{
+    return ns->allocated && ns->ssd && !ns->ssd_shared &&
+           (NS_BBSSD(ns) || NS_CSD(ns));
+}
+
+/*
+ * Whether event 0016h applies: one FTL namespace at least, none kept by
+ * the shared storage of a subsystem (the event state is per controller),
+ * and a die failed at creation only when it is the same die.
+ */
+static bool femu_ocp_inj_ok(FemuCtrl *n)
+{
+    bool ftl = false;
+
+    if (n->bb_params.failed_die >= 0 &&
+        n->bb_params.failed_die != n->bb_params.inject_die) {
+        return false;
+    }
+    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ctrl != n) {
+            return false;
+        }
+        ftl |= femu_ocp_inj_ftl(ns);
+    }
+    return ftl;
+}
+
+/* every FTL of the controller takes the die offline, or brings it back */
+static void femu_ocp_die_offline(FemuCtrl *n, bool offline)
+{
+    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        if (femu_ocp_inj_ftl(&n->namespaces[i])) {
+            ssd_set_offline_die(n->namespaces[i].ssd,
+                                offline ? n->bb_params.inject_die : -1);
+        }
+    }
+}
+
+/* the caller holds ocp_inj_lock */
+static void femu_ocp_inj_drop(FemuCtrl *n)
+{
+    if (n->ocp_inj_set) {
+        femu_ocp_die_offline(n, false);
+    }
+    n->ocp_inj_set = false;
+    qatomic_set(&n->ocp_inj_reads, 0);
+    memset(n->ocp_inj_entry, 0, sizeof(n->ocp_inj_entry));
+}
+
+/* NUME 0 (ERRI-2) and a power cycle (ERRI-8) end the injection */
+void nvme_ocp_inj_clear(FemuCtrl *n)
+{
+    qemu_mutex_lock(&n->ocp_inj_lock);
+    femu_ocp_inj_drop(n);
+    qemu_mutex_unlock(&n->ocp_inj_lock);
+}
+
+/* a poller: a Read command completed with success while one is pending */
+void nvme_ocp_inj_read_done(FemuCtrl *n)
+{
+    qemu_mutex_lock(&n->ocp_inj_lock);
+    if (n->ocp_inj_reads) {
+        qatomic_set(&n->ocp_inj_reads, n->ocp_inj_reads - 1);
+        if (!n->ocp_inj_reads) {
+            femu_ocp_die_offline(n, true);
+        }
+    }
+    qemu_mutex_unlock(&n->ocp_inj_lock);
+}
+
+uint16_t femu_ocp_inj_set(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    g_autofree uint8_t *p = NULL;
+    uint16_t nrtde;
+    uint16_t status;
+
+    /* SERRI-13, SERRI-14: NUME is 0 or 1, the rest reserved */
+    if (dw11 & ~0x1u) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (!dw11) {
+        nvme_ocp_inj_clear(n);
+        return NVME_SUCCESS;
+    }
+    p = g_malloc0(4096);
+    status = dma_write_prp(n, p, 4096, le64_to_cpu(cmd->dptr.prp1),
+                           le64_to_cpu(cmd->dptr.prp2));
+    if (status) {
+        return status;
+    }
+    /*
+     * ERRIE-1 to ERRIE-4, ERRIEDP-1 to ERRIEDP-4: both flags set, the one
+     * supported type (ERRI-5), reserved bytes zero; ERRI-1, ERRI-4: one
+     * entry, the others zero.
+     */
+    if (p[0] != 0x3 || p[1] || lduw_le_p(&p[2]) != OCP_INJ_DIE_OFFLINE ||
+        !femu_ocp_inj_ok(n) || !buffer_is_zero(&p[6], 4096 - 6)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    nrtde = lduw_le_p(&p[4]);
+
+    /* ERRI: a new injection replaces the one before */
+    qemu_mutex_lock(&n->ocp_inj_lock);
+    femu_ocp_inj_drop(n);
+    memcpy(n->ocp_inj_entry, p, sizeof(n->ocp_inj_entry));
+    n->ocp_inj_set = true;
+    if (nrtde) {
+        qatomic_set(&n->ocp_inj_reads, nrtde);
+    } else {
+        femu_ocp_die_offline(n, true);
+    }
+    qemu_mutex_unlock(&n->ocp_inj_lock);
+    return NVME_SUCCESS;
+}
+
+/*
+ * Get Features C0h (4.15.4): NUME 1 while the event waits for its reads,
+ * and the entry while one is set. Default and saved are 0 and zeros.
+ */
+uint16_t femu_ocp_inj_get(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe,
+                          bool current)
+{
+    g_autofree uint8_t *p = g_malloc0(4096);
+    uint32_t nume = 0;
+
+    if (current) {
+        qemu_mutex_lock(&n->ocp_inj_lock);
+        if (n->ocp_inj_set) {
+            memcpy(p, n->ocp_inj_entry, sizeof(n->ocp_inj_entry));
+        }
+        nume = n->ocp_inj_reads != 0;
+        qemu_mutex_unlock(&n->ocp_inj_lock);
+    }
+    cqe->n.result = cpu_to_le32(nume);
+    return dma_read_prp(n, p, 4096, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}

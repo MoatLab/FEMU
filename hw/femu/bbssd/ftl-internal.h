@@ -307,6 +307,7 @@ bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn);
                    (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
 
 bool ssd_out_of_lines(struct ssd *ssd);
+bool ssd_pass2_staged(struct ssd *ssd, struct ppa *ppa);
 bool ssd_host_out_of_lines(struct ssd *ssd);
 
 /* GC trigger predicates (used by the datapath and GC) */

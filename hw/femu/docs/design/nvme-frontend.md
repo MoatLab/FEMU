@@ -704,8 +704,16 @@ disables C2h (DP-CFG-6) and prohibits CBh (DP-CFG-13), so both fail.
  CAh  idle wake up time            15:0        0        ms
 ```
 
-The NVM subsystem features (C6h, C7h, C8h, CAh) take NSID 0 or FFFFFFFFh
-only.
+The NVM subsystem features (C0h, C6h, C7h, C8h, CAh) take NSID 0 or
+FFFFFFFFh only.
+
+C0h is OCP Event Injection (4.15.3). FEMU supports one event type, 0016h
+NAND Die Offline, on a controller with a bbssd or CSD namespace; any other
+type fails with Invalid Field. The entry takes NRTDE, the number of
+Read commands that complete before the event, with any status. NUME 0 clears the event, and
+Get Features returns NUME 1 while the event waits. The event is not
+saveable, and `simulate-power-loss` clears it. See
+[Die parity](nand-timing.md#die-parity) for its effect.
 
 With `hmb_mb` (bbssd, `mapping=dftl`), the controller is DRAM-less and
 asks for a Host Memory Buffer: Identify reports HMPRE and HMMIN as

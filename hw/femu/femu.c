@@ -4917,6 +4917,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("die_parity", FemuCtrl, bb_params.die_parity, 0),
     DEFINE_PROP_INT32("parity_xor_ns", FemuCtrl, bb_params.parity_xor_ns, 0),
     DEFINE_PROP_INT32("failed_die", FemuCtrl, bb_params.failed_die, -1),
+    DEFINE_PROP_INT32("inject_die", FemuCtrl, bb_params.inject_die, 0),
     DEFINE_PROP_UINT32("prog_pass2_lag", FemuCtrl, bb_params.prog_pass2_lag,
                        0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
@@ -5575,6 +5576,8 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     nvme_resv_power_loss(n);
     if (n->ocp) {
         femu_ocp_lat_power_cycle(n);
+        /* ERRI-8: a power cycle ends an injected event */
+        nvme_ocp_inj_clear(n);
     }
 }
 
@@ -5703,6 +5706,7 @@ static void femu_instance_finalize(Object *obj)
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
     qemu_mutex_destroy(&n->ocp_lat.lock);
+    qemu_mutex_destroy(&n->ocp_inj_lock);
     qemu_mutex_destroy(&n->rn_lock);
     qemu_mutex_destroy(&n->ps_lock);
 }
@@ -5710,6 +5714,7 @@ static void femu_instance_finalize(Object *obj)
 static void femu_instance_init(Object *obj)
 {
     qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
+    qemu_mutex_init(&FEMU(obj)->ocp_inj_lock);
     qemu_mutex_init(&FEMU(obj)->rn_lock);
     qemu_mutex_init(&FEMU(obj)->ps_lock);
     seqlock_init(&FEMU(obj)->ocp_lat.seq);

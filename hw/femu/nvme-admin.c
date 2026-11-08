@@ -37,6 +37,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
     [NVME_OCP_DSSD_POWER_STATE]     = true,
+    [NVME_OCP_EVENT_INJECTION]      = true,
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = true,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = true,
     [NVME_OCP_TELEMETRY_PROFILE]    = true,
@@ -88,6 +89,8 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
      * prohibits CBh (DP-CFG-13), so neither is here.
      */
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = NVME_FEAT_CAP_CHANGE,
+    /* SERRI-10: Event Injection is not saveable */
+    [NVME_OCP_EVENT_INJECTION]      = NVME_FEAT_CAP_CHANGE,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = NVME_FEAT_CAP_CHANGE |
                                       NVME_FEAT_CAP_SAVE,
     [NVME_OCP_TELEMETRY_PROFILE]    = NVME_FEAT_CAP_CHANGE |
@@ -131,7 +134,8 @@ static const NvmeOcpValFeat *nvme_ocp_val_feat(uint8_t fid)
 /* the OCP features of NVM subsystem scope (OCP 4.15, the feature table) */
 static bool nvme_ocp_subsys_fid(uint8_t fid)
 {
-    return fid == NVME_OCP_DSSD_POWER_STATE || nvme_ocp_val_feat(fid);
+    return fid == NVME_OCP_DSSD_POWER_STATE ||
+           fid == NVME_OCP_EVENT_INJECTION || nvme_ocp_val_feat(fid);
 }
 
 /* back to the factory defaults: realize; a reset restores the saved ones */
@@ -324,6 +328,7 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
     case NVME_OCP_DSSD_AEN_CONFIG:
     case NVME_OCP_LATENCY_MONITOR:
     case NVME_OCP_DSSD_POWER_STATE:
+    case NVME_OCP_EVENT_INJECTION:
     case NVME_OCP_CLEAR_PCIE_ERRORS:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
@@ -1963,6 +1968,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          sel == NVME_GETFEAT_SELECT_SAVED)) {
         return nvme_hmb_get(n, cmd, cqe, false);
     }
+    /* GERRI-2: default and saved are no injection, with a zeroed buffer */
+    if (fid == NVME_OCP_EVENT_INJECTION &&
+        (sel == NVME_GETFEAT_SELECT_DEFAULT ||
+         sel == NVME_GETFEAT_SELECT_SAVED)) {
+        return femu_ocp_inj_get(n, cmd, cqe, false);
+    }
 
     switch (sel) {
     case NVME_GETFEAT_SELECT_CURRENT:
@@ -2118,6 +2129,8 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                             sizeof(n->features.host_behavior), prp1, prp2);
     case NVME_HOST_MEM_BUFFER:
         return nvme_hmb_get(n, cmd, cqe, true);
+    case NVME_OCP_EVENT_INJECTION:
+        return femu_ocp_inj_get(n, cmd, cqe, true);
     case NVME_TIMESTAMP: {
         uint8_t ts[8];
 
@@ -2465,6 +2478,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_OCP_LATENCY_MONITOR:
         /* the payload holds the configuration; SV is accepted (LMSF-10) */
         return femu_ocp_lat_set(n, cmd);
+    case NVME_OCP_EVENT_INJECTION:
+        return femu_ocp_inj_set(n, cmd);
     case NVME_OCP_CLEAR_PCIE_ERRORS:
         /*
          * CPCIE-13: bit 31 clears the PCIe correctable error counters of
@@ -3221,7 +3236,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     uint8_t log[512] = {};
     uint64_t wr_pages = 0, rd_pages = 0, bad = 0, uncorr = 0, soft = 0;
     uint64_t refresh = 0, free_lines = 0, empty_lines = 0, nuse = 0;
-    uint64_t erase_sum = 0, blocks = 0, dies = 0, unaligned = 0;
+    uint64_t erase_sum = 0, blocks = 0, dies = 0, unaligned = 0, xor = 0;
     uint32_t max_pe = 0, min_pe = UINT32_MAX, page_size = 0;
     uint16_t max_temp_k = MAX(n->ocp_max_temp_k, n->temperature);
     FemuMediaStats st;
@@ -3252,6 +3267,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         rd_pages = nvme_ocp_add(rd_pages, ssd_media_read_pages(ns->ssd));
         uncorr = nvme_ocp_add(uncorr, ssd_read_errors(ns->ssd));
         soft = nvme_ocp_add(soft, ssd_recovered_reads(ns->ssd));
+        xor = nvme_ocp_add(xor, ssd_degraded_reads(ns->ssd));
         ssd_ocp_blocks(ns->ssd, &ob);
         bad = nvme_ocp_add(bad, ob.bad);
         unaligned = nvme_ocp_add(unaligned, ssd_unaligned_writes(ns->ssd));
@@ -3274,6 +3290,7 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     stw_le_p(&log[38], st.available_spare);
     nvme_ocp_put(&log[40], 6, UINT64_MAX);          /* in the user field */
     stw_le_p(&log[46], 0xffff);
+    nvme_ocp_put(&log[48], 8, xor);                 /* XOR recoveries */
     nvme_ocp_put(&log[56], 8, uncorr);
     nvme_ocp_put(&log[64], 8, soft);
     nvme_ocp_put(&log[81], 7, refresh);

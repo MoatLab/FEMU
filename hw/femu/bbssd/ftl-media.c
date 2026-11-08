@@ -353,7 +353,7 @@ void bb_nand_media_refresh_timing(struct ssd *ssd)
  *   prog: [c0]  [c1 f0] [c2 f1] [c3 f2 f3]   (block full at wl 3)
  *   read wl 2 before c3: from the buffer, no array time
  */
-static bool ssd_pass2_staged(struct ssd *ssd, struct ppa *ppa)
+bool ssd_pass2_staged(struct ssd *ssd, struct ppa *ppa)
 {
     struct nand_block *blk = get_blk(ssd, ppa);
     uint64_t wl = ppa->g.pg / ssd->sp.wl_pages;
@@ -428,7 +428,7 @@ static void ssd_parity_book(struct ssd *ssd, struct ppa *ppa, uint64_t done)
  * the page is ready. The survivors' blocks take no read count.
  */
 static uint64_t ssd_parity_read(struct ssd *ssd, struct ppa *ppa,
-                                uint64_t stime)
+                                int failed, uint64_t stime)
 {
     struct ssdparams *spp = &ssd->sp;
     int dies = spp->nchs * spp->luns_per_ch;
@@ -438,7 +438,7 @@ static uint64_t ssd_parity_read(struct ssd *ssd, struct ppa *ppa,
         struct ppa p = *ppa;
         NandLoc loc;
 
-        if (d == spp->failed_die) {
+        if (d == failed) {
             continue;
         }
         p.g.ch = d / spp->luns_per_ch;
@@ -450,7 +450,7 @@ static uint64_t ssd_parity_read(struct ssd *ssd, struct ppa *ppa,
         done = MAX(done, nand_media_op(&ssd->media, &loc, NAND_MEDIA_READ,
                                        stime).done_ns);
     }
-    ssd->degraded_reads++;
+    qatomic_set(&ssd->degraded_reads, ssd->degraded_reads + 1);
     return done + spp->parity_xor_ns;
 }
 
@@ -487,10 +487,14 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ssd->pass2_staged_reads++;
         return 0;
     }
-    if (unlikely(ssd->sp.failed_die >= 0) && op == NAND_MEDIA_READ &&
-        !bb_io_meta(ncmd->type) &&
-        ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == ssd->sp.failed_die) {
-        return ssd_parity_read(ssd, ppa, stime) - stime;
+    if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&
+        !bb_io_meta(ncmd->type)) {
+        int failed = ssd_offline_die(ssd);
+
+        if (failed >= 0 &&
+            ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == failed) {
+            return ssd_parity_read(ssd, ppa, failed, stime) - stime;
+        }
     }
     if (op == NAND_MEDIA_READ && !bb_io_meta(ncmd->type)) {
         reads = get_blk(ssd, ppa)->read_cnt++;

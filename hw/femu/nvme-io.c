@@ -735,6 +735,15 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     if (unlikely(n->ocp) && cq->cqid) {
         femu_ocp_lat_note(n, req, femu_io_now(n));
     }
+    /*
+     * OCP event injection: a pending event counts the NVM Read commands
+     * that complete, with any status (ERRIEDP-4).
+     */
+    if (unlikely(qatomic_read(&n->ocp_inj_reads)) &&
+        req->cmd_opcode == NVME_CMD_READ && req->ns &&
+        (req->ns->csi == NVME_CSI_NVM || req->ns->csi == NVME_CSI_ZONED)) {
+        nvme_ocp_inj_read_done(n);
+    }
 
     /*
      * Nothing to count with coalescing off, on the admin queue, or on a
