@@ -147,6 +147,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         spp->plane_first = false;
         /* KV reads a value one page at a time, never as one command */
         spp->onfi_cache_read = false;
+        /* KV packing keeps its own DRAM time, pg_rd_lat / 16 */
+        spp->dram_hit_ns = 0;
     }
 
     /* initialize ssd internal layout architecture */

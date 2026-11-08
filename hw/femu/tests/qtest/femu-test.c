@@ -42443,6 +42443,48 @@ static uint64_t femu_rrl_media_errors(FemuCtrlState *c, uint64_t log)
     return qtest_readq(c->pdev->bus->qts, log + 160);
 }
 
+/*
+ * dram_hit_ns: the DRAM time of a page hit. One LUN with 100 ms page
+ * reads. @data names the case: "buffer" reads a page the write buffer
+ * holds; "cache" reads a page twice, so the read cache answers the second
+ * read. Device lines ending in "on" set dram_hit_ns to 20 ms, so a hit
+ * takes 20 to 100 ms; without it the hit takes pg_rd_lat / 16, 6.25 ms.
+ */
+static void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = g_str_has_suffix(mode, "-on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6d, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    if (g_str_has_prefix(mode, "cache")) {
+        /* the first read misses and fills the cache */
+        us = femu_timed_read(&c, 0, buf);
+        g_test_message("dram_hit %s: miss %" PRId64 " us", mode, us);
+        g_assert_cmpint(us, >=, 100000);
+    }
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("dram_hit %s: hit %" PRId64 " us", mode, us);
+    if (on) {
+        g_assert_cmpint(us, >=, 20000);
+        g_assert_cmpint(us, <, 100000);
+    } else {
+        g_assert_cmpint(us, >=, 6000);
+        g_assert_cmpint(us, <, 20000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* Set Features 12h (Read Recovery Level): @sv, @nsid, CDW11, CDW12 */
 static uint16_t femu_rrl_set_full(FemuCtrlState *c, bool sv, uint32_t nsid,
                                   uint32_t dw11, uint32_t dw12)
@@ -52493,6 +52535,38 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,rber_ppb=1"
             ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("dram-hit-buffer-on", "femu", femu_test_dram_hit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer-on",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=100000000,buffer_size=16,dram_hit_ns=20000000"
+    });
+    qos_add_test("dram-hit-buffer-off", "femu", femu_test_dram_hit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"buffer-off",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=100000000,buffer_size=16"
+    });
+    qos_add_test("dram-hit-cache-on", "femu", femu_test_dram_hit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cache-on",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=100000000,read_cache_mb=1,dram_hit_ns=20000000"
+    });
+    qos_add_test("dram-hit-cache-off", "femu", femu_test_dram_hit,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cache-off",
+        .edge.extra_device_opts =
+            "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=100000000,read_cache_mb=1"
+    });
     qos_add_test("rrl", "femu", femu_test_rrl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

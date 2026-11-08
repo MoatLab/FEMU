@@ -434,6 +434,10 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    if (p->dram_hit_ns < 0) {
+        error_setg(errp, "FEMU bbssd: dram_hit_ns must not be negative");
+        return -1;
+    }
     if (p->l2p_dram_ns < 0 ||
         (p->l2p_dram_ns && (p->onfi_cache_read ||
                             (n->subsys && n->subsys->params.fdp.enabled)))) {
@@ -570,6 +574,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_low_pcent = n->bb_params.buffer_low_pcent / 100.0;
     spp->iu_pages = MAX(n->bb_params.iu_pages, 1);
     spp->l2p_dram_ns = n->bb_params.l2p_dram_ns;
+    spp->dram_hit_ns = n->bb_params.dram_hit_ns;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;

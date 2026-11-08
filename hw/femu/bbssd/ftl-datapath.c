@@ -226,7 +226,13 @@ bool ssd_buffer_hit(struct ssd *ssd, uint64_t lpn)
  */
 uint64_t ssd_buffer_hit_lat(struct ssd *ssd)
 {
-    uint64_t lat = ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
+    uint64_t lat;
+
+    /* the controller DRAM time of a page, when the user gives one */
+    if (ssd->sp.dram_hit_ns) {
+        return ssd->sp.dram_hit_ns;
+    }
+    lat = ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
 
     /* a configured page read time under 16ns would otherwise round to free */
     return lat > 0 ? lat : 1;

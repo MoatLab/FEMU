@@ -828,7 +828,8 @@ handle's reclaim unit (`fdp_buffer_destage()` in
 
   watermark = max(1, (int)(buffer_size * buffer_thres_pcent / 100))
   batch     = max(1, buffer_size - watermark)
-  DRAM access = pg_rd_lat / 16 (1000 ns when pg_rd_lat is 0)
+  DRAM access = dram_hit_ns, or pg_rd_lat / 16 when it is 0
+                (1000 ns when pg_rd_lat is 0 too)
 ```
 
 - **Structure.** A tail queue in order of last write, LRU (`write_buffer`) and a GLib
@@ -890,7 +891,8 @@ neighbours in that page become durable with it.
         |
         v
   lookup in an open-addressed hash over capacity slots
-     hit:  cost pg_rd_lat / 16, no NAND read, no block read count
+     hit:  cost dram_hit_ns (or pg_rd_lat / 16), no NAND read, no block
+           read count
      miss: insert (evict by cache_evict if full), then NAND read
 ```
 
@@ -1240,7 +1242,7 @@ does inside the FTL and what it interacts with.
 | `gc_strategy` | reclaim unit victim selection | FDP only; a `gc_policy` other than `greedy` replaces it |
 | `mapping` | L2P scheme | `hybrid` and `fast` reserve a line and refuse Streams and FDP |
 | `mapping_cache_mb` | DFTL cache size | used only with `mapping=dftl` |
-| `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `pg_rd_lat` / 16 at realize; 0xEF does not change it |
+| `read_cache_mb`, `cache_evict` | read cache size and eviction | hit time is `dram_hit_ns`, or `pg_rd_lat` / 16 at realize (1 ns at least) when that is 0; 0xEF does not change it |
 | `hot_cold_sep` | hot write pointer for overwrites | page or DFTL only; reserves a line; refused with FDP |
 | `buffer_size`, `buffer_thres_pcent` | write buffer capacity in pages, and the write-back watermark | `vwc`, `power_loss`; under FDP each page goes to its handle's unit |
 | `fdp_trim_erase_all` | FDP deallocate resets every reclaim unit | FDP only |

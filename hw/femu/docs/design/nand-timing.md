@@ -1180,7 +1180,8 @@ every plane it spans, with the command's `stime`, and returns the largest
 The FTL adds these to a command's latency alongside its NAND operations:
 
 - **BBSSD write buffer** (`buffer_size` > 0): a write the buffer accepts costs
-  `pg_rd_lat / 16` (1 us when `pg_rd_lat` is 0), plus the programs of any
+  `dram_hit_ns`, or `pg_rd_lat / 16` when that is 0 (1 us when `pg_rd_lat`
+  is 0 too), plus the programs of any
   destage it forces. A Flush pays for programming everything buffered
   (`bbssd/ftl.c`). A read of a buffered page costs the same DRAM access.
 - **BBSSD read cache and DFTL mapping cache**: a hit costs a DRAM access; a
@@ -1325,7 +1326,7 @@ properties and states how they interact.
 | Group | Properties | Interactions |
 | --- | --- | --- |
 | [Geometry](../reference/properties.md#nand-geometry-bbssd-csd-kv) | `secsz`, `secs_per_pg`, `pgs_per_blk`, `blks_per_pl`, `pls_per_lun`, `luns_per_ch`, `nchs` | `nchs * luns_per_ch` is the number of independent dies. `pls_per_lun` adds no read or program parallelism under the LUN rule unless `mp_program` or `mp_read` is set. |
-| [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. `pg_rd_lat / 16` is also the cost of a write buffer hit. |
+| [Array times](../reference/properties.md#nand-timing-bbssd-csd-kv) | `pg_rd_lat`, `pg_wr_lat`, `blk_er_lat` | Ignored when `nand_cell_type` is 1 to 4. 0xEF codes 3 and 4 overwrite them. With `dram_hit_ns` at 0, `pg_rd_lat / 16` (1 ns at least) is also the cost of a write buffer hit. |
 | [Cell type](../reference/properties.md#nand-timing-bbssd-csd-kv) | `nand_cell_type`, `cell_pages`, `pgtype_lat` | `pgtype_lat` applies only with `nand_cell_type=0`. `nand_cell_type` limits `pgs_per_blk` to 512. |
 | [Bus phases](../reference/properties.md#nand-timing-bbssd-csd-kv) | `cmd_addr_lat`, `pg_xfer_lat`, `ch_xfer_lat`, `status_lat` | Any non-zero value turns the bus on. `pg_xfer_lat` takes precedence over `ch_xfer_lat`. |
 | [Multi-plane](../reference/properties.md#nand-timing-bbssd-csd-kv) | `tplebsy`, `mp_program`, `tplpbsy`, `mp_read`, `tplrbsy`, `plane_first` (`trcbsy` applies only with `onfi_cache_read`) | Only with `pls_per_lun > 1`. `tplebsy` applies to the multi-plane erase of GC; `tplpbsy` only with `mp_program`; `tplrbsy` only with `mp_read`. |

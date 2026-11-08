@@ -166,6 +166,10 @@ own description allows. A message keeps its format directives (`%s`,
 - dps needs 8 bytes of metadata and a matching dpc
 - meta: protection information (dpc, dps) is not supported
 
+## `dram_hit_ns`
+
+- FEMU bbssd: dram_hit_ns must not be negative
+
 ## `ecc_retention_sec`
 
 - femu: pd_open_age needs ecc_retention_sec above 0

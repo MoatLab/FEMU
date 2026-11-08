@@ -284,7 +284,8 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
     ssd->rcache.hits = 0;
     ssd->rcache.misses = 0;
     /* a hit must return a nonzero latency: rcache_touch() signals a miss with 0 */
-    ssd->rcache.hit_lat = ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
+    ssd->rcache.hit_lat = ssd->sp.dram_hit_ns ? ssd->sp.dram_hit_ns :
+                          ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
     if (ssd->rcache.hit_lat < 1) {
         ssd->rcache.hit_lat = 1;
     }

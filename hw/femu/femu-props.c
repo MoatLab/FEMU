@@ -805,6 +805,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "lookup, added to the mapping cost of every host page read and "
       "written, 0 or more; not with onfi_cache_read or FDP; 0 (default) "
       "charges none" },
+    { "dram_hit_ns",
+      "bbssd, CSD: controller DRAM time in ns of one page that the write "
+      "buffer or the read cache answers, 0 or more; a read takes the most "
+      "of its pages, and a buffered write pays it once; 0 (default) is "
+      "pg_rd_lat / 16 (1 ns at least), or 1000 ns when pg_rd_lat is 0" },
     { "iu_pages",
       "bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write "
       "that covers part of a unit reads the unit's other mapped pages and "

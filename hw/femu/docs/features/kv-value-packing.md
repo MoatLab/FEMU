@@ -99,7 +99,8 @@ volatile write cache apply:
 | CC.SHN | programs the open page of every KV namespace |
 | the next record does not fit, or the page is full of live records | programs the open page; the Store that needs the room, or fills the page, waits for it |
 
-The DRAM time is `pg_rd_lat / 16`, the time a bbssd write buffer charges.
+The DRAM time is `pg_rd_lat / 16`, the time a bbssd write buffer charges
+when `dram_hit_ns` is 0. KV does not take `dram_hit_ns`.
 The program at Set Features and at shutdown loads the LUNs; the admin
 command and the shutdown status do not wait for it. FEMU models no power
 loss for KV, so the index in device DRAM needs no journal.

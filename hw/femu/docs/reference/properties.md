@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 277 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 278 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -253,6 +253,7 @@ Devices:
 | `gc_idle_pcent` | `uint8` | `0` | bbssd with gc_idle_ms: idle collection runs while the line fill is above this percent, as gc_thres_pcent counts it; 0 (default) takes gc_thres_pcent, else 1 to 99 |
 | `buffer_size` | `int32` | `0` | bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 programs every write directly |
 | `l2p_dram_ns` | `int32` | `0` | bbssd, CSD: controller DRAM time in ns of each logical-to-physical lookup, added to the mapping cost of every host page read and written, 0 or more; not with onfi_cache_read or FDP; 0 (default) charges none |
+| `dram_hit_ns` | `int32` | `0` | bbssd, CSD: controller DRAM time in ns of one page that the write buffer or the read cache answers, 0 or more; a read takes the most of its pages, and a buffered write pays it once; 0 (default) is pg_rd_lat / 16 (1 ns at least), or 1000 ns when pg_rd_lat is 0 |
 | `iu_pages` | `int32` | `0` | bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write that covers part of a unit reads the unit's other mapped pages and programs them again (read-modify-write) on the write path, not for Write Zeroes; not with buffer_size, streams, mp_program, end-of-life read-only or FDP; 0 or 1 (default) maps each page |
 | `buffer_low_pcent` | `int32` | `0` | bbssd, CSD: with buffer_size, an idle FTL thread writes buffered pages back, one per die once all dies are free, until the fill level falls to this percent; below buffer_thres_pcent; not with shared namespaces or power_loss; 0 (default) writes back only when the buffer reaches buffer_thres_pcent |
 | `buffer_thres_pcent` | `int32` | `90` | bbssd, CSD: buffer fill level in percent at which buffered pages are written to NAND, 1 to 100 when buffer_size > 0 |
