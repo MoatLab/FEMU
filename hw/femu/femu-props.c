@@ -274,6 +274,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "hmb_ns",
       "with hmb_mb, ns per mapping lookup in the Host Memory Buffer, the "
       "PCIe round trip; 0 or more (default 1000)" },
+    { "crypto_mbps",
+      "throughput in MB/s of the inline encryption engine of a "
+      "self-encrypting drive; the data a command reads or programs (Read, "
+      "Write, Zone Append, Compare, Verify, Write Zeroes that programs, "
+      "twice for Copy, key-value and memory transfers) passes the one "
+      "engine, after the media and the host link; a failed command pays "
+      "nothing, and a reset clears the engine. 0 (default) is off" },
     { "telemetry_da4",
       "report Data Area 4 in the telemetry logs (07h, 08h) when the host "
       "sets ETDAS in Host Behavior Support: one 512-byte counter block per "

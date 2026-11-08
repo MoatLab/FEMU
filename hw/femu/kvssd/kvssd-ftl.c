@@ -2574,6 +2574,7 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         }
         return status;
     }
+    req->xfer_bytes = len;
     kv_apply_lat(req, lat);
     return NVME_SUCCESS;
 }

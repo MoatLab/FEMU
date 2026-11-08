@@ -45,6 +45,42 @@ static bool nvme_link_applies(const NvmeRequest *req)
 }
 
 /*
+ * The bytes a command passes through the inline encryption engine: the data
+ * it reads from or programs to the media. A Copy decrypts its source and
+ * encrypts its destination. A failed command moved no data.
+ */
+static uint64_t nvme_crypto_bytes(const NvmeRequest *req)
+{
+    uint64_t blocks;
+
+    if (!req->ns || req->status != NVME_SUCCESS) {
+        return 0;
+    }
+    if (NS_KVSSD(req->ns) || NS_SLM(req->ns) || NS_CP(req->ns)) {
+        return req->xfer_bytes;
+    }
+    switch (req->cmd_opcode) {
+    case NVME_CMD_READ:
+    case NVME_CMD_WRITE:
+    case NVME_CMD_ZONE_APPEND:
+    case NVME_CMD_COMPARE:
+    case NVME_CMD_VERIFY:
+        blocks = req->nlb;
+        break;
+    case NVME_CMD_WRITE_ZEROES:
+        blocks = req->wz_deac ? 0 : req->nlb;
+        break;
+    case NVME_CMD_COPY:
+        blocks = 2 * (uint64_t)req->nlb;
+        break;
+    default:
+        return 0;
+    }
+    return blocks << req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(
+                         req->ns->id_ns.flbas)].lbads;
+}
+
+/*
  * The bytes a command moves over the link. A key-value store and retrieve
  * share the Read and Write opcodes and carry no block count.
  */
@@ -451,6 +487,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->cqe.res64 = 0;
         req->ns = NULL;
         req->xfer_bytes = 0;
+        req->wz_deac = false;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
@@ -586,11 +623,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         /*
-         * The host-link and controller-CPU models are applied on the ring
-         * path, so a request that should pay them cannot complete inline.
+         * The host-link, encryption engine and controller-CPU models are
+         * applied on the ring path, so a request that should pay them
+         * cannot complete inline.
          */
         if (inline_mode && !n->pcie_enabled && !n->fw_enabled &&
-            req->ns && NS_NOSSD(req->ns)) {
+            !n->crypto_mbps && req->ns && NS_NOSSD(req->ns)) {
             /*
              * Inline completion: NoSSD has zero latency, so the request is
              * ready now. Post the CQE directly here instead of bouncing it
@@ -881,6 +919,25 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             req->expire_time = nvme_link_book(n, req->is_write,
                                               nvme_link_bytes(req),
                                               req->expire_time);
+        }
+
+        /*
+         * Optional inline encryption engine (crypto_mbps): the data a
+         * command reads or programs passes the one engine, at its
+         * throughput, so a slow engine caps the drive's bandwidth. 1 MB/s
+         * is one byte per microsecond. Requests take the engine in the
+         * order the poller sees them, as they take the link.
+         */
+        if (unlikely(n->crypto_mbps) && nvme_crypto_bytes(req)) {
+            uint64_t ns = nvme_crypto_bytes(req) * 1000 / n->crypto_mbps;
+            uint64_t start;
+
+            pthread_spin_lock(&n->crypto_lock);
+            start = MAX(n->crypto_next_avail_time,
+                        (uint64_t)req->expire_time);
+            n->crypto_next_avail_time = start + ns;
+            req->expire_time = (int64_t)n->crypto_next_avail_time;
+            pthread_spin_unlock(&n->crypto_lock);
         }
 
         /*
@@ -2210,6 +2267,9 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     bool deac = (control & NVME_WZ_DEAC) != 0;
     uint16_t status;
 
+    /* the encryption engine charges what a programming Write Zeroes writes */
+    req->wz_deac = deac;
+    req->nlb = nlb;
     nvme_note_user_write(n);
 
     /* DTYPE is bits 22:20 here; bit 23 is NSZ (NVM 1.2, Figure 82) */

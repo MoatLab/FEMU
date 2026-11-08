@@ -686,6 +686,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
                     bool completed = req->status != NVME_SUCCESS ||
                         ((!n->use_ftl_thread || r == 1) &&
                          !n->pcie_enabled && !n->fw_enabled &&
+                         !n->crypto_mbps &&
                          req->expire_time <= femu_dev_now(n));
 
                     nvme_retire_ns_request(req, completed);

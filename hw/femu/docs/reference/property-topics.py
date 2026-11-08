@@ -63,7 +63,7 @@ DEVICES = [
                 "title": "LBA formats, metadata and protection",
                 "kind": "static",
                 "props": [
-                    "nlbaf", "atomic_write_lbas", "perf_hints", "hmb_mb", "hmb_ns", "telemetry_da4", "ocp", "ocp_profile",
+                    "nlbaf", "atomic_write_lbas", "perf_hints", "hmb_mb", "hmb_ns", "crypto_mbps", "telemetry_da4", "ocp", "ocp_profile",
                     "lba_index", "extended", "meta", "mc", "pi", "pif",
                     "dpc", "dps", "ms", "ms_max", "dlfeat",
                 ],

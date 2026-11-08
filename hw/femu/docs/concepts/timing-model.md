@@ -112,6 +112,10 @@ for when it will happen, so other LUNs can use the bus in the meantime.
 
 ### Program and erase suspend, ECC
 
+- `crypto_mbps` adds an inline encryption engine of that throughput, shared
+  by every queue. A command holds it for the bytes it reads or programs: a
+  Copy pays twice (decrypt, then encrypt), and a failed command pays nothing.
+  Commands take the engine in the order the poller sees them.
 - `pe_suspend` (`zns_pe_suspend` for ZNS) lets a read go ahead of a program or
   erase that is running on its LUN (plane for ZNS). The first such read pays
   `tsusp_ns` (`zns_tsusp_ns`); the suspended operation then ends later by

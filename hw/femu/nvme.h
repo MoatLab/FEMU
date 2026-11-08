@@ -1977,6 +1977,8 @@ typedef struct NvmeRequest {
     uint64_t                slba;
     uint16_t                is_write;
     uint16_t                nlb;
+    /* a Write Zeroes that only deallocates programs no data */
+    bool                    wz_deac;
     /*
      * Bytes this command really moved, for the modes whose transfer size is not
      * a block count. Zero everywhere else; the block arithmetic applies there.
@@ -3051,6 +3053,10 @@ typedef struct FemuCtrl {
     uint64_t        fw_cpu_next_avail_time;
     uint64_t        *fw_core_avail; /* fw_cores entries */
     pthread_spinlock_t fw_cpu_lock;
+    /* inline encryption engine (crypto_mbps): one, shared by all queues */
+    uint32_t        crypto_mbps;
+    uint64_t        crypto_next_avail_time;
+    pthread_spinlock_t crypto_lock;
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
     /* per-NS FDP placement handle lists "0:1,2"; NULL = every handle */

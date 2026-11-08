@@ -644,6 +644,10 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         n->fw_cpu_next_avail_time = 0;
         pthread_spin_unlock(&n->fw_cpu_lock);
     }
+    /* nor the encryption engine */
+    pthread_spin_lock(&n->crypto_lock);
+    n->crypto_next_avail_time = 0;
+    pthread_spin_unlock(&n->crypto_lock);
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
@@ -4190,6 +4194,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                     n->fw_other_ns;
     n->fw_core_avail = g_new0(uint64_t, n->fw_cores);
     pthread_spin_init(&n->pcie_lock, PTHREAD_PROCESS_PRIVATE);
+    pthread_spin_init(&n->crypto_lock, PTHREAD_PROCESS_PRIVATE);
+    n->crypto_next_avail_time = 0;
     pthread_spin_init(&n->fw_cpu_lock, PTHREAD_PROCESS_PRIVATE);
 
     n->completed = 0;
@@ -4622,6 +4628,7 @@ static void femu_exit(PCIDevice *pci_dev)
         femu_free_namespace_bitmaps(n);
     }
     pthread_spin_destroy(&n->pcie_lock);
+    pthread_spin_destroy(&n->crypto_lock);
     pthread_spin_destroy(&n->fw_cpu_lock);
     g_free(n->fw_core_avail);
     n->fw_core_avail = NULL;
@@ -4701,6 +4708,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_BOOL("telemetry_da4", FemuCtrl, telemetry_da4, false),
+    DEFINE_PROP_UINT32("crypto_mbps", FemuCtrl, crypto_mbps, 0),
     DEFINE_PROP_UINT32("hmb_mb", FemuCtrl, hmb_mb, 0),
     DEFINE_PROP_INT32("hmb_ns", FemuCtrl, hmb_ns, 1000),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
