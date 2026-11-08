@@ -877,6 +877,11 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     /* an offline die with no parity has lost its pages (OCP event 0016h) */
     int lost_die = spp->die_parity ? -1 : ssd_offline_die(ssd);
     bool lost = false;
+    bool failed;
+
+    /* the Read Recovery Level bounds host Read commands only */
+    ssd->rber_failed = false;
+    ssd->rrl_read = req->cmd.opcode == NVME_CMD_READ;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
@@ -967,8 +972,16 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         srd.type = USER_IO;
         srd.cmd = NAND_READ;
         srd.stime = dstart;
+        /* the flag holds this page's outcome, then the command's */
+        failed = ssd->rber_failed;
+        ssd->rber_failed = false;
         sublat = ssd_advance_status(ssd, &ppa, &srd) + wait;
         maxlat = (sublat > maxlat) ? sublat : maxlat;
+        /* a page that did not decode is not in the read cache either */
+        if (unlikely(ssd->rber_failed)) {
+            rcache_invalidate(ssd, lpn);
+        }
+        ssd->rber_failed |= failed;
         ssd_read_check_wear(ssd, &ppa, req->stime);
     }
     sublat = ssd_mp_flush(ssd, NAND_READ);
@@ -979,6 +992,10 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     }
     /* the media was read and its pages did not decode */
     if (unlikely(lost)) {
+        req->status = NVME_UNRECOVERED_READ | NVME_DNR;
+        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
+    } else if (unlikely(ssd->rber_failed)) {
+        /* the Read Recovery Level stopped short (Fast Fail: no retry) */
         req->status = NVME_UNRECOVERED_READ | NVME_DNR;
         qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
     }

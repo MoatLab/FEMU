@@ -1628,6 +1628,7 @@ enum NvmeFeatureIds {
     NVME_HOST_MEM_BUFFER            = 0xd,
     NVME_TIMESTAMP                  = 0xe,
     NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
+    NVME_READ_RECOVERY              = 0x12, /* Read Recovery Level, rrl=on */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SPINUP_CONTROL             = 0x1a,
@@ -2888,6 +2889,12 @@ typedef struct FemuCtrl {
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
     bool            persist_ftl;     /* the file holds the bbssd FTL too */
+    /*
+     * Read Recovery Level (rrl, Feature 12h): the level the FTL thread
+     * applies to host reads through the retry model; 4 is the default.
+     */
+    bool            rrl;
+    uint8_t         rrl_level;
     /* a fetched request left without the FTL: no FTL save this run */
     bool            persist_torn;
     char            *persist_path;   /* persist_file, absolute and resolved */
@@ -3812,6 +3819,13 @@ uint64_t ssd_media_read_pages(struct ssd *ssd);
 uint64_t ssd_recovered_reads(struct ssd *ssd);
 uint64_t ssd_read_errors(struct ssd *ssd);
 uint64_t ssd_degraded_reads(struct ssd *ssd);
+/* Read Recovery Levels FEMU supports: 4 (default), 9 and 15 (Fast Fail) */
+#define NVME_RRL_DEFAULT        4
+#define NVME_RRL_NO_SOFT        9
+#define NVME_RRL_FAST_FAIL      15
+#define NVME_RRLS               ((1u << NVME_RRL_DEFAULT) | \
+                                 (1u << NVME_RRL_NO_SOFT) | \
+                                 (1u << NVME_RRL_FAST_FAIL))
 uint64_t ssd_persist_max_len(struct ssd *ssd);
 GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest);
 bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,

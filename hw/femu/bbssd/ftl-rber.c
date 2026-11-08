@@ -87,6 +87,10 @@ static double rber_lambda(struct ssd *ssd, struct ppa *ppa, uint64_t now,
  * Draws the decode outcome of each codeword, then books each retry and soft
  * pass as a page read after the one before. Returns the time the page data
  * is ready.
+ *
+ * With rrl, the Read Recovery Level bounds the recovery: level 9 has no
+ * soft decode, level 15 (Fast Fail) one hard decode. A codeword it leaves
+ * uncorrected fails the read: ssd_read() sees rber_failed.
  */
 uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
                        uint64_t done, uint64_t reads)
@@ -102,6 +106,10 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
     bool need_soft = false;
     bool limit = false;
     double att = 1.0;
+    int level = ssd->n->rrl && ssd->rrl_read ?
+                qatomic_read(&ssd->n->rrl_level) : NVME_RRL_DEFAULT;
+    uint32_t steps = level >= NVME_RRL_FAST_FAIL ? 0 : spp->rr_steps;
+    bool soft_ok = level <= NVME_RRL_DEFAULT && spp->ecc_soft_bits;
 
     for (uint32_t k = 0; k <= spp->rr_steps; k++) {
         hard[k] = rber_cdf(spp->ecc_hard_bits, lam * (f + (1 - f) * att),
@@ -115,10 +123,10 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
     }
 
     for (uint32_t i = 0; i < cws; i++) {
-        uint32_t depth = spp->rr_steps;
+        uint32_t depth = steps;
         bool hard_ok = false;
 
-        for (uint32_t k = 0; k <= spp->rr_steps; k++) {
+        for (uint32_t k = 0; k <= steps; k++) {
             if (rber_pass(rber_draw(ssd), hard[k])) {
                 depth = k;
                 hard_ok = true;
@@ -129,11 +137,15 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
         if (hard_ok) {
             continue;
         }
-        if (spp->ecc_soft_bits) {
+        if (soft_ok) {
             need_soft = true;
             if (!rber_pass(rber_draw(ssd), soft)) {
                 limit = true;
             }
+        } else if (level > NVME_RRL_DEFAULT) {
+            /* the level stops here: the read fails */
+            ssd->rber_failed = true;
+            limit = true;
         } else {
             limit = true;
         }

@@ -33,6 +33,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = true,
     [NVME_HOST_MEM_BUFFER]          = true,
     [NVME_SPINUP_CONTROL]           = true,
+    [NVME_READ_RECOVERY]            = true,
     [NVME_HCTM]                     = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
@@ -89,6 +90,8 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
      * prohibits CBh (DP-CFG-13), so neither is here.
      */
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = NVME_FEAT_CAP_CHANGE,
+    /* Read Recovery Level: changeable, not saveable here */
+    [NVME_READ_RECOVERY]            = NVME_FEAT_CAP_CHANGE,
     /* SERRI-10: Event Injection is not saveable */
     [NVME_OCP_EVENT_INJECTION]      = NVME_FEAT_CAP_CHANGE,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = NVME_FEAT_CAP_CHANGE |
@@ -322,6 +325,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->power_states;
     case NVME_HOST_MEM_BUFFER:
         return n->hmb_mb != 0;
+    case NVME_READ_RECOVERY:
+        return n->rrl;
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1910,6 +1915,9 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
     case NVME_OCP_DSSD_AEN_CONFIG:
         result = NVME_OCP_AEN_DEFAULT;
         break;
+    case NVME_READ_RECOVERY:
+        result = NVME_RRL_DEFAULT;
+        break;
     case NVME_OCP_DSSD_POWER_STATE:
         /* the DSSD state of power state 0: its Maximum Power in watts */
         result = n->ps_max_watts;
@@ -1944,6 +1952,13 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (nvme_resv_fid(fid)) {
         return nvme_resv_get_feature(n, cmd, cqe);
+    }
+    /*
+     * Read Recovery Level: NVM subsystem scope takes NSID 0 only (4.4);
+     * CDW11 bits 31:16 are reserved.
+     */
+    if (fid == NVME_READ_RECOVERY && (nsid || dw11 & 0xffff0000u)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     /* OCP GETF-4: the NVM subsystem features take NSID 0 or FFFFFFFFh */
@@ -2095,6 +2110,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* fixed off: no capability bit is set, so a Set cannot change it */
         cqe->n.result = 0;
         break;
+    case NVME_READ_RECOVERY:
+        cqe->n.result = cpu_to_le32(qatomic_read(&n->rrl_level));
+        break;
     case NVME_HCTM:
         cqe->n.result = cpu_to_le32((uint32_t)n->hctm_tmt1 << 16 |
                                     n->hctm_tmt2);
@@ -2170,6 +2188,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (nvme_resv_fid(fid)) {
         return nvme_resv_set_feature(n, cmd);
+    }
+    if (fid == NVME_READ_RECOVERY && nsid) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     if (save && !(nvme_feat_cap(n, fid) & NVME_FEAT_CAP_SAVE)) {
@@ -2480,6 +2501,21 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return femu_ocp_lat_set(n, cmd);
     case NVME_OCP_EVENT_INJECTION:
         return femu_ocp_inj_set(n, cmd);
+    case NVME_READ_RECOVERY: {
+        /*
+         * Figures 419 and 420: CDW12 bits 3:0 the level; NVMSETID (CDW11
+         * bits 15:0) is ignored, as there are no NVM Sets. The level is
+         * not saveable, and it persists across resets (Base 2.3, 4.4).
+         */
+        uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+
+        if (dw12 & ~0xfu || dw11 & 0xffff0000u ||
+            !(NVME_RRLS & (1u << dw12))) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        qatomic_set(&n->rrl_level, dw12);
+        break;
+    }
     case NVME_OCP_CLEAR_PCIE_ERRORS:
         /*
          * CPCIE-13: bit 31 clears the PCIe correctable error counters of
@@ -2769,7 +2805,8 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
-        } else if (fid == NVME_SPINUP_CONTROL || nvme_ocp_subsys_fid(fid)) {
+        } else if (fid == NVME_SPINUP_CONTROL ||
+                   fid == NVME_READ_RECOVERY || nvme_ocp_subsys_fid(fid)) {
             scope = NVME_FID_SCOPE_SUBSYS;
         } else if (fid == NVME_FDP_EVENTS) {
             scope = 0;  /* a reclaim unit handle, which has no FSP bit */

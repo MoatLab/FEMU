@@ -2496,6 +2496,11 @@ static void nvme_init_ctrl(FemuCtrl *n)
     if (n->reservations) {
         id->ctratt |= cpu_to_le32(1 << 0);
     }
+    /* RRLVLS and the levels Feature 12h takes */
+    if (n->rrl) {
+        id->ctratt |= cpu_to_le32(1 << 3);
+        id->rrls = cpu_to_le16(NVME_RRLS);
+    }
 
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
@@ -4092,6 +4097,23 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
     }
+    /* Read Recovery Levels cut the recovery of the retry model short */
+    if (n->rrl && !n->bb_params.rber_ppb) {
+        error_setg(errp, "FEMU: rrl needs rber_ppb");
+        return;
+    }
+    /* the level has NVM subsystem scope; FEMU keeps it in the controller */
+    if (n->rrl && n->subsys) {
+        error_setg(errp, "FEMU: rrl is not supported with a subsystem");
+        return;
+    }
+    /* the level must persist across power cycles; the file does not keep it */
+    if (n->rrl && n->persist_file) {
+        error_setg(errp, "FEMU: rrl is not supported with persist_file");
+        return;
+    }
+    /* level 4 until a Set Features 12h; resets keep the level */
+    n->rrl_level = NVME_RRL_DEFAULT;
     /*
      * The first version of idle collection runs one bbssd namespace built
      * at realize. bb_init() checks the rest.
@@ -4676,6 +4698,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
     DEFINE_PROP_STRING("persist_file", FemuCtrl, persist_file),
     DEFINE_PROP_BOOL("persist_ftl", FemuCtrl, persist_ftl, false),
+    DEFINE_PROP_BOOL("rrl", FemuCtrl, rrl, false),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),

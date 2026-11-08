@@ -683,7 +683,8 @@ State Transition, 0Ch), LBA Range Type (03h), Temperature Threshold (04h), Error
 Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
-Timestamp (0Eh), Host Behavior Support (16h), Command Set Profile (19h), FDP
+Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`), Host
+Behavior Support (16h), Command Set Profile (19h), FDP
 (1Dh, 1Eh, only with FDP on), Key Value Configuration (20h, only with
 a KV namespace) and Software Progress Marker (80h). Any other identifier, or
 one of these without what it needs, fails with Invalid Field in Command, and

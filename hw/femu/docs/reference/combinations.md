@@ -720,6 +720,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `persist_file`
 
+- FEMU: rrl is not supported with persist_file
 - persist_file '%s' cannot be read in full
 - persist_file '%s' does not match this device: the mode, the backend size (%
 - persist_file '%s' has a short FTL section
@@ -810,6 +811,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU %s: rber_ppb is not supported with %s
 - FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU: rber_ppb is not supported with %s
+- FEMU: rrl needs rber_ppb
 - x-rber-u requires rber_ppb
 
 ## `read_prio`
@@ -836,6 +838,12 @@ own description allows. A message keeps its format directives (`%s`,
 
 - a rotational subsystem does not offer FDP
 - a rotational subsystem needs NVM namespaces; namespace %d is %s
+
+## `rrl`
+
+- FEMU: rrl is not supported with a subsystem
+- FEMU: rrl is not supported with persist_file
+- FEMU: rrl needs rber_ppb
 
 ## `sanitize_ms`
 

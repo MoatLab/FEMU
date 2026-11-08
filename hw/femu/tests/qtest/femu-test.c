@@ -42299,6 +42299,174 @@ static void femu_test_rber_scripted(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* Media and Data Integrity Errors of the SMART log, low 64 bits */
+static uint64_t femu_rrl_media_errors(FemuCtrlState *c, uint64_t log)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, 0x02, log, 512, 0)), ==,
+                    NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, log + 160);
+}
+
+/* Set Features 12h (Read Recovery Level): @sv, @nsid, CDW11, CDW12 */
+static uint16_t femu_rrl_set_full(FemuCtrlState *c, bool sv, uint32_t nsid,
+                                  uint32_t dw11, uint32_t dw12)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(0x12 | (sv ? 1u << 31 : 0));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_rrl_set(FemuCtrlState *c, uint32_t dw12)
+{
+    return femu_rrl_set_full(c, false, 0, 0, dw12);
+}
+
+/*
+ * Read Recovery Levels (rrl=on) on the rber-retry device: rr_steps=2, four
+ * codewords per page, scripted decode draws (1 fails, 0 passes). Identify
+ * reports RRLVLS and levels 4, 9 and 15; the default is 4; level 5 and a
+ * reserved bit fail. Then, per level, a read with a given script:
+ *   15 "0 1 0 0"        codeword 1 fails its one decode: the read fails
+ *   9  "1 1 1 0 0 0"    codeword 0 fails 3 hard decodes, no soft: fails
+ *   9  "0 0 1 1 0 0"    codeword 2 passes on retry 2: the read passes
+ *   4  "1 1 1 0 0 0 0"  soft decode recovers codeword 0: passes
+ * A failed read has DNR set and counts in the SMART media errors. With the
+ * read cache on, a failed page is not cached: a second level 15 read
+ * draws again and fails again, and a later read of the second page of a
+ * failed 8 KiB read draws again too. Feature 12h takes NSID 0 only, is not
+ * saveable (SEL 3 is 4h, SEL 1 and 2 return 4), and a reset keeps it.
+ */
+static void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const struct {
+        uint32_t level;
+        const char *u;
+        uint64_t used;
+        bool fails;
+        uint64_t extra_ns;      /* retries and soft decode the level made */
+    } cases[] = {
+        { 15, "0 1 0 0", 4, true, 0 },
+        { 9, "1 1 1 0 0 0", 6, true, 200000000 },
+        { 9, "0 0 1 1 0 0", 6, false, 200000000 },
+        { 4, "1 1 1 0 0 0 0", 7, false, 510000000 },
+    };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t id[4096];
+    uint32_t res;
+    uint64_t v[9];
+    uint64_t err0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, id, sizeof(id));
+    g_assert_cmphex(ldl_le_p(id + 96) & (1 << 3), ==, 1 << 3);
+    g_assert_cmphex(lduw_le_p(id + 100), ==, 0x8210);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    g_assert_cmphex(femu_rrl_set(&c, 5), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set(&c, 0x10 | 15), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 1, 0, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0xffffffff, 0, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1u << 16, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, true, 0, 0, 15), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    /* NVMSETID is ignored: there are no NVM Sets */
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 7, 15), ==, NVME_SUCCESS);
+    for (uint8_t sel = 1; sel <= 3; sel++) {
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, sel, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, sel == 3 ? 0x4 : 4);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 1, 0, &res)), ==,
+                    NVME_INVALID_FIELD);
+    /* a Controller Level Reset keeps the level (Base 2.3, 4.4) */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 15);
+
+    /* one page per case: the read cache would answer a page read before */
+    qtest_memset(qts, buf, 0x3c, 8192);
+    for (int i = 0; i < 7; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
+        uint16_t st;
+
+        g_assert_cmphex(femu_rrl_set(&c, cases[i].level), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, cases[i].level);
+        err0 = femu_rrl_media_errors(&c, log);
+        femu_rber_script(qts, cases[i].u);
+        st = femu_rw(&c, NVME_CMD_READ, i * 8, buf);
+        femu_rber_state(qts, v);
+        g_test_message("rrl %u: status 0x%x, draws %" PRIu64,
+                       cases[i].level, st, v[0]);
+        g_assert_cmpuint(v[0], ==, cases[i].used);
+        g_assert_cmpuint(v[2], ==, 0);              /* no script underrun */
+        g_assert_cmpuint(v[8], ==, cases[i].extra_ns);
+        if (cases[i].fails) {
+            g_assert_cmphex(st & 0x7fff, ==,
+                            NVME_UNRECOVERED_READ | NVME_DNR);
+            g_assert_cmpuint(femu_rrl_media_errors(&c, log) - err0, ==, 1);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+            g_assert_cmpuint(femu_rrl_media_errors(&c, log) - err0, ==, 0);
+        }
+        femu_rber_script(qts, "off");
+    }
+
+    /* the read cache keeps no page that failed: the retry fails too */
+    g_assert_cmphex(femu_rrl_set(&c, 15), ==, NVME_SUCCESS);
+    femu_rber_script(qts, "0 1 0 0 0 1 0 0");
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 4 * 8, buf) & 0x7fff, ==,
+                        NVME_UNRECOVERED_READ | NVME_DNR);
+    }
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[0], ==, 8);
+
+    /* both pages of a failed 8 KiB read leave the cache, not the first only */
+    femu_rber_script(qts, "0 1 0 0 0 1 0 0");
+    femu_crypto_submit(&c, NVME_CMD_READ, 5 * 8, buf, 0);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL) & 0x7fff, ==,
+                    NVME_UNRECOVERED_READ | NVME_DNR);
+    femu_rber_script(qts, "0 0 0 0");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 6 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[0], ==, 4);
+    femu_rber_script(qts, "off");
+    g_assert_cmphex(femu_rrl_set(&c, 4), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
 /*
  * Read disturb with real draws: rber_read_double=1 doubles the error mean
  * with each read of the block. A fresh block reads with no retry; after 40
@@ -52188,6 +52356,13 @@ static void femu_register_nodes(void)
             "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,rber_ppb=1"
+            ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("rrl", "femu", femu_test_rrl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1,rrl=on,read_cache_mb=1"
             ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
     qos_add_test("rber-clean", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"clean",

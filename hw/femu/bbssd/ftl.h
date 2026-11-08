@@ -745,6 +745,8 @@ struct ssd {
     bool rber_scripted;
     uint64_t rber_script_short; /* draws asked for past the script */
     uint64_t rber_last_extra_ns; /* time the last host read added */
+    bool rber_failed;           /* the Read Recovery Level failed a read */
+    bool rrl_read;              /* this ssd_read() is a host Read command */
     /* the last close_seq given to a retired reclaim unit */
     uint64_t ru_close_seq;
 

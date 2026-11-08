@@ -113,6 +113,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "user out. Format NVM keeps the LBA format. The FTL state is kept "
       "only with persist_ftl. Not with namespace_modes, ns_mgmt, shared "
       "namespaces, cxl_ssd, metadata or sanitize_ms" },
+    { "rrl",
+      "bbssd with rber_ppb: Read Recovery Levels (Feature 12h, levels 4, "
+      "9 and 15). Level 4 (default) recovers as the retry model does; 9 "
+      "skips soft decode and 15 (Fast Fail) makes one hard decode, and a "
+      "codeword they leave uncorrected fails the read; off (default)" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
       "(mapping, page and block state, lines, write pointer, counters), "

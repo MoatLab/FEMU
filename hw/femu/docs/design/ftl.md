@@ -966,6 +966,29 @@ seeded with `rber_seed`. Each pass adds to the block read count, so read
 stress and read reclaim see it. GC reads, translation reads and FDP map
 reads are left out. Log page C0h counts the outcomes at offsets 296 to 320.
 
+With `rrl=on` the host sets a Read Recovery Level (Feature 12h). The level
+bounds the recovery of host reads; GC reads keep full recovery.
+
+```text
+ level 4 (default)    attempts 0 .. rr_steps, then soft decode (as above);
+                      a codeword still uncorrected changes time only
+ level 9              attempts 0 .. rr_steps, no soft decode
+ level 15 (Fast Fail) attempt 0 only, per codeword
+ level 9 or 15, a codeword left uncorrected --> Unrecovered Read Error with DNR
+                                 (Linux does not retry it), a SMART
+                                 media error; the page leaves the read cache
+```
+
+The level applies to host Read commands only: Compare, Verify and Copy
+keep full recovery, and GC reads stay outside the retry model. Without
+soft bits, levels 9 and 4 make the same attempts, but level 9 fails the
+read where level 4 does not. Realize refuses `rrl` with `persist_file`:
+the level must survive a power cycle, and the file does not keep it. Identify Controller sets CTRATT bit 3 and RRLS bits
+4, 9 and 15. Feature 12h has NVM subsystem scope: it takes NSID 0 only,
+and realize refuses `rrl` in a subsystem. It is not saveable, and the
+level persists across resets. A Set of another level fails with Invalid
+Field.
+
 ### Read-only end of life (`eol_read_only`)
 
 With `blk_pe_limit`, a block wears out on the erase that takes it to its
