@@ -247,7 +247,8 @@ void tp_note(struct ssd *ssd, uint64_t lpn)
     uint64_t tp;
     int32_t slot;
 
-    if (!ssd->tp_on) {
+    /* with the table in the Host Memory Buffer, no translation page moves */
+    if (!ssd->tp_on || (ssd->n && qatomic_read(&ssd->n->hmb_active))) {
         return;
     }
     tp = lpn / ssd->cmt.lpn_per_tp;

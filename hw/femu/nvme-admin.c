@@ -31,6 +31,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_TIMESTAMP]                = true,
+    [NVME_HOST_MEM_BUFFER]          = true,
     [NVME_SPINUP_CONTROL]           = true,
     [NVME_HCTM]                     = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
@@ -60,6 +61,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
+    [NVME_HOST_MEM_BUFFER]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HCTM]                     = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_IDENTIFIER]          = NVME_FEAT_CAP_CHANGE,
     [NVME_AUTO_PST]                 = NVME_FEAT_CAP_CHANGE,
@@ -192,10 +194,102 @@ static bool nvme_feature_uidx_ok(FemuCtrl *n, NvmeCmd *cmd, uint8_t fid)
 {
     uint8_t uidx = le32_to_cpu(cmd->cdw14) & 0x7f;
 
+    /* Host Memory Buffer: CDW14 holds the descriptor list address */
+    if (fid == NVME_HOST_MEM_BUFFER) {
+        return true;
+    }
+
     if (!n->ocp || !uidx) {
         return true;
     }
     return uidx == 1 && fid >= 0xc0 && fid <= 0xcb;
+}
+
+/*
+ * Host Memory Buffer (Base 2.3, 5.2.26.2.4). With hmb_mb the controller
+ * is DRAM-less: while the host has the buffer enabled, the mapping table
+ * lives there, and a lookup costs one PCIe round trip (hmb_ns) instead of
+ * translation page reads. The buffer must hold HMMIN, the whole table.
+ *
+ *   Set 0Dh EHM=1, HSIZE, descriptor list --> hmb_active, lookups in host
+ *   Set 0Dh EHM=0, or a reset              --> lookups through the CMT
+ */
+#define NVME_HMB_MAX_DESC 4096
+
+static uint16_t nvme_hmb_set(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t hsize = le32_to_cpu(cmd->cdw12);
+    uint64_t dla = (uint64_t)le32_to_cpu(cmd->cdw14) << 32 |
+                   (le32_to_cpu(cmd->cdw13) & ~0xfu);
+    uint32_t dlec = le32_to_cpu(cmd->cdw15);
+    uint64_t mps = 1ull << (12 + NVME_CC_MPS(n->bar.cc));
+    uint64_t total = 0;
+    g_autofree uint8_t *list = NULL;
+
+    /* HMNARE needs CTRATT.HMBR, which FEMU leaves clear; bits 31:3 reserved */
+    if (dw11 & ~0x3u) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (!(dw11 & 0x1)) {
+        /* disabling a disabled buffer succeeds and does nothing */
+        qatomic_set(&n->hmb_active, false);
+        return NVME_SUCCESS;
+    }
+    if (qatomic_read(&n->hmb_active)) {
+        return NVME_CMD_SEQ_ERROR;
+    }
+    if (!dlec || dlec > NVME_HMB_MAX_DESC) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    list = g_malloc((size_t)dlec * 16);
+    /* memory only: a list address on a device's registers reads nothing */
+    if (femu_dma_read(n, dla, list, (size_t)dlec * 16)) {
+        return NVME_DATA_TRAS_ERROR;
+    }
+    for (uint32_t i = 0; i < dlec; i++) {
+        uint64_t badd = ldq_le_p(list + i * 16);
+        uint32_t bsize = ldl_le_p(list + i * 16 + 8);
+
+        /* a descriptor of size 0 is ignored (Figure 482) */
+        if (!bsize) {
+            continue;
+        }
+        if (badd & (mps - 1)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        total += bsize;
+    }
+    /* the descriptors hold HSIZE pages, and HSIZE holds HMMIN */
+    if (total != hsize || (uint64_t)hsize * mps <
+        (uint64_t)le32_to_cpu(n->id_ctrl.hmmin) * 4096) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    n->hmb_hsize = hsize;
+    n->hmb_dla = dla;
+    n->hmb_dlec = dlec;
+    qatomic_set(&n->hmb_active, true);
+    return NVME_SUCCESS;
+}
+
+/*
+ * Get Features 0Dh: EHM in Dword 0, the attributes (Figure 484) as data.
+ * The default (and saved, as nothing is saveable) is a disabled buffer.
+ */
+static uint16_t nvme_hmb_get(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe,
+                             bool current)
+{
+    uint8_t attr[4096] = { 0 };
+
+    if (current) {
+        stl_le_p(attr, n->hmb_hsize);
+        stl_le_p(attr + 4, (uint32_t)n->hmb_dla);
+        stl_le_p(attr + 8, (uint32_t)(n->hmb_dla >> 32));
+        stl_le_p(attr + 12, n->hmb_dlec);
+    }
+    cqe->n.result = cpu_to_le32(current && qatomic_read(&n->hmb_active));
+    return dma_read_prp(n, attr, sizeof(attr), le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
 }
 
 bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
@@ -222,6 +316,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->reservations;
     case NVME_AUTO_PST:
         return n->power_states;
+    case NVME_HOST_MEM_BUFFER:
+        return n->hmb_mb != 0;
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1862,6 +1958,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
     }
 
+    if (fid == NVME_HOST_MEM_BUFFER &&
+        (sel == NVME_GETFEAT_SELECT_DEFAULT ||
+         sel == NVME_GETFEAT_SELECT_SAVED)) {
+        return nvme_hmb_get(n, cmd, cqe, false);
+    }
+
     switch (sel) {
     case NVME_GETFEAT_SELECT_CURRENT:
         break;
@@ -2014,6 +2116,8 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return dma_read_prp(n, n->features.host_behavior,
                             sizeof(n->features.host_behavior), prp1, prp2);
+    case NVME_HOST_MEM_BUFFER:
+        return nvme_hmb_get(n, cmd, cqe, true);
     case NVME_TIMESTAMP: {
         uint8_t ts[8];
 
@@ -2432,6 +2536,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         femu_pel_set_feature(n, cmd, hbs, sizeof(hbs));
         return NVME_SUCCESS;
     }
+    case NVME_HOST_MEM_BUFFER:
+        return nvme_hmb_set(n, cmd);
     case NVME_TIMESTAMP: {
         /* Figure 414: 48 bits of milliseconds; bytes 7:6 are reserved */
         uint8_t ts[8];

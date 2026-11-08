@@ -550,6 +550,10 @@ static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     if (!ssd->cmt.capacity) {
         return dram;
     }
+    /* the whole table in the host's memory (HMB): one PCIe round trip */
+    if (ssd->n && qatomic_read(&ssd->n->hmb_active)) {
+        return dram + ssd->n->hmb_ns;
+    }
     if (!ssd->tp_on) {
         return dram + cmt_touch(ssd, lpn, stime, is_write);
     }

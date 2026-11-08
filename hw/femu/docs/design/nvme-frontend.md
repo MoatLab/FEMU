@@ -707,6 +707,23 @@ disables C2h (DP-CFG-6) and prohibits CBh (DP-CFG-13), so both fail.
 The NVM subsystem features (C6h, C7h, C8h, CAh) take NSID 0 or FFFFFFFFh
 only.
 
+With `hmb_mb` (bbssd, `mapping=dftl`), the controller is DRAM-less and
+asks for a Host Memory Buffer: Identify reports HMPRE and HMMIN as
+`hmb_mb` in 4 KiB pages, and HMMAXD as 4096 descriptors. `hmb_mb` must
+hold the whole mapping table, 8 bytes per page. Set Features 0Dh with EHM
+checks the descriptor list (MPS-aligned entries whose sizes add up to
+HSIZE, HSIZE at least HMMIN; entries of size 0 are skipped) and refuses a
+second enable with Command Sequence Error. While the
+buffer is enabled the mapping table lives there: a lookup costs `hmb_ns`
+and writes move no translation page. A disable, a Controller Level Reset
+or a system reset returns the lookups to the DFTL cache. FEMU stores
+nothing in the buffer.
+
+```text
+ lookup, HMB off: CMT hit, or a translation page read from flash on a miss
+ lookup, HMB on:  hmb_ns (PCIe round trip), no flash read
+```
+
 With `ocp=on` the PCIe function also has Function Level Reset (OCP PCI-6),
 Advanced Error Reporting (PCI-26) and the Device Serial Number (PCI-25).
 The serial number is a 64-bit FNV-1a hash of `serial`. An FLR, or a

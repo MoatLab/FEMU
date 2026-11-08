@@ -568,6 +568,7 @@ static void nvme_reset_features(FemuCtrl *n)
     nvme_ana_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     nvme_ocp_val_reset(n);
+    qatomic_set(&n->hmb_active, false);   /* a reset disables the HMB */
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
                                            NVME_TEMPERATURE_WARNING;
     n->features.temp_thresh_under = 0;
@@ -1992,6 +1993,27 @@ static int nvme_check_rotational_namespaces(FemuCtrl *n,
  * telemetry_da4 reports each namespace's media counters. FDP namespaces
  * share one FTL, whose counters belong to no single namespace.
  */
+/* hmb_mb stands in for a DFTL cache, which only a bbssd or CSD FTL has */
+static int nvme_check_hmb_namespaces(FemuCtrl *n, const uint8_t *modes,
+                                     Error **errp)
+{
+    if (!n->hmb_mb) {
+        return 0;
+    }
+    if (n->cxl_dev) {
+        error_setg(errp, "hmb_mb is not supported with cxl_ssd");
+        return -1;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] != FEMU_BBSSD_MODE && modes[i] != FEMU_CSD_MODE) {
+            error_setg(errp, "hmb_mb needs bbssd or CSD namespaces; "
+                       "namespace %d is not", i + 1);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int nvme_check_da4_namespaces(FemuCtrl *n, Error **errp)
 {
     if (n->telemetry_da4 && n->subsys && n->subsys->params.fdp.enabled) {
@@ -2069,6 +2091,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         nvme_check_rotational_namespaces(n, ns_modes, errp) ||
         nvme_check_ocp_namespaces(n, ns_modes, errp) ||
         nvme_check_da4_namespaces(n, errp) ||
+        nvme_check_hmb_namespaces(n, ns_modes, errp) ||
         nvme_check_profile_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
         g_free(ns_modes);
@@ -2494,6 +2517,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->sqes         = (n->max_sqes << 4) | 0x6;
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
+    /* HMB: the whole mapping table or nothing, in 4 KiB units */
+    id->hmpre        = cpu_to_le32(n->hmb_mb * 256);
+    id->hmmin        = cpu_to_le32(n->hmb_mb * 256);
+    id->hmmaxd       = cpu_to_le16(n->hmb_mb ? 4096 : 0);
     /* the Open-Channel commands take PRPs only, so they get no SGLs */
     if (n->sgl && !OCSSD(n)) {
         id->sgls     = cpu_to_le32(0x1);   /* advertise address-SGL support */
@@ -4326,6 +4353,17 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* the serial number is final now */
     femu_dsn_update(n);
 
+    /* hmb_mb holds the whole mapping table: 8 bytes per page */
+    if (n->hmb_mb && n->mbe &&
+        (uint64_t)n->hmb_mb * MiB <
+        (uint64_t)n->mbe->size / ((uint64_t)n->bb_params.secsz *
+                                  n->bb_params.secs_per_pg) * 8) {
+        error_setg(errp, "hmb_mb %u MiB is smaller than the mapping table "
+                   "of this device (8 bytes per page)", n->hmb_mb);
+        femu_realize_undo(n);
+        return;
+    }
+
     /* Validate retention before starting threads that would need unwinding. */
     if (!femu_persist_init(n, errp) || !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
@@ -4663,6 +4701,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_BOOL("telemetry_da4", FemuCtrl, telemetry_da4, false),
+    DEFINE_PROP_UINT32("hmb_mb", FemuCtrl, hmb_mb, 0),
+    DEFINE_PROP_INT32("hmb_ns", FemuCtrl, hmb_ns, 1000),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
@@ -5769,6 +5809,8 @@ static void femu_pci_reset(DeviceState *dev)
 {
     FemuCtrl *n = FEMU(dev);
 
+    /* the host's memory is its own again after any reset */
+    qatomic_set(&n->hmb_active, false);
     if (!n->ocp) {
         return;
     }

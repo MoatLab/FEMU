@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 269 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 271 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -95,6 +95,8 @@ Devices:
 | `nlbaf` | `uint8` | `5` | Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte blocks doubling with each format |
 | `atomic_write_lbas` | `uint32` | `0` | Namespace atomic write unit in blocks: NAWUN and the boundary NABSN become N - 1, from block 0. 0 (default) keeps one block; else a power of two from 2 to 65536 that fits MDTS at the largest block size. The power-fail unit stays one block. bbssd and NoSSD only; refused with power_loss, ns_mgmt, namespace_modes and a subsystem |
 | `perf_hints` | `bool` | `off` | bbssd, CSD: report the optimal write and deallocate granularity (NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, for the format in use; off (default) reports 0 (one block). Refused with FDP and ns_mgmt |
+| `hmb_mb` | `uint32` | `0` | bbssd with mapping=dftl: ask the host for a Host Memory Buffer of this many MiB (Identify HMPRE and HMMIN). While the host has it enabled (Set Features 0Dh), the mapping table lives there: a lookup costs hmb_ns and reads no translation page. 0 (default) is off |
+| `hmb_ns` | `int32` | `1000` | with hmb_mb, ns per mapping lookup in the Host Memory Buffer, the PCIe round trip; 0 or more (default 1000) |
 | `telemetry_da4` | `bool` | `off` | report Data Area 4 in the telemetry logs (07h, 08h) when the host sets ETDAS in Host Behavior Support: one 512-byte counter block per namespace after the controller block; also the Maximum Created Data Area field of log 07h; not with FDP; off (default) |
 | `ocp` | `bool` | `off` | bbssd, CSD: report the OCP 2.7 SMART Extended (C0h) and Error Recovery (C1h) logs behind the OCP UUID; the FEMU C0h counters move to UUID index 2; not with a femu-subsys; off (default) keeps C0h as the FEMU counters |
 | `ocp_profile` | `str` | unset | with ocp=on: 13 letters, A or B, one per OCP 2.7 device profile setting DP-CFG-1 to DP-CFG-13; unset (default) is BAABABAAAABAB, the settings FEMU meets; B for DP-CFG-7 turns on Write Uncorrectable; A for DP-CFG-1, 4, 6, 11 or 13 is refused, and ocp needs lba_index 0 |

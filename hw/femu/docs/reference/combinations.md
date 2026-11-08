@@ -141,6 +141,7 @@ own description allows. A message keeps its format directives (`%s`,
 - cxl_ssd requires the femu-cxl-ssd to have ftl=on
 - femu: onfi_mode is not supported with cxl_ssd
 - femu: the pd_* properties are not supported with cxl_ssd
+- hmb_mb is not supported with cxl_ssd
 
 ## `devsz_mb`
 
@@ -287,6 +288,17 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: gc_thres_pcent and gc_thres_pcent_high must be in [1, 100], got %d and %d
 - FEMU bbssd: gc_thres_pcent_high (%d) must not be below gc_thres_pcent (%d); the forced watermark is reached after the background one, not before
 
+## `hmb_mb`
+
+- FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
+- hmb_mb %u MiB is smaller than the mapping table of this device (8 bytes per page)
+- hmb_mb is not supported with cxl_ssd
+- hmb_mb needs bbssd or CSD namespaces; namespace %d is not
+
+## `hmb_ns`
+
+- FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
+
 ## `hot_cold_sep`
 
 - FEMU %s: hot_cold_sep is not supported under FDP: the placement handle of a write chooses its reclaim unit, and the overwrite pointer writes past it; give hot data a handle of its own
@@ -359,6 +371,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `lba_index`
 
+- femu-save-data: namespace %u is formatted to LBA format %u, not lba_index %u; a later run could not load the file
 - nlbaf must be in [1, 16] and lba_index below it
 - ocp needs lba_index 0: the factory sector size is LBA format 0 (DP-CFG-1 B, NSM-3)
 - zoned namespaces need a logical block of 4 KiB or less; lba_index selects %u bytes
@@ -406,10 +419,12 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU %s: mapping=%s is not supported under FDP: the log-block mappings write and merge through lines that are not FDP-aware; use page or dftl
 - FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
+- FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - FEMU bbssd: unknown mapping "%s"
 - Streams requires page or dftl mapping
 - femu: pd_open_read_limit and pd_open_close_sec are not supported with mapping=%s
+- hmb_mb %u MiB is smaller than the mapping table of this device (8 bytes per page)
 
 ## `max_cqes`
 
@@ -496,6 +511,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FDP needs namespaces of the NVM command set; namespace 1 is %s
 - FEMU bbssd: a reclaim group must hold every namespace, since a host may place all of its data in one: the namespaces expose %
 - FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
+- FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
 - FEMU bbssd: the %u namespaces expose %
 - FEMU: gc_idle_ms is not supported with shared namespaces
 - a rotational subsystem needs NVM namespaces; namespace %d is %s
@@ -509,6 +525,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: the pd_* properties are not supported with ns_mgmt or shared namespaces
 - femu: throttle works with bbssd or CSD namespaces only
 - gc_frontier must match the controller that owns the shared namespaces
+- hmb_mb needs bbssd or CSD namespaces; namespace %d is not
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace; shared namespaces are NoSSD or bbssd
 - kv_max_keys needs a key-value namespace; shared namespaces are NoSSD or bbssd
 - kv_pack=off needs a key-value namespace; shared namespaces are NoSSD or bbssd
@@ -687,6 +704,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `pel_file`
 
+- femu-save-data: '%s' is a device's pel_file
 - persist_file and pel_file name one file
 
 ## `perf_hints`
@@ -701,6 +719,8 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file and pel_file name one file
 - persist_file is not supported with %s
 - persist_file must not be empty
+- persist_file: '%s' ends in .lock, which names a lock file
+- persist_file: '%s' is a link to nothing
 
 ## `pg_xfer_lat`
 

@@ -9537,6 +9537,146 @@ static void femu_test_die_parity(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+static uint16_t femu_identify(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
+                              uint32_t cntid, uint64_t buf);
+
+/* Set Features 0Dh: @ehm, @hsize pages, a descriptor list at @list */
+static uint16_t femu_hmb_set(FemuCtrlState *c, bool ehm, uint32_t hsize,
+                             uint64_t list, uint32_t entries)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x0d);
+    cmd.cdw11 = cpu_to_le32(ehm ? 1 : 0);
+    cmd.cdw12 = cpu_to_le32(hsize);
+    cmd.cdw13 = cpu_to_le32((uint32_t)list);
+    cmd.cdw14 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw15 = cpu_to_le32(entries);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* Get Features 0Dh into @buf: Dword 0 (EHM) and the attributes */
+static uint32_t femu_hmb_get(FemuCtrlState *c, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+    uint32_t res = 0xdead;
+
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x0d);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(c, &cmd, &res)), ==,
+                    NVME_SUCCESS);
+    return res;
+}
+
+/* one timed 4 KiB read of LBA page @page, in microseconds */
+static int64_t femu_timed_read(FemuCtrlState *c, uint64_t page, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, page * 8, buf)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * Host Memory Buffer (hmb_mb=1, DFTL with a one-page mapping cache, 50 ms
+ * page reads, 1 ms HMB lookups). Identify asks for 256 pages. Without the
+ * HMB a read whose translation page is not cached reads it first (100 ms
+ * or more); with the HMB enabled the same read takes the 1 ms lookup and
+ * the data read only. Set Features checks the descriptors, refuses a
+ * second enable, and Get Features and a reset report the state.
+ */
+static void femu_test_hmb(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mem = guest_alloc(alloc, 2u << 20);
+    uint64_t base = QEMU_ALIGN_UP(mem, 4096);
+    uint32_t res = 0;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 272), ==, 256);    /* HMPRE */
+    g_assert_cmpuint(qtest_readl(qts, buf + 276), ==, 256);    /* HMMIN */
+
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2048 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* the cache holds the translation page of 2048: page 0 misses */
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("hmb off: read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 100000);
+
+    /* 128 pages, matching HSIZE but short of HMMIN, are refused */
+    qtest_memset(qts, list, 0, 32);
+    qtest_writeq(qts, list, base);
+    qtest_writel(qts, list + 8, 128);
+    g_assert_cmphex(femu_hmb_set(&c, true, 128, list, 1), ==,
+                    NVME_INVALID_FIELD);
+    /* 256 pages, then a size-0 entry whose address does not matter */
+    qtest_writel(qts, list + 8, 256);
+    qtest_writeq(qts, list + 16, 1);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_hmb_set(&c, true, 255, list, 2), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==,
+                    NVME_CMD_SEQ_ERROR);
+    res = femu_hmb_get(&c, buf);
+    g_assert_cmpuint(res & 1, ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);   /* HSIZE */
+    g_assert_cmpuint(qtest_readl(qts, buf + 12), ==, 2); /* HMDLEC */
+
+    us = femu_timed_read(&c, 2048, buf);
+    g_test_message("hmb on: read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 51000);                /* lookup and data read */
+    g_assert_cmpint(us, <, 90000);
+    /* writes under the HMB move no translation page */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        int64_t tp0 = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "map-write-pages");
+
+        qobject_unref(rsp);
+        qtest_memset(qts, buf, 0x3c, 4096);
+        /* pages in three other translation pages of 512 mappings */
+        for (int i = 1; i <= 3; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            (i * 1024 + 1) * 8, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        ns = femu_query_ns(qts, "", &rsp);
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                      "map-write-pages"), ==, tp0);
+        qobject_unref(rsp);
+    }
+
+    g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    res = femu_hmb_get(&c, buf);
+    g_assert_cmpuint(res & 1, ==, 0);                  /* a reset disables */
+    femu_disable(&c);
+    guest_free(alloc, mem);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
 /*
  * Firmware time per opcode and per core, on NoSSD so nothing else adds time.
  * @data names the case: "read" charges reads only, "other" charges commands
@@ -51007,6 +51147,14 @@ static void femu_register_nodes(void)
             "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=3,"
             "pg_rd_lat=100000000,die_parity=1,parity_xor_ns=50000000,"
             "failed_die=1"
+    });
+    qos_add_test("hmb", "femu", femu_test_hmb,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=64,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=50000000,mapping=dftl,x-cmt-slots=1,hmb_mb=1,"
+            "hmb_ns=1000000"
     });
     /* one LUN; a 100 ms read shows whether the array was used */
     qos_add_test("prog-pass2-off", "femu", femu_test_prog_pass2,

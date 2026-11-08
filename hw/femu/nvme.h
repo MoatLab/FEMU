@@ -1490,7 +1490,8 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    mntmt;
     uint16_t    mxtmt;
     uint32_t    sanicap;
-    uint8_t     rsvd332[6];
+    uint32_t    hmminds;
+    uint16_t    hmmaxd;
     uint16_t    nsetidmax;
     uint16_t    endgidmax;
     uint8_t     anatt;          /* ANA Transition Time, s */
@@ -1624,6 +1625,7 @@ enum NvmeFeatureIds {
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
     NVME_AUTO_PST                   = 0xc,
+    NVME_HOST_MEM_BUFFER            = 0xd,
     NVME_TIMESTAMP                  = 0xe,
     NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
@@ -2882,6 +2884,17 @@ typedef struct FemuCtrl {
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
     char            *persist_path;   /* persist_file, absolute and resolved */
+    /*
+     * Host Memory Buffer (hmb_mb): the host's last Set Features 0Dh, and
+     * whether the mapping table lives there now. The FTL thread reads
+     * hmb_active.
+     */
+    uint32_t        hmb_mb;
+    int32_t         hmb_ns;
+    bool            hmb_active;
+    uint32_t        hmb_hsize;
+    uint64_t        hmb_dla;
+    uint32_t        hmb_dlec;
     int             persist_lock_fd; /* holds persist_path.lock */
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */

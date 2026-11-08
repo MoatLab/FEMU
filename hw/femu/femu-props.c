@@ -266,6 +266,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "and OACS bit 10; the host can prohibit most admin commands and "
       "changeable Feature Identifiers on the admin queue until QEMU stops; "
       "not with a femu-subsys; off (default)" },
+    { "hmb_mb",
+      "bbssd with mapping=dftl: ask the host for a Host Memory Buffer of "
+      "this many MiB (Identify HMPRE and HMMIN). While the host has it "
+      "enabled (Set Features 0Dh), the mapping table lives there: a lookup "
+      "costs hmb_ns and reads no translation page. 0 (default) is off" },
+    { "hmb_ns",
+      "with hmb_mb, ns per mapping lookup in the Host Memory Buffer, the "
+      "PCIe round trip; 0 or more (default 1000)" },
     { "telemetry_da4",
       "report Data Area 4 in the telemetry logs (07h, 08h) when the host "
       "sets ETDAS in Host Behavior Support: one 512-byte counter block per "

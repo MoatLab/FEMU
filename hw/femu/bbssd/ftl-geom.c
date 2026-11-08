@@ -310,6 +310,20 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
     /*
+     * HMB holds the mapping table of a DRAM-less drive, so it needs the
+     * DFTL cache it stands in for, with translation pages on flash.
+     */
+    if (n->hmb_ns < 0 || n->hmb_mb > 65536 ||
+        (n->hmb_mb && (!p->mapping_scheme ||
+                       strcmp(p->mapping_scheme, "dftl") || KVSSD(n) ||
+                       nvme_ns_shared(n) ||
+                       (n->subsys && n->subsys->params.fdp.enabled)))) {
+        error_setg(errp, "FEMU bbssd: hmb_mb is at most 65536 and needs "
+                   "mapping=dftl without FDP, KV or shared namespaces; "
+                   "hmb_ns must not be negative");
+        return -1;
+    }
+    /*
      * Die parity: a stripe is one page per die, so two dies at least; its
      * hooks sit in the single-page media path, which batches skip; FDP
      * windows and the KV allocator do not follow the stripe.
