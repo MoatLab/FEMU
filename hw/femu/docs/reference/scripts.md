@@ -15,7 +15,7 @@ reference. Do not use them.
 | Script | Run from | What it does |
 | --- | --- | --- |
 | `pkgdep.sh` | anywhere, as root | Installs the build dependencies with `apt-get` on Debian and Ubuntu. Exits with `pkgdep: unsupported system type` elsewhere. CI does not run it. |
-| `femu-compile.sh` | `build-femu/` | Runs `make clean`, then `../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp --disable-libnfs --disable-libiscsi --disable-curl`, then `make` with one job per CPU. `--enable-csd-ubpf` adds uBPF CSD programs, `--enable-csd-ubpf=PATH` uses the uBPF tree at `PATH`. Any other argument is an error. See [build.md](../getting-started/build.md). |
+| `femu-compile.sh` | `build-femu/` | Runs `make clean`, then `../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp --disable-libnfs --disable-libiscsi --disable-curl`, then `make` with one job per CPU. `--enable-csd-ubpf` adds uBPF CSD programs, `--enable-csd-ubpf=PATH` uses the uBPF tree at `PATH`, and `--werror` makes a compiler warning fail the build. Without that flag the script disables warnings as errors, since a newer compiler can warn in QEMU code. Any other argument is an error. See [build.md](../getting-started/build.md). |
 | `femu-copy-scripts.sh` | `build-femu/` | Copies `pkgdep.sh`, `femu-compile.sh`, `make-guest-image.sh`, `run-guest-ssh.sh`, the `run-blackbox.sh`, `run-blackbox-fdp.sh`, `run-whitebox.sh`, `run-nossd.sh`, `run-zns.sh`, `run-csd.sh` and `run-kvssd.sh` launchers, `pin.sh` and `ftk/` into the current directory, overwriting earlier copies. It does not copy `run-cxlssd.sh`, `ssd-config.sh`, `configs/` or the guest tools; run those from `../femu-scripts/`. |
 
 ## Guest image and access
@@ -225,6 +225,7 @@ explains each.
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |
 | `check-changelog-hashes.py` | `[--head COMMIT] [FILE]`; checks that every commit the CHANGELOG names is in the history of `--head` (needs a full clone) |
 | `check-c-style.py` | `[DIR]` (default `hw/femu`) or `--self-test`; finds C99 comments and trailing whitespace in `.c` and `.h` files, and fails on a tree with no source file |
+| `check-patches.sh` | `BASE HEAD` or `--self-test`; runs QEMU's `scripts/checkpatch.pl` on each commit in `BASE..HEAD`, merges left out: an ERROR or a git or checker failure fails, a WARNING is printed in full. A base of all zeros (a new branch) checks HEAD alone; binary or mode-only commits are skipped. CI runs it on the commits of each push and pull request |
 | `check-property-tests.py` | no argument or `--self-test`; checks that a file under `tests/` or `scripts/` names each property in `reference/properties.md`, or that `tests/untested-properties.list` lists it with a reason |
 | `check-unit-tests.py` | no argument, `--meson-names`, `--listed FILE` or `--self-test`; checks that each `tests/unit/test-*.c` is in `tests/meson.build` or `tests/Makefile`, and that the `femu-unit` suite lists every meson unit test |
 | `check-doc-examples.py` | `--lint`, `--list`, `--self-test`, `--qemu BINARY`, `--qos-test BINARY`, `--only NAME`, `--timeout SEC`, `[PATH...]`; checks every code block's tag and runs the tagged examples |

@@ -2,6 +2,8 @@
 
 NRCPUS="$(cat /proc/cpuinfo | grep "vendor_id" | wc -l)"
 FEMU_CONFIGURE_OPTS=""
+# QEMU's configure turns -Werror on in a git tree; FEMU leaves it to --werror
+WERROR="--disable-werror"
 
 for arg in "$@"; do
     case "$arg" in
@@ -12,9 +14,13 @@ for arg in "$@"; do
             UBPF_PATH="${arg#*=}"
             FEMU_CONFIGURE_OPTS="${FEMU_CONFIGURE_OPTS} --enable-femu-csd-ubpf -Dfemu_csd_ubpf_path=${UBPF_PATH}"
             ;;
+        --werror)
+            # off by default: a newer compiler can warn in QEMU code
+            WERROR="--enable-werror"
+            ;;
         *)
             echo "Unknown option: $arg"
-            echo "Usage: $0 [--enable-csd-ubpf[=/path/to/ubpf-cemu]]"
+            echo "Usage: $0 [--enable-csd-ubpf[=/path/to/ubpf-cemu]] [--werror]"
             exit 1
             ;;
     esac
@@ -27,7 +33,7 @@ make clean
 # on newer distributions. Leave them out.
 ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
              --disable-libnfs --disable-libiscsi --disable-curl \
-             ${FEMU_CONFIGURE_OPTS} || {
+             ${WERROR} ${FEMU_CONFIGURE_OPTS} || {
     echo "===> FEMU configure failed"
     exit 1
 }

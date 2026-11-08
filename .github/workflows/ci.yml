@@ -500,6 +500,17 @@ jobs:
         python3 hw/femu/scripts/check-c-style.py --self-test
         python3 hw/femu/scripts/check-c-style.py hw/femu
 
+    - name: Check new commits with checkpatch
+      run: |
+        # QEMU's scripts/checkpatch.pl on each commit this push or pull
+        # request adds: an ERROR fails the step, a WARNING is printed. The
+        # self-test plants a C99 comment first, so a checker that cannot
+        # fail turns this step red. A new branch has no base: nothing runs.
+        bash hw/femu/scripts/check-patches.sh --self-test
+        base="${{ github.event.pull_request.base.sha || github.event.before }}"
+        head="${{ github.event.pull_request.head.sha || github.sha }}"
+        bash hw/femu/scripts/check-patches.sh "$base" "$head"
+
     - name: Check that CI runs every unit test
       run: |
         # A unit test source in neither meson.build nor the Makefile never
