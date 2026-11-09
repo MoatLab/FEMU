@@ -5030,6 +5030,11 @@ static bool nvme_fdp_format_block_bad(FemuCtrl *n, NvmeNamespace *ns,
     if (bs > eg->fdp.runs) {
         return true;
     }
+    /* a pSLC unit (tier_mode=static) must hold a block too */
+    if (bb_fdp_slc_blk_pgs(n) &&
+        bs > eg->fdp.runs / n->bb_params.pgs_per_blk * bb_fdp_slc_blk_pgs(n)) {
+        return true;
+    }
     return eg->fdp.nrg > 1 && (NS_BBSSD(ns) || NS_CSD(ns)) &&
            bs % ((uint64_t)n->bb_params.secs_per_pg * n->bb_params.secsz);
 }

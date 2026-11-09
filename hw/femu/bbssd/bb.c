@@ -67,8 +67,11 @@ static int bb_check_fdp_block(FemuCtrl *n, NvmeNamespace *ns,
     const BbCtrlParams *p = &n->bb_params;
     uint32_t nrg = n->subsys->endgrp.fdp.nrg;
     uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    /* a pSLC unit holds fewer pages per block: the smallest unit counts */
+    int blk_pgs = bb_fdp_slc_blk_pgs(n) ? bb_fdp_slc_blk_pgs(n) :
+                  p->pgs_per_blk;
     uint64_t unit = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
-                    p->pgs_per_blk * page / nrg;
+                    blk_pgs * page / nrg;
     uint64_t block = 1ULL << ns->lbaf.lbads;
 
     if (block > unit) {
@@ -236,8 +239,10 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return -1;
         }
         reserve += bb_fdp_eol_reserve(n);
+        /* the static pSLC units of each group hold no dense data */
+        reserve += bb_fdp_slc_units(n);
         eol = bb_fdp_eol_reserve(n) ? " and the eol_read_only reserve (lower "
-              "mdts)" : "";
+              "mdts)" : bb_fdp_slc_units(n) ? " and the pSLC units" : "";
         usable_pgs = pool > reserve ? (pool - reserve) * unit_pgs : 0;
         /* every namespace of the controller places into this one FTL */
         exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);

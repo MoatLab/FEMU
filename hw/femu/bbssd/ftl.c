@@ -1173,6 +1173,8 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
                 do_gc_fdp_style(ssd, g, 0, false);
             }
         }
+        /* static pSLC units: fold one where a group has none free */
+        fdp_slc_tick(ssd);
     } else if (ssd->sp.gc_pace) {
         ssd_pace_tick(ssd);
     } else if (should_gc(ssd)) {

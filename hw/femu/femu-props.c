@@ -832,8 +832,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "in pSLC mode in front of the dense lines, and host writes go there "
       "first. dynamic also borrows free dense lines for the pool while the "
       "device has room. Needs nand_cell_type 2, 3 or 4 and page or dftl "
-      "mapping; refused with FDP, more than one namespace, Streams and the "
-      "wear, refresh and pd_* features" },
+      "mapping; under FDP only static with the direct policy; refused with "
+      "more than one namespace, Streams and the wear, refresh and pd_* "
+      "features" },
     { "tier_full_policy",
       "bbssd with a tier_mode: what a host page does when the pool "
       "has no free page; direct (unset) writes it to the dense lines, "

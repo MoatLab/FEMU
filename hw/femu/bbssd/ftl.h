@@ -429,7 +429,18 @@ typedef struct ru_mgmt {
     pqueue_t *victim_ru_cb;  /* cost-benefit victim selection */
     QTAILQ_HEAD(full_ru_list, FemuReclaimUnit) full_ru_list;
     uint64_t tt_rus;
-    uint64_t free_ru_cnt;
+    uint64_t free_ru_cnt;           /* dense units only */
+    /*
+     * The static pSLC units of the group (tier_mode=static under FDP).
+     * They keep their mode for life: free, a host frontier, or closed and
+     * waiting for a fold. They are never collection victims or
+     * destinations, so free_ru_cnt and the thresholds count dense units.
+     */
+    QTAILQ_HEAD(, FemuReclaimUnit) slc_free_list;
+    QTAILQ_HEAD(, FemuReclaimUnit) slc_closed_list;
+    uint64_t slc_tt;
+    uint64_t slc_free_cnt;
+    uint64_t slc_closed_cnt;
     int custom_gc_threshold;
     /* a handle's heap in one group: the units the handle holds there */
     int in_use;
@@ -475,6 +486,7 @@ struct FemuReclaimUnit {
     uint64_t last_invalidated_time;
     float my_cb;
     /* a refresh has taken the unit off every list for its move */
+    bool slc;      /* a static pSLC unit: blk_pgs below pgs_per_blk */
     bool reclaiming;
     /* a worn-out block took the unit out of service: on no list, no data */
     bool retired;
@@ -661,6 +673,8 @@ struct ssd {
     FemuRuHandle *ruhs;
     uint64_t nruhs;
     bool fdp_enabled;
+    int slc_blk_pgs;        /* FDP pSLC units: usable pages per block; 0 off */
+    uint64_t slc_folds;     /* pSLC units folded and erased */
     bool fdp_debug;    /* enable FDP FTL tracing */
 
     /*
@@ -891,6 +905,9 @@ uint64_t bb_fdp_eol_units(FemuCtrl *n);
 uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
 bool bb_tp_physical(FemuCtrl *n);
 uint64_t bb_tier_pool_lines(FemuCtrl *n);
+int bb_fdp_slc_blk_pgs(FemuCtrl *n);
+uint64_t bb_fdp_slc_units(FemuCtrl *n);
+void fdp_slc_tick(struct ssd *ssd);
 bool bb_tier_check_props(FemuCtrl *n, Error **errp);
 /* one idle fold step of the pSLC tier, when one is due (tier_idle_ms) */
 void bb_tier_idle(FemuCtrl *n);

@@ -89,12 +89,58 @@ uint64_t bb_tier_pool_lines(FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
 
-    if (!ftl_tier_on(p)) {
+    /* under FDP the pool is units of each group: bb_fdp_slc_units() */
+    if (!ftl_tier_on(p) || (n->subsys && n->subsys->params.fdp.enabled)) {
         return 0;
     }
     return tier_pool_lines(p->tier_static_mb,
                            (uint64_t)p->secs_per_pg * p->secsz,
                            bb_tier_line_pgs(n));
+}
+
+/**
+ * bb_fdp_slc_blk_pgs - usable pages per block of an FDP pSLC unit
+ * @n: the controller
+ *
+ * Returns 0 when the controller has no FDP pSLC units: no tier, or no FDP.
+ */
+int bb_fdp_slc_blk_pgs(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    int density;
+
+    if (!ftl_tier_static(p) || !n->subsys ||
+        !n->subsys->params.fdp.enabled) {
+        return 0;
+    }
+    density = ftl_tier_density(n->nand_cell_type);
+    return density ? (int)tier_blk_pgs(p->pgs_per_blk, density) : 0;
+}
+
+/**
+ * bb_fdp_slc_units - the static pSLC reclaim units of each group
+ * @n: the controller
+ *
+ * Enough units to hold tier_static_mb of host data at the pSLC size of a
+ * unit, in every group, since a host may place all of its data in one.
+ * They hold no dense data, so realize counts them as a reserve.
+ */
+uint64_t bb_fdp_slc_units(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    int blk_pgs = bb_fdp_slc_blk_pgs(n);
+    uint64_t nrg;
+    uint64_t dies;
+    uint64_t unit_pgs;
+
+    if (!blk_pgs) {
+        return 0;
+    }
+    nrg = MAX(n->subsys->endgrp.fdp.nrg, 1);
+    dies = (uint64_t)p->nchs * p->luns_per_ch / nrg;
+    unit_pgs = dies * p->pls_per_lun * blk_pgs;
+    return tier_pool_lines(p->tier_static_mb,
+                           (uint64_t)p->secs_per_pg * p->secsz, unit_pgs);
 }
 
 /*
@@ -109,8 +155,14 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (!BBSSD(n)) {
         return "a mode other than bbssd";
     }
-    if (n->subsys && n->subsys->params.fdp.enabled) {
-        return "FDP";
+    /*
+     * Under FDP the pool is a set of pSLC reclaim units of each group
+     * (ftl-fdp.c). It has no idle folds, no borrowing and no through wait.
+     */
+    if (n->subsys && n->subsys->params.fdp.enabled &&
+        (ftl_tier_dynamic(p) || ftl_tier_through(p) || p->tier_idle_ms)) {
+        return "FDP with tier_mode=dynamic, tier_full_policy=through or "
+               "tier_idle_ms";
     }
     if (n->num_namespaces > 1 || n->namespace_modes) {
         return "more than one namespace";
@@ -294,6 +346,10 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
 
     ssd->tier = NULL;
     if (!ftl_tier_on(p) || !ssd->ns || !NS_BBSSD(ssd->ns)) {
+        return;
+    }
+    /* FDP keeps its pSLC units in its reclaim groups: no line tier */
+    if (n->subsys && n->subsys->params.fdp.enabled) {
         return;
     }
     density = ftl_tier_density(n->nand_cell_type);

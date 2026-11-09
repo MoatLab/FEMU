@@ -17,7 +17,7 @@ DEVICES = [
         "parent": "pci-device",
         "test_only": ["x-cmt-slots", "x-copy-held", "x-copy-hold",
                       "x-csd-pause-stats", "x-eol-enter", "x-fdp-check",
-                      "x-fdp-ns-mapped", "x-ftl-check", "x-ftl-hold",
+                      "x-fdp-ns-mapped", "x-fdp-slc", "x-ftl-check", "x-ftl-hold",
                       "x-ftl-trace", "x-gc-frontier", "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
                       "x-gc-idle-order",

@@ -18,7 +18,6 @@ err_read_unc_ppm    no test yet
 mapping_cache_mb    no test yet
 cache_evict         no test yet
 debug_ftl           no test yet: turns on debug output only
-tier_pslc_prog_ns   no test yet
 tier_pslc_pe_cycles no test yet
 fw_write_ns         no test yet
 zns_cross_zone_read no test yet

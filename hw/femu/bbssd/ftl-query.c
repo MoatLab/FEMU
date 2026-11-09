@@ -119,6 +119,10 @@ static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
         QTAILQ_FOREACH(ru, &rm->full_ru_list, entry) {
             state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FULL;
         }
+        /* a closed pSLC unit waits for its fold as a full unit would */
+        QTAILQ_FOREACH(ru, &rm->slc_closed_list, entry) {
+            state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FULL;
+        }
         for (int i = 0; i < ssd->rg[g].tt_nru; i++) {
             if (ssd->rg[g].rus[i].pos) {
                 state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
@@ -144,6 +148,9 @@ static void ssd_query_ru_states(struct ssd *ssd, uint8_t *state)
         QTAILQ_FOREACH(ru, &ssd->rg[g].ru_mgmt->free_ru_list, entry) {
             state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FREE;
         }
+        QTAILQ_FOREACH(ru, &ssd->rg[g].ru_mgmt->slc_free_list, entry) {
+            state[ssd_query_ru_index(ssd, ru)] = FEMU_RECLAIM_UNIT_STATE_FREE;
+        }
         for (int i = 0; i < ssd->rg[g].tt_nru; i++) {
             if (ssd->rg[g].rus[i].retired) {
                 state[ssd_query_ru_index(ssd, &ssd->rg[g].rus[i])] =
@@ -167,7 +174,9 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
         return;
     }
     q->rus_per_rg = ssd->rg[0].tt_nru;
-    q->pgs_per_ru = ssd->rg[0].rus[0].npages;
+    /* the nominal dense unit; a pSLC unit holds blk_pgs of each block */
+    q->pgs_per_ru = ssd->rg[0].rus[0].npages / ssd->rg[0].rus[0].blk_pgs *
+                    ssd->sp.pgs_per_blk;
     for (uint32_t g = 0; g < q->nrg; g++) {
         FemuReclaimGroup *rg = &ssd->rg[g];
 
@@ -175,7 +184,8 @@ static void ssd_query_fdp(struct ssd *ssd, FemuQueryNs *q)
         q->rgs[g].nch = rg->nch;
         q->rgs[g].lun0 = rg->lun0;
         q->rgs[g].nlun = rg->nlun;
-        q->rgs[g].free_units = rg->ru_mgmt->free_ru_cnt;
+        q->rgs[g].free_units = rg->ru_mgmt->free_ru_cnt +
+                               rg->ru_mgmt->slc_free_cnt;
     }
     for (uint32_t h = 0; h < q->nr_ruhs; h++) {
         FemuRuHandle *ruh = &ssd->ruhs[h];

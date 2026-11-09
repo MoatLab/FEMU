@@ -50479,6 +50479,119 @@ static void femu_test_tier_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* x-fdp-slc of device fdpt into @v: tt, free, closed, folds, handles 0-3 */
+static void femu_fdp_slc(QTestState *qts, uint64_t v[8])
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/fdpt',"
+                           "'property':'x-fdp-slc'}}");
+    const char *r;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    r = qdict_get_str(rsp, "return");
+    g_test_message("x-fdp-slc %s", r);
+    g_assert_cmpint(sscanf(r, "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+                           &v[7]), ==, 8);
+    qobject_unref(rsp);
+}
+
+/* x-fdp-check of device fdpt: 0 when every unit is in one right place */
+static uint64_t femu_fdpt_check(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/fdpt',"
+                           "'property':'x-fdp-check'}}");
+    uint64_t bad;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    bad = g_ascii_strtoull(qdict_get_str(rsp, "return"), NULL, 10);
+    qobject_unref(rsp);
+    return bad;
+}
+
+/*
+ * The pSLC tier under FDP (tier_mode=static, 4 persistently isolated
+ * handles). A dense unit is 4 dies x 48 TLC pages; a pSLC unit holds 4 x
+ * 16 = 64 pages, so tier_static_mb=1 is 4 pSLC units, which the 4 handles
+ * take as their first write units. 64 pages through handle 0 fill its
+ * unit: handle 0 goes on in a dense unit, and the request folds the full
+ * pSLC unit into handle 0's collection unit, which frees it. Handle 1
+ * then fills its unit and takes the freed one, and its old one folds.
+ */
+static void femu_test_fdp_tier(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[8];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x76, 4 * 4096);
+    femu_fdp_slc(qts, v);
+    g_assert_cmpuint(v[0], ==, 4);
+    g_assert_cmpuint(v[1], ==, 0);
+    g_assert_cmpuint(v[3], ==, 0);
+    g_assert_cmpuint(v[4] + v[5] + v[6] + v[7], ==, 4);
+
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_fdp_wb_write(&c, i * 4, 4, buf, list, 0, false),
+                        ==, NVME_SUCCESS);
+    }
+    femu_fdp_slc(qts, v);
+    g_assert_cmpuint(v[3], ==, 1);          /* one fold */
+    g_assert_cmpuint(v[1], ==, 1);          /* it freed the unit */
+    g_assert_cmpuint(v[2], ==, 0);
+    g_assert_cmpuint(v[4], ==, 0);          /* handle 0 writes dense now */
+    g_assert_cmpuint(femu_fdpt_check(qts), ==, 0);
+
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_fdp_wb_write(&c, 512 + i * 4, 4, buf, list, 1,
+                                          false), ==, NVME_SUCCESS);
+    }
+    femu_fdp_slc(qts, v);
+    g_assert_cmpuint(v[3], ==, 2);
+    g_assert_cmpuint(v[5], ==, 1);          /* handle 1 took the freed unit */
+    g_assert_cmpuint(femu_fdpt_check(qts), ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A page in an FDP pSLC unit takes the pSLC program time: 400 ms with
+ * tier_pslc_prog_ns. A TLC program takes under 6 ms; with the wake of an
+ * idle poller (up to about 100 ms) it stays far below the 300 ms bound.
+ */
+static void femu_test_fdp_tier_timing(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x77, 4096);
+    t0 = g_get_monotonic_time();
+    g_assert_cmphex(femu_fdp_wb_write(&c, 0, 1, buf, list, 2, false), ==,
+                    NVME_SUCCESS);
+    g_test_message("pSLC write: %" PRId64 " us", g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 300000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
 /*
  * The pSLC tier with mapping=dftl and a 2-entry mapping cache, so writes
  * spread over the device evict dirty translation pages to flash. The
@@ -54394,6 +54507,22 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
             ",tier_mode=static,tier_static_mb=1,tier_full_policy=through,"
             "buffer_size=64,buffer_thres_pcent=90,buffer_low_pcent=1"
+    });
+    qos_add_test("fdp-tier", "femu", femu_test_fdp_tier,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=fdpt,devsz_mb=8,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=48,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
+            "subsys=fdpsub"
+    });
+    qos_add_test("fdp-tier-timing", "femu", femu_test_fdp_tier_timing,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=fdpt,devsz_mb=8,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=48,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
+            "tier_pslc_prog_ns=400000000,subsys=fdpsub"
     });
     qos_add_test("tier-dftl", "femu", femu_test_tier_dftl,
                  &(QOSGraphTestOptions) {

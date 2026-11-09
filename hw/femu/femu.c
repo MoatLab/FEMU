@@ -5270,6 +5270,41 @@ static char *femu_test_fdp_check(Object *obj, Error **errp)
 }
 
 /*
+ * The static pSLC units of FDP reclaim group 0: total, free, closed, the
+ * folds so far, then 1 or 0 for each handle whose group-0 write unit is
+ * pSLC, in handle order. Empty without them.
+ */
+static char *femu_test_fdp_slc(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    struct ssd *ssd = ns ? ns->ssd : NULL;
+    GString *out;
+    bool resume;
+
+    if (!ssd || !ssd->fdp_enabled) {
+        error_setg(errp, "FDP pSLC report requires an FDP namespace 1");
+        return NULL;
+    }
+    out = g_string_new(NULL);
+    resume = nvme_pause_pollers(n);
+    if (ssd->slc_blk_pgs) {
+        struct ru_mgmt *rm = ssd->rg[0].ru_mgmt;
+
+        g_string_append_printf(out, "%" PRIu64 " %" PRIu64 " %" PRIu64
+                               " %" PRIu64, rm->slc_tt, rm->slc_free_cnt,
+                               rm->slc_closed_cnt, ssd->slc_folds);
+        for (uint64_t h = 0; h < ssd->nruhs; h++) {
+            FemuReclaimUnit *ru = ssd->ruhs[h].rus[0];
+
+            g_string_append_printf(out, " %d", ru && ru->slc);
+        }
+    }
+    nvme_resume_pollers(n, resume);
+    return g_string_free(out, false);
+}
+
+/*
  * The mapped pages in each namespace's slice of the FTL, namespace 1 first:
  * what a test needs to tell the namespaces of an FDP controller apart.
  */
@@ -5813,6 +5848,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-tier-check", femu_test_tier_check,
                                 NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);
+        object_property_add_str(obj, "x-fdp-slc", femu_test_fdp_slc, NULL);
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);

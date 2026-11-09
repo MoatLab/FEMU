@@ -114,13 +114,26 @@ static void fdp_set_ru_write_pointer(struct ssd *ssd, FemuReclaimUnit *ru)
  * fdp_get_new_ru - allocate a fresh free RU for a given RUH
  */
 static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
-                                       uint16_t ruhid)
+                                       uint16_t ruhid, bool host)
 {
     FemuRuHandle *eruh = &ssd->ruhs[ruhid];
     FemuReclaimGroup *rg = &ssd->rg[rgidx];
+    struct ru_mgmt *rm = rg->ru_mgmt;
     FemuReclaimUnit *new_ru;
 
-    new_ru = get_next_free_ru(ssd, rg);
+    /*
+     * A host frontier of a persistently isolated handle takes a pSLC unit
+     * while one is free. Collection destinations and the initially isolated
+     * handle, which collection writes into, stay dense.
+     */
+    if (host && rm->slc_free_cnt &&
+        eruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        new_ru = QTAILQ_FIRST(&rm->slc_free_list);
+        QTAILQ_REMOVE(&rm->slc_free_list, new_ru, entry);
+        rm->slc_free_cnt--;
+    } else {
+        new_ru = get_next_free_ru(ssd, rg);
+    }
     if (!new_ru) {
         ftl_err("No reclaim unit available for ruh %d\n", ruhid);
         return NULL;
@@ -437,6 +450,12 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
         ru->vpc += ru->lines[i]->vpc;
     }
 
+    /* a pSLC unit waits for its fold, never as a collection victim */
+    if (ru->slc) {
+        QTAILQ_INSERT_TAIL(&rm->slc_closed_list, ru, entry);
+        rm->slc_closed_cnt++;
+        return is_full;
+    }
     if (is_full) {
         QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
         return true;
@@ -470,7 +489,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
 static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                                                FemuReclaimGroup *rg,
                                                FemuRuHandle *ruh,
-                                               FemuReclaimUnit *ru)
+                                               FemuReclaimUnit *ru, bool host)
 {
     struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = rg->ru_mgmt;
@@ -487,7 +506,7 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
     /* the unit is full: take a free one of its group for the handle */
     if (ruh != NULL) {
         check_addr(wpp->blk, spp->blks_per_pl);
-        new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
+        new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid, host);
         if (!new_ru) {
             ftl_err("No free RU for ruh %d: device full - point %s L:%d\n",
                     ruh->ruhid, __FILE__, __LINE__);
@@ -624,8 +643,11 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
              (float)ru->last_invalidated_time));
     }
     fdp_victim_reprioritize(ssd, ru);
-    /* a unit a refresh is moving is on no list until the move ends */
-    if (was_full_ru && !ru->reclaiming) {
+    /*
+     * A unit a refresh or fold is moving is on no list until the move
+     * ends. A closed pSLC unit stays on its own list.
+     */
+    if (was_full_ru && !ru->reclaiming && !ru->slc) {
         QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
         fdp_victim_enqueue(ssd, ru);
     }
@@ -649,14 +671,15 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
 
     if (ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
         if (!ruh->gc_rus[rgidx]) {
-            ruh->gc_rus[rgidx] = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
+            ruh->gc_rus[rgidx] = fdp_get_new_ru(ssd, rgidx, ruh->ruhid,
+                                                false);
         }
         return ruh->gc_rus[rgidx];
     }
 
     ftl_assert(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED);
     if (!ruh->rus[rgidx]) {
-        ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid);
+        ru = fdp_get_new_ru(ssd, rgidx, ruh->ruhid, false);
         if (!ru) {
             return NULL;
         }
@@ -975,7 +998,7 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
      */
     if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
         ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
-                                        dest_ru->ruh, dest_ru);
+                                        dest_ru->ruh, dest_ru, false);
         if (ret_ru && ret_ru != dest_ru) {
             dest_ruh->gc_rus[dest_ru->rgidx] = ret_ru;
         } else if (!ret_ru) {
@@ -986,7 +1009,7 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
 
         ftl_assert(dest_ruh->ruhid == gcruh_id);
         ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
-                                        dest_ruh, dest_ru);
+                                        dest_ruh, dest_ru, false);
         if (ret_ru && ret_ru != dest_ru) {
             fdp_set_active(&ssd->ruhs[gcruh_id], dest_ru->rgidx, ret_ru);
             fdp_note_ruh_modified(ssd, dest_ruh, dest_ru->rgidx, mv);
@@ -1216,6 +1239,12 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
 
     fdp_ru_reset(ssd, ru);
+    /* a pSLC unit keeps its mode: it goes back to the pSLC free list */
+    if (ru->slc) {
+        QTAILQ_INSERT_TAIL(&rm->slc_free_list, ru, entry);
+        rm->slc_free_cnt++;
+        return;
+    }
     QTAILQ_INSERT_TAIL(&rm->free_ru_list, ru, entry);
     rm->free_ru_cnt++;
 }
@@ -1362,7 +1391,10 @@ static void fdp_file_back(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
 
-    if (ru->vpc == ru->npages) {
+    if (ru->slc) {
+        QTAILQ_INSERT_HEAD(&rm->slc_closed_list, ru, entry);
+        rm->slc_closed_cnt++;
+    } else if (ru->vpc == ru->npages) {
         QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
     } else {
         fdp_victim_enqueue(ssd, ru);
@@ -1570,7 +1602,7 @@ static bool fdp_pd_leave_ru(struct ssd *ssd, FemuReclaimUnit *ru, bool pad,
         return false;
     }
     if (host) {
-        fresh = fdp_get_new_ru(ssd, rg, host->ruhid);
+        fresh = fdp_get_new_ru(ssd, rg, host->ruhid, true);
         if (!fresh) {
             return false;
         }
@@ -1801,7 +1833,7 @@ static bool fdp_ruh_ready(struct ssd *ssd, FemuRuHandle *ruh, uint16_t rgid)
     if (likely(ruh->rus[rgid])) {
         return true;
     }
-    fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+    fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid, true);
     if (!fresh) {
         ftl_err("ssd_stream_write: device full, no RU for ruh %d\n",
                 ruh->ruhid);
@@ -1883,7 +1915,7 @@ static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
     fdp_ru_programmed(ssd, ru, 1);
 
     /* advance RU write pointer; may allocate new RU */
-    FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
+    FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru, true);
     if (ret && ret != ru) {
         fdp_set_active(ruh, rg->rgidx, ret);
     } else if (!ret) {
@@ -2315,7 +2347,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
             continue;
         }
 
-        fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+        fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid, true);
         if (!fresh && do_gc_fdp_style(ssd, rgid, ruh->ruhid, true) != -1) {
             if (ssd->media_ro) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
@@ -2331,7 +2363,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
                 if (ruh->rus[rgid]) {
                     continue;
                 }
-                fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+                fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid, true);
                 if (!fresh) {
                     req->status = NVME_CAP_EXCEEDED | NVME_DNR;
                     return;
@@ -2339,7 +2371,7 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
                 fdp_set_active(ruh, rgid, fresh);
                 continue;
             }
-            fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+            fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid, true);
         }
         if (!fresh) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
@@ -2445,6 +2477,8 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
 
     QTAILQ_INIT(&rm->free_ru_list);
     QTAILQ_INIT(&rm->full_ru_list);
+    QTAILQ_INIT(&rm->slc_free_list);
+    QTAILQ_INIT(&rm->slc_closed_list);
 
     rm->victim_ru_pq = pqueue_init(rm->tt_rus, victim_ru_cmp_pri,
                                    victim_ru_get_pri, victim_ru_set_pri,
@@ -2555,6 +2589,69 @@ static int femu_fdp_gc_strategy(const BbCtrlParams *p)
     return p->gc_strategy;
 }
 
+/*
+ * tier_mode=static under FDP: take the static pSLC units of @rg off its
+ * free list. Each holds blk_pgs pages per block for good. The thresholds
+ * keep counting the whole group, so collection starts a little earlier;
+ * realize sized the group with these units held out.
+ */
+static void fdp_slc_partition(struct ssd *ssd, FemuCtrl *n,
+                              FemuReclaimGroup *rg)
+{
+    struct ru_mgmt *rm = rg->ru_mgmt;
+    uint64_t k = bb_fdp_slc_units(n);
+
+    ssd->slc_blk_pgs = k ? bb_fdp_slc_blk_pgs(n) : 0;
+    for (; k && rm->free_ru_cnt; k--) {
+        FemuReclaimUnit *ru = QTAILQ_FIRST(&rm->free_ru_list);
+
+        QTAILQ_REMOVE(&rm->free_ru_list, ru, entry);
+        rm->free_ru_cnt--;
+        ru->slc = true;
+        ru->npages = ru->npages / ru->blk_pgs * ssd->slc_blk_pgs;
+        ru->blk_pgs = ssd->slc_blk_pgs;
+        QTAILQ_INSERT_TAIL(&rm->slc_free_list, ru, entry);
+        rm->slc_free_cnt++;
+        rm->slc_tt++;
+    }
+}
+
+/*
+ * The fold of one closed pSLC unit of group @g: collect it, as a refresh
+ * does, into the dense destination of its handle. The erase gives it back
+ * to the pSLC free list. Runs after a request once the group has no free
+ * pSLC unit left and dense room for the copies.
+ */
+static void fdp_slc_fold(struct ssd *ssd, uint16_t g)
+{
+    struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
+    FemuReclaimUnit *ru = QTAILQ_FIRST(&rm->slc_closed_list);
+    int ok;
+
+    if (!ru || rm->slc_free_cnt || fdp_rg_short(ssd, g)) {
+        return;
+    }
+    QTAILQ_REMOVE(&rm->slc_closed_list, ru, entry);
+    rm->slc_closed_cnt--;
+    ru->reclaiming = true;
+    ok = fdp_collect_ru(ssd, ru, fdp_dest_ruh(ssd, ru), false);
+    ru->reclaiming = false;
+    if (ok >= 0) {
+        ssd->slc_folds++;
+    }
+}
+
+/* after each request: fold where the pool of a group is used up */
+void fdp_slc_tick(struct ssd *ssd)
+{
+    if (!ssd->slc_blk_pgs) {
+        return;
+    }
+    for (uint16_t g = 0; g < ssd->nrg; g++) {
+        fdp_slc_fold(ssd, g);
+    }
+}
+
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeSubsystem *subsys = n->subsys;
@@ -2624,6 +2721,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                                    &rg->rus[j], entry);
                 rg->ru_mgmt->free_ru_cnt++;
             }
+            fdp_slc_partition(ssd, n, rg);
             rg->ru_mgmt->gc_thres_pcent =
                 n->bb_params.gc_thres_pcent / 100.0;
             rg->ru_mgmt->gc_thres_pcent_high =
@@ -2716,7 +2814,7 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
         ssd->ruhs[i].rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
         ssd->ruhs[i].gc_rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
         for (int j = 0; j < (int)endgrp->fdp.nrg; j++) {
-            ssd->ruhs[i].rus[j] = fdp_get_new_ru(ssd, j, i);
+            ssd->ruhs[i].rus[j] = fdp_get_new_ru(ssd, j, i, true);
             ssd->ruhs[i].rus[j]->ruh = &ssd->ruhs[i];
             ssd->ruhs[i].ruh->rus[j] = ssd->ruhs[i].rus[j]->nvme_ru;
         }
@@ -3035,6 +3133,12 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
             QTAILQ_REMOVE(&rm->full_ru_list, v_ru, entry);
             mark_ru_free(ssd, v_ru->rgidx, v_ru);
         }
+        /* closed pSLC units waiting for a fold are erased too */
+        while ((v_ru = QTAILQ_FIRST(&rm->slc_closed_list)) != NULL) {
+            QTAILQ_REMOVE(&rm->slc_closed_list, v_ru, entry);
+            rm->slc_closed_cnt--;
+            mark_ru_free(ssd, v_ru->rgidx, v_ru);
+        }
     }
 
     /* reset active RUs and stats for each RUH across all RGs */
@@ -3080,7 +3184,8 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         ssd->ruhs[i].ruh_live_pages_cnt = 0;
         for (rg_idx = 0; rg_idx < (int)ssd->nrg; rg_idx++) {
             fdp_set_active(&ssd->ruhs[i], rg_idx,
-                           fdp_get_new_ru(ssd, rg_idx, ssd->ruhs[i].ruhid));
+                           fdp_get_new_ru(ssd, rg_idx, ssd->ruhs[i].ruhid,
+                                          true));
         }
     }
 
@@ -3243,14 +3348,49 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
     for (uint64_t g = 0; g < ssd->nrg; g++) {
         struct ru_mgmt *rm = ssd->rg[g].ru_mgmt;
 
+        uint64_t slc_free = 0;
+        uint64_t slc_closed = 0;
+        uint64_t slc_all = 0;
+        /* the pages of a dense unit, as femu_fdp_init_ssd_reclaim_unit() */
+        int dense_pgs = ssd->sp.lines_per_ru *
+                        (ssd->sp.pgs_per_line / ssd->nrg);
+
         QTAILQ_FOREACH(ru, &rm->free_ru_list, entry) {
             fdp_check_place(ssd, ru, seen);
             /* an erased unit has programmed nothing */
             bad += ru->prog_bytes != 0;
+            /* a pSLC unit is never on the dense lists */
+            bad += ru->slc;
         }
         QTAILQ_FOREACH(ru, &rm->full_ru_list, entry) {
             fdp_check_place(ssd, ru, seen);
+            bad += ru->slc;
         }
+        /* the pSLC lists hold pSLC units only, and their counts agree */
+        QTAILQ_FOREACH(ru, &rm->slc_free_list, entry) {
+            fdp_check_place(ssd, ru, seen);
+            bad += ru->prog_bytes != 0 || !ru->slc;
+            slc_free++;
+        }
+        QTAILQ_FOREACH(ru, &rm->slc_closed_list, entry) {
+            fdp_check_place(ssd, ru, seen);
+            bad += !ru->slc;
+            slc_closed++;
+        }
+        for (uint64_t j = 0; j < ssd->rg[g].tt_nru; j++) {
+            FemuReclaimUnit *u = &ssd->rg[g].rus[j];
+
+            slc_all += u->slc;
+            /* a pSLC unit holds its usable pages, a dense one all */
+            bad += u->blk_pgs != (u->slc ? ssd->slc_blk_pgs :
+                                           ssd->sp.pgs_per_blk);
+            bad += u->npages != dense_pgs / ssd->sp.pgs_per_blk * u->blk_pgs;
+            /* and is never a collection victim */
+            bad += u->slc && (u->pos || u->ruh_pos);
+        }
+        bad += slc_free != rm->slc_free_cnt;
+        bad += slc_closed != rm->slc_closed_cnt;
+        bad += slc_all != rm->slc_tt;
         fdp_check_heap(ssd, rm->victim_ru_pq, false, in_grp, &bad);
         if (rm->victim_ru_cb != rm->victim_ru_pq && rm->victim_ru_cb) {
             fdp_check_heap(ssd, rm->victim_ru_cb, false, in_grp, &bad);
@@ -3267,10 +3407,14 @@ uint64_t ssd_fdp_check_units(struct ssd *ssd)
             if (host) {
                 fdp_check_place(ssd, host, seen);
                 bad += host->rgidx != g;
+                /* collection writes into this handle: it stays dense */
+                bad += host->slc &&
+                       ruh->ruh_type != NVME_RUHT_PERSISTENTLY_ISOLATED;
             }
             if (gc && gc != host) {
                 fdp_check_place(ssd, gc, seen);
                 bad += gc->rgidx != g;
+                bad += gc->slc;     /* a fold must leave the pSLC units */
             }
             /* a handle's heap repeats victims its group heap holds */
             if (ruh->ru_mgmt && ruh->ru_mgmt[g].victim_ru_pq) {

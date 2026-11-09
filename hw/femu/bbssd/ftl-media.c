@@ -71,6 +71,17 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime,
     /* a page of a pSLC tier line takes the pSLC timing row */
     if (unlikely(ssd->tier)) {
         ftl_tier_decode(ssd, ppa, &loc);
+    } else if (unlikely(ssd->slc_blk_pgs) && ssd->fdp_enabled && data) {
+        FemuReclaimUnit *ru = get_line(ssd, ppa)->my_ru;
+
+        /*
+         * And a data page of an FDP pSLC unit. A dftl translation access
+         * under FDP names a placeholder page that no unit holds.
+         */
+        if (ru && ru->slc) {
+            loc.flash_type = SLC;
+            loc.page_type = SLC_PAGE;
+        }
     }
 
     /*
@@ -217,6 +228,13 @@ void bb_nand_media_init(struct ssd *ssd)
     }
     if (unlikely(ssd->tier)) {
         ftl_tier_media_cfg(ssd, &cfg);
+    } else if (ssd->n && bb_fdp_slc_blk_pgs(ssd->n)) {
+        /* FDP pSLC units: the same free SLC row, from the tier times */
+        const BbCtrlParams *p = &ssd->n->bb_params;
+
+        cfg.timing.rd_table_ns[SLC][SLC_PAGE] = (int64_t)p->tier_pslc_read_ns;
+        cfg.timing.wr_table_ns[SLC][SLC_PAGE] = (int64_t)p->tier_pslc_prog_ns;
+        cfg.timing.er_table_ns[SLC] = (int64_t)p->tier_pslc_erase_ns;
     }
 
     /*
