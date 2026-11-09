@@ -318,7 +318,7 @@ instead. Realize refuses a value that is not a power-of-two multiple of
 | Action | Select All acts on | Notes |
 | --- | --- | --- |
 | Close (01h) | open zones | |
-| Finish (02h) | open and closed zones | moves `w_ptr` and `wp` to the capacity; does not program the write cache |
+| Finish (02h) | open and closed zones | moves `w_ptr` and `wp` to the capacity; the FTL thread programs what the zone's write cache holds, and the command completes when those programs end |
 | Open (03h) | closed zones, all or none | bit 9 of CDW13 also allocates a ZRWA (single zone only) |
 | Reset (04h) | open, closed and full zones | descriptor changes on the poller; the erase runs on the FTL thread |
 | Offline (05h) | read-only zones | |
@@ -462,7 +462,8 @@ What each command is charged, in `zftl.c`:
 | Write, Zone Append | the larger of two figures: 1 us for each 4 KiB logical page put into the zone's write cache, summed over the pages added since the request's last cache flush, and the program time of any cache this write caused to be programmed: an evicted cache, or this zone's own cache when a page of this write found it full. The write that fills a cache is not charged for programming it; the next write to the zone is |
 | Read | the largest NAND read time over the 4 KiB pages it touches that have been programmed; pages still in a write cache, or never written, cost nothing |
 | Zone Reset | the largest erase time over the blocks of each reset zone; zones reset by one command share planes, so the command ends with its last erase. An Empty zone has no erase. With `zns_reset_by_fill`, only blocks that hold a programmed page are erased, so a zone whose data is all still in its write cache costs nothing |
-| Open, Close, Finish, Report, Offline | nothing |
+| Finish | the program time of what the finished zones' write caches held, from the request's start; nothing when the caches were empty or the zone was already Full with its programs done |
+| Open, Close, Report, Offline | nothing |
 
 ### Write cache
 
