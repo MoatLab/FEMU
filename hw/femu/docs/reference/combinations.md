@@ -891,6 +891,16 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: read_reclaim_limit must not be negative
 - femu: pd_open_read_limit must not be above read_reclaim_limit
 
+## `ready_ms`
+
+- ready_ms and recovery_ms must be below 7500, the CAP.TO the host reads
+- recovery_ms must be 0 or at least ready_ms
+
+## `recovery_ms`
+
+- ready_ms and recovery_ms must be below 7500, the CAP.TO the host reads
+- recovery_ms must be 0 or at least ready_ms
+
 ## `reservations`
 
 - reservations do not work with Open-Channel

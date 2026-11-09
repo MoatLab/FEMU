@@ -3037,6 +3037,16 @@ typedef struct FemuCtrl {
     uint32_t        sanitize_ms;
     bool            sanitize_ops;
     QEMUTimer       *san_timer;
+    /*
+     * ready_ms and recovery_ms: CSTS.RDY comes this long after CC.EN, the
+     * longer recovery time on the first start after a power cut. While
+     * starting is set the admin queue holds its doorbells and runs nothing.
+     */
+    uint32_t        ready_ms;
+    uint32_t        recovery_ms;
+    QEMUTimer       *ready_timer;
+    bool            starting;
+    bool            recovery_pending;
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */

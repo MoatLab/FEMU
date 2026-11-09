@@ -254,13 +254,12 @@ static uint16_t femu_admin(FemuCtrlState *c, NvmeCmd *cmd)
     return femu_admin_result(c, cmd, NULL);
 }
 
-static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
-                           QGuestAllocator *alloc, uint32_t cc)
+/* map the BAR, program the admin queues and write CC; do not wait */
+static void femu_enable_start(FemuCtrlState *c, QPCIDevice *pdev,
+                              QGuestAllocator *alloc, uint32_t cc)
 {
     uint64_t cap;
-    uint32_t csts;
     uint32_t acq;
-    int waited = 0;
 
     c->pdev = pdev;
     c->alloc = alloc;
@@ -277,6 +276,15 @@ static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
     qpci_io_writeq(pdev, c->bar, 0x30, c->admin.cq_addr);
 
     qpci_io_writel(pdev, c->bar, 0x14, cc);
+}
+
+static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
+                           QGuestAllocator *alloc, uint32_t cc)
+{
+    uint32_t csts;
+    int waited = 0;
+
+    femu_enable_start(c, pdev, alloc, cc);
     for (;;) {
         csts = qpci_io_readl(pdev, c->bar, 0x1c);
         if (csts & NVME_CSTS_READY) {
@@ -29936,6 +29944,211 @@ static void femu_test_events_timer(void *obj, void *data,
     rmdir(dir);
 }
 
+/* CSTS.RDY of the controller of @c */
+static bool femu_rdy(FemuCtrlState *c)
+{
+    return qpci_io_readl(c->pdev, c->bar, 0x1c) & NVME_CSTS_READY;
+}
+
+/*
+ * ready_ms=200. CSTS.RDY stays 0 until 200 ms of guest time pass. An
+ * Identify sent before then posts nothing, and completes at ready with
+ * no new doorbell write. A reset before the time cancels the start: RDY
+ * stays 0 past the old time, and a new enable waits the whole 200 ms.
+ */
+static void femu_test_ready_delay(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t cc = (6 << 16) | (4 << 20) | 1;
+    NvmeCmd cmd;
+    uint16_t got;
+
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, &femu->dev, alloc, cc);
+    g_assert_false(femu_rdy(&c));
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1);
+    femu_submit(&c, &c.admin, &cmd);
+    qtest_clock_step(qts, 200 * 1000000LL - 1);
+    g_assert_false(femu_rdy(&c));
+    /* no completion yet: the phase bit of the first entry is still 0 */
+    g_assert_cmpint(qtest_readw(qts, c.admin.cq_addr + 14) & 1, ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_true(femu_rdy(&c));
+    g_assert_cmpint(femu_complete(&c, &c.admin, &got, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, c.cid - 1);
+    femu_disable(&c);
+
+    /* a reset at 100 ms cancels the start */
+    memset(&c, 0, sizeof(c));
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, &femu->dev, alloc, cc);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    qpci_io_writel(c.pdev, c.bar, 0x14, cc);
+    qtest_clock_step(qts, 200 * 1000000LL - 1);
+    g_assert_false(femu_rdy(&c));
+    qtest_clock_step(qts, 1);
+    g_assert_true(femu_rdy(&c));
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* qom-set simulate-power-loss on device @id */
+static void femu_cut_power(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'simulate-power-loss',"
+                           "'value':true}}", path);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* enable, then the guest time in ms until CSTS.RDY, stepped 1 ms a time */
+static int femu_ms_to_ready(FemuCtrlState *c, QGuestAllocator *alloc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    int ms = 0;
+
+    femu_queue_init(c, &c->admin, 0);
+    femu_enable_start(c, c->pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    while (!femu_rdy(c)) {
+        g_assert_cmpint(ms, <, 8000);
+        qtest_clock_step(qts, 1000000LL);
+        ms++;
+    }
+    return ms;
+}
+
+/*
+ * ready_ms=50, recovery_ms=300. A power cut makes the next start take
+ * 300 ms. A cut during that start ends it, and the start after it
+ * takes 300 ms again. Once ready, a plain reset takes 50 ms.
+ */
+static void femu_test_recovery_delay(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 50);
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 50);
+
+    /* a cut during recovery: the next start recovers again */
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, c.pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    femu_cut_power(qts, "rec");
+    /* the old start must not come ready */
+    qtest_clock_step(qts, 300 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+
+    /* a reset ends a recovery, but only ready ends the need for it */
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, c.pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+    femu_disable(&c);
+}
+
+/*
+ * ready_ms=200 and no ocp. A system reset at 100 ms ends the start: the
+ * Identify queued before it never runs, its buffer and the completion
+ * queue keep their contents, and the controller is not ready after.
+ */
+static void femu_test_ready_sysreset(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=rs,addr=5,devsz_mb=16,"
+        "femu_mode=1,ready_ms=200");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    NvmeCmd cmd;
+
+    c.alloc = &qs->alloc;
+    c.pdev = pdev;
+    qtest_memset(qts, buf, 0xa5, 4096);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, pdev, &qs->alloc, (6 << 16) | (4 << 20) | 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1);
+    femu_submit(&c, &c.admin, &cmd);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_clock_step(qts, 300 * 1000000LL);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0xa5);
+    g_assert_cmpint(qtest_readw(qts, c.admin.cq_addr + 14) & 1, ==, 0);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_false(femu_rdy(&c));
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* values the host could time out on, and recovery below ready, refuse */
+static void femu_test_ready_bad(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const bad[] = {
+        "'ready_ms':7500", "'recovery_ms':7500",
+        "'ready_ms':100,'recovery_ms':50",
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'rdb','addr':'6','devsz_mb':16,"
+            "'femu_mode':1,%s}", bad[i]);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("ready-bad %s: %s", bad[i],
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), "_ms"));
+        qobject_unref(rsp);
+    }
+}
+
 /* qom-set die-slow of device @id; returns the error text or NULL */
 static char *femu_die_slow_set(QTestState *qts, const char *id,
                                const char *v)
@@ -53860,6 +54073,23 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=ds,femu_mode=1,devsz_mb=64",
     });
     qos_add_test("die-slow-events", "femu", femu_test_die_slow_events, NULL);
+    qos_add_test("ready-delay", "femu", femu_test_ready_delay,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=rdy,femu_mode=1,devsz_mb=16,ready_ms=200",
+    });
+    qos_add_test("recovery-delay", "femu", femu_test_recovery_delay,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rec,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
+            "ready_ms=50,recovery_ms=300",
+    });
+    qos_add_test("ready-sysreset", "femu", femu_test_ready_sysreset, NULL);
+    qos_add_test("ready-bad", "femu", femu_test_ready_bad,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=rdb0,femu_mode=1,devsz_mb=16",
+    });
     qos_add_test("events", "femu", femu_test_events, NULL);
     qos_add_test("events-seed", "femu", femu_test_events_seed, NULL);
     qos_add_test("events-bad", "femu", femu_test_events_bad, NULL);

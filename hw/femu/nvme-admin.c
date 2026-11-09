@@ -6202,6 +6202,11 @@ void nvme_process_sq_admin(void *opaque)
     NvmeCqe cqe;
     bool aborted;
 
+    /* before CSTS.RDY the doorbell value is kept; the commands run at ready */
+    if (n->starting) {
+        return;
+    }
+
     /*
      * A command is only fetched while its completion has somewhere to go. The
      * rest stay in the queue until the host frees a slot, which resumes this

@@ -616,6 +616,11 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
      * added to do.
      */
     resume = nvme_pause_pollers(n);
+    /* a start still under way ends here; a cut keeps recovery_pending */
+    if (n->ready_timer) {
+        timer_del(n->ready_timer);
+    }
+    n->starting = false;
 
     /*
      * Drop every Async Event Request the controller was holding, along with any
@@ -819,9 +824,41 @@ static int nvme_start_ctrl(FemuCtrl *n)
         return -1;
     }
 
-    nvme_start_dataplane(n);
-
     return 0;
+}
+
+/* The controller comes ready: the I/O path starts and admin commands run. */
+static void femu_ctrl_ready(FemuCtrl *n)
+{
+    n->starting = false;
+    n->recovery_pending = false;
+    nvme_start_dataplane(n);
+    n->bar.csts = NVME_CSTS_READY;
+    /* the first ready controller starts the events_file times */
+    femu_events_start(n);
+    /* commands the host queued while the controller started */
+    if (n->sq[0]) {
+        nvme_process_sq_admin(n->sq[0]);
+    }
+}
+
+static void femu_ready_timer_cb(void *opaque)
+{
+    FemuCtrl *n = opaque;
+
+    if (n->starting && NVME_CC_EN(n->bar.cc) &&
+        !(n->bar.csts & NVME_CSTS_FAILED)) {
+        femu_ctrl_ready(n);
+    }
+}
+
+/* the time from CC.EN to CSTS.RDY: recovery_ms (else ready_ms) after a cut */
+static uint32_t femu_ready_delay_ms(FemuCtrl *n)
+{
+    if (n->recovery_pending && n->recovery_ms) {
+        return n->recovery_ms;
+    }
+    return n->ready_ms;
 }
 
 static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned size)
@@ -865,10 +902,13 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             n->bar.cc = data;
             if (nvme_start_ctrl(n)) {
                 n->bar.csts = NVME_CSTS_FAILED;
+            } else if (femu_ready_delay_ms(n)) {
+                n->starting = true;
+                timer_mod(n->ready_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          (int64_t)femu_ready_delay_ms(n) * SCALE_MS);
             } else {
-                n->bar.csts = NVME_CSTS_READY;
-                /* the first ready controller starts the events_file times */
-                femu_events_start(n);
+                femu_ctrl_ready(n);
             }
         } else if (reset) {
             /*
@@ -1014,6 +1054,10 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
         }
 
         cq->head = new_val;
+        /* before CSTS.RDY a doorbell only keeps its value */
+        if (n->starting) {
+            return;
+        }
 
         if (cq->tail != cq->head) {
             nvme_isr_notify_admin(cq);
@@ -1281,6 +1325,16 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                         n->namespace_modes || n->subsys || n->cxl_dev)) {
         error_setg(errp, "die_slow requires bbssd or CSD with one namespace, "
                    "and no ns_mgmt, namespace_modes, subsystem or cxl_ssd");
+        return false;
+    }
+    /* CAP.TO and CRTO.CRWMT give the host 7500 ms */
+    if (n->ready_ms >= 7500 || n->recovery_ms >= 7500) {
+        error_setg(errp, "ready_ms and recovery_ms must be below 7500, "
+                   "the CAP.TO the host reads");
+        return false;
+    }
+    if (n->recovery_ms && n->recovery_ms < n->ready_ms) {
+        error_setg(errp, "recovery_ms must be 0 or at least ready_ms");
         return false;
     }
     /* the table is sized before the FTL checks its geometry */
@@ -3218,6 +3272,7 @@ static void femu_realize_undo(FemuCtrl *n)
     }
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
+    g_clear_pointer(&n->ready_timer, timer_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -4403,6 +4458,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->san_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                     nvme_sanitize_timer_cb, n);
     }
+    if (n->ready_ms || n->recovery_ms) {
+        /* the host polls CSTS.RDY in guest time */
+        n->ready_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      femu_ready_timer_cb, n);
+    }
     for (uint32_t i = 1; n->ana && i <= n->namespace_limit; i++) {
         if (nvme_ns_allocated(n, i)) {
             nvme_ana_ns(n, nvme_ns_allocated(n, i));
@@ -4716,6 +4776,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_fw_exit(n);
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
+    g_clear_pointer(&n->ready_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -4806,6 +4867,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("cqr", FemuCtrl, cqr, 1),
     DEFINE_PROP_UINT8("vwc", FemuCtrl, vwc, 0),
     DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
+    DEFINE_PROP_UINT32("ready_ms", FemuCtrl, ready_ms, 0),
+    DEFINE_PROP_UINT32("recovery_ms", FemuCtrl, recovery_ms, 0),
     DEFINE_PROP_UINT8("intc", FemuCtrl, intc, 0),
     DEFINE_PROP_UINT8("intc_thresh", FemuCtrl, intc_thresh, 0),
     DEFINE_PROP_UINT8("intc_time", FemuCtrl, intc_time, 0),
@@ -5767,6 +5830,8 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         return;
     }
     nvme_clear_ctrl(n, false);
+    /* the next start rebuilds state: it takes recovery_ms */
+    n->recovery_pending = true;
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
             lost |= bbssd_power_loss(&n->namespaces[i]);
@@ -6051,6 +6116,13 @@ static void femu_pci_reset(DeviceState *dev)
     /* the host's memory is its own again after any reset */
     femu_hmb_off(n);
     if (!n->ocp) {
+        /*
+         * The controller keeps its state, but a start under way ends: its
+         * queued admin commands would post into memory the host took back.
+         */
+        if (n->starting) {
+            nvme_write_bar(n, 0x14, n->bar.cc & ~1u, 4);
+        }
         return;
     }
     if (NVME_CC_EN(n->bar.cc)) {

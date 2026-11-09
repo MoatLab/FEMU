@@ -295,6 +295,34 @@ not a delay added at completion.
 - `query-femu` lists each slow LUN and its factor under `media`,
   `slow-luns`.
 
+## Ready and recovery time
+
+A real SSD takes time to come ready after CC.EN, and longer after an
+unsafe power cut, while it rebuilds its state. `ready_ms` and
+`recovery_ms` model this. Both are 0 by default: ready at once.
+
+```text
+ CC.EN 0 -> 1 --> admin queues set up, CSTS.RDY = 0
+              --> ready_ms later (recovery_ms after a power cut) --> RDY = 1
+ admin doorbells before RDY: the value is kept, the commands run at RDY
+ CC.EN 1 -> 0 or a power cut before RDY --> the start ends; enable again
+```
+
+- The time is guest time (the QEMU virtual clock). It stops while the VM
+  is stopped. An `events_file` power cut runs on host time, so it can
+  end a start while the VM is stopped.
+- Every power cut (`simulate-power-loss` or an `events_file`
+  `power-loss`) makes the next successful start a recovery. A start that
+  a reset or another cut ends does not count.
+- `recovery_ms` 0 uses `ready_ms`. Both are nominal times below
+  7500 ms, the CAP.TO and CRTO the host reads. Start-up work and timer
+  latency add to them, so a value near 7500 ms can exceed the host limit.
+- Recovery only delays CSTS.RDY. The roll back of buffered writes still
+  happens at the cut.
+- A system reset ends a start under way, with or without `ocp`.
+- A failed start (CSTS.CFS) does not take part: the admin queue then
+  behaves as before.
+
 ## CXL SSD counters
 
 The `femu-cxl-ssd` counters are QOM properties, read on the host through
