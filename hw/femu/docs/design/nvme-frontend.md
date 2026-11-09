@@ -137,12 +137,14 @@ The shutdown has its own state, apart from CC.SHN:
 
 ```text
  CC.SHN 00b -> nonzero, no shutdown yet --> flush, clear, SHST = 10b
+                                             (01b for shutdown_ms first)
  CC.SHN changes again                    --> CC readback only
- CC.SHN -> 00b                           --> SHST stays 10b
+ CC.SHN -> 00b                           --> SHST stays as it is
  next CC.EN 0 -> 1, a controller reset, a power cut, a PCI or
    system reset                          --> SHST = 00b
  a power cut after SHST 10b: no unsafe shutdown, no new recovery
- a failed flush: CFS, SHST 00b, and no shutdown until a reset
+ a failed flush: CFS, SHST 00b, and no shutdown until a reset or the
+   next enable, which also clears that CFS
  CC.EN 0 -> 1 with a new SHN in the same write: no start, a shutdown
 ```
 

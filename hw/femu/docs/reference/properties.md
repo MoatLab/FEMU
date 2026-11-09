@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 285 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 286 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -131,6 +131,7 @@ Devices:
 | `power_loss` | `bool` | `off` | bbssd: roll back writes still in the write buffer on a simulated power cut and enable simulate-power-loss; needs buffer_size > 0, vwc=1, page-aligned namespaces, and no meta, pi, ns_mgmt, subsys, namespace_modes or cxl_ssd |
 | `ready_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin commands queued before ready run then; 0 (default) is ready at once |
 | `recovery_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY for the first start after a power cut, in ms, 0 or ready_ms to 7499; 0 (default) uses ready_ms |
+| `shutdown_ms` | `uint32` | `0` | time in ms of guest time CSTS.SHST reads 01b (in progress) after a shutdown, below 5000; the shutdown work is done before it; 0 (default) is complete at once |
 
 ### NAND geometry (bbssd, CSD, KV)
 

@@ -81,6 +81,7 @@ DEVICES = [
                 "props": [
                     "ns_mgmt", "bbssd_ns_limit", "streams", "streams.max",
                     "power_loss", "ready_ms", "recovery_ms",
+                    "shutdown_ms",
                 ],
             },
             {

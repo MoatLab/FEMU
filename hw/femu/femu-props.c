@@ -419,6 +419,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "ready_ms",
       "time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin "
       "commands queued before ready run then; 0 (default) is ready at once" },
+    { "shutdown_ms",
+      "time in ms of guest time CSTS.SHST reads 01b (in progress) after a "
+      "shutdown, below 5000; the shutdown work is done before it; 0 "
+      "(default) is complete at once" },
     { "recovery_ms",
       "time from CC.EN to CSTS.RDY for the first start after a power cut, "
       "in ms, 0 or ready_ms to 7499; 0 (default) uses ready_ms" },

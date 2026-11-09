@@ -2119,6 +2119,7 @@ enum {
     FEMU_SHUT_NONE,
     FEMU_SHUT_DONE,
     FEMU_SHUT_FAILED,   /* a flush failed: no shutdown until a reset */
+    FEMU_SHUT_PROGRESS, /* shutdown_ms: SHST 01b until the timer */
 };
 
 typedef struct NvmeSQueue {
@@ -3063,6 +3064,8 @@ typedef struct FemuCtrl {
      * next enable.
      */
     uint8_t         shut;           /* FEMU_SHUT_* */
+    uint32_t        shutdown_ms;    /* SHST 01b this long, then 10b */
+    QEMUTimer       *shut_timer;
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */

@@ -960,6 +960,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu: onfi_mode needs an even page size on the bus (secsz * secs_per_pg + onfi_spare_bytes)
 
+## `shutdown_ms`
+
+- shutdown_ms must be below 5000, the time a Linux host waits for a shutdown by default
+
 ## `spare_lines`
 
 - femu: spare_lines (%u) must be below blks_per_pl (%d)

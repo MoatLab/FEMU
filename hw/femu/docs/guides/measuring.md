@@ -345,6 +345,12 @@ unsafe power cut, while it rebuilds its state. `ready_ms` and
 - Recovery only delays CSTS.RDY. The roll back of buffered writes still
   happens at the cut.
 - A system reset ends a start under way, with or without `ocp`.
+- `shutdown_ms` holds CSTS.SHST at 01b (in progress) that long after a
+  shutdown, then 10b. The flush and the teardown are done before 01b,
+  so a power cut during 01b loses nothing, but it counts as an unsafe
+  shutdown. A reset or a power cut ends the 01b time; a second
+  notification does not restart it. Keep it below 5000 ms, the time a
+  Linux host waits by default.
 - A failed start (CSTS.CFS) does not take part: the admin queue then
   behaves as before.
 

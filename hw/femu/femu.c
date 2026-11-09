@@ -867,8 +867,29 @@ static uint32_t femu_ready_delay_ms(FemuCtrl *n)
 /* no shutdown: a reset, a power cut or the next enable ends one */
 static void femu_shut_clear(FemuCtrl *n)
 {
+    if (n->shut_timer) {
+        timer_del(n->shut_timer);
+    }
     n->shut = FEMU_SHUT_NONE;
     n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
+}
+
+/* the SHST field alone, never ORed: 01b then 10b must not read 11b */
+static void femu_shst_set(FemuCtrl *n, uint32_t shst)
+{
+    n->bar.csts = (n->bar.csts & ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT)) | shst;
+}
+
+/* shutdown_ms has passed: the shutdown work was done before it began */
+static void femu_shut_timer_cb(void *opaque)
+{
+    FemuCtrl *n = opaque;
+
+    if (n->shut == FEMU_SHUT_PROGRESS &&
+        !(n->bar.csts & NVME_CSTS_FAILED)) {
+        n->shut = FEMU_SHUT_DONE;
+        femu_shst_set(n, NVME_CSTS_SHST_COMPLETE);
+    }
 }
 
 static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned size)
@@ -892,9 +913,13 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
          */
         uint32_t cc = n->bar.cc;
         bool reset = !NVME_CC_EN(data) && NVME_CC_EN(cc);
-        /* one shutdown per notification, until a reset or the next enable */
+        bool start = NVME_CC_EN(data) && !NVME_CC_EN(cc);
+        /*
+         * One shutdown per notification, until a reset or the next enable;
+         * an enable in the same write ends the old one first.
+         */
         bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc) &&
-                        n->shut == FEMU_SHUT_NONE;
+                        (start || n->shut == FEMU_SHUT_NONE);
         uint16_t fail = 0;
 
         /*
@@ -914,7 +939,13 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
         data &= 0x00fffff1;
 
         if (NVME_CC_EN(data) && !NVME_CC_EN(cc)) {
-            /* a new start ends a finished shutdown (Base 2.3, Figure 42) */
+            /*
+             * A new start ends a finished shutdown (Base 2.3, Figure 42),
+             * and the fatal status a failed one left.
+             */
+            if (n->shut == FEMU_SHUT_FAILED) {
+                n->bar.csts &= ~NVME_CSTS_FAILED;
+            }
             femu_shut_clear(n);
             n->bar.cc = data;
             if (shutdown) {
@@ -975,11 +1006,16 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                 /* no completion until a reset: SHST 00b, and CFS says why */
                 n->shut = FEMU_SHUT_FAILED;
                 n->bar.csts |= NVME_CSTS_FAILED;
+            } else if (n->shutdown_ms) {
+                /* the work is done; the status takes shutdown_ms */
+                n->shut = FEMU_SHUT_PROGRESS;
+                femu_shst_set(n, NVME_CSTS_SHST_PROGRESS);
+                timer_mod(n->shut_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          (int64_t)n->shutdown_ms * SCALE_MS);
             } else {
                 n->shut = FEMU_SHUT_DONE;
-                n->bar.csts = (n->bar.csts &
-                               ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT)) |
-                              NVME_CSTS_SHST_COMPLETE;
+                femu_shst_set(n, NVME_CSTS_SHST_COMPLETE);
             }
         }
         /* SHN back to 00b has no shutdown effect: SHST stays */
@@ -1392,6 +1428,12 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
     if (n->recovery_ms && n->recovery_ms < n->ready_ms) {
         error_setg(errp, "recovery_ms must be 0 or at least ready_ms");
+        return false;
+    }
+    /* Linux waits 5 s for SHST by default, and FEMU sets no RTD3E */
+    if (n->shutdown_ms >= 5000) {
+        error_setg(errp, "shutdown_ms must be below 5000, the time a Linux "
+                   "host waits for a shutdown by default");
         return false;
     }
     /* the table is sized before the FTL checks its geometry */
@@ -3330,6 +3372,7 @@ static void femu_realize_undo(FemuCtrl *n)
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
     g_clear_pointer(&n->ready_timer, timer_free);
+    g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
@@ -4519,6 +4562,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (n->wrr) {
         n->wrr_tried = g_new0(bool, n->nr_io_queues + 1);
     }
+    if (n->shutdown_ms) {
+        /* the host polls CSTS.SHST in guest time */
+        n->shut_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, femu_shut_timer_cb,
+                                     n);
+    }
     if (n->ready_ms || n->recovery_ms) {
         /* the host polls CSTS.RDY in guest time */
         n->ready_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -4838,6 +4886,7 @@ static void femu_exit(PCIDevice *pci_dev)
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
     g_clear_pointer(&n->ready_timer, timer_free);
+    g_clear_pointer(&n->shut_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -4933,6 +4982,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
     DEFINE_PROP_UINT32("ready_ms", FemuCtrl, ready_ms, 0),
     DEFINE_PROP_UINT32("recovery_ms", FemuCtrl, recovery_ms, 0),
+    DEFINE_PROP_UINT32("shutdown_ms", FemuCtrl, shutdown_ms, 0),
     DEFINE_PROP_UINT8("intc", FemuCtrl, intc, 0),
     DEFINE_PROP_UINT8("intc_thresh", FemuCtrl, intc_thresh, 0),
     DEFINE_PROP_UINT8("intc_time", FemuCtrl, intc_time, 0),
@@ -5959,7 +6009,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         n->ocp_incomplete_shutdowns++;
     }
     n->bar.csts = 0;
-    n->shut = FEMU_SHUT_NONE;
+    femu_shut_clear(n);
     if (!clean && (n->unsafe_shutdowns[0] != UINT64_MAX ||
                    n->unsafe_shutdowns[1] != UINT64_MAX)) {
         if (++n->unsafe_shutdowns[0] == 0) {

@@ -881,9 +881,10 @@ saves the page's previous bytes and per-LBA state as an undo record. When
 the page is programmed the record is dropped. Setting the QOM property
 `simulate-power-loss` ([runtime properties](../reference/runtime-properties.md#power-loss-trigger))
 resets the controller, restores every buffered page from its undo record,
-empties the buffer and counts an unsafe shutdown.
+empties the buffer and counts an unsafe shutdown, unless a shutdown had
+completed (SHST 10b) before the cut.
 
-In this mode a normal shutdown, turning the cache off and Sanitize first
+In this mode a shutdown of any kind, turning the cache off and Sanitize first
 write back every namespace's buffer; Flush, Format, Dataset Management,
 Copy, Write Zeroes (except on a PI-formatted namespace) and Write
 Uncorrectable write back their own namespace's. If the device has no

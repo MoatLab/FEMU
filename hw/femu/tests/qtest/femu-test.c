@@ -12323,6 +12323,70 @@ static void femu_test_shutdown_sysreset(void *obj, void *data,
     qtest_pc_shutdown(qs);
 }
 
+/* CSTS of the controller of @c */
+static uint32_t femu_csts(FemuCtrlState *c)
+{
+    return qpci_io_readl(c->pdev, c->bar, 0x1c);
+}
+
+/*
+ * shutdown_ms=200. A normal shutdown with CC.EN still 1 reads SHST 01b
+ * until 200 ms of guest time pass, then 10b; RDY stays and nothing else
+ * in CSTS changes. A second notification keeps the first deadline. A
+ * reset during the 01b time ends the shutdown: SHST 00b, also past the
+ * old deadline.
+ */
+static void femu_test_shutdown_delay(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (1 << 2));
+    qtest_clock_step(qts, 100 * 1000000LL);
+    /* an abrupt notification now changes CC only */
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | (2 << 14));
+    g_assert_cmphex(qpci_io_readl(c.pdev, c.bar, 0x14), ==,
+                    FEMU_CC_ENABLE | (2 << 14));
+    qtest_clock_step(qts, 100 * 1000000LL - 1);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (1 << 2));
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (2 << 2));
+    femu_disable(&c);
+
+    /* a reset during 01b ends the shutdown for good */
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    g_assert_cmphex(femu_csts(&c), ==, 0);
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_cmphex(femu_csts(&c), ==, 0);
+    femu_queue_free(&c, &c.admin);
+    qpci_iounmap(c.pdev, c.bar);
+}
+
+/* a shutdown_ms a Linux host would time out on is refused */
+static void femu_test_shutdown_bad(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                           "'driver':'femu','id':'sdb','addr':'6',"
+                           "'devsz_mb':16,'femu_mode':1,"
+                           "'shutdown_ms':5000}}");
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "shutdown_ms"));
+    qobject_unref(rsp);
+}
+
 /*
  * The controller configuration and status registers (Base 2.3, Figures 41-42
  * and 3.5): a write that disables and shuts down at once does both, a reset
@@ -57315,6 +57379,15 @@ static void femu_register_nodes(void)
     });
     qos_add_test("shutdown-sysreset", "femu", femu_test_shutdown_sysreset,
                  NULL);
+    qos_add_test("shutdown-delay", "femu", femu_test_shutdown_delay,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=sd,femu_mode=1,devsz_mb=16,shutdown_ms=200",
+    });
+    qos_add_test("shutdown-bad", "femu", femu_test_shutdown_bad,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=sd0,femu_mode=1,devsz_mb=16",
+    });
     qos_add_test("power-fua-place-fail", "femu", femu_test_power_fua_place_fail,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
