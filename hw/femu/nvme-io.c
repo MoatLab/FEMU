@@ -254,7 +254,7 @@ static int nvme_post_backlog(FemuCtrl *n, int index_poller, bool *should_isr)
         }
         QTAILQ_REMOVE(backlog, req, entry);
         if (n->stage_sets) {
-            nvme_stages_note(n, index_poller, req, femu_io_now(n));
+            nvme_stages_note(n, index_poller, req, req->t_cqe);
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         should_isr[cq->cqid] = true;
@@ -655,8 +655,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                     n->poller_ctr[index_poller].nr_tt_ios++;
                     n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
                     if (n->stage_sets) {
-                        nvme_stages_note(n, index_poller, req,
-                                         femu_io_now(n));
+                        nvme_stages_note(n, index_poller, req, req->t_cqe);
                     }
                 }
                 QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
@@ -725,22 +724,24 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
      * The completion is written with the CSD lock held and the use released
      * under it, so an admin command sees either both or neither.
      */
+    /*
+     * One time for the CQE write, taken before any bookkeeping: the trace,
+     * the OCP latency monitor and the stage histograms all count to it, so
+     * none of them counts the work of another.
+     */
     if (unlikely(req->csd_use)) {
         femu_csd_post_cqe(n, cq, req);
     } else {
         nvme_write_cqe(n, cq, cqe);
+        femu_note_cqe_time(n, req);
     }
     nvme_inc_cq_tail(cq);
-    /*
-     * io_trace takes the CQE time before the OCP latency monitor, which
-     * may wait for its lock, adds to it.
-     */
     if (unlikely(qatomic_read(&n->iotrace_on)) && cq->cqid) {
-        femu_iotrace_note(n, req, femu_io_now(n));
+        femu_iotrace_note(n, req, req->t_cqe);
     }
     /* OCP latency monitor: SQ fetch to CQE write, I/O queues only */
     if (unlikely(n->ocp) && cq->cqid) {
-        femu_ocp_lat_note(n, req, femu_io_now(n));
+        femu_ocp_lat_note(n, req, req->t_cqe);
     }
     /*
      * OCP event injection: a pending event counts the NVM Read commands
@@ -1032,8 +1033,8 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             continue;
         }
         if (n->stage_sets) {
-            /* after the entry is written, as the host sees it */
-            nvme_stages_note(n, index_poller, req, femu_io_now(n));
+            /* the time the entry was written, as the host sees it */
+            nvme_stages_note(n, index_poller, req, req->t_cqe);
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;

@@ -1332,10 +1332,13 @@ void femu_csd_post_cqe(FemuCtrl *n, NvmeCQueue *cq, NvmeRequest *req)
     req->csd_use = 0;
     if (!csd || !csd->cp_nsid) {
         nvme_write_cqe(n, cq, &req->cqe);
+        femu_note_cqe_time(n, req);
         return;
     }
     qemu_mutex_lock(&csd->lock);
     nvme_write_cqe(n, cq, &req->cqe);
+    /* before the release of the uses, which is not the host's to see */
+    femu_note_cqe_time(n, req);
     csd_cp_use_done_locked(csd, use);
     qemu_mutex_unlock(&csd->lock);
 }

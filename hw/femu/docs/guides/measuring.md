@@ -227,7 +227,9 @@ t_submit_ns,t_cqe_ns,sqid,cid,nsid,opcode,slba,nlb,status
 
 `t_cqe_ns - t_submit_ns` runs from the fetch of the command to the CQE
 write, every model stage included. Time in the SQ before the fetch and
-the interrupt after the CQE are not in it. Only NVM and zoned namespaces
+the interrupt after the CQE are not in it. The trace, `io_stages` and the
+OCP latency monitor (log C3h) take one time right after the CQE write, so
+a command has the same end in all three. Only NVM and zoned namespaces
 get a range. Admin commands are not in the trace.
 
 The file is written through a 1 MiB buffer. QEMU exit flushes it, and

@@ -2001,6 +2001,8 @@ typedef struct NvmeRequest {
     int64_t                 stime;
     /* the submit time; stime moves past it when a write books the link */
     int64_t                 t_submit;
+    /* when the CQE was written: one sample for every latency it feeds */
+    int64_t                 t_cqe;
     int64_t                 wake_ns;    /* PS3 exit latency first */
     /* the write paid its host-link transfer before the media */
     bool                    link_early;
@@ -3486,6 +3488,17 @@ static inline int64_t femu_io_now(FemuCtrl *n)
     }
     return qemu_clock_get_ns(n->test_oc12_clock ? QEMU_CLOCK_VIRTUAL :
                                                 QEMU_CLOCK_REALTIME);
+}
+
+/*
+ * The time a CQE was written, for io_trace, the OCP latency monitor and
+ * io_stages: read once, right after the write, and only when one is on.
+ */
+static inline void femu_note_cqe_time(FemuCtrl *n, NvmeRequest *req)
+{
+    if (unlikely(qatomic_read(&n->iotrace_on) || n->ocp || n->stage_sets)) {
+        req->t_cqe = femu_io_now(n);
+    }
 }
 
 /* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
