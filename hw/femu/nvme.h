@@ -2550,6 +2550,7 @@ typedef struct BbCtrlParams {
     uint32_t tier_idle_ms;    /* quiet time before an idle fold; 0: off */
     uint32_t gc_idle_ms;      /* quiet time before idle collection; 0: off */
     uint8_t gc_idle_pcent;    /* idle collection target; 0: gc_thres_pcent */
+    bool maint_idle;          /* idle steps also reclaim and refresh */
     uint32_t tier_lazy_pct;   /* idle folds: 0 eager; else pool use to keep */
 } BbCtrlParams;
 

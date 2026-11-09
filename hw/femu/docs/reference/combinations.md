@@ -297,6 +297,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `gc_idle_ms`
 
 - FEMU %s: gc_idle_ms is not supported with %s
+- FEMU %s: maint_idle needs gc_idle_ms
 - FEMU: gc_idle_ms is not supported with %s
 - FEMU: gc_idle_ms is not supported with shared namespaces
 - gc idle check requires gc_idle_ms
@@ -304,6 +305,8 @@ own description allows. A message keeps its format directives (`%s`,
 - gc idle kick requires gc_idle_ms
 - gc idle latch requires gc_idle_ms
 - gc idle order requires gc_idle_ms
+- maint_idle needs gc_idle_ms
+- maintenance check requires gc_idle_ms
 
 ## `gc_policy`
 
@@ -465,6 +468,11 @@ own description allows. A message keeps its format directives (`%s`,
 ## `lver`
 
 - lver must be 1 (Open-Channel 1.2) or 2 (Open-Channel 2.0)
+
+## `maint_idle`
+
+- FEMU %s: maint_idle needs gc_idle_ms
+- maint_idle needs gc_idle_ms
 
 ## `mapping`
 

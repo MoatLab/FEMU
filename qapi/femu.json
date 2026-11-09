@@ -211,6 +211,12 @@
 # @degraded-reads: reads of the failed die, served from the other dies
 #     of its stripe.  Present only with die_parity.
 #
+# @idle-reclaims: read reclaims done in idle time.  Present only with
+#     maint_idle.
+#
+# @idle-refreshes: retention refreshes done in idle time, by the scan or
+#     a queued age reclaim.  Present only with maint_idle.
+#
 # @waf: write amplification factor, (@nand-write-pages +
 #     @gc-write-pages + @map-write-pages + @pad-write-pages +
 #     @parity-write-pages) / @host-write-pages.  Absent until the host
@@ -223,7 +229,8 @@
             'gc-write-pages': 'uint64', 'block-erases': 'uint64',
             '*pad-write-pages': 'uint64', '*map-write-pages': 'uint64',
             '*map-read-pages': 'uint64', '*parity-write-pages': 'uint64',
-            '*degraded-reads': 'uint64', '*waf': 'number' } }
+            '*degraded-reads': 'uint64', '*idle-reclaims': 'uint64',
+            '*idle-refreshes': 'uint64', '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:

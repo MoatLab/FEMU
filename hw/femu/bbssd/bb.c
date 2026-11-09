@@ -392,6 +392,10 @@ int bb_check_gc_idle(FemuCtrl *n, const char *mode, Error **errp)
         warn_report("femu: gc_idle_pcent has no effect unless gc_idle_ms "
                     "is set");
     }
+    if (p->maint_idle && !p->gc_idle_ms) {
+        error_setg(errp, "FEMU %s: maint_idle needs gc_idle_ms", mode);
+        return -1;
+    }
     if (!p->gc_idle_ms) {
         return 0;
     }
@@ -652,6 +656,7 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     if (n->bb_params.gc_idle_ms) {
         ssd->gc_idle_ns = (uint64_t)n->bb_params.gc_idle_ms * 1000000;
+        ssd->maint_idle = n->bb_params.maint_idle;
         n->gc_idle = true;
     }
 }

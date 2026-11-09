@@ -2002,21 +2002,125 @@ bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now)
  * the media work of this one; a step that frees nothing also waits
  * gc_idle_ns. Returns what the step did.
  */
+/* lines the retention scan reads in one idle step */
+#define MAINT_SCAN_LINES 16
+
+/*
+ * The next closed data line, of MAINT_SCAN_LINES ids from the cursor, whose
+ * data is older than retention_limit_sec. Every id read counts, so a step
+ * costs the same however few lines are closed.
+ */
+static struct line *maint_scan(struct ssd *ssd, uint64_t now)
+{
+    uint64_t limit = (uint64_t)ssd->sp.retention_limit_sec *
+                     NANOSECONDS_PER_SECOND;
+
+    if (!limit || !ssd->lm.tt_lines) {
+        return NULL;
+    }
+    for (int k = 0; k < MAINT_SCAN_LINES; k++) {
+        struct line *l = &ssd->lm.lines[ssd->maint_cursor];
+
+        ssd->maint_cursor = (ssd->maint_cursor + 1) % ssd->lm.tt_lines;
+        /* closed: on the full list or in the victim queue, with data */
+        if (l->close_time && l->vpc > 0 && l->kind == LINE_DATA &&
+            !l->reclaiming && !l->retired && !l->spare && !l->reserve &&
+            (l->pos || l->vpc == ssd->sp.pgs_per_line) &&
+            ssd_data_age_ns(ssd, l->close_time, now) >= limit) {
+            return l;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * One maintenance step (maint_idle). A queued reclaim that waits for free
+ * lines lets one collection run first, or the space it waits for would
+ * never come. Otherwise the queued reclaim, the retention scan and idle
+ * collection take turns, one line of work per step.
+ */
+static bool maint_idle_work(struct ssd *ssd, uint64_t now)
+{
+    struct line *aged;
+
+    /*
+     * Forced, as the write path collects before its reclaim: a victim
+     * with few invalid pages still frees a line here.
+     */
+    if (ssd->read_reclaim_line &&
+        (should_gc_high(ssd) || ssd->lm.free_line_cnt < 2)) {
+        do_gc(ssd, true);
+        ssd->gc_idle_steps++;
+        return true;
+    }
+    for (int k = 0; k < 3; k++) {
+        uint8_t turn = ssd->maint_turn;
+
+        ssd->maint_turn = (turn + 1) % 3;
+        if (turn == 0 && ssd->read_reclaim_line) {
+            do_read_reclaim(ssd);
+            return false;
+        }
+        aged = turn == 1 ? maint_scan(ssd, now) : NULL;
+        if (aged) {
+            /*
+             * The scan rewrites its own line; a read reclaim already
+             * queued keeps its place for its own turn.
+             */
+            struct line *queued = ssd->read_reclaim_line;
+            enum ssd_reclaim_why why = ssd->reclaim_why;
+
+            ssd->read_reclaim_line = aged;
+            ssd->reclaim_why = RECLAIM_AGE;
+            do_read_reclaim(ssd);
+            if (queued && queued != aged) {
+                ssd->read_reclaim_line = queued;
+                ssd->reclaim_why = why;
+            }
+            return false;
+        }
+        if (turn == 2 && ssd->lm.free_line_cnt < ssd->sp.gc_idle_lines) {
+            do_gc(ssd, false);
+            ssd->gc_idle_steps++;
+            return true;
+        }
+    }
+    return false;
+}
+
 SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now)
 {
     uint64_t erases = ssd->total_erases;
     uint64_t copies = ssd->gc_write_pages;
+    uint64_t reads = ssd->read_reclaims;
+    uint64_t ages = ssd->retention_refreshes;
     int free0 = ssd->lm.free_line_cnt;
     SsdGcIdleOutcome out;
     uint64_t fence;
+    bool gc = true;
 
-    if (ssd->lm.free_line_cnt >= ssd->sp.gc_idle_lines) {
+    if (ssd->maint_idle) {
+        /* work still booked, the write-back's too, goes first */
+        uint64_t busy = MAX(ssd_media_last_end(ssd), ssd->buffer_bg_fence);
+
+        if (busy > now) {
+            ssd->gc_idle_fence = MAX(ssd->gc_idle_fence, busy);
+            return SSD_GC_IDLE_NONE;
+        }
+        gc = maint_idle_work(ssd, now);
+        ssd->idle_reclaims += ssd->read_reclaims - reads;
+        ssd->idle_refreshes += ssd->retention_refreshes - ages;
+    } else if (ssd->lm.free_line_cnt >= ssd->sp.gc_idle_lines) {
         return SSD_GC_IDLE_AT_TARGET;
+    } else {
+        do_gc(ssd, false);
+        ssd->gc_idle_steps++;
     }
-    do_gc(ssd, false);
-    ssd->gc_idle_steps++;
     if (ssd->total_erases != erases) {
-        ssd->gc_idle_done++;
+        /* victims of collection only; reclaims count apart */
+        if (gc) {
+            ssd->gc_idle_done++;
+        }
         out = ssd->lm.free_line_cnt > free0 ? SSD_GC_IDLE_GAIN :
                                               SSD_GC_IDLE_RECLAIMED;
     } else {
@@ -2024,8 +2128,16 @@ SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now)
                                               SSD_GC_IDLE_NONE;
     }
     fence = MAX(now, ssd_media_last_end(ssd));
-    /* a step that freed no line waits the quiet time before the next try */
-    if (ssd->lm.free_line_cnt <= free0) {
+    if (ssd->maint_idle) {
+        fence = MAX(fence, ssd->buffer_bg_fence);
+    }
+    /*
+     * A step that freed no line waits the quiet time before the next try;
+     * with maint_idle, a step that neither copied nor erased waits it too.
+     */
+    if (ssd->maint_idle ? ssd->total_erases == erases &&
+                          ssd->gc_write_pages == copies :
+                          ssd->lm.free_line_cnt <= free0) {
         fence = MAX(fence, now + ssd->gc_idle_ns);
     }
     ssd->gc_idle_fence = MAX(ssd->gc_idle_fence, fence);

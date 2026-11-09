@@ -1069,11 +1069,35 @@ Every NAND read the FTL issues, host, GC or merge, increments its block's
 `read_cnt` (GC reads are issued only while GC timing is on); an erase
 resets it. Reads answered by the write buffer, the read cache or a DFTL
 translation page do not count. The rewrite happens on a write, where
-relocation already costs something, so a read never stalls behind a whole
-line. One line is refreshed per write at most. A line that nothing reads is
-never refreshed, and a workload that only reads refreshes nothing: FEMU runs
-no background media scan. The request is dropped if GC collects the line first, or if the line is
+relocation already costs something, so the read that queued it does not
+stall behind a whole line. One line is refreshed per write at most. Without `maint_idle`, a line
+that nothing reads is never refreshed, and a workload that only reads
+refreshes nothing. The request is dropped if GC collects the line first, or if the line is
 still open for writing when the next write checks it.
+
+### Maintenance in idle time (`maint_idle`)
+
+With `gc_idle_ms` and `maint_idle=on`, an idle step also runs the queued
+reclaim and scans closed lines for retention age:
+
+```text
+  idle step due (gc_idle_ms rules) and no media work still booked:
+    a reclaim waits for free lines (high watermark, or < 2 free)
+        --> one collection victim first; the reclaim stays queued
+    else turns: queued reclaim, retention scan, idle collection
+        scan: 16 line ids from a cursor; a closed data line with valid
+              pages and ssd_data_age_ns() >= retention_limit_sec
+              --> queued with reason AGE and rewritten now
+    a step that neither copies nor erases waits gc_idle_ms
+```
+
+Idle reclaims and refreshes add to the same totals as the write path's;
+`query-femu` also counts them apart (`idle-reclaims`, `idle-refreshes`).
+A read that arrives while an idle step runs waits for that one line's
+copies and erase. The scan keeps its own turn while a read reclaim is
+queued, so new read stress cannot stop it.
+One read reclaim is queued at a time, as before; open lines and frontiers
+are not scanned, and static wear levelling stays on the write path.
 
 ## Fault insertion
 

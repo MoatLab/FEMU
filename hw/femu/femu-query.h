@@ -96,6 +96,9 @@ typedef struct FemuQueryNs {
     uint64_t map_reads;
     bool tp_on;                 /* translation pages on flash */
     uint64_t erases;
+    bool maint_on;              /* maint_idle */
+    uint64_t idle_reclaims;
+    uint64_t idle_refreshes;
 
     uint32_t free_lines;
     uint32_t victim_lines;

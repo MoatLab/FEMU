@@ -736,6 +736,12 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     ctr->nand_write_pages = q->nand_pages;
     ctr->gc_write_pages = q->gc_pages;
     ctr->block_erases = q->erases;
+    if (q->maint_on) {
+        ctr->has_idle_reclaims = true;
+        ctr->idle_reclaims = q->idle_reclaims;
+        ctr->has_idle_refreshes = true;
+        ctr->idle_refreshes = q->idle_refreshes;
+    }
     if (q->pad_pages) {
         ctr->has_pad_write_pages = true;
         ctr->pad_write_pages = q->pad_pages;

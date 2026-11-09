@@ -822,6 +822,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd with one namespace and page mapping: quiet time in ms after "
       "which the device collects lines in the background, one victim at a "
       "time; 0 (default) collects only on the write path" },
+    { "maint_idle",
+      "bbssd with gc_idle_ms: idle steps also run the queued read reclaim "
+      "and scan closed lines for retention age, 16 line ids a step, in turns "
+      "with idle collection; a reclaim that waits for free lines lets "
+      "collection run first; off (default) leaves both to the write path" },
     { "gc_idle_pcent",
       "bbssd with gc_idle_ms: idle collection runs while the line fill is "
       "above this percent, as gc_thres_pcent counts it; 0 (default) takes "

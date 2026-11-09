@@ -647,6 +647,15 @@ struct ssd {
     uint64_t gc_idle_fence; /* end of the last step's media work, or a retry */
     uint64_t gc_idle_steps; /* steps run */
     uint64_t gc_idle_done;  /* victims reclaimed by steps */
+    /*
+     * maint_idle: idle steps also run the queued read reclaim and scan
+     * closed lines for retention age, in turns with idle collection.
+     */
+    bool maint_idle;
+    uint32_t maint_cursor;  /* next line id the retention scan reads */
+    uint8_t maint_turn;     /* 0 queued reclaim, 1 scan, 2 collection */
+    uint64_t idle_reclaims; /* read reclaims done by idle steps */
+    uint64_t idle_refreshes; /* retention refreshes done by idle steps */
     bool gc_idle_hold;      /* qtest: no step runs on the FTL thread */
     uint32_t gc_idle_latch_ms; /* qtest: a step sleeps this long in the sweep */
     bool gc_idle_running;   /* qtest: a step is inside the sweep now */

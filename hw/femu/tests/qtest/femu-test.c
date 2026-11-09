@@ -43377,6 +43377,144 @@ static char *femu_gci_kick(QTestState *qts)
 }
 
 /*
+ * x-maint-idle of "gc-test": idle reclaims, idle refreshes, all read
+ * reclaims, all retention refreshes, GC copies, erases
+ */
+static void femu_maint_state(QTestState *qts, uint64_t *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-maint-idle'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-maint-idle: %s", qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 6);
+    for (int i = 0; i < 6; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * One channel, one LUN, 16 pages a line. LPNs 0 to 15 fill line 0, with
+ * idle steps held so only the kicks below run one.
+ *   refresh: retention 1 s at age_scale 4, nothing read; after 0.4 s
+ *            (1.6 s of age) one idle step
+ *            rewrites line 0 (16 copies, 1 erase) with no host write
+ *   reclaim: read limit 4; four reads of LPN 0 queue line 0, and one
+ *            idle step rewrites it with no host write
+ *   off:     the same as refresh without maint_idle: nothing moves
+ */
+static void femu_test_maint_idle(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    const char *mode = data;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    g_autofree char *what = NULL;
+    uint64_t v[6];
+
+    /* held before the first enable, so no step moves the scan cursor */
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    if (!strcmp(mode, "reclaim")) {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        g_usleep(50 * 1000);
+    } else {
+        /*
+         * retention_limit_sec 1 and age_scale 4: 0.4 s of real time is
+         * 1.6 s of age, past the limit only with the scale applied
+         */
+        g_usleep(400 * 1000);
+    }
+    femu_maint_state(qts, v);
+    g_assert_cmpuint(v[4], ==, 0);
+    g_assert_cmpuint(v[5], ==, 0);
+    what = femu_gci_kick(qts);
+    g_test_message("maint-idle %s: kick %s", mode, what);
+    femu_maint_state(qts, v);
+    if (!strcmp(mode, "off")) {
+        g_assert_cmpstr(what, ==, "at-target");
+        for (int i = 0; i < 6; i++) {
+            g_assert_cmpuint(v[i], ==, 0);
+        }
+    } else {
+        bool reclaim = !strcmp(mode, "reclaim");
+
+        g_assert_cmpuint(v[0], ==, reclaim ? 1 : 0);
+        g_assert_cmpuint(v[1], ==, reclaim ? 0 : 1);
+        g_assert_cmpuint(v[2], ==, reclaim ? 1 : 0);
+        g_assert_cmpuint(v[3], ==, reclaim ? 0 : 1);
+        g_assert_cmpuint(v[4], ==, 16);
+        g_assert_cmpuint(v[5], ==, 1);
+        {
+            QDict *rsp;
+            QDict *ctr = qdict_get_qdict(femu_query_ns(qts,
+                "'path':'/machine/peripheral/gc-test'", &rsp), "counters");
+
+            g_assert_cmpint(qdict_get_int(ctr, "idle-reclaims"), ==,
+                            reclaim ? 1 : 0);
+            g_assert_cmpint(qdict_get_int(ctr, "idle-refreshes"), ==,
+                            reclaim ? 0 : 1);
+            qobject_unref(rsp);
+        }
+    }
+    /* the data is still there */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 15 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x3c);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* maint_idle needs gc_idle_ms, and bbssd */
+static void femu_test_maint_idle_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *want;
+    } bad[] = {
+        { "'femu_mode':1,'maint_idle':true", "maint_idle needs gc_idle_ms" },
+        { "'femu_mode':2,'maint_idle':true,'gc_idle_ms':5",
+          "gc_idle_ms is not supported" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'mir','addr':'6','devsz_mb':16,%s}",
+            bad[i].opts);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("maint-idle-refused %s: %s", bad[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].want));
+        qobject_unref(rsp);
+    }
+}
+
+/*
  * The fill writes the 768 pages of the namespace once, and two passes of
  * overwrites in a fixed random order leave invalid pages in most lines.
  * The write path collects only below 8 free lines (gc_thres_pcent=90).
@@ -54317,6 +54455,30 @@ static void femu_register_nodes(void)
     qos_add_test("gc-frontier-refused", "femu", femu_test_gc_frontier_refused,
                  NULL);
     qos_add_test("gc-frontier-skew", "femu", femu_test_gc_frontier_skew, NULL);
+    {
+        static const char *const maint[][2] = {
+            { "refresh", ",retention_limit_sec=1,age_scale=4,maint_idle=on" },
+            { "reclaim", ",read_reclaim_limit=4,maint_idle=on" },
+            { "off", ",retention_limit_sec=1,age_scale=4" },
+        };
+
+        for (size_t i = 0; i < ARRAY_SIZE(maint); i++) {
+            g_autofree char *name = g_strdup_printf("maint-idle-%s",
+                                                    maint[i][0]);
+            g_autofree char *dev_opts = g_strdup_printf(
+                "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,"
+                "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
+                "luns_per_ch=1,nchs=1,gc_idle_ms=5%s", maint[i][1]);
+
+            qos_add_test(name, "femu", femu_test_maint_idle,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = dev_opts,
+                .arg = (void *)maint[i][0],
+            });
+        }
+    }
+    qos_add_test("maint-idle-refused", "femu", femu_test_maint_idle_refused,
+                 NULL);
     qos_add_test("gc-idle-recover", "femu", femu_test_gc_idle_recover,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

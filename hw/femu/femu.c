@@ -1337,6 +1337,14 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "and no ns_mgmt, namespace_modes, subsystem or cxl_ssd");
         return false;
     }
+    /*
+     * The idle maintenance rides on idle collection, whose own checks then
+     * name what it does not support.
+     */
+    if (n->bb_params.maint_idle && !n->bb_params.gc_idle_ms) {
+        error_setg(errp, "maint_idle needs gc_idle_ms");
+        return false;
+    }
     /* bb_init() refuses the media timing settings it cannot count yet */
     if (n->die_stats && (n->femu_mode != FEMU_BBSSD_MODE ||
                          n->namespace_modes || n->subsys || n->cxl_dev)) {
@@ -5208,6 +5216,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("tier_max_mb", FemuCtrl, bb_params.tier_max_mb, 0),
     DEFINE_PROP_UINT32("tier_idle_ms", FemuCtrl, bb_params.tier_idle_ms, 0),
     DEFINE_PROP_UINT32("gc_idle_ms", FemuCtrl, bb_params.gc_idle_ms, 0),
+    DEFINE_PROP_BOOL("maint_idle", FemuCtrl, bb_params.maint_idle, false),
     DEFINE_PROP_UINT8("gc_idle_pcent", FemuCtrl, bb_params.gc_idle_pcent, 0),
     DEFINE_PROP_UINT32("tier_lazy_pct", FemuCtrl, bb_params.tier_lazy_pct, 0),
     DEFINE_PROP_UINT32("tier_shrink_pct", FemuCtrl, bb_params.tier_shrink_pct,
@@ -5547,6 +5556,31 @@ static char *femu_test_gc_idle(Object *obj, Error **errp)
     out = g_strdup_printf("%" PRIu64 " %" PRIu64 " %d %d", ssd->gc_idle_steps,
                           ssd->gc_idle_done, ssd->lm.free_line_cnt,
                           ssd->sp.gc_idle_lines);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+/*
+ * qtest only: idle maintenance counters, "idle-reclaims idle-refreshes
+ * read-reclaims retention-refreshes gc-copies erases"
+ */
+static char *femu_test_maint_idle(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->gc_idle ? n->ssd : NULL;
+    char *out;
+    bool resume;
+
+    if (!ssd) {
+        error_setg(errp, "maintenance check requires gc_idle_ms");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                          " %" PRIu64 " %" PRIu64, ssd->idle_reclaims,
+                          ssd->idle_refreshes, ssd->read_reclaims,
+                          ssd->retention_refreshes, ssd->gc_write_pages,
+                          ssd->total_erases);
     nvme_resume_pollers(n, resume);
     return out;
 }
@@ -6071,6 +6105,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-gc-frontier", femu_test_gc_frontier,
                                 NULL);
         object_property_add_str(obj, "x-gc-idle", femu_test_gc_idle, NULL);
+        object_property_add_str(obj, "x-maint-idle", femu_test_maint_idle,
+                                NULL);
         object_property_add_bool(obj, "x-gc-idle-hold",
                                  femu_test_gc_idle_hold_get,
                                  femu_test_gc_idle_hold_set);

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 284 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 285 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -257,6 +257,7 @@ Devices:
 | `gc_frontier` | `bool` | `off` | bbssd, CSD: write the pages garbage collection copies to lines of their own, apart from host writes; refused with FDP, cxl_ssd, gc_pace, Streams, and retention_limit_sec without pd_open_close_sec |
 | `gc_idle_ms` | `uint32` | `0` | bbssd with one namespace and page mapping: quiet time in ms after which the device collects lines in the background, one victim at a time; 0 (default) collects only on the write path |
 | `gc_idle_pcent` | `uint8` | `0` | bbssd with gc_idle_ms: idle collection runs while the line fill is above this percent, as gc_thres_pcent counts it; 0 (default) takes gc_thres_pcent, else 1 to 99 |
+| `maint_idle` | `bool` | `off` | bbssd with gc_idle_ms: idle steps also run the queued read reclaim and scan closed lines for retention age, 16 line ids a step, in turns with idle collection; a reclaim that waits for free lines lets collection run first; off (default) leaves both to the write path |
 | `buffer_size` | `int32` | `0` | bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 programs every write directly |
 | `l2p_dram_ns` | `int32` | `0` | bbssd, CSD: controller DRAM time in ns of each logical-to-physical lookup, added to the mapping cost of every host page read and written, 0 or more; not with onfi_cache_read or FDP; 0 (default) charges none |
 | `dram_hit_ns` | `int32` | `0` | bbssd, CSD: controller DRAM time in ns of one page that the write buffer or the read cache answers, 0 or more; a read takes the most of its pages, and a buffered write pays it once; 0 (default) is pg_rd_lat / 16 (1 ns at least), or 1000 ns when pg_rd_lat is 0 |
@@ -494,7 +495,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables
