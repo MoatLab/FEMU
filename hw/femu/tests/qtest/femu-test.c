@@ -12257,6 +12257,73 @@ static void femu_test_queue_create_status(void *obj, void *data,
 #define FEMU_INVALID_QSIZE  0x102   /* command specific */
 
 /*
+ * An abrupt shutdown (CC.SHN 10b) that completes leaves nothing the host
+ * was told is written in the write buffer: after SHST reads 10b, a power
+ * cut keeps the new data. Before, only a normal shutdown flushed.
+ */
+static void femu_test_shutdown_abrupt(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0xab, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | (2 << 14));
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(c.pdev, c.bar, 0x1c)), ==,
+                    2);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/power',"
+                    "'property':'simulate-power-loss','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, c.pdev, c.alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0xab);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A system reset ends a completed shutdown, with or without ocp, and
+ * with CC.EN already 0: SHST reads 00b after it.
+ */
+static void femu_test_shutdown_sysreset(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=sr,addr=5,devsz_mb=16,"
+        "femu_mode=1");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, pdev, &qs->alloc);
+    qpci_io_writel(pdev, c.bar, 0x14, (FEMU_CC_ENABLE & ~1) |
+                   FEMU_CC_SHN_NORMAL);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(pdev, c.bar, 0x1c)), ==, 2);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(pdev, c.bar, 0x1c)), ==, 0);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/*
  * The controller configuration and status registers (Base 2.3, Figures 41-42
  * and 3.5): a write that disables and shuts down at once does both, a reset
  * clears the shutdown status, the I/O entry sizes may be left at 0 until an
@@ -12277,8 +12344,9 @@ static void femu_test_cc_states(void *obj, void *data, QGuestAllocator *alloc)
     csts = qpci_io_readl(dev, c.bar, 0x1c);
     g_assert_cmpint(csts & NVME_CSTS_READY, ==, 0);
     g_assert_cmpint(FEMU_CSTS_SHST(csts), ==, 2);
+    /* clearing SHN has no shutdown effect: SHST stays to the next enable */
     qpci_io_writel(dev, c.bar, 0x14, 0);
-    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(dev, c.bar, 0x1c)), ==, 0);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(dev, c.bar, 0x1c)), ==, 2);
     femu_queue_free(&c, &c.admin);
     qpci_iounmap(dev, c.bar);
 
@@ -12287,6 +12355,9 @@ static void femu_test_cc_states(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, dev, alloc);
     qpci_io_writel(dev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
     g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(dev, c.bar, 0x1c)), ==, 2);
+    /* the teardown keeps CC as the host wrote it */
+    g_assert_cmphex(qpci_io_readl(dev, c.bar, 0x14), ==,
+                    FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
     qpci_io_writel(dev, c.bar, 0x14, FEMU_CC_SHN_NORMAL);
     csts = qpci_io_readl(dev, c.bar, 0x1c);
     g_assert_cmpint(FEMU_CSTS_SHST(csts), ==, 0);
@@ -57235,6 +57306,15 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=4,fdm_size=1,mapping=dftl,x-cmt-slots=1"
     });
+    qos_add_test("shutdown-abrupt", "femu", femu_test_shutdown_abrupt,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on"
+    });
+    qos_add_test("shutdown-sysreset", "femu", femu_test_shutdown_sysreset,
+                 NULL);
     qos_add_test("power-fua-place-fail", "femu", femu_test_power_fua_place_fail,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

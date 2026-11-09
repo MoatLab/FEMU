@@ -2115,6 +2115,12 @@ typedef struct DMAOff {
     dma_addr_t len;
 } DMAOff;
 
+enum {
+    FEMU_SHUT_NONE,
+    FEMU_SHUT_DONE,
+    FEMU_SHUT_FAILED,   /* a flush failed: no shutdown until a reset */
+};
+
 typedef struct NvmeSQueue {
     struct FemuCtrl *ctrl;
     uint8_t     phys_contig;
@@ -3051,6 +3057,12 @@ typedef struct FemuCtrl {
     QEMUTimer       *ready_timer;
     bool            starting;
     bool            recovery_pending;
+    /*
+     * The shutdown the host asked for, apart from CC.SHN: the host may
+     * clear SHN, and SHST still reports the shutdown until a reset or the
+     * next enable.
+     */
+    uint8_t         shut;           /* FEMU_SHUT_* */
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */

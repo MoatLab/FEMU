@@ -864,6 +864,13 @@ static uint32_t femu_ready_delay_ms(FemuCtrl *n)
     return n->ready_ms;
 }
 
+/* no shutdown: a reset, a power cut or the next enable ends one */
+static void femu_shut_clear(FemuCtrl *n)
+{
+    n->shut = FEMU_SHUT_NONE;
+    n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
+}
+
 static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned size)
 {
     switch (offset) {
@@ -885,25 +892,34 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
          */
         uint32_t cc = n->bar.cc;
         bool reset = !NVME_CC_EN(data) && NVME_CC_EN(cc);
-        bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc);
+        /* one shutdown per notification, until a reset or the next enable */
+        bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc) &&
+                        n->shut == FEMU_SHUT_NONE;
+        uint16_t fail = 0;
 
-        if (n->power_loss && shutdown && NVME_CC_SHN(data) == 1) {
-            bool resume = nvme_pause_pollers(n);
-            uint16_t status = bbssd_flush_all(n);
-
-            if (status) {
-                nvme_resume_pollers(n, resume);
-                n->bar.csts |= NVME_CSTS_FAILED;
-                break;
-            }
+        /*
+         * A completed shutdown, normal or abrupt, leaves nothing the host
+         * acknowledged in the write buffer (NVM Command Set 2.1.4.2.2).
+         */
+        /*
+         * The pollers stay paused from the flush to the teardown below, so
+         * no write is acknowledged between them.
+         */
+        if (n->power_loss && shutdown) {
+            nvme_pause_pollers(n);
+            fail = bbssd_flush_all(n);
         }
 
         /* reserved bits, and CRIME, which CAP.CRMS does not offer */
         data &= 0x00fffff1;
 
         if (NVME_CC_EN(data) && !NVME_CC_EN(cc)) {
+            /* a new start ends a finished shutdown (Base 2.3, Figure 42) */
+            femu_shut_clear(n);
             n->bar.cc = data;
-            if (nvme_start_ctrl(n)) {
+            if (shutdown) {
+                /* shut down in the same write: the controller never starts */
+            } else if (nvme_start_ctrl(n)) {
                 n->bar.csts = NVME_CSTS_FAILED;
             } else if (femu_ready_delay_ms(n)) {
                 n->starting = true;
@@ -921,8 +937,8 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
              * completes below.
              */
             nvme_clear_ctrl(n, shutdown);
-            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED |
-                             (CSTS_SHST_MASK << CSTS_SHST_SHIFT));
+            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED);
+            femu_shut_clear(n);
             /*
              * The Timestamp is not kept across a Controller Level Reset,
              * except with ocp (OCP 2.7 NVMe-OPT-4).
@@ -937,20 +953,36 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
         } else if (!NVME_CC_EN(data)) {
             /* the other fields are the host's to set while disabled */
             n->bar.cc = data;
+        } else {
+            /* enabled: SHN is the field the host may still change */
+            n->bar.cc = (cc & ~(CC_SHN_MASK << CC_SHN_SHIFT)) |
+                        (data & (CC_SHN_MASK << CC_SHN_SHIFT));
         }
 
         if (shutdown) {
             if (!reset) {
+                /* the teardown zeroes CC; the host's value stays readable */
+                uint32_t keep = n->bar.cc;
+
                 nvme_clear_ctrl(n, true);
+                n->bar.cc = keep;
             }
             /* the queues are idle: KV programs its open pages of values */
-            kvssd_flush_all(n);
-            n->bar.cc = data;
-            n->bar.csts |= NVME_CSTS_SHST_COMPLETE;
-        } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(cc)) {
-            n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
-            n->bar.cc = data;
+            if (!fail) {
+                fail = kvssd_flush_all(n);
+            }
+            if (fail) {
+                /* no completion until a reset: SHST 00b, and CFS says why */
+                n->shut = FEMU_SHUT_FAILED;
+                n->bar.csts |= NVME_CSTS_FAILED;
+            } else {
+                n->shut = FEMU_SHUT_DONE;
+                n->bar.csts = (n->bar.csts &
+                               ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT)) |
+                              NVME_CSTS_SHST_COMPLETE;
+            }
         }
+        /* SHN back to 00b has no shutdown effect: SHST stays */
         break;
     }
     case 0x24:
@@ -5898,6 +5930,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
     bool lost = false;
+    bool clean;
 
     if (!n->power_loss || !DEVICE(obj)->realized) {
         error_setg(errp, "simulated power loss requires a realized "
@@ -5907,9 +5940,15 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     if (!value) {
         return;
     }
+    clean = n->shut == FEMU_SHUT_DONE;
     nvme_clear_ctrl(n, false);
-    /* the next start rebuilds state: it takes recovery_ms */
-    n->recovery_pending = true;
+    /*
+     * After a completed shutdown the cut is expected: no recovery, and no
+     * unsafe shutdown. Otherwise the next start rebuilds state.
+     */
+    if (!clean) {
+        n->recovery_pending = true;
+    }
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
             lost |= bbssd_power_loss(&n->namespaces[i]);
@@ -5920,8 +5959,9 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         n->ocp_incomplete_shutdowns++;
     }
     n->bar.csts = 0;
-    if (n->unsafe_shutdowns[0] != UINT64_MAX ||
-        n->unsafe_shutdowns[1] != UINT64_MAX) {
+    n->shut = FEMU_SHUT_NONE;
+    if (!clean && (n->unsafe_shutdowns[0] != UINT64_MAX ||
+                   n->unsafe_shutdowns[1] != UINT64_MAX)) {
         if (++n->unsafe_shutdowns[0] == 0) {
             n->unsafe_shutdowns[1]++;
         }
@@ -6198,6 +6238,8 @@ static void femu_pci_reset(DeviceState *dev)
 
     /* the host's memory is its own again after any reset */
     femu_hmb_off(n);
+    /* a device reset ends a shutdown, whatever EN and ocp are */
+    femu_shut_clear(n);
     if (!n->ocp) {
         /*
          * The controller keeps its state, but a start under way ends: its

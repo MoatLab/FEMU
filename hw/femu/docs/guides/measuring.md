@@ -334,9 +334,11 @@ unsafe power cut, while it rebuilds its state. `ready_ms` and
 - The time is guest time (the QEMU virtual clock). It stops while the VM
   is stopped. An `events_file` power cut runs on host time, so it can
   end a start while the VM is stopped.
-- Every power cut (`simulate-power-loss` or an `events_file`
-  `power-loss`) makes the next successful start a recovery. A start that
-  a reset or another cut ends does not count.
+- A power cut (`simulate-power-loss` or an `events_file`
+  `power-loss`) makes the next successful start a recovery, unless the
+  shutdown had completed (SHST 10b). A completed shutdown does not end a
+  recovery an earlier cut asked for. A start that a reset or another cut
+  ends does not count.
 - `recovery_ms` 0 uses `ready_ms`. Both are nominal times below
   7500 ms, the CAP.TO and CRTO the host reads. Start-up work and timer
   latency add to them, so a value near 7500 ms can exceed the host limit.

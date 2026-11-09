@@ -127,9 +127,24 @@ A shutdown with CC.EN still 1 runs `nvme_clear_ctrl()` but leaves RDY set
 and resets neither the Timestamp nor the Persistent Event Log context.
 
 Pollers are created once and survive a reset; a reset only clears
-`dataplane_started` until the next enable. With `power_loss=on`, a normal
-shutdown (CC.SHN = 01b) first flushes the BBSSD write buffer, and a failed
-flush sets CSTS.CFS.
+`dataplane_started` until the next enable. With `power_loss=on`, a
+shutdown of any kind (CC.SHN 01b, 10b or 11b) first flushes the BBSSD
+write buffer: a completed shutdown leaves nothing the host was told is
+written in the buffer. A failed BBSSD or KV flush sets CSTS.CFS and
+leaves SHST at 00b.
+
+The shutdown has its own state, apart from CC.SHN:
+
+```text
+ CC.SHN 00b -> nonzero, no shutdown yet --> flush, clear, SHST = 10b
+ CC.SHN changes again                    --> CC readback only
+ CC.SHN -> 00b                           --> SHST stays 10b
+ next CC.EN 0 -> 1, a controller reset, a power cut, a PCI or
+   system reset                          --> SHST = 00b
+ a power cut after SHST 10b: no unsafe shutdown, no new recovery
+ a failed flush: CFS, SHST 00b, and no shutdown until a reset
+ CC.EN 0 -> 1 with a new SHN in the same write: no start, a shutdown
+```
 
 ## Queues
 
