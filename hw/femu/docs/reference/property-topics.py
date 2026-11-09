@@ -43,7 +43,7 @@ DEVICES = [
                     "namespace_modes", "namespace_phls", "op_pcent", "subsys",
                     "cxl_ssd",
                     "pel_file", "persist_file", "persist_ftl", "io_trace",
-                    "events_file",
+                    "events_file", "die_slow",
                     "serial",
                 ],
             },
@@ -226,6 +226,13 @@ DEVICES = [
                 "kind": "runtime",
                 "props": [
                     "ana-state",
+                ],
+            },
+            {
+                "title": "Slow die",
+                "kind": "runtime",
+                "props": [
+                    "die-slow",
                 ],
             },
         ],

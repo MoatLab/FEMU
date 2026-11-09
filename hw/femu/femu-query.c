@@ -137,6 +137,8 @@ typedef struct FemuQuerySel {
     NandMediaPhases media;
     const char *profile_name;   /* the controller's NAND profile, or NULL */
     const char *profile_file;
+    /* die_slow: the slow LUNs, copied while the controller is held */
+    FemuSlowLunList *slow_luns;
     bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
     FemuKvLsmSnap lsm;
     bool has_pack;              /* a kvssd namespace with kv_pack=on */
@@ -173,6 +175,29 @@ static const NandMedia *femu_query_media(FemuCtrl *n, NvmeNamespace *ns,
     return NULL;
 }
 
+/* The LUNs whose die_slow factor is not 100, in channel then LUN order. */
+static void femu_query_slow_luns(const NandMedia *media, FemuQuerySel *sel)
+{
+    FemuSlowLunList **tail = &sel->slow_luns;
+
+    for (uint32_t ch = 0; media->lun_pct && ch < media->cfg.nchs; ch++) {
+        for (uint32_t lun = 0; lun < media->cfg.luns_per_ch; lun++) {
+            uint32_t pct = qatomic_read(&media->lun_pct[ch *
+                                        media->cfg.luns_per_ch + lun]);
+            FemuSlowLun *sl;
+
+            if (pct == 100) {
+                continue;
+            }
+            sl = g_new0(FemuSlowLun, 1);
+            sl->channel = ch;
+            sl->lun = lun;
+            sl->percent = pct;
+            QAPI_LIST_APPEND(tail, sl);
+        }
+    }
+}
+
 /* Check one namespace and size the buffers of its copy. */
 static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
                                FemuQueryKind kind, uint32_t offset,
@@ -188,6 +213,7 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
         nand_media_phases(media, &sel->media);
         sel->profile_name = n->nand_profile_name;
         sel->profile_file = n->nand_profile;
+        femu_query_slow_luns(media, sel);
     }
 
     if (media && (NS_CSD(ns) || NS_KVSSD(ns) || NS_OCSSD(ns))) {
@@ -511,7 +537,7 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     return fdp;
 }
 
-static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
+static FemuMediaTiming *femu_query_media_info(FemuQuerySel *sel)
 {
     FemuMediaTiming *mt = g_new0(FemuMediaTiming, 1);
     const NandMediaPhases *ph = &sel->media;
@@ -527,6 +553,9 @@ static FemuMediaTiming *femu_query_media_info(const FemuQuerySel *sel)
         mt->nand_profile = g_strdup(sel->profile_name);
         mt->nand_profile_file = g_strdup(sel->profile_file);
     }
+    /* the reply takes the list; this QAPI keeps has_ for optional lists */
+    mt->slow_luns = g_steal_pointer(&sel->slow_luns);
+    mt->has_slow_luns = mt->slow_luns != NULL;
     mt->onfi_profile = sel->onfi_mode >= 0;
     mt->has_onfi_mode = mt->onfi_profile;
     mt->onfi_mode = mt->onfi_profile ? sel->onfi_mode : 0;
@@ -619,7 +648,7 @@ static FemuKvPackInfo *femu_query_pack_info(const FemuKvPackSnap *p)
     return info;
 }
 
-static FemuNamespaceInfo *femu_query_media_ns_info(const FemuQuerySel *sel)
+static FemuNamespaceInfo *femu_query_media_ns_info(FemuQuerySel *sel)
 {
     FemuNamespaceInfo *ns_info = g_new0(FemuNamespaceInfo, 1);
     FemuMediaTiming *mt = femu_query_media_info(sel);
@@ -981,6 +1010,9 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
     }
 
 out:
+    for (i = 0; sel && i < cap; i++) {
+        qapi_free_FemuSlowLunList(sel[i].slow_luns);
+    }
     g_free(sel);
     femu_query_zoned_free(zoned, cap);
     femu_query_free(req);

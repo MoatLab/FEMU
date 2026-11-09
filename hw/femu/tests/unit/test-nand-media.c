@@ -1258,6 +1258,80 @@ static void test_media_hold(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * die_slow: a LUN at 500% takes 5x the array time, booked one op after
+ * another on that LUN; another LUN keeps its time. A table of all 100
+ * gives the same times as none, and a factor change keeps booked work.
+ */
+static void test_die_slow(void)
+{
+    static uint32_t pct[8 * 8];
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a = { 0 };
+    NandLoc b = { .ch = 1 };
+
+    printf("# die_slow: per-LUN array time\n");
+    for (int i = 0; i < 8 * 8; i++) {
+        pct[i] = 100;
+    }
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.lun_pct = pct;
+    check("all 100: a read is nominal",
+          nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns, 10000);
+    nand_media_destroy(&m);
+
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.lun_pct = pct;
+    pct[0] = 500;
+    check("500%: the first read takes 5x",
+          nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns, 50000);
+    check("500%: the next read on the LUN waits for it",
+          nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns, 100000);
+    check("another LUN keeps its time",
+          nand_media_op(&m, &b, NAND_MEDIA_READ, 0).done_ns, 10000);
+    check("500%: a program takes 5x",
+          nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, 100000).done_ns,
+          100000 + 200000);
+    pct[0] = 100;
+    check("back to 100: a new op is nominal again, after the booked work",
+          nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns, 300000 + 10000);
+    nand_media_destroy(&m);
+
+    /*
+     * 2 channels x 4 LUNs: the index is ch * luns_per_ch + lun. Slow
+     * (ch 1, lun 2), index 6; its neighbours on the same channel and
+     * the same LUN on channel 0 keep their time.
+     */
+    for (int i = 0; i < 8 * 8; i++) {
+        pct[i] = 100;
+    }
+    bb_config(&cfg);
+    cfg.nchs = 2;
+    cfg.luns_per_ch = 4;
+    nand_media_init(&m, &cfg);
+    m.lun_pct = pct;
+    pct[1 * 4 + 2] = 300;
+    {
+        NandLoc s = { .ch = 1, .lun = 2 };
+        NandLoc l1 = { .ch = 1, .lun = 1 };
+        NandLoc l3 = { .ch = 1, .lun = 3 };
+        NandLoc c0 = { .ch = 0, .lun = 2 };
+
+        check("2x4: the slow LUN takes 3x",
+              nand_media_op(&m, &s, NAND_MEDIA_READ, 0).done_ns, 30000);
+        check("2x4: the LUN below on its channel is nominal",
+              nand_media_op(&m, &l1, NAND_MEDIA_READ, 0).done_ns, 10000);
+        check("2x4: the LUN above on its channel is nominal",
+              nand_media_op(&m, &l3, NAND_MEDIA_READ, 0).done_ns, 10000);
+        check("2x4: the same LUN on channel 0 is nominal",
+              nand_media_op(&m, &c0, NAND_MEDIA_READ, 0).done_ns, 10000);
+    }
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -1281,6 +1355,7 @@ int main(void)
     test_partial_xfer();
     test_unbounded_windows();
     test_plane_reads();
+    test_die_slow();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

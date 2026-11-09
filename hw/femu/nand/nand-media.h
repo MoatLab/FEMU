@@ -327,6 +327,12 @@ typedef struct NandMedia {
      * NULL means 100. The controller publishes it (femu-thermal.c).
      */
     const uint32_t *throttle_pct;
+    /*
+     * die_slow: array time in percent of nominal for each LUN, indexed
+     * ch * luns_per_ch + lun and read atomically; NULL means 100 for all.
+     * The controller owns the table and keeps it for the media's life.
+     */
+    const uint32_t *lun_pct;
 } NandMedia;
 
 uint64_t nand_media_last_end(const NandMedia *m);

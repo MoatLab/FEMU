@@ -548,6 +548,22 @@
 { 'enum': 'FemuArrayTiming', 'data': [ 'flat', 'table', 'page-type' ] }
 
 ##
+# @FemuSlowLun:
+#
+# A LUN whose array time die-slow scales.
+#
+# @channel: channel of the LUN
+#
+# @lun: LUN within the channel
+#
+# @percent: array time in percent of nominal, 101 to 10000
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuSlowLun',
+  'data': { 'channel': 'uint32', 'lun': 'uint32', 'percent': 'uint32' } }
+
+##
 # @FemuMediaTiming:
 #
 # The NAND bus timing a namespace charges.  The values are the ones
@@ -661,6 +677,9 @@
 # @nand-profile-file: the profile file as given.  Absent without a
 #     profile.
 #
+# @slow-luns: the LUNs that die-slow made slow, with their factors.
+#     Absent when no LUN is slow, and without die_slow.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuMediaTiming',
@@ -684,7 +703,8 @@
             'page-register-hold': 'bool', 'status-per-plane': 'bool',
             'array-timing': 'FemuArrayTiming', 'read-ns': 'uint64',
             'program-ns': 'uint64', 'erase-ns': 'uint64',
-            '*nand-profile': 'str', '*nand-profile-file': 'str' } }
+            '*nand-profile': 'str', '*nand-profile-file': 'str',
+            '*slow-luns': ['FemuSlowLun'] } }
 
 ##
 # @FemuMediaInfo:

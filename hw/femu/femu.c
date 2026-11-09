@@ -1271,6 +1271,27 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "and no metadata, namespace management or subsystem");
         return false;
     }
+    /*
+     * Each namespace has its own FTL and dies, and "<ch>:<lun>" names no
+     * namespace, so the table serves one namespace only.
+     */
+    if (n->die_slow && ((n->femu_mode != FEMU_BBSSD_MODE &&
+                         n->femu_mode != FEMU_CSD_MODE) ||
+                        n->num_namespaces != 1 || n->ns_mgmt ||
+                        n->namespace_modes || n->subsys || n->cxl_dev)) {
+        error_setg(errp, "die_slow requires bbssd or CSD with one namespace, "
+                   "and no ns_mgmt, namespace_modes, subsystem or cxl_ssd");
+        return false;
+    }
+    /* the table is sized before the FTL checks its geometry */
+    if (n->die_slow &&
+        (n->bb_params.nchs <= 0 || n->bb_params.nchs > (1 << CH_BITS) ||
+         n->bb_params.luns_per_ch <= 0 ||
+         n->bb_params.luns_per_ch > (1 << LUN_BITS))) {
+        error_setg(errp, "die_slow: nchs must be 1 to %d and luns_per_ch "
+                   "1 to %d", 1 << CH_BITS, 1 << LUN_BITS);
+        return false;
+    }
     if (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) {
         error_setg(errp, "vwc, intc, cqr and extended are single bits");
         return false;
@@ -3182,6 +3203,7 @@ static void femu_realize_undo(FemuCtrl *n)
     femu_persist_abort(n);
     femu_iotrace_abort(n);
     femu_events_exit(n);
+    g_clear_pointer(&n->die_slow_pct, g_free);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;
@@ -4341,6 +4363,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         femu_realize_undo(n);
         return;
     }
+    /* before any FTL builds its media, which keeps a pointer to it */
+    if (n->die_slow) {
+        size_t nr = (size_t)n->bb_params.nchs * n->bb_params.luns_per_ch;
+
+        n->die_slow_pct = g_new(uint32_t, nr);
+        for (size_t i = 0; i < nr; i++) {
+            n->die_slow_pct[i] = 100;
+        }
+    }
     if (n->shared_storage) {
         n->namespace_limit = NVME_MAX_NUM_NAMESPACES;
         n->namespace_pool_size = n->subsys->storage->namespace_pool_size;
@@ -4680,6 +4711,8 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_iotrace_exit(n);
     femu_persist_exit(n);
     femu_pel_exit(n);
+    /* no media op runs now; the FTLs that read the table are stopped */
+    g_clear_pointer(&n->die_slow_pct, g_free);
     femu_fw_exit(n);
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
@@ -4840,6 +4873,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("mode", FemuCtrl, mode_name),
     DEFINE_PROP_STRING("io_trace", FemuCtrl, io_trace),
     DEFINE_PROP_STRING("events_file", FemuCtrl, events_file),
+    DEFINE_PROP_BOOL("die_slow", FemuCtrl, die_slow, false),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,
@@ -5611,6 +5645,65 @@ static char *femu_test_pause_stats(Object *obj, Error **errp)
                            st.expired, st.users);
 }
 
+/* die-slow: "<ch>:<lun>:<pct>" sets the array time of one LUN */
+static void femu_die_slow_set(Object *obj, const char *value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    const char *p = value;
+    uint64_t v[3];
+    char *e;
+
+    if (!n->die_slow_pct) {
+        error_setg(errp, "die-slow needs a realized controller with "
+                   "die_slow=on");
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!g_ascii_isdigit(*p)) {
+            goto bad;
+        }
+        errno = 0;
+        v[i] = g_ascii_strtoull(p, &e, 10);
+        if (errno || *e != (i < 2 ? ':' : '\0')) {
+            goto bad;
+        }
+        p = e + 1;
+    }
+    if (v[0] >= (uint64_t)n->bb_params.nchs ||
+        v[1] >= (uint64_t)n->bb_params.luns_per_ch ||
+        v[2] < 100 || v[2] > 10000) {
+        goto bad;
+    }
+    /* the FTL thread reads it on each op it books; ops booked keep theirs */
+    qatomic_set(&n->die_slow_pct[v[0] * n->bb_params.luns_per_ch + v[1]],
+                (uint32_t)v[2]);
+    return;
+bad:
+    error_setg(errp, "die-slow takes \"<ch>:<lun>:<pct>\": a channel below "
+               "%d, a LUN below %d and a percent 100 to 10000",
+               n->bb_params.nchs, n->bb_params.luns_per_ch);
+}
+
+/* the LUNs that are not at 100, as "<ch>:<lun>:<pct>" separated by spaces */
+static char *femu_die_slow_get(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    GString *out = g_string_new("");
+
+    for (int ch = 0; n->die_slow_pct && ch < n->bb_params.nchs; ch++) {
+        for (int lun = 0; lun < n->bb_params.luns_per_ch; lun++) {
+            uint32_t pct = qatomic_read(&n->die_slow_pct[ch *
+                                        n->bb_params.luns_per_ch + lun]);
+
+            if (pct != 100) {
+                g_string_append_printf(out, "%s%d:%d:%u", out->len ? " " : "",
+                                       ch, lun, pct);
+            }
+        }
+    }
+    return g_string_free(out, false);
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -5847,6 +5940,8 @@ static void femu_instance_init(Object *obj)
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
+    object_property_add_str(obj, "die-slow", femu_die_slow_get,
+                            femu_die_slow_set);
     nvme_ana_add_props(obj);
     femu_ctrl_describe_runtime(obj);
     if (qtest_enabled()) {

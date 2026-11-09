@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 279 properties of its own and 2 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 280 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -42,7 +42,8 @@ Devices:
 | `persist_file` | `str` | unset | bbssd, NoSSD: host file that keeps the data and the deallocated and uncorrectable blocks across runs; realize loads it, unplug or the end of QEMU saves it. A file of another mode, size, namespace layout or LBA format fails realize, and FILE.lock keeps a second user out. Format NVM keeps the LBA format. The FTL state is kept only with persist_ftl. Not with namespace_modes, ns_mgmt, shared namespaces, cxl_ssd, metadata or sanitize_ms |
 | `persist_ftl` | `bool` | `off` | bbssd with mapping=page: persist_file keeps the FTL state too (mapping, page and block state, lines, write pointer, counters), so a restarted drive continues as it was; a file of other geometry, mapping, GC or NAND timing properties fails realize. Not with FDP or the FTL features whose state it does not keep (realize names the property); off (default) |
 | `io_trace` | `str` | unset | host file for an I/O trace: one CSV line per completed I/O command (t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), in every mode; the file must not exist; unset (default) is off |
-| `events_file` | `str` | unset | host file of timed actions, read at realize: lines '<ms> <action>' or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> (state 1 to 3, needs ana=on) or power-loss (needs power_loss=on); times count from the first enable and survive resets; see query-femu-events; not with csd_pause; unset (default) is off |
+| `events_file` | `str` | unset | host file of timed actions, read at realize: lines '<ms> <action>' or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> (state 1 to 3, needs ana=on), power-loss (needs power_loss=on) or slow=<ch>:<lun>:<pct> (needs die_slow=on); times count from the first enable and survive resets; see query-femu-events; not with csd_pause; unset (default) is off |
+| `die_slow` | `bool` | `off` | bbssd, CSD: on makes the array time of each LUN settable at run time with the die-slow property or a slow= action of events_file, for a die that turns slow; one namespace only, not with ns_mgmt, namespace_modes, subsys or cxl_ssd; query-femu lists slow LUNs; off (default) adds nothing to the media path |
 | `serial` | `str` | unset | No effect, kept for compatibility; Identify Controller reports a serial number FEMU generates. Setting it warns at realize |
 
 ### Queues, pollers and interrupts

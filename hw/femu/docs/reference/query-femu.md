@@ -226,6 +226,7 @@ fallbacks. Times are in ns.
 | `staged-bus` | true when the channel bus phases are charged |
 | `array-timing`, `read-ns`, `program-ns`, `erase-ns` | `flat` (one time each) or `table` (per NAND type and page type), and the base array times the media uses, before ECC and other additions; with `table`, page 0 of the media's table row. A ZNS program covers the pages of a wordline |
 | `nand-profile`, `nand-profile-file` | the name in the `nand_profile` file and the file as given; absent without a profile |
+| `slow-luns` | each LUN that `die-slow` made slow: `channel`, `lun`, `percent`; absent when no LUN is slow |
 | `onfi-profile`, `onfi-mode` | true when `onfi_mode` 0 to 26 or `onfi_param_page` sets the bus phases; `onfi-mode` is present only then, and with a parameter page and `onfi_mode=-1` it is the highest mode the page lists |
 | `column-cycles`, `row-cycles` | the address cycles of each command with the profile: 2 and 3, or the page's byte 101; 0 without the profile |
 | `page-transfer-ns` | one page on the bus |

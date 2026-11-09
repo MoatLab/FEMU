@@ -42,6 +42,7 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     m->ca_res = NULL;
     m->susp = NULL;
     m->throttle_pct = NULL;
+    m->lun_pct = NULL;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs &&
         cfg->policy.ca_separate) {
         /* a burst must find its gaps on both buses; nothing falls back */
@@ -369,15 +370,27 @@ static uint64_t ecc_extra_ns(NandMedia *m, const NandLoc *loc)
 }
 
 /*
- * The thermal throttle stretches the array time (tR, tPROG, tBERS) only:
- * ECC, bus phases and queue wait keep their length. 100 is nominal.
+ * The thermal throttle and a slow die (die_slow) stretch the array time
+ * (tR, tPROG, tBERS) only: ECC, bus phases and queue wait keep their
+ * length. 100 is nominal. The die factor applies after the thermal one,
+ * when the op is booked: work booked before a change keeps its length.
  */
-static uint64_t throttled(const NandMedia *m, uint64_t ns)
+static uint64_t throttled(const NandMedia *m, const NandLoc *loc, uint64_t ns)
 {
     uint32_t pct = m->throttle_pct ?
                    __atomic_load_n(m->throttle_pct, __ATOMIC_RELAXED) : 100;
 
-    return pct == 100 ? ns : ns * pct / 100;
+    if (pct != 100) {
+        ns = ns * pct / 100;
+    }
+    if (m->lun_pct) {
+        pct = __atomic_load_n(&m->lun_pct[loc->ch * m->cfg.luns_per_ch +
+                                          loc->lun], __ATOMIC_RELAXED);
+        if (pct != 100) {
+            ns = ns * pct / 100;
+        }
+    }
+    return ns;
 }
 
 /* per-op array latency, honoring flat vs table + bbssd page-type multiplier */
@@ -387,13 +400,13 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     uint64_t lat;
 
     if (op == NAND_MEDIA_ERASE) {
-        return throttled(m, m->cfg.policy.use_flat_timing ? t->er_ns :
+        return throttled(m, loc, m->cfg.policy.use_flat_timing ? t->er_ns :
                             t->er_table_ns[loc->flash_type]);
     }
     if (op == NAND_MEDIA_READ) {
         lat = m->cfg.policy.use_flat_timing ?
               t->rd_ns : t->rd_table_ns[loc->flash_type][loc->page_type];
-        return throttled(m, lat) + ecc_extra_ns(m, loc);
+        return throttled(m, loc, lat) + ecc_extra_ns(m, loc);
     }
     /* program */
     lat = m->cfg.policy.use_flat_timing ?
@@ -401,7 +414,7 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     if (m->cfg.policy.use_flat_timing && t->pgtype_lat) {
         lat = lat * t->pgtype_mult[loc->page_type] / 1000;
     }
-    return throttled(m, lat);
+    return throttled(m, loc, lat);
 }
 
 /* the timeline of plane @p of the LUN at @loc */
@@ -1085,7 +1098,8 @@ static NandOpCompletion sca_multiplane(NandMedia *m, const NandLoc *locs,
     if (op == NAND_MEDIA_READ) {
         uint64_t worst = 0;
 
-        alat = throttled(m, m->cfg.policy.use_flat_timing ? tm->rd_ns :
+        alat = throttled(m, &locs[0],
+                         m->cfg.policy.use_flat_timing ? tm->rd_ns :
                          tm->rd_table_ns[locs[0].flash_type][locs[0].page_type]);
         for (i = 0; i < nlocs; i++) {
             worst = mx(worst, ecc_extra_ns(m, &locs[i]));
@@ -1208,7 +1222,7 @@ static NandOpCompletion onfi_op(NandMedia *m, const NandLoc *loc,
 uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
                          uint32_t npg, uint64_t stime, uint64_t ns)
 {
-    uint64_t alat = throttled(m, ns);
+    uint64_t alat = throttled(m, loc, ns);
     uint64_t s, done;
 
     /* the same single-word rule as nand_media_op()'s lock-free path */
@@ -1460,7 +1474,8 @@ static NandOpCompletion onfi_multiplane(NandMedia *m, const NandLoc *locs,
     if (op == NAND_MEDIA_READ) {
         uint64_t worst = 0;
 
-        alat = throttled(m, m->cfg.policy.use_flat_timing ? tm->rd_ns :
+        alat = throttled(m, &locs[0],
+                         m->cfg.policy.use_flat_timing ? tm->rd_ns :
                          tm->rd_table_ns[locs[0].flash_type][locs[0].page_type]);
         for (i = 0; i < nlocs; i++) {
             worst = mx(worst, ecc_extra_ns(m, &locs[i]));
@@ -1544,7 +1559,7 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     }
     uint64_t alat;
     if (op == NAND_MEDIA_READ) {
-        alat = throttled(m, m->cfg.policy.use_flat_timing ?
+        alat = throttled(m, &locs[0], m->cfg.policy.use_flat_timing ?
                m->cfg.timing.rd_ns :
                m->cfg.timing.rd_table_ns[locs[0].flash_type][locs[0].page_type]);
         /* the plane needing the most correction paces the whole operation */

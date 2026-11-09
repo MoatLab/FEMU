@@ -31,6 +31,12 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | --- | --- | --- |
 | `ana-state` | `string` | with ana=on: "g:s" sets the ANA state of group g (the namespace ID) through this controller: 1 Optimized, 2 Non-Optimized, 3 Inaccessible, 4 Persistent Loss; reading lists every group |
 
+### Slow die
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `die-slow` | `string` | with die_slow=on: "<ch>:<lun>:<pct>" sets the array time of one LUN to pct percent of nominal (100 to 10000), for ops booked from then on; reading lists the LUNs not at 100 |
+
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
 ### Cache tunables (also accepted on -device)

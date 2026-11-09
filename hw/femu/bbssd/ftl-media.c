@@ -337,6 +337,10 @@ void bb_nand_media_init(struct ssd *ssd)
     if (ssd->n && (ssd->n->throttle || ssd->n->power_states)) {
         ssd->media.throttle_pct = &ssd->n->throttle_pct_now;
     }
+    /* die_slow: the controller's per-LUN factors, for as long as it lives */
+    if (ssd->n && ssd->n->die_slow_pct) {
+        ssd->media.lun_pct = ssd->n->die_slow_pct;
+    }
 }
 
 /*

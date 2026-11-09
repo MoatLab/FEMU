@@ -11,6 +11,7 @@
  * draws its time once, from splitmix64 seeded with <seed>. Actions:
  *   ana=<group>:<state>   ANA state 1, 2 or 3, as the ana-state property
  *   power-loss            a power cut, as simulate-power-loss=true
+ *   slow=<ch>:<lun>:<pct> the array time of a LUN, as the die-slow property
  * The timeline is host time: events run while the VM is stopped too.
  */
 #include "qemu/osdep.h"
@@ -32,6 +33,7 @@
 enum {
     FEMU_EVENT_ANA = 0,
     FEMU_EVENT_POWER_LOSS,
+    FEMU_EVENT_SLOW,
 };
 
 typedef struct FemuEvent {
@@ -39,6 +41,9 @@ typedef struct FemuEvent {
     int kind;
     unsigned int grp;
     unsigned int state;
+    unsigned int ch;            /* slow= */
+    unsigned int lun;
+    unsigned int pct;
     int64_t deadline_ns;        /* after the epoch */
     int64_t ran_ns;             /* after the epoch; -1 until it runs */
     FemuEventResult result;
@@ -121,6 +126,36 @@ static bool femu_events_action(FemuCtrl *n, const char *a, FemuEvent *ev,
             return false;
         }
         ev->kind = FEMU_EVENT_ANA;
+        return true;
+    }
+    if (g_str_has_prefix(a, "slow=")) {
+        const char *p = a + 5;
+        uint64_t v[3];
+
+        for (int i = 0; i < 3; i++) {
+            if (!femu_events_num(p, &p, UINT32_MAX, &v[i]) ||
+                *p != (i < 2 ? ':' : '\0')) {
+                error_setg(errp, "slow takes <ch>:<lun>:<pct>");
+                return false;
+            }
+            p++;
+        }
+        if (!n->die_slow_pct) {
+            error_setg(errp, "action slow needs die_slow=on");
+            return false;
+        }
+        if (v[0] >= (uint64_t)n->bb_params.nchs ||
+            v[1] >= (uint64_t)n->bb_params.luns_per_ch ||
+            v[2] < 100 || v[2] > 10000) {
+            error_setg(errp, "slow needs a channel below %d, a LUN below %d "
+                       "and a percent 100 to 10000", n->bb_params.nchs,
+                       n->bb_params.luns_per_ch);
+            return false;
+        }
+        ev->ch = v[0];
+        ev->lun = v[1];
+        ev->pct = v[2];
+        ev->kind = FEMU_EVENT_SLOW;
         return true;
     }
     error_setg(errp, "unknown action '%s'", a);
@@ -276,12 +311,25 @@ static void femu_events_one(FemuCtrl *n, FemuEvent *ev, int64_t now)
     Object *obj = OBJECT(n);
     Error *err = NULL;
 
-    if (ev->kind == FEMU_EVENT_ANA) {
+    switch (ev->kind) {
+    case FEMU_EVENT_ANA: {
         g_autofree char *v = g_strdup_printf("%u:%u", ev->grp, ev->state);
 
         object_property_set_str(obj, "ana-state", v, &err);
-    } else {
+        break;
+    }
+    case FEMU_EVENT_SLOW: {
+        g_autofree char *v = g_strdup_printf("%u:%u:%u", ev->ch, ev->lun,
+                                             ev->pct);
+
+        object_property_set_str(obj, "die-slow", v, &err);
+        break;
+    }
+    case FEMU_EVENT_POWER_LOSS:
         object_property_set_bool(obj, "simulate-power-loss", true, &err);
+        break;
+    default:
+        g_assert_not_reached();
     }
     ev->ran_ns = now;
     if (err) {

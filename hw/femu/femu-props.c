@@ -129,9 +129,16 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "events_file",
       "host file of timed actions, read at realize: lines '<ms> <action>' "
       "or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> "
-      "(state 1 to 3, needs ana=on) or power-loss (needs power_loss=on); "
+      "(state 1 to 3, needs ana=on), power-loss (needs power_loss=on) or "
+      "slow=<ch>:<lun>:<pct> (needs die_slow=on); "
       "times count from the first enable and survive resets; see "
       "query-femu-events; not with csd_pause; unset (default) is off" },
+    { "die_slow",
+      "bbssd, CSD: on makes the array time of each LUN settable at run "
+      "time with the die-slow property or a slow= action of events_file, "
+      "for a die that turns slow; one namespace only, not with ns_mgmt, "
+      "namespace_modes, subsys or cxl_ssd; query-femu lists slow LUNs; "
+      "off (default) adds nothing to the media path" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
       "(mapping, page and block state, lines, write pointer, counters), "
@@ -1145,6 +1152,10 @@ static const FemuPropDesc femu_ctrl_runtime_descs[] = {
       "Write-only: setting true on a realized controller with power_loss=on "
       "drops the write buffer and resets the controller as a power cut "
       "would" },
+    { "die-slow",
+      "with die_slow=on: \"<ch>:<lun>:<pct>\" sets the array time of one "
+      "LUN to pct percent of nominal (100 to 10000), for ops booked from "
+      "then on; reading lists the LUNs not at 100" },
     { NULL, NULL }
 };
 

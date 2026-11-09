@@ -2768,6 +2768,12 @@ typedef struct FemuCtrl {
     uint8_t     meta;
     bool        pi;
     bool        power_loss;
+    /*
+     * die_slow: a table of array time in percent of nominal for each LUN,
+     * nchs x luns_per_ch, read atomically by the media; NULL when off.
+     */
+    bool        die_slow;
+    uint32_t    *die_slow_pct;
     uint64_t    unsafe_shutdowns[2];
     uint8_t     vwc;
     uint8_t     mc;

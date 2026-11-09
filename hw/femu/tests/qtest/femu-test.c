@@ -29936,6 +29936,216 @@ static void femu_test_events_timer(void *obj, void *data,
     rmdir(dir);
 }
 
+/* qom-set die-slow of device @id; returns the error text or NULL */
+static char *femu_die_slow_set(QTestState *qts, const char *id,
+                               const char *v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'die-slow','value':%s}}",
+                           path, v);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                     "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+static char *femu_die_slow_get(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'die-slow'}}", path);
+    char *v = g_strdup(qdict_get_str(rsp, "return"));
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/* the one slow LUN query-femu of device @id reports, as "<ch>:<lun>:<pct>" */
+static char *femu_query_slow_luns(QTestState *qts, const char *id)
+{
+    g_autofree char *arg = g_strdup_printf("'path':'/machine/peripheral/%s'",
+                                           id);
+    QDict *rsp;
+    QDict *md = qdict_get_qdict(femu_query_ns(qts, arg, &rsp), "media");
+    QList *sl = qdict_haskey(md, "slow-luns") ?
+                qdict_get_qlist(md, "slow-luns") : NULL;
+    char *v;
+
+    if (!sl) {
+        v = g_strdup("");
+    } else {
+        QDict *e;
+
+        g_assert_cmpuint(qlist_size(sl), ==, 1);
+        e = qobject_to(QDict, qlist_peek(sl));
+        v = g_strdup_printf("%" PRId64 ":%" PRId64 ":%" PRId64,
+                            qdict_get_int(e, "channel"),
+                            qdict_get_int(e, "lun"),
+                            qdict_get_int(e, "percent"));
+    }
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * die_slow=on, 20 ms page reads. Page 0 is on LUN 0 of channel 0, page
+ * 1 on channel 1 and page 8 on LUN 1 of channel 0. At 500% LUN 0:0 reads
+ * take about 100 ms; channel 1 keeps 20 ms. Back at 100 both are nominal.
+ * Bad values are refused and change nothing. LUN 0:1 at 500% slows page
+ * 8 and leaves page 0 nominal.
+ */
+static void femu_test_die_slow(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const char *const bad[] = {
+        "0:0:99", "0:0:10001", "8:0:500", "0:8:500", "0:0", "0:0:500x",
+        "x:0:500", "0:0:99999999999999999999",
+    };
+    g_autofree char *v = NULL;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x78, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* pages 2 to 8: the write pointer crosses 8 channels, then LUN 1 */
+    for (uint64_t pg = 2; pg <= 8; pg++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, pg * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 nominal %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:0:500"));
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 at 500%% %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 80000);
+    us = femu_timed_read(&c, 1, buf);
+    g_test_message("die_slow: channel 1 %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *err = femu_die_slow_set(qts, "ds", bad[i]);
+
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "die-slow takes"));
+    }
+    g_free(v);
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:0:100"));
+    g_free(v);
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    us = femu_timed_read(&c, 0, buf);
+    g_assert_cmpint(us, <, 60000);
+
+    /* LUN 1 of channel 0 is another die: LUN 0:0 keeps its time */
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:1:500"));
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:1:500");
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 with 0:1 slow %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+    us = femu_timed_read(&c, 8, buf);
+    g_test_message("die_slow: LUN 0:1 at 500%% %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 80000);
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:1:100"));
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* without die_slow=on the property is refused */
+static void femu_test_die_slow_off(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *err = femu_die_slow_set(qts, "ds", "0:0:500");
+    g_autofree char *v = NULL;
+    QDict *rsp;
+
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "die_slow=on"));
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':3,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "die_slow requires"));
+    qobject_unref(rsp);
+    /* "<ch>:<lun>" names no namespace: two namespaces are refused */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':1,'namespaces':2,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "one namespace"));
+    qobject_unref(rsp);
+    /* a bad geometry is an error reply, not an abort when sizing the table */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':1,'nchs':-1,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+}
+
+/* an events_file slows a die at 100 ms and restores it at 300 ms */
+static void femu_test_die_slow_events(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "100 slow=0:1:300\n300 slow=0:1:100\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,die_slow=on,events_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *v = NULL;
+
+    femu_events_now(qts, 0);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_events_now(qts, 150);
+    v = femu_die_slow_get(qts, "ev");
+    g_assert_cmpstr(v, ==, "0:1:300");
+    femu_events_now(qts, 350);
+    g_free(v);
+    v = femu_die_slow_get(qts, "ev");
+    g_assert_cmpstr(v, ==, "");
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* valid pages of all 40 lines of device pd: one per mapped LPN */
 static uint64_t femu_ftl_vpc_sum(QTestState *qts)
 {
@@ -53640,6 +53850,16 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("die-slow", "femu", femu_test_die_slow,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=ds,femu_mode=1,devsz_mb=64,pg_rd_lat=20000000,die_slow=on",
+    });
+    qos_add_test("die-slow-off", "femu", femu_test_die_slow_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=ds,femu_mode=1,devsz_mb=64",
+    });
+    qos_add_test("die-slow-events", "femu", femu_test_die_slow_events, NULL);
     qos_add_test("events", "femu", femu_test_events, NULL);
     qos_add_test("events-seed", "femu", femu_test_events_seed, NULL);
     qos_add_test("events-bad", "femu", femu_test_events_bad, NULL);

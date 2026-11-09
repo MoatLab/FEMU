@@ -261,7 +261,8 @@ reads and checks the whole file and names the line of any error.
 ```
 
 - Actions: `ana=<group>:<state>` with state 1, 2 or 3 (needs `ana=on`),
-  and `power-loss` (needs `power_loss=on`).
+  `power-loss` (needs `power_loss=on`), and `slow=<ch>:<lun>:<pct>`
+  (needs `die_slow=on`, see below).
 - A window `<ms>+<window>~<seed>` draws its time once from the seed with
   splitmix64, so the same file and seed give the same time.
 - The times are host time. Events also run while the VM is stopped.
@@ -269,6 +270,30 @@ reads and checks the whole file and names the line of any error.
   its result. A failed action stops the events after it.
 - Limits: 1024 lines, each of at most 256 bytes, and 64 KiB a file. Not
   with `csd_pause`.
+
+## A slow die (die_slow)
+
+With `die_slow=on`, the QOM property `die-slow` (or a `slow=` action of
+`events_file`) sets the array time of one LUN in percent of nominal.
+The LUN stays busy longer, so later ops on it wait: real contention,
+not a delay added at completion.
+
+```text
+ die-slow "0:1:500"  --> LUN 1 of channel 0: tR, tPROG, tBERS x 5
+ thermal throttle first, then the die factor; ECC and bus phases unchanged
+ die-slow "0:1:100"  --> back to nominal, for ops booked from then on
+```
+
+- The factor applies when an op is booked. Work booked before a change
+  keeps its length, so a backlog stays after the die is fast again.
+- It covers host, GC, fold, translation page, multi-plane, copyback and
+  two-pass ops of bbssd and CSD namespaces. GC with its delay off stays
+  untimed. The CSD NVM-to-AFDM copy takes a fixed `pg_rd_lat`, not this.
+- A controller reset keeps the factors: they model the media.
+- One namespace only: `<ch>:<lun>` names no namespace, so `namespaces`
+  above 1 and `ns_mgmt` are refused.
+- `query-femu` lists each slow LUN and its factor under `media`,
+  `slow-luns`.
 
 ## CXL SSD counters
 
