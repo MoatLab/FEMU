@@ -1605,6 +1605,8 @@ typedef struct NvmeFeatureVal {
 #define NVME_ARB_LPW(arb)       ((arb >> 8) & 0xff)
 #define NVME_ARB_MPW(arb)       ((arb >> 16) & 0xff)
 #define NVME_ARB_HPW(arb)       ((arb >> 24) & 0xff)
+/* the reset value: AB 7 (no burst limit), HPW 31, MPW 15, LPW 7 */
+#define NVME_ARB_DEFAULT        0x1f0f0707
 
 #define NVME_INTC_THR(intc)     (intc & 0xff)
 #define NVME_INTC_TIME(intc)    ((intc >> 8) & 0xff)
@@ -3194,6 +3196,7 @@ typedef struct FemuCtrl {
     uint32_t        test_query_delay_ms;
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
+    uint32_t        test_fetch_hold;    /* pollers take no SQE */
     /* qtest only (x-stage-hold-ms): ms a poller waits inside a stage update */
     uint32_t        test_stage_hold_ms;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */

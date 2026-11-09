@@ -874,8 +874,12 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 - One controller per PCI function. No SR-IOV, no NVM Subsystem Reset, no
   controller memory for PMR.
 - No interrupt coalescing; the coalescing features only store values.
-- Weighted round robin arbitration is not implemented: CAP.AMS advertises it,
-  but each poller sweeps its queues in id order.
+- Arbitration is round robin only (CAP.AMS 0). Each poller sweeps its
+  queues in id order and takes at most 2^AB commands from each, AB being
+  the Arbitration Burst of feature 01h; AB 7, the reset value, is no
+  limit. The feature stores the weights; the queue priority of Create
+  I/O SQ is ignored. Admin commands run at their doorbell write, outside
+  the pollers.
 - A queue can have at most `size` commands outstanding, and a poller's rings
   hold 65535 requests each.
 - Abort only reaches commands not yet fetched.

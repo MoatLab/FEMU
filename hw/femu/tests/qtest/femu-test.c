@@ -30,6 +30,8 @@
 #include "standard-headers/linux/pci_regs.h"
 
 #define FEMU_QSIZE          16
+/* feature 01h at reset: AB 7 (no burst limit), HPW 31, MPW 15, LPW 7 */
+#define FEMU_ARB_DEFAULT    0x1f0f0707
 #define FEMU_DATA_SIZE      4096
 #define FEMU_POLL_LIMIT_MS  10000
 /* the femu device's queues property default, which these tests do not set */
@@ -12334,6 +12336,12 @@ static void femu_test_features_reset(void *obj, void *data,
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ARBITRATION, false, 0,
                                              0x1, NULL)), ==, NVME_SUCCESS);
+    /* Default (SEL 1) and Saved (SEL 2) keep the reset value */
+    for (uint8_t sel = 1; sel <= 2; sel++) {
+        g_assert_cmpint(femu_get_feature(&c, NVME_ARBITRATION, sel, 0, 0,
+                                         &result), ==, NVME_SUCCESS);
+        g_assert_cmphex(result, ==, FEMU_ARB_DEFAULT);
+    }
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
                                              false, 0, 0x2, NULL)),
                     ==, NVME_SUCCESS);
@@ -12364,7 +12372,7 @@ static void femu_test_features_reset(void *obj, void *data,
     femu_enable(&c, &femu->dev, alloc);
     g_assert_cmpint(femu_get_feature(&c, NVME_ARBITRATION, 0, 0, 0, &result),
                     ==, NVME_SUCCESS);
-    g_assert_cmphex(result, ==, 0x1f0f0706);
+    g_assert_cmphex(result, ==, FEMU_ARB_DEFAULT);
     g_assert_cmpint(femu_get_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, 0, 0,
                                      0, &result), ==, NVME_SUCCESS);
     g_assert_cmphex(result, ==, 0);
@@ -29694,6 +29702,155 @@ static void femu_test_io_trace(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+
+/* Set Features 01h, Arbitration */
+static void femu_set_arbitration(FemuCtrlState *c, uint32_t arb)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(NVME_ARBITRATION);
+    cmd.cdw11 = cpu_to_le32(arb);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/* qom-set the test-only fetch hold of device @id */
+static void femu_fetch_hold(QTestState *qts, const char *id, int hold)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':%s,'property':'x-fetch-hold',"
+                             "'value':%i}}", path, hold);
+}
+
+typedef struct FemuTraceRow {
+    uint64_t t_submit;
+    int row;        /* the completion order breaks a tie */
+    int sqid;
+} FemuTraceRow;
+
+static int femu_trace_row_cmp(const void *a, const void *b)
+{
+    const FemuTraceRow *x = a;
+    const FemuTraceRow *y = b;
+
+    if (x->t_submit != y->t_submit) {
+        return x->t_submit < y->t_submit ? -1 : 1;
+    }
+    return x->row - y->row;
+}
+
+#define FEMU_ARB_DEPTH  8
+
+/*
+ * The Arbitration Burst (AB) of feature 01h, on one poller and two
+ * submission queues of 8 reads each. The fetch is held while both are
+ * filled, then let go. io_trace stamps t_submit_ns at the fetch, so the
+ * rows sorted by it give the fetch order. AB 0 takes one command of a
+ * queue and moves on, AB 1 two; the reset value, AB 7, empties queue 1
+ * first. 8 commands cannot tell AB 7 from a limit of 8 or more.
+ */
+static void femu_test_arb_burst(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const struct {
+        uint32_t arb;
+        const char *order;
+    } pass[] = {
+        { 0, "1111111122222222" },          /* the reset value, not set */
+        { FEMU_ARB_DEFAULT & ~7u, "1212121212121212" },
+        { (FEMU_ARB_DEFAULT & ~7u) | 1, "1122112211221122" },
+        { FEMU_ARB_DEFAULT, "1111111122222222" },
+    };
+    g_autofree char *dir = g_dir_make_tmp("femu-arb-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "trace.csv", NULL);
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=arb,addr=5,devsz_mb=16,"
+        "femu_mode=2,io_trace=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    FemuQueue q[2];
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    int row = 1;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    for (int i = 0; i < 2; i++) {
+        femu_burst_queue(&c, &q[i], i + 1);
+    }
+    for (size_t p = 0; p < ARRAY_SIZE(pass); p++) {
+        if (pass[p].arb) {
+            femu_set_arbitration(&c, pass[p].arb);
+        }
+        femu_fetch_hold(qts, "arb", 1);
+        for (int i = 0; i < 2; i++) {
+            for (int k = 0; k < FEMU_ARB_DEPTH; k++) {
+                NvmeRwCmd rw = { 0 };
+
+                rw.opcode = NVME_CMD_READ;
+                rw.cid = cpu_to_le16(c.cid++);
+                rw.nsid = cpu_to_le32(1);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.slba = cpu_to_le64(k);
+                qtest_memwrite(qts, q[i].sq_addr +
+                               q[i].sq_tail * sizeof(NvmeCmd), &rw,
+                               sizeof(rw));
+                q[i].sq_tail = (q[i].sq_tail + 1) % FEMU_QSIZE;
+            }
+            qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, q[i].qid),
+                           q[i].sq_tail);
+        }
+        femu_fetch_hold(qts, "arb", 0);
+        for (int i = 0; i < 2; i++) {
+            for (int k = 0; k < FEMU_ARB_DEPTH; k++) {
+                uint16_t cid;
+
+                g_assert_cmpint(FEMU_SC(femu_complete(&c, &q[i], &cid,
+                                                      NULL)),
+                                ==, NVME_SUCCESS);
+            }
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        femu_queue_free(&c, &q[i]);
+    }
+    femu_disable(&c);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", 0);
+    for (size_t p = 0; p < ARRAY_SIZE(pass); p++) {
+        FemuTraceRow r[2 * FEMU_ARB_DEPTH];
+        char got[2 * FEMU_ARB_DEPTH + 1];
+
+        for (int k = 0; k < 2 * FEMU_ARB_DEPTH; k++, row++) {
+            g_auto(GStrv) f = NULL;
+
+            g_assert_nonnull(lines[row]);
+            f = g_strsplit(lines[row], ",", 0);
+            g_assert_cmpuint(g_strv_length(f), ==, 9);
+            r[k].t_submit = g_ascii_strtoull(f[0], NULL, 10);
+            r[k].sqid = atoi(f[2]);
+            r[k].row = row;
+        }
+        qsort(r, 2 * FEMU_ARB_DEPTH, sizeof(r[0]), femu_trace_row_cmp);
+        for (int k = 0; k < 2 * FEMU_ARB_DEPTH; k++) {
+            got[k] = '0' + r[k].sqid;
+        }
+        got[2 * FEMU_ARB_DEPTH] = 0;
+        g_test_message("arb 0x%08x: fetch order %s", pass[p].arb, got);
+        g_assert_cmpstr(got, ==, pass[p].order);
+    }
+    unlink(path);
+    rmdir(dir);
+}
 
 /* query-femu-events of device @id */
 static QDict *femu_events_q(QTestState *qts, const char *id, QDict **rsp)
@@ -54086,6 +54243,7 @@ static void femu_register_nodes(void)
             "ready_ms=50,recovery_ms=300",
     });
     qos_add_test("ready-sysreset", "femu", femu_test_ready_sysreset, NULL);
+    qos_add_test("arb-burst", "femu", femu_test_arb_burst, NULL);
     qos_add_test("ready-bad", "femu", femu_test_ready_bad,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=rdb0,femu_mode=1,devsz_mb=16",

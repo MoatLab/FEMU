@@ -383,7 +383,18 @@ static int nvme_eol_peek(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *cmd,
     return ssd_eol_admit(ns->ssd, *pages);
 }
 
-static void nvme_process_sq_io(void *opaque, int index_poller)
+/*
+ * The Arbitration Burst of feature 01h: the most commands one submission
+ * queue gives in a sweep before the poller moves on. AB 7 is no limit.
+ */
+static uint32_t nvme_arb_burst(FemuCtrl *n)
+{
+    uint32_t ab = NVME_ARB_AB(qatomic_read(&n->features.arbitration));
+
+    return ab == 7 ? UINT32_MAX : 1u << ab;
+}
+
+static void nvme_process_sq_io(void *opaque, int index_poller, uint32_t burst)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
@@ -397,6 +408,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     int eol = -1;
     uint32_t eol_pages = 0;
     int64_t fetched = 0;
+    uint32_t taken = 0;
 
     /*
      * Inline completion fast path (NoSSD only). NoSSD has a no-op timing model
@@ -418,7 +430,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
      * free list. Leave the rest of the burst unconsumed for the next sweep
      * rather than taking a request that is not there.
      */
-    while (!nvme_sq_empty(sq) && !QTAILQ_EMPTY(&sq->req_list)) {
+    while (!nvme_sq_empty(sq) && !QTAILQ_EMPTY(&sq->req_list) &&
+           taken < burst) {
         /*
          * Inline mode completes into the CQ within this same sweep, so unlike
          * the FTL path (which is latency-throttled and drip-feeds completions
@@ -472,6 +485,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
         aborted = sq->nr_aborts && nvme_take_abort(sq, cmd.cid);
         nvme_inc_sq_head(sq);
+        taken++;
 
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
@@ -1095,6 +1109,7 @@ void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
+    uint32_t burst;
     int i;
 
     /* the log trace backend reads its file under RCU */
@@ -1132,7 +1147,9 @@ void *nvme_poller(void *arg)
              * nr_pollers == nr_io_queues and the loop runs once for q == index
              * -- identical to the original one-queue-per-poller behavior.
              */
-            for (int q = index; q <= n->nr_io_queues; q += n->nr_pollers) {
+            burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            for (int q = index; burst && q <= n->nr_io_queues;
+                 q += n->nr_pollers) {
                 NvmeSQueue *sq = n->sq[q];
                 NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;
                 if (sq && sq->is_active && cq && cq->is_active) {
@@ -1147,7 +1164,7 @@ void *nvme_poller(void *arg)
                      * the same poller index. Using `q` here would index those
                      * poller-sized arrays out of bounds. Do NOT change to `q`.
                      */
-                    nvme_process_sq_io(sq, index);
+                    nvme_process_sq_io(sq, index, burst);
                 }
             }
             nvme_process_cq_cpl(n, index);
@@ -1179,14 +1196,15 @@ void *nvme_poller(void *arg)
              * may share one completion queue, so the queue to check is the one
              * this submission queue names, not the one with the same number.
              */
-            for (i = 1; i <= n->nr_io_queues; i++) {
+            burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            for (i = 1; burst && i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;
                 if (sq && sq->is_active && cq && cq->is_active) {
                     /* acquire: pair with the smp_wmb() before is_active=true
                      * in nvme_create_sq so we see a fully-initialized sq/cq */
                     smp_rmb();
-                    nvme_process_sq_io(sq, index);
+                    nvme_process_sq_io(sq, index, burst);
                 }
             }
             nvme_process_cq_cpl(n, index);

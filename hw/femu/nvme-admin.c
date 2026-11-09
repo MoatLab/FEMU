@@ -1866,7 +1866,7 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
                             le64_to_cpu(cmd->dptr.prp2));
     }
     case NVME_ARBITRATION:
-        result = 0x1f0f0706;
+        result = NVME_ARB_DEFAULT;
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         /*
@@ -2240,7 +2240,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     }
     case NVME_ARBITRATION:
-        n->features.arbitration = dw11;
+        /* the pollers read the burst limit (AB) on each sweep */
+        qatomic_set(&n->features.arbitration, dw11);
         break;
     case NVME_AUTO_PST:
         return femu_apst_set(n, cmd);

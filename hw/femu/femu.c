@@ -559,7 +559,7 @@ static void nvme_reset_features(FemuCtrl *n)
 {
     int i;
 
-    n->features.arbitration     = 0x1f0f0706;
+    n->features.arbitration     = NVME_ARB_DEFAULT;
     n->ocp_aen_config           = NVME_OCP_AEN_DEFAULT;
     n->ocp_media_ready_sent     = false;
     /* with ocp, 02h and C7h come back to their saved values (OCP PWR-5) */
@@ -5767,6 +5767,25 @@ static char *femu_die_slow_get(Object *obj, Error **errp)
     return g_string_free(out, false);
 }
 
+/*
+ * The pollers fetch nothing while set, so a test can fill several queues.
+ * A sweep reads the value once, so the change waits for the sweeps under
+ * way to end before it returns.
+ */
+static void femu_test_fetch_hold_set(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    bool resume = nvme_pause_pollers(n);
+
+    qatomic_set(&n->test_fetch_hold, value);
+    nvme_resume_pollers(n, resume);
+}
+
+static bool femu_test_fetch_hold_get(Object *obj, Error **errp)
+{
+    return qatomic_read(&FEMU(obj)->test_fetch_hold);
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -6051,6 +6070,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-ftl-hold",
                                        &FEMU(obj)->test_ftl_hold,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add_bool(obj, "x-fetch-hold",
+                                 femu_test_fetch_hold_get,
+                                 femu_test_fetch_hold_set);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
         object_property_add_bool(obj, "x-telemetry-trigger", NULL,
