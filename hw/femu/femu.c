@@ -560,6 +560,9 @@ static void nvme_reset_features(FemuCtrl *n)
     int i;
 
     n->features.arbitration     = NVME_ARB_DEFAULT;
+    if (n->wrr) {
+        nvme_wrr_reset(n);
+    }
     n->ocp_aen_config           = NVME_OCP_AEN_DEFAULT;
     n->ocp_media_ready_sent     = false;
     /* with ocp, 02h and C7h come back to their saved values (OCP PWR-5) */
@@ -782,8 +785,8 @@ static int nvme_start_ctrl(FemuCtrl *n)
     if (!(NVME_CAP_CSS(n->bar.cap) & (1 << NVME_CC_CSS(n->bar.cc)))) {
         return -1;
     }
-    /* only round robin, which CAP.AMS does not need to list */
-    if (NVME_CC_AMS(n->bar.cc)) {
+    /* round robin, or weighted round robin when CAP.AMS offers it */
+    if (NVME_CC_AMS(n->bar.cc) > (n->wrr ? 1 : 0)) {
         return -1;
     }
 
@@ -1256,6 +1259,13 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     if (n->multipoller_enabled > 1) {
         error_setg(errp, "multipoller_enabled must be 0 (one poller for all "
                    "queues) or 1 (each poller owns poller_ratio queues)");
+        return false;
+    }
+    /* one poller arbitrates all queues: the count dataplane start uses */
+    if (n->wrr && n->multipoller_enabled && n->nr_io_queues &&
+        1 + (n->nr_io_queues - 1) / MAX(n->poller_ratio, 1) != 1) {
+        error_setg(errp, "wrr needs one poller: multipoller_enabled=0, or "
+                   "poller_ratio of at least queues");
         return false;
     }
     /*
@@ -2673,8 +2683,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->bar.cap = 0;
     NVME_CAP_SET_MQES(n->bar.cap, n->max_q_ents);
     NVME_CAP_SET_CQR(n->bar.cap, n->cqr);
-    /* no weighted round robin: submission queues are served in turn */
-    NVME_CAP_SET_AMS(n->bar.cap, 0);
+    /* weighted round robin with an urgent class only with wrr=on */
+    NVME_CAP_SET_AMS(n->bar.cap, n->wrr ? 1 : 0);
     NVME_CAP_SET_TO(n->bar.cap, 0xf);
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
@@ -3273,6 +3283,7 @@ static void femu_realize_undo(FemuCtrl *n)
     nvme_resv_exit(n);
     g_clear_pointer(&n->san_timer, timer_free);
     g_clear_pointer(&n->ready_timer, timer_free);
+    g_clear_pointer(&n->wrr_tried, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -4458,6 +4469,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->san_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                     nvme_sanitize_timer_cb, n);
     }
+    if (n->wrr) {
+        n->wrr_tried = g_new0(bool, n->nr_io_queues + 1);
+    }
     if (n->ready_ms || n->recovery_ms) {
         /* the host polls CSTS.RDY in guest time */
         n->ready_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -4786,6 +4800,8 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
+    /* the pollers are gone: no grant can read it any more */
+    g_clear_pointer(&n->wrr_tried, g_free);
     /* the pollers are gone, so nothing can wake the bottom half any more */
     qemu_bh_delete(n->aer_bh);
     n->aer_bh = NULL;
@@ -4855,6 +4871,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("multipoller_enabled", FemuCtrl, multipoller_enabled, 0),
     DEFINE_PROP_UINT32("poller_ratio", FemuCtrl, poller_ratio, 1),
+    DEFINE_PROP_BOOL("wrr", FemuCtrl, wrr, false),
     DEFINE_PROP_BOOL("hiops_inline", FemuCtrl, hiops_inline, true),
     DEFINE_PROP_BOOL("io_stages", FemuCtrl, io_stages, false),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),

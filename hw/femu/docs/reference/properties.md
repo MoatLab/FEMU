@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 282 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 283 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -59,6 +59,7 @@ Devices:
 | `poller_ratio` | `uint32` | `1` | I/O queues per poller thread when multipoller_enabled=1; 0 is treated as 1, one poller per queue |
 | `hiops_inline` | `bool` | `on` | NoSSD only: performance option, on by default; set off only when debugging |
 | `io_stages` | `bool` | `off` | Time each I/O command in five stages (submit, ftl, hold, post-delay, total) for the QMP command query-femu-stages; off by default |
+| `wrr` | `bool` | `off` | weighted round robin with an urgent class: CAP.AMS offers it and the host may set CC.AMS 001b; needs one poller (multipoller_enabled=0, or poller_ratio of at least queues); off (default) is round robin only |
 | `aerl` | `uint8` | `3` | Asynchronous Event Request Limit (Identify AERL, 0's based): the controller holds up to aerl + 1 outstanding requests |
 | `elpe` | `uint8` | `3` | Error Log Page Entries (Identify ELPE, 0's based): the Error Information log keeps the newest elpe + 1 entries |
 | `mdts` | `uint8` | `10` | Maximum Data Transfer Size as a power of two of the minimum memory page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit |

@@ -2118,7 +2118,7 @@ typedef struct DMAOff {
 typedef struct NvmeSQueue {
     struct FemuCtrl *ctrl;
     uint8_t     phys_contig;
-    uint8_t     arb_burst;
+    uint8_t     qprio;          /* QPRIO of Create I/O SQ: 0 urgent to 3 low */
     uint16_t    sqid;
     uint16_t    cqid;
     uint32_t    head;
@@ -3197,6 +3197,17 @@ typedef struct FemuCtrl {
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
     uint32_t        test_fetch_hold;    /* pollers take no SQE */
+    /*
+     * wrr=on: weighted round robin with an urgent class (CC.AMS 001b).
+     * The one poller owns the credits (high, medium, low) and the next-SQ
+     * cursor of each class; admin_busy holds off I/O grants while the
+     * admin queue runs.
+     */
+    bool            wrr;
+    uint16_t        wrr_credit[4];
+    uint32_t        wrr_cursor[4];
+    bool            *wrr_tried;
+    int             admin_busy;
     /* qtest only (x-stage-hold-ms): ms a poller waits inside a stage update */
     uint32_t        test_stage_hold_ms;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
@@ -3643,6 +3654,7 @@ void nvme_update_cq_eventidx(NvmeCQueue *cq);
 uint8_t nvme_cq_full(NvmeCQueue *cq);
 uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
+void nvme_wrr_reset(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
 void nvme_ns_refresh_hints(FemuCtrl *n, NvmeNamespace *ns);

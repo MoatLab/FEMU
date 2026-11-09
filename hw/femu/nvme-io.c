@@ -394,7 +394,9 @@ static uint32_t nvme_arb_burst(FemuCtrl *n)
     return ab == 7 ? UINT32_MAX : 1u << ab;
 }
 
-static void nvme_process_sq_io(void *opaque, int index_poller, uint32_t burst)
+/* Take at most @burst commands of one queue; returns how many it took. */
+static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
+                                   uint32_t burst)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
@@ -715,6 +717,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller, uint32_t burst)
 
     nvme_update_sq_eventidx(sq);
     sq->completed += processed;
+    return taken;
 }
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
@@ -1105,6 +1108,128 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
+/* the active I/O queue @q with its completion queue, or NULL */
+static NvmeSQueue *nvme_wrr_sq(FemuCtrl *n, uint32_t q)
+{
+    NvmeSQueue *sq = n->sq[q];
+    NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;
+
+    if (!sq || !sq->is_active || !cq || !cq->is_active) {
+        return NULL;
+    }
+    /* acquire: pair with the smp_wmb() before is_active=true */
+    smp_rmb();
+    return sq;
+}
+
+static uint32_t nvme_sq_avail(NvmeSQueue *sq)
+{
+    return (sq->tail + sq->size - sq->head) % sq->size;
+}
+
+/*
+ * The next queue of class @prio with commands, from the class cursor on,
+ * that this grant has not found blocked.
+ */
+static NvmeSQueue *nvme_wrr_pick(FemuCtrl *n, uint8_t prio)
+{
+    uint32_t nq = n->nr_io_queues;
+
+    for (uint32_t k = 0; k < nq; k++) {
+        uint32_t q = (n->wrr_cursor[prio] + k) % nq + 1;
+        NvmeSQueue *sq = nvme_wrr_sq(n, q);
+
+        if (sq && sq->qprio == prio && !n->wrr_tried[q] &&
+            nvme_sq_avail(sq)) {
+            return sq;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * One weighted round robin grant (CC.AMS 001b, one poller). Urgent queues
+ * go first; then high, medium and low by their credits, HPW + 1, MPW + 1
+ * and LPW + 1, refilled when no class with commands has credit. A grant
+ * takes at most 2^AB commands and at most what the queue held at its
+ * start. A queue that takes none (no free request, a full completion
+ * queue, admission) is passed over without a charge and tried again in
+ * the next grant.
+ */
+static void nvme_wrr_grant(FemuCtrl *n, int index)
+{
+    uint32_t arb = qatomic_read(&n->features.arbitration);
+    uint32_t ab = NVME_ARB_AB(arb) == 7 ? UINT32_MAX : 1u << NVME_ARB_AB(arb);
+    bool refilled = false;
+
+    /* the admin queue goes before any I/O */
+    if (qatomic_read(&n->admin_busy)) {
+        return;
+    }
+    for (uint32_t q = 1; q <= n->nr_io_queues; q++) {
+        NvmeSQueue *sq = nvme_wrr_sq(n, q);
+
+        n->wrr_tried[q] = false;
+        if (sq) {
+            nvme_update_sq_tail(sq);
+        }
+    }
+    for (;;) {
+        NvmeSQueue *sq = nvme_wrr_pick(n, NVME_Q_PRIO_URGENT);
+        uint8_t cls = NVME_Q_PRIO_URGENT;
+        uint32_t budget;
+        uint32_t taken;
+
+        for (uint8_t c = NVME_Q_PRIO_HIGH; !sq && c <= NVME_Q_PRIO_LOW; c++) {
+            if (n->wrr_credit[c]) {
+                sq = nvme_wrr_pick(n, c);
+                cls = c;
+            }
+        }
+        if (!sq) {
+            bool waiting = false;
+
+            for (uint8_t c = NVME_Q_PRIO_HIGH; c <= NVME_Q_PRIO_LOW; c++) {
+                waiting |= nvme_wrr_pick(n, c) != NULL;
+            }
+            if (!waiting || refilled) {
+                return;
+            }
+            n->wrr_credit[NVME_Q_PRIO_HIGH] = NVME_ARB_HPW(arb) + 1;
+            n->wrr_credit[NVME_Q_PRIO_NORMAL] = NVME_ARB_MPW(arb) + 1;
+            n->wrr_credit[NVME_Q_PRIO_LOW] = NVME_ARB_LPW(arb) + 1;
+            refilled = true;
+            continue;
+        }
+        budget = MIN(ab, nvme_sq_avail(sq));
+        if (cls != NVME_Q_PRIO_URGENT) {
+            budget = MIN(budget, n->wrr_credit[cls]);
+        }
+        taken = nvme_process_sq_io(sq, index, budget);
+        if (taken) {
+            if (cls != NVME_Q_PRIO_URGENT) {
+                n->wrr_credit[cls] -= taken;
+            }
+            /* the next grant of this class starts after this queue */
+            n->wrr_cursor[cls] = sq->sqid % n->nr_io_queues;
+            return;
+        }
+        n->wrr_tried[sq->sqid] = true;
+    }
+}
+
+/* Clear the credits and cursors; the pollers must be paused. */
+void nvme_wrr_reset(FemuCtrl *n)
+{
+    memset(n->wrr_credit, 0, sizeof(n->wrr_credit));
+    memset(n->wrr_cursor, 0, sizeof(n->wrr_cursor));
+}
+
+static bool nvme_wrr_on(FemuCtrl *n)
+{
+    return n->wrr && NVME_CC_AMS(n->bar.cc) == 1;
+}
+
 void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
@@ -1148,6 +1273,10 @@ void *nvme_poller(void *arg)
              * -- identical to the original one-queue-per-poller behavior.
              */
             burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            if (burst && nvme_wrr_on(n)) {
+                nvme_wrr_grant(n, index);
+                burst = 0;
+            }
             for (int q = index; burst && q <= n->nr_io_queues;
                  q += n->nr_pollers) {
                 NvmeSQueue *sq = n->sq[q];
@@ -1197,6 +1326,10 @@ void *nvme_poller(void *arg)
              * this submission queue names, not the one with the same number.
              */
             burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            if (burst && nvme_wrr_on(n)) {
+                nvme_wrr_grant(n, index);
+                burst = 0;
+            }
             for (i = 1; burst && i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;

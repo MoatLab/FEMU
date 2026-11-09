@@ -176,6 +176,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "poller_ratio",
       "I/O queues per poller thread when multipoller_enabled=1; 0 is "
       "treated as 1, one poller per queue" },
+    { "wrr",
+      "weighted round robin with an urgent class: CAP.AMS offers it and "
+      "the host may set CC.AMS 001b; needs one poller (multipoller_enabled=0, "
+      "or poller_ratio of at least queues); off (default) is round robin "
+      "only" },
     { "hiops_inline",
       "NoSSD only: performance option, on by default; set off only when "
       "debugging" },

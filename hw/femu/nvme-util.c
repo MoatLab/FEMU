@@ -838,21 +838,8 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
         QTAILQ_INSERT_TAIL(&(sq->req_list), &sq->io_req[i], entry);
     }
 
-    switch (prio) {
-    case NVME_Q_PRIO_URGENT:
-        sq->arb_burst = (1 << NVME_ARB_AB(n->features.arbitration));
-        break;
-    case NVME_Q_PRIO_HIGH:
-        sq->arb_burst = NVME_ARB_HPW(n->features.arbitration) + 1;
-        break;
-    case NVME_Q_PRIO_NORMAL:
-        sq->arb_burst = NVME_ARB_MPW(n->features.arbitration) + 1;
-        break;
-    case NVME_Q_PRIO_LOW:
-    default:
-        sq->arb_burst = NVME_ARB_LPW(n->features.arbitration) + 1;
-        break;
-    }
+    /* the class under weighted round robin; round robin ignores it */
+    sq->qprio = prio;
 
     /* the admin queue is rebuilt in place, so drop any buffer it had before */
     sq->db_addr = sq->db_addr_hva = 0;

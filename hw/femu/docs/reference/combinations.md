@@ -544,6 +544,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `multipoller_enabled`
 
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
+- wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
 
 ## `namespace_modes`
 
@@ -836,6 +837,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `poller_ratio`
 
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
+- wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
 
 ## `power_loss`
 
@@ -871,6 +873,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: eol_read_only needs queues x (entries + 1) of at most %d
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
 - queues must be in [1, %d]
+- wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
 
 ## `rber_ppb`
 
@@ -1068,6 +1071,10 @@ own description allows. A message keeps its format directives (`%s`,
 ## `wl_spread`
 
 - FEMU bbssd: wl_spread must not be negative
+
+## `wrr`
+
+- wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
 
 ## `zns_blk_er_lat`
 

@@ -600,7 +600,8 @@ static void nvme_init_poller(FemuCtrl *n)
      */
     if (n->multipoller_enabled) {
         uint32_t r = n->poller_ratio ? n->poller_ratio : 1;
-        n->nr_pollers = (n->nr_io_queues + r - 1) / r;
+        /* ceil(queues / r) with no overflow; realize checks wrr with it */
+        n->nr_pollers = n->nr_io_queues ? 1 + (n->nr_io_queues - 1) / r : 1;
     } else {
         n->nr_pollers = 1;
     }
@@ -2241,7 +2242,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     case NVME_ARBITRATION:
         /* the pollers read the burst limit (AB) on each sweep */
-        qatomic_set(&n->features.arbitration, dw11);
+        if (n->wrr) {
+            /* the weights start a new round: no old credit survives */
+            bool resume = nvme_pause_pollers(n);
+
+            qatomic_set(&n->features.arbitration, dw11);
+            nvme_wrr_reset(n);
+            nvme_resume_pollers(n, resume);
+        } else {
+            qatomic_set(&n->features.arbitration, dw11);
+        }
         break;
     case NVME_AUTO_PST:
         return femu_apst_set(n, cmd);
@@ -6191,7 +6201,7 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
     qemu_mutex_unlock(&n->aer_lock);
 }
 
-void nvme_process_sq_admin(void *opaque)
+static void nvme_run_sq_admin(void *opaque)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
@@ -6259,4 +6269,25 @@ void nvme_process_sq_admin(void *opaque)
         nvme_inc_cq_tail(cq);
         nvme_isr_notify_admin(cq);
     }
+}
+
+/*
+ * Every path that runs admin commands comes here: the submission and the
+ * completion doorbells and the ready transition. With weighted round
+ * robin the poller starts no I/O grant while this runs.
+ */
+void nvme_process_sq_admin(void *opaque)
+{
+    NvmeSQueue *sq = opaque;
+    FemuCtrl *n = sq->ctrl;
+
+    if (!n->wrr) {
+        nvme_run_sq_admin(sq);
+        return;
+    }
+    qatomic_set(&n->admin_busy, 1);
+    /* the poller sees the flag before any admin command takes effect */
+    smp_mb();
+    nvme_run_sq_admin(sq);
+    qatomic_set(&n->admin_busy, 0);
 }

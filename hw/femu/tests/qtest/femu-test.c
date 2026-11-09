@@ -29852,6 +29852,269 @@ static void femu_test_arb_burst(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/* an I/O queue pair @qid whose submission queue has priority @prio */
+static void femu_prio_queue(FemuCtrlState *c, FemuQueue *q, uint16_t qid,
+                            uint8_t prio)
+{
+    NvmeCmd cmd = { 0 };
+
+    femu_queue_init(c, q, qid);
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32((qid << 16) | (prio << 1) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/* queue @nr reads in @q and ring its doorbell */
+static void femu_queue_reads(FemuCtrlState *c, FemuQueue *q, int nr,
+                             uint64_t buf)
+{
+    for (int k = 0; k < nr; k++) {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_READ;
+        rw.cid = cpu_to_le16(c->cid++);
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(k);
+        qtest_memwrite(c->pdev->bus->qts,
+                       q->sq_addr + q->sq_tail * sizeof(NvmeCmd), &rw,
+                       sizeof(rw));
+        q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+    }
+    qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
+}
+
+/* the sqid of each traced command of @path, in fetch order */
+static char *femu_fetch_order(const char *path)
+{
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    g_autofree FemuTraceRow *r = NULL;
+    char *got;
+    guint nr;
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", 0);
+    nr = g_strv_length(lines);
+    g_assert_cmpuint(nr, >, 2);
+    nr -= 2;                            /* the header and the last "" */
+    r = g_new0(FemuTraceRow, nr);
+    for (guint k = 0; k < nr; k++) {
+        g_auto(GStrv) f = g_strsplit(lines[k + 1], ",", 0);
+
+        g_assert_cmpuint(g_strv_length(f), ==, 9);
+        r[k].t_submit = g_ascii_strtoull(f[0], NULL, 10);
+        r[k].sqid = atoi(f[2]);
+        r[k].row = k;
+    }
+    qsort(r, nr, sizeof(r[0]), femu_trace_row_cmp);
+    got = g_malloc0(nr + 1);
+    for (guint k = 0; k < nr; k++) {
+        got[k] = '0' + r[k].sqid;
+    }
+    return got;
+}
+
+typedef struct FemuWrrCase {
+    const char *opts;       /* more -device femu options */
+    uint32_t cc_ams;
+    uint32_t arb;           /* feature 01h */
+    int nr;
+    uint8_t prio[4];        /* of SQ 1 to nr */
+    int depth[4];
+    const char *order;      /* sqids in fetch order */
+} FemuWrrCase;
+
+/*
+ * One poller, NoSSD, io_trace. The fetch is held while every queue is
+ * filled, then let go; the trace sorted by fetch time gives the order.
+ */
+static void femu_test_wrr(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const FemuWrrCase *t = data;
+    g_autofree char *dir = g_dir_make_tmp("femu-wrr-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "trace.csv", NULL);
+    g_autofree char *got = NULL;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=arb,addr=5,devsz_mb=16,"
+        "femu_mode=2,io_trace=%s%s", path, t->opts);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    FemuQueue q[4];
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    c.pdev = pdev;
+    c.alloc = &qs->alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, &qs->alloc,
+                   (6 << 16) | (4 << 20) | (t->cc_ams << 11) | 1);
+    femu_set_arbitration(&c, t->arb);
+    for (int i = 0; i < t->nr; i++) {
+        femu_prio_queue(&c, &q[i], i + 1, t->prio[i]);
+    }
+    femu_fetch_hold(qts, "arb", 1);
+    for (int i = 0; i < t->nr; i++) {
+        femu_queue_reads(&c, &q[i], t->depth[i], buf);
+    }
+    femu_fetch_hold(qts, "arb", 0);
+    for (int i = 0; i < t->nr; i++) {
+        for (int k = 0; k < t->depth[i]; k++) {
+            uint16_t cid;
+
+            g_assert_cmpint(FEMU_SC(femu_complete(&c, &q[i], &cid, NULL)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_queue_free(&c, &q[i]);
+    }
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+
+    got = femu_fetch_order(path);
+    g_test_message("wrr: fetch order %s", got);
+    g_assert_cmpstr(got, ==, t->order);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* feature 01h with the weights and burst given */
+#define FEMU_ARB(hpw, mpw, lpw, ab) \
+    (((hpw) << 24) | ((mpw) << 16) | ((lpw) << 8) | (ab))
+
+static const FemuWrrCase femu_wrr_cases[] = {
+    /* urgent first, though its queue has the higher id */
+    { ",wrr=on", 1, FEMU_ARB(31, 15, 7, 0), 2, { 3, 0 }, { 8, 8 },
+      "2222222211111111" },
+    /* urgent queues share in turn, one command each with AB 0 */
+    { ",wrr=on", 1, FEMU_ARB(31, 15, 7, 0), 3, { 0, 0, 3 }, { 2, 2, 2 },
+      "121233" },
+    /* HPW 3: four high, one low, then four high again */
+    { ",wrr=on", 1, FEMU_ARB(3, 0, 0, 0), 2, { 1, 3 }, { 8, 8 },
+      "1111211112222222" },
+    /* all weights 0: the high cursor moves, so SQ 2 is not starved */
+    { ",wrr=on", 1, FEMU_ARB(0, 0, 0, 0), 4, { 1, 1, 2, 3 }, { 6, 6, 6, 6 },
+      "134234134234134234121212" },
+    /* CC.AMS 000b: round robin, the priority ignored */
+    { ",wrr=on", 0, FEMU_ARB(31, 15, 7, 0), 2, { 3, 0 }, { 8, 8 },
+      "1212121212121212" },
+    /* AB 7: each urgent queue empties in one grant, then the low one */
+    { ",wrr=on", 1, FEMU_ARB(31, 15, 7, 7), 3, { 0, 0, 3 }, { 8, 8, 8 },
+      "111111112222222233333333" },
+};
+
+/*
+ * wrr off: CC.AMS 001b fails the start (CSTS.CFS). wrr on needs one
+ * poller, so realize refuses it with a poller per queue.
+ */
+static void femu_test_wrr_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, &femu->dev, alloc,
+                      (6 << 16) | (4 << 20) | (1 << 11) | 1);
+    g_assert_cmpint(qpci_io_readl(c.pdev, c.bar, 0x1c) &
+                    (NVME_CSTS_READY | NVME_CSTS_FAILED), ==,
+                    NVME_CSTS_FAILED);
+    g_assert_cmpint((qpci_io_readq(c.pdev, c.bar, 0) >> 17) & 3, ==, 0);
+    femu_disable(&c);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'wr2','addr':'6','devsz_mb':16,"
+                    "'femu_mode':2,'wrr':true,'multipoller_enabled':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "wrr needs one poller"));
+    qobject_unref(rsp);
+}
+
+/*
+ * A blocked urgent queue does not keep the grant. Urgent SQ 2 fills its
+ * completion queue (15 entries, never read), then gets 4 more commands
+ * while low SQ 1 gets 8. The low queue runs; once the host reads the
+ * completion queue, the urgent commands run with no new doorbell.
+ */
+static void femu_test_wrr_blocked(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wrr-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "trace.csv", NULL);
+    g_autofree char *got = NULL;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=arb,addr=5,devsz_mb=16,"
+        "femu_mode=2,wrr=on,io_trace=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    FemuQueue q[2];
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    int waited = 0;
+
+    c.pdev = pdev;
+    c.alloc = &qs->alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, &qs->alloc,
+                   (6 << 16) | (4 << 20) | (1 << 11) | 1);
+    femu_set_arbitration(&c, FEMU_ARB(31, 15, 7, 0));
+    femu_prio_queue(&c, &q[0], 1, 3);
+    femu_prio_queue(&c, &q[1], 2, 0);
+    femu_queue_reads(&c, &q[1], FEMU_QSIZE - 1, buf);
+    /* wait until the 15th completion is posted: the queue is full */
+    while (!(qtest_readw(qts, q[1].cq_addr + (FEMU_QSIZE - 2) *
+                         sizeof(NvmeCqe) + 14) & 1)) {
+        g_assert_cmpint(waited++, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    femu_fetch_hold(qts, "arb", 1);
+    femu_queue_reads(&c, &q[1], 4, buf);
+    femu_queue_reads(&c, &q[0], 8, buf);
+    femu_fetch_hold(qts, "arb", 0);
+    for (int k = 0; k < 8; k++) {
+        uint16_t cid;
+
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &q[0], &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int k = 0; k < FEMU_QSIZE - 1 + 4; k++) {
+        uint16_t cid;
+
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &q[1], &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int i = 0; i < 2; i++) {
+        femu_queue_free(&c, &q[i]);
+    }
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+
+    got = femu_fetch_order(path);
+    g_test_message("wrr-blocked: fetch order %s", got);
+    g_assert_cmpstr(got, ==, "222222222222222" "11111111" "2222");
+    unlink(path);
+    rmdir(dir);
+}
+
 /* query-femu-events of device @id */
 static QDict *femu_events_q(QTestState *qts, const char *id, QDict **rsp)
 {
@@ -54244,6 +54507,16 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ready-sysreset", "femu", femu_test_ready_sysreset, NULL);
     qos_add_test("arb-burst", "femu", femu_test_arb_burst, NULL);
+    for (size_t i = 0; i < ARRAY_SIZE(femu_wrr_cases); i++) {
+        g_autofree char *name = g_strdup_printf("wrr-%zu", i);
+
+        qos_add_test(name, "femu", femu_test_wrr,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)&femu_wrr_cases[i],
+        });
+    }
+    qos_add_test("wrr-refused", "femu", femu_test_wrr_refused, NULL);
+    qos_add_test("wrr-blocked", "femu", femu_test_wrr_blocked, NULL);
     qos_add_test("ready-bad", "femu", femu_test_ready_bad,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=rdb0,femu_mode=1,devsz_mb=16",
