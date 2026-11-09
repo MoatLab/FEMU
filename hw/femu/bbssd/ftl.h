@@ -456,6 +456,11 @@ struct FemuReclaimUnit {
     int ruh_pos;   /* heap index in the per-RUH victim pqueue (PI RUHs) */
     int n_lines;
     int npages;
+    /*
+     * Usable pages of each block: pgs_per_blk, or fewer for a unit
+     * programmed one bit per NAND unit (pSLC). npages counts these.
+     */
+    int blk_pgs;
     float utilization;
 
     /* retirement order for the fifo policy; 0 while the unit is free */

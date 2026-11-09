@@ -479,7 +479,7 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
     bool is_full;
 
     /* mid-RU: the same RU keeps taking pages */
-    if (!ssd_wp_step(spp, wpp)) {
+    if (!ssd_wp_step_lim(spp, wpp, ru->blk_pgs)) {
         return ru;
     }
     is_full = fdp_retire_ru(ssd, ru);
@@ -886,6 +886,20 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
 };
 
 /*
+ * The bytes @ru takes from its erase: RUNS, or the part of it that its
+ * usable pages hold when it programs fewer pages per block (pSLC).
+ */
+static uint64_t fdp_ru_room(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
+
+    if (ru->blk_pgs == ssd->sp.pgs_per_blk) {
+        return runs;
+    }
+    return runs / ssd->sp.pgs_per_blk * ru->blk_pgs;
+}
+
+/*
  * The RUAMW of @ru from the bytes programmed into it, in the blocks of the
  * namespaces that use its handle. The remaining bytes round down to whole
  * logical blocks, so a page smaller than a block and a page of any program
@@ -893,7 +907,7 @@ static const struct ssd_gc_move_ops fdp_gc_move_ops = {
  */
 static uint64_t fdp_ru_ruamw(struct ssd *ssd, FemuReclaimUnit *ru)
 {
-    uint64_t runs = ssd->n->subsys->endgrp.fdp.runs;
+    uint64_t runs = fdp_ru_room(ssd, ru);
 
     return (runs - MIN(runs, ru->prog_bytes)) >> ru->ruh->ruh->lbads;
 }
@@ -1058,7 +1072,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
             int *cur = &next[i * npos + pos];
 
             src.g.blk = victim_ru->lines[i]->id;
-            while (!found && *cur < spp->pgs_per_blk) {
+            while (!found && *cur < victim_ru->blk_pgs) {
                 src.g.pg = (*cur)++;
                 found = get_pg(ssd, &src)->status == PG_VALID;
             }
@@ -1068,8 +1082,8 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
 
             seq++;
             src.ppa = 0;
-            src.g.pg = i % spp->pgs_per_blk;
-            i /= spp->pgs_per_blk;
+            src.g.pg = i % victim_ru->blk_pgs;
+            i /= victim_ru->blk_pgs;
             src.g.pl = i % spp->pls_per_lun;
             i /= spp->pls_per_lun;
             src.g.lun = rg->lun0 + i % rg->nlun;
@@ -1443,8 +1457,9 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
 
     /* update FDP statistics: media bytes written (GC writes) */
     uint64_t gc_bytes = (uint64_t)mv.pages * spp->secsz * spp->secs_per_pg;
+    /* an erase clears the pages a block of the unit can hold */
     uint64_t erase_bytes = (uint64_t)blk_cnt * spp->secsz * spp->secs_per_pg
-                           * spp->pgs_per_blk;
+                           * victim_ru->blk_pgs;
 
     FDP_TRACE(ssd, "GC_DONE victim_ru=%u pages_migrated=%d "
               "blocks_erased=%d mbmw_delta=%lu mbe_delta=%lu\n",
@@ -2462,6 +2477,7 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     femu_ru->pos = 0;
     femu_ru->ruh_pos = 0;     /* not yet in any victim pqueue */
     femu_ru->ssd_wptr = g_malloc0(sizeof(struct write_pointer));
+    femu_ru->blk_pgs = spp->pgs_per_blk;
     femu_ru->npages = spp->lines_per_ru * (spp->pgs_per_line / ssd->nrg);
 
     wpp = femu_ru->ssd_wptr;
