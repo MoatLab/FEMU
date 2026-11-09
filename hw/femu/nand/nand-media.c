@@ -43,6 +43,7 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     m->susp = NULL;
     m->throttle_pct = NULL;
     m->lun_pct = NULL;
+    m->die_stat = NULL;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs &&
         cfg->policy.ca_separate) {
         /* a burst must find its gaps on both buses; nothing falls back */
@@ -391,6 +392,27 @@ static uint64_t throttled(const NandMedia *m, const NandLoc *loc, uint64_t ns)
         }
     }
     return ns;
+}
+
+/*
+ * Count one booking of @loc's LUN: it could start at @eligible, started at
+ * @start and holds the array for @ns. The FTL thread is the only caller.
+ */
+static inline void die_acct(NandMedia *m, const NandLoc *loc,
+                            uint64_t eligible, uint64_t start, uint64_t ns)
+{
+    NandDieStat *d;
+
+    if (!m->die_stat) {
+        return;
+    }
+    d = &m->die_stat[loc->ch * m->cfg.luns_per_ch + loc->lun];
+    d->ops++;
+    if (start > eligible) {
+        d->waits++;
+        d->wait_ns += start - eligible;
+    }
+    d->array_ns += ns;
 }
 
 /* per-op array latency, honoring flat vs table + bbssd page-type multiplier */
@@ -1236,6 +1258,7 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
         } while (!__atomic_compare_exchange_n(lun, &old, done, false,
                                               __ATOMIC_ACQ_REL,
                                               __ATOMIC_RELAXED));
+        die_acct(m, loc, stime, done - alat, alat);
         return done;
     }
     if (m->cfg.timeline->lock_lun) {
@@ -1243,6 +1266,7 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
     }
     s = array_contend_op(m, loc, stime, NAND_MEDIA_PROGRAM);
     done = s + alat;
+    die_acct(m, loc, stime, s, alat);
     array_commit_op(m, loc, done, NAND_MEDIA_PROGRAM);
     suspend_note(m, loc, NAND_MEDIA_PROGRAM, done);
     /* no read of the wordline goes ahead of its pass */
@@ -1299,6 +1323,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                     break;
                 }
             }
+            /* counted once, for the value the CAS took */
+            die_acct(m, loc, t, done - alat, alat);
             c.done_ns = done;
             c.latency_ns = done - stime;
             return c;
@@ -1326,6 +1352,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                 array_suspend_extend(m, loc, rs, shift);
             } else {
                 done = s + alat;
+                die_acct(m, loc, t, s, alat);
                 array_commit_op(m, loc, done, op);
                 suspend_note(m, loc, op, done);
                 if (op != NAND_MEDIA_READ) {
@@ -1573,6 +1600,8 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
         alat = array_lat(m, &locs[0], op);
     }
     uint64_t done = start + alat;
+    /* one booking for the group, whatever the plane count */
+    die_acct(m, &locs[0], t, start, alat);
     for (i = 0; i < nlocs; i++) {
         array_commit_op(m, &locs[i], done, op);
         suspend_note(m, &locs[i], op, done);
@@ -1672,8 +1701,14 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
         t = bus_now(m, src->ch, stime, t, m->cfg.timing.cb_rd_cmd_ns ?
                     m->cfg.timing.cb_rd_cmd_ns : m->cfg.timing.cmd_addr_ns);
     }
-    s = array_contend_start(m, src, t) + array_lat(m, src, NAND_MEDIA_READ) -
-        ecc_extra_ns(m, src);
+    {
+        uint64_t rs = array_contend_start(m, src, t);
+        uint64_t rlat = array_lat(m, src, NAND_MEDIA_READ) -
+                        ecc_extra_ns(m, src);
+
+        die_acct(m, src, t, rs, rlat);
+        s = rs + rlat;
+    }
     array_commit(m, src, s);
     /* the on-chip read is part of the program, so it is suspended with it */
     suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
@@ -1683,7 +1718,14 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                        m->cfg.timing.cb_wr_cmd_ns :
                        m->cfg.timing.cmd_addr_ns));
     }
-    s = array_contend_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
+    {
+        uint64_t ps = array_contend_start(m, dst, s);
+        uint64_t plat = array_lat(m, dst, NAND_MEDIA_PROGRAM);
+
+        /* the program follows its read: that order is not a wait */
+        die_acct(m, dst, s, ps, plat);
+        s = ps + plat;
+    }
     array_commit(m, dst, s);
     suspend_note(m, dst, NAND_MEDIA_PROGRAM, s);
     if (m->cfg.timeline->unlock_lun) {

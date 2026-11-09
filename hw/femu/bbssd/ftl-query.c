@@ -273,6 +273,36 @@ static void ssd_query_blocks(struct ssd *ssd, FemuQueryNs *q)
     }
 }
 
+/*
+ * The window of LUN counters from q->offset, and the LUN of the whole
+ * media with the most wait. This runs on the FTL thread, the only writer,
+ * so the copy is one consistent state.
+ */
+static void ssd_query_dies(struct ssd *ssd, FemuQueryNs *q)
+{
+    const NandDieStat *st = ssd->media.die_stat;
+    uint32_t end;
+
+    q->tt_dies = ssd->sp.nchs * ssd->sp.luns_per_ch;
+    q->nr_dies = 0;
+    q->has_most = false;
+    if (!q->dies || !st || q->offset >= q->tt_dies) {
+        return;
+    }
+    end = MIN(q->tt_dies, q->offset + q->max_dies);
+    for (uint32_t i = q->offset; i < end; i++) {
+        q->dies[q->nr_dies++] = st[i];
+    }
+    for (uint32_t i = 0; i < q->tt_dies; i++) {
+        if (st[i].wait_ns && (!q->has_most ||
+                              st[i].wait_ns > q->most_stat.wait_ns)) {
+            q->has_most = true;
+            q->most = i;
+            q->most_stat = st[i];
+        }
+    }
+}
+
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -312,6 +342,7 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     }
 
     ssd_query_blocks(ssd, q);
+    ssd_query_dies(ssd, q);
     q->fdp = ssd->fdp_enabled;
     if (q->fdp) {
         ssd_query_fdp(ssd, q);

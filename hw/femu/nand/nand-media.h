@@ -317,6 +317,19 @@ typedef struct NandSuspendState {
     uint32_t win_planes[NAND_PRIO_WINDOWS];
 } NandSuspendState;
 
+/*
+ * die_stats: what one LUN's bookings saw. A booking is one array phase
+ * (a multi-plane group is one, a copyback two). wait_ns sums how long
+ * bookings waited for the LUN after they could start; array_ns sums the
+ * array time booked, so it can exceed the elapsed time.
+ */
+typedef struct NandDieStat {
+    uint64_t ops;
+    uint64_t waits;
+    uint64_t wait_ns;
+    uint64_t array_ns;
+} NandDieStat;
+
 typedef struct NandMedia {
     NandMediaConfig cfg;
     NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
@@ -333,6 +346,8 @@ typedef struct NandMedia {
      * The controller owns the table and keeps it for the media's life.
      */
     const uint32_t *lun_pct;
+    /* die_stats: one entry per LUN, ch * luns_per_ch + lun; NULL is off */
+    NandDieStat *die_stat;
 } NandMedia;
 
 uint64_t nand_media_last_end(const NandMedia *m);

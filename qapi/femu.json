@@ -55,10 +55,41 @@
 # @blocks: the summary and one record per flash block, for a window of
 #     blocks.  Blackbox namespaces only.
 #
+# @dies: the summary and the wait counters of each LUN, for a window of
+#     LUNs.  Blackbox namespaces with die_stats only.
+#
 # Since: 10.1
 ##
 { 'enum': 'FemuQueryKind',
-  'data': [ 'summary', 'lines', 'zones', 'reclaim-units', 'blocks' ] }
+  'data': [ 'summary', 'lines', 'zones', 'reclaim-units', 'blocks',
+            'dies' ] }
+
+##
+# @FemuDieInfo:
+#
+# What the array bookings of one LUN saw (die_stats).  A booking is one
+# array operation: a multi-plane group is one, a copyback two.  LUNs
+# are listed in the order channel, LUN.
+#
+# @channel: the channel
+#
+# @lun: the LUN in its channel
+#
+# @ops: bookings of the LUN
+#
+# @waits: bookings that found the LUN busy and started later
+#
+# @wait-ns: the sum of those delays, from when a booking could start to
+#     when it started
+#
+# @array-ns: the sum of the array time booked.  Bookings on several
+#     planes overlap, so this can exceed the elapsed time.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuDieInfo',
+  'data': { 'channel': 'uint32', 'lun': 'uint32', 'ops': 'uint64',
+            'waits': 'uint64', 'wait-ns': 'uint64', 'array-ns': 'uint64' } }
 
 ##
 # @FemuBlockInfo:
@@ -933,11 +964,17 @@
 # @blocks: with kind @blocks, the flash blocks from @offset, at most
 #     limit of them
 #
-# @offset: with kind @lines, @reclaim-units or @blocks, the index of the
-#     first record in the listing
+# @dies: with kind @dies, the LUNs from @offset, at most limit of them
 #
-# @next-offset: with kind @lines, @reclaim-units or @blocks, the offset
-#     that continues the listing.  Absent after the last record.
+# @most-waited: with kind @dies, the LUN of the whole media with the
+#     largest @wait-ns (the lowest index on a tie).  Absent when no
+#     booking waited.
+#
+# @offset: with kind @lines, @reclaim-units, @blocks or @dies, the index
+#     of the first record in the listing
+#
+# @next-offset: with kind @lines, @reclaim-units, @blocks or @dies, the
+#     offset that continues the listing.  Absent after the last record.
 #
 # Since: 10.1
 ##
@@ -948,7 +985,8 @@
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*end-of-life': 'FemuEolInfo',
             '*lines': [ 'FemuLineInfo' ],
-            '*blocks': [ 'FemuBlockInfo' ], '*offset': 'uint32',
+            '*blocks': [ 'FemuBlockInfo' ], '*dies': [ 'FemuDieInfo' ],
+            '*most-waited': 'FemuDieInfo', '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 
 ##
@@ -1052,14 +1090,16 @@
 #
 # @kind: what to report (default summary).  Kind lines needs a
 #     blackbox namespace without flexible data placement, kind
-#     reclaim-units one with it, and kind zones a zoned namespace.  A
-#     csd, kvssd or ocssd namespace takes kind summary only.
+#     reclaim-units one with it, and kind zones a zoned namespace.
+#     Kind blocks needs a blackbox namespace, and kind dies one with
+#     die_stats.  A csd, kvssd or ocssd namespace takes kind summary
+#     only.
 #
-# @offset: the first line, zone or reclaim unit to report (default
-#     0).  An error with kind summary.
+# @offset: the first line, zone, reclaim unit, block or LUN to report
+#     (default 0).  An error with kind summary.
 #
-# @limit: the most lines, zones or reclaim units to report, 1 to 4096
-#     (default 256).  An error with kind summary.
+# @limit: the most lines, zones, reclaim units, blocks or LUNs to
+#     report, 1 to 4096 (default 256).  An error with kind summary.
 #
 # Returns: the state of the controller and its selected namespaces
 #

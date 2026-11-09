@@ -645,6 +645,11 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd->ssdname = (char *)n->devname;
     femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
     ssd_init(n, ns);
+    if (n->die_stats && !ssd->media.die_stat) {
+        error_setg(errp, "die_stats does not count plane_reads, pe_suspend, "
+                   "read priority, cache reads or bus timing yet");
+        return;
+    }
     if (n->bb_params.gc_idle_ms) {
         ssd->gc_idle_ns = (uint64_t)n->bb_params.gc_idle_ms * 1000000;
         n->gc_idle = true;

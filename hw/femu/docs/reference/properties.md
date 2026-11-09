@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 283 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 284 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -44,6 +44,7 @@ Devices:
 | `io_trace` | `str` | unset | host file for an I/O trace: one CSV line per completed I/O command (t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), in every mode; the file must not exist; unset (default) is off |
 | `events_file` | `str` | unset | host file of timed actions, read at realize: lines '<ms> <action>' or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> (state 1 to 3, needs ana=on), power-loss (needs power_loss=on) or slow=<ch>:<lun>:<pct> (needs die_slow=on); times count from the first enable and survive resets; see query-femu-events; not with csd_pause; unset (default) is off |
 | `die_slow` | `bool` | `off` | bbssd, CSD: on makes the array time of each LUN settable at run time with the die-slow property or a slow= action of events_file, for a die that turns slow; one namespace only, not with ns_mgmt, namespace_modes, subsys or cxl_ssd; query-femu lists slow LUNs; off (default) adds nothing to the media path |
+| `die_stats` | `bool` | `off` | bbssd: count, per LUN, the array bookings, the ones that waited for a busy LUN, the wait and the array time, for query-femu kind dies; not with plane_reads, pe_suspend, read priority, cache reads or bus timing yet; off (default) adds nothing to the media path |
 | `serial` | `str` | unset | No effect, kept for compatibility; Identify Controller reports a serial number FEMU generates. Setting it warns at realize |
 
 ### Queues, pollers and interrupts

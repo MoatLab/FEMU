@@ -295,6 +295,29 @@ not a delay added at completion.
 - `query-femu` lists each slow LUN and its factor under `media`,
   `slow-luns`.
 
+## Waits per die (die_stats)
+
+With `die_stats=on`, the media counts, for each LUN, the array bookings,
+the ones that waited for a busy LUN, the wait and the array time.
+`query-femu` kind `dies` lists them, and names the LUN with the most
+wait.
+
+```text
+ booking: one array op (a multi-plane group 1, a copyback 2)
+ could start at e, started at s, holds the array for a
+   ops += 1 ; s > e --> waits += 1, wait-ns += s - e ; array-ns += a
+```
+
+- The counters cover every booked op: host, GC, folds and translation
+  pages. GC that is not timed books nothing.
+- `array-ns` can exceed the elapsed time when planes overlap.
+- Plane reads (with more than one plane), suspend, read priority, cache
+  reads and the bus phases choose their starts another way;
+  `die_stats` refuses them for now. FDP and a `femu-subsys` are refused
+  too. A setting that has no effect (`plane_reads` with one plane) is
+  accepted.
+- Off, the media gets no table and the timing is as before.
+
 ## Ready and recovery time
 
 A real SSD takes time to come ready after CC.EN, and longer after an

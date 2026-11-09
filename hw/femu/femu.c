@@ -1337,6 +1337,13 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "and no ns_mgmt, namespace_modes, subsystem or cxl_ssd");
         return false;
     }
+    /* bb_init() refuses the media timing settings it cannot count yet */
+    if (n->die_stats && (n->femu_mode != FEMU_BBSSD_MODE ||
+                         n->namespace_modes || n->subsys || n->cxl_dev)) {
+        error_setg(errp, "die_stats requires bbssd, with no namespace_modes, "
+                   "subsystem or cxl_ssd");
+        return false;
+    }
     /* CAP.TO and CRTO.CRWMT give the host 7500 ms */
     if (n->ready_ms >= 7500 || n->recovery_ms >= 7500) {
         error_setg(errp, "ready_ms and recovery_ms must be below 7500, "
@@ -4954,6 +4961,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("io_trace", FemuCtrl, io_trace),
     DEFINE_PROP_STRING("events_file", FemuCtrl, events_file),
     DEFINE_PROP_BOOL("die_slow", FemuCtrl, die_slow, false),
+    DEFINE_PROP_BOOL("die_stats", FemuCtrl, die_stats, false),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,

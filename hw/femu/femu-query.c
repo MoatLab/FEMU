@@ -237,7 +237,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
 
         if (kind == FEMU_QUERY_KIND_LINES ||
             kind == FEMU_QUERY_KIND_RECLAIM_UNITS ||
-            kind == FEMU_QUERY_KIND_BLOCKS) {
+            kind == FEMU_QUERY_KIND_BLOCKS ||
+            kind == FEMU_QUERY_KIND_DIES) {
             error_setg(errp, "namespace %u: kind '%s' applies only to "
                        "bbssd namespaces", ns->id, FemuQueryKind_str(kind));
             return false;
@@ -305,6 +306,24 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
             q->max_blocks = limit;
             q->blocks = g_new0(FemuQueryBlock, limit);
         }
+        if (kind == FEMU_QUERY_KIND_DIES) {
+            struct ssdparams *spp = &ns->ssd->sp;
+            uint32_t total = spp->nchs * spp->luns_per_ch;
+
+            if (!ns->ssd->media.die_stat) {
+                error_setg(errp, "namespace %u: kind 'dies' needs "
+                           "die_stats=on", ns->id);
+                return false;
+            }
+            if (offset >= total) {
+                error_setg(errp, "namespace %u: offset %u is past its last "
+                           "LUN (%u LUNs)", ns->id, offset, total);
+                return false;
+            }
+            q->offset = offset;
+            q->max_dies = limit;
+            q->dies = g_new0(NandDieStat, limit);
+        }
         if (ns->ssd->fdp_enabled) {
             struct ssd *ssd = ns->ssd;
             uint32_t total = ssd->rg ? ssd->nrg * ssd->rg[0].tt_nru : 0;
@@ -362,6 +381,7 @@ static void femu_query_free(FemuQueryReq *req)
     for (uint32_t i = 0; i < req->nr_ns; i++) {
         g_free(req->ns[i].lines);
         g_free(req->ns[i].blocks);
+        g_free(req->ns[i].dies);
         g_free(req->ns[i].state);
         g_free(req->ns[i].ruhs);
         g_free(req->ns[i].rgs);
@@ -535,6 +555,21 @@ static FemuFdpInfo *femu_query_fdp_info(FemuQueryNs *q)
     }
 
     return fdp;
+}
+
+/* the record of LUN @idx (ch * luns_per_ch + lun) from its counters */
+static FemuDieInfo *femu_query_die(const FemuQueryNs *q, uint32_t idx,
+                                   const NandDieStat *d)
+{
+    FemuDieInfo *di = g_new0(FemuDieInfo, 1);
+
+    di->channel = idx / q->luns_per_ch;
+    di->lun = idx % q->luns_per_ch;
+    di->ops = d->ops;
+    di->waits = d->waits;
+    di->wait_ns = d->wait_ns;
+    di->array_ns = d->array_ns;
+    return di;
 }
 
 static FemuMediaTiming *femu_query_media_info(FemuQuerySel *sel)
@@ -756,6 +791,25 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         if (q->offset + q->nr_blocks < q->tt_blocks) {
             info->has_next_offset = true;
             info->next_offset = q->offset + q->nr_blocks;
+        }
+    }
+    /* kind dies: the window of LUNs, and the most waited of all of them */
+    if (q->dies) {
+        FemuDieInfoList **tail = &info->dies;
+
+        info->has_dies = true;
+        for (uint32_t i = 0; i < q->nr_dies; i++) {
+            QAPI_LIST_APPEND(tail, femu_query_die(q, q->offset + i,
+                                                  &q->dies[i]));
+        }
+        if (q->has_most) {
+            info->most_waited = femu_query_die(q, q->most, &q->most_stat);
+        }
+        info->has_offset = true;
+        info->offset = q->offset;
+        if (q->offset + q->nr_dies < q->tt_dies) {
+            info->has_next_offset = true;
+            info->next_offset = q->offset + q->nr_dies;
         }
     }
     if (q->fdp) {

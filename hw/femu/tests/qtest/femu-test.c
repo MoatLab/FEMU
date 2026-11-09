@@ -30569,6 +30569,151 @@ static void femu_test_ready_bad(void *obj, void *data, QGuestAllocator *alloc)
     }
 }
 
+/* the record of LUN @idx in a dies listing */
+static QDict *femu_die_at(QList *dies, uint32_t idx)
+{
+    const QListEntry *e;
+    uint32_t i = 0;
+
+    QLIST_FOREACH_ENTRY(dies, e) {
+        if (i++ == idx) {
+            return qobject_to(QDict, qlist_entry_obj(e));
+        }
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * die_stats=on, 20 ms reads. Page 0 is on LUN 0:0, page 1 on LUN 1:0.
+ * Two reads of page 0 go in together: the second waits for the first.
+ * LUN 0:0 then has 3 bookings (a program, two reads), 1 wait of at most
+ * one read time, and the array time of a program and two reads; LUN 1:0
+ * has its program only. A window of one LUN continues at 1.
+ */
+static void femu_test_die_stats(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ns;
+    QDict *md;
+    QDict *d;
+    QList *dies;
+    uint64_t rd;
+    uint64_t wr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* both reads are fetched in one sweep, so the second one waits */
+    femu_fetch_hold(qts, "dst", 1);
+    for (int i = 0; i < 2; i++) {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_READ;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_fetch_hold(qts, "dst", 0);
+    for (int i = 0; i < 2; i++) {
+        uint16_t cid;
+
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/dst',"
+                       "'kind':'dies','nsid':1", &rsp);
+    md = qdict_get_qdict(ns, "media");
+    rd = qdict_get_int(md, "read-ns");
+    wr = qdict_get_int(md, "program-ns");
+    dies = qdict_get_qlist(ns, "dies");
+    g_assert_cmpuint(qlist_size(dies), ==, 64);
+    d = femu_die_at(dies, 0);
+    g_test_message("die 0:0: ops %" PRId64 " waits %" PRId64 " wait-ns %"
+                   PRId64 " array-ns %" PRId64, qdict_get_int(d, "ops"),
+                   qdict_get_int(d, "waits"), qdict_get_int(d, "wait-ns"),
+                   qdict_get_int(d, "array-ns"));
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 3);
+    g_assert_cmpint(qdict_get_int(d, "waits"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "wait-ns"), >, 0);
+    g_assert_cmpint(qdict_get_int(d, "wait-ns"), <=, rd);
+    g_assert_cmpint(qdict_get_int(d, "array-ns"), ==, wr + 2 * rd);
+    d = femu_die_at(dies, 8);
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "waits"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "array-ns"), ==, wr);
+    d = qdict_get_qdict(ns, "most-waited");
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    qobject_unref(rsp);
+
+    /* a window of one LUN at 8 continues at 9; the maximum is global */
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/dst',"
+                       "'kind':'dies','nsid':1,'offset':8,'limit':1", &rsp);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(ns, "dies")), ==, 1);
+    g_assert_cmpint(qdict_get_int(ns, "next-offset"), ==, 9);
+    d = qdict_get_qdict(ns, "most-waited");
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 3);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * die_stats is refused where it cannot count, and kind dies without it.
+ */
+static void femu_test_die_stats_refused(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *want;
+    } bad[] = {
+        { "'femu_mode':2,'die_stats':true", "die_stats requires bbssd" },
+        { "'femu_mode':1,'die_stats':true,'plane_reads':true,"
+          "'pls_per_lun':2", "die_stats does not count" },
+        { "'femu_mode':1,'die_stats':true,'pe_suspend':1",
+          "die_stats does not count" },
+        { "'femu_mode':1,'die_stats':true,'read_prio':1",
+          "die_stats does not count" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'dsr','addr':'6','devsz_mb':16,%s}",
+            bad[i].opts);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("die-stats-refused %s: %s", bad[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].want));
+        qobject_unref(rsp);
+    }
+    femu_query_fails(qts, "'path':'/machine/peripheral/dso','kind':'dies',"
+                     "'nsid':1", "needs die_stats=on");
+}
+
 /* qom-set die-slow of device @id; returns the error text or NULL */
 static char *femu_die_slow_set(QTestState *qts, const char *id,
                                const char *v)
@@ -54493,6 +54638,15 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=ds,femu_mode=1,devsz_mb=64",
     });
     qos_add_test("die-slow-events", "femu", femu_test_die_slow_events, NULL);
+    qos_add_test("die-stats", "femu", femu_test_die_stats,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=dst,femu_mode=1,devsz_mb=64,pg_rd_lat=20000000,die_stats=on",
+    });
+    qos_add_test("die-stats-refused", "femu", femu_test_die_stats_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=dso,femu_mode=1,devsz_mb=64",
+    });
     qos_add_test("ready-delay", "femu", femu_test_ready_delay,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=rdy,femu_mode=1,devsz_mb=16,ready_ms=200",

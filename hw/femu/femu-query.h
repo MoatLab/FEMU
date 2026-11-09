@@ -119,6 +119,13 @@ typedef struct FemuQueryNs {
     uint32_t max_blocks;
     uint32_t nr_blocks;
     FemuQueryBlock *blocks;     /* max_blocks entries, kind blocks only */
+    uint32_t tt_dies;
+    uint32_t max_dies;
+    uint32_t nr_dies;
+    NandDieStat *dies;          /* max_dies entries, kind dies only */
+    bool has_most;              /* a booking waited: most is valid */
+    uint32_t most;              /* index of the LUN with the most wait-ns */
+    NandDieStat most_stat;
 
     bool fdp;
     uint32_t nrg;

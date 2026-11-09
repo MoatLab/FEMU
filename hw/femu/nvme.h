@@ -2776,6 +2776,7 @@ typedef struct FemuCtrl {
      */
     bool        die_slow;
     uint32_t    *die_slow_pct;
+    bool        die_stats;      /* per-LUN wait counters (query-femu dies) */
     uint64_t    unsafe_shutdowns[2];
     uint8_t     vwc;
     uint8_t     mc;

@@ -1241,6 +1241,7 @@ void ssd_free(struct ssd *ssd)
     ssd->maptbl = NULL;
 
     nand_media_destroy(&ssd->media);
+    g_clear_pointer(&ssd->media.die_stat, g_free);
     if (ssd->wear_on) {
         qemu_mutex_destroy(&ssd->wear_lock);
         ssd->wear_on = false;

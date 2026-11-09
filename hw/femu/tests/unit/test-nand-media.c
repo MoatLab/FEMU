@@ -1332,6 +1332,135 @@ static void test_die_slow(void)
     nand_media_destroy(&m);
 }
 
+/* the four counters of one LUN, checked as one tuple */
+static void check_die(const char *what, const NandDieStat *d, uint64_t ops,
+                      uint64_t waits, uint64_t wait_ns, uint64_t array_ns)
+{
+    char buf[160];
+
+    snprintf(buf, sizeof(buf), "%s: ops", what);
+    check(buf, d->ops, ops);
+    snprintf(buf, sizeof(buf), "%s: waits", what);
+    check(buf, d->waits, waits);
+    snprintf(buf, sizeof(buf), "%s: wait ns", what);
+    check(buf, d->wait_ns, wait_ns);
+    snprintf(buf, sizeof(buf), "%s: array ns", what);
+    check(buf, d->array_ns, array_ns);
+}
+
+/*
+ * die_stats on the bbssd paths: tR 10 us, tPROG 40 us, flat timing. A
+ * booking counts once: a multi-plane group once, a copyback twice (its
+ * program follows its read, which is no wait). Completions do not change
+ * with the counters on.
+ */
+static void test_die_stats(void)
+{
+    static NandDieStat st[8 * 8];
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a = { 0 };
+    NandLoc b = { .ch = 1 };
+    uint64_t on[3];
+    uint64_t off[3];
+
+    printf("# die_stats: per-LUN waits\n");
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    on[0] = nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns;
+    on[1] = nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns;
+    on[2] = nand_media_op(&m, &b, NAND_MEDIA_READ, 0).done_ns;
+    check_die("A A B at 0, A", &st[0], 2, 1, 10000, 20000);
+    check_die("A A B at 0, B", &st[8], 1, 0, 0, 10000);
+    nand_media_destroy(&m);
+
+    /* the same ops with the counters off end at the same times */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    off[0] = nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns;
+    off[1] = nand_media_op(&m, &a, NAND_MEDIA_READ, 0).done_ns;
+    off[2] = nand_media_op(&m, &b, NAND_MEDIA_READ, 0).done_ns;
+    for (int i = 0; i < 3; i++) {
+        check("die_stats off: same completion", off[i], on[i]);
+    }
+    nand_media_destroy(&m);
+
+    /* an idle gap is no wait */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    lun_avail[0] = 1000;
+    nand_media_op(&m, &a, NAND_MEDIA_READ, 5000);
+    check_die("idle gap", &st[0], 1, 0, 0, 10000);
+    nand_media_destroy(&m);
+
+    /* a busy LUN: the wait is from the request to the start */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    lun_avail[0] = 3000;
+    nand_media_op(&m, &a, NAND_MEDIA_READ, 0);
+    check_die("busy LUN", &st[0], 1, 1, 3000, 10000);
+    nand_media_destroy(&m);
+
+    /* a two-plane read is one booking */
+    bb_config(&cfg);
+    cfg.planes_per_lun = 2;
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    lun_avail[0] = 3000;
+    {
+        NandLoc locs[2] = { { 0 }, { .pl = 1 } };
+
+        nand_media_multiplane(&m, locs, 2, NAND_MEDIA_READ, 0);
+    }
+    check_die("two-plane read", &st[0], 1, 1, 3000, 10000);
+    nand_media_destroy(&m);
+
+    /* a copyback: a read that waits, then a program that does not */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    lun_avail[0] = 3000;
+    {
+        NandLoc dst = { .blk = 1 };
+
+        check("copyback ends after both phases",
+              nand_media_copyback(&m, &a, &dst, 0).done_ns,
+              3000 + 10000 + 40000);
+    }
+    check_die("copyback", &st[0], 2, 1, 3000, 50000);
+    nand_media_destroy(&m);
+
+    /* the second pass of a two-pass program */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    lun_avail[0] = 3000;
+    check("hold ends after the busy time",
+          nand_media_hold(&m, &a, 0, 1, 0, 500), 3500);
+    check_die("hold", &st[0], 1, 1, 3000, 500);
+    nand_media_destroy(&m);
+
+    /* N reads at once: N - 1 wait, 0 + 1 + ... + N - 1 reads long */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    memset(st, 0, sizeof(st));
+    for (int i = 0; i < 5; i++) {
+        nand_media_op(&m, &a, NAND_MEDIA_READ, 0);
+    }
+    check_die("5 reads at once", &st[0], 5, 4, 10000 * 10, 50000);
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -1356,6 +1485,7 @@ int main(void)
     test_unbounded_windows();
     test_plane_reads();
     test_die_slow();
+    test_die_stats();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

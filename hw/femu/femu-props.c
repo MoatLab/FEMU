@@ -139,6 +139,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "for a die that turns slow; one namespace only, not with ns_mgmt, "
       "namespace_modes, subsys or cxl_ssd; query-femu lists slow LUNs; "
       "off (default) adds nothing to the media path" },
+    { "die_stats",
+      "bbssd: count, per LUN, the array bookings, the ones that waited for "
+      "a busy LUN, the wait and the array time, for query-femu kind dies; "
+      "not with plane_reads, pe_suspend, read priority, cache reads or bus "
+      "timing yet; off (default) adds nothing to the media path" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
       "(mapping, page and block state, lines, write pointer, counters), "

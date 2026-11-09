@@ -341,6 +341,19 @@ void bb_nand_media_init(struct ssd *ssd)
     if (ssd->n && ssd->n->die_slow_pct) {
         ssd->media.lun_pct = ssd->n->die_slow_pct;
     }
+    /*
+     * die_stats counts the plain LUN bookings. Plane reads, suspend, read
+     * priority, cache reads and the bus phases choose their starts another
+     * way; bb_init() refuses them while the table stays NULL.
+     */
+    if (ssd->n && ssd->n->die_stats &&
+        cfg.policy.channel_mode != NAND_CH_STAGED &&
+        cfg.policy.array_contend != NAND_CONTEND_LUN_PE_PLANE_READ &&
+        !cfg.policy.pe_suspend && !cfg.policy.read_prio &&
+        !cfg.policy.cache_read) {
+        ssd->media.die_stat = g_new0(NandDieStat,
+                                     (size_t)spp->nchs * spp->luns_per_ch);
+    }
 }
 
 /*

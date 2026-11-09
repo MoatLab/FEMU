@@ -145,6 +145,7 @@ own description allows. A message keeps its format directives (`%s`,
 - cxl_ssd requires %s
 - cxl_ssd requires the femu-cxl-ssd to have ftl=on
 - die_slow requires bbssd or CSD with one namespace, and no ns_mgmt, namespace_modes, subsystem or cxl_ssd
+- die_stats requires bbssd, with no namespace_modes, subsystem or cxl_ssd
 - femu: onfi_mode is not supported with cxl_ssd
 - femu: the pd_* properties are not supported with cxl_ssd
 - hmb_mb is not supported with cxl_ssd
@@ -167,6 +168,12 @@ own description allows. A message keeps its format directives (`%s`,
 - die-slow needs a realized controller with die_slow=on
 - die_slow requires bbssd or CSD with one namespace, and no ns_mgmt, namespace_modes, subsystem or cxl_ssd
 - die_slow: nchs must be 1 to %d and luns_per_ch 1 to %d
+
+## `die_stats`
+
+- die_stats does not count plane_reads, pe_suspend, read priority, cache reads or bus timing yet
+- die_stats requires bbssd, with no namespace_modes, subsystem or cxl_ssd
+- namespace %u: kind 'dies' needs die_stats=on
 
 ## `dpc`
 
@@ -550,6 +557,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: die_parity needs two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - die_slow requires bbssd or CSD with one namespace, and no ns_mgmt, namespace_modes, subsystem or cxl_ssd
+- die_stats requires bbssd, with no namespace_modes, subsystem or cxl_ssd
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_max_keys needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
@@ -766,6 +774,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `pe_suspend`
 
 - FEMU bbssd: pe_suspend_max and tresume_ns need pe_suspend
+- die_stats does not count plane_reads, pe_suspend, read priority, cache reads or bus timing yet
 - femu: pe_suspend is refused with onfi_mode
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 
@@ -831,6 +840,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `plane_reads`
 
+- die_stats does not count plane_reads, pe_suspend, read priority, cache reads or bus timing yet
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 - plane_reads works with bbssd, CSD or KV namespaces only (KV keeps the LUN rule)
 
