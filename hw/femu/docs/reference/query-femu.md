@@ -518,6 +518,15 @@ group once per call, also for a summary. The command fails with an error in thes
 
 Only one query at a time can wait on a device.
 
+## Timed actions: query-femu-events
+
+QMP command `query-femu-events` returns the `events_file` schedule of a
+controller: its state (`waiting`, `running` or `done`) and, for each event,
+the file line, the action, its time and when it ran, in ms after the
+first enable, and its result (`pending`, `done` or `failed`). It works
+before the first enable and after a power cut. See
+[timed actions](../guides/measuring.md#timed-actions-events_file).
+
 ## I/O stage times: query-femu-stages
 
 With `io_stages=on`, the pollers time each I/O command in stages, and the

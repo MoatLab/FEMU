@@ -15,3 +15,6 @@ femu_power_state(uint8_t from, uint8_t to) "PS%"PRIu8" -> PS%"PRIu8
 # bbssd/ftl-line-gc.c
 femu_gc_victim(int line, int vpc, int ipc) "line %d vpc %d ipc %d"
 femu_erase(int ch, int lun, int pl, int blk, uint32_t erase_cnt) "ch %d lun %d pl %d blk %d erases %"PRIu32
+
+# femu-events.c
+femu_event(int line, const char *action, int64_t time_ns, int64_t ran_ns, int ok) "line %d %s at %"PRId64" ns ran %"PRId64" ns ok %d"

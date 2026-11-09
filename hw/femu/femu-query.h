@@ -14,6 +14,10 @@
 #define FEMU_QUERY_MAX_LINES        4096
 #define FEMU_QUERY_DEFAULT_LINES    256
 
+/* the events_file schedule of a controller (femu-events.c) */
+struct FemuCtrl;
+FemuEvents *femu_events_info(struct FemuCtrl *n, Error **errp);
+
 typedef struct FemuQueryLine {
     uint32_t id;
     uint32_t vpc;

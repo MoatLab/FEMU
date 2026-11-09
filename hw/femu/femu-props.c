@@ -126,6 +126,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "host file for an I/O trace: one CSV line per completed I/O command "
       "(t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), "
       "in every mode; the file must not exist; unset (default) is off" },
+    { "events_file",
+      "host file of timed actions, read at realize: lines '<ms> <action>' "
+      "or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> "
+      "(state 1 to 3, needs ana=on) or power-loss (needs power_loss=on); "
+      "times count from the first enable and survive resets; see "
+      "query-femu-events; not with csd_pause; unset (default) is off" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
       "(mapping, page and block state, lines, write pointer, counters), "

@@ -239,6 +239,37 @@ device refuses a trace path that is any device's `persist_file`,
 [scripts](../reference/scripts.md) gives another format from QEMU
 tracing: no NSID and no submit time.
 
+## Timed actions (events_file)
+
+`events_file=PATH` gives the controller a list of actions at fixed times,
+so a fault in an experiment comes at the same point every run. Realize
+reads and checks the whole file and names the line of any error.
+
+```text
+ # ANA path goes to Inaccessible at 100 ms, back at 300 ms
+ 100 ana=1:3
+ 300 ana=1:1
+ # a power cut at a seeded time in [2000, 2500) ms
+ 2000+500~42 power-loss
+```
+
+```text
+ realize: check, compile each time once (state waiting)
+ first successful enable: times count from here (state running)
+ each event: its action, as the runtime property would do it
+ resets and power cuts keep the times and what already ran
+```
+
+- Actions: `ana=<group>:<state>` with state 1, 2 or 3 (needs `ana=on`),
+  and `power-loss` (needs `power_loss=on`).
+- A window `<ms>+<window>~<seed>` draws its time once from the seed with
+  splitmix64, so the same file and seed give the same time.
+- The times are host time. Events also run while the VM is stopped.
+- `query-femu-events` lists each event with its time, when it ran and
+  its result. A failed action stops the events after it.
+- Limits: 1024 lines, each of at most 256 bytes, and 64 KiB a file. Not
+  with `csd_pause`.
+
 ## CXL SSD counters
 
 The `femu-cxl-ssd` counters are QOM properties, read on the host through

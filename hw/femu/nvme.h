@@ -2895,6 +2895,9 @@ typedef struct FemuCtrl {
     char            *mode_name;      /* mode=NAME, resolved into femu_mode */
     /* io_trace: one CSV line per posted I/O completion (femu-iotrace.c) */
     char            *io_trace;
+    /* a timed list of actions on the controller (femu-events.c) */
+    char            *events_file;
+    struct FemuEventSched *events;
     char            *iotrace_path;   /* io_trace as an absolute path */
     FILE            *iotrace_f;
     char            *iotrace_buf;    /* the stdio buffer, freed after close */
@@ -3535,6 +3538,12 @@ char *femu_path_resolve(const char *file);
 bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only);
 void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now);
 void femu_iotrace_exit(FemuCtrl *n);
+bool femu_events_init(FemuCtrl *n, Error **errp);
+void femu_events_start(FemuCtrl *n);
+void femu_events_exit(FemuCtrl *n);
+void femu_events_add_test_props(Object *obj);
+bool femu_events_installed(FemuCtrl *n);
+struct FemuEventSched;
 void femu_iotrace_abort(FemuCtrl *n);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);

@@ -867,6 +867,8 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                 n->bar.csts = NVME_CSTS_FAILED;
             } else {
                 n->bar.csts = NVME_CSTS_READY;
+                /* the first ready controller starts the events_file times */
+                femu_events_start(n);
             }
         } else if (reset) {
             /*
@@ -3179,6 +3181,7 @@ static void femu_realize_undo(FemuCtrl *n)
     /* a device that never came up keeps the file it was given */
     femu_persist_abort(n);
     femu_iotrace_abort(n);
+    femu_events_exit(n);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;
@@ -4440,8 +4443,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     /* Validate retention before starting threads that would need unwinding. */
     /* the trace first: its failure leaves nothing of the others to undo */
+    /* events before the PEL: a refused file leaves no PEL timer behind */
     if (!femu_iotrace_init(n, errp) || !femu_persist_init(n, errp) ||
-        !femu_pel_init(n, errp)) {
+        !femu_events_init(n, errp) || !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
         return;
     }
@@ -4657,6 +4661,8 @@ static void femu_exit(PCIDevice *pci_dev)
 
     femu_debug("femu_exit starting!\n");
     femu_thermal_stop(n);
+    /* no scheduled action may reach a device that is going */
+    femu_events_exit(n);
 
     /*
      * Stop every thread first. femu_exit_extensions() releases each mode's FTL
@@ -4833,6 +4839,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
     DEFINE_PROP_STRING("mode", FemuCtrl, mode_name),
     DEFINE_PROP_STRING("io_trace", FemuCtrl, io_trace),
+    DEFINE_PROP_STRING("events_file", FemuCtrl, events_file),
     DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_BOOL("oc12_channel_timing", FemuCtrl,
@@ -5612,6 +5619,11 @@ static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
         error_setg(errp, "test clock requires a disabled OC 1.2 controller");
         return;
     }
+    /* the events_file timer reads the real-time clock */
+    if (femu_events_installed(n)) {
+        error_setg(errp, "test clock does not work with events_file");
+        return;
+    }
     n->test_oc12_clock = value;
     if (!value) {
         g_clear_pointer(&n->oc12_trace, g_free);
@@ -5888,6 +5900,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-stage-hold-ms",
                                        &FEMU(obj)->test_stage_hold_ms,
                                        OBJ_PROP_FLAG_READWRITE);
+        femu_events_add_test_props(obj);
         femu_test_add_u32(obj, "x-tier-fold-stop",
                           &FEMU(obj)->test_tier_fold_stop, true);
         femu_test_add_u32(obj, "x-place-fail",

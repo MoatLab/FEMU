@@ -18287,7 +18287,7 @@ static void femu_test_pci_pm(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
- * QEMU trace points (hw/femu/trace-events): QMP lists the eight femu_*
+ * QEMU trace points (hw/femu/trace-events): QMP lists the nine femu_*
  * events, one turns on, and commands still run with it on.
  */
 static void femu_test_trace_events(void *obj, void *data,
@@ -18305,7 +18305,7 @@ static void femu_test_trace_events(void *obj, void *data,
     rsp = qtest_qmp(qts, "{'execute':'trace-event-get-state','arguments':"
                     "{'name':'femu_*'}}");
     list = qdict_get_qlist(rsp, "return");
-    g_assert_cmpuint(qlist_size(list), ==, 8);
+    g_assert_cmpuint(qlist_size(list), ==, 9);
     QLIST_FOREACH_ENTRY(list, e) {
         QDict *ev = qobject_to(QDict, qlist_entry_obj(e));
 
@@ -29686,6 +29686,255 @@ static void femu_test_io_trace(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+
+/* query-femu-events of device @id */
+static QDict *femu_events_q(QTestState *qts, const char *id, QDict **rsp)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    *rsp = qtest_qmp(qts, "{'execute':'query-femu-events','arguments':{"
+                     "'path':%s}}", path);
+    g_assert_true(qdict_haskey(*rsp, "return"));
+    return qdict_get_qdict(*rsp, "return");
+}
+
+/* the field @key of event @i of device @id */
+static const char *femu_events_field(QTestState *qts, const char *id, int i,
+                                     const char *key, QDict **rsp)
+{
+    QDict *r = femu_events_q(qts, id, rsp);
+    QList *ev = qdict_get_qlist(r, "events");
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(ev, e) {
+        if (!i--) {
+            return qdict_get_str(qobject_to(QDict, qlist_entry_obj(e)), key);
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* when event @i of device @id ran, in ms after the first enable */
+static int64_t femu_events_ran(QTestState *qts, const char *id, int i)
+{
+    QDict *rsp;
+    QDict *r = femu_events_q(qts, id, &rsp);
+    QListEntry *e;
+    int64_t ran = -1;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "events"), e) {
+        if (!i--) {
+            ran = qdict_get_int(qobject_to(QDict, qlist_entry_obj(e)),
+                                "ran-ms");
+            break;
+        }
+    }
+    qobject_unref(rsp);
+    return ran;
+}
+
+static char *femu_events_file(const char *dir, const char *text)
+{
+    char *path = g_build_filename(dir, "events.txt", NULL);
+
+    g_assert_true(g_file_set_contents(path, text, -1, NULL));
+    return path;
+}
+
+static void femu_events_now(QTestState *qts, uint32_t ms)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/ev',"
+                           "'property':'x-events-now','value':%u}}", ms);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static char *femu_ana_states(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/ev',"
+                           "'property':'ana-state'}}");
+    char *v = g_strdup(qdict_get_str(rsp, "return"));
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * events_file: ANA state 3 at 100 ms, back to 1 at 300 ms. The schedule
+ * waits until the first enable. x-events-now steps the time: at 150 ms the
+ * first event ran and the second waits. A controller reset keeps both the
+ * results and the epoch, and at 350 ms the second runs.
+ */
+static void femu_test_events(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "# ANA path change and back\n100 ana=1:3\n300 ana=1:1\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,ana=on,events_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *ana = NULL;
+    QDict *rsp;
+
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "waiting");
+    qobject_unref(rsp);
+    /* the test clock from the start: no event runs on host time */
+    femu_events_now(qts, 0);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_events_now(qts, 150);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 1, "result", &rsp), ==,
+                    "pending");
+    qobject_unref(rsp);
+    ana = femu_ana_states(qts);
+    g_assert_cmpstr(ana, ==, "1:3");
+
+    /* a reset keeps the epoch and what ran */
+    femu_disable(&c);
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "running");
+    qobject_unref(rsp);
+    femu_events_now(qts, 350);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 1, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "done");
+    qobject_unref(rsp);
+    /* each event ran once: the reset did not start the list again */
+    g_assert_cmpint(femu_events_ran(qts, "ev", 0), ==, 150);
+    g_assert_cmpint(femu_events_ran(qts, "ev", 1), ==, 350);
+    g_free(ana);
+    ana = femu_ana_states(qts);
+    g_assert_cmpstr(ana, ==, "1:1");
+
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* the time of event 0 of a device realized with events_file @path */
+static int64_t femu_events_seed_time(const char *path)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,ana=on,events_file=%s", path);
+    QDict *rsp;
+    QDict *r = femu_events_q(qs->qts, "ev", &rsp);
+    QDict *e = qobject_to(QDict, qlist_peek(qdict_get_qlist(r, "events")));
+    int64_t t = qdict_get_int(e, "time-ms");
+
+    qobject_unref(rsp);
+    qtest_pc_shutdown(qs);
+    return t;
+}
+
+/*
+ * A seeded window draws one time, the same for the same file and seed,
+ * and the one splitmix64 gives.
+ */
+static void femu_test_events_seed(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir, "100+1000~42 ana=1:2\n");
+    int64_t a = femu_events_seed_time(path);
+    int64_t b = femu_events_seed_time(path);
+
+    g_test_message("seeded time %" PRId64 " ms", a);
+    /* splitmix64 seeded with 42 gives 13679457532755275413, 413 mod 1000 */
+    g_assert_cmpint(a, ==, 513);
+    g_assert_cmpint(a, ==, b);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* realize refuses a file it cannot run, and names the line */
+static void femu_test_events_bad(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
+    static const struct {
+        const char *text;
+        const char *msg;
+    } cases[] = {
+        { "abc ana=1:2\n", "line 1: a time in ms" },
+        { "# ok\n100 frob\n", "line 2: unknown action" },
+        { "100+0~1 ana=1:2\n", "line 1: a window" },
+        { "99999999999999999999 ana=1:2\n", "line 1: a time in ms" },
+        { "100 ana=1:4\n", "line 1: ana state must be 1, 2 or 3" },
+        { "100 ana=1:2 extra\n", "line 1: one action" },
+        { "100 ana=4294967297:3\n", "line 1: ana takes" },
+        { "100 power-loss\n", "needs power_loss=on" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *path = femu_events_file(dir, cases[i].text);
+        QDict *rsp = qtest_qmp(qs->qts, "{'execute':'device_add','arguments':{"
+                               "'driver':'femu','id':'evbad','addr':'6',"
+                               "'devsz_mb':16,'femu_mode':1,'ana':true,"
+                               "'events_file':%s}}", path);
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("events refused: %s", desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    qtest_pc_shutdown(qs);
+    rmdir(dir);
+}
+
+/* the real timer runs an event after the enable, with no test clock */
+static void femu_test_events_timer(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir, "50 ana=1:2\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,ana=on,events_file=%s", path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *state = NULL;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    for (i = 0; i < 300; i++) {
+        g_free(state);
+        state = g_strdup(qdict_get_str(femu_events_q(qs->qts, "ev", &rsp),
+                                       "state"));
+        qobject_unref(rsp);
+        if (!strcmp(state, "done")) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_assert_cmpstr(state, ==, "done");
+    g_assert_cmpstr(femu_events_field(qs->qts, "ev", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
 
 /* valid pages of all 40 lines of device pd: one per mapped LPN */
 static uint64_t femu_ftl_vpc_sum(QTestState *qts)
@@ -53391,6 +53640,10 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("events", "femu", femu_test_events, NULL);
+    qos_add_test("events-seed", "femu", femu_test_events_seed, NULL);
+    qos_add_test("events-bad", "femu", femu_test_events_bad, NULL);
+    qos_add_test("events-timer", "femu", femu_test_events_timer, NULL);
     qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,
                  &(QOSGraphTestOptions) {

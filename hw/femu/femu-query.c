@@ -1029,6 +1029,13 @@ void qmp_femu_save_data(const char *path, const char *file, Error **errp)
     }
 }
 
+FemuEvents *qmp_query_femu_events(const char *path, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+
+    return n ? femu_events_info(n, errp) : NULL;
+}
+
 FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
                                     bool reset, Error **errp)
 {

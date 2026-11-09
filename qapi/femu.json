@@ -1382,6 +1382,108 @@
   'returns': 'FemuIoStages' }
 
 ##
+# @FemuEventResult:
+#
+# What happened to one event of an events_file.
+#
+# @pending: its time has not come yet
+#
+# @done: its action ran
+#
+# @failed: its action failed; no later event runs
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuEventResult',
+  'data': [ 'pending', 'done', 'failed' ] }
+
+##
+# @FemuEventsState:
+#
+# Where the events_file of a controller is.
+#
+# @waiting: the controller has not been enabled yet
+#
+# @running: times count from the first enable; events are left
+#
+# @done: every event ran, or one failed
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuEventsState',
+  'data': [ 'waiting', 'running', 'done' ] }
+
+##
+# @FemuEventInfo:
+#
+# One event of an events_file, in time order.
+#
+# @line: its line in the file
+#
+# @action: its action, as the file gives it
+#
+# @time-ms: its time, in ms after the first enable
+#
+# @ran-ms: when it ran, in ms after the first enable; absent while
+#     pending
+#
+# @result: what happened to it
+#
+# @error: why it failed, when it did
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuEventInfo',
+  'data': { 'line': 'int', 'action': 'str', 'time-ms': 'uint64',
+            '*ran-ms': 'int', 'result': 'FemuEventResult',
+            '*error': 'str' } }
+
+##
+# @FemuEvents:
+#
+# The events_file schedule of a FEMU controller.
+#
+# @path: canonical QOM path of the device
+#
+# @state: where the schedule is
+#
+# @events: every event, in time order
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuEvents',
+  'data': { 'path': 'str', 'state': 'FemuEventsState',
+            'events': [ 'FemuEventInfo' ] } }
+
+##
+# @query-femu-events:
+#
+# Report the events_file schedule of a FEMU controller.  It works
+# before the first enable and after a power cut.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# Returns: the schedule and the result of each event
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu-events" }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "state": "running",
+#            "events": [ { "line": 1, "action": "ana=1:3",
+#                          "time-ms": 100, "ran-ms": 100,
+#                          "result": "done" },
+#                        { "line": 2, "action": "ana=1:1",
+#                          "time-ms": 300, "result": "pending" } ] } }
+##
+{ 'command': 'query-femu-events',
+  'data': { '*path': 'str' },
+  'returns': 'FemuEvents' }
+
+##
 # @femu-save-data:
 #
 # Write a checkpoint of a femu device's data in the persist_file format:
