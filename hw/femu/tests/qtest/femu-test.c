@@ -43617,6 +43617,111 @@ static void femu_test_maint_idle(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/*
+ * Kick idle steps until one does work, and return its outcome. A step that
+ * meets booked media work only moves its fence ("none"), so it is retried.
+ */
+static char *femu_maint_kick_work(QTestState *qts)
+{
+    char *what = NULL;
+
+    for (int i = 0; i < 500; i++) {
+        g_free(what);
+        what = femu_gci_kick(qts);
+        if (strcmp(what, "not-due") && strcmp(what, "none")) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    return what;
+}
+
+/*
+ * Space recovery on a nearly full device. 56 lines of 16 pages, 48 of them
+ * for the 768 LPNs; gc_thres_pcent_high=90 forces collection at 5 free
+ * lines. One overwrite of LPN 16k for each k leaves every victim with one
+ * invalid page, below the two that unforced collection asks for, and the
+ * write path ends at 5 free lines. Four reads of LPN 0 queue its line for
+ * a read reclaim, which must wait for space:
+ *   step 1: one forced victim (15 copies, 1 erase), no reclaim
+ *   step 2: the reclaim (16 copies, 1 erase)
+ */
+static void femu_test_maint_idle_space(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[6];
+    uint64_t v[6];
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    char *what;
+    int g0[4];
+    int g[4];
+
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int k = 0; k < 48; k++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, k * 16 * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_gci_state(qts, g0);
+    femu_maint_state(qts, v0);
+    g_test_message("maint-idle-space before: free %d target %d", g0[2],
+                   g0[3]);
+    g_assert_cmpint(g0[3], ==, 5);
+    g_assert_cmpint(g0[2], <=, 5);
+    g_assert_cmpuint(v0[0], ==, 0);
+    g_assert_cmpuint(v0[2], ==, 0);
+
+    what = femu_maint_kick_work(qts);
+    femu_gci_state(qts, g);
+    femu_maint_state(qts, v);
+    g_test_message("maint-idle-space step 1: %s, free %d", what, g[2]);
+    g_assert_cmpstr(what, ==, "gain");
+    g_free(what);
+    g_assert_cmpint(g[0], ==, g0[0] + 1);
+    g_assert_cmpint(g[1], ==, g0[1] + 1);
+    g_assert_cmpuint(v[0], ==, 0);
+    g_assert_cmpuint(v[4] - v0[4], ==, 15);
+    g_assert_cmpuint(v[5] - v0[5], ==, 1);
+
+    what = femu_maint_kick_work(qts);
+    femu_maint_state(qts, v);
+    g_test_message("maint-idle-space step 2: %s", what);
+    g_assert_cmpstr(what, ==, "reclaimed");
+    g_free(what);
+    g_assert_cmpuint(v[0], ==, 1);
+    g_assert_cmpuint(v[2], ==, 1);
+    g_assert_cmpuint(v[4] - v0[4], ==, 15 + 16);
+    g_assert_cmpuint(v[5] - v0[5], ==, 2);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x5a);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* maint_idle needs gc_idle_ms, and bbssd */
 static void femu_test_maint_idle_refused(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -54612,6 +54717,13 @@ static void femu_register_nodes(void)
             });
         }
     }
+    qos_add_test("maint-idle-space", "femu", femu_test_maint_idle_space,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=56,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=90,gc_idle_ms=5,"
+            "read_reclaim_limit=4,maint_idle=on" });
     qos_add_test("maint-idle-refused", "femu", femu_test_maint_idle_refused,
                  NULL);
     qos_add_test("gc-idle-recover", "femu", femu_test_gc_idle_recover,
