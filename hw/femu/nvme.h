@@ -3150,6 +3150,8 @@ typedef struct FemuCtrl {
     bool            power_limit;
     bool            ns_wp;          /* Namespace Write Protection */
     bool            sanitize_ns;    /* Sanitize Namespace (8Ch) */
+    /* shared_ftl=on: the bbssd namespaces share the FTL of namespace 1 */
+    bool            shared_ftl;
     uint32_t        san_ns_target;  /* NSID being sanitized; 0 = none */
     uint64_t        sanns_genctr;   /* GENCTR of log 7Fh */
     int64_t         san_ns_start_ms;

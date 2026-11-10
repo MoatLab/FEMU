@@ -2238,6 +2238,76 @@ static int nvme_check_hmb_namespaces(FemuCtrl *n, const uint8_t *modes,
     return 0;
 }
 
+/*
+ * shared_ftl at realize, also for a controller that joins a subsystem and
+ * skips the namespace checks below.
+ */
+static bool femu_shared_ftl_check(FemuCtrl *n, Error **errp)
+{
+    if (n->shared_ftl && n->subsys) {
+        error_setg(errp, "shared_ftl is not supported with a femu-subsys "
+                   "(FDP shares its FTL already)");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * shared_ftl: the bbssd namespaces place into the FTL of namespace 1, each
+ * in its own slice of the logical pages, so they share the NAND array, the
+ * write buffer and GC. A NAND page must hold blocks of one namespace only.
+ * The refused options keep state for one namespace per FTL: the power cut
+ * recovery and the FTL file walk one namespace, the write protection and
+ * namespace sanitize act on a whole FTL, and DFTL sizes its translation
+ * pages by namespace 1. FDP shares its FTL already.
+ */
+static int nvme_check_shared_ftl(FemuCtrl *n, const uint8_t *modes,
+                                 const uint64_t *sizes, Error **errp)
+{
+    uint64_t page = (uint64_t)n->bb_params.secsz * n->bb_params.secs_per_pg;
+    const char *map = n->bb_params.mapping_scheme;
+    const char *why = NULL;
+
+    if (!n->shared_ftl) {
+        return 0;
+    }
+    if (n->subsys) {
+        why = "a femu-subsys (FDP shares its FTL already)";
+    } else if (n->ns_mgmt) {
+        why = "ns_mgmt";
+    } else if (n->power_loss) {
+        why = "power_loss";
+    } else if (n->persist_ftl) {
+        why = "persist_ftl";
+    } else if (map && *map && strcmp(map, "page")) {
+        why = "a mapping other than page";
+    } else if (n->ns_wp) {
+        why = "ns_wp";
+    } else if (n->sanitize_ns) {
+        why = "sanitize_ns";
+    } else if (n->telemetry_da4) {
+        why = "telemetry_da4";
+    }
+    if (why) {
+        error_setg(errp, "shared_ftl is not supported with %s", why);
+        return -1;
+    }
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (modes[i] != FEMU_BBSSD_MODE) {
+            error_setg(errp, "shared_ftl needs every namespace in bbssd "
+                       "mode; namespace %d is not", i + 1);
+            return -1;
+        }
+        if (!page || sizes[i] % page) {
+            error_setg(errp, "shared_ftl needs namespace sizes in whole NAND "
+                       "pages (%" PRIu64 " bytes); namespace %d has %" PRIu64
+                       " bytes", page, i + 1, sizes[i]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int nvme_check_da4_namespaces(FemuCtrl *n, Error **errp)
 {
     if (n->telemetry_da4 && n->subsys && n->subsys->params.fdp.enabled) {
@@ -2315,6 +2385,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         nvme_check_rotational_namespaces(n, ns_modes, errp) ||
         nvme_check_ocp_namespaces(n, ns_modes, errp) ||
         nvme_check_da4_namespaces(n, errp) ||
+        nvme_check_shared_ftl(n, ns_modes, ns_sizes, errp) ||
         nvme_check_hmb_namespaces(n, ns_modes, errp) ||
         nvme_check_profile_namespaces(n, ns_modes, errp)) {
         g_free(ns_sizes);
@@ -4398,7 +4469,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
         !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
-        !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp)) {
+        !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp) ||
+        !femu_shared_ftl_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -5260,6 +5332,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
+    DEFINE_PROP_BOOL("shared_ftl", FemuCtrl, shared_ftl, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),

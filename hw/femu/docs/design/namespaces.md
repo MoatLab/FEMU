@@ -154,6 +154,31 @@ key space.
 | no `kvssd` with FDP | placement takes every line, leaving the KV store none | `nvme_init_namespaces()` |
 | `meta` and `streams` need every namespace to be `nossd` or `bbssd` | only the block data path carries them | `nvme_init_namespaces()` |
 | with FDP and more than one namespace: all `bbssd` in whole NAND pages, or all `nossd`; no `fdp_trim_erase_all` | the namespaces share one FTL, one slice each, and the endurance group's handles ([FDP](fdp.md#several-namespaces)) | `nvme_check_fdp_namespaces()` |
+| `shared_ftl`: all `bbssd` in whole NAND pages, `mapping=page`, no femu-subsys | the namespaces share one FTL, one slice each (see below) | `nvme_check_shared_ftl()` |
+
+### One FTL for several namespaces
+
+With `shared_ftl=on`, namespaces 2 and up place into the FTL of namespace
+1, as FDP namespaces do. Each namespace keeps the slice of logical pages
+at its backend offset. The namespaces then share the NAND array, the write
+buffer and GC, so the writes of one namespace slow the reads of another.
+
+```text
+ ns1 --+
+       +--> FTL of ns1: one NAND array, one buffer, one GC
+ ns2 --+    ns1 pages [0, a)   ns2 pages [a, b)
+```
+
+- The sum of the namespace sizes must fit the geometry with room for GC.
+- Format of one namespace unmaps only its slice and drops only its
+  buffered pages. The Flush of another namespace still waits for its own
+  write-back.
+- query-femu reports the same device counters for each namespace and
+  names the FTL's namespace in `shared-ftl-nsid`.
+- Not with a femu-subsys (FDP shares its FTL already), `ns_mgmt`,
+  `power_loss`, `persist_ftl`, `ns_wp`, `sanitize_ns` or `telemetry_da4`.
+  The options that refuse several namespaces (idle GC, the pSLC tier,
+  wear limits) still refuse them.
 
 ## Namespace management
 

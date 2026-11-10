@@ -314,6 +314,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "past the FTL step abort at once (CMDA), the others when the step "
       "ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, "
       "ocp, power_loss or a femu-subsys; off (default)" },
+    { "shared_ftl",
+      "bbssd: the namespaces share the FTL and NAND array of namespace 1, "
+      "each in its own slice of the logical pages, so writes and GC of one "
+      "slow the I/O of another; sizes in whole NAND pages; needs "
+      "mapping=page; not with a femu-subsys, ns_mgmt, power_loss, "
+      "persist_ftl, ns_wp, sanitize_ns or telemetry_da4; off (default)" },
     { "power_states",
       "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch "
       "NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is "

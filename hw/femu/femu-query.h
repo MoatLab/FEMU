@@ -146,6 +146,7 @@ typedef struct FemuQueryNs {
     uint16_t nr_phs;
     uint16_t *phs;              /* the namespace's placement handle list */
     uint32_t ftl_nsid;          /* the namespace whose FTL this is */
+    uint32_t shared_nsid;       /* shared_ftl: the namespace whose FTL */
 } FemuQueryNs;
 
 typedef struct FemuQueryReq {

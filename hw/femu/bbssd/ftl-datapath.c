@@ -1492,6 +1492,20 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
     }
     if (ssd->fdp_enabled) {
         ssd_deallocate_fdp_ns(ssd, ns);
+    } else if (ssd->n->shared_ftl) {
+        /*
+         * Only the slice of @ns goes. The other namespaces keep their
+         * pages, their buffered entries and the write-back fence their
+         * Flush waits for. Page mapping only: no translation page.
+         */
+        uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+        uint64_t base = ssd_ns_byte_base(ssd, ns);
+        uint64_t last = MIN(DIV_ROUND_UP(base + ns->size, pg),
+                            (uint64_t)ssd->sp.tt_pgs);
+
+        if (last > base / pg) {
+            ssd_deallocate_lpns(ssd, base / pg, last - 1, &already_invalid);
+        }
     } else {
         ssd_deallocate_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
         /* the translation pages go with the data, unwritten */

@@ -20,7 +20,7 @@ uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns)
 {
     uint64_t end = ns->size;
 
-    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+    if (!n->shared_ftl && (!n->subsys || !n->subsys->endgrp.fdp.enabled)) {
         return end;
     }
     for (int i = 0; i < n->num_namespaces; i++) {
@@ -281,8 +281,17 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 
     usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
-    exposed_pgs = DIV_ROUND_UP(ns->size, page_bytes);
+    exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
 
+    if (exposed_pgs > usable_pgs && n->shared_ftl) {
+        error_setg(errp, "FEMU bbssd: the %u namespaces share one FTL and "
+                   "expose %" PRIu64 " KiB, but this geometry keeps %" PRIu64
+                   " KiB after garbage collection's room; lower devsz_mb or "
+                   "the namespace sizes, or set op_pcent", n->num_namespaces,
+                   bb_ftl_bytes(n, ns) >> 10,
+                   (usable_pgs * page_bytes) >> 10);
+        return -1;
+    }
     if (exposed_pgs > usable_pgs) {
         error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64 " MiB of "
                    "the %" PRIu64 " MiB this geometry has, leaving garbage "
@@ -446,7 +455,9 @@ void bb_buffer_idle(FemuCtrl *n)
     for (uint32_t i = 0; n->dataplane_started && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ns->allocated && ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns))) {
+        /* an FTL that namespaces share takes one step, through its owner */
+        if (ns->allocated && ns->ssd && !ns->ssd_shared &&
+            (NS_BBSSD(ns) || NS_CSD(ns))) {
             ssd_buffer_bg_step(ns->ssd, ssd_now(ns->ssd));
         }
     }
@@ -613,6 +624,12 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         if (bb_init_fdp(n, ns, "bbssd", errp)) {
             return;
         }
+        ns->ssd = n->ssd;
+        ns->ssd_shared = true;
+        return;
+    }
+    /* shared_ftl: realize checked that the FTL holds every slice */
+    if (n->ssd && n->shared_ftl) {
         ns->ssd = n->ssd;
         ns->ssd_shared = true;
         return;

@@ -965,6 +965,10 @@
 # @end-of-life: read-only end-of-life state.  Present only with
 #     eol_read_only and blk_pe_limit.
 #
+# @shared-ftl-nsid: with shared_ftl, the namespace whose FTL holds
+#     this one.  Every namespace of the controller places into that FTL,
+#     so each reports the same geometry and write counters.
+#
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
 #
@@ -991,6 +995,7 @@
             'media': 'FemuMediaTiming',
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*end-of-life': 'FemuEolInfo',
+            '*shared-ftl-nsid': 'uint32',
             '*lines': [ 'FemuLineInfo' ],
             '*blocks': [ 'FemuBlockInfo' ], '*dies': [ 'FemuDieInfo' ],
             '*most-waited': 'FemuDieInfo', '*offset': 'uint32',

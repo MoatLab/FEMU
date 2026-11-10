@@ -44424,6 +44424,196 @@ static void femu_test_cancel_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* mapped, lost and orphan pages of the FTL of device "shftl" */
+static void femu_shftl_check(QTestState *qts, uint64_t *mapped,
+                             uint64_t *lost, uint64_t *orphans)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/shftl',"
+                           "'property':'x-ftl-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           mapped, lost, orphans), ==, 3);
+    qobject_unref(rsp);
+}
+
+/* the first block of each NAND page of @nsid in [0, @pages) reads @pat */
+static void femu_shftl_read(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                            uint32_t pages, uint8_t pat)
+{
+    for (uint32_t p = 0; p < pages; p++) {
+        femu_power_read(c, buf, nsid, p * 8, pat);
+    }
+}
+
+#define FEMU_SHFTL_PAGES    128     /* NAND pages in each namespace */
+
+/*
+ * shared_ftl: two namespaces of 512 KiB place into one FTL. Their first
+ * writes alternate, so each line holds pages of both. Overwrites of
+ * namespace 1 then make GC move live pages of namespace 2. The FTL keeps
+ * every mapping, and both namespaces read back.
+ */
+static void femu_test_shared_ftl(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    QDict *rsp;
+    QDict *ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0x10, false);
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x5b, false);
+    }
+    for (int round = 1; round <= 3; round++) {
+        for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+            femu_power_write(&c, buf, 1, p * 8, 8, 0x10 + round, false);
+        }
+    }
+    ns = femu_query_ns(qts, "'nsid':2", &rsp);
+    g_assert_cmpuint(qdict_get_int(ns, "shared-ftl-nsid"), ==, 1);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "gc-write-pages"), >, 0);
+    qobject_unref(rsp);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 2 * FEMU_SHFTL_PAGES);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_shftl_read(&c, buf, 2, FEMU_SHFTL_PAGES, 0x5b);
+    femu_shftl_read(&c, buf, 1, FEMU_SHFTL_PAGES, 0x13);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Format of one namespace of a shared FTL unmaps only its slice: the
+ * other keeps its mappings and its data.
+ */
+static void femu_test_shared_ftl_format(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0x21, false);
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x22, false);
+    }
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 2 * FEMU_SHFTL_PAGES);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, FEMU_SHFTL_PAGES);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_shftl_read(&c, buf, 2, FEMU_SHFTL_PAGES, 0x22);
+    femu_shftl_read(&c, buf, 1, 4, 0);
+    /* namespace 1 works again; then namespace 2 goes */
+    femu_power_write(&c, buf, 1, 0, 8, 0x23, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_SUCCESS);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 1);
+    femu_power_read(&c, buf, 1, 0, 0x23);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * With a write buffer, pages of namespace 2 may wait in it when namespace
+ * 1 is formatted. The Format drops only the entries of namespace 1, so a
+ * Flush of namespace 2 still maps its pages.
+ */
+static void femu_test_shared_ftl_buffer(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x30, false);
+    for (uint32_t p = 0; p < 8; p++) {
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x31, false);
+    }
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_power_flush(&c, 2);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 8);
+    g_assert_cmpuint(lost, ==, 0);
+    femu_shftl_read(&c, buf, 2, 8, 0x31);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* the refusals of shared_ftl at realize */
+static void femu_test_shared_ftl_refused(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QTestState *qts = ((QFemu *)obj)->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'devsz_mb':16,'mapping':'dftl'", "a mapping other than page" },
+        { "'devsz_mb':16,'ns_wp':true", "ns_wp" },
+        { "'devsz_mb':16,'telemetry_da4':true", "telemetry_da4" },
+        { "'devsz_mb':16,'namespace_sizes':'514K,510K'",
+          "whole NAND pages" },
+        /* each fits alone; together they leave GC no room */
+        { "'devsz_mb':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,"
+          "'blks_per_pl':8,'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
+          "share one FTL" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'shftlr','addr':'5','femu_mode':1,"
+            "'namespaces':2,'shared_ftl':true,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -60646,6 +60836,27 @@ static void femu_register_nodes(void)
             "namespaces=2,sanitize_ops=on,sanitize_ns=on,sanitize_ms=200",
     });
     qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
+                 NULL);
+    qos_add_test("shared-ftl", "femu", femu_test_shared_ftl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=shftl,femu_mode=1,devsz_mb=1,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=8,blks_per_pl=12,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2,namespaces=2,shared_ftl=on",
+    });
+    qos_add_test("shared-ftl-format", "femu", femu_test_shared_ftl_format,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=shftl,femu_mode=1,devsz_mb=1,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=8,blks_per_pl=12,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2,namespaces=2,shared_ftl=on",
+    });
+    qos_add_test("shared-ftl-buffer", "femu", femu_test_shared_ftl_buffer,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=shftl,femu_mode=1,devsz_mb=1,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=8,blks_per_pl=12,"
+            "pls_per_lun=1,luns_per_ch=2,nchs=2,namespaces=2,shared_ftl=on,"
+            "buffer_size=16,vwc=1",
+    });
+    qos_add_test("shared-ftl-refused", "femu", femu_test_shared_ftl_refused,
                  NULL);
     qos_add_test("cancel-deferred", "femu", femu_test_cancel_deferred,
                  &(QOSGraphTestOptions) {

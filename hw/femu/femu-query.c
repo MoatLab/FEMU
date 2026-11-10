@@ -324,6 +324,9 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
             q->max_dies = limit;
             q->dies = g_new0(NandDieStat, limit);
         }
+        if (ns->ctrl && ns->ctrl->shared_ftl) {
+            q->shared_nsid = ssd_owner_nsid(ns->ssd);
+        }
         if (ns->ssd->fdp_enabled) {
             struct ssd *ssd = ns->ssd;
             uint32_t total = ssd->rg ? ssd->nrg * ssd->rg[0].tt_nru : 0;
@@ -765,6 +768,10 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
                     (double)q->parity_pages) / (double)q->host_pages;
     }
     info->counters = ctr;
+    if (q->shared_nsid) {
+        info->has_shared_ftl_nsid = true;
+        info->shared_ftl_nsid = q->shared_nsid;
+    }
 
     if (q->eol_mode) {
         FemuEolInfo *eol = g_new0(FemuEolInfo, 1);

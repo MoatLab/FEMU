@@ -533,6 +533,7 @@ own description allows. A message keeps its format directives (`%s`,
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
 - persist_file '%s' does not match this device: the mode, the backend size (%
 - shared namespace mode and capabilities must match
+- shared_ftl needs every namespace in bbssd mode; namespace %d is not
 - test-storm is threads,pages,iters,mode,seed with at most one thread per vCPU
 
 ## `mp_program`
@@ -602,6 +603,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
 - FEMU bbssd: the %u namespaces expose %
+- FEMU bbssd: the %u namespaces share one FTL and expose %
 - FEMU: gc_idle_ms is not supported with shared namespaces
 - a rotational subsystem needs NVM namespaces; namespace %d is %s
 - bbssd_ns_limit must be between 1 and %u and cover the boot namespaces
@@ -985,6 +987,12 @@ own description allows. A message keeps its format directives (`%s`,
 ## `secsz`
 
 - femu: onfi_mode needs an even page size on the bus (secsz * secs_per_pg + onfi_spare_bytes)
+
+## `shared_ftl`
+
+- shared_ftl is not supported with %s
+- shared_ftl needs every namespace in bbssd mode; namespace %d is not
+- shared_ftl needs namespace sizes in whole NAND pages (%
 
 ## `shutdown_ms`
 
