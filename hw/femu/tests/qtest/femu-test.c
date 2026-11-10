@@ -43785,6 +43785,18 @@ static uint16_t femu_sanns_sstat(FemuCtrlState *c, uint32_t nsid,
     return qtest_readw(c->pdev->bus->qts, buf + 2);
 }
 
+/* Dword 1 of the completion that femu_complete() took last from @q */
+static uint32_t femu_sanns_dw1(FemuCtrlState *c, FemuQueue *q)
+{
+    uint64_t slot = q->cq_addr +
+                    ((q->cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
+                    sizeof(NvmeCqe);
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, slot, &cqe, sizeof(cqe));
+    return le32_to_cpu(cqe.dw1);
+}
+
 /* log 7Fh with NLT @nlt into @buf: the number of NSIDs; GENCTR too */
 static uint64_t femu_sanns_list(FemuCtrlState *c, uint64_t buf, bool nlt,
                                 uint64_t *gen)
@@ -43935,6 +43947,11 @@ static void femu_test_sanitize_ns(void *obj, void *data,
                     NVME_SUCCESS);
     g_assert_cmpint(cid, ==, want);
     g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sanns_dw1(&c, &c.admin), ==, 1);
+    /* an inactive NSID has no log 81h */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 3,
+                                0x81 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    NVME_INVALID_NSID);
     g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x401);
     g_assert_cmphex(qtest_readw(qts, buf), ==, 0xffff);
     g_assert_cmphex(qtest_readl(qts, buf + 4), ==, 0x4);
@@ -43957,6 +43974,19 @@ static void femu_test_sanitize_ns(void *obj, void *data,
     /* now namespace 2: namespace 1 keeps what was written since */
     g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, NVME_SUCCESS);
     qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    /*
+     * No AER was outstanding. A read with RAE keeps the event, so the
+     * next AER returns it with NSID 2 in Dword 1.
+     */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 2,
+                                0x81 | 1 << 15 | (512 / 4 - 1) << 16, 0, 0,
+                                buf), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sanns_dw1(&c, &c.admin), ==, 2);
     g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0x401);
     for (i = 0; i < 8; i++) {
         femu_power_read(&c, buf, 2, i, 0);
