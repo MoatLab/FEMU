@@ -6305,6 +6305,263 @@ static void femu_test_thermal_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+static uint16_t femu_identify(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
+                              uint32_t cntid, uint64_t buf);
+
+#define FEMU_LOG_POWER_MEAS     0x25
+#define FEMU_FID_POWER_MEAS     0x25
+#define FEMU_PM_TS              0x100000000ULL
+#define FEMU_PM_MS              ((1ULL << 48) - 1)
+
+/* the Power Measurement log page (Figure 297), 64 bytes */
+static void femu_pmeas_read(FemuCtrlState *c, uint64_t log, uint8_t *page)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, FEMU_LOG_POWER_MEAS, log, 64, 0)),
+                    ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, page, 64);
+}
+
+/* Get Log Page 25h with @nsid */
+static uint16_t femu_pmeas_log_ns(FemuCtrlState *c, uint32_t nsid,
+                                  uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_POWER_MEAS | (64 / 4 - 1) << 16);
+    return femu_admin(c, &cmd);
+}
+
+/*
+ * Power Measurement with power_meas=on, idle_mw 500 and 1 mJ per plane
+ * program. 1000 programs booked before the first tick give 1 J in that
+ * interval: 1.5 W (15000 at 0.0001 W, scale 01b). The next two intervals
+ * are 0.5 W, so after 3 s the average is 0.8333 W (8333). Start with SMT 1
+ * stops after 60 intervals; the log stays across a controller reset.
+ */
+static void femu_test_pmeas(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t page[64];
+    uint32_t result;
+    uint64_t smts;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* a host Timestamp, so the log's timestamps have a known floor */
+    qtest_writeq(qts, buf, FEMU_PM_TS);
+    g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==, NVME_SUCCESS);
+
+    /* CTRATT.PMS, IPMSR 1 s (SRS 5h, SRV 100), MSMT 0 */
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, log), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, log + 96) & (1u << 21), ==, 1u << 21);
+    g_assert_cmphex(qtest_readw(qts, log + 392), ==, 0x0564);
+    g_assert_cmphex(qtest_readw(qts, log + 394), ==, 0);
+
+    /* nothing measured yet: MIPWRTS and EPF only */
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(page[0], ==, 0);
+    g_assert_cmpuint(page[1], ==, 0);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(ldl_le_p(page + 4), ==, 64);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmpuint(ldq_le_p(page + 16), ==, 0);
+    g_assert_cmpuint(lduw_le_p(page + 24), ==, 8);
+    g_assert_cmpuint(lduw_le_p(page + 26), ==, 250);
+    g_assert_cmpuint(lduw_le_p(page + 28), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16);
+    g_assert_cmpuint(ldq_le_p(page + 48), ==, 0);
+    g_assert_cmpuint(page[56], ==, 255);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0);
+
+    /* only type 0h; only actions 0h and 1h; not saveable */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x11, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x2, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, true, 0,
+                                             0x1, NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 3, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x4);
+
+    /*
+     * Feature 25h takes NSID 0 only, log 25h 0 or FFFFFFFFh; a refused
+     * Start changes nothing.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 1,
+                                             0x1, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false,
+                                             NVME_NSID_BROADCAST, 0x1,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 1, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_pmeas_log_ns(&c, 1, log)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_pmeas_log_ns(&c, 0, log)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 1), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, log + 2), ==, 0x000c);
+
+    /* Start: PMGN 1, PME 1, still no interval */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x1, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x101);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16);
+    qtest_memset(qts, buf, 0x5d, 16 * 4096);
+    for (i = 0; i < 1000; i += 8) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 8, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000d);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 1);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 15000);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16 | 15000);
+    g_assert_cmpuint(ldq_le_p(page + 48) & FEMU_PM_MS, >=, FEMU_PM_TS);
+
+    qtest_clock_step(qts, 2 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 8333);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16 | 15000);
+
+    /* Stop: PME 0, SMTS set, the counts kept */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x0, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x100);
+    qtest_clock_step(qts, 2 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    smts = ldq_le_p(page + 16);
+    g_assert_cmpuint(smts & FEMU_PM_MS, >=, FEMU_PM_TS);
+
+    /* a controller reset keeps the log and the feature state */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_writeq(qts, buf, 2 * FEMU_PM_TS);
+    g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==, NVME_SUCCESS);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(page[1], ==, 1);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    g_assert_cmpuint(ldq_le_p(page + 16), ==, smts);
+
+    /* Start with SMT 1 minute: SMTR 1, then a stop after 60 intervals */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             1u << 16 | 0x1, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x10201);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 1);
+    qtest_clock_step(qts, 59 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 59);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000d);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 1);
+    qtest_clock_step(qts, 6 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 60);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 5000);
+    g_assert_cmpuint(ldq_le_p(page + 16) & FEMU_PM_MS, >=, 2 * FEMU_PM_TS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x200);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* power_meas off (default): no PMS bit, no log 25h, no feature 25h */
+static void femu_test_pmeas_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, log), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, log + 96) & (1u << 21), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, log + 392), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_POWER_MEAS, log, 64, 0)),
+                    ==, NVME_INVALID_LOG_ID);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x00, log, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, log + 4 * FEMU_LOG_POWER_MEAS), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 0, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x1, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    guest_free(alloc, log);
+    femu_disable(&c);
+}
+
+/*
+ * power_meas refusals at realize. The main device is in nssub with
+ * power_meas on, so a second controller there is refused.
+ */
+static void femu_test_pmeas_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'power_meas':true,'persist_file':'pmeas.img'",
+          "power_meas is not supported with persist_file" },
+        { "'power_meas':true,'ns_mgmt':true",
+          "power_meas is not supported with namespace management" },
+        { "'subsys':'nssub'", "a power_meas subsystem takes a single" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'pmeas','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /*
  * Log page C0h counts the NAND pages a host write covers only in part. With
  * 512-byte blocks and 4 KiB pages: one block inside a page is one; a whole
@@ -9731,9 +9988,6 @@ static void femu_test_die_parity(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
     guest_free(alloc, buf);
 }
-
-static uint16_t femu_identify(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
-                              uint32_t cntid, uint64_t buf);
 
 /* Set Features 0Dh: @ehm, @hsize pages, a descriptor list at @list */
 static uint16_t femu_hmb_set(FemuCtrlState *c, bool ehm, uint32_t hsize,
@@ -56517,6 +56771,18 @@ static void femu_register_nodes(void)
             "idle_mw=1000"
     });
     qos_add_test("thermal-refused", "femu", femu_test_thermal_refused, NULL);
+    qos_add_test("power-meas-log", "femu", femu_test_pmeas,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,power_meas=on,idle_mw=500,energy_prog_nj=1000000"
+    });
+    qos_add_test("power-meas-off", "femu", femu_test_pmeas_off, NULL);
+    qos_add_test("power-meas-refused", "femu", femu_test_pmeas_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,power_meas=on,subsys=nssub",
+        .before = femu_ns_subsys_before,
+    });
     qos_add_test("partial-writes-bbssd", "femu", femu_test_partial_writes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,oncs=0x1c"

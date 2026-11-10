@@ -725,7 +725,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "level at this temperature in kelvin and leaves 2 K below; 0 "
       "(default) is off; ocp=on uses 350 K and 348 K" },
     { "idle_mw",
-      "power with no NAND operations, mW, for the thermal model" },
+      "power with no NAND operations, mW, for the thermal model and "
+      "power_meas" },
+    { "power_meas",
+      "Power Measurement (Base 2.3, 8.1.19.1): log page 25h and feature 25h, "
+      "estimated from idle_mw and energy_*_nj; one controller, not with "
+      "persist_file, ns_mgmt or shared namespaces; off (default)" },
     { "thermal_step_ms",
       "how often the thermal model updates the temperature, ms, 1 to 60000; "
       "100 (default)" },

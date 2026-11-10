@@ -535,6 +535,12 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
             error_setg(errp, "a Streams subsystem takes a single controller");
             return -1;
         }
+        /* log 25h is global to the subsystem; FEMU keeps it per controller */
+        if (other && (n->power_meas || other->power_meas)) {
+            error_setg(errp, "a power_meas subsystem takes a single "
+                       "controller");
+            return -1;
+        }
     }
 
     cntlid = femu_subsys_register_ctrl(n);
@@ -2715,6 +2721,14 @@ static void nvme_init_ctrl(FemuCtrl *n)
         id->ctratt |= cpu_to_le32(1 << 3);
         id->rrls = cpu_to_le16(NVME_RRLS);
     }
+    /*
+     * PMS, and the sample interval: one sample a second, SRS 5h (10 ms)
+     * times SRV 100. MSMT 0: any SMT.
+     */
+    if (n->power_meas) {
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_PMS);
+        id->ipmsr = cpu_to_le16(5 << 8 | 100);
+    }
 
     /* an extended self-test takes a minute at most; both complete at once */
     id->edstt        = cpu_to_le16(1);
@@ -4375,7 +4389,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_check_multiplane_props(n, errp)) {
         return;
     }
-    if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp)) {
+    if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
+        !femu_pmeas_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -4691,6 +4706,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         n->ftl_thread_running = true;
     }
     femu_thermal_start(n);
+    femu_pmeas_start(n);
 }
 
 /*
@@ -4861,6 +4877,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
     femu_debug("femu_exit starting!\n");
     femu_thermal_stop(n);
+    femu_pmeas_stop(n);
     /* no scheduled action may reach a device that is going */
     femu_events_exit(n);
 
@@ -5228,6 +5245,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("thermal_tau_ms", FemuCtrl, thermal_tau_ms, 0),
     DEFINE_PROP_UINT32("thermal_r", FemuCtrl, thermal_r, 0),
     DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
+    DEFINE_PROP_BOOL("power_meas", FemuCtrl, power_meas, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),

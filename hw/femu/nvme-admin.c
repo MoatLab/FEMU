@@ -26,6 +26,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
     [NVME_FDP_MODE]                 = true,
     [NVME_FDP_EVENTS]               = true,
+    [NVME_POWER_MEAS]               = true,
     [NVME_KV_FEAT_CONFIG]           = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
@@ -70,6 +71,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_RESV_NOTIFY_MASK]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_RESV_PERSISTENCE]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
+    [NVME_POWER_MEAS]               = NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_SAVE |
@@ -320,6 +322,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->subsys && n->subsys->endgrp.fdp.enabled;
     case NVME_HCTM:
         return femu_hctm_supported(n);
+    case NVME_POWER_MEAS:
+        return n->power_meas;
     case NVME_HOST_IDENTIFIER:
     case NVME_RESV_NOTIFY_MASK:
     case NVME_RESV_PERSISTENCE:
@@ -1964,6 +1968,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (fid == NVME_READ_RECOVERY && (nsid || dw11 & 0xffff0000u)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* NVM subsystem scope with no NSID use: NSID 0 only (4.4) */
+    if (fid == NVME_POWER_MEAS && nsid) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     /* OCP GETF-4: the NVM subsystem features take NSID 0 or FFFFFFFFh */
     if (nvme_ocp_subsys_fid(fid) && nsid && nsid != NVME_NSID_BROADCAST) {
@@ -2121,6 +2129,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         cqe->n.result = cpu_to_le32((uint32_t)n->hctm_tmt1 << 16 |
                                     n->hctm_tmt2);
         break;
+    case NVME_POWER_MEAS:
+        cqe->n.result = cpu_to_le32(femu_pmeas_get(n));
+        break;
     case NVME_OCP_DSSD_AEN_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_aen_config);
         break;
@@ -2193,7 +2204,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (nvme_resv_fid(fid)) {
         return nvme_resv_set_feature(n, cmd);
     }
-    if (fid == NVME_READ_RECOVERY && nsid) {
+    if ((fid == NVME_READ_RECOVERY || fid == NVME_POWER_MEAS) && nsid) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -2513,6 +2524,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return femu_ocp_lat_set(n, cmd);
     case NVME_OCP_EVENT_INJECTION:
         return femu_ocp_inj_set(n, cmd);
+    case NVME_POWER_MEAS: {
+        uint32_t result;
+        uint16_t status = femu_pmeas_set(n, dw11, &result);
+
+        if (status) {
+            return status;
+        }
+        cqe->n.result = cpu_to_le32(result);
+        break;
+    }
     case NVME_READ_RECOVERY: {
         /*
          * Figures 419 and 420: CDW12 bits 3:0 the level; NVMSETID (CDW11
@@ -2817,7 +2838,7 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
-        } else if (fid == NVME_SPINUP_CONTROL ||
+        } else if (fid == NVME_SPINUP_CONTROL || fid == NVME_POWER_MEAS ||
                    fid == NVME_READ_RECOVERY || nvme_ocp_subsys_fid(fid)) {
             scope = NVME_FID_SCOPE_SUBSYS;
         } else if (fid == NVME_FDP_EVENTS) {
@@ -4763,6 +4784,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_endgrp_info(n, len, off, cmd);
     case NVME_LOG_ROTATIONAL:
         return nvme_rotational_log(n, len, off, cmd);
+    case NVME_LOG_POWER_MEAS:
+        return femu_pmeas_log(n, cmd, len, off);
     case NVME_LOG_FDP_CONFS:
         return nvme_fdp_confs(n, lspi, len, off, cmd);
     case NVME_LOG_FDP_RUH_USAGE:

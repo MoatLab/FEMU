@@ -867,6 +867,11 @@ own description allows. A message keeps its format directives (`%s`,
 - sanitize_ms and sanitize_ops do not work with power_loss yet
 - simulated power loss requires a realized power_loss device
 
+## `power_meas`
+
+- a power_meas subsystem takes a single controller
+- femu: power_meas is not supported with %s
+
 ## `power_states`
 
 - power_states does not work with a femu-subsys yet

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 286 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 287 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -225,7 +225,8 @@ Devices:
 | `energy_erase_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane erase in nJ, for the energy total in log page C0h; 0 (default) gives no figure |
 | `thermal_tau_ms` | `uint32` | `0` | time constant of the package, ms: the composite temperature moves towards temperature + power * thermal_r at this rate, where power is idle_mw plus the energy of the NAND plane operations (energy_*_nj) per second; 0 (default) turns the model off |
 | `thermal_r` | `uint32` | `0` | thermal resistance from the package to ambient, mK per mW (K per W); needed with thermal_tau_ms |
-| `idle_mw` | `uint32` | `0` | power with no NAND operations, mW, for the thermal model |
+| `idle_mw` | `uint32` | `0` | power with no NAND operations, mW, for the thermal model and power_meas |
+| `power_meas` | `bool` | `off` | Power Measurement (Base 2.3, 8.1.19.1): log page 25h and feature 25h, estimated from idle_mw and energy_*_nj; one controller, not with persist_file, ns_mgmt or shared namespaces; off (default) |
 | `thermal_step_ms` | `uint32` | `100` | how often the thermal model updates the temperature, ms, 1 to 60000; 100 (default) |
 | `throttle` | `bool` | `off` | bbssd, CSD: thermal throttling on the thermal model (needs thermal_tau_ms); enables feature 10h (HCTM) and stretches NAND array time at the light or heavy level |
 | `throttle_light_pct` | `uint32` | `150` | with throttle: NAND array time at the light level, in percent of nominal, 100 to throttle_heavy_pct |

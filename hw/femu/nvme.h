@@ -152,6 +152,7 @@ enum NvmeIdCtrlCtratt {
     NVME_CTRATT_UUIDL   = 1 <<  9,
     NVME_CTRATT_ELBAS   = 1 << 15,
     NVME_CTRATT_FDPS    = 1 << 19,
+    NVME_CTRATT_PMS     = 1 << 21,   /* Power Measurement Support */
 };
 
 typedef struct QEMU_PACKED NvmeFdpEvent {
@@ -1299,6 +1300,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
+    NVME_LOG_POWER_MEAS     = 0x25,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
     NVME_LOG_RESV_NOTIFY        = 0x80,
     NVME_LOG_SANITIZE           = 0x81,
@@ -1501,7 +1503,10 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint32_t    pels;           /* Persistent Event log size, 64 KiB units */
     uint8_t     rsvd356[4];
     uint16_t    mptfawr;        /* Max Processing Time for FW Activation w/o Reset */
-    uint8_t     rsvd362[150];
+    uint8_t     rsvd362[30];
+    uint16_t    ipmsr;          /* Interval Power Measurement Sample Rate */
+    uint16_t    msmt;           /* Maximum Stop Measurement Time, min */
+    uint8_t     rsvd396[116];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -1636,6 +1641,7 @@ enum NvmeFeatureIds {
     NVME_SPINUP_CONTROL             = 0x1a,
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
+    NVME_POWER_MEAS                 = 0x25, /* power_meas=on */
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_HOST_IDENTIFIER            = 0x81,
     NVME_RESV_NOTIFY_MASK           = 0x82,
@@ -3031,6 +3037,23 @@ typedef struct FemuCtrl {
     int64_t         thermal_deadline;
     uint64_t        *thermal_ops;   /* plane ops priced, 3 per namespace */
     /*
+     * Power Measurement log 25h and feature 25h (femu-pmeas.c), under the
+     * BQL. The state stays across resets and power cuts.
+     */
+    bool            power_meas;
+    QEMUTimer       *pm_timer;
+    uint64_t        *pm_ops;        /* plane ops at the interval start */
+    int64_t         pm_last_ns;     /* the interval start */
+    bool            pm_on;          /* PME */
+    uint8_t         pm_gen;         /* PMGN */
+    uint16_t        pm_smt;         /* SMT of the last start, minutes */
+    uint32_t        pm_count;       /* PMC */
+    uint64_t        pm_samples;     /* the samples in pm_sum_uw */
+    uint64_t        pm_sum_uw;
+    uint64_t        pm_max_uw;
+    uint64_t        pm_max_ts;      /* MIPWRT */
+    uint64_t        pm_stop_ts;     /* SMTS */
+    /*
      * Thermal throttle (femu-thermal.c). The policy runs under the BQL;
      * the media layer reads only throttle_pct_now, atomically.
      */
@@ -3659,6 +3682,13 @@ void nvme_resv_realize(FemuCtrl *n);
 void nvme_resv_exit(FemuCtrl *n);
 bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
+bool femu_pmeas_check(FemuCtrl *n, Error **errp);
+void femu_pmeas_start(FemuCtrl *n);
+void femu_pmeas_stop(FemuCtrl *n);
+uint16_t femu_pmeas_set(FemuCtrl *n, uint32_t dw11, uint32_t *result);
+uint32_t femu_pmeas_get(FemuCtrl *n);
+uint16_t femu_pmeas_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                        uint64_t off);
 bool femu_temp_condition(FemuCtrl *n);
 void femu_temp_eval(FemuCtrl *n);
 void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe);

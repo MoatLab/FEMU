@@ -76,7 +76,7 @@ bool femu_thermal_check(FemuCtrl *n, Error **errp)
     }
 
     if (!n->thermal_tau_ms) {
-        if (n->thermal_r || n->idle_mw) {
+        if (n->thermal_r || (n->idle_mw && !n->power_meas)) {
             warn_report("femu: thermal_r and idle_mw have no effect unless "
                         "thermal_tau_ms is set");
         }

@@ -197,6 +197,44 @@ comes from the user; FEMU has no built-in figures.
   `-icount`. `thermal_tau_ms` needs `thermal_r`; `thermal_step_ms` is 1 to
   60000.
 
+## Power Measurement (log 25h, feature 25h)
+
+With `power_meas=on` the controller reports the Power Measurement
+capability (Base 2.3, 8.1.19.1): CTRATT bit 21, log page 25h and feature
+25h. The power is an estimate from the same energy figures as the thermal
+model, so the log sets the Estimated Power Flag (EPF).
+
+```text
+  Set Features 25h, ACT 1h (Start), PMTS 0h:
+    PMC := 0, PMGN := PMGN + 1, PME := 1, SMTR := SMT
+  every 1 s of virtual time while PME = 1:
+    P = idle_mw + NAND energy booked in the interval / the interval
+    PMC + 1; average and maximum of P; MIPWRT := the Timestamp now
+  SMT minutes of intervals, or Set Features 25h, ACT 0h (Stop):
+    PME := 0, SMTR := 0, SMTS := the Timestamp now
+  Get Features 25h, Dword 0: SMTR (31:16), PMGN (15:8), PME (0)
+```
+
+- The only measurement type is 0h, the NVM subsystem total power. PMTS
+  1h to Fh and ACT values other than 0h and 1h fail with Invalid Field.
+- Power fields use scale 01b (0.0001 W) while the value fits in 16 bits,
+  else 10b (0.01 W). With PMC 0 they read 0 in scale 01b. IPWRPE is 255
+  (not reported).
+- There is no histogram: NPHDS and NPHD are 0, PHBS is 250, PHDS is 8.
+- IPMSR is 1 s (one sample an interval); MSMT is 0, so any SMT is taken.
+- Intervals start on fixed one-second boundaries from Start. A tick that
+  fires after a boundary counts each whole interval it passed and spreads
+  their energy evenly.
+- Feature 25h takes NSID 0 only; log 25h takes NSID 0 or FFFFFFFFh.
+  Other values fail with Invalid Field.
+- Energy is booked when the FTL books an operation, so an interval can
+  carry the energy of an operation that ends in the next one.
+- The state stays across a controller reset and a power cut, and
+  collection does not stop at a shutdown, so NCPDF stays 0.
+- One controller per femu-subsys. Refused with `persist_file`, namespace
+  management, shared namespaces, `cxl_ssd` and `-icount`. The Power
+  Threshold feature (24h) is not offered.
+
 ## Persistent Event log retention
 
 The Persistent Event log (0Dh) lives in memory and is lost when QEMU exits.

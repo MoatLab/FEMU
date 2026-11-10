@@ -387,6 +387,8 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return n->reservations ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_LOCKDOWN:
         return n->lockdown ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_POWER_MEAS:
+        return n->power_meas ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_SANITIZE:
         return nvme_can_sanitize(n) ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_ENDGRP:
