@@ -2725,6 +2725,10 @@ static void nvme_init_ctrl(FemuCtrl *n)
      * PMS, and the sample interval: one sample a second, SRS 5h (10 ms)
      * times SRV 100. MSMT 0: any SMT.
      */
+    /* NWPWPS: No Write Protect and Write Protect only (no RPMB) */
+    if (n->ns_wp) {
+        id->nwpc = 1;
+    }
     if (n->power_meas) {
         id->ctratt |= cpu_to_le32(NVME_CTRATT_PMS);
         id->ipmsr = cpu_to_le16(5 << 8 | 100);
@@ -4390,7 +4394,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
-        !femu_pmeas_check(n, errp)) {
+        !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -5247,6 +5251,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
     DEFINE_PROP_BOOL("power_meas", FemuCtrl, power_meas, false),
     DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
+    DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),

@@ -738,6 +738,36 @@ are always the first states; the rest are renumbered from 0.
 - Not with `ocp=on`: OCP 2.7 NVMe-OPT-21 forbids 23h, and
   `power_states` is refused with `ocp` already.
 
+With `ns_wp=on`, Namespace Write Protection (84h, Base 2.3 8.1.17) takes
+the No Write Protect (0) and Write Protect (1) states of a namespace, or
+of all for NSID FFFFFFFFh. The other two states need an RPMB, which FEMU
+does not have, so they fail with Feature Not Changeable.
+
+```text
+ Set 84h, WPS 1: refuse new writes --> wait for fetched requests to reach
+   the FTL (1 s at most, else Command Interrupted, state unchanged)
+   --> destage the namespace's write buffer --> release its Streams
+ I/O to a protected namespace (Figure 671):
+   Read, Compare, Verify, Reservations, DSM without AD   as before
+   Flush                                                 success, no effect
+   Write, Write Zeroes, Write Uncorrectable, DSM with AD,
+   Copy into it, I/O Management, others                  20h
+ Admin: Format NVM or Sanitize that covers it, Get LBA Status on it,
+   Streams Allocate Resources on it                      20h
+```
+
+- Identify reports NWPC bit 0, and NSATTR bit 0 (CWP) for a protected
+  namespace in CNS 00h and 08h. SMART does not report the media as
+  read-only.
+- A reset and a power cut keep the state. Default and Saved read the
+  current state, since the spec gives 84h no default.
+- A Copy from a protected namespace into another one works.
+- bbssd and NoSSD namespaces only. Not with FDP (its namespaces share
+  one write buffer), `ns_mgmt`, shared namespaces, `cxl_ssd` or
+  `persist_file`.
+- Logs 12h and 05h report NCC and NIC for 84h and Set Features: one
+  Set can change CWP of several namespaces.
+
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
 and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,

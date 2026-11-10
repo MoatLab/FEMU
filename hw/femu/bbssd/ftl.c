@@ -1059,7 +1059,13 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          * if pages are being held back, a flush has to write them out. Doing
          * this only for an enabled cache would let the host disable the cache
          * and then be told a flush succeeded with pages still buffered.
+         *
+         * A write protected namespace has nothing buffered: the change to
+         * that state destaged it. Its Flush has no effect (Figure 671).
          */
+        if (femu_wp(req->ns)) {
+            break;
+        }
         lat = ssd_buffer_destage(ssd, 0, req->stime);
         /*
          * Pages the idle write-back or a cache disable took out may still be

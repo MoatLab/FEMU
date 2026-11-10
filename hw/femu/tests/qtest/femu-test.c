@@ -43245,6 +43245,437 @@ static void femu_test_power_limit_sysreset(void *obj, void *data,
     qtest_pc_shutdown(qs);
 }
 
+#define FEMU_FID_NS_WP          0x84
+#define FEMU_SC_NS_WP           0x020
+#define FEMU_SC_INTERRUPTED     0x021
+
+/* an I/O or admin command of @opcode on @nsid, with CDW10 to 12 and PRP1 */
+static uint16_t femu_wp_cmd(FemuCtrlState *c, bool admin, uint8_t opcode,
+                            uint32_t nsid, uint32_t dw10, uint32_t dw11,
+                            uint32_t dw12, uint64_t prp1)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(prp1);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(admin ? femu_admin(c, &cmd) : femu_io(c, &cmd));
+}
+
+static uint16_t femu_wp_set(FemuCtrlState *c, uint32_t nsid, uint32_t wps)
+{
+    return FEMU_SC(femu_set_feature(c, FEMU_FID_NS_WP, false, nsid, wps,
+                                    NULL));
+}
+
+static uint32_t femu_wp_get(FemuCtrlState *c, uint32_t nsid, uint8_t sel)
+{
+    uint32_t res = 0xff;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, FEMU_FID_NS_WP, sel, nsid,
+                                             0, &res)), ==, NVME_SUCCESS);
+    return res;
+}
+
+/* NSATTR bit 0 (CWP) in CNS 00h byte 99 and CNS 08h byte 8 */
+static void femu_wp_check_cwp(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                              bool cwp)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_identify(c, nsid, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 99) & 1, ==, cwp);
+    g_assert_cmphex(femu_identify(c, nsid, 0x08, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 8) & 1, ==, cwp);
+}
+
+/*
+ * Namespace Write Protection on two namespaces (oncs=0x19f). Each command
+ * runs on namespace 1 unprotected first; protected, the ones that change
+ * it fail with 20h and change nothing, and the others work. Namespace 2
+ * stays writable, and a Format of all namespaces fails before it changes
+ * namespace 2. A reset keeps the state.
+ */
+static void femu_test_ns_wp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const struct {
+        const char *name;
+        bool admin;
+        uint8_t opcode;
+        uint32_t dw10, dw11, dw12;
+        bool allowed;
+    } cmds[] = {
+        { "write", false, NVME_CMD_WRITE, 8, 0, 7, false },
+        { "write zeroes", false, NVME_CMD_WRITE_ZEROES, 8, 0, 7, false },
+        { "write zeroes deac", false, NVME_CMD_WRITE_ZEROES, 8, 0,
+          7 | 1u << 25, false },
+        { "write uncorrectable", false, NVME_CMD_WRITE_UNCOR, 16, 0, 7,
+          false },
+        { "dsm deallocate", false, NVME_CMD_DSM, 0, 1 << 2, 0, false },
+        { "copy", false, NVME_CMD_COPY, 24, 0, 0, false },
+        { "dsm hint", false, NVME_CMD_DSM, 0, 1 << 0, 0, true },
+        { "read", false, NVME_CMD_READ, 0, 0, 7, true },
+        { "compare", false, NVME_CMD_COMPARE, 0, 0, 7, true },
+        { "verify", false, NVME_CMD_VERIFY, 0, 0, 7, true },
+        { "flush", false, NVME_CMD_FLUSH, 0, 0, 0, true },
+    };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* NWPC, log 12h (FSUPP, NCC, NIC, namespace scope), log 05h */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 531), ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FID_NS_WP), ==,
+                    0x0010000d);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09) & 0xc, ==, 0xc);
+
+    /* selects, saving, the states FEMU does not offer, NSIDs */
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    g_assert_cmphex(femu_wp_get(&c, 1, 3), ==, 0x6);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_NS_WP, 0,
+                                             NVME_NSID_BROADCAST, 0, NULL)),
+                    ==, NVME_INVALID_NSID);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_NS_WP, true, 1, 1,
+                                             NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 2), ==, NVME_FEAT_NOT_CHANGEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 3), ==, NVME_FEAT_NOT_CHANGEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 4), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, false);
+
+    /* the DSM range and the Copy descriptor: blocks 0 to 7 */
+    qtest_memset(qts, list, 0, 64);
+    qtest_writel(qts, list + 4, 8);
+    qtest_writeq(qts, list + 8, 0);
+    qtest_writew(qts, list + 32 + 16, 7);
+    qtest_writeq(qts, list + 32 + 8, 0);
+
+    /* unprotected: every command works */
+    for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+        uint64_t prp = cmds[i].opcode == NVME_CMD_DSM ? list :
+                       cmds[i].opcode == NVME_CMD_COPY ? list + 32 : buf;
+
+        femu_power_write(&c, buf, 1, 0, 8, 0x5c, false);
+        g_test_message("unprotected %s", cmds[i].name);
+        g_assert_cmphex(femu_wp_cmd(&c, cmds[i].admin, cmds[i].opcode, 1,
+                                    cmds[i].dw10, cmds[i].dw11, cmds[i].dw12,
+                                    prp), ==, NVME_SUCCESS);
+    }
+
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    NVME_SUCCESS);
+
+    /* protected: data 0xa1 in blocks 0 to 31, nothing may change it */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 16, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 24, 8, 0xa1, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 1, 1), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 1, 2), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 2, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    femu_wp_check_cwp(&c, buf, 2, false);
+    for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+        uint64_t prp = cmds[i].opcode == NVME_CMD_DSM ? list :
+                       cmds[i].opcode == NVME_CMD_COPY ? list + 32 : buf;
+
+        if (cmds[i].opcode == NVME_CMD_WRITE ||
+            cmds[i].opcode == NVME_CMD_COMPARE) {
+            qtest_memset(qts, buf, cmds[i].opcode == NVME_CMD_WRITE ?
+                         0xee : 0xa1, 4096);
+        }
+        g_test_message("protected %s", cmds[i].name);
+        g_assert_cmphex(femu_wp_cmd(&c, cmds[i].admin, cmds[i].opcode, 1,
+                                    cmds[i].dw10, cmds[i].dw11, cmds[i].dw12,
+                                    prp), ==,
+                        cmds[i].allowed ? NVME_SUCCESS : FEMU_SC_NS_WP);
+    }
+    for (i = 0; i < 32; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+    }
+    /* not in Figure 671 */
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    FEMU_SC_NS_WP);
+
+    /* namespace 2 takes writes; a Format of namespace 1 fails */
+    femu_power_write(&c, buf, 2, 0, 8, 0xb2, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, FEMU_SC_NS_WP);
+
+    /*
+     * Namespace 2 protected, namespace 1 not: a Format of all fails
+     * before it changes namespace 1, which comes first.
+     */
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 2, 1), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc5, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, NVME_NSID_BROADCAST, 0, 0)), ==,
+                    FEMU_SC_NS_WP);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0xc5);
+        femu_power_read(&c, buf, 2, i, 0xb2);
+    }
+    g_assert_cmphex(femu_wp_set(&c, 2, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+
+    /* a reset keeps the state */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    qtest_memset(qts, buf, 0xee, 4096);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+
+    /* all namespaces at once, both ways */
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 1), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 2, 0), ==, 1);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 2, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, false);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    /*
+     * Copy format 2 from protected namespace 2 into namespace 1 works;
+     * into protected namespace 1 it fails and copies nothing.
+     */
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writew(qts, buf + 4, 0x4);
+    g_assert_cmphex(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 2, 16, 8, 0x9d, false);
+    g_assert_cmphex(femu_wp_set(&c, 2, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_copy_fmt2(&c, list, 64, 2, 16, 8)), ==,
+                    NVME_SUCCESS);
+    for (i = 64; i < 72; i++) {
+        femu_power_read(&c, buf, 1, i, 0x9d);
+    }
+    femu_power_write(&c, buf, 1, 80, 8, 0x3e, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_copy_fmt2(&c, list, 80, 2, 16, 8)), ==,
+                    FEMU_SC_NS_WP);
+    for (i = 80; i < 88; i++) {
+        femu_power_read(&c, buf, 1, i, 0x3e);
+    }
+
+    /* a block erase covers the protected namespaces; exiting does not */
+    g_assert_cmphex(femu_sanitize(&c, 2), ==, FEMU_SC_NS_WP);
+    g_assert_cmphex(femu_sanitize(&c, 1), ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 80, 0x3e);
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 0), ==,
+                    NVME_SUCCESS);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Protection releases the Streams resources of the namespace, and a
+ * protected namespace takes no new ones (Figure 671 note 3).
+ */
+static void femu_test_ns_wp_streams(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t result = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101, 0, 0,
+                                   NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 3, 0, 0, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 3);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 3);
+
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 4);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 3, 0, 0, &result),
+                    ==, FEMU_SC_NS_WP);
+
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 2, 0, 0, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 2);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The write buffer is destaged when protection comes: A durable (FUA), B
+ * buffered over it, protect, cut. B reads back, and the protection
+ * survives the cut. Without protection the same cut brings back C.
+ */
+static void femu_test_ns_wp_buffer(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    qtest_memset(c.pdev->bus->qts, buf, 0xee, 4096);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+
+    /* the control: unprotected, the buffered page is lost */
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* hold the FTL thread of device "wpd" off its rings, or let it go */
+static void femu_wp_hold(QTestState *qts, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/wpd',"
+                           "'property':'x-ftl-hold','value':%d}}", hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * A write that changed the backend and waits on the FTL ring holds the
+ * protection off: Set Features 84h fails with Command Interrupted and the
+ * state stays. Once the write completes, the protection takes.
+ */
+static void femu_test_ns_wp_drain(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x7e, 4096);
+    femu_wp_hold(qts, true);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_usleep(100 * 1000);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, FEMU_SC_INTERRUPTED);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_hold(qts, false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0x7e);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* without the property: no NWPC, no feature 84h */
+static void femu_test_ns_wp_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 531), ==, 0);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_NS_WP, 0, 1, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_ns_wp_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':5", "a mode other than bbssd or NoSSD" },
+        { "'femu_mode':1,'ns_mgmt':true", "namespace management" },
+        { "'femu_mode':1,'persist_file':'nswp.img'", "persist_file" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'nswp','addr':'5','devsz_mb':1,"
+            "'ns_wp':true,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -59439,6 +59870,29 @@ static void femu_register_nodes(void)
     });
     qos_add_test("power-limit-sysreset", "femu",
                  femu_test_power_limit_sysreset, NULL);
+    qos_add_test("ns-wp", "femu", femu_test_ns_wp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=nswp,femu_mode=1,devsz_mb=16,"
+            "namespaces=2,oncs=0x19f,ns_wp=on",
+    });
+    qos_add_test("ns-wp-buffer", "femu", femu_test_ns_wp_buffer,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,ns_wp=on"
+    });
+    qos_add_test("ns-wp-drain", "femu", femu_test_ns_wp_drain,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=wpd,femu_mode=1,devsz_mb=16,ns_wp=on",
+    });
+    qos_add_test("ns-wp-streams", "femu", femu_test_ns_wp_streams,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=nswps,femu_mode=1,devsz_mb=16,"
+            "streams=on,streams.max=4,namespaces=2,ns_wp=on",
+    });
+    qos_add_test("ns-wp-off", "femu", femu_test_ns_wp_off, NULL);
+    qos_add_test("ns-wp-refused", "femu", femu_test_ns_wp_refused, NULL);
     qos_add_test("power-limit-off", "femu", femu_test_power_limit_off,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,power_states=on",

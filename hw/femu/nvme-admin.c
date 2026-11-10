@@ -28,6 +28,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_FDP_EVENTS]               = true,
     [NVME_POWER_MEAS]               = true,
     [NVME_POWER_LIMIT]              = true,
+    [NVME_NS_WRITE_PROTECT]         = true,
     [NVME_KV_FEAT_CONFIG]           = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
@@ -74,6 +75,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     [NVME_POWER_MEAS]               = NVME_FEAT_CAP_CHANGE,
     [NVME_POWER_LIMIT]              = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
+    [NVME_NS_WRITE_PROTECT]         = NVME_FEAT_CAP_NS | NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_SAVE |
@@ -328,6 +330,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->power_meas;
     case NVME_POWER_LIMIT:
         return n->power_limit;
+    case NVME_NS_WRITE_PROTECT:
+        return n->ns_wp;
     case NVME_HOST_IDENTIFIER:
     case NVME_RESV_NOTIFY_MASK:
     case NVME_RESV_PERSISTENCE:
@@ -1026,16 +1030,17 @@ static uint16_t nvme_reach_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
 }
 
 /*
- * The namespace's media is read-only at its end of life: Currently Write
- * Protected (NSATTR bit 0, CNS 00h byte 99 and CNS 08h byte 8), since every
- * write to it fails.
+ * Currently Write Protected (NSATTR bit 0, CNS 00h byte 99 and CNS 08h
+ * byte 8): the namespace is write protected (feature 84h), or its media
+ * is read-only at its end of life, so every write to it fails.
  */
 QEMU_BUILD_BUG_ON(offsetof(NvmeIdNs, nsattr) != 99);
 
 static bool nvme_ns_media_ro(NvmeNamespace *ns)
 {
-    return ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns)) &&
-           ssd_media_read_only(ns->ssd);
+    return femu_wp(ns) ||
+           (ns->ssd && (NS_BBSSD(ns) || NS_CSD(ns)) &&
+            ssd_media_read_only(ns->ssd));
 }
 
 static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd,
@@ -1839,6 +1844,11 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         return dma_read_prp(n, hbs, sizeof(hbs), le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
+    /* 84h has no default (5.2.26.1.35): FEMU reads the current state */
+    if (fid == NVME_NS_WRITE_PROTECT) {
+        cqe->n.result = cpu_to_le32(femu_wp_get(n, le32_to_cpu(cmd->nsid)));
+        return NVME_SUCCESS;
+    }
     /* no limit, in a defined scale (PLS 10b) */
     if (fid == NVME_POWER_LIMIT) {
         cqe->n.result = cpu_to_le32(femu_pl_get(n,
@@ -2149,6 +2159,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_POWER_LIMIT:
         cqe->n.result = cpu_to_le32(femu_pl_get(n,
                                                 NVME_GETFEAT_SELECT_CURRENT));
+        break;
+    case NVME_NS_WRITE_PROTECT:
+        cqe->n.result = cpu_to_le32(femu_wp_get(n, nsid));
         break;
     case NVME_OCP_DSSD_AEN_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_aen_config);
@@ -2542,6 +2555,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return femu_ocp_lat_set(n, cmd);
     case NVME_OCP_EVENT_INJECTION:
         return femu_ocp_inj_set(n, cmd);
+    case NVME_NS_WRITE_PROTECT:
+        return femu_wp_set(n, nsid, dw11);
     case NVME_POWER_LIMIT: {
         uint16_t status = femu_pl_set(n, le32_to_cpu(cmd->cdw13), save);
 
@@ -2808,6 +2823,8 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
 /* fields of a FID Supported and Effects entry (Base 2.3, Figure 267) */
 #define NVME_FID_FSUPP          (1u << 0)
+#define NVME_FID_NCC            (1u << 2)
+#define NVME_FID_NIC            (1u << 3)
 #define NVME_FID_CCC            (1u << 4)
 #define NVME_FID_SCOPE_NS       (1u << 20)
 #define NVME_FID_SCOPE_CTRL     (1u << 21)
@@ -2878,6 +2895,10 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         /* a new limit changes the power states Identify reports */
         if (fid == NVME_POWER_LIMIT) {
             scope |= NVME_FID_CCC;
+        }
+        /* CWP of one namespace, or of several with FFFFFFFFh */
+        if (fid == NVME_NS_WRITE_PROTECT) {
+            scope |= NVME_FID_NCC | NVME_FID_NIC;
         }
         fis[fid] = cpu_to_le32(NVME_FID_FSUPP | scope);
     }
@@ -4308,6 +4329,10 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
     if (!ns) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* not in Figure 671 */
+    if (femu_wp(ns)) {
+        return NVME_NS_WRITE_PROTECTED | NVME_DNR;
+    }
     switch (atype) {
     case 0x10:
     case 0x11:
@@ -4574,6 +4599,10 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     /* no Media Verification state (VERS 0) */
     if (emvs) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* every namespace is in scope: none may be write protected */
+    if (femu_wp_scope(n, NVME_NSID_BROADCAST)) {
+        return NVME_NS_WRITE_PROTECTED | NVME_DNR;
     }
     /* Sanitize Start (Figure 247): the whole subsystem is the target */
     stl_le_p(ev, le32_to_cpu(n->id_ctrl.sanicap));
@@ -5295,6 +5324,11 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
      */
     if (sec_erase > 1) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* FNA 0: a Format changes only the namespaces it names */
+    status = femu_wp_scope(n, nsid);
+    if (status) {
+        return status;
     }
 
     /*

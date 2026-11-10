@@ -205,6 +205,10 @@ static uint16_t nvme_streams_receive(FemuCtrl *n, NvmeNamespace *ns,
         if (!ns || ns->streams_allocated) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        /* a protected namespace takes no resources (Figure 671 note 3) */
+        if (femu_wp(ns)) {
+            return NVME_NS_WRITE_PROTECTED | NVME_DNR;
+        }
         if (!available) {
             return NVME_STREAM_RESOURCE_ALLOC_FAILED;
         }

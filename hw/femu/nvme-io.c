@@ -3131,6 +3131,15 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
          nvme_ns_io_effects(n, ns, cmd->opcode))) {
         return NVME_WRITE_TO_RO | NVME_DNR;
     }
+    /* Namespace Write Protection (Figure 671) */
+    if (unlikely(n->ns_wp)) {
+        bool noop;
+        uint16_t status = femu_wp_io(ns, cmd, &noop);
+
+        if (status || noop) {
+            return status;
+        }
+    }
     /* a sanitize in progress refuses every I/O command but Flush */
     if (unlikely(nvme_sanitize_busy(n)) && cmd->opcode != NVME_CMD_FLUSH) {
         return NVME_SANITIZE_IN_PROGRESS;

@@ -674,6 +674,10 @@ own description allows. A message keeps its format directives (`%s`,
 - ns_mgmt=on does not support subsys; use a standalone controller
 - ocp is not supported with ns_mgmt
 
+## `ns_wp`
+
+- femu: ns_wp is not supported with %s
+
 ## `oacs`
 
 - oacs may only set Format NVM (0x%x)

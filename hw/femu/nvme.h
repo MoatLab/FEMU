@@ -1097,6 +1097,8 @@ enum NvmeStatusCodes {
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
     NVME_SANITIZE_IN_PROGRESS   = 0x001d,
+    NVME_NS_WRITE_PROTECTED     = 0x0020,
+    NVME_CMD_INTERRUPTED        = 0x0021,
     NVME_HOSTID_INCONSISTENT    = 0x0018,   /* 64 and 128 bit at once */
     NVME_INVALID_SGL_SEG_DESCR  = 0x000d,
     NVME_INVALID_NUM_SGL_DESCRS = 0x000e,
@@ -1523,7 +1525,7 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    awun;
     uint16_t    awupf;
     uint8_t     nvscc;
-    uint8_t     rsvd531;
+    uint8_t     nwpc;           /* Namespace Write Protection Capabilities */
     uint16_t    acwu;
     uint16_t    ocfs;           /* Copy descriptor formats offered */
     uint32_t    sgls;
@@ -1647,6 +1649,7 @@ enum NvmeFeatureIds {
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
     NVME_POWER_LIMIT                = 0x23, /* power_limit=on */
+    NVME_NS_WRITE_PROTECT           = 0x84, /* ns_wp=on */
     NVME_POWER_MEAS                 = 0x25, /* power_meas=on */
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_HOST_IDENTIFIER            = 0x81,
@@ -2275,6 +2278,12 @@ typedef struct NvmeNamespace {
      * namespace was read back on every other.
      */
     uint32_t        err_rec;
+    /*
+     * Namespace Write Protection (feature 84h, ns_wp=on): set under the
+     * BQL, read by the pollers and the FTL thread. Resets and power cuts
+     * keep it.
+     */
+    bool            wp;
     unsigned long   *util;
     unsigned long   *uncorrectable;
     /*
@@ -3109,6 +3118,7 @@ typedef struct FemuCtrl {
      * first pl_drop ones. Written under the BQL and ps_lock.
      */
     bool            power_limit;
+    bool            ns_wp;          /* Namespace Write Protection */
     uint8_t         pl_drop;
     uint32_t        pl_cur;         /* CDW13 as set: PLS, PLV */
     uint32_t        pl_saved;
@@ -3700,6 +3710,12 @@ void nvme_resv_exit(FemuCtrl *n);
 bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_pmeas_check(FemuCtrl *n, Error **errp);
+bool femu_wp_check(FemuCtrl *n, Error **errp);
+bool femu_wp(NvmeNamespace *ns);
+uint16_t femu_wp_io(NvmeNamespace *ns, NvmeCmd *cmd, bool *noop);
+uint16_t femu_wp_set(FemuCtrl *n, uint32_t nsid, uint32_t dw11);
+uint32_t femu_wp_get(FemuCtrl *n, uint32_t nsid);
+uint16_t femu_wp_scope(FemuCtrl *n, uint32_t nsid);
 void femu_pmeas_start(FemuCtrl *n);
 void femu_pmeas_stop(FemuCtrl *n);
 uint16_t femu_pmeas_set(FemuCtrl *n, uint32_t dw11, uint32_t *result);

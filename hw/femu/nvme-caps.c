@@ -197,8 +197,14 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
     case NVME_ADM_CMD_GET_LOG_PAGE:
     case NVME_ADM_CMD_GET_FEATURES:
     case NVME_ADM_CMD_SET_FEATURES:
-        /* USS: the UUID index selects OCP pages and features (ocp=on) */
-        return NVME_CMD_EFF_CSUPP | (n->ocp ? 1u << 19 : 0);
+        /*
+         * USS: the UUID index selects OCP pages and features (ocp=on).
+         * NCC, NIC: feature 84h changes NSATTR.CWP of a namespace, or of
+         * several with NSID FFFFFFFFh.
+         */
+        return NVME_CMD_EFF_CSUPP | (n->ocp ? 1u << 19 : 0) |
+               (opc == NVME_ADM_CMD_SET_FEATURES && n->ns_wp ?
+                NVME_CMD_EFF_NCC | NVME_CMD_EFF_NIC : 0);
     default:
         return nvme_cse_acs[opc] | nvme_mode_admin_effects(n, opc);
     }

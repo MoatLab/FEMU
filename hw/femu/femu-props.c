@@ -297,6 +297,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "with power_states: Power Limit (feature 23h, Base 2.3 8.1.18.6); a "
       "host limit in watts prohibits the power states whose MP is above "
       "it and renumbers the rest; not with persist_file; off (default)" },
+    { "ns_wp",
+      "bbssd, NoSSD: Namespace Write Protection (feature 84h, Base 2.3 "
+      "8.1.17), the No Write Protect and Write Protect states; writes to a "
+      "protected namespace fail with Namespace Is Write Protected; not with "
+      "FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off "
+      "(default)" },
     { "power_states",
       "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch "
       "NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is "

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 288 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 289 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -95,6 +95,7 @@ Devices:
 | `reservations` | `bool` | `off` | Reservations (Base 2.3, 8.1.24): Reservation Register, Report, Acquire and Release, the Host Identifier (81h), Reservation Notification Mask (82h) and Reservation Persistence (83h) features, and log 80h; ONCS bit 5; not with Open-Channel; off (default) |
 | `ps_max_watts` | `uint8` | `25` | Maximum Power of power state 0 in watts, 1 to 127 (default 25); with ocp, the lowest valid DSSD power state of C4h and C7h; FEMU does not cap its modelled power at it |
 | `power_limit` | `bool` | `off` | with power_states: Power Limit (feature 23h, Base 2.3 8.1.18.6); a host limit in watts prohibits the power states whose MP is above it and renumbers the rest; not with persist_file; off (default) |
+| `ns_wp` | `bool` | `off` | bbssd, NoSSD: Namespace Write Protection (feature 84h, Base 2.3 8.1.17), the No Write Protect and Write Protect states; writes to a protected namespace fail with Namespace Is Write Protected; not with FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off (default) |
 
 ### LBA formats, metadata and protection
 
