@@ -43617,6 +43617,21 @@ static void femu_test_maint_idle(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* poison @buf, read @lpn into it, and check the whole page holds @pat */
+static void femu_maint_read_check(FemuCtrlState *c, QTestState *qts,
+                                  uint64_t buf, int lpn, uint8_t pat)
+{
+    g_autofree uint8_t *page = g_malloc(FEMU_DATA_SIZE);
+
+    qtest_memset(qts, buf, 0xff, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, (uint64_t)lpn * 8, buf)),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, FEMU_DATA_SIZE);
+    for (int i = 0; i < FEMU_DATA_SIZE; i++) {
+        g_assert_cmpint(page[i], ==, pat);
+    }
+}
+
 /*
  * Kick idle steps until one does work, and return its outcome. A step that
  * meets booked media work only moves its fence ("none"), so it is retried.
@@ -43683,9 +43698,12 @@ static void femu_test_maint_idle_space(void *obj, void *data,
     g_test_message("maint-idle-space before: free %d target %d", g0[2],
                    g0[3]);
     g_assert_cmpint(g0[3], ==, 5);
-    g_assert_cmpint(g0[2], <=, 5);
+    g_assert_cmpint(g0[2], ==, 5);
     g_assert_cmpuint(v0[0], ==, 0);
     g_assert_cmpuint(v0[2], ==, 0);
+    /* the write path collected 16 victims forced for the last 16 writes */
+    g_assert_cmpuint(v0[4], ==, 16 * 15);
+    g_assert_cmpuint(v0[5], ==, 16);
 
     what = femu_maint_kick_work(qts);
     femu_gci_state(qts, g);
@@ -43713,9 +43731,77 @@ static void femu_test_maint_idle_space(void *obj, void *data,
     g_assert_cmpuint(mapped, ==, 768);
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
-    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
-                    NVME_SUCCESS);
-    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x5a);
+    femu_maint_read_check(&c, qts, buf, 0, 0x5a);
+    femu_maint_read_check(&c, qts, buf, 767, 0x5a);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Scan fairness. LPNs 0 to 15 fill line 0, which nothing reads and which
+ * ages past the 1 s retention limit. LPNs 16 to 31 then fill line 1. Before
+ * each idle step, four reads of LPN 16 queue its line for a read reclaim;
+ * that line is always younger than the limit, so the read path never asks
+ * for an age refresh. Only the scan can find line 0:
+ *   step 0: queued reclaim      step 1: scan, refresh of line 0
+ *   steps 2 to 5: no aged line, so the queued reclaim
+ * A step that always took the queued line would never refresh line 0.
+ */
+static void femu_test_maint_idle_burst(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    uint64_t v[6];
+
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    g_usleep(1100 * 1000);
+    qtest_memset(qts, buf, 0x4e, FEMU_DATA_SIZE);
+    for (int lpn = 16; lpn < 32; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int step = 0; step < 6; step++) {
+        g_autofree char *what = NULL;
+
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 16 * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        what = femu_maint_kick_work(qts);
+        femu_maint_state(qts, v);
+        g_test_message("maint-idle-burst step %d: %s", step, what);
+        g_assert_cmpstr(what, ==, "reclaimed");
+        g_assert_cmpuint(v[0], ==, step ? step : 1);
+        g_assert_cmpuint(v[1], ==, step ? 1 : 0);
+        g_assert_cmpuint(v[4], ==, 16 * (step + 1));
+        g_assert_cmpuint(v[5], ==, step + 1);
+    }
+    /* the refresh came from the scan: the read path asked for none */
+    g_assert_cmpuint(v[3], ==, 1);
+    g_assert_cmpuint(v[2], ==, 5);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 32);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_maint_read_check(&c, qts, buf, 0, 0x2d);
+    femu_maint_read_check(&c, qts, buf, 15, 0x2d);
+    femu_maint_read_check(&c, qts, buf, 16, 0x4e);
+    femu_maint_read_check(&c, qts, buf, 31, 0x4e);
     femu_gci_hold(qts, false);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -54724,6 +54810,13 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=56,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=90,gc_idle_ms=5,"
             "read_reclaim_limit=4,maint_idle=on" });
+    qos_add_test("maint-idle-burst", "femu", femu_test_maint_idle_burst,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_idle_ms=5,retention_limit_sec=1,read_reclaim_limit=4,"
+            "maint_idle=on" });
     qos_add_test("maint-idle-refused", "femu", femu_test_maint_idle_refused,
                  NULL);
     qos_add_test("gc-idle-recover", "femu", femu_test_gc_idle_recover,
