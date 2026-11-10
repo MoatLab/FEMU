@@ -230,6 +230,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
     ssd_init_ns_slices(n, ssd);
+    ssd_durable_init(ssd);
     ssd->gc_copyback_pages = 0;
     ssd->victim_digest = 0;
     ssd->forced_gc_timed = 0;
@@ -1099,6 +1100,18 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 
             lat = MAX(lat, end - req->stime);
         }
+        /*
+         * durable_at_done: a written page is durable when its program
+         * ends, so the Flush completes no earlier than the last pending
+         * one, also with an empty buffer. Later writes do not move it.
+         */
+        if (ssd_durable_on(ssd)) {
+            int64_t end = ssd_durable_deadline(ssd);
+
+            if (end > (int64_t)req->stime) {
+                lat = MAX(lat, end - (int64_t)req->stime);
+            }
+        }
         /* pages still held had no room on the media: say so */
         if (ssd->write_buffer_cnt) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
@@ -1267,6 +1280,7 @@ void ssd_free(struct ssd *ssd)
     ssd->rmap = NULL;
     g_free(ssd->maptbl);
     ssd->maptbl = NULL;
+    ssd_durable_drop_all(ssd);
     g_clear_pointer(&ssd->ns_slice_lo, g_free);
     g_clear_pointer(&ssd->ns_ctr, g_free);
     ssd->nr_ns_slices = 0;

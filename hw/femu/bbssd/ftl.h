@@ -869,6 +869,15 @@ struct ssd {
      */
     uint32_t nr_ns_slices;
     uint64_t *ns_slice_lo;
+    /*
+     * durable_at_done (ftl-durable.c): the generations of booked host
+     * programs that have not ended, in program order, and their bound.
+     * last_prog_done is the end of the last host program booked.
+     */
+    QTAILQ_HEAD(, ssd_gen) gens;
+    uint32_t nr_gens;
+    uint32_t gen_cap;
+    int64_t last_prog_done;
     struct ssd_ns_ctr *ns_ctr;
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
@@ -976,6 +985,21 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
 void ssd_free(struct ssd *ssd);
+
+/* durable_at_done (ftl-durable.c) */
+bool ssd_durable_on(struct ssd *ssd);
+void ssd_durable_init(struct ssd *ssd);
+void ssd_durable_drop_all(struct ssd *ssd);
+void ssd_durable_retire(struct ssd *ssd, int64_t now);
+bool ssd_durable_room(struct ssd *ssd);
+void ssd_durable_push(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
+                      uint8_t *undo, uint8_t *state, int64_t done);
+int64_t ssd_durable_deadline(struct ssd *ssd);
+void ssd_page_restore(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
+                      const uint8_t *undo, const uint8_t *state);
+bool ssd_durable_cut(struct ssd *ssd, int64_t c);
+void ssd_durable_counts(struct ssd *ssd, uint64_t *lpns, uint64_t *gens,
+                        uint64_t *ended);
 
 /* true when the named mapping scheme allocates through the LOG write pointer */
 bool femu_mapping_name_uses_log_class(const char *name);

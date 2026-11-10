@@ -2821,6 +2821,9 @@ typedef struct FemuCtrl {
     uint8_t     meta;
     bool        pi;
     bool        power_loss;
+    /* with power_loss: a written page is durable when its program ends */
+    bool        durable_at_done;
+    int64_t     durable_cut;    /* the time of the cut being recovered */
     /*
      * die_slow: a table of array time in percent of nominal for each LUN,
      * nchs x luns_per_ch, read atomically by the media; NULL when off.
@@ -3134,6 +3137,13 @@ typedef struct FemuCtrl {
     uint8_t         shut;           /* FEMU_SHUT_* */
     uint32_t        shutdown_ms;    /* SHST 01b this long, then 10b */
     QEMUTimer       *shut_timer;
+    /*
+     * durable_at_done: SHST 10b also waits for the last pending program,
+     * on the host clock (durable_timer); shut_wait holds the timers that
+     * have not fired: bit 0 shut_timer, bit 1 durable_timer.
+     */
+    QEMUTimer       *durable_timer;
+    uint8_t         shut_wait;
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */

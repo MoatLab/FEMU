@@ -16,7 +16,8 @@ DEVICES = [
         "title": "NVMe controller",
         "parent": "pci-device",
         "test_only": ["x-cmt-slots", "x-copy-held", "x-copy-hold",
-                      "x-csd-pause-stats", "x-eol-enter", "x-events-now",
+                      "x-csd-pause-stats", "x-durable-check", "x-eol-enter",
+                      "x-events-now",
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
                       "x-ftl-check", "x-ftl-hold", "x-ftl-trace",
@@ -84,7 +85,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "ns_mgmt", "bbssd_ns_limit", "streams", "streams.max",
-                    "power_loss", "ready_ms", "recovery_ms",
+                    "power_loss", "durable_at_done", "ready_ms", "recovery_ms",
                     "shutdown_ms",
                 ],
             },

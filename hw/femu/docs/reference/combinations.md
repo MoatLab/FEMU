@@ -194,6 +194,11 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: dram_hit_ns must not be negative
 
+## `durable_at_done`
+
+- durable_at_done is not supported with %s
+- durable_at_done needs power_loss=on
+
 ## `ecc_retention_sec`
 
 - femu: pd_open_age needs ecc_retention_sec above 0
@@ -880,6 +885,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
 - action power-loss needs power_loss=on
 - csd_slm_size and csd_cp cannot be used with ns_mgmt, power_loss or a CXL link
+- durable_at_done needs power_loss=on
 - power_loss requires bbssd, buffer_size > 0, and no metadata, namespace management or subsystem
 - power_loss requires page-aligned namespaces and whole LBAs per NAND page
 - sanitize_ms and sanitize_ops do not work with power_loss yet

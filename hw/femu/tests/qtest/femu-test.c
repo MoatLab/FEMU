@@ -44887,6 +44887,143 @@ static void femu_test_io_stages_ns_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* x-durable-check of device "power": LPNs, generations, ended ones */
+static void femu_durable_counts(QTestState *qts, uint64_t *lpns,
+                                uint64_t *gens, uint64_t *ended)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-durable-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           lpns, gens, ended), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * durable_at_done with 2 s programs:
+ * - A is flushed: its program has ended;
+ * - B is written; one Flush books its program, and a second Flush, with
+ *   the buffer already empty, must still wait for that program to end;
+ * - C is written and a Flush books its program; a cut 0.2 s later, inside
+ *   that program, gives back B;
+ * - C written and flushed again survives a cut.
+ */
+static void femu_test_durable_at_done(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    int64_t t0;
+    uint16_t f2;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    /* the idle pass may retire ended generations: none is pending */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(100 * 1000);
+    femu_submit(&c, &c.io, &flush);
+    f2 = le16_to_cpu(flush.cid);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+        /*
+         * The second Flush found an empty buffer, yet waits for B's
+         * program, booked by the first one 2 s from about t0.
+         */
+        if (cid == f2) {
+            g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1500000);
+        }
+    }
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    /* C's program is pending: the cut lands inside it */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(lpns, ==, 1);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* durable_at_done: the commands it does not support yet, and realize */
+static void femu_test_durable_refused(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const char *cases[][2] = {
+        { "'buffer_size':16,'vwc':1,'durable_at_done':true",
+          "durable_at_done needs power_loss=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,"
+          "'durable_at_done':true,'ns_wp':true",
+          "durable_at_done is not supported with ns_wp" },
+    };
+    NvmeCmd cmd = { 0 };
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_INVALID_FIELD);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *add = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'durr','addr':'5','femu_mode':1,"
+            "'devsz_mb':8,%s}}", cases[i][0]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -61110,6 +61247,22 @@ static void femu_register_nodes(void)
     });
     qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
                  NULL);
+    qos_add_test("durable-at-done", "femu", femu_test_durable_at_done,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
+            "durable_at_done=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("durable-refused", "femu", femu_test_durable_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
+            "durable_at_done=on"
+    });
     qos_add_test("io-stages-ns", "femu", femu_test_io_stages_ns,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=stns,femu_mode=1,devsz_mb=16,"

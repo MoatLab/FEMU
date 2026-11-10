@@ -448,6 +448,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "power cut and enable simulate-power-loss; needs buffer_size > 0, "
       "vwc=1, page-aligned namespaces, and no meta, pi, ns_mgmt, subsys, "
       "namespace_modes or cxl_ssd" },
+    { "durable_at_done",
+      "with power_loss: a written page is durable when its NAND program "
+      "ends, not when it is booked; a cut restores the pages whose program "
+      "had not ended, Flush and shutdown wait for the last program; DSM, "
+      "Write Zeroes, Copy, Write Uncorrectable, Format, Sanitize and cache "
+      "disable fail with Invalid Field; not with mp_program, pe_suspend, "
+      "read_prio, prog_pass2_ns, die_parity, ns_wp or sanitize_ns; off "
+      "(default)" },
     { "ready_ms",
       "time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin "
       "commands queued before ready run then; 0 (default) is ready at once" },

@@ -458,7 +458,12 @@ void bb_buffer_idle(FemuCtrl *n)
         /* an FTL that namespaces share takes one step, through its owner */
         if (ns->allocated && ns->ssd && !ns->ssd_shared &&
             (NS_BBSSD(ns) || NS_CSD(ns))) {
-            ssd_buffer_bg_step(ns->ssd, ssd_now(ns->ssd));
+            if (ssd_durable_on(ns->ssd)) {
+                ssd_durable_retire(ns->ssd, ssd_now(ns->ssd));
+            }
+            if (n->buffer_bg) {
+                ssd_buffer_bg_step(ns->ssd, ssd_now(ns->ssd));
+            }
         }
     }
     n->ftl_in_sweep = false;

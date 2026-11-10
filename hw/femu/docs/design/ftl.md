@@ -892,6 +892,30 @@ line to write to, they fail with Capacity Exceeded (a shutdown sets
 Controller Fatal Status instead) rather than claim the data is durable. An FUA write programs a whole NAND page, so buffered
 neighbours in that page become durable with it.
 
+With `durable_at_done=on` a page is durable when its program ends, not
+when the program is booked. Each booked host program keeps a generation:
+the page's bytes and LBA states before it, and the program's end time.
+
+```text
+ per page, oldest first:  durable | g1 (end d1) | g2 (end d2)
+ g2 ends:                 g1 and g2 go (programs end out of order)
+ cut at c:                from the newest back, restore while d > c
+```
+
+- A direct write (FUA or cache off) keeps one too. When it replaces a
+  buffered copy, the generation holds the bytes from before that copy.
+- A Flush completes no earlier than the end of the last pending program,
+  also when the buffer is empty. SHST 10b waits for it too.
+- The generations are at most `buffer_size`; the buffer has its own
+  bound. At the bound a direct write fails with Capacity Exceeded, and a
+  write-back stops, so a buffered write fails when the buffer is full.
+  The older generations stay. The FTL idle pass drops the generations
+  whose program ended.
+- The mapping is not rolled back: only the payload and its LBA states.
+- DSM, Write Zeroes, Copy, Write Uncorrectable, Format, Sanitize and a
+  cache disable fail with Invalid Field, because they change parts of
+  pages or need a delayed completion.
+
 ## Read cache
 
 `read_cache_mb` adds a DRAM read cache in front of NAND reads

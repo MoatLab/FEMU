@@ -541,6 +541,13 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
     loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
     c = nand_media_op(&ssd->media, &loc, op, stime);
+    /*
+     * durable_at_done: the end of the host program just booked. A merge
+     * or collection program after it (GC_IO) must not take its place.
+     */
+    if (op == NAND_MEDIA_PROGRAM && ncmd->type == USER_IO) {
+        ssd->last_prog_done = c.done_ns;
+    }
     if (unlikely(ssd->sp.prog_pass2_ns) && op == NAND_MEDIA_PROGRAM &&
         !bb_io_meta(ncmd->type)) {
         ssd_pass2_book(ssd, ppa, &loc, c.done_ns);

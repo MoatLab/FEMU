@@ -3353,5 +3353,21 @@ void nvme_post_cqes_io(void *opaque)
 /* The opt-in model accesses payloads on the same thread as its write buffer. */
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req)
 {
+    /*
+     * durable_at_done keeps whole-page histories of host programs; these
+     * change parts of pages or other namespaces, so they wait for their
+     * rules and fail before they change anything.
+     */
+    if (unlikely(n->durable_at_done)) {
+        switch (req->cmd.opcode) {
+        case NVME_CMD_DSM:
+        case NVME_CMD_WRITE_ZEROES:
+        case NVME_CMD_COPY:
+        case NVME_CMD_WRITE_UNCOR:
+            return NVME_INVALID_FIELD | NVME_DNR;
+        default:
+            break;
+        }
+    }
     return nvme_io_cmd(n, &req->cmd, req);
 }

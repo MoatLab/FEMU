@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 293 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 294 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -135,6 +135,7 @@ Devices:
 | `streams` | `bool` | `off` | Enable the Streams directive; bbssd separates streams per FTL page (SWS) and needs page or dftl mapping, NoSSD has no placement effect; not with FDP or a shared subsystem |
 | `streams.max` | `uint16` | `8` | Number of stream slots with streams=on, 1 to 32; bbssd reserves streams.max + 1 lines for them |
 | `power_loss` | `bool` | `off` | bbssd: roll back writes still in the write buffer on a simulated power cut and enable simulate-power-loss; needs buffer_size > 0, vwc=1, page-aligned namespaces, and no meta, pi, ns_mgmt, subsys, namespace_modes or cxl_ssd |
+| `durable_at_done` | `bool` | `off` | with power_loss: a written page is durable when its NAND program ends, not when it is booked; a cut restores the pages whose program had not ended, Flush and shutdown wait for the last program; DSM, Write Zeroes, Copy, Write Uncorrectable, Format, Sanitize and cache disable fail with Invalid Field; not with mp_program, pe_suspend, read_prio, prog_pass2_ns, die_parity, ns_wp or sanitize_ns; off (default) |
 | `ready_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin commands queued before ready run then; 0 (default) is ready at once |
 | `recovery_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY for the first start after a power cut, in ms, 0 or ready_ms to 7499; 0 (default) uses ready_ms |
 | `shutdown_ms` | `uint32` | `0` | time in ms of guest time CSTS.SHST reads 01b (in progress) after a shutdown, below 5000; the shutdown work is done before it; 0 (default) is complete at once |
@@ -503,7 +504,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

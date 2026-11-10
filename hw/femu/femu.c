@@ -876,6 +876,10 @@ static void femu_shut_clear(FemuCtrl *n)
     if (n->shut_timer) {
         timer_del(n->shut_timer);
     }
+    if (n->durable_timer) {
+        timer_del(n->durable_timer);
+    }
+    n->shut_wait = 0;
     n->shut = FEMU_SHUT_NONE;
     n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
 }
@@ -886,16 +890,42 @@ static void femu_shst_set(FemuCtrl *n, uint32_t shst)
     n->bar.csts = (n->bar.csts & ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT)) | shst;
 }
 
-/* shutdown_ms has passed: the shutdown work was done before it began */
-static void femu_shut_timer_cb(void *opaque)
+/* one wait of a shutdown ended; SHST 10b when no other is left */
+static void femu_shut_wait_done(FemuCtrl *n, uint8_t bit)
 {
-    FemuCtrl *n = opaque;
-
-    if (n->shut == FEMU_SHUT_PROGRESS &&
+    n->shut_wait &= ~bit;
+    if (!n->shut_wait && n->shut == FEMU_SHUT_PROGRESS &&
         !(n->bar.csts & NVME_CSTS_FAILED)) {
         n->shut = FEMU_SHUT_DONE;
         femu_shst_set(n, NVME_CSTS_SHST_COMPLETE);
     }
+}
+
+/* shutdown_ms has passed: the shutdown work was done before it began */
+static void femu_shut_timer_cb(void *opaque)
+{
+    femu_shut_wait_done(opaque, 1);
+}
+
+/* durable_at_done: the last program pending at the shutdown has ended */
+static void femu_durable_timer_cb(void *opaque)
+{
+    femu_shut_wait_done(opaque, 2);
+}
+
+/* durable_at_done: the latest end of a pending host program, or 0 */
+static int64_t femu_durable_deadline(FemuCtrl *n)
+{
+    int64_t end = 0;
+
+    for (uint32_t i = 0; n->durable_at_done && i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ssd && !ns->ssd_shared && NS_BBSSD(ns)) {
+            end = MAX(end, ssd_durable_deadline(ns->ssd));
+        }
+    }
+    return end;
 }
 
 static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned size)
@@ -1012,13 +1042,32 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                 /* no completion until a reset: SHST 00b, and CFS says why */
                 n->shut = FEMU_SHUT_FAILED;
                 n->bar.csts |= NVME_CSTS_FAILED;
-            } else if (n->shutdown_ms) {
-                /* the work is done; the status takes shutdown_ms */
+            } else if (n->shutdown_ms ||
+                       femu_durable_deadline(n) > femu_dev_now(n)) {
+                /*
+                 * The work is done; the status takes shutdown_ms, and with
+                 * durable_at_done the end of the last pending program.
+                 */
+                int64_t end = femu_durable_deadline(n);
+
                 n->shut = FEMU_SHUT_PROGRESS;
                 femu_shst_set(n, NVME_CSTS_SHST_PROGRESS);
-                timer_mod(n->shut_timer,
-                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                          (int64_t)n->shutdown_ms * SCALE_MS);
+                n->shut_wait = 0;
+                if (n->shutdown_ms) {
+                    n->shut_wait |= 1;
+                    timer_mod(n->shut_timer,
+                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                              (int64_t)n->shutdown_ms * SCALE_MS);
+                }
+                if (end > femu_dev_now(n)) {
+                    n->shut_wait |= 2;
+                    timer_mod(n->durable_timer, end);
+                }
+                /* the program ended between the two looks: done now */
+                if (!n->shut_wait) {
+                    n->shut = FEMU_SHUT_DONE;
+                    femu_shst_set(n, NVME_CSTS_SHST_COMPLETE);
+                }
             } else {
                 n->shut = FEMU_SHUT_DONE;
                 femu_shst_set(n, NVME_CSTS_SHST_COMPLETE);
@@ -2239,6 +2288,47 @@ static int nvme_check_hmb_namespaces(FemuCtrl *n, const uint8_t *modes,
 }
 
 /*
+ * durable_at_done keeps the end time of each booked host program. The
+ * refused options book a program later (mp_program), move its end after
+ * it is booked (pe_suspend, read_prio), split it in two passes
+ * (prog_pass2_ns) or program parity beside it (die_parity). ns_wp and
+ * sanitize_ns change pages the history holds.
+ */
+static bool femu_durable_check(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *why = NULL;
+
+    if (!n->durable_at_done) {
+        return true;
+    }
+    if (!n->power_loss) {
+        error_setg(errp, "durable_at_done needs power_loss=on");
+        return false;
+    }
+    if (bp->mp_program > 0) {
+        why = "mp_program";
+    } else if (bp->pe_suspend > 0) {
+        why = "pe_suspend";
+    } else if (bp->read_prio > 0) {
+        why = "read_prio";
+    } else if (bp->prog_pass2_ns > 0) {
+        why = "prog_pass2_ns";
+    } else if (bp->die_parity > 0) {
+        why = "die_parity";
+    } else if (n->ns_wp) {
+        why = "ns_wp";
+    } else if (n->sanitize_ns) {
+        why = "sanitize_ns";
+    }
+    if (why) {
+        error_setg(errp, "durable_at_done is not supported with %s", why);
+        return false;
+    }
+    return true;
+}
+
+/*
  * shared_ftl at realize, also for a controller that joins a subsystem and
  * skips the namespace checks below.
  */
@@ -3166,7 +3256,7 @@ static void *femu_ftl_thread(void *arg)
          * collection may run, in the idle time.
          */
         if (unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
-                     n->tier_upkeep) && !busy) {
+                     n->tier_upkeep || n->durable_at_done) && !busy) {
             if (n->tier_upkeep) {
                 bb_tier_upkeep(n);
             }
@@ -3176,7 +3266,7 @@ static void *femu_ftl_thread(void *arg)
             if (n->gc_idle) {
                 bb_gc_idle(n);
             }
-            if (n->buffer_bg) {
+            if (n->buffer_bg || n->durable_at_done) {
                 bb_buffer_idle(n);
             }
         }
@@ -3476,6 +3566,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->san_timer, timer_free);
     g_clear_pointer(&n->ready_timer, timer_free);
     g_clear_pointer(&n->shut_timer, timer_free);
+    g_clear_pointer(&n->durable_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
@@ -4482,7 +4573,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
         !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
         !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp) ||
-        !femu_shared_ftl_check(n, errp)) {
+        !femu_shared_ftl_check(n, errp) || !femu_durable_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -4674,6 +4765,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         /* the host polls CSTS.SHST in guest time */
         n->shut_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, femu_shut_timer_cb,
                                      n);
+    }
+    if (n->durable_at_done) {
+        /* programs end on the host clock of the device */
+        n->durable_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
+                                        femu_durable_timer_cb, n);
     }
     if (n->ready_ms || n->recovery_ms) {
         /* the host polls CSTS.RDY in guest time */
@@ -4998,6 +5094,7 @@ static void femu_exit(PCIDevice *pci_dev)
     g_clear_pointer(&n->san_timer, timer_free);
     g_clear_pointer(&n->ready_timer, timer_free);
     g_clear_pointer(&n->shut_timer, timer_free);
+    g_clear_pointer(&n->durable_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -5092,6 +5189,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("cqr", FemuCtrl, cqr, 1),
     DEFINE_PROP_UINT8("vwc", FemuCtrl, vwc, 0),
     DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
+    DEFINE_PROP_BOOL("durable_at_done", FemuCtrl, durable_at_done, false),
     DEFINE_PROP_UINT32("ready_ms", FemuCtrl, ready_ms, 0),
     DEFINE_PROP_UINT32("recovery_ms", FemuCtrl, recovery_ms, 0),
     DEFINE_PROP_UINT32("shutdown_ms", FemuCtrl, shutdown_ms, 0),
@@ -5535,6 +5633,30 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     } else {
         error_setg(errp, "unknown namespace fixture");
     }
+}
+
+/*
+ * durable_at_done of namespace 1: LPNs with pending generations, the
+ * generations, and those whose program has already ended.
+ */
+static char *femu_test_durable_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "the durable check requires a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd_durable_counts(ns->ssd, &lpns, &gens, &ended);
+    nvme_resume_pollers(n, resume);
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64, lpns, gens,
+                           ended);
 }
 
 /*
@@ -6127,6 +6249,8 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     if (!clean) {
         n->recovery_pending = true;
     }
+    /* one cut time for every namespace, taken before any restore */
+    n->durable_cut = femu_dev_now(n);
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
             lost |= bbssd_power_loss(&n->namespaces[i]);
@@ -6313,6 +6437,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_str(obj, "x-durable-check",
+                                femu_test_durable_check, NULL);
         object_property_add_str(obj, "x-tier-check", femu_test_tier_check,
                                 NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);

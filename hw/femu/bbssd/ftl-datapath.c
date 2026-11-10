@@ -259,6 +259,70 @@ void ssd_free_write_buffer(struct ssd *ssd)
     }
 }
 
+/* the namespace whose slice of the backend holds page @lpn */
+static NvmeNamespace *ssd_lpn_ns(struct ssd *ssd, uint64_t lpn)
+{
+    uint64_t byte = lpn * ssd_page_size(ssd);
+    FemuCtrl *n = ssd->n;
+
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (ns->allocated && ns->ssd == ssd && byte >= ns->backend_offset &&
+            byte < ns->backend_offset + ns->size) {
+            return ns;
+        }
+    }
+    return ssd->ns;
+}
+
+/* the bytes and LBA states of page @lpn of @ns, as they are now */
+static void ssd_page_snapshot(struct ssd *ssd, NvmeNamespace *ns,
+                              uint64_t lpn, uint8_t **undo, uint8_t **state)
+{
+    uint32_t page_size = ssd_page_size(ssd);
+    uint8_t shift = ns->lbaf.lbads;
+    uint64_t offset = lpn * page_size - ns->backend_offset;
+    uint64_t slba = offset >> shift;
+    uint32_t count = page_size >> shift;
+    uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+
+    *undo = g_memdup2(base + offset, page_size);
+    *state = g_malloc(count);
+    for (uint32_t i = 0; i < count; i++) {
+        (*state)[i] = test_bit(slba + i, ns->util) |
+                      (test_bit(slba + i, ns->uncorrectable) << 1);
+    }
+}
+
+/*
+ * A direct (FUA or cache-off) write of page @lpn was booked. A buffered
+ * copy of the page that this write replaces never reached the media, so
+ * the generation keeps the bytes from before that copy, which stay the
+ * last durable ones; else the page as it was before this write.
+ */
+static void ssd_durable_direct(struct ssd *ssd, NvmeNamespace *ns,
+                               uint64_t lpn, uint8_t **snap,
+                               uint8_t **snap_state)
+{
+    struct buffer_entry target = { .lpn = lpn };
+    struct buffer_entry *entry = ssd->wb_tree ?
+        g_tree_lookup(ssd->wb_tree, &target) : NULL;
+
+    if (entry && entry->undo) {
+        ssd_durable_push(ssd, ns, lpn, entry->undo, entry->lba_state,
+                         ssd->last_prog_done);
+        entry->undo = NULL;
+        entry->lba_state = NULL;
+        g_clear_pointer(snap, g_free);
+        g_clear_pointer(snap_state, g_free);
+        return;
+    }
+    ssd_durable_push(ssd, ns, lpn, *snap, *snap_state, ssd->last_prog_done);
+    *snap = NULL;
+    *snap_state = NULL;
+}
+
 /* Save the last durable bytes once, then apply only this write's LBAs. */
 static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
                               bool buffered)
@@ -381,6 +445,10 @@ bool bbssd_power_loss(NvmeNamespace *ns)
             }
         }
         rcache_invalidate(ssd, entry->lpn);
+    }
+    /* durable_at_done: programs that had not ended give their pages back */
+    if (ssd_durable_on(ssd) && ssd->ns == ns) {
+        lost |= ssd_durable_cut(ssd, ssd->n->durable_cut);
     }
     while ((entry = QTAILQ_FIRST(&ssd->write_buffer))) {
         ssd_buffer_discard(ssd, entry->lpn);
@@ -885,6 +953,10 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
         if (!victim) {
             break;
         }
+        /* durable_at_done: no program without room for its generation */
+        if (ssd_durable_on(ssd) && victim->undo && !ssd_durable_room(ssd)) {
+            break;
+        }
 
         /* with dftl, the translation goes with the program */
         curlat = ssd_map_and_program(ssd, victim->lpn, stime, -1, &placed);
@@ -895,6 +967,14 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
          */
         if (!placed) {
             break;
+        }
+        /* its bytes before the buffered write stay until the program ends */
+        if (ssd_durable_on(ssd) && victim->undo) {
+            ssd_durable_push(ssd, ssd_lpn_ns(ssd, victim->lpn), victim->lpn,
+                             victim->undo, victim->lba_state,
+                             ssd->last_prog_done);
+            victim->undo = NULL;
+            victim->lba_state = NULL;
         }
         buffer_remove(ssd, victim);
         done++;
@@ -1138,6 +1218,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int r;
     bool wl_done;
     uint64_t passes = ssd->gc_stall_passes;
+    uint8_t *snap = NULL;
+    uint8_t *snap_state = NULL;
     bool buffer_full = false;
     bool placed;
     bool drain;
@@ -1274,6 +1356,19 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         /*
+         * durable_at_done: the page as it is now, before this write, so a
+         * failed placement can put it back; no write without room for its
+         * generation.
+         */
+        if (ssd_durable_on(ssd) && req->write_data) {
+            if (!ssd_durable_room(ssd)) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
+                break;
+            }
+            ssd_page_snapshot(ssd, req->ns, lpn, &snap, &snap_state);
+        }
+        /*
          * Under power_loss a buffered copy keeps its undo record until this
          * page is placed: a cut after a failed placement restores it.
          */
@@ -1284,7 +1379,16 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         if (!placed) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
+            /* the write did not happen: the page is as it was */
+            if (snap) {
+                ssd_page_restore(ssd, req->ns, lpn, snap, snap_state);
+                g_clear_pointer(&snap, g_free);
+                g_clear_pointer(&snap_state, g_free);
+            }
             break;
+        }
+        if (snap) {
+            ssd_durable_direct(ssd, req->ns, lpn, &snap, &snap_state);
         }
         if (ssd->write_buffer_cnt) {
             ssd_buffer_discard(ssd, lpn);
