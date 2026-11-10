@@ -1311,6 +1311,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_POWER_MEAS     = 0x25,
+    NVME_LOG_SANITIZE_NS_LIST = 0x7f,  /* sanitize_ns=on */
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
     NVME_LOG_RESV_NOTIFY        = 0x80,
     NVME_LOG_SANITIZE           = 0x81,
@@ -3137,6 +3138,7 @@ typedef struct FemuCtrl {
     bool            ns_wp;          /* Namespace Write Protection */
     bool            sanitize_ns;    /* Sanitize Namespace (8Ch) */
     uint32_t        san_ns_target;  /* NSID being sanitized; 0 = none */
+    uint64_t        sanns_genctr;   /* GENCTR of log 7Fh */
     int64_t         san_ns_start_ms;
     uint8_t         pl_drop;
     uint32_t        pl_cur;         /* CDW13 as set: PLS, PLV */
@@ -3907,8 +3909,13 @@ static inline NvmeSanitizeState *nvme_sanitize_state(FemuCtrl *n)
  */
 static inline void nvme_note_ns_write(NvmeNamespace *ns)
 {
-    if (unlikely(qatomic_read(&ns->nde))) {
-        qatomic_set(&ns->nde, false);
+    /* one writer takes NDE from 1 to 0, and counts the list change */
+    if (unlikely(qatomic_read(&ns->nde)) &&
+        qatomic_cmpxchg(&ns->nde, true, false)) {
+        /* it leaves the list of erased namespaces (log 7Fh) */
+        if (ns->ctrl) {
+            qatomic_inc(&ns->ctrl->sanns_genctr);
+        }
     }
 }
 

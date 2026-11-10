@@ -4727,6 +4727,47 @@ transfer:
 static uint16_t nvme_lockdown_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                                   uint64_t off);
 
+/*
+ * Sanitize Namespace Status List (7Fh, Figures 299 and 300). NLT (LSP bit
+ * 0) 0 lists the namespaces whose sanitize is in progress; 1 the idle ones
+ * with NDE set. GENCTR counts changes of either list.
+ */
+static uint16_t nvme_sanns_list_log(FemuCtrl *n, NvmeCmd *cmd,
+                                    uint32_t buf_len, uint64_t off)
+{
+    uint8_t lsp = (le32_to_cpu(cmd->cdw10) >> 8) & 0x7f;
+    bool nlt = lsp & 0x1;
+    size_t size = 16 + 4 * (size_t)n->namespace_limit;
+    g_autofree uint8_t *log = g_malloc0(size);
+    uint64_t num = 0;
+    bool resume;
+
+    if (lsp & ~0x1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* one snapshot of the states and NDE bits */
+    resume = nvme_pause_pollers(n);
+    stq_le_p(log, n->sanns_genctr);
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        bool busy = qatomic_read(&ns->san_busy);
+
+        if (ns->allocated &&
+            (nlt ? !busy && qatomic_read(&ns->nde) : busy)) {
+            stl_le_p(log + 16 + 4 * num++, ns->id);
+        }
+    }
+    nvme_resume_pollers(n, resume);
+    stq_le_p(log + 8, num);
+    size = 16 + 4 * num;
+    if (off >= size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    return dma_read_prp(n, log + off, MIN(size - off, buf_len),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -4878,6 +4919,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
             return NVME_INVALID_LOG_ID | NVME_DNR;
         }
         return nvme_resv_log(n, cmd, len, off, rae);
+    case NVME_LOG_SANITIZE_NS_LIST:
+        return nvme_sanns_list_log(n, cmd, len, off);
     case NVME_LOG_LOCKDOWN:
         if (!n->lockdown) {
             return NVME_INVALID_LOG_ID | NVME_DNR;
@@ -6031,6 +6074,50 @@ static bool nvme_sanitize_allows(NvmeCmd *cmd)
     }
 }
 
+/*
+ * Admin commands while a Sanitize Namespace runs (Figures 144 and 145):
+ * those that touch the namespace being sanitized, name it, or name every
+ * namespace with an effect on it, fail with Sanitize Namespace In
+ * Progress. Format NVM, Get LBA Status and 8Ch check it themselves.
+ */
+static uint16_t nvme_sanns_admin_check(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t t = qatomic_read(&n->san_ns_target);
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    bool named = nsid == t;
+    bool all = nsid == NVME_NSID_BROADCAST;
+    uint8_t fid;
+
+    if (!t) {
+        return NVME_SUCCESS;
+    }
+    switch (cmd->opcode) {
+    case NVME_ADM_CMD_ACTIVATE_FW:
+    case NVME_ADM_CMD_DOWNLOAD_FW:
+    case NVME_ADM_CMD_LOCKDOWN:
+        return NVME_SANITIZE_NS_IN_PROGRESS;
+    case NVME_ADM_CMD_DEV_SELF_TEST:
+    case NVME_ADM_CMD_DIRECTIVE_SEND:
+    case NVME_ADM_CMD_DIRECTIVE_RECV:
+        return named || all ? NVME_SANITIZE_NS_IN_PROGRESS : NVME_SUCCESS;
+    case NVME_ADM_CMD_GET_LOG_PAGE:
+        /* its own Sanitize Status log stays readable */
+        return named && (le32_to_cpu(cmd->cdw10) & 0xff) != NVME_LOG_SANITIZE ?
+               NVME_SANITIZE_NS_IN_PROGRESS : NVME_SUCCESS;
+    case NVME_ADM_CMD_GET_FEATURES:
+    case NVME_ADM_CMD_SET_FEATURES:
+        fid = NVME_GETSETFEAT_FID(le32_to_cpu(cmd->cdw10));
+        if (!(nvme_feat_cap(n, fid) & NVME_FEAT_CAP_NS)) {
+            return NVME_SUCCESS;
+        }
+        /* a Set for all namespaces would change it too */
+        return named || (all && cmd->opcode == NVME_ADM_CMD_SET_FEATURES) ?
+               NVME_SANITIZE_NS_IN_PROGRESS : NVME_SUCCESS;
+    default:
+        return NVME_SUCCESS;
+    }
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     trace_femu_admin_cmd(cmd->cid, cmd->opcode);
@@ -6047,6 +6134,13 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     if (unlikely(nvme_sanitize_busy(n)) && !nvme_sanitize_allows(cmd)) {
         return NVME_SANITIZE_IN_PROGRESS;
+    }
+    if (unlikely(n->sanitize_ns)) {
+        uint16_t status = nvme_sanns_admin_check(n, cmd);
+
+        if (status) {
+            return status;
+        }
     }
     if (n->reservations) {
         uint16_t status = nvme_resv_admin_check(n, cmd);

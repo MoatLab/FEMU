@@ -794,6 +794,13 @@ time (MNSOIP 1).
   2Ch while one runs, and 8Ch fails with 1Dh during a Sanitize.
 - NDE is set for a new namespace and by a sanitize, and cleared by a
   write. The state lives in memory: `persist_file` is refused.
+- Admin commands while it runs (Figures 144 and 145) fail with 2Ch:
+  Firmware Commit and Download and Lockdown always; Device Self-test
+  and the Directives for n or for all; Get Log Page for n, except log
+  81h; Get or Set Features of a namespace-scoped feature for n, and Set
+  for all.
+- Log 7Fh lists NSIDs: NLT 0 the namespaces in progress, NLT 1 the idle
+  ones with NDE set. GENCTR counts every change of either list.
 - Not with a femu-subsys, `ns_mgmt` or `cxl_ssd`; bbssd and NoSSD only.
 
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP

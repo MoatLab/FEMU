@@ -129,6 +129,7 @@ void femu_sanns_finish(FemuCtrl *n)
     stl_le_p(ev + 8, nsid);
     qatomic_set(&ns->san_busy, false);
     qatomic_set(&n->san_ns_target, 0);
+    n->sanns_genctr++;          /* from in progress to erased */
     nvme_resume_pollers(n, resume);
     femu_pel_log(n, NVME_PEL_SANITIZE_COMPLETION, 2, ev, sizeof(ev));
     /* Sanitize Operation Completed, the NSID in Dword 1 */
@@ -200,6 +201,7 @@ uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd)
     femu_sanns_erase(n, ns);
     ns->san_sstat = 0x2;
     ns->san_cdw10 = dw10;
+    n->sanns_genctr++;          /* it joins the in-progress list */
     n->san_ns_start_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     qatomic_set(&n->san_ns_target, nsid);
     nvme_resume_pollers(n, resume);
@@ -251,13 +253,20 @@ void femu_sanns_log(FemuCtrl *n, NvmeNamespace *ns, uint8_t *log)
  */
 void femu_sanns_subsys_done(FemuCtrl *n, uint32_t cdw10, uint16_t sos)
 {
+    bool changed = false;
+
     for (int i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
         if (ns->allocated) {
+            changed |= !qatomic_read(&ns->nde);
             qatomic_set(&ns->nde, true);
             ns->san_sstat = sos;
             ns->san_cdw10 = cdw10;
         }
+    }
+    /* GENCTR moves only when a namespace joins the erased list */
+    if (changed) {
+        n->sanns_genctr++;
     }
 }

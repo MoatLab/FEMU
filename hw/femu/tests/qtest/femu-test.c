@@ -43785,6 +43785,23 @@ static uint16_t femu_sanns_sstat(FemuCtrlState *c, uint32_t nsid,
     return qtest_readw(c->pdev->bus->qts, buf + 2);
 }
 
+/* log 7Fh with NLT @nlt into @buf: the number of NSIDs; GENCTR too */
+static uint64_t femu_sanns_list(FemuCtrlState *c, uint64_t buf, bool nlt,
+                                uint64_t *gen)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x7f | (uint32_t)nlt << 8 | (64 / 4 - 1) << 16);
+    qtest_memset(c->pdev->bus->qts, buf, 0xff, 64);
+    g_assert_cmphex(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    if (gen) {
+        *gen = qtest_readq(c->pdev->bus->qts, buf);
+    }
+    return qtest_readq(c->pdev->bus->qts, buf + 8);
+}
+
 /*
  * Set test hook @prop of device "sanns": x-fetch-hold is a bool,
  * x-ftl-hold a number.
@@ -43833,6 +43850,7 @@ static void femu_test_sanitize_ns(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint32_t res = 0;
+    uint64_t gen = 0, gen2 = 0;
     uint16_t cid, want;
     NvmeCmd fmt = { 0 };
     int i;
@@ -43887,6 +43905,29 @@ static void femu_test_sanitize_ns(void *obj, void *data,
     g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
                     FEMU_SC_SANNS_BUSY);
 
+    /* Figures 144 and 145: what names namespace 1 or all, or changes it */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 1,
+                                0x02 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 2,
+                                0x02 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x05, 0, 1, 0, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x05, 0, 2, 0, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x05, false,
+                                             NVME_NSID_BROADCAST, 0, NULL)),
+                    ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, 0x14, 1, 1, 0, 0, 0), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, 0x11, 0, 0, 0, 0, buf), ==,
+                    FEMU_SC_SANNS_BUSY);
+    /* log 7Fh: namespace 1 in progress; none erased and idle */
+    g_assert_cmphex(femu_sanns_list(&c, buf, false, &gen), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 16), ==, 1);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, NULL), ==, 0);
+
     /* it ends: an event for log 81h, NDE, SOS 001b, the data gone */
     want = femu_aer(&c);
     qtest_clock_step(qts, 250 * 1000 * 1000LL);
@@ -43902,10 +43943,16 @@ static void femu_test_sanitize_ns(void *obj, void *data,
         femu_power_read(&c, buf, 2, i, 0xb2);
     }
     g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0);
+    g_assert_cmphex(femu_sanns_list(&c, buf, false, &gen2), ==, 0);
+    g_assert_cmpuint(gen2, >, gen);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, NULL), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 16), ==, 1);
 
-    /* a write clears NDE; SOS stays */
+    /* a write clears NDE; SOS stays; it leaves the erased list */
     femu_power_write(&c, buf, 1, 8, 8, 0xc3, false);
     g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x1);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, &gen), ==, 0);
+    g_assert_cmpuint(gen, >, gen2);
 
     /* now namespace 2: namespace 1 keeps what was written since */
     g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, NVME_SUCCESS);
