@@ -3401,6 +3401,7 @@ static void femu_realize_undo(FemuCtrl *n)
     if (n->subsys) {
         femu_subsys_unregister_ctrl(n->subsys, n);
     }
+    femu_cancel_exit(n);
     if (n->aer_bh) {
         qemu_bh_delete(n->aer_bh);
         n->aer_bh = NULL;
@@ -4397,7 +4398,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
         !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
-        !femu_sanns_check(n, errp)) {
+        !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -4515,6 +4516,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     qemu_mutex_init(&n->streams_lock);
     n->aer_bh = qemu_bh_new_guarded(femu_aer_bh, n,
                                     &DEVICE(n)->mem_reentrancy_guard);
+    femu_cancel_init(n);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
     n->features.ic_vec = g_new0(NvmeIcVector, n->nr_io_queues + 1);
     for (int v = 0; v <= n->nr_io_queues; v++) {
@@ -4927,6 +4929,7 @@ static void femu_exit(PCIDevice *pci_dev)
     n->aer_bh = NULL;
     qemu_mutex_destroy(&n->aer_lock);
     qemu_mutex_destroy(&n->streams_lock);
+    femu_cancel_exit(n);
     if (!n->shared_storage && !n->cxl_dev) {
         free_dram_backend(n->mbe);
     } else if (n->cxl_dev) {
@@ -5256,6 +5259,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
+    DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),
@@ -5955,6 +5959,15 @@ static bool femu_test_fetch_hold_get(Object *obj, Error **errp)
     return qatomic_read(&FEMU(obj)->test_fetch_hold);
 }
 
+/* the requests that wait for their CQE (femu_cancel_cpl_count()) */
+static void femu_test_cpl_count_get(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    uint32_t value = femu_cancel_cpl_count(FEMU(obj));
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
 static void femu_test_oc12_clock(Object *obj, bool value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -6252,6 +6265,11 @@ static void femu_instance_init(Object *obj)
         object_property_add_bool(obj, "x-fetch-hold",
                                  femu_test_fetch_hold_get,
                                  femu_test_fetch_hold_set);
+        object_property_add_uint32_ptr(obj, "x-cpl-hold",
+                                       &FEMU(obj)->test_cpl_hold,
+                                       OBJ_PROP_FLAG_READWRITE);
+        object_property_add(obj, "x-cpl-count", "uint32",
+                            femu_test_cpl_count_get, NULL, NULL, NULL);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
         object_property_add_bool(obj, "x-telemetry-trigger", NULL,

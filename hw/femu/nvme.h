@@ -856,6 +856,7 @@ enum NvmeIoCommands {
     NVME_CMD_DSM                = 0x09,
     NVME_CMD_VERIFY             = 0x0c,
     NVME_CMD_IO_MGMT_RECV       = 0x12,
+    NVME_CMD_CANCEL             = 0x18,
     NVME_CMD_COPY               = 0x19,
     NVME_CMD_IO_MGMT_SEND       = 0x1d,
     NVME_CMD_RESV_REGISTER      = 0x0d,
@@ -1150,6 +1151,8 @@ enum NvmeStatusCodes {
     NVME_INVALID_POWER_LIMIT    = 0x013e,
     /* Figure 392; Figure 103 lists 3Ch for the same status */
     NVME_SANITIZE_NS_LIMIT      = 0x0112,
+    /* Cancel: the CID names this Cancel (Figure 592) */
+    NVME_CANCEL_INVALID_CID     = 0x0184,
     NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
@@ -2005,6 +2008,8 @@ typedef struct NvmeRequest {
     uint32_t                nlb;
     /* a Write Zeroes that only deallocates programs no data */
     bool                    wz_deac;
+    /* a Cancel found it before its FTL step (cancel=on, femu-cancel.c) */
+    bool                    cancel;
     /*
      * Bytes this command really moved, for the modes whose transfer size is not
      * a block count. Zero everywhere else; the block arithmetic applies there.
@@ -3021,6 +3026,14 @@ typedef struct FemuCtrl {
      */
     QemuMutex       aer_lock;
     QEMUBH          *aer_bh;
+    /*
+     * cancel=on: the pollers append each Cancel that passed its checks
+     * under cancel_lock; cancel_bh runs them with the dataplane paused.
+     */
+    bool            cancel;
+    QemuMutex       cancel_lock;
+    QTAILQ_HEAD(, NvmeRequest) cancel_list;
+    QEMUBH          *cancel_bh;
     QEMUTimer       *aer_timer;
     uint8_t         aer_mask;
     /*
@@ -3283,6 +3296,11 @@ typedef struct FemuCtrl {
     /* qtest only (x-ftl-hold): the FTL thread takes no request while set */
     uint32_t        test_ftl_hold;
     uint32_t        test_fetch_hold;    /* pollers take no SQE */
+    /*
+     * qtest only (x-cpl-hold): 1, the pollers leave the requests the FTL
+     * returned in their ring; 2, they leave them in pq. Backlogs post.
+     */
+    uint32_t        test_cpl_hold;
     /*
      * wrr=on: weighted round robin with an urgent class (CC.AMS 001b).
      * The one poller owns the credits (high, medium, low) and the next-SQ
@@ -3735,6 +3753,14 @@ bool femu_wp_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);
 uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd);
+bool femu_cancel_check(FemuCtrl *n, Error **errp);
+void femu_cancel_init(FemuCtrl *n);
+void femu_cancel_exit(FemuCtrl *n);
+uint16_t femu_cancel_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+void femu_cancel_fetched(FemuCtrl *n, NvmeRequest *req, int poller);
+void femu_cancel_drop_sq(FemuCtrl *n, NvmeSQueue *sq);
+void femu_cancel_retire_ns(FemuCtrl *n, NvmeNamespace *ns, uint16_t status);
+uint32_t femu_cancel_cpl_count(FemuCtrl *n);
 void femu_sanns_finish(FemuCtrl *n);
 void femu_sanns_log(FemuCtrl *n, NvmeNamespace *ns, uint8_t *log);
 void femu_sanns_subsys_done(FemuCtrl *n, uint32_t cdw10, uint16_t sos);

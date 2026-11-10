@@ -44067,6 +44067,363 @@ static void femu_test_sanitize_ns_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+#define FEMU_IO_CANCEL          0x18
+#define FEMU_SC_CANCEL_CID      0x184
+
+/* set test hook @prop of device @id to @value */
+static void femu_cancel_hook(QTestState *qts, const char *id,
+                             const char *prop, int value)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':%s,'value':%d}}",
+                           path, prop, value);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* wait until @want requests of device @id wait for their CQE */
+static void femu_cancel_wait_cpl(QTestState *qts, const char *id,
+                                 int64_t want)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    int64_t got = -1;
+
+    for (int i = 0; i < FEMU_POLL_LIMIT_MS; i++) {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':%s,'property':'x-cpl-count'}}", path);
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        got = qdict_get_int(rsp, "return");
+        qobject_unref(rsp);
+        if (got == want) {
+            return;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmpint(got, ==, want);
+}
+
+/* submit Cancel: CID @cid, SQID @sqid, ACODE @acode, NSID @nsid */
+static uint16_t femu_cancel_submit(FemuCtrlState *c, uint32_t nsid,
+                                   uint16_t cid, uint16_t sqid, uint8_t acode)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_IO_CANCEL;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32((uint32_t)cid << 16 | sqid);
+    cmd.cdw11 = cpu_to_le32(acode);
+    femu_submit(c, &c->io, &cmd);
+    return le16_to_cpu(cmd.cid);
+}
+
+/* Cancel and its completion: status, and Dword 0 in @res */
+static uint16_t femu_cancel(FemuCtrlState *c, uint32_t nsid, uint16_t cid,
+                            uint16_t sqid, uint8_t acode, uint32_t *res)
+{
+    uint16_t want = femu_cancel_submit(c, nsid, cid, sqid, acode);
+    uint16_t got;
+    uint16_t status = femu_complete(c, &c->io, &got, res);
+
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
+/* submit an 8-block Write (@write) or Read of @nsid at @lba; do not wait */
+static uint16_t femu_cancel_rw(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                               uint64_t lba, bool write, uint8_t pattern)
+{
+    NvmeRwCmd rw = { 0 };
+
+    if (write) {
+        qtest_memset(c->pdev->bus->qts, buf, pattern, 4096);
+    }
+    rw.opcode = write ? NVME_CMD_WRITE : NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    return le16_to_cpu(rw.cid);
+}
+
+/*
+ * @n completions in any order, one for each CID in @cid: it takes its
+ * status in @sc and, when @res is given, Dword 0 in @res.
+ */
+static void femu_cancel_reap(FemuCtrlState *c, int n, const uint16_t *cid,
+                             uint16_t *sc, uint32_t *res)
+{
+    bool seen[8] = { false };
+
+    g_assert_cmpint(n, <=, ARRAY_SIZE(seen));
+    for (int i = 0; i < n; i++) {
+        uint16_t got;
+        uint32_t dw0 = 0;
+        uint16_t status = femu_complete(c, &c->io, &got, &dw0);
+        int j;
+
+        for (j = 0; j < n && cid[j] != got; j++) {
+            ;
+        }
+        g_assert_cmpint(j, <, n);
+        g_assert_false(seen[j]);
+        seen[j] = true;
+        sc[j] = FEMU_SC(status);
+        if (res) {
+            res[j] = dw0;
+        }
+    }
+}
+
+/*
+ * Deferred abort: with the FTL held, three Writes wait in to_ftl, two to
+ * namespace 1 and one to namespace 2. A Cancel of all of namespace 1
+ * reports CEDA 2. After the release the two complete with Command Abort
+ * Requested, the third with success; the FTL step still ran, so the data
+ * reads back. The request slots then serve new commands as usual.
+ */
+static void femu_test_cancel_deferred(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t wbuf[3];
+    uint16_t cid[3];
+    uint16_t sc[3];
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* each Write keeps its own buffer until it completes */
+    for (int i = 0; i < 3; i++) {
+        wbuf[i] = guest_alloc(alloc, 4096);
+    }
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 1);
+    cid[0] = femu_cancel_rw(&c, wbuf[0], 1, 0, true, 0xa1);
+    cid[1] = femu_cancel_rw(&c, wbuf[1], 2, 0, true, 0xa2);
+    cid[2] = femu_cancel_rw(&c, wbuf[2], 1, 8, true, 0xa1);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, c.io.qid, 1, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 2 << 16);
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 0);
+    femu_cancel_reap(&c, 3, cid, sc, NULL);
+    g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(sc[1], ==, NVME_SUCCESS);
+    g_assert_cmphex(sc[2], ==, NVME_CMD_ABORT_REQ);
+    for (int i = 0; i < 16; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+        femu_power_read(&c, buf, 2, i % 8, 0xa2);
+    }
+    /* nothing left: a second Cancel finds no command */
+    g_assert_cmphex(femu_cancel(&c, NVME_NSID_BROADCAST, 0xffff, c.io.qid,
+                                1, &res), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0);
+    for (int i = 0; i < FEMU_QSIZE; i++) {
+        femu_power_write(&c, buf, 1, 16, 8, 0xb3, false);
+    }
+    femu_power_read(&c, buf, 1, 16, 0xb3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    for (int i = 0; i < 3; i++) {
+        guest_free(alloc, wbuf[i]);
+    }
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Immediate abort: a Read held past its FTL step, first in pq (x-cpl-hold
+ * 2), then in the return ring (1). A single Cancel by CID reports CMDA 1,
+ * and the Read completes with Command Abort Requested. The two CQEs may
+ * post in either order (5.2.1.1).
+ */
+static void femu_test_cancel_immediate(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const uint32_t nsid[2] = { NVME_NSID_BROADCAST, 1 };
+    uint16_t cid[2];
+    uint16_t sc[2];
+    uint32_t res[2];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* a mapped page, so the Read reaches the media */
+    femu_power_write(&c, buf, 1, 0, 8, 0xc4, false);
+    for (int hold = 2; hold >= 1; hold--) {
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", hold);
+        cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
+        femu_cancel_wait_cpl(qts, "cancel", 1);
+        cid[1] = femu_cancel_submit(&c, nsid[hold - 1], cid[0], c.io.qid, 0);
+        femu_cancel_reap(&c, 2, cid, sc, res);
+        g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+        g_assert_cmphex(sc[1], ==, NVME_SUCCESS);
+        g_assert_cmphex(res[1], ==, 1);
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+    }
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+    femu_power_read(&c, buf, 1, 0, 0xc4);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The field checks (Figures 590 and 591), a CID that is not found, a
+ * single Cancel whose CID names another namespace (the target is left as
+ * it was), and the effects log entry.
+ */
+static void femu_test_cancel_checks(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t sq;
+    uint16_t cid;
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    sq = c.io.qid;
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 1024 + 4 * FEMU_IO_CANCEL), ==,
+                    0x1);
+
+    g_assert_cmphex(femu_cancel(&c, 1, c.cid, sq, 0, NULL), ==,
+                    FEMU_SC_CANCEL_CID);
+    g_assert_cmphex(femu_cancel(&c, 1, 0x10, sq + 1, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 1, 0x10, sq, 1, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, sq, 2, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 0, 0xffff, sq, 1, NULL), ==,
+                    NVME_INVALID_NSID);
+    res = 0xdead;
+    g_assert_cmphex(femu_cancel(&c, 1, 0xfff0, sq, 0, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0);
+
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 1);
+    cid = femu_cancel_rw(&c, buf, 2, 0, true, 0xd5);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_cancel(&c, 1, cid, sq, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 0);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_power_read(&c, buf, 2, 0, 0xd5);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * NoSSD has no FTL thread: the poller reads to_ftl itself. x-cpl-hold 1
+ * keeps two Writes there, and a Cancel of all namespaces defers both.
+ * The firmware CPU model (fw_cpu_ns) sends NoSSD I/O through the rings;
+ * without a model it can complete in the fetch sweep, with nothing left
+ * for a Cancel to find.
+ */
+static void femu_test_cancel_nossd(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t cid[2];
+    uint16_t sc[2];
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 1);
+    /* one pattern: a shared buffer cannot change under the Writes */
+    cid[0] = femu_cancel_rw(&c, buf, 1, 0, true, 0xe6);
+    cid[1] = femu_cancel_rw(&c, buf, 1, 8, true, 0xe6);
+    femu_cancel_wait_cpl(qts, "cancel", 2);
+    g_assert_cmphex(femu_cancel(&c, NVME_NSID_BROADCAST, 0xffff, c.io.qid,
+                                1, &res), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 2 << 16);
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+    femu_cancel_reap(&c, 2, cid, sc, NULL);
+    g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(sc[1], ==, NVME_CMD_ABORT_REQ);
+    femu_power_read(&c, buf, 1, 0, 0xe6);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* cancel off: 18h is not supported; and the refusals at realize */
+static void femu_test_cancel_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':5,'cancel':true", "a mode other than bbssd or NoSSD" },
+        { "'femu_mode':1,'cancel':true,'buffer_size':16", "buffer_size" },
+        { "'femu_mode':1,'cancel':true,'mapping':'dftl'",
+          "a mapping other than page" },
+        { "'femu_mode':1,'cancel':true,'ocp':true", "ocp" },
+    };
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 1024 + 4 * FEMU_IO_CANCEL), ==,
+                    0);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, c.io.qid, 1, NULL), ==,
+                    NVME_INVALID_OPCODE);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'cancelr','addr':'5','devsz_mb':16,%s}}",
+            cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -60290,6 +60647,30 @@ static void femu_register_nodes(void)
     });
     qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
                  NULL);
+    qos_add_test("cancel-deferred", "femu", femu_test_cancel_deferred,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
+            "namespaces=2,cancel=on",
+    });
+    qos_add_test("cancel-immediate", "femu", femu_test_cancel_immediate,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
+            "cancel=on",
+    });
+    qos_add_test("cancel-checks", "femu", femu_test_cancel_checks,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
+            "namespaces=2,cancel=on",
+    });
+    qos_add_test("cancel-nossd", "femu", femu_test_cancel_nossd,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=cancel,femu_mode=2,devsz_mb=16,"
+            "fw_cpu_ns=1000,cancel=on",
+    });
+    qos_add_test("cancel-refused", "femu", femu_test_cancel_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=16",
+    });
     qos_add_test("fused-refused", "femu", femu_test_fused_refused,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,oncs=0x19f",

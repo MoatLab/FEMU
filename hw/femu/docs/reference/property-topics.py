@@ -20,6 +20,7 @@ DEVICES = [
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
                       "x-ftl-check", "x-ftl-hold", "x-ftl-trace",
+                      "x-cpl-count", "x-cpl-hold",
                       "x-gc-frontier", "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
                       "x-gc-idle-order", "x-maint-idle",
@@ -64,7 +65,7 @@ DEVICES = [
                 "props": [
                     "vid", "did", "pci_pm", "acl", "cqr", "vwc", "temperature", "mpsmin",
                     "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "sanitize_ms", "sanitize_ops", "ana", "power_states", "lockdown", "reservations", "ps_max_watts",
-                    "power_limit", "ns_wp", "sanitize_ns",
+                    "power_limit", "ns_wp", "sanitize_ns", "cancel",
                 ],
             },
             {

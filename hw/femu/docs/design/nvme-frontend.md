@@ -803,6 +803,37 @@ time (MNSOIP 1).
   ones with NDE set. GENCTR counts every change of either list.
 - Not with a femu-subsys, `ns_mgmt` or `cxl_ssd`; bbssd and NoSSD only.
 
+With `cancel=on`, Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its
+own submission queue: one by CID (ACODE 00b) or all of a namespace
+(ACODE 01b, NSID FFFFFFFFh for all). Dword 0 of its completion holds
+CEDA (bits 31:16) and CMDA (bits 15:0).
+
+```text
+ poller: fetch 18h --> field checks --> fail: CQE without the FTL
+                                    --> pass: held for a bottom half
+ bottom half, dataplane paused, on the poller that owns the queue:
+   past the FTL step (return ring, pq, backlog), or a held Cancel
+     --> Command Abort Requested now; CMDA + 1
+   before the FTL step (to_ftl)
+     --> the step runs, then Command Abort Requested; CEDA + 1
+   Cancel CQE
+```
+
+- A command past its FTL step has moved its data and changed the
+  mapping, so only its CQE is left: the abort leaves no effect after the
+  Cancel completes (5.2.1.1). A command that already failed keeps its
+  status.
+- A single cancel finds the CID first. If that command names another
+  namespace, the Cancel fails with Invalid Field and changes nothing. A
+  CID that is not found gives CEDA 0 and CMDA 0. The Cancel's own CID
+  gives status 184h.
+- A held Cancel can be aborted; a Cancel that ran keeps its effects.
+- A namespace retirement (sanitize, detach, delete) wins over a deferred
+  abort, so CEDA counts the commands eligible for one.
+- Needs `mapping=page`. Not with `buffer_size`, `cxl_ssd`, `ocp`,
+  `power_loss` or a femu-subsys: each leaves work after the FTL step, or
+  more than one controller.
+
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
 and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,

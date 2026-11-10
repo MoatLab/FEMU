@@ -506,6 +506,7 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
         req->ns = NULL;
         req->xfer_bytes = 0;
         req->wz_deac = false;
+        req->cancel = false;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
@@ -570,6 +571,12 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
             }
         }
         req->status = status;
+        /* a Cancel completes without the FTL (femu-cancel.c) */
+        if (unlikely(req->cmd_opcode == NVME_CMD_CANCEL) && n->cancel) {
+            femu_cancel_fetched(n, req, index_poller);
+            processed++;
+            continue;
+        }
 
         /*
          * Host I/O totals for the SMART health log, counted here so every mode
@@ -928,6 +935,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     struct rte_ring *rp = n->to_ftl[index_poller];
     pqueue_t *pq = n->pq[index_poller];
     bool *should_isr = nvme_should_isr(n, index_poller);
+    uint32_t hold = qatomic_read(&n->test_cpl_hold);
     uint64_t now;
     int processed = 0;
     int rc;
@@ -937,7 +945,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         rp = n->to_poller[index_poller];
     }
 
-    while (femu_ring_count(rp)) {
+    while (hold != 1 && femu_ring_count(rp)) {
         req = NULL;
         rc = femu_ring_dequeue(rp, (void *)&req, 1);
         if (rc != 1) {
@@ -1008,6 +1016,14 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             }
         }
 
+        /* a Cancel found it before its FTL step: a deferred abort */
+        if (unlikely(req->cancel)) {
+            req->cancel = false;
+            if (req->status == NVME_SUCCESS) {
+                req->status = NVME_CMD_ABORT_REQ;
+                req->cqe.res64 = 0;
+            }
+        }
         pqueue_insert(pq, req);
     }
 
@@ -1015,7 +1031,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         processed += nvme_post_backlog(n, index_poller, should_isr);
     }
 
-    while ((req = pqueue_peek(pq))) {
+    while (!hold && (req = pqueue_peek(pq))) {
         now = femu_io_now(n);
         if (now < req->expire_time) {
             break;
@@ -3107,6 +3123,10 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
     trace_femu_io_cmd(cmd->cid, nsid, cmd->opcode);
+    /* Cancel names FFFFFFFFh or an NSID it checks itself (Figure 591) */
+    if (unlikely(cmd->opcode == NVME_CMD_CANCEL) && n->cancel) {
+        return femu_cancel_cmd(n, cmd, req);
+    }
     req->ns = ns = nvme_ns(n, nsid);
     if (!ns) {
         if (nvme_ns_mgmt_supported(n) && nsid && nsid <= n->namespace_limit) {

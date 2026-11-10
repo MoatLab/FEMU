@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 290 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 291 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -97,6 +97,7 @@ Devices:
 | `power_limit` | `bool` | `off` | with power_states: Power Limit (feature 23h, Base 2.3 8.1.18.6); a host limit in watts prohibits the power states whose MP is above it and renumbers the rest; not with persist_file; off (default) |
 | `ns_wp` | `bool` | `off` | bbssd, NoSSD: Namespace Write Protection (feature 84h, Base 2.3 8.1.17), the No Write Protect and Write Protect states; writes to a protected namespace fail with Namespace Is Write Protected; not with FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off (default) |
 | `sanitize_ns` | `bool` | `off` | bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 5.2.23), a crypto erase of one namespace while other namespaces keep their data, one at a time; log 81h by NSID; not with a femu-subsys, ns_mgmt, cxl_ssd or persist_file; off (default) |
+| `cancel` | `bool` | `off` | bbssd, NoSSD: Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its own submission queue, one by CID or all of a namespace; commands past the FTL step abort at once (CMDA), the others when the step ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, ocp, power_loss or a femu-subsys; off (default) |
 
 ### LBA formats, metadata and protection
 
@@ -500,7 +501,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

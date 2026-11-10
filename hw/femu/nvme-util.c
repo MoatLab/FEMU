@@ -560,6 +560,7 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
 
     /* first, so nothing posts a completion for this queue after the drain */
     femu_csd_drain_sq(n, sq);
+    femu_cancel_drop_sq(n, sq);
 
     for (p = 1; p <= (int)n->nr_pollers; p++) {
         struct rte_ring *rings[2];
@@ -645,6 +646,8 @@ static void nvme_retire_ns_request(NvmeRequest *req, bool completed,
     req->ns = NULL;
     req->opaque = NULL;
     req->expire_time = 0;
+    /* the retirement status wins over a deferred Cancel */
+    req->cancel = false;
 }
 
 /*
@@ -672,6 +675,7 @@ void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
 
     assert(!n->dataplane_started);
     assert(ns);
+    femu_cancel_retire_ns(n, ns, status);
     for (p = 1; p <= n->nr_pollers; p++) {
         struct rte_ring *rings[2];
         int r;

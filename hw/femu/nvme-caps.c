@@ -298,6 +298,9 @@ static uint32_t nvme_mode_io_effects(FemuCtrl *n, uint8_t csi, uint8_t mode,
     switch (opc) {
     case NVME_CMD_FLUSH:
         return NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    case NVME_CMD_CANCEL:
+        /* femu_cancel_check() allows bbssd and NoSSD only */
+        return n->cancel ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_CMD_IO_MGMT_RECV:
     case NVME_CMD_IO_MGMT_SEND:
         return csi == NVME_CSI_NVM && n->subsys &&

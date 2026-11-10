@@ -68,6 +68,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: unknown cache_evict "%s"; use clock, random, lru or arc
 
+## `cancel`
+
+- femu: cancel is not supported with %s
+
 ## `cell_pages`
 
 - FEMU bbssd: cell_pages must be in [0, %d]

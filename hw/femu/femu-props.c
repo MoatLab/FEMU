@@ -308,6 +308,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "5.2.23), a crypto erase of one namespace while other namespaces keep "
       "their data, one at a time; log 81h by NSID; not with a femu-subsys, "
       "ns_mgmt, cxl_ssd or persist_file; off (default)" },
+    { "cancel",
+      "bbssd, NoSSD: Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its "
+      "own submission queue, one by CID or all of a namespace; commands "
+      "past the FTL step abort at once (CMDA), the others when the step "
+      "ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, "
+      "ocp, power_loss or a femu-subsys; off (default)" },
     { "power_states",
       "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch "
       "NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is "
