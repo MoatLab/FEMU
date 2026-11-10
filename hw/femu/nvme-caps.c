@@ -500,6 +500,10 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
     if (nvme_fid_supported(n, NVME_TIMESTAMP)) {
         o |= NVME_ONCS_TIMESTAMP;
     }
+    /* feature 23h shall be saveable */
+    if (n->power_limit) {
+        o |= NVME_ONCS_FEATURES;
+    }
     /* a Copy's write portion is one write here, so it is single-atomic */
     if (o & NVME_ONCS_COPY) {
         o |= NVME_ONCS_NVMCSA;

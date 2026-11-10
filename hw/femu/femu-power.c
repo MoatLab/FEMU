@@ -17,6 +17,18 @@
  * command fetched before the wake ends waits for it. Idle GC and the
  * thermal model do not look at the state.
  *
+ * With power_limit=on, feature 23h prohibits the states whose MP is above
+ * the limit (8.1.18.6). MP falls with the state number, so they are the
+ * first pl_drop states, and the host numbers the rest from 0:
+ *
+ *   physical  0    1    2    3          drop 1:  host 0 = physical 1
+ *   MP        100% 60%  35%  0.05 W     drop 2:  host 0 = physical 2
+ *
+ * ps_cur, ps_op and the APST table stay physical; feature 02h, feature
+ * 0Ch and Identify convert. A limit below every operational MP is refused.
+ * The MP figures stay nominal: the limit restricts the states, not the
+ * energy the thermal model or log 25h counts.
+ *
  * The state moves forward when it is read, not on a timer. Idle time runs
  * from the later of the last I/O fetch and the end of the work the FTL
  * booked. Open gap: a request still queued for the FTL, or held for a full
@@ -28,6 +40,7 @@
 
 #define FEMU_NPSS           3
 #define FEMU_PS_NONOP       3
+#define FEMU_PL_DEFAULT     (2u << 16)      /* PLS 10b (0.01 W), no limit */
 
 static const struct {
     uint8_t mp_pct;         /* of PS0, for the operational states */
@@ -45,6 +58,10 @@ bool femu_power_check(FemuCtrl *n, Error **errp)
 {
     n->thermal_pct = 100;
     n->ps_pct = 100;
+    if (n->power_limit && !n->power_states) {
+        error_setg(errp, "power_limit needs power_states");
+        return false;
+    }
     if (!n->power_states) {
         return true;
     }
@@ -71,32 +88,79 @@ bool femu_power_check(FemuCtrl *n, Error **errp)
                    "throttle_heavy_pct <= 1000");
         return false;
     }
+    n->pl_cur = FEMU_PL_DEFAULT;
+    n->pl_saved = FEMU_PL_DEFAULT;
+    /* the saved limit lives in memory only */
+    if (n->power_limit && n->persist_file) {
+        error_setg(errp, "power_limit is not supported with persist_file");
+        return false;
+    }
     return true;
 }
 
-/* the descriptors of Identify Controller, APSTA, NPSS */
+/* MP of physical state @i, in 0.01 W */
+static uint32_t femu_ps_mp(FemuCtrl *n, int i)
+{
+    return i == FEMU_PS_NONOP ? 5 : n->ps_max_watts * femu_ps[i].mp_pct;
+}
+
+/*
+ * The states a limit of CDW13 @dw13 prohibits: those whose MP is above
+ * it. FEMU_PS_NONOP means it prohibits every operational state.
+ */
+static uint8_t femu_pl_drop(FemuCtrl *n, uint32_t dw13)
+{
+    uint32_t plv = dw13 & 0xffff;
+    uint64_t lim = (uint64_t)plv * (((dw13 >> 16) & 0x3) == 1 ? 1 : 100);
+    uint8_t d = 0;
+
+    if (!plv) {
+        return 0;
+    }
+    /* both sides in 0.0001 W */
+    while (d < FEMU_PS_NONOP && (uint64_t)femu_ps_mp(n, d) * 100 > lim) {
+        d++;
+    }
+    return d;
+}
+
+/*
+ * The descriptors of Identify Controller, APSTA, NPSS: the states the
+ * limit allows, renumbered from 0, and zero slots after them. Rebuilt
+ * under the BQL when the limit changes.
+ */
 void femu_power_id(FemuCtrl *n, NvmeIdCtrl *id)
 {
+    uint8_t d = n->pl_drop;
+
     if (!n->power_states) {
         return;
     }
-    id->npss = FEMU_NPSS;
+    id->npss = FEMU_NPSS - d;
     id->apsta = 1;
-    for (int i = 0; i <= FEMU_NPSS; i++) {
+    memset(id->psd, 0, sizeof(id->psd));
+    for (int i = d; i <= FEMU_NPSS; i++) {
         NvmePSD psd = { 0 };
+        /* relative ranks stay below the number of states */
+        uint8_t rel = femu_ps[i].rel - d;
 
         /* MXPS 0: 0.01 W units; PS3 draws 0.05 W */
-        psd.mp = cpu_to_le16(i == FEMU_PS_NONOP ? 5 :
-                             n->ps_max_watts * femu_ps[i].mp_pct);
+        psd.mp = cpu_to_le16(femu_ps_mp(n, i));
         psd.enlat = cpu_to_le32(femu_ps[i].enlat_us);
         psd.exlat = cpu_to_le32(femu_ps[i].exlat_us);
-        psd.rrt = femu_ps[i].rel;
-        psd.rrl = femu_ps[i].rel;
-        psd.rwt = femu_ps[i].rel;
-        psd.rwl = femu_ps[i].rel;
+        psd.rrt = rel;
+        psd.rrl = rel;
+        psd.rwt = rel;
+        psd.rwl = rel;
         /* byte 3 bit 1: NOPS */
         psd.reserved = cpu_to_le16(i == FEMU_PS_NONOP ? 1 << 9 : 0);
-        id->psd[i] = psd;
+        id->psd[i - d] = psd;
+    }
+    if (n->power_limit) {
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_PLS);
+        /* MUPS 10b: MUP in 0.01 W, the MP of PS0 with no limit */
+        id->mups = 2;
+        id->mup = cpu_to_le16(femu_ps_mp(n, 0));
     }
 }
 
@@ -178,7 +242,8 @@ int64_t femu_power_io(FemuCtrl *n, int64_t now)
         n->ps_ready_at = MAX(n->ps_ready_at,
                              now + (int64_t)femu_ps[FEMU_PS_NONOP].exlat_us *
                                    SCALE_US);
-        femu_power_enter(n, n->ps_op, now);
+        /* the last operational state, if the limit allows it */
+        femu_power_enter(n, MAX(n->ps_op, n->pl_drop), now);
     }
     n->ps_last_io = now;
     wait = MAX(n->ps_ready_at - now, 0);
@@ -202,8 +267,9 @@ void femu_power_busy(FemuCtrl *n, int64_t end)
 }
 
 /*
- * Set Features 02h: the controller is in @ps when the command completes.
- * Leaving PS3 for an operational state takes PS3's exit latency.
+ * Set Features 02h: the controller is in host state @ps when the command
+ * completes. Leaving PS3 for an operational state takes PS3's exit
+ * latency.
  */
 void femu_power_set(FemuCtrl *n, uint8_t ps)
 {
@@ -214,6 +280,7 @@ void femu_power_set(FemuCtrl *n, uint8_t ps)
     }
     now = femu_io_now(n);
     qemu_mutex_lock(&n->ps_lock);
+    ps += n->pl_drop;
     femu_power_advance(n, now);
     if (n->ps_cur == FEMU_PS_NONOP && ps != FEMU_PS_NONOP) {
         n->ps_ready_at = MAX(n->ps_ready_at,
@@ -235,18 +302,49 @@ uint32_t femu_power_get(FemuCtrl *n)
     }
     qemu_mutex_lock(&n->ps_lock);
     femu_power_advance(n, femu_io_now(n));
-    ps = n->ps_cur;
+    ps = n->ps_cur - n->pl_drop;
     qemu_mutex_unlock(&n->ps_lock);
     return wh | ps;
 }
 
+/* an APST entry with its ITPS moved by @shift states */
+static uint64_t femu_apst_shift(uint64_t e, int shift)
+{
+    uint8_t itps = (e >> 3) & 0x1f;
+
+    if (!e) {
+        return 0;
+    }
+    return (e & ~(0x1full << 3)) | (uint64_t)((itps + shift) & 0x1f) << 3;
+}
+
+/*
+ * The table under a limit of @d prohibited states (8.1.18.6.1 steps 3, 5
+ * and 8): their rows are cleared, and an ITPS that names one of them
+ * names the new PS0.
+ */
+static void femu_apst_cut(uint64_t *t, uint8_t d)
+{
+    for (int i = 0; i < 32; i++) {
+        uint8_t itps = (t[i] >> 3) & 0x1f;
+
+        if (i < d) {
+            t[i] = 0;
+        } else if (t[i] && itps < d) {
+            t[i] = femu_apst_shift(t[i], d - itps);
+        }
+    }
+}
+
 /*
  * Feature 0Ch (5.2.26.1.6): APSTE in CDW11 bit 0, 32 entries of ITPT
- * (bits 31:8, ms) and ITPS (bits 7:3). An entry with ITPT set must name a
- * non-operational state; otherwise the command fails and nothing changes.
+ * (bits 31:8, ms) and ITPS (bits 7:3), in host state numbers. An entry
+ * with ITPT set must name the non-operational state; otherwise the
+ * command fails and nothing changes. The table is kept by physical state.
  */
 uint16_t femu_apst_set(FemuCtrl *n, NvmeCmd *cmd)
 {
+    uint8_t d = n->pl_drop;     /* changes under the BQL only */
     uint64_t tbl[32];
     uint16_t status;
 
@@ -261,16 +359,17 @@ uint16_t femu_apst_set(FemuCtrl *n, NvmeCmd *cmd)
         uint8_t itps = (e >> 3) & 0x1f;
 
         /* unused entries are zero; a timed entry names a non-op state */
-        if ((i > FEMU_NPSS && e) ||
-            ((e >> 8) & 0xffffff && itps != FEMU_PS_NONOP)) {
+        if ((i > FEMU_NPSS - d && e) ||
+            ((e >> 8) & 0xffffff && itps != FEMU_PS_NONOP - d)) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
     }
     /* the state reached so far stays; the new table counts from now */
     qemu_mutex_lock(&n->ps_lock);
     femu_power_advance(n, femu_io_now(n));
-    for (int i = 0; i < 32; i++) {
-        n->apst[i] = le64_to_cpu(tbl[i]);
+    memset(n->apst, 0, sizeof(n->apst));
+    for (int i = 0; i + d < 32; i++) {
+        n->apst[i + d] = femu_apst_shift(le64_to_cpu(tbl[i]), d);
     }
     n->ps_entered = femu_io_now(n);
     n->apste = le32_to_cpu(cmd->cdw11) & 0x1;
@@ -284,8 +383,9 @@ uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res)
 
     qemu_mutex_lock(&n->ps_lock);
     *res = dflt ? 0 : n->apste;
-    for (int i = 0; i < 32 && !dflt; i++) {
-        tbl[i] = cpu_to_le64(n->apst[i]);
+    for (int i = 0; i + n->pl_drop < 32 && !dflt; i++) {
+        tbl[i] = cpu_to_le64(femu_apst_shift(n->apst[i + n->pl_drop],
+                                             -n->pl_drop));
     }
     qemu_mutex_unlock(&n->ps_lock);
     return dma_read_prp(n, (uint8_t *)tbl, sizeof(tbl),
@@ -293,7 +393,11 @@ uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res)
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
-/* a Controller Level Reset: PS0, APST off and its table cleared */
+/*
+ * A Controller Level Reset (also at a power cut): APST off and its table
+ * cleared; feature 23h takes its saved value, and the controller enters
+ * the first state that limit allows (host PS0).
+ */
 void femu_power_reset(FemuCtrl *n)
 {
     if (!n->power_states) {
@@ -302,9 +406,90 @@ void femu_power_reset(FemuCtrl *n)
     qemu_mutex_lock(&n->ps_lock);
     n->apste = false;
     memset(n->apst, 0, sizeof(n->apst));
+    memset(n->apst_base, 0, sizeof(n->apst_base));
+    n->pl_cur = n->pl_saved;
+    n->pl_drop = femu_pl_drop(n, n->pl_cur);
     n->ps_ready_at = 0;
     n->ps_last_io = 0;
     qatomic_set(&n->ps_busy_until, 0);
-    femu_power_enter(n, 0, femu_io_now(n));
+    femu_power_enter(n, n->pl_drop, femu_io_now(n));
     qemu_mutex_unlock(&n->ps_lock);
+    femu_power_id(n, &n->id_ctrl);
+}
+
+/*
+ * Move to @d1 prohibited states (8.1.18.6), ps_lock held. More states
+ * prohibited: keep the unlimited APST table the first time, cut the
+ * table, and leave a prohibited state for the new PS0. Fewer: restore
+ * that table and cut it again for what stays prohibited (8.1.18.6.2).
+ * The state the controller is in stays; only its number changes.
+ */
+static void femu_pl_apply_locked(FemuCtrl *n, uint8_t d1, int64_t now)
+{
+    uint8_t d0 = n->pl_drop;
+
+    if (d1 == d0) {
+        return;
+    }
+    if (d1 > d0) {
+        if (!d0) {
+            memcpy(n->apst_base, n->apst, sizeof(n->apst));
+        }
+        femu_apst_cut(n->apst, d1);
+    } else {
+        memcpy(n->apst, n->apst_base, sizeof(n->apst));
+        femu_apst_cut(n->apst, d1);
+    }
+    n->pl_drop = d1;
+    if (n->ps_cur < d1) {
+        femu_power_enter(n, d1, now);
+    } else if (n->ps_cur == FEMU_PS_NONOP) {
+        /* asleep: background media work runs at the wake target's speed */
+        n->ps_pct = femu_ps_factor(n, MAX(n->ps_op, d1));
+        femu_actuator_set_locked(n);
+    }
+}
+
+/*
+ * Set Features 23h (Figure 452): PLS in CDW13 bits 17:16, PLV in 15:0.
+ * PLV 0 removes the limit. A limit below the MP of every operational
+ * state fails with Invalid Power Limit and changes nothing.
+ */
+uint16_t femu_pl_set(FemuCtrl *n, uint32_t dw13, bool save)
+{
+    uint8_t pls = (dw13 >> 16) & 0x3;
+    uint8_t d;
+
+    if (pls == 0 || pls == 3) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    dw13 &= 0x3ffff;
+    d = femu_pl_drop(n, dw13);
+    if (d >= FEMU_PS_NONOP) {
+        return NVME_INVALID_POWER_LIMIT | NVME_DNR;
+    }
+    qemu_mutex_lock(&n->ps_lock);
+    /* a transition already due happens on the old table first */
+    femu_power_advance(n, femu_io_now(n));
+    femu_pl_apply_locked(n, d, femu_io_now(n));
+    n->pl_cur = dw13;
+    if (save) {
+        n->pl_saved = dw13;
+    }
+    qemu_mutex_unlock(&n->ps_lock);
+    femu_power_id(n, &n->id_ctrl);
+    return NVME_SUCCESS;
+}
+
+/* Get Features 23h: Dword 0 for the select @sel (current, default, saved) */
+uint32_t femu_pl_get(FemuCtrl *n, uint8_t sel)
+{
+    switch (sel) {
+    case NVME_GETFEAT_SELECT_DEFAULT:
+        return FEMU_PL_DEFAULT;
+    case NVME_GETFEAT_SELECT_SAVED:
+        return n->pl_saved;
+    default:
+        return n->pl_cur;
+    }
 }

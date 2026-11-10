@@ -5246,6 +5246,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("thermal_r", FemuCtrl, thermal_r, 0),
     DEFINE_PROP_UINT32("idle_mw", FemuCtrl, idle_mw, 0),
     DEFINE_PROP_BOOL("power_meas", FemuCtrl, power_meas, false),
+    DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),
@@ -6295,10 +6296,11 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
 }
 
 /*
- * A Function Level Reset (OCP 2.7 PCI-6) or a system reset, with ocp:
- * a Controller Level Reset, then the registers the host programs back to
- * their reset values. Without ocp the controller keeps its state, as it
- * always has.
+ * A Function Level Reset (OCP 2.7 PCI-6) or a system reset, with ocp or
+ * power_limit: a Controller Level Reset, then the registers the host
+ * programs back to their reset values. A saveable feature such as Power
+ * Limit (23h) takes its saved value then. Otherwise the controller keeps
+ * its state, as it always has.
  */
 static void femu_pci_reset(DeviceState *dev)
 {
@@ -6308,7 +6310,7 @@ static void femu_pci_reset(DeviceState *dev)
     femu_hmb_off(n);
     /* a device reset ends a shutdown, whatever EN and ocp are */
     femu_shut_clear(n);
-    if (!n->ocp) {
+    if (!n->ocp && !n->power_limit) {
         /*
          * The controller keeps its state, but a start under way ends: its
          * queued admin commands would post into memory the host took back.

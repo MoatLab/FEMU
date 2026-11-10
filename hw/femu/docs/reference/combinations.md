@@ -817,6 +817,7 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file: '%s' ends in .lock, which names a lock file
 - persist_file: '%s' is a link to nothing
 - persist_ftl needs persist_file
+- power_limit is not supported with persist_file
 
 ## `persist_ftl`
 
@@ -857,6 +858,11 @@ own description allows. A message keeps its format directives (`%s`,
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
 - wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
 
+## `power_limit`
+
+- power_limit is not supported with persist_file
+- power_limit needs power_states
+
 ## `power_loss`
 
 - FEMU bbssd: buffer_low_pcent needs buffer_size, must be below buffer_thres_pcent, and does not work with shared namespaces or power_loss, got %d
@@ -874,6 +880,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `power_states`
 
+- power_limit needs power_states
 - power_states does not work with a femu-subsys yet
 - power_states does not work with ocp yet (OCP C7h maps DSSD power states to PS0)
 - power_states needs 100 <= throttle_light_pct <= throttle_heavy_pct <= 1000

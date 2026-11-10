@@ -42919,6 +42919,393 @@ static void femu_test_power_states(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+#define FEMU_FID_POWER_LIMIT    0x23
+#define FEMU_PL_W(w)            (2u << 16 | (w) * 100)  /* PLS 10b */
+#define FEMU_SC_POWER_LIMIT     0x13e
+
+/* Set Features 23h with @dw13 (PLS, PLV) */
+static uint16_t femu_pl(FemuCtrlState *c, uint32_t dw13, bool save)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(FEMU_FID_POWER_LIMIT | (save ? 1u << 31 : 0));
+    cmd.cdw13 = cpu_to_le32(dw13);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint32_t femu_pl_read(FemuCtrlState *c, uint8_t sel)
+{
+    uint32_t res = 0;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, FEMU_FID_POWER_LIMIT, sel, 0,
+                                             0, &res)), ==, NVME_SUCCESS);
+    return res;
+}
+
+/*
+ * Identify with @npss visible states: PSD0's MP, relative ranks at most
+ * NPSS, and every PSD slot past NPSS zero.
+ */
+static void femu_pl_check_id(FemuCtrlState *c, uint64_t buf, uint8_t npss,
+                             uint16_t mp0)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    int i;
+
+    g_assert_cmphex(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & (1u << 20), ==, 1u << 20);
+    g_assert_cmpuint(qtest_readb(qts, buf + 385), ==, 2);
+    g_assert_cmpuint(qtest_readw(qts, buf + 390), ==, 1500);
+    g_assert_cmphex(qtest_readw(qts, buf + 520) & (1 << 4), ==, 1 << 4);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, npss);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048), ==, mp0);
+    for (i = 0; i <= npss; i++) {
+        for (int f = 12; f < 16; f++) {
+            g_assert_cmpuint(qtest_readb(qts, buf + 2048 + i * 32 + f), ==,
+                             i);
+        }
+    }
+    for (i = 2048 + (npss + 1) * 32; i < 3072; i++) {
+        g_assert_cmpuint(qtest_readb(qts, buf + i), ==, 0);
+    }
+}
+
+/*
+ * The modelled time of a read of LBA 0 on "pwr": the PS0 time @d0 with
+ * the 1 ms array time stretched to @pct, plus the 5 ms exit latency of
+ * PS3 after a @wake.
+ */
+static void femu_pl_read_time(FemuCtrlState *c, uint64_t io, uint64_t d0,
+                              uint32_t pct, bool wake)
+{
+    uint64_t d = femu_pwr_read_ns(c, io) - (wake ? 5000000 : 0);
+    uint64_t want = d0 + 1000000ull * (pct - 100) / 100;
+
+    g_test_message("read %" PRIu64 " ns, want %" PRIu64, d, want);
+    g_assert_cmpuint(d, >=, want - 20000);
+    g_assert_cmpuint(d, <=, want + 20000);
+}
+
+/*
+ * Power Limit with ps_max_watts 15: MP 15 W, 9 W, 5.25 W and 0.05 W, and
+ * array time x1, x1.5, x3 (throttle_light_pct 150, heavy 300). The state
+ * the controller is in stays across a raise and a removal; a limit moves
+ * it only out of a prohibited state, and a wake from PS3 goes to the last
+ * operational state the limit allows.
+ */
+static void femu_test_power_limit(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    uint64_t d0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, io, 0x6e, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    d0 = femu_pwr_read_ns(&c, io);
+    g_assert_cmpuint(d0, >=, 1000000);
+    g_assert_cmpuint(d0, <, 1500000);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 1), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 3), ==, 0x5);
+    /* log 12h: FSUPP, CCC, controller scope */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FID_POWER_LIMIT), ==,
+                    0x00200011);
+
+    /* reserved scales; a limit below PS2 (5.2499 W) changes nothing */
+    g_assert_cmphex(femu_pl(&c, 700, false), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl(&c, 3u << 16 | 700, false), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl(&c, 1u << 16 | 52499, true), ==,
+                    FEMU_SC_POWER_LIMIT);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(3), false), ==,
+                    FEMU_SC_POWER_LIMIT);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, 0x20000);
+
+    /* 5.25 W exactly: PS0 and PS1 go, the controller moves to old PS2 */
+    g_assert_cmphex(femu_pl(&c, 1u << 16 | 52500, false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 1, 525);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048 + 32), ==, 5);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 2, NULL)),
+                    ==, NVME_INVALID_FIELD);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* 10 W, then none: the state stays old PS2, renumbered */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 1);
+    femu_pl_read_time(&c, io, d0, 300, false);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* asleep from PS0, a 10 W limit: the wake goes to old PS1 */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    femu_pl_read_time(&c, io, d0, 150, true);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* asleep from PS0, a limit that comes and goes: the wake is to PS0 */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    femu_pl_read_time(&c, io, d0, 100, true);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* saved 10 W, current 11 W; a reset brings back the saved one */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    femu_pl_read_time(&c, io, d0, 150, false);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(11), false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(11));
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, FEMU_PL_W(10));
+    g_assert_cmphex(femu_pl_read(&c, 1), ==, 0x20000);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(10));
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    femu_pl_read_time(&c, io, d0, 150, false);
+    /* host PS1 under the limit is old PS2 */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 1);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* leave nothing saved behind */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, true), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* Set Features 0Ch with the 32 entries @t (host numbers) */
+static uint16_t femu_pl_apst_set(FemuCtrlState *c, uint64_t buf, bool on,
+                                 const uint64_t *t)
+{
+    NvmeCmd cmd = { 0 };
+
+    for (int i = 0; i < 32; i++) {
+        qtest_writeq(c->pdev->bus->qts, buf + 8 * i, t[i]);
+    }
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    cmd.cdw11 = cpu_to_le32(on);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* Get Features 0Ch: APSTE, and the table must equal @want */
+static void femu_pl_apst_check(FemuCtrlState *c, uint64_t buf, bool on,
+                               const uint64_t *want)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+    uint32_t res = 0;
+
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    qtest_memset(qts, buf, 0xff, 256);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(c, &cmd, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res & 1, ==, on);
+    for (int i = 0; i < 32; i++) {
+        g_assert_cmphex(qtest_readq(qts, buf + 8 * i), ==, want[i]);
+    }
+}
+
+#define FEMU_APST(ms, ps)       ((uint64_t)(ms) << 8 | (uint64_t)(ps) << 3)
+
+/*
+ * The APST table under a limit (8.1.18.6): rows of prohibited states go,
+ * the rest are renumbered, and an ITPS that names a prohibited state names
+ * the new PS0. The table from before the first limit comes back when the
+ * limit rises (cut again) or goes; APSTE is the host's.
+ */
+static void femu_test_power_limit_apst(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    /* A: rows 0 to 2 go to PS3 after 100, 200, 300 ms; row 3 names PS1 */
+    const uint64_t a[32] = { FEMU_APST(100, 3), FEMU_APST(200, 3),
+                             FEMU_APST(300, 3), FEMU_APST(0, 1) };
+    const uint64_t a2[32] = { FEMU_APST(300, 1), 0 };
+    const uint64_t b[32] = { FEMU_APST(400, 1) };
+    const uint64_t a1[32] = { FEMU_APST(200, 2), FEMU_APST(300, 2), 0 };
+    const uint64_t cc[32] = { FEMU_APST(500, 2) };
+    const uint64_t due[32] = { FEMU_APST(50, 3) };
+    const uint64_t empty[32] = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a);
+
+    /* 6 W: old rows 2 and 3 as rows 0 and 1; row 3's ITPS 1 becomes 0 */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(6), false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a2);
+    /* past NPSS 1, or a timed row to an operational state: refused */
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a1), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, b), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, b);
+
+    /* 10 W: A cut for one state, not B */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a1);
+
+    /* C with APSTE off, then no limit: A, and APSTE stays off */
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, false, cc), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, false, a);
+
+    /*
+     * PS0 to PS3 after 50 ms is due when a 10 W limit comes: the move to
+     * PS3 happens first, so the limit leaves the controller asleep.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, due), ==, NVME_SUCCESS);
+    g_usleep(150 * 1000);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+
+    /* a reset with a saved limit drops the table kept from before it */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, true), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, false, empty);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A system reset of an enabled controller with power_limit: feature 23h
+ * takes its saved value (10 W, NPSS 2), not the current one (6 W).
+ */
+static void femu_test_power_limit_sysreset(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=pls,addr=5,devsz_mb=16,"
+        "femu_mode=1,power_states=on,power_limit=on,ps_max_watts=15");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(6), false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 1, 525);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(10));
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* power_states without power_limit: no PLS, no MUP, no feature 23h */
+static void femu_test_power_limit_off(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & (1u << 20), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 385), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 390), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, 3);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_LIMIT, 0, 0,
+                                             0, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_power_limit_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'power_limit':true", "power_limit needs power_states" },
+        { "'power_limit':true,'power_states':true,"
+          "'persist_file':'plimit.img'",
+          "power_limit is not supported with persist_file" },
+        { "'power_limit':true,'power_states':true,'ocp':true",
+          "power_states does not work with ocp" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'plimit','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* without the property: one power state, no APST */
 static void femu_test_power_states_off(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -59038,6 +59425,25 @@ static void femu_register_nodes(void)
             "power_states=on,pg_rd_lat=1000000",
     });
     qos_add_test("power-states-off", "femu", femu_test_power_states_off,
+                 NULL);
+    qos_add_test("power-limit", "femu", femu_test_power_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=pwr,femu_mode=1,devsz_mb=64,"
+            "power_states=on,power_limit=on,ps_max_watts=15,"
+            "pg_rd_lat=1000000",
+    });
+    qos_add_test("power-limit-apst", "femu", femu_test_power_limit_apst,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=pwr-apst,femu_mode=1,devsz_mb=64,"
+            "power_states=on,power_limit=on,ps_max_watts=15",
+    });
+    qos_add_test("power-limit-sysreset", "femu",
+                 femu_test_power_limit_sysreset, NULL);
+    qos_add_test("power-limit-off", "femu", femu_test_power_limit_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,power_states=on",
+    });
+    qos_add_test("power-limit-refused", "femu", femu_test_power_limit_refused,
                  NULL);
     qos_add_test("plane-reads", "femu", femu_test_plane_reads, NULL);
     qos_add_test("plane-reads-on", "femu", femu_test_plane_reads_timing,

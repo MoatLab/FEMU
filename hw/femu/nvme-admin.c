@@ -27,6 +27,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_FDP_MODE]                 = true,
     [NVME_FDP_EVENTS]               = true,
     [NVME_POWER_MEAS]               = true,
+    [NVME_POWER_LIMIT]              = true,
     [NVME_KV_FEAT_CONFIG]           = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
@@ -72,6 +73,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_RESV_PERSISTENCE]         = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     [NVME_POWER_MEAS]               = NVME_FEAT_CAP_CHANGE,
+    [NVME_POWER_LIMIT]              = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
     /* configured at realize, which makes it the saved value as well */
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_SAVE |
@@ -324,6 +326,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return femu_hctm_supported(n);
     case NVME_POWER_MEAS:
         return n->power_meas;
+    case NVME_POWER_LIMIT:
+        return n->power_limit;
     case NVME_HOST_IDENTIFIER:
     case NVME_RESV_NOTIFY_MASK:
     case NVME_RESV_PERSISTENCE:
@@ -1835,6 +1839,12 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         return dma_read_prp(n, hbs, sizeof(hbs), le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
+    /* no limit, in a defined scale (PLS 10b) */
+    if (fid == NVME_POWER_LIMIT) {
+        cqe->n.result = cpu_to_le32(femu_pl_get(n,
+                                                NVME_GETFEAT_SELECT_DEFAULT));
+        return NVME_SUCCESS;
+    }
     /* APST defaults to off with an empty table */
     if (fid == NVME_AUTO_PST) {
         uint32_t res;
@@ -2022,6 +2032,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                                         n->ocp_dssd_ps_saved);
             return NVME_SUCCESS;
         }
+        if (fid == NVME_POWER_LIMIT) {
+            cqe->n.result = cpu_to_le32(femu_pl_get(n, sel));
+            return NVME_SUCCESS;
+        }
         /* nothing else is saved, so the saved value is the default */
         /* fall through */
     case NVME_GETFEAT_SELECT_DEFAULT:
@@ -2131,6 +2145,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_POWER_MEAS:
         cqe->n.result = cpu_to_le32(femu_pmeas_get(n));
+        break;
+    case NVME_POWER_LIMIT:
+        cqe->n.result = cpu_to_le32(femu_pl_get(n,
+                                                NVME_GETFEAT_SELECT_CURRENT));
         break;
     case NVME_OCP_DSSD_AEN_CONFIG:
         cqe->n.result = cpu_to_le32(n->ocp_aen_config);
@@ -2524,6 +2542,14 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return femu_ocp_lat_set(n, cmd);
     case NVME_OCP_EVENT_INJECTION:
         return femu_ocp_inj_set(n, cmd);
+    case NVME_POWER_LIMIT: {
+        uint16_t status = femu_pl_set(n, le32_to_cpu(cmd->cdw13), save);
+
+        if (status) {
+            return status;
+        }
+        break;
+    }
     case NVME_POWER_MEAS: {
         uint32_t result;
         uint16_t status = femu_pmeas_set(n, dw11, &result);
@@ -2782,6 +2808,7 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
 /* fields of a FID Supported and Effects entry (Base 2.3, Figure 267) */
 #define NVME_FID_FSUPP          (1u << 0)
+#define NVME_FID_CCC            (1u << 4)
 #define NVME_FID_SCOPE_NS       (1u << 20)
 #define NVME_FID_SCOPE_CTRL     (1u << 21)
 #define NVME_FID_SCOPE_ENDGRP   (1u << 23)
@@ -2847,6 +2874,10 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
             scope = NVME_FID_SCOPE_NS;
         } else {
             scope = NVME_FID_SCOPE_CTRL;
+        }
+        /* a new limit changes the power states Identify reports */
+        if (fid == NVME_POWER_LIMIT) {
+            scope |= NVME_FID_CCC;
         }
         fis[fid] = cpu_to_le32(NVME_FID_FSUPP | scope);
     }

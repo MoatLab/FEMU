@@ -707,6 +707,37 @@ a KV namespace) and Software Progress Marker (80h). Any other identifier, or
 one of these without what it needs, fails with Invalid Field in Command, and
 log 12h lists exactly the identifiers that answer.
 
+With `power_states=on` and `power_limit=on`, Power Limit (23h, Base 2.3
+8.1.18.6) takes a limit in CDW13 (PLS 01b or 10b, PLV). The states whose
+MP is above it are prohibited. MP falls with the state number, so these
+are always the first states; the rest are renumbered from 0.
+
+```text
+ ps_max_watts 15:  PS0 15 W   PS1 9 W   PS2 5.25 W   PS3 0.05 W (non-op)
+ limit             prohibited    host PS0..   NPSS
+ none, >= 15 W     none          PS0          3
+ 9 to 14.99 W      PS0           PS1          2
+ 5.25 to 8.99 W    PS0, PS1      PS2          1
+ below 5.25 W      Invalid Power Limit (0x13e); nothing changes
+```
+
+- Identify reports CTRATT bit 20, MUPS 10b and MUP (the MP of PS0
+  without a limit). PSD slots past NPSS read 0, and the relative ranks
+  are renumbered with the states.
+- The controller stays in the state it is in. A limit that prohibits it
+  moves the controller to the new PS0. A wake from PS3 goes to the last
+  operational state, or to the new PS0 if that state is prohibited.
+- The APST table is renumbered too. When the limit first comes, FEMU
+  keeps the table; a higher limit or none brings it back, cut again for
+  the states that stay prohibited (8.1.18.6.2).
+- 23h is saveable (ONCS bit 4 set). The default is PLS 10b, PLV 0 (no
+  limit). A reset and a power cut take the saved value; it lives in
+  memory, so `persist_file` is refused.
+- The MP figures are nominal. The limit restricts the states; it does
+  not cap the energy that the thermal model and log 25h count.
+- Not with `ocp=on`: OCP 2.7 NVMe-OPT-21 forbids 23h, and
+  `power_states` is refused with `ocp` already.
+
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
 and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,

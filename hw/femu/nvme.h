@@ -152,6 +152,7 @@ enum NvmeIdCtrlCtratt {
     NVME_CTRATT_UUIDL   = 1 <<  9,
     NVME_CTRATT_ELBAS   = 1 << 15,
     NVME_CTRATT_FDPS    = 1 << 19,
+    NVME_CTRATT_PLS     = 1 << 20,   /* Power Limit Support */
     NVME_CTRATT_PMS     = 1 << 21,   /* Power Measurement Support */
 };
 
@@ -1140,6 +1141,7 @@ enum NvmeStatusCodes {
     NVME_FW_REQ_RESET           = 0x010b,
     NVME_INVALID_QUEUE_DEL      = 0x010c,
     NVME_FID_NOT_SAVEABLE       = 0x010d,
+    NVME_INVALID_POWER_LIMIT    = 0x013e,
     NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
@@ -1503,7 +1505,10 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint32_t    pels;           /* Persistent Event log size, 64 KiB units */
     uint8_t     rsvd356[4];
     uint16_t    mptfawr;        /* Max Processing Time for FW Activation w/o Reset */
-    uint8_t     rsvd362[30];
+    uint8_t     rsvd362[23];
+    uint8_t     mups;           /* Maximum Unlimited Power Scale */
+    uint8_t     rsvd386[4];
+    uint16_t    mup;            /* Maximum Unlimited Power */
     uint16_t    ipmsr;          /* Interval Power Measurement Sample Rate */
     uint16_t    msmt;           /* Maximum Stop Measurement Time, min */
     uint8_t     rsvd396[116];
@@ -1641,6 +1646,7 @@ enum NvmeFeatureIds {
     NVME_SPINUP_CONTROL             = 0x1a,
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
+    NVME_POWER_LIMIT                = 0x23, /* power_limit=on */
     NVME_POWER_MEAS                 = 0x25, /* power_meas=on */
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_HOST_IDENTIFIER            = 0x81,
@@ -3097,7 +3103,16 @@ typedef struct FemuCtrl {
     int64_t         ps_last_io;     /* fetch of the last I/O command */
     int64_t         ps_busy_until;  /* end of the work booked so far */
     bool            apste;
-    uint64_t        apst[32];
+    uint64_t        apst[32];       /* by physical state */
+    /*
+     * Power Limit (feature 23h): the prohibited states are always the
+     * first pl_drop ones. Written under the BQL and ps_lock.
+     */
+    bool            power_limit;
+    uint8_t         pl_drop;
+    uint32_t        pl_cur;         /* CDW13 as set: PLS, PLV */
+    uint32_t        pl_saved;
+    uint64_t        apst_base[32];  /* the table when the limit came */
     uint16_t        hctm_tmt1;      /* feature 10h, 0 = that level off */
     uint16_t        hctm_tmt2;
     uint8_t         hctm_level;     /* 0 none, 1 light, 2 heavy (HCTM) */
@@ -3647,6 +3662,8 @@ void femu_actuator_set(FemuCtrl *n);
 void femu_power_busy(FemuCtrl *n, int64_t end);
 int64_t femu_power_io(FemuCtrl *n, int64_t now);
 void femu_power_set(FemuCtrl *n, uint8_t ps);
+uint16_t femu_pl_set(FemuCtrl *n, uint32_t dw13, bool save);
+uint32_t femu_pl_get(FemuCtrl *n, uint8_t sel);
 uint32_t femu_power_get(FemuCtrl *n);
 uint16_t femu_apst_set(FemuCtrl *n, NvmeCmd *cmd);
 uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res);

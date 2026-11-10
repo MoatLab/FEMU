@@ -64,6 +64,7 @@ DEVICES = [
                 "props": [
                     "vid", "did", "pci_pm", "acl", "cqr", "vwc", "temperature", "mpsmin",
                     "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "sanitize_ms", "sanitize_ops", "ana", "power_states", "lockdown", "reservations", "ps_max_watts",
+                    "power_limit",
                 ],
             },
             {
