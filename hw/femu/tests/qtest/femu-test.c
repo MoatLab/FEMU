@@ -43023,6 +43023,10 @@ static void femu_test_power_limit(void *obj, void *data,
                     NVME_SUCCESS);
     g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FID_POWER_LIMIT), ==,
                     0x00200011);
+    /* log 05h: Set Features may change the controller's power states */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09) & (1 << 4), ==, 1 << 4);
 
     /* reserved scales; a limit below PS2 (5.2499 W) changes nothing */
     g_assert_cmphex(femu_pl(&c, 700, false), ==, NVME_INVALID_FIELD);
