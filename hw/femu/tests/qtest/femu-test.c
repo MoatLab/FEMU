@@ -44451,6 +44451,49 @@ static void femu_shftl_read(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
 #define FEMU_SHFTL_PAGES    128     /* NAND pages in each namespace */
 
 /*
+ * The pages of each namespace: namespace 1 wrote its 128 pages 4 times,
+ * namespace 2 once, and GC moved pages of namespace 2, which namespace 1
+ * never overwrote. The namespace counters add up to the device counters.
+ */
+static void femu_shftl_counters(QTestState *qts)
+{
+    const char *key[3] = { "host-write-pages", "nand-write-pages",
+                           "gc-write-pages" };
+    uint64_t sum[3] = { 0 };
+    uint64_t dev[3];
+
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        g_autofree char *args = g_strdup_printf("'nsid':%u", nsid);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QDict *nc = qdict_get_qdict(ns, "namespace-counters");
+        QDict *ctr = qdict_get_qdict(ns, "counters");
+
+        g_assert_nonnull(nc);
+        g_assert_cmpuint(qdict_get_int(nc, "host-write-pages"), ==,
+                         (nsid == 1 ? 4 : 1) * FEMU_SHFTL_PAGES);
+        /* no buffer: each host page is one program of its own namespace */
+        g_assert_cmpuint(qdict_get_int(nc, "nand-write-pages"), ==,
+                         qdict_get_int(nc, "host-write-pages"));
+        if (nsid == 2) {
+            g_assert_cmpuint(qdict_get_int(nc, "gc-write-pages"), >, 0);
+        }
+        g_assert_cmpfloat_with_epsilon(qdict_get_double(nc, "waf"),
+            ((double)qdict_get_int(nc, "nand-write-pages") +
+             (double)qdict_get_int(nc, "gc-write-pages")) /
+            (double)qdict_get_int(nc, "host-write-pages"), 0.000000001);
+        for (int k = 0; k < 3; k++) {
+            sum[k] += qdict_get_int(nc, key[k]);
+            dev[k] = qdict_get_int(ctr, key[k]);
+        }
+        qobject_unref(rsp);
+    }
+    for (int k = 0; k < 3; k++) {
+        g_assert_cmpuint(sum[k], ==, dev[k]);
+    }
+}
+
+/*
  * shared_ftl: two namespaces of 512 KiB place into one FTL. Their first
  * writes alternate, so each line holds pages of both. Overwrites of
  * namespace 1 then make GC move live pages of namespace 2. The FTL keeps
@@ -44485,12 +44528,27 @@ static void femu_test_shared_ftl(void *obj, void *data,
     g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
                                    "gc-write-pages"), >, 0);
     qobject_unref(rsp);
+    femu_shftl_counters(qts);
     femu_shftl_check(qts, &mapped, &lost, &orphans);
     g_assert_cmpuint(mapped, ==, 2 * FEMU_SHFTL_PAGES);
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
     femu_shftl_read(&c, buf, 2, FEMU_SHFTL_PAGES, 0x5b);
     femu_shftl_read(&c, buf, 1, FEMU_SHFTL_PAGES, 0x13);
+    /* a page that finds no place is not a host page of namespace 2 */
+    femu_place_fail_id(qts, "shftl", 1);
+    {
+        NvmeRwCmd rw = { 0 };
+
+        qtest_memset(qts, buf, 0x5c, 4096);
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(2);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(7);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                        NVME_CAP_EXCEEDED);
+    }
+    femu_shftl_counters(qts);
 
     femu_queue_free(&c, &c.io);
     femu_disable(&c);

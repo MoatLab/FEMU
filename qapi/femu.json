@@ -946,6 +946,31 @@
             'held-pages': 'uint32', 'held-requests': 'uint32' } }
 
 ##
+# @FemuNamespaceWriteCounters:
+#
+# The pages of one namespace in a flash translation layer that several
+# namespaces share (shared_ftl, or flexible data placement).  A page
+# counts for the namespace whose slice of the logical pages holds it.
+# Mapping, pad and parity pages are not in any namespace.
+#
+# @host-write-pages: pages the host wrote to this namespace, counted as
+#     @FemuWriteCounters counts them
+#
+# @nand-write-pages: pages of this namespace programmed for host data
+#
+# @gc-write-pages: pages of this namespace that garbage collection
+#     moved
+#
+# @waf: (@nand-write-pages + @gc-write-pages) / @host-write-pages.
+#     Absent before the first host write.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuNamespaceWriteCounters',
+  'data': { 'host-write-pages': 'uint64', 'nand-write-pages': 'uint64',
+            'gc-write-pages': 'uint64', '*waf': 'number' } }
+
+##
 # @FemuBbssdInfo:
 #
 # State of a blackbox namespace, copied by the FTL thread between two
@@ -968,6 +993,10 @@
 # @shared-ftl-nsid: with shared_ftl, the namespace whose FTL holds
 #     this one.  Every namespace of the controller places into that FTL,
 #     so each reports the same geometry and write counters.
+#
+# @namespace-counters: the pages of this namespace alone, when several
+#     namespaces share the FTL (shared_ftl, or flexible data placement
+#     with more than one namespace)
 #
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
@@ -996,6 +1025,7 @@
             '*line-counts': 'FemuLineCounts', '*fdp': 'FemuFdpInfo',
             '*end-of-life': 'FemuEolInfo',
             '*shared-ftl-nsid': 'uint32',
+            '*namespace-counters': 'FemuNamespaceWriteCounters',
             '*lines': [ 'FemuLineInfo' ],
             '*blocks': [ 'FemuBlockInfo' ], '*dies': [ 'FemuDieInfo' ],
             '*most-waited': 'FemuDieInfo', '*offset': 'uint32',

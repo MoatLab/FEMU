@@ -109,6 +109,27 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
         (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(n, ns);
 }
 
+/*
+ * The slice table of an FTL that several namespaces share: under shared_ftl
+ * or FDP, each fixed namespace places at its backend offset.
+ */
+static void ssd_init_ns_slices(FemuCtrl *n, struct ssd *ssd)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    bool fdp = n->subsys && n->subsys->endgrp.fdp.enabled;
+
+    ssd->nr_ns_slices = 0;
+    if (n->num_namespaces < 2 || !(n->shared_ftl || fdp) || !pg) {
+        return;
+    }
+    ssd->ns_slice_lo = g_new0(uint64_t, n->num_namespaces);
+    ssd->ns_ctr = g_new0(struct ssd_ns_ctr, n->num_namespaces);
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        ssd->ns_slice_lo[i] = n->namespaces[i].backend_offset / pg;
+    }
+    ssd->nr_ns_slices = n->num_namespaces;
+}
+
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 {
     struct ssd *ssd = ns->ssd;
@@ -208,6 +229,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
+    ssd_init_ns_slices(n, ssd);
     ssd->gc_copyback_pages = 0;
     ssd->victim_digest = 0;
     ssd->forced_gc_timed = 0;
@@ -1245,6 +1267,9 @@ void ssd_free(struct ssd *ssd)
     ssd->rmap = NULL;
     g_free(ssd->maptbl);
     ssd->maptbl = NULL;
+    g_clear_pointer(&ssd->ns_slice_lo, g_free);
+    g_clear_pointer(&ssd->ns_ctr, g_free);
+    ssd->nr_ns_slices = 0;
 
     nand_media_destroy(&ssd->media);
     g_clear_pointer(&ssd->media.die_stat, g_free);

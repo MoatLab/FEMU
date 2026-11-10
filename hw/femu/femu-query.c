@@ -772,6 +772,19 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         info->has_shared_ftl_nsid = true;
         info->shared_ftl_nsid = q->shared_nsid;
     }
+    if (q->ns_ctr_on) {
+        FemuNamespaceWriteCounters *nc = g_new0(FemuNamespaceWriteCounters, 1);
+
+        nc->host_write_pages = q->ns_host_pages;
+        nc->nand_write_pages = q->ns_nand_pages;
+        nc->gc_write_pages = q->ns_gc_pages;
+        if (q->ns_host_pages) {
+            nc->has_waf = true;
+            nc->waf = ((double)q->ns_nand_pages + (double)q->ns_gc_pages) /
+                      (double)q->ns_host_pages;
+        }
+        info->namespace_counters = nc;
+    }
 
     if (q->eol_mode) {
         FemuEolInfo *eol = g_new0(FemuEolInfo, 1);

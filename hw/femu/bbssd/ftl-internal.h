@@ -383,6 +383,31 @@ uint64_t ftl_gc_rand(struct ssd *ssd);
 extern const struct femu_mapping_ops femu_mapping_hybrid_ops;
 extern const struct femu_mapping_ops femu_mapping_fast_ops;
 
+/*
+ * The counters of the namespace whose slice holds @lpn, or NULL when one
+ * namespace owns the FTL. Slices are packed in order, so the owner is the
+ * last slice that starts at or before @lpn.
+ */
+static inline struct ssd_ns_ctr *ssd_ns_ctr_of(struct ssd *ssd, uint64_t lpn)
+{
+    uint32_t lo = 0;
+    uint32_t hi = ssd->nr_ns_slices;
+
+    if (likely(!hi)) {
+        return NULL;
+    }
+    while (hi - lo > 1) {
+        uint32_t mid = lo + (hi - lo) / 2;
+
+        if (ssd->ns_slice_lo[mid] <= lpn) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return &ssd->ns_ctr[lo];
+}
+
 /* byte offset in the FTL of block 0 of @ns */
 static inline uint64_t ssd_ns_byte_base(struct ssd *ssd, NvmeNamespace *ns)
 {

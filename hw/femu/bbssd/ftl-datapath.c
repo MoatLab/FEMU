@@ -747,6 +747,9 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 
     mark_page_valid(ssd, &ppa);
     ssd->nand_write_pages++; /* write amplification: a user page programmed */
+    if (unlikely(ssd->nr_ns_slices)) {
+        ssd_ns_ctr_of(ssd, lpn)->nand_write_pages++;
+    }
     /* only log + track pages that carry the marker string */
     if (femu_dbg_lpn_has_secret(ssd, lpn)) {
         exp_watch_lpn_add(lpn);
@@ -1101,6 +1104,27 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
+/*
+ * Host pages count when the device takes them. The namespace that owns
+ * @lpn takes the same count.
+ */
+static void ssd_host_pages(struct ssd *ssd, uint64_t lpn, uint64_t pages)
+{
+    ssd->host_write_pages += pages;
+    if (unlikely(ssd->nr_ns_slices)) {
+        ssd_ns_ctr_of(ssd, lpn)->host_write_pages += pages;
+    }
+}
+
+/* give back the @pages from @lpn that a failed command never placed */
+static void ssd_host_pages_back(struct ssd *ssd, uint64_t lpn, uint64_t pages)
+{
+    ssd->host_write_pages -= pages;
+    if (unlikely(ssd->nr_ns_slices)) {
+        ssd_ns_ctr_of(ssd, lpn)->host_write_pages -= pages;
+    }
+}
+
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1140,7 +1164,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     wl_done = do_wear_level(ssd) == 0;
 
     /* pages the host wrote, whether or not the buffer absorbs them */
-    ssd->host_write_pages += end_lpn - start_lpn + 1;
+    ssd_host_pages(ssd, start_lpn, end_lpn - start_lpn + 1);
     ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
     ssd->sp.write_cnt += end_lpn - start_lpn + 1;
 
@@ -1184,6 +1208,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 if (ssd->write_buffer_cnt >= before &&
                     ssd_buffer_at_watermark(ssd)) {
                     req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                    ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
                     break;
                 }
             }
@@ -1244,6 +1269,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
         if (stream >= 0 ? !mapped_ppa(&target) : ssd_host_out_of_lines(ssd)) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
             break;
         }
 
@@ -1257,6 +1283,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         if (!placed) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
             break;
         }
         if (ssd->write_buffer_cnt) {
@@ -1422,7 +1449,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         }
         wl_done = do_wear_level(ssd) == 0;
 
-        ssd->host_write_pages += end_lpn - start_lpn + 1;
+        ssd_host_pages(ssd, start_lpn, end_lpn - start_lpn + 1);
         /* the pair an ordinary write bumps; these pages are programmed too */
         ssd->sp.write_cnt += end_lpn - start_lpn + 1;
         ssd_count_partial_pages(ssd, req, le64_to_cpu(rw->slba),
@@ -1434,6 +1461,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             maxlat = (curlat > maxlat) ? curlat : maxlat;
             if (ssd_host_out_of_lines(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
                 break;
             }
             /* with dftl, the translation goes with the program */
@@ -1441,6 +1469,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             maxlat = (curlat > maxlat) ? curlat : maxlat;
             if (!placed) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
                 break;
             }
             /*

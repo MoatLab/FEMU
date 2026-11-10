@@ -778,6 +778,9 @@ void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
     set_rmap_ent(ssd, INVALID_LPN, old_ppa);
     ops->mark_valid(ssd, new_ppa, dest);
     ssd->gc_write_pages++; /* write amplification */
+    if (unlikely(ssd->nr_ns_slices)) {
+        ssd_ns_ctr_of(ssd, lpn)->gc_write_pages++;
+    }
 }
 
 /**

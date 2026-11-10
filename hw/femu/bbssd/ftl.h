@@ -622,6 +622,13 @@ enum ssd_reclaim_why {
     RECLAIM_OPEN,       /* pd_open_read_limit: reads of an open block */
 };
 
+/* the write counters of one namespace in an FTL that namespaces share */
+struct ssd_ns_ctr {
+    uint64_t host_write_pages;
+    uint64_t nand_write_pages;
+    uint64_t gc_write_pages;
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -855,6 +862,14 @@ struct ssd {
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* data pages the device relocated itself */
+    /*
+     * Namespaces that share this FTL (shared_ftl, or FDP): the first LPN of
+     * each slice, in namespace order, and its write counters. A page counts
+     * for the namespace whose slice holds its LPN.
+     */
+    uint32_t nr_ns_slices;
+    uint64_t *ns_slice_lo;
+    struct ssd_ns_ctr *ns_ctr;
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
      * Lines that forced collection freed with GC delay on, and when the NAND

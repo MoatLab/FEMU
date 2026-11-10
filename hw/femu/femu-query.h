@@ -88,6 +88,11 @@ typedef struct FemuQueryNs {
     uint64_t host_pages;
     uint64_t nand_pages;
     uint64_t gc_pages;
+    /* an FTL that namespaces share: this namespace's own pages */
+    bool ns_ctr_on;
+    uint64_t ns_host_pages;
+    uint64_t ns_nand_pages;
+    uint64_t ns_gc_pages;
     uint64_t pad_pages;
     bool parity_on;             /* die_parity */
     uint64_t parity_pages;

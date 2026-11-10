@@ -321,6 +321,14 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->host_pages = ssd->host_write_pages;
     q->nand_pages = ssd->nand_write_pages;
     q->gc_pages = ssd->gc_write_pages;
+    if (ssd->nr_ns_slices && q->nsid && q->nsid <= ssd->nr_ns_slices) {
+        const struct ssd_ns_ctr *c = &ssd->ns_ctr[q->nsid - 1];
+
+        q->ns_ctr_on = true;
+        q->ns_host_pages = c->host_write_pages;
+        q->ns_nand_pages = c->nand_write_pages;
+        q->ns_gc_pages = c->gc_write_pages;
+    }
     q->pad_pages = ssd->pd_pad_pages;
     q->parity_on = ssd->sp.die_parity != 0;
     q->parity_pages = ssd->parity_pages;

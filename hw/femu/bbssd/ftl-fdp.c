@@ -1912,6 +1912,9 @@ static uint64_t fdp_program_page(struct ssd *ssd, FemuReclaimGroup *rg,
         }
     }
     ssd->nand_write_pages++; /* a user page programmed into NAND */
+    if (unlikely(ssd->nr_ns_slices)) {
+        ssd_ns_ctr_of(ssd, lpn)->nand_write_pages++;
+    }
     fdp_ru_programmed(ssd, ru, 1);
 
     /* advance RU write pointer; may allocate new RU */
@@ -2041,6 +2044,9 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
          * amplification figure divides by.
          */
         ssd->host_write_pages++;
+        if (unlikely(ssd->nr_ns_slices)) {
+            ssd_ns_ctr_of(ssd, lpn)->host_write_pages++;
+        }
         written++;
     }
 
@@ -2255,6 +2261,9 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     ssd->host_write_pages += accepted;
+    if (unlikely(ssd->nr_ns_slices) && accepted) {
+        ssd_ns_ctr_of(ssd, start_lpn)->host_write_pages += accepted;
+    }
     spp->write_cnt += accepted;
     req->xfer_bytes = accepted * pg;
     host = fdp_host_bytes(ssd, req, req->slba, req->nlb, accepted);

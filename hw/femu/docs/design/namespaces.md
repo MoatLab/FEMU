@@ -175,6 +175,17 @@ buffer and GC, so the writes of one namespace slow the reads of another.
   write-back.
 - query-femu reports the same device counters for each namespace and
   names the FTL's namespace in `shared-ftl-nsid`.
+- `namespace-counters` in query-femu holds the pages of one namespace:
+  host, NAND and GC pages, and its WAF. A page counts for the namespace
+  whose slice holds its LPN, so a GC move counts for the owner of the
+  data, not for the namespace whose write started GC. Map, pad and
+  parity pages count for the device only. FDP with several namespaces
+  reports the same field.
+
+```text
+ host write to ns2 --> lpn in slice 2 --> ns2 host and NAND pages
+ GC moves lpn      --> owner of lpn   --> that namespace's GC pages
+```
 - Not with a femu-subsys (FDP shares its FTL already), `ns_mgmt`,
   `power_loss`, `persist_ftl`, `ns_wp`, `sanitize_ns` or `telemetry_da4`.
   The options that refuse several namespaces (idle GC, the pSLC tier,
