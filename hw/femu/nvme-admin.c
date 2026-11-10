@@ -5948,6 +5948,10 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (cmd->psdt != NVME_PSDT_PRP) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* no fused operation is supported (FUSES 0; Base 2.3, 3.4.2) */
+    if (cmd->fuse) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (nvme_locked_out(n, cmd)) {
         return NVME_CMD_PROHIBITED | NVME_DNR;
     }

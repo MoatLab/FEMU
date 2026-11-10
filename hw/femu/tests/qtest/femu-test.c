@@ -43676,6 +43676,82 @@ static void femu_test_ns_wp_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * FUSES is 0, so a command that names a fused operation fails with Invalid
+ * Field and does not run. A Compare that would miscompare, then its Write:
+ * both fail, and the blocks keep their data. Admin commands too; FUSE 11b
+ * is reserved. A normal command after them runs.
+ */
+static void femu_test_fused_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd cmd;
+    int fuse;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+
+    /* Compare against B (a miscompare), then Write C: neither runs */
+    qtest_memset(qts, buf, 0xb2, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_COMPARE;
+    cmd.flags = 1;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(7);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_memset(qts, buf, 0xc3, 4096);
+    cmd.opcode = NVME_CMD_WRITE;
+    cmd.flags = 2;
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    for (int i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+    }
+
+    /* each FUSE value on a Write and on an admin Identify */
+    for (fuse = 1; fuse <= 3; fuse++) {
+        qtest_memset(qts, buf, 0xd4, 4096);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.flags = fuse;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw12 = cpu_to_le32(7);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+        for (int i = 0; i < 8; i++) {
+            femu_power_read(&c, buf, 1, i, 0xa1);
+        }
+
+        /* a refused Identify moves no data */
+        qtest_memset(qts, buf, 0x6c, 4096);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.flags = fuse;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, 0x6c6c6c6c6c6c6c6cULL);
+        g_assert_cmphex(qtest_readq(qts, buf + 4088), ==,
+                        0x6c6c6c6c6c6c6c6cULL);
+    }
+
+    /* FUSES reads 0, and normal commands still run */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 522), ==, 0);
+    femu_power_write(&c, buf, 1, 0, 8, 0xe5, false);
+    femu_power_read(&c, buf, 1, 0, 0xe5);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -59892,6 +59968,10 @@ static void femu_register_nodes(void)
             "streams=on,streams.max=4,namespaces=2,ns_wp=on",
     });
     qos_add_test("ns-wp-off", "femu", femu_test_ns_wp_off, NULL);
+    qos_add_test("fused-refused", "femu", femu_test_fused_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,oncs=0x19f",
+    });
     qos_add_test("ns-wp-refused", "femu", femu_test_ns_wp_refused, NULL);
     qos_add_test("power-limit-off", "femu", femu_test_power_limit_off,
                  &(QOSGraphTestOptions) {

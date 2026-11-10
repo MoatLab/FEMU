@@ -3095,6 +3095,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /*
+     * FUSES is 0: no fused operation is supported, so a command that names
+     * one fails (Base 2.3, 3.4.2) and does not run alone. A Compare and
+     * Write pair run as two commands would write after a miscompare.
+     */
+    if (unlikely(cmd->fuse)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     /* a path that cannot reach the namespace fails its I/O (8.1.1) */
     if (unlikely(n->ana)) {
