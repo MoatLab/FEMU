@@ -648,6 +648,10 @@ static void nvme_init_poller(FemuCtrl *n)
     if (n->io_stages && !n->stage_sets) {
         n->stage_sets = g_new0(FemuStageSet, n->nr_pollers + 1);
     }
+    if (n->stage_ns && !n->stage_ns_sets) {
+        n->stage_ns_sets = g_new0(FemuStageSet, (n->nr_pollers + 1) *
+                                  FEMU_STAGE_NS * FEMU_STAGE_CLASSES);
+    }
 
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));

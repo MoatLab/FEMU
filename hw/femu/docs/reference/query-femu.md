@@ -612,6 +612,26 @@ retired are not counted, and admin commands are not timed. Without `reset`,
 a reply taken during I/O can differ by the commands in flight. Without
 `io_stages=on` the command fails.
 
+With `stage_ns=on`, each poller also keeps sets for NSID 1 to 8: one for
+Read, one for the write commands (Write, Write Zeroes, Zone Append, and
+Copy at its destination). `nsid` adds `read` and `write` to the reply,
+each with its stages, bands and `returned-after-due`.
+
+```json
+{"execute": "query-femu-stages", "arguments": {"nsid": 2, "reset": true}}
+```
+
+- Only NVM (bbssd, NoSSD) and zoned namespaces have classes. Other
+  commands and command sets count only in the controller's stages, so
+  the classes need not add up to them.
+- `reset` with `nsid` clears only that namespace's two classes; without
+  `nsid` it clears only the controller's stages.
+- `nsid` must be 1 to 8 and name an attached namespace. `stage_ns` is
+  refused with `ns_mgmt`, so an NSID names one namespace for the life of
+  the controller.
+- With `shared_ftl`, the read class of one namespace shows how long its
+  reads wait while another namespace writes and collects.
+
 ## femu-save-data
 
 `femu-save-data` writes a checkpoint of a bbssd or NoSSD device while it

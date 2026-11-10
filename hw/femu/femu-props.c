@@ -202,6 +202,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Time each I/O command in five stages (submit, ftl, hold, "
       "post-delay, total) for the QMP command query-femu-stages; off by "
       "default" },
+    { "stage_ns",
+      "with io_stages: also time the Read and the write commands of each "
+      "NVM or zoned namespace, NSID 1 to 8, apart, in ns; "
+      "query-femu-stages returns them with nsid; not with ns_mgmt; off "
+      "(default)" },
     { "intc",
       "Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector "
       "Configuration feature for every vector" },

@@ -2249,6 +2249,18 @@ static bool femu_shared_ftl_check(FemuCtrl *n, Error **errp)
                    "(FDP shares its FTL already)");
         return false;
     }
+    /*
+     * stage_ns keeps the histograms of an NSID for the controller's life,
+     * so a namespace that management deletes could pass its counts on.
+     */
+    if (n->stage_ns && !n->io_stages) {
+        error_setg(errp, "stage_ns needs io_stages=on");
+        return false;
+    }
+    if (n->stage_ns && n->ns_mgmt) {
+        error_setg(errp, "stage_ns is not supported with ns_mgmt");
+        return false;
+    }
     return true;
 }
 
@@ -4863,6 +4875,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     n->poller_ctr = NULL;
     g_free(n->stage_sets);
     n->stage_sets = NULL;
+    g_clear_pointer(&n->stage_ns_sets, g_free);
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
 }
@@ -5333,6 +5346,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("shared_ftl", FemuCtrl, shared_ftl, false),
+    DEFINE_PROP_BOOL("stage_ns", FemuCtrl, stage_ns, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),

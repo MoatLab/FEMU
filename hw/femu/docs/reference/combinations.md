@@ -362,6 +362,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `io_stages`
 
+- stage_ns needs io_stages=on
 - the femu device does not time I/O stages; set io_stages=on
 
 ## `io_trace`
@@ -679,6 +680,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: the pd_* properties are not supported with ns_mgmt or shared namespaces
 - ns_mgmt=on does not support subsys; use a standalone controller
 - ocp is not supported with ns_mgmt
+- stage_ns is not supported with ns_mgmt
 
 ## `ns_wp`
 
@@ -991,6 +993,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `shared_ftl`
 
 - shared_ftl is not supported with %s
+- shared_ftl is not supported with a femu-subsys (FDP shares its FTL already)
 - shared_ftl needs every namespace in bbssd mode; namespace %d is not
 - shared_ftl needs namespace sizes in whole NAND pages (%
 
@@ -1002,6 +1005,13 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu: spare_lines (%u) must be below blks_per_pl (%d)
 - femu: spare_lines needs blk_pe_limit
+
+## `stage_ns`
+
+- nsid %u: stage_ns times NSID 1 to %d
+- nsid needs stage_ns=on
+- stage_ns is not supported with ns_mgmt
+- stage_ns needs io_stages=on
 
 ## `status_lat`
 
@@ -1029,6 +1039,7 @@ own description allows. A message keeps its format directives (`%s`,
 - power_states does not work with a femu-subsys yet
 - reservations must be the same on every controller of a femu-subsys
 - sanitize_ms does not work with a femu-subsys yet
+- shared_ftl is not supported with a femu-subsys (FDP shares its FTL already)
 
 ## `telemetry_da4`
 

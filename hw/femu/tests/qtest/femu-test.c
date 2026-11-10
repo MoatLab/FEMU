@@ -44281,8 +44281,10 @@ static void femu_test_cancel_immediate(void *obj, void *data,
 }
 
 /*
- * An immediate abort completes a Read before its 100 ms model time. Its
- * stage times end at the abort, so they still add up to its total.
+ * An immediate abort completes a Read before its 100 ms model time, from
+ * pq (x-cpl-hold 2) and from the return ring (1). Its stage times end at
+ * the abort, so they add up to its total, in the controller's stages and
+ * in the read class of namespace 1.
  */
 static void femu_test_cancel_stages(void *obj, void *data,
                                     QGuestAllocator *alloc)
@@ -44300,23 +44302,36 @@ static void femu_test_cancel_stages(void *obj, void *data,
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     femu_power_write(&c, buf, 1, 0, 8, 0xc7, false);
-    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
-                    "'arguments':{'reset':true}}");
-    qobject_unref(rsp);
-    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 2);
-    cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
-    femu_cancel_wait_cpl(qts, "cancel", 1);
-    cid[1] = femu_cancel_submit(&c, 1, cid[0], c.io.qid, 0);
-    femu_cancel_reap(&c, 2, cid, sc, res);
-    g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
-    g_assert_cmphex(res[1], ==, 1);
-    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
-    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
-    ret = qdict_get_qdict(rsp, "return");
-    femu_stages_check_sum(ret);
-    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "max-ns"), <,
-                     50 * 1000 * 1000);
-    qobject_unref(rsp);
+    for (int hold = 2; hold >= 1; hold--) {
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'reset':true}}");
+        qobject_unref(rsp);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'nsid':1,'reset':true}}");
+        qobject_unref(rsp);
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", hold);
+        cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
+        femu_cancel_wait_cpl(qts, "cancel", 1);
+        cid[1] = femu_cancel_submit(&c, 1, cid[0], c.io.qid, 0);
+        femu_cancel_reap(&c, 2, cid, sc, res);
+        g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+        g_assert_cmphex(res[1], ==, 1);
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+        /* a pause: the pollers have recorded what they posted */
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'nsid':1}}");
+        ret = qdict_get_qdict(rsp, "return");
+        /* the Read and the Cancel; the Read alone in the read class */
+        g_assert_cmpint(qdict_get_int(femu_stage(ret, "total"), "count"),
+                        ==, 2);
+        femu_stages_check_sum(ret);
+        g_assert_cmpint(qdict_get_int(femu_stage(qdict_get_qdict(ret, "read"),
+                                                 "total"), "count"), ==, 1);
+        femu_stages_check_sum(qdict_get_qdict(ret, "read"));
+        qobject_unref(rsp);
+    }
 
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -44711,6 +44726,162 @@ static void femu_test_shared_ftl_refused(void *obj, void *data,
         desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
         g_test_message("%s: %s", cases[i].opts, desc);
         g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* query-femu-stages for @nsid (0: none), with @reset; the reply */
+static QDict *femu_stages_ns(QTestState *qts, uint32_t nsid, bool reset,
+                             QDict **rsp)
+{
+    g_autofree char *args = nsid ?
+        g_strdup_printf("{'nsid':%u,'reset':%s}", nsid,
+                        reset ? "true" : "false") :
+        g_strdup_printf("{'reset':%s}", reset ? "true" : "false");
+
+    *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':%p}",
+                     qobject_from_json(args, &error_abort));
+    g_assert_true(qdict_haskey(*rsp, "return"));
+    return qdict_get_qdict(*rsp, "return");
+}
+
+static int64_t femu_stage_count(QDict *cls)
+{
+    return qdict_get_int(femu_stage(cls, "total"), "count");
+}
+
+/*
+ * stage_ns: 8 Reads of mapped pages of namespace 1 (3 ms each) and 4
+ * Writes of namespace 2 land in their own classes, with the durations,
+ * bands and sums the controller's stages have. A reset of namespace 1
+ * leaves namespace 2 and the controller's stages as they were.
+ */
+static void femu_test_io_stages_ns(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ret;
+    QDict *rd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 8; i++) {
+        femu_power_write(&c, buf, 1, i * 8, 8, 0x41, false);
+    }
+    for (uint32_t nsid = 0; nsid <= 2; nsid++) {
+        femu_stages_ns(qts, nsid, true, &rsp);
+        qobject_unref(rsp);
+    }
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0x41);
+    }
+    for (i = 0; i < 4; i++) {
+        femu_power_write(&c, buf, 2, i * 8, 8, 0x42, false);
+    }
+    /* a pause: the pollers have recorded every CQE they posted */
+    femu_cancel_wait_cpl(qts, "stns", 0);
+
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    g_assert_cmpuint(qdict_get_int(ret, "nsid"), ==, 1);
+    rd = qdict_get_qdict(ret, "read");
+    g_assert_cmpint(femu_stage_count(rd), ==, 8);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 0);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "max-ns"), >=,
+                     3000000);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), >=,
+                     8 * 3000000);
+    femu_stage_check_buckets(femu_stage(rd, "total"));
+    femu_stages_check_sum(rd);
+    femu_stages_check_bands(rd);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 0);
+    rd = qdict_get_qdict(ret, "write");
+    g_assert_cmpint(femu_stage_count(rd), ==, 4);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), >, 0);
+    femu_stages_check_sum(rd);
+    femu_stages_check_bands(rd);
+    qobject_unref(rsp);
+
+    /* bad selectors fail before a reset clears anything */
+    for (i = 0; i < 2; i++) {
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':"
+                        "{'nsid':%d,'reset':true}}", i ? 9 : 0);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 8);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+
+    /* reset namespace 1 only */
+    ret = femu_stages_ns(qts, 1, true, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 8);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    rd = qdict_get_qdict(ret, "read");
+    g_assert_cmpint(femu_stage_count(rd), ==, 0);
+    g_assert_cmpint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), ==, 0);
+    g_assert_cmpint(qdict_get_int(femu_stage(rd, "total"), "max-ns"), ==, 0);
+    g_assert_cmpint(qlist_size(qdict_get_qlist(rd, "bands")), ==, 0);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 4);
+    qobject_unref(rsp);
+    /* a reset of the controller's stages keeps the namespace classes */
+    femu_stages_ns(qts, 0, true, &rsp);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(ret), ==, 0);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 4);
+    qobject_unref(rsp);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* nsid without stage_ns, and stage_ns without io_stages or with ns_mgmt */
+static void femu_test_io_stages_ns_refused(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QTestState *qts = ((QFemu *)obj)->dev.bus->qts;
+    const char *cases[][2] = {
+        { "'stage_ns':true", "stage_ns needs io_stages=on" },
+        { "'stage_ns':true,'io_stages':true,'ns_mgmt':true",
+          "stage_ns is not supported with ns_mgmt" },
+    };
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':"
+                    "{'nsid':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "stage_ns"));
+    qobject_unref(rsp);
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'stnsr','addr':'5','femu_mode':1,"
+            "'devsz_mb':16,%s}}", cases[i][0]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
@@ -60939,6 +61110,15 @@ static void femu_register_nodes(void)
     });
     qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
                  NULL);
+    qos_add_test("io-stages-ns", "femu", femu_test_io_stages_ns,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=stns,femu_mode=1,devsz_mb=16,"
+            "namespaces=2,io_stages=on,stage_ns=on,pg_rd_lat=3000000",
+    });
+    qos_add_test("io-stages-ns-refused", "femu",
+                 femu_test_io_stages_ns_refused, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,io_stages=on",
+    });
     qos_add_test("shared-ftl", "femu", femu_test_shared_ftl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=shftl,femu_mode=1,devsz_mb=1,"
@@ -60973,7 +61153,7 @@ static void femu_register_nodes(void)
     qos_add_test("cancel-stages", "femu", femu_test_cancel_stages,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
-            "io_stages=on,pg_rd_lat=100000000,cancel=on",
+            "io_stages=on,stage_ns=on,pg_rd_lat=100000000,cancel=on",
     });
     qos_add_test("cancel-checks", "femu", femu_test_cancel_checks,
                  &(QOSGraphTestOptions) {

@@ -163,15 +163,11 @@ static void nvme_stage_band_add(FemuStageSet *set, int64_t total,
  * FTL ring) counts only in post-delay, past-due and total. A command that a
  * namespace retired has no due time, and is not counted.
  */
-static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
-                             int64_t post)
+static void nvme_stages_note_set(FemuCtrl *n, FemuStageSet *set,
+                                 NvmeRequest *req, int64_t post, bool hold)
 {
-    FemuStageSet *set = &n->stage_sets[index_poller];
     int64_t ready = req->expire_time;
 
-    if (req->expire_time < req->t_submit) {
-        return;
-    }
     /* a query copies the whole set of this poller between two commands */
     seqlock_write_begin(&set->seq);
     if (req->t_handoff && req->t_return) {
@@ -190,11 +186,55 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     nvme_stage_add(&set->st[FEMU_STAGE_PAST_DUE], post - req->expire_time);
     nvme_stage_add(&set->st[FEMU_STAGE_TOTAL], post - req->t_submit);
     /* qtest only: stop between the histograms and the band of a command */
-    if (unlikely(qatomic_read(&n->test_stage_hold_ms))) {
+    if (unlikely(hold && qatomic_read(&n->test_stage_hold_ms))) {
         g_usleep(qatomic_read(&n->test_stage_hold_ms) * 1000ULL);
     }
     nvme_stage_band_add(set, post - req->t_submit, post - req->expire_time);
     seqlock_write_end(&set->seq);
+}
+
+/*
+ * The class of @req for stage_ns: NVM and zoned namespaces only, as other
+ * command sets reuse these opcodes. Copy counts at its destination.
+ */
+static int nvme_stage_class(NvmeRequest *req)
+{
+    NvmeNamespace *ns = req->ns;
+
+    if (!ns || !(NS_BBSSD(ns) || NS_NOSSD(ns) || NS_ZNSSD(ns))) {
+        return -1;
+    }
+    switch (req->cmd_opcode) {
+    case NVME_CMD_READ:
+        return FEMU_STAGE_READ;
+    case NVME_CMD_WRITE:
+    case NVME_CMD_WRITE_ZEROES:
+    case NVME_CMD_ZONE_APPEND:
+    case NVME_CMD_COPY:
+        return FEMU_STAGE_WRITE;
+    default:
+        return -1;
+    }
+}
+
+static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
+                             int64_t post)
+{
+    int cls;
+
+    if (req->expire_time < req->t_submit) {
+        return;
+    }
+    nvme_stages_note_set(n, &n->stage_sets[index_poller], req, post, true);
+    if (unlikely(n->stage_ns_sets) && req->ns &&
+        req->ns->id <= FEMU_STAGE_NS) {
+        cls = nvme_stage_class(req);
+        if (cls >= 0) {
+            nvme_stages_note_set(n, nvme_stage_ns_set(n, index_poller,
+                                                      req->ns->id, cls),
+                                 req, post, false);
+        }
+    }
 }
 
 /*

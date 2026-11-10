@@ -3265,6 +3265,12 @@ typedef struct FemuCtrl {
     bool            cq_teardown;   /* a reset frees every CQ: no interrupts */
     bool            io_stages;     /* time each I/O command by stage */
     FemuStageSet    *stage_sets;   /* per-poller stage times (1-based) */
+    /*
+     * stage_ns=on: for each poller, a set per namespace (NSID 1 to
+     * FEMU_STAGE_NS) and class (read, write); see nvme_stage_ns_set()
+     */
+    bool            stage_ns;
+    FemuStageSet    *stage_ns_sets;
     bool            print_log;
 
     uint8_t         multipoller_enabled;
@@ -3478,6 +3484,18 @@ static inline NvmeNamespace *nvme_ns(FemuCtrl *n, uint32_t nsid)
 }
 
 #define FEMU_MAX_INF_REQS       (65536)
+
+/* stage_ns: namespaces with their own stage sets, and the classes */
+#define FEMU_STAGE_NS           8
+enum { FEMU_STAGE_READ, FEMU_STAGE_WRITE, FEMU_STAGE_CLASSES };
+
+/* the stage set of poller @p for namespace @nsid (1-based) and @cls */
+static inline FemuStageSet *nvme_stage_ns_set(FemuCtrl *n, int p,
+                                              uint32_t nsid, int cls)
+{
+    return &n->stage_ns_sets[((size_t)p * FEMU_STAGE_NS + nsid - 1) *
+                             FEMU_STAGE_CLASSES + cls];
+}
 
 enum {
     FEMU_OCSSD_MODE = 0,

@@ -1419,6 +1419,26 @@
             'past-due-sum-ns': 'uint64' } }
 
 ##
+# @FemuIoStageClass:
+#
+# Stage times of one class of I/O commands of one namespace
+# (stage_ns=on).
+#
+# @stages: one entry per stage
+#
+# @returned-after-due: commands of the class that came back from the
+#     FTL after the time the model completes them
+#
+# @bands: one entry per non-empty total-time bucket, in bucket order
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoStageClass',
+  'data': { 'stages': [ 'FemuIoStageInfo' ],
+            'returned-after-due': 'uint64',
+            'bands': [ 'FemuIoStageBand' ] } }
+
+##
 # @FemuIoStages:
 #
 # Stage times of the I/O commands a FEMU controller completed.
@@ -1435,12 +1455,20 @@
 #     without reset, so per poller they agree.  Several pollers are
 #     read one after the other.
 #
+# @nsid: the namespace of @read and @write, when one was asked for
+#
+# @read: the Read commands of namespace @nsid
+#
+# @write: the Write, Write Zeroes, Zone Append and Copy commands of
+#     namespace @nsid (a Copy counts for its destination)
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuIoStages',
   'data': { 'path': 'str', 'stages': [ 'FemuIoStageInfo' ],
             'returned-after-due': 'uint64',
-            'bands': [ 'FemuIoStageBand' ] } }
+            'bands': [ 'FemuIoStageBand' ], '*nsid': 'uint32',
+            '*read': 'FemuIoStageClass', '*write': 'FemuIoStageClass' } }
 
 ##
 # @query-femu-stages:
@@ -1457,7 +1485,14 @@
 # @path: QOM path of the femu device.  Optional when exactly one
 #     exists.
 #
-# @reset: clear the counts after they are read (default false)
+# @nsid: also report the read and write classes of this namespace,
+#     1 to 8.  Needs stage_ns=on.  Only NVM (bbssd, nossd) and zoned
+#     namespaces have classes; the other commands count only in the
+#     controller's stages, so the classes need not add up to them.
+#
+# @reset: clear the counts after they are read (default false).  With
+#     @nsid, only that namespace's classes; without, only the
+#     controller's stages.
 #
 # Returns: the stage times of the controller
 #
@@ -1480,7 +1515,7 @@
 #                         "past-due-sum-ns": 30000 } ] } }
 ##
 { 'command': 'query-femu-stages',
-  'data': { '*path': 'str', '*reset': 'bool' },
+  'data': { '*path': 'str', '*nsid': 'uint32', '*reset': 'bool' },
   'returns': 'FemuIoStages' }
 
 ##

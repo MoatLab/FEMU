@@ -1148,36 +1148,21 @@ FemuEvents *qmp_query_femu_events(const char *path, Error **errp)
     return n ? femu_events_info(n, errp) : NULL;
 }
 
-FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
-                                    bool reset, Error **errp)
+typedef FemuStageSet *(*FemuStageSetFn)(FemuCtrl *n, int p, void *opaque);
+
+/* add the set that @set gives for each poller into @sum */
+static void femu_query_stage_sum(FemuCtrl *n, FemuStageSetFn set,
+                                 void *opaque, FemuStageSet *sum)
 {
-    FemuCtrl *n = femu_query_find(path, errp);
-    g_autofree FemuStageSet *sum = NULL;
-    g_autofree FemuStageSet *copy = NULL;
-    FemuIoStages *info;
-    FemuIoStageInfoList **tail;
-    FemuIoStageBandList **btail;
-    bool clear = has_reset && reset && n && n->stage_sets;
-    bool resume = false;
+    g_autofree FemuStageSet *copy = g_new0(FemuStageSet, 1);
 
-    if (!n) {
-        return NULL;
-    }
-    if (!n->io_stages) {
-        error_setg(errp, "the femu device does not time I/O stages; set "
-                   "io_stages=on");
-        return NULL;
-    }
+    for (int p = 1; p <= n->nr_pollers; p++) {
+        FemuStageSet *s = set(n, p, opaque);
 
-    /* a reset reads and clears with the pollers stopped, so it loses none */
-    if (clear) {
-        resume = nvme_pause_pollers(n);
-    }
-    /* sum the per-poller copies; each copy is whole in itself */
-    sum = g_new0(FemuStageSet, 1);
-    copy = g_new0(FemuStageSet, 1);
-    for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
-        femu_query_stage_copy(&n->stage_sets[p], copy);
+        if (!s) {
+            continue;
+        }
+        femu_query_stage_copy(s, copy);
         for (int st = 0; st < FEMU_STAGE_NR; st++) {
             FemuStageHist *d = &sum->st[st];
             const FemuStageHist *h = &copy->st[st];
@@ -1196,10 +1181,31 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
             sum->bands[b].past_due_ns += copy->bands[b].past_due_ns;
         }
     }
+}
 
-    info = g_new0(FemuIoStages, 1);
-    info->path = object_get_canonical_path(OBJECT(n));
-    tail = &info->stages;
+static FemuStageSet *femu_query_stage_all(FemuCtrl *n, int p, void *opaque)
+{
+    return n->stage_sets ? &n->stage_sets[p] : NULL;
+}
+
+/* @opaque: the class in the low bit, the NSID above it */
+static FemuStageSet *femu_query_stage_ns(FemuCtrl *n, int p, void *opaque)
+{
+    uintptr_t key = (uintptr_t)opaque;
+
+    return n->stage_ns_sets ?
+           nvme_stage_ns_set(n, p, key >> 1, key & 1) : NULL;
+}
+
+/* the stages, returned-after-due and bands of @sum, in QAPI form */
+static void femu_query_stage_lists(const FemuStageSet *sum,
+                                   FemuIoStageInfoList **stages,
+                                   uint64_t *returned_after_due,
+                                   FemuIoStageBandList **bands)
+{
+    FemuIoStageInfoList **tail = stages;
+    FemuIoStageBandList **btail = bands;
+
     for (int st = 0; st < FEMU_STAGE_NR; st++) {
         FemuIoStageInfo *si = g_new0(FemuIoStageInfo, 1);
         uint64List **ltail = &si->buckets;
@@ -1213,8 +1219,7 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
         }
         QAPI_LIST_APPEND(tail, si);
     }
-    info->returned_after_due = sum->returned_after_due;
-    btail = &info->bands;
+    *returned_after_due = sum->returned_after_due;
     for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
         FemuIoStageBand *bd;
 
@@ -1228,9 +1233,89 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_reset,
         bd->past_due_sum_ns = sum->bands[b].past_due_ns;
         QAPI_LIST_APPEND(btail, bd);
     }
+}
 
+static FemuIoStageClass *femu_query_stage_class(const FemuStageSet *sum)
+{
+    FemuIoStageClass *c = g_new0(FemuIoStageClass, 1);
+
+    femu_query_stage_lists(sum, &c->stages, &c->returned_after_due,
+                           &c->bands);
+    return c;
+}
+
+FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
+                                    uint32_t nsid, bool has_reset,
+                                    bool reset, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+    g_autofree FemuStageSet *sum = NULL;
+    g_autofree FemuStageSet *ns_sum = NULL;
+    FemuIoStages *info;
+    bool clear = has_reset && reset;
+    bool resume = false;
+
+    if (!n) {
+        return NULL;
+    }
+    if (!n->io_stages) {
+        error_setg(errp, "the femu device does not time I/O stages; set "
+                   "io_stages=on");
+        return NULL;
+    }
+    /* every argument is checked before a reset can clear anything */
+    if (has_nsid) {
+        if (!n->stage_ns) {
+            error_setg(errp, "nsid needs stage_ns=on");
+            return NULL;
+        }
+        if (nsid < 1 || nsid > FEMU_STAGE_NS) {
+            error_setg(errp, "nsid %u: stage_ns times NSID 1 to %d", nsid,
+                       FEMU_STAGE_NS);
+            return NULL;
+        }
+        if (!nvme_ns(n, nsid)) {
+            error_setg(errp, "nsid %u is not an attached namespace", nsid);
+            return NULL;
+        }
+    }
+
+    /* a reset reads and clears with the pollers stopped, so it loses none */
     if (clear) {
+        resume = nvme_pause_pollers(n);
+    }
+    sum = g_new0(FemuStageSet, 1);
+    femu_query_stage_sum(n, femu_query_stage_all, NULL, sum);
+    info = g_new0(FemuIoStages, 1);
+    info->path = object_get_canonical_path(OBJECT(n));
+    femu_query_stage_lists(sum, &info->stages, &info->returned_after_due,
+                           &info->bands);
+    if (has_nsid) {
+        info->has_nsid = true;
+        info->nsid = nsid;
+        for (int cls = 0; cls < FEMU_STAGE_CLASSES; cls++) {
+            ns_sum = g_new0(FemuStageSet, 1);
+            femu_query_stage_sum(n, femu_query_stage_ns,
+                                 (void *)(uintptr_t)(nsid << 1 | cls), ns_sum);
+            if (cls == FEMU_STAGE_READ) {
+                info->read = femu_query_stage_class(ns_sum);
+            } else {
+                info->write = femu_query_stage_class(ns_sum);
+            }
+            g_clear_pointer(&ns_sum, g_free);
+        }
+    }
+
+    /* with nsid, only that namespace's sets; without, only the aggregate */
+    if (clear && has_nsid && n->stage_ns_sets) {
+        for (int p = 1; p <= n->nr_pollers; p++) {
+            memset(nvme_stage_ns_set(n, p, nsid, 0), 0,
+                   sizeof(FemuStageSet) * FEMU_STAGE_CLASSES);
+        }
+    } else if (clear && n->stage_sets) {
         memset(n->stage_sets, 0, sizeof(FemuStageSet) * (n->nr_pollers + 1));
+    }
+    if (clear) {
         nvme_resume_pollers(n, resume);
     }
     return info;
