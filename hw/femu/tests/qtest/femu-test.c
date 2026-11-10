@@ -44281,6 +44281,50 @@ static void femu_test_cancel_immediate(void *obj, void *data,
 }
 
 /*
+ * An immediate abort completes a Read before its 100 ms model time. Its
+ * stage times end at the abort, so they still add up to its total.
+ */
+static void femu_test_cancel_stages(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t cid[2];
+    uint16_t sc[2];
+    uint32_t res[2];
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc7, false);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    qobject_unref(rsp);
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 2);
+    cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
+    femu_cancel_wait_cpl(qts, "cancel", 1);
+    cid[1] = femu_cancel_submit(&c, 1, cid[0], c.io.qid, 0);
+    femu_cancel_reap(&c, 2, cid, sc, res);
+    g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(res[1], ==, 1);
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    ret = qdict_get_qdict(rsp, "return");
+    femu_stages_check_sum(ret);
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "max-ns"), <,
+                     50 * 1000 * 1000);
+    qobject_unref(rsp);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
  * The field checks (Figures 590 and 591), a CID that is not found, a
  * single Cancel whose CID names another namespace (the target is left as
  * it was), and the effects log entry.
@@ -60925,6 +60969,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
             "cancel=on",
+    });
+    qos_add_test("cancel-stages", "femu", femu_test_cancel_stages,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=cancel,femu_mode=1,devsz_mb=16,"
+            "io_stages=on,pg_rd_lat=100000000,cancel=on",
     });
     qos_add_test("cancel-checks", "femu", femu_test_cancel_checks,
                  &(QOSGraphTestOptions) {

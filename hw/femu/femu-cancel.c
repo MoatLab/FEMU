@@ -213,9 +213,18 @@ static bool femu_cancel_take(FemuCancelOp *op, NvmeRequest *t, bool held)
 
 static void femu_cancel_abort(FemuCtrl *n, FemuCancelOp *op, NvmeRequest *t)
 {
+    int64_t now = femu_io_now(n);
+
     t->status = NVME_CMD_ABORT_REQ;
     t->cqe.res64 = 0;
     t->cancel = false;
+    /*
+     * It completes now, before the time its model gave it: the stage
+     * times (io_stages) end at the abort, so they still add up.
+     */
+    if (t->expire_time > now) {
+        t->expire_time = now;
+    }
     op->cmda++;
 }
 
@@ -248,6 +257,10 @@ static void femu_cancel_walk(FemuCtrl *n, FemuCancelOp *op)
 
         assert(rc == 1);
         if (femu_cancel_match(op, t) && femu_cancel_take(op, t, false)) {
+            /* the poller stamps this when it takes the ring; Cancel does */
+            if (n->stage_sets && !t->t_return) {
+                t->t_return = femu_io_now(n);
+            }
             femu_cancel_abort(n, op, t);
             nvme_req_release_ranges(t);
             QTAILQ_INSERT_TAIL(backlog, t, entry);
