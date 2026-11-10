@@ -196,7 +196,7 @@ static void femu_power_advance(FemuCtrl *n, int64_t now)
                                           qatomic_read(&n->ps_busy_until)));
 
     /* a sanitize in progress suspends autonomous transitions (8.1.26.5) */
-    if (nvme_sanitize_busy(n)) {
+    if (nvme_sanitize_busy(n) || femu_sanns_busy(n)) {
         return;
     }
 

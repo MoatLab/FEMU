@@ -2606,6 +2606,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->id = i + 1;
         ns->attached = true;
         ns->allocated = true;
+        ns->nde = true;     /* never written */
 
         /* mode and command set for this namespace */
         ns->femu_mode = ns_modes[i];
@@ -3321,6 +3322,7 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
         ns->id_ns.rescap = NVME_RESCAP_ALL;
     }
     nvme_ana_ns(n, ns);
+    ns->nde = true;
     ns->allocated = true;
     nvme_set_ctrl_capacity(n);
     return 0;
@@ -4394,7 +4396,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
-        !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp)) {
+        !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
+        !femu_sanns_check(n, errp)) {
         return;
     }
     if (!femu_check_wear_props(n, errp)) {
@@ -5252,6 +5255,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("power_meas", FemuCtrl, power_meas, false),
     DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
+    DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),
     DEFINE_PROP_BOOL("plane_reads", FemuCtrl, plane_reads, false),
     DEFINE_PROP_UINT32("throttle_light_pct", FemuCtrl, throttle_light_pct, 150),

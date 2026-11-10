@@ -43756,6 +43756,240 @@ static void femu_test_fused_refused(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+#define FEMU_ADM_SANITIZE_NS    0x8c
+#define FEMU_SC_SANNS_BUSY      0x02c
+#define FEMU_SC_SANNS_LIMIT     0x112
+
+/* Sanitize Namespace of @nsid with CDW10 @dw10 */
+static uint16_t femu_sanns(FemuCtrlState *c, uint32_t nsid, uint32_t dw10)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_ADM_SANITIZE_NS;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* log 81h for @nsid into @buf; returns SSTAT */
+static uint16_t femu_sanns_sstat(FemuCtrlState *c, uint32_t nsid,
+                                 uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x81 | (512 / 4 - 1) << 16);
+    g_assert_cmphex(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    return qtest_readw(c->pdev->bus->qts, buf + 2);
+}
+
+/*
+ * Set test hook @prop of device "sanns": x-fetch-hold is a bool,
+ * x-ftl-hold a number.
+ */
+static void femu_sanns_hold(QTestState *qts, const char *prop, bool on)
+{
+    QDict *rsp = g_str_equal(prop, "x-ftl-hold") ?
+        qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                  "'path':'/machine/peripheral/sanns',"
+                  "'property':%s,'value':%d}}", prop, on) :
+        qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                  "'path':'/machine/peripheral/sanns',"
+                  "'property':%s,'value':%i}}", prop, on);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* submit an 8-block Write of @pattern to @nsid at @lba; do not wait */
+static void femu_sanns_write(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                             uint64_t lba, uint8_t pattern)
+{
+    NvmeRwCmd rw = { 0 };
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+}
+
+/*
+ * Sanitize Namespace (8Ch) with sanitize_ms 200 on two namespaces. NDE is
+ * set for a new namespace and cleared by a write. A crypto erase of
+ * namespace 1 refuses its I/O (Flush aside), a second one and a Sanitize
+ * while it runs; namespace 2 keeps working. At the end namespace 1 reads
+ * zero, its log shows SOS 001b and NDE, and an event names log 81h.
+ */
+static void femu_test_sanitize_ns(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t res = 0;
+    uint16_t cid, want;
+    NvmeCmd fmt = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* log 05h: 8Ch changes logical blocks; the subsystem log: MNSOIP 1 */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_ADM_SANITIZE_NS), ==,
+                    0x3);
+    femu_sanns_sstat(&c, 0, buf);
+    g_assert_cmphex(qtest_readl(qts, buf + 40), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 44), ==, 0);
+
+    /* a new namespace: NDE, GDE, SOS 000b; STNSID, no MNSOIP */
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x500);
+    g_assert_cmphex(qtest_readl(qts, buf + 40), ==, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, buf + 44), ==, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0);
+
+    /* refused, and nothing changes */
+    g_assert_cmphex(femu_sanns(&c, 0, 0x4), ==, NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, NVME_NSID_BROADCAST, 0x4), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, 3, 0x4), ==, NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x5), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x2), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4 | 1 << 10), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+
+    /* namespace 1 in progress */
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf) & 0x7, ==, 0x2);
+    g_assert_cmpuint(qtest_readw(qts, buf), <, 0xffff);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_READ, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_FLUSH, 1, 0, 0, 0, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 2, 0, 0xb2);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, FEMU_SC_SANNS_LIMIT);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, FEMU_SC_SANNS_BUSY);
+    fmt.opcode = 0x80;
+    fmt.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &fmt)), ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    FEMU_SC_SANNS_BUSY);
+
+    /* it ends: an event for log 81h, NDE, SOS 001b, the data gone */
+    want = femu_aer(&c);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x401);
+    g_assert_cmphex(qtest_readw(qts, buf), ==, 0xffff);
+    g_assert_cmphex(qtest_readl(qts, buf + 4), ==, 0x4);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0);
+        femu_power_read(&c, buf, 2, i, 0xb2);
+    }
+    g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0);
+
+    /* a write clears NDE; SOS stays */
+    femu_power_write(&c, buf, 1, 8, 8, 0xc3, false);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x1);
+
+    /* now namespace 2: namespace 1 keeps what was written since */
+    g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0x401);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 2, i, 0);
+        femu_power_read(&c, buf, 1, 8 + i, 0xc3);
+    }
+
+    /*
+     * A Write queued and not fetched when the sanitize starts never runs,
+     * also after it ends: it completes with 2Ch.
+     */
+    femu_sanns_hold(qts, "x-fetch-hold", true);
+    femu_sanns_write(&c, buf, 1, 16, 0xee);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    femu_sanns_hold(qts, "x-fetch-hold", false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    for (i = 16; i < 24; i++) {
+        femu_power_read(&c, buf, 1, i, 0);
+    }
+
+    /* a fetched Write the FTL has not finished: also 2Ch */
+    femu_sanns_hold(qts, "x-ftl-hold", true);
+    femu_sanns_write(&c, buf, 1, 24, 0xee);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    femu_sanns_hold(qts, "x-ftl-hold", false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    femu_power_read(&c, buf, 1, 24, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* sanitize_ns off: 8Ch is an invalid opcode; and the refusals */
+static void femu_test_sanitize_ns_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':1,'sanitize_ns':true", "needs sanitize_ops" },
+        { "'femu_mode':5,'sanitize_ns':true,'sanitize_ops':true",
+          "a mode other than bbssd or NoSSD" },
+        { "'femu_mode':1,'sanitize_ns':true,'sanitize_ops':true,"
+          "'ns_mgmt':true", "namespace management" },
+        { "'femu_mode':1,'sanitize_ns':true,'sanitize_ops':true,"
+          "'persist_file':'sanns.img'", "persist_file" },
+    };
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_INVALID_OPCODE);
+    femu_disable(&c);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'sanns','addr':'5','devsz_mb':1,%s}}",
+            cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -59972,6 +60206,13 @@ static void femu_register_nodes(void)
             "streams=on,streams.max=4,namespaces=2,ns_wp=on",
     });
     qos_add_test("ns-wp-off", "femu", femu_test_ns_wp_off, NULL);
+    qos_add_test("sanitize-ns", "femu", femu_test_sanitize_ns,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=sanns,femu_mode=1,devsz_mb=16,"
+            "namespaces=2,sanitize_ops=on,sanitize_ns=on,sanitize_ms=200",
+    });
+    qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
+                 NULL);
     qos_add_test("fused-refused", "femu", femu_test_fused_refused,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,oncs=0x19f",

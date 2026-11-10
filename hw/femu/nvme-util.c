@@ -23,6 +23,7 @@
 /* Mark written blocks allocated and clear their invalid status. */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
+    nvme_note_ns_write(ns);
     if (ns->util) {
         bitmap_set_atomic(ns->util, slba, nlb);
     }
@@ -626,16 +627,19 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
     }
 }
 
-static void nvme_retire_ns_request(NvmeRequest *req, bool completed)
+static void nvme_retire_ns_request(NvmeRequest *req, bool completed,
+                                   uint16_t status)
 {
     nvme_req_release_ranges(req);
+    /* a write the FTL will not run gives its end-of-life credits back */
+    nvme_eol_release(req);
     /*
      * CQ pressure cannot undo finished work. Only unfinished commands take
-     * the inactive-NSID status, Invalid Field in Command (Base 2.3, 8.1.16
-     * and Figure 92); Namespace Not Ready describes a temporary condition.
+     * @status: Invalid Field in Command for an inactive NSID (Base 2.3,
+     * 8.1.16 and Figure 92), or Sanitize Namespace In Progress.
      */
     if (!completed) {
-        req->status = NVME_INVALID_FIELD;
+        req->status = status;
         req->cqe.res64 = 0;
     }
     req->ns = NULL;
@@ -650,6 +654,12 @@ static void nvme_retire_ns_request(NvmeRequest *req, bool completed)
  * after this returns, and their normal pollers deliver them when space appears.
  */
 void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
+{
+    nvme_retire_ns_requests_status(n, ns, NVME_INVALID_FIELD);
+}
+
+void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
+                                    uint16_t status)
 {
     NvmeRequest *req;
     NvmeRequest *next;
@@ -669,7 +679,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
         if (n->cpl_backlog) {
             QTAILQ_FOREACH(req, &n->cpl_backlog[p], entry) {
                 if (req->ns == ns) {
-                    nvme_retire_ns_request(req, true);
+                    nvme_retire_ns_request(req, true, status);
                 }
             }
         }
@@ -692,7 +702,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
                          !n->crypto_mbps &&
                          req->expire_time <= femu_dev_now(n));
 
-                    nvme_retire_ns_request(req, completed);
+                    nvme_retire_ns_request(req, completed, status);
                     QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
                 } else {
                     rc = femu_ring_enqueue(rings[r], (void **)&req, 1);
@@ -710,7 +720,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
             if (req->ns == ns) {
                 nvme_retire_ns_request(req, req->status != NVME_SUCCESS ||
                                         req->expire_time <=
-                                        femu_dev_now(n));
+                                        femu_dev_now(n), status);
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
             } else {
                 kept[nkept++] = req;
@@ -728,7 +738,7 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
         QTAILQ_FOREACH_SAFE(req, &n->cq[q]->req_list, entry, next) {
             if (req->ns == ns) {
                 QTAILQ_REMOVE(&n->cq[q]->req_list, req, entry);
-                nvme_retire_ns_request(req, true);
+                nvme_retire_ns_request(req, true, status);
                 /* Only the SQ's owning poller may recycle its requests. */
                 p = 1 + (req->sq->sqid - 1) % n->nr_pollers;
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
@@ -742,16 +752,22 @@ void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns)
  * The mark goes either way, since the slot is consumed now. Only the thread
  * fetching from @sq calls this; an Abort adds marks with the pollers held off.
  */
-bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid)
+uint32_t nvme_take_mark(NvmeSQueue *sq, uint16_t cid)
 {
     uint32_t mark = sq->abort_cid[sq->head];
 
     if (!mark) {
-        return false;
+        return 0;
     }
     sq->abort_cid[sq->head] = 0;
     sq->nr_aborts--;
-    return mark == (NVME_ABORT_MARKED | cid);
+    /* the kind of mark, if it names this command */
+    return (mark & 0xffff) == cid ? mark & ~0xffffu : 0;
+}
+
+bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid)
+{
+    return nvme_take_mark(sq, cid) == NVME_ABORT_MARKED;
 }
 
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)

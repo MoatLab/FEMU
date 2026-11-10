@@ -194,6 +194,9 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
     case NVME_ADM_CMD_ACTIVATE_FW:
         /* an activation changes FR in Identify Controller */
         return n->fw_slots > 1 ? NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_CCC : 0;
+    case NVME_ADM_CMD_SANITIZE_NS:
+        /* it erases a namespace's logical blocks */
+        return n->sanitize_ns ? NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC : 0;
     case NVME_ADM_CMD_GET_LOG_PAGE:
     case NVME_ADM_CMD_GET_FEATURES:
     case NVME_ADM_CMD_SET_FEATURES:

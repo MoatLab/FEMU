@@ -4333,6 +4333,10 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
     if (femu_wp(ns)) {
         return NVME_NS_WRITE_PROTECTED | NVME_DNR;
     }
+    /* Figure 145 */
+    if (qatomic_read(&ns->san_busy)) {
+        return NVME_SANITIZE_NS_IN_PROGRESS;
+    }
     switch (atype) {
     case 0x10:
     case 0x11:
@@ -4529,6 +4533,7 @@ static uint16_t nvme_sanitize_finish(FemuCtrl *n)
         }
     }
     nvme_sanitize_apply(n, sanitize->cdw10, sanitize->cdw11);
+    femu_sanns_subsys_done(n, sanitize->cdw10, unexpected ? 0x4 : 0x1);
     /*
      * Set before the pollers resume: a write clears GDE, and one that ran
      * first would leave the status claiming no data was written since.
@@ -4557,7 +4562,14 @@ static uint16_t nvme_sanitize_finish(FemuCtrl *n)
  */
 void nvme_sanitize_timer_cb(void *opaque)
 {
-    nvme_sanitize_finish(opaque);
+    FemuCtrl *n = opaque;
+
+    /* the two kinds never run at once, so one timer serves both */
+    if (femu_sanns_busy(n)) {
+        femu_sanns_finish(n);
+        return;
+    }
+    nvme_sanitize_finish(n);
 }
 
 static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
@@ -4574,6 +4586,10 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     /* only Exit Media Verification runs while one is in progress */
     if (nvme_sanitize_busy(n) && sanact != 0x5) {
         return NVME_SANITIZE_IN_PROGRESS;
+    }
+    /* a namespace sanitize in progress blocks this one (8.1.26.4) */
+    if (femu_sanns_busy(n)) {
+        return NVME_SANITIZE_NS_IN_PROGRESS;
     }
     /*
      * Base 8.1.26.1: no sanitize starts while a firmware activation waits
@@ -4613,6 +4629,13 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     /* a new operation clears the completion event of the last one */
     nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE, 0,
                          true);
+    /* and those of namespace operations, each tagged with its NSID */
+    for (int i = 0; n->sanitize_ns && i < n->namespace_limit; i++) {
+        if (n->namespaces[i].allocated) {
+            nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC,
+                                 NVME_LOG_SANITIZE, n->namespaces[i].id, true);
+        }
+    }
     trace_femu_sanitize(dw10, false);
     sanitize->cdw10 = dw10;
     sanitize->cdw11 = le32_to_cpu(cmd->cdw11);
@@ -4634,11 +4657,32 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 {
     uint16_t status;
     NvmeSanitizeState *sanitize = nvme_sanitize_state(n);
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    NvmeNamespace *target = NULL;
+    bool resume;
     uint8_t log[512] = {};
     uint32_t trans_len;
 
     if (off >= sizeof(log)) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /*
+     * With Sanitize Namespace, an allocated NSID names that namespace as
+     * the target (5.2.12.1.36); 0 and FFFFFFFFh name the subsystem.
+     */
+    if (n->sanitize_ns && nsid && nsid != NVME_NSID_BROADCAST) {
+        target = nvme_ns_allocated(n, nsid);
+        if (!target) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if (nvme_sanitize_busy(n)) {
+            return NVME_SANITIZE_IN_PROGRESS;
+        }
+        /* SOS, NDE and GDE as one snapshot: no write runs meanwhile */
+        resume = nvme_pause_pollers(n);
+        femu_sanns_log(n, target, log);
+        nvme_resume_pollers(n, resume);
+        goto transfer;
     }
     if (nvme_sanitize_busy(n)) {
         int64_t done = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
@@ -4661,6 +4705,12 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         stl_le_p(log + 8 + 4 * i, n->sanitize_ms && op ?
                  DIV_ROUND_UP(n->sanitize_ms, 1000) : 0xffffffff);
     }
+    /* MNSOIP: one namespace sanitize at a time; STNSID 0 */
+    if (n->sanitize_ns) {
+        stl_le_p(log + 32, 0xffffffff);
+        stl_le_p(log + 40, 1);
+    }
+transfer:
     trans_len = MIN(sizeof(log) - off, buf_len);
     status = dma_read_prp(n, log + off, trans_len,
                           le64_to_cpu(cmd->dptr.prp1),
@@ -4668,7 +4718,7 @@ static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     /* a read without RAE clears Sanitize Operation Completed */
     if (!status && !rae) {
         nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE,
-                             0, true);
+                             target ? target->id : 0, true);
         qemu_bh_schedule(n->aer_bh);
     }
     return status;
@@ -4891,6 +4941,37 @@ static hwaddr nvme_sq_slot_addr(FemuCtrl *n, NvmeSQueue *sq, uint32_t slot)
 }
 
 /*
+ * Mark every I/O command for @nsid that the host has queued and the
+ * pollers have not fetched (pollers paused): each completes with Sanitize
+ * Namespace In Progress when fetched, and never runs (8.1.26.5).
+ */
+void nvme_mark_ns_queued(FemuCtrl *n, uint32_t nsid)
+{
+    for (uint32_t q = 1; n->sq && q <= n->nr_io_queues; q++) {
+        NvmeSQueue *sq = n->sq[q];
+
+        if (!sq || !sq->abort_cid) {
+            continue;
+        }
+        nvme_update_sq_tail(sq);
+        for (uint32_t index = 0; index < sq->size; index++) {
+            uint32_t slot = (sq->head + index) % sq->size;
+            NvmeCmd entry;
+
+            if (slot == sq->tail) {
+                break;
+            }
+            nvme_addr_read(n, nvme_sq_slot_addr(n, sq, slot), &entry,
+                           sizeof(entry));
+            if (le32_to_cpu(entry.nsid) == nsid && !sq->abort_cid[slot]) {
+                sq->abort_cid[slot] = NVME_SANNS_MARKED | entry.cid;
+                sq->nr_aborts++;
+            }
+        }
+    }
+}
+
+/*
  * Abort commands still in the admin queue. Admin commands run one at a time,
  * so with the one running these are all the Aborts the host has submitted
  * and not yet seen complete.
@@ -4965,7 +5046,11 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
                 sq->abort_cid[slot] = NVME_ABORT_MARKED | entry.cid;
                 sq->nr_aborts++;
             }
-            *result = 0;
+            /*
+             * A Sanitize Namespace marked it first: it completes with 2Ch,
+             * not Command Abort Requested, so the abort was not performed.
+             */
+            *result = sq->abort_cid[slot] & NVME_ABORT_MARKED ? 0 : 1;
             break;
         }
     }
@@ -5329,6 +5414,11 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     status = femu_wp_scope(n, nsid);
     if (status) {
         return status;
+    }
+    /* Figure 145: not the namespace being sanitized, nor all of them */
+    if (femu_sanns_busy(n) &&
+        (nsid == NVME_NSID_BROADCAST || nsid == n->san_ns_target)) {
+        return NVME_SANITIZE_NS_IN_PROGRESS;
     }
 
     /*
@@ -6033,6 +6123,8 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_set_db_memory(n, cmd);
     case NVME_ADM_CMD_SANITIZE:
         return nvme_sanitize(n, cmd);
+    case NVME_ADM_CMD_SANITIZE_NS:
+        return femu_sanns_cmd(n, cmd);
     case NVME_ADM_CMD_GET_LBA_STATUS:
         return nvme_get_lba_status(n, cmd);
     case NVME_ADM_CMD_DEV_SELF_TEST:

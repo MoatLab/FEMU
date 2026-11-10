@@ -565,6 +565,8 @@ enum NvmeCapMask {
 #define NVME_TEMP_TMPSEL(dw11)  (((dw11) >> 16) & 0xf)
 #define NVME_TEMP_THSEL(dw11)   (((dw11) >> 20) & 0x3)
 #define NVME_ABORT_MARKED       (1u << 16)
+/* queued when a Sanitize Namespace of its namespace started */
+#define NVME_SANNS_MARKED       (1u << 17)
 
 #define NVME_CAP_MQES(cap)  (((cap) >> CAP_MQES_SHIFT)   & CAP_MQES_MASK)
 #define NVME_CAP_CQR(cap)   (((cap) >> CAP_CQR_SHIFT)    & CAP_CQR_MASK)
@@ -834,6 +836,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_DEV_SELF_TEST  = 0x14,
     NVME_ADM_CMD_LOCKDOWN       = 0x24,
     NVME_ADM_CMD_SANITIZE       = 0x84,
+    NVME_ADM_CMD_SANITIZE_NS    = 0x8c,   /* sanitize_ns=on */
     NVME_ADM_CMD_GET_LBA_STATUS = 0x86,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
@@ -1099,6 +1102,7 @@ enum NvmeStatusCodes {
     NVME_SANITIZE_IN_PROGRESS   = 0x001d,
     NVME_NS_WRITE_PROTECTED     = 0x0020,
     NVME_CMD_INTERRUPTED        = 0x0021,
+    NVME_SANITIZE_NS_IN_PROGRESS = 0x002c,
     NVME_HOSTID_INCONSISTENT    = 0x0018,   /* 64 and 128 bit at once */
     NVME_INVALID_SGL_SEG_DESCR  = 0x000d,
     NVME_INVALID_NUM_SGL_DESCRS = 0x000e,
@@ -1144,6 +1148,8 @@ enum NvmeStatusCodes {
     NVME_INVALID_QUEUE_DEL      = 0x010c,
     NVME_FID_NOT_SAVEABLE       = 0x010d,
     NVME_INVALID_POWER_LIMIT    = 0x013e,
+    /* Figure 392; Figure 103 lists 3Ch for the same status */
+    NVME_SANITIZE_NS_LIMIT      = 0x0112,
     NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
@@ -2284,6 +2290,16 @@ typedef struct NvmeNamespace {
      * keep it.
      */
     bool            wp;
+    /*
+     * Sanitize Namespace (sanitize_ns=on, femu-sanitize-ns.c). nde is the
+     * Namespace Data Erased bit: set at creation and by a sanitize, cleared
+     * when user data is written. san_busy refuses the namespace's commands
+     * while its sanitize runs. Under the BQL, read by the I/O threads.
+     */
+    bool            nde;
+    bool            san_busy;
+    uint16_t        san_sstat;      /* SOS of its last operation */
+    uint32_t        san_cdw10;
     unsigned long   *util;
     unsigned long   *uncorrectable;
     /*
@@ -3119,6 +3135,9 @@ typedef struct FemuCtrl {
      */
     bool            power_limit;
     bool            ns_wp;          /* Namespace Write Protection */
+    bool            sanitize_ns;    /* Sanitize Namespace (8Ch) */
+    uint32_t        san_ns_target;  /* NSID being sanitized; 0 = none */
+    int64_t         san_ns_start_ms;
     uint8_t         pl_drop;
     uint32_t        pl_cur;         /* CDW13 as set: PLS, PLV */
     uint32_t        pl_saved;
@@ -3711,6 +3730,12 @@ bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_pmeas_check(FemuCtrl *n, Error **errp);
 bool femu_wp_check(FemuCtrl *n, Error **errp);
+bool femu_sanns_check(FemuCtrl *n, Error **errp);
+bool femu_sanns_busy(FemuCtrl *n);
+uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd);
+void femu_sanns_finish(FemuCtrl *n);
+void femu_sanns_log(FemuCtrl *n, NvmeNamespace *ns, uint8_t *log);
+void femu_sanns_subsys_done(FemuCtrl *n, uint32_t cdw10, uint16_t sos);
 bool femu_wp(NvmeNamespace *ns);
 uint16_t femu_wp_io(NvmeNamespace *ns, NvmeCmd *cmd, bool *noop);
 uint16_t femu_wp_set(FemuCtrl *n, uint32_t nsid, uint32_t dw11);
@@ -3763,11 +3788,15 @@ void nvme_ic_flush(FemuCtrl *n);
 void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 bool nvme_take_abort(NvmeSQueue *sq, uint16_t cid);
+uint32_t nvme_take_mark(NvmeSQueue *sq, uint16_t cid);
+void nvme_mark_ns_queued(FemuCtrl *n, uint32_t nsid);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags
                       prio, int contig);
 void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq);
 void nvme_retire_ns_requests(FemuCtrl *n, NvmeNamespace *ns);
+void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
+                                    uint16_t status);
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n);
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n);
 uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
@@ -3862,11 +3891,25 @@ uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);
 
 /* Sanitize Status SSTAT: Global Data Erased, cleared by any write after it */
 #define NVME_SSTAT_GDE          (1 << 8)
+/* Namespace Data Erased, for a namespace target (Figure 302) */
+#define NVME_SSTAT_NDE          (1 << 10)
 
 /* Shared storage keeps its sanitize history across controller removal. */
 static inline NvmeSanitizeState *nvme_sanitize_state(FemuCtrl *n)
 {
     return nvme_ns_shared(n) ? &n->subsys->sanitize : &n->sanitize;
+}
+
+/*
+ * User data of @ns is about to change: the namespace no longer reads as
+ * erased (NDE). Called before the data moves, so a write that fails part
+ * way still clears it.
+ */
+static inline void nvme_note_ns_write(NvmeNamespace *ns)
+{
+    if (unlikely(qatomic_read(&ns->nde))) {
+        qatomic_set(&ns->nde, false);
+    }
 }
 
 static inline void nvme_note_user_write(FemuCtrl *n)

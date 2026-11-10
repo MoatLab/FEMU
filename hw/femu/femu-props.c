@@ -303,6 +303,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "protected namespace fail with Namespace Is Write Protected; not with "
       "FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off "
       "(default)" },
+    { "sanitize_ns",
+      "bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 "
+      "5.2.23), a crypto erase of one namespace while other namespaces keep "
+      "their data, one at a time; log 81h by NSID; not with a femu-subsys, "
+      "ns_mgmt, cxl_ssd or persist_file; off (default)" },
     { "power_states",
       "bbssd, CSD: four power states (Base 2.3, 8.1.18). PS1 and PS2 stretch "
       "NAND array time by throttle_light_pct and throttle_heavy_pct; PS3 is "

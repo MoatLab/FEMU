@@ -964,8 +964,14 @@ own description allows. A message keeps its format directives (`%s`,
 - sanitize_ms does not work with a femu-subsys yet
 - sanitize_ms is at most 3600000 (one hour)
 
+## `sanitize_ns`
+
+- femu: sanitize_ns is not supported with %s
+- femu: sanitize_ns needs sanitize_ops
+
 ## `sanitize_ops`
 
+- femu: sanitize_ns needs sanitize_ops
 - sanitize_ms and sanitize_ops do not work with power_loss yet
 
 ## `secs_per_pg`

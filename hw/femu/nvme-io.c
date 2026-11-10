@@ -348,8 +348,8 @@ static int nvme_eol_peek(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *cmd,
      * name this command, as nvme_take_abort() asks; another would let it
      * run without credits.
      */
-    if (sq->nr_aborts &&
-        sq->abort_cid[sq->head] == (NVME_ABORT_MARKED | cmd->cid)) {
+    if (sq->nr_aborts && sq->abort_cid[sq->head] &&
+        (sq->abort_cid[sq->head] & 0xffff) == cmd->cid) {
         return -1;
     }
     ns = nvme_ns(n, le32_to_cpu(cmd->nsid));
@@ -407,6 +407,7 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
     NvmeRequest *req;
     int processed = 0;
     bool aborted;
+    uint32_t mark;
     int eol = -1;
     uint32_t eol_pages = 0;
     int64_t fetched = 0;
@@ -485,7 +486,8 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
                 break;
             }
         }
-        aborted = sq->nr_aborts && nvme_take_abort(sq, cmd.cid);
+        mark = sq->nr_aborts ? nvme_take_mark(sq, cmd.cid) : 0;
+        aborted = mark != 0;
         nvme_inc_sq_head(sq);
         taken++;
 
@@ -550,8 +552,12 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
             req->ns = nvme_ns(n, le32_to_cpu(cmd.nsid));
         }
         if (aborted) {
-            /* an Abort found it queued, so it completes without running */
-            status = NVME_CMD_ABORT_REQ;
+            /*
+             * An Abort found it queued, or a Sanitize Namespace of its
+             * namespace started with it queued: it completes without running.
+             */
+            status = mark == NVME_SANNS_MARKED ?
+                     NVME_SANITIZE_NS_IN_PROGRESS : NVME_CMD_ABORT_REQ;
         } else if (n->power_loss && req->ns) {
             status = NVME_SUCCESS;
         } else {
@@ -1590,6 +1596,10 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
      * NoSSD does not inject uncorrectable read errors, so skipping that check
      * (done on the generic read path) is correct here.
      */
+    /* the data moves from here, and a later fault keeps what moved */
+    if (req->is_write) {
+        nvme_note_ns_write(ns);
+    }
     if (NOSSD(n) && n->hiops_inline && !n->cmbsz && prp1) {
         uint64_t pg = n->page_size;
         uint64_t off0 = prp1 & (pg - 1);
@@ -1681,6 +1691,10 @@ mapped:
     /* a read takes a block's data and metadata as one snapshot */
     if (meta_size) {
         qemu_mutex_lock(&ns->mdata_lock);
+    }
+    /* a PRP, SGL or CMB write moves data from here, also when it then fails */
+    if (req->is_write) {
+        nvme_note_ns_write(ns);
     }
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret && meta_size &&
@@ -1902,6 +1916,10 @@ static uint16_t nvme_copy_source(FemuCtrl *n, NvmeNamespace *ns, uint8_t fmt,
     if (s != ns && (!(NS_BBSSD(s) || NS_NOSSD(s)) ||
                     !(NS_BBSSD(ns) || NS_NOSSD(ns)))) {
         return NVME_INVALID_NSID | NVME_DNR;
+    }
+    /* a source being sanitized reads nothing (8.1.26.5) */
+    if (qatomic_read(&s->san_busy)) {
+        return NVME_SANITIZE_NS_IN_PROGRESS;
     }
     /* a source is read: its reservation is checked as a read (Figure 703) */
     if (s != ns && nvme_resv_check(n, s, false)) {
@@ -2494,6 +2512,8 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      */
     if (deac) {
         nvme_deallocate_range(n, ns, slba, nlb);
+        /* a write of zeros: the namespace no longer reads as erased */
+        nvme_note_ns_write(ns);
         /*
          * The blocks read back zeros now, also ones Write Uncorrectable
          * marked (OCP NVMe-IO-6): a Write Zeroes modifies them.
@@ -3147,6 +3167,11 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         if (status || noop) {
             return status;
         }
+    }
+    /* a Sanitize Namespace in progress on it: all but Flush (8.1.26.5) */
+    if (unlikely(qatomic_read(&ns->san_busy)) &&
+        cmd->opcode != NVME_CMD_FLUSH) {
+        return NVME_SANITIZE_NS_IN_PROGRESS;
     }
     /* a sanitize in progress refuses every I/O command but Flush */
     if (unlikely(nvme_sanitize_busy(n)) && cmd->opcode != NVME_CMD_FLUSH) {

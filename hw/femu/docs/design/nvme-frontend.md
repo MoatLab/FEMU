@@ -768,6 +768,34 @@ does not have, so they fail with Feature Not Changeable.
 - Logs 12h and 05h report NCC and NIC for 84h and Set Features: one
   Set can change CWP of several namespaces.
 
+With `sanitize_ops=on` and `sanitize_ns=on`, Sanitize Namespace (8Ch,
+Base 2.3 5.2.23) runs a Crypto Erase of one namespace. One runs at a
+time (MNSOIP 1).
+
+```text
+ 8Ch, NSID n, SANACT 100b, dataplane paused:
+   refuse n's new commands --> mark n's queued commands and retire its
+   unfinished ones (each completes with 2Ch) --> erase n: backend slice,
+   metadata, bitmaps, FTL mappings, buffered pages --> SOS 010b
+ sanitize_ms later, or at once: SOS 001b, NDE --> event (log 81h, NSID)
+ while it runs: I/O to n but Flush, a Copy from n, Format of n or of
+   all, Get LBA Status of n --> Sanitize Namespace In Progress (2Ch)
+```
+
+- The buffered pages are dropped, not written back, so the operation
+  cannot fail. Work that finished before the start keeps its status.
+- NDE clears before a write moves data, so a write that fails part way
+  also clears it.
+- Log 81h with NSID n reports that namespace: its SOS, NDE (bit 10),
+  the subsystem's GDE, STNSID n. NSID 0 or FFFFFFFFh reports the
+  subsystem, with MNSOIP 1.
+- A second namespace sanitize fails with SCT 1, SC 12h (Figure 392;
+  Figure 103 lists 3Ch for the same status). A Sanitize (84h) fails with
+  2Ch while one runs, and 8Ch fails with 1Dh during a Sanitize.
+- NDE is set for a new namespace and by a sanitize, and cleared by a
+  write. The state lives in memory: `persist_file` is refused.
+- Not with a femu-subsys, `ns_mgmt` or `cxl_ssd`; bbssd and NoSSD only.
+
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
 and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,

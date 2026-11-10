@@ -554,6 +554,7 @@ uint16_t femu_pi_zeroes(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     }
     if (control & NVME_WZ_DEAC) {
         nvme_deallocate_range(n, ns, slba, nlb);
+        nvme_note_ns_write(ns);
         /* they read zeros now, as without PI (OCP NVMe-IO-6) */
         if (ns->uncorrectable) {
             bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
