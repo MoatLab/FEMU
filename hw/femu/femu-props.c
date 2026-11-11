@@ -452,10 +452,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "with power_loss: a written page is durable when its NAND program "
       "ends, not when it is booked; a cut restores the pages whose program "
       "had not ended, Flush, cache disable and shutdown wait for the last "
-      "program; Copy and Write Zeroes without Deallocate fail with Invalid "
-      "Field; not with mp_program, pe_suspend, "
-      "read_prio, prog_pass2_ns, die_parity, ns_wp or sanitize_ns; off "
-      "(default)" },
+      "program; on a namespace with metadata, Copy and Write Zeroes "
+      "without Deallocate fail with Invalid Field; not with mp_program, "
+      "pe_suspend, read_prio, prog_pass2_ns, die_parity, rain_parity, ns_wp "
+      "or sanitize_ns; off (default)" },
     { "ready_ms",
       "time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin "
       "commands queued before ready run then; 0 (default) is ready at once" },

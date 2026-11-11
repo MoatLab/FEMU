@@ -2105,6 +2105,10 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     base = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
     ms = nvme_ns_ms(ns);
+    /* durable_at_done keeps the before-images of data bytes only */
+    if (n->durable_at_done && (ms || femu_pi_type(ns))) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     /* format 4h reads the memory namespace, once the host enabled it */
     if (fmt == 4 && CSD_SLM(n) && (n->features.host_behavior[4] & (1 << 4))) {
         status = nvme_copy_slm_source(n, ns, cmd, nr, sdlba, &data, &total);
@@ -2258,6 +2262,14 @@ write:
     if (status) {
         return status;
     }
+    /*
+     * durable_at_done: the gathered bytes go to the FTL as a write's
+     * payload, so it takes each destination page's before-image first.
+     */
+    if (n->durable_at_done) {
+        req->write_data = g_steal_pointer(&data);
+        goto staged;
+    }
     if (mstage) {
         qemu_mutex_lock(&ns->mdata_lock);
     }
@@ -2283,6 +2295,7 @@ write:
     if (mstage) {
         qemu_mutex_unlock(&ns->mdata_lock);
     }
+staged:
     nvme_note_user_write(n);
 
     req->dsm_ranges = g_steal_pointer(&src);
@@ -2546,6 +2559,13 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
+    /*
+     * durable_at_done keeps the before-images of data bytes only, so a
+     * namespace with metadata cannot take a programming Write Zeroes.
+     */
+    if (!deac && n->durable_at_done && (femu_pi_type(ns) || nvme_ns_ms(ns))) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (femu_pi_type(ns)) {
         return femu_pi_zeroes(n, ns, cmd);
     }
@@ -2580,6 +2600,13 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
         }
         bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
+    } else if (n->durable_at_done) {
+        /*
+         * The zeros go to the FTL as a write's payload: it takes each
+         * page's before-image there, before the bytes change.
+         */
+        req->write_data = g_malloc0((size_t)nlb << ns->lbaf.lbads);
+        req->slba = slba;
     } else {
         nvme_deallocate_range(n, ns, slba, nlb);
         nvme_mark_written(ns, slba, nlb);
@@ -3357,25 +3384,5 @@ void nvme_post_cqes_io(void *opaque)
 /* The opt-in model accesses payloads on the same thread as its write buffer. */
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req)
 {
-    /*
-     * durable_at_done keeps whole-page histories of host programs. Write
-     * Zeroes without DEAC and Copy change bytes before their FTL step,
-     * where no before-image is taken yet, so they fail before any change.
-     */
-    if (unlikely(n->durable_at_done)) {
-        const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
-
-        switch (req->cmd.opcode) {
-        case NVME_CMD_WRITE_ZEROES:
-            if (le16_to_cpu(rw->control) & NVME_WZ_DEAC) {
-                break;
-            }
-            return NVME_INVALID_FIELD | NVME_DNR;
-        case NVME_CMD_COPY:
-            return NVME_INVALID_FIELD | NVME_DNR;
-        default:
-            break;
-        }
-    }
     return nvme_io_cmd(n, &req->cmd, req);
 }

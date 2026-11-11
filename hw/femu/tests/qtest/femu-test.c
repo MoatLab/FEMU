@@ -45906,6 +45906,115 @@ static void femu_test_durable_stall(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * durable_at_done, 2 s programs, buffer on: Write Zeroes without DEAC
+ * and Copy stage their bytes as a write's payload, so the FTL takes the
+ * before-image of each destination page.
+ *
+ *   page 0: A (0xa1), page 2: C (0xc3), both durable
+ *   Write Zeroes page 0, cut before its program: A
+ *   Write Zeroes page 0, Flush, cut: zeros
+ *   Copy page 2 to page 0, cut before its program: zeros
+ *   Copy page 2 to page 0, Flush, cut: C
+ *   write cache off: Write Zeroes, then Copy of page 4, each cut 0.2 s
+ *   into its program: C; a page that finds no place goes back at once
+ */
+static void femu_test_durable_wz_copy(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QTestState *qts = femu->dev.bus->qts;
+    const uint64_t src[1] = { 16 };
+    const uint16_t nlb[1] = { 8 };
+    NvmeCmd cmd;
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 16, 8, 0xc3, false);
+    femu_power_flush(&c, 1);
+
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 0, 8, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 0, 8, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+
+    g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 0, src, nlb, 1, 1, 0)), ==,
+                    NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+    g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 0, src, nlb, 1, 1, 0)), ==,
+                    NVME_SUCCESS);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 16, 0xc3);
+
+    /* write cache off: each command programs at once; cut inside it */
+    femu_power_write(&c, buf, 1, 32, 8, 0xd4, false);
+    femu_power_flush(&c, 1);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    /* a direct program completes the command at its end: do not wait */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw12 = cpu_to_le32(7);
+    femu_submit(&c, &c.io, &cmd);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writeq(qts, list + 8, 32);
+    qtest_writew(qts, list + 16, 7);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    femu_submit(&c, &c.io, &cmd);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    /*
+     * A page that finds no place goes back at once, and the command stops:
+     * page 1 fails, page 2 (C) is never reached.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_place_fail_id(qts, "power", 1);
+    g_assert_cmphex(FEMU_SC(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf,
+                                             8, 16, 0)), ==,
+                    NVME_CAP_EXCEEDED);
+    femu_power_read(&c, buf, 1, 16, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* durable_at_done: the commands it does not support yet, and realize */
 static void femu_test_durable_refused(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -45920,18 +46029,10 @@ static void femu_test_durable_refused(void *obj, void *data,
           "'durable_at_done':true,'ns_wp':true",
           "durable_at_done is not supported with ns_wp" },
     };
-    NvmeCmd cmd = { 0 };
     QDict *rsp;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
-    cmd.opcode = NVME_CMD_WRITE_ZEROES;
-    cmd.nsid = cpu_to_le32(1);
-    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = NVME_CMD_COPY;
-    cmd.nsid = cpu_to_le32(1);
-    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
     /* nothing is programming: a cache disable completes at once */
     g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
                     ==, NVME_SUCCESS);
@@ -62320,6 +62421,14 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "femu_mode=1,buffer_size=3,vwc=1,power_loss=on,"
             "durable_at_done=on,pg_wr_lat=500000000"
+    });
+    qos_add_test("durable-wz-copy", "femu", femu_test_durable_wz_copy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,oncs=0x11f,"
+            "durable_at_done=on,pg_wr_lat=2000000000"
     });
     qos_add_test("durable-refused", "femu", femu_test_durable_refused,
                  &(QOSGraphTestOptions) {

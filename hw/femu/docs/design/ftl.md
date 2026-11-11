@@ -931,8 +931,11 @@ the page's bytes and LBA states before it, and the program's end time.
   Uncorrectable makes them allocated and uncorrectable. A cut then rolls
   the other LBAs of a page back and keeps these.
 - Format and Sanitize drop the history of the namespaces they erase.
-- Copy and Write Zeroes without DEAC fail with Invalid Field: they change
-  bytes before the FTL step, where no before-image is taken yet.
+- Copy and Write Zeroes without DEAC hand their bytes to the FTL as a
+  write's payload: the gathered source bytes, or zeros. The FTL takes
+  each destination page's before-image, then applies the bytes, as for
+  a write. On a namespace with metadata both fail with Invalid Field:
+  the before-image holds data bytes only.
 - A partial deallocate still unmaps the whole page in the FTL; this
   changes timing only.
 

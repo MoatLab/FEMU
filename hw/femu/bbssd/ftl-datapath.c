@@ -1554,6 +1554,11 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         bool wl_done;
         bool placed;
 
+        /* durable_at_done staged the zeros: they are a write's payload */
+        if (req->write_data) {
+            return ssd_write(ssd, req);
+        }
+
         /*
          * Without the bit the blocks hold written zeros rather than becoming
          * deallocated: the host reads zeros back, so the device has to put
