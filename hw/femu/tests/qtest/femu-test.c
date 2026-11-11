@@ -7309,6 +7309,8 @@ static void femu_test_pd_refused(void *obj, void *data,
           "die_parity and rain_parity need" },
         { "'femu_mode':1,'rain_rebuild':true",
           "rain_rebuild needs rain_parity" },
+        { "'femu_mode':2,'rber_timing_only':true",
+          "rber_timing_only needs rber_ppb" },
         { "'femu_mode':1,'pd_open_close_sec':-1", "must not be negative" },
         { "'femu_mode':1,'pd_open_read_limit':9,'read_reclaim_limit':8",
           "not be above read_reclaim_limit" },
@@ -47751,13 +47753,19 @@ static void femu_rber_script(QTestState *qts, const char *u)
 }
 
 /* one 4 KiB host read of @lpn, and its time in us */
-static int64_t femu_rber_read(FemuCtrlState *c, uint64_t buf, uint64_t lpn)
+static int64_t femu_rber_read_st(FemuCtrlState *c, uint64_t buf,
+                                 uint64_t lpn, uint16_t status)
 {
     int64_t t0 = g_get_monotonic_time();
 
-    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
-                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
+                    status);
     return g_get_monotonic_time() - t0;
+}
+
+static int64_t femu_rber_read(FemuCtrlState *c, uint64_t buf, uint64_t lpn)
+{
+    return femu_rber_read_st(c, buf, lpn, NVME_SUCCESS);
 }
 
 /*
@@ -47766,7 +47774,9 @@ static int64_t femu_rber_read(FemuCtrlState *c, uint64_t buf, uint64_t lpn)
  * KiB page has 4 codewords of 1 KiB, read in order. @data names the case:
  *   retry: codeword 2 fails twice           1 event, 2 passes, 3 reads
  *   soft:  codeword 0 fails 3 hard, soft ok soft 1, limit 0, 6 reads
- *   limit: codeword 0 fails soft as well    soft 1, limit 1, 6 reads
+ *   limit: codeword 0 fails soft as well    soft 1, limit 1, 6 reads;
+ *          nothing corrected it, so the read fails (81h)
+ *   limit-timing: the same with rber_timing_only=on: the read passes
  *   clean: every codeword passes at once    no counter, 1 read
  * The C0h counters at 296 to 320 must match, and the block read count at
  * offset 32 must grow by every page read, retries and soft passes too.
@@ -47781,11 +47791,17 @@ static void femu_test_rber_scripted(void *obj, void *data,
         uint64_t ctr[4];
         int reads;
         uint64_t extra_ns;
+        uint16_t status;
     } cases[] = {
-        { "retry", "0 0 1 1 0 0", 6, { 1, 2, 0, 0 }, 3, 200000000 },
-        { "soft", "1 1 1 0 0 0 0", 7, { 1, 2, 1, 0 }, 6, 510000000 },
-        { "limit", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000 },
-        { "clean", "0 0 0 0", 4, { 0, 0, 0, 0 }, 1, 0 },
+        { "retry", "0 0 1 1 0 0", 6, { 1, 2, 0, 0 }, 3, 200000000,
+          NVME_SUCCESS },
+        { "soft", "1 1 1 0 0 0 0", 7, { 1, 2, 1, 0 }, 6, 510000000,
+          NVME_SUCCESS },
+        { "limit", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000,
+          NVME_UNRECOVERED_READ },
+        { "limit-timing", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000,
+          NVME_SUCCESS },
+        { "clean", "0 0 0 0", 4, { 0, 0, 0, 0 }, 1, 0, NVME_SUCCESS },
     };
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
@@ -47821,12 +47837,14 @@ static void femu_test_rber_scripted(void *obj, void *data,
     }
     femu_rber_script(qts, cases[k].u);
     qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
-    us = femu_rber_read(&c, buf, 0);
+    us = femu_rber_read_st(&c, buf, 0, cases[k].status);
     femu_rber_state(qts, v);
-    /* the model changes time only: the data and status stay */
-    qtest_memread(qts, buf, out, sizeof(out));
-    for (size_t i = 0; i < sizeof(out); i++) {
-        g_assert_cmphex(out[i], ==, 0x3c);
+    /* a read that passes returns the data the write left */
+    if (cases[k].status == NVME_SUCCESS) {
+        qtest_memread(qts, buf, out, sizeof(out));
+        for (size_t i = 0; i < sizeof(out); i++) {
+            g_assert_cmphex(out[i], ==, 0x3c);
+        }
     }
     g_test_message("%s: %" PRId64 " us, used %" PRIu64 ", counters %" PRIu64
                    " %" PRIu64 " %" PRIu64 " %" PRIu64, cases[k].name, us,
@@ -47849,6 +47867,55 @@ static void femu_test_rber_scripted(void *obj, void *data,
     }
     g_assert_cmpint(us, >=, cases[k].reads * 100000 - 1000);
     femu_rber_script(qts, "off");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* SMART: Media and Data Integrity Errors and error log entries (low 64) */
+static void femu_err_smart(FemuCtrlState *c, uint64_t log, uint64_t *media,
+                           uint64_t *entries)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    *media = qtest_readq(c->pdev->bus->qts, log + 160);
+    *entries = qtest_readq(c->pdev->bus->qts, log + 176);
+}
+
+/*
+ * err_read_unc_ppm and err_write_fail_ppm at 250000: one command in four
+ * fails, at a fixed period. Writes 4 and 8 get Write Fault, read 4 gets
+ * Unrecovered Read Error, the others pass.
+ */
+static void femu_test_err_inject(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t me0, el0, me, el;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_err_smart(&c, log, &me0, &el0);
+    qtest_memset(femu->dev.bus->qts, buf, 0x6e, FEMU_DATA_SIZE);
+    for (int i = 1; i <= 8; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        i % 4 ? NVME_SUCCESS : NVME_WRITE_FAULT);
+    }
+    /* each failure counts as a media error and adds an error log entry */
+    femu_err_smart(&c, log, &me, &el);
+    g_assert_cmpuint(me - me0, ==, 2);
+    g_assert_cmpuint(el - el0, ==, 2);
+    for (int i = 1; i <= 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                        i % 4 ? NVME_SUCCESS : NVME_UNRECOVERED_READ);
+    }
+    femu_err_smart(&c, log, &me, &el);
+    g_assert_cmpuint(me - me0, ==, 3);
+    g_assert_cmpuint(el - el0, ==, 3);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, log);
@@ -58449,6 +58516,20 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,rber_ppb=1"
             ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("rber-limit-timing", "femu", femu_test_rber_scripted,
+                 &(QOSGraphTestOptions) { .arg = (void *)"limit-timing",
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1,rber_timing_only=on"
+            ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("err-inject", "femu", femu_test_err_inject,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=err-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,err_read_unc_ppm=250000,err_write_fail_ppm=250000"
+    });
     qos_add_test("rber-limit", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"limit",
         .edge.extra_device_opts =

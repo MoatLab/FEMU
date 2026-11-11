@@ -1185,14 +1185,15 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         sublat = ssd_read_seq_charge(ssd, pend, npend, seq_stime);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
-    /* the media was read and its pages did not decode */
+    /*
+     * The media was read and its pages did not decode.
+     * bb_ftl_process_req() counts and logs it by the final status.
+     */
     if (unlikely(lost)) {
         req->status = NVME_UNRECOVERED_READ | NVME_DNR;
-        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
     } else if (unlikely(ssd->rber_failed)) {
-        /* the Read Recovery Level stopped short (Fast Fail: no retry) */
+        /* no decode corrected a codeword at this Read Recovery Level */
         req->status = NVME_UNRECOVERED_READ | NVME_DNR;
-        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
     }
 
     return maxlat;

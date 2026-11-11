@@ -123,6 +123,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "ecc_step_ns", "ecc_retention_sec", "rber_ppb",
+                    "rber_timing_only",
                     "rber_pe_double", "rber_age_double_sec",
                     "rber_read_double", "ecc_cw_bytes", "ecc_hard_bits",
                     "ecc_soft_bits", "rr_steps", "rr_gain", "rr_floor_pct",

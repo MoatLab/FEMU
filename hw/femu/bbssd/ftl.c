@@ -588,6 +588,7 @@ static uint64_t ssd_read_ranges(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
 {
     NvmeNamespace *dns = req->ns;
     uint64_t rlat = 0;
+    bool failed;
 
     for (int i = 0; i < req->dsm_nr_ranges; i++) {
         uint32_t snsid = le32_to_cpu(req->dsm_ranges[i].cattr);
@@ -606,9 +607,14 @@ static uint64_t ssd_read_ranges(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
         }
         req->slba = le64_to_cpu(req->dsm_ranges[i].slba);
         req->nlb = le32_to_cpu(req->dsm_ranges[i].nlb);
+        failed = req->status != NVME_SUCCESS;
         lat = ssd_read(from, req);
         req->ns = dns;
         rlat = MAX(rlat, lat);
+        /* Dword 0 names the first source range that failed (NVM 3.3.2.5) */
+        if (!failed && req->status != NVME_SUCCESS) {
+            req->cqe.n.result = cpu_to_le32(i);
+        }
     }
     return rlat;
 }
@@ -1060,6 +1066,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
     struct ssd *ssd = ns->ssd;
     uint64_t lat = 0;
+    uint16_t status0;
 
     if (!ssd) {
         return 0;
@@ -1076,6 +1083,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     if (req->status != NVME_SUCCESS && !nvme_req_media_checked(req)) {
         return 0;
     }
+    status0 = req->status;
     ssd->pace_gen++;
 
     if (n->streams) {
@@ -1204,7 +1212,6 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         if (ssd->err_read_unc_period && req->status == NVME_SUCCESS &&
             (++ssd->err_read_counter % ssd->err_read_unc_period) == 0) {
             req->status = NVME_UNRECOVERED_READ | NVME_DNR;
-            ssd->err_read_injected++;
         }
         break;
     case NVME_CMD_IO_MGMT_SEND:
@@ -1268,6 +1275,24 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
      */
     if (ssd->tp_on && ssd->tp_fifo_cnt && !ssd->pace_line) {
         tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+    }
+
+    /*
+     * A media error that this request ends with: count it and log it once,
+     * by the final status. A Compare or Verify that failed its check keeps
+     * that status, and its read error does not count as returned.
+     */
+    if (status0 == NVME_SUCCESS &&
+        (req->status & 0x7ff) == NVME_UNRECOVERED_READ) {
+        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
+        nvme_set_error_page(n, req->sq->sqid, req->cmd.cid,
+                            NVME_UNRECOVERED_READ, offsetof(NvmeRwCmd, slba),
+                            req->slba, ns->id, req->cmd.opcode, ns->csi);
+    } else if (status0 == NVME_SUCCESS &&
+               (req->status & 0x7ff) == NVME_WRITE_FAULT) {
+        nvme_set_error_page(n, req->sq->sqid, req->cmd.cid, NVME_WRITE_FAULT,
+                            offsetof(NvmeRwCmd, slba), req->slba, ns->id,
+                            req->cmd.opcode, ns->csi);
     }
 
     if (n->streams) {

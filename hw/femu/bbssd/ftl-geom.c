@@ -636,6 +636,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pd_open_tiers = n->bb_params.pd_open_tiers;
     spp->pd_open_age = n->bb_params.pd_open_age;
     spp->rber_ppb = n->bb_params.rber_ppb;
+    spp->rber_timing_only = n->bb_params.rber_timing_only;
     spp->rber_pe_double = n->bb_params.rber_pe_double;
     spp->rber_age_double_sec = n->bb_params.rber_age_double_sec;
     spp->rber_read_double = n->bb_params.rber_read_double;

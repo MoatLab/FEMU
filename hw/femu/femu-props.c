@@ -660,10 +660,17 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "ecc_step_ns; 0 counts wear only" },
     { "rber_ppb",
       "bbssd: fresh raw bit error rate of host reads in parts per 10^9; "
-      "it adds read-retry and soft decode time to host reads. 0 "
-      "(default) turns the model off. At most 10^9; refused with bus "
+      "it adds read-retry and soft decode time to host reads, and a "
+      "codeword that no decode corrects fails the read with Unrecovered "
+      "Read Error. 0 (default) turns the model off. At most 10^9; refused "
+      "with bus "
       "phase or ONFI timing, pe_suspend, read_prio, mp_read, onfi_cache_read, "
       "gc_copyback, ecc_step_ns, the pSLC tier and cxl_ssd" },
+    { "rber_timing_only",
+      "bbssd with rber_ppb: on lets a read whose codeword no decode "
+      "corrects pass, charging only the time (the earlier rule); levels 9 "
+      "and 15 of rrl still fail it. Off (default): it fails with "
+      "Unrecovered Read Error" },
     { "rber_pe_double",
       "bbssd with rber_ppb: block erases that double the raw bit error "
       "rate; 0 (default) leaves wear out" },

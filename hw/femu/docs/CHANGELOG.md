@@ -186,6 +186,7 @@ listed one by one.
 - `wrr=on` adds weighted round robin with an urgent class (CC.AMS 001b): the queue priority of Create I/O SQ and the weights of feature 01h choose which queue the poller serves next. It needs one poller.
 - `die_stats=on` counts, for each LUN, the array bookings, the ones that waited for a busy LUN, the wait and the array time; `query-femu` kind `dies` lists them. See [waits per die](guides/measuring.md#waits-per-die-die_stats).
 - bbssd: a Write or Write Zeroes that fails with Capacity Exceeded no longer counts the pages it did not place as host pages, so the WAF denominator holds only pages the device took, as under FDP.
+- With `rber_ppb`, a codeword that no decode corrects now fails the read with Unrecovered Read Error at every Read Recovery Level, as on a drive; `rber_timing_only=on` keeps the earlier rule, which charges the time only.
 - Enabling a SMART event in Asynchronous Event Configuration now sends it at once when its warning (spare, reliability or read-only) is already set (Base 2.3, 5.2.26.1.5).
 - A failed die under `rain_parity` sets SMART Critical Warning bit 2 (reliability degraded); a failure at run time also raises the SMART event.
 - With `rain_parity`, SMART Available Spare falls with each failed die; below its threshold it sets Critical Warning bit 0.

@@ -5,8 +5,8 @@
  * A synthetic, uncalibrated model of the read tail that retries and soft
  * decode cause. Each codeword of a page passes or fails each decode attempt
  * with a chance from a Poisson CDF of its expected bit errors. A failed
- * attempt costs one more page read on the same LUN and channel. The model
- * changes read time only, never data or status.
+ * attempt costs one more page read on the same LUN and channel. A codeword
+ * that no decode corrects fails the read; the model never changes data.
  *
  *   lambda   = min(rber * 2^(PE/pe_d + age/age_d + reads/rd_d) * bits, cap)
  *   lambda_k = lambda * (f + (1 - f) * gain^-k)       k = 0 .. rr_steps
@@ -89,8 +89,10 @@ static double rber_lambda(struct ssd *ssd, struct ppa *ppa, uint64_t now,
  * is ready.
  *
  * With rrl, the Read Recovery Level bounds the recovery: level 9 has no
- * soft decode, level 15 (Fast Fail) one hard decode. A codeword it leaves
- * uncorrected fails the read: ssd_read() sees rber_failed.
+ * soft decode, level 15 (Fast Fail) one hard decode. A codeword that no
+ * decode corrects fails the read, at every level: ssd_read() sees
+ * rber_failed. rber_timing_only keeps the old rule, which charges the
+ * time and lets the read pass.
  */
 uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
                        uint64_t done, uint64_t reads)
@@ -137,10 +139,16 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
         if (hard_ok) {
             continue;
         }
+        /*
+         * Nothing corrected the codeword: the read fails, as on a drive
+         * (Unrecovered Read Error), unless rber_timing_only keeps the old
+         * rule that charges time only.
+         */
         if (soft_ok) {
             need_soft = true;
             if (!rber_pass(rber_draw(ssd), soft)) {
                 limit = true;
+                ssd->rber_failed |= !ssd->sp.rber_timing_only;
             }
         } else if (level > NVME_RRL_DEFAULT) {
             /* the level stops here: the read fails */
@@ -148,6 +156,7 @@ uint64_t ssd_rber_read(struct ssd *ssd, struct ppa *ppa, const NandLoc *loc,
             limit = true;
         } else {
             limit = true;
+            ssd->rber_failed |= !ssd->sp.rber_timing_only;
         }
     }
 

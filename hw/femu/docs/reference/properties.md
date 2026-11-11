@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 296 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 297 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -201,7 +201,8 @@ Devices:
 | --- | --- | --- | --- |
 | `ecc_step_ns` | `int32` | `0` | bbssd, CSD, KV: extra read time in ns per ECC tier, one tier per 750 erases of the block plus one per ecc_retention_sec of data age, at most 4 tiers; 0 turns the model off |
 | `ecc_retention_sec` | `int32` | `0` | bbssd, CSD, KV: data age in seconds that adds one ECC tier, with ecc_step_ns; 0 counts wear only |
-| `rber_ppb` | `uint32` | `0` | bbssd: fresh raw bit error rate of host reads in parts per 10^9; it adds read-retry and soft decode time to host reads. 0 (default) turns the model off. At most 10^9; refused with bus phase or ONFI timing, pe_suspend, read_prio, mp_read, onfi_cache_read, gc_copyback, ecc_step_ns, the pSLC tier and cxl_ssd |
+| `rber_ppb` | `uint32` | `0` | bbssd: fresh raw bit error rate of host reads in parts per 10^9; it adds read-retry and soft decode time to host reads, and a codeword that no decode corrects fails the read with Unrecovered Read Error. 0 (default) turns the model off. At most 10^9; refused with bus phase or ONFI timing, pe_suspend, read_prio, mp_read, onfi_cache_read, gc_copyback, ecc_step_ns, the pSLC tier and cxl_ssd |
+| `rber_timing_only` | `bool` | `off` | bbssd with rber_ppb: on lets a read whose codeword no decode corrects pass, charging only the time (the earlier rule); levels 9 and 15 of rrl still fail it. Off (default): it fails with Unrecovered Read Error |
 | `rber_pe_double` | `uint32` | `0` | bbssd with rber_ppb: block erases that double the raw bit error rate; 0 (default) leaves wear out |
 | `rber_age_double_sec` | `uint32` | `0` | bbssd with rber_ppb: data age in seconds that doubles the raw bit error rate, from the line close, or the first program with pd_open_age; 0 (default) leaves age out |
 | `rber_read_double` | `uint32` | `0` | bbssd with rber_ppb: block reads since its erase that double the raw bit error rate; 0 (default) leaves read disturb out |

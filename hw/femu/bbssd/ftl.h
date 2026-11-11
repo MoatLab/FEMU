@@ -301,6 +301,7 @@ struct ssdparams {
     int pd_wl_pages;  /* pages per wordline of the edge term */
     /* raw bit error model of host reads; rber_ppb 0 turns it off */
     uint32_t rber_ppb;
+    bool rber_timing_only;
     uint32_t rber_pe_double;
     uint32_t rber_age_double_sec;
     uint32_t rber_read_double;

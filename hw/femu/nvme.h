@@ -2539,6 +2539,7 @@ typedef struct BbCtrlParams {
     int ecc_retention_sec; /* retention age per ECC tier (s); 0 = age adds none */
     /* raw bit error model of host reads (rber_ppb); 0 = off */
     uint32_t rber_ppb;        /* fresh raw bit error rate, parts per 10^9 */
+    bool rber_timing_only;    /* an uncorrectable codeword costs time only */
     uint32_t rber_pe_double;  /* erases per doubling; 0 = no wear term */
     uint32_t rber_age_double_sec; /* data age per doubling; 0 = no term */
     uint32_t rber_read_double; /* block reads per doubling; 0 = no term */

@@ -951,7 +951,12 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU: rber_ppb is not supported with %s
 - FEMU: rrl needs rber_ppb
+- femu: rber_timing_only needs rber_ppb
 - x-rber-u requires rber_ppb
+
+## `rber_timing_only`
+
+- femu: rber_timing_only needs rber_ppb
 
 ## `read_prio`
 

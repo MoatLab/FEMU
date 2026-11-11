@@ -4577,6 +4577,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (!femu_check_multiplane_props(n, errp)) {
         return;
     }
+    /* every mode: rber_timing_only changes the RBER model, so it needs it */
+    if (n->bb_params.rber_timing_only && !n->bb_params.rber_ppb) {
+        error_setg(errp, "femu: rber_timing_only needs rber_ppb");
+        return;
+    }
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
         !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
         !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp) ||
@@ -5389,6 +5394,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("ecc_retention_sec", FemuCtrl,
                       bb_params.ecc_retention_sec, 0),
     DEFINE_PROP_UINT32("rber_ppb", FemuCtrl, bb_params.rber_ppb, 0),
+    DEFINE_PROP_BOOL("rber_timing_only", FemuCtrl, bb_params.rber_timing_only,
+                     false),
     DEFINE_PROP_UINT32("rber_pe_double", FemuCtrl, bb_params.rber_pe_double, 0),
     DEFINE_PROP_UINT32("rber_age_double_sec", FemuCtrl,
                        bb_params.rber_age_double_sec, 0),
