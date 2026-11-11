@@ -5647,6 +5647,31 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
 }
 
 /*
+ * rain_parity: die @value (ch * luns_per_ch + lun) of namespace 1 fails
+ * now. The FTL is paused, so the failure is in place when this returns
+ * and no request sees half of it.
+ */
+static void femu_test_rain_fail(Object *obj, const char *value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    int64_t die;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "the RAIN failure needs a bbssd namespace 1");
+        return;
+    }
+    if (qemu_strtoi64(value, NULL, 0, &die) || die < 0 || die > INT_MAX) {
+        error_setg(errp, "x-rain-fail takes a die number");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd_rain_fail(ns->ssd, (int)die, errp);
+    nvme_resume_pollers(n, resume);
+}
+
+/*
  * durable_at_done of namespace 1: LPNs with pending generations, the
  * generations, and those whose program has already ended.
  */
@@ -6452,6 +6477,8 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-durable-check",
                                 femu_test_durable_check, NULL);
+        object_property_add_str(obj, "x-rain-fail", NULL,
+                                femu_test_rain_fail);
         object_property_add_str(obj, "x-tier-check", femu_test_tier_check,
                                 NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);

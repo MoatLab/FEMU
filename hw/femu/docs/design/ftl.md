@@ -959,7 +959,23 @@ so no die holds all the parity.
   XOR time `parity_xor_ns` comes first.
 - A line that closes early (open-block read reclaim) books the parity of
   each row it ends inside.
-- `failed_die` reads a page of that die from the other dies of its row.
+- A failed die (`failed_die`) is out of every line opened after it
+  fails. Such a line has S = dies - 1 members, so it holds
+  `rows * (S - 1)` data pages.
+- A read of a page on the failed die reads the other members of its row
+  at once. It reads those with data or parity, then adds the XOR time.
+- One die can fail. With one parity page per stripe, a second failure
+  could lose data, and FEMU does not model that loss yet.
+- A failure at run time (the qtest hook `x-rain-fail`) needs room for
+  GC: an old line can fill two new lines, so the forced GC reserve must
+  hold two lines.
+
+```text
+ line opened after t2 failed (S = 3)
+          t0  t1  t2  t3
+ row 0:   D   D   x   P
+ row 1:   D   P   x   D
+```
 
 ## Read cache
 

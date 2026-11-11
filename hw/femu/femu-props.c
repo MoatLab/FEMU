@@ -613,10 +613,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "page per die at a plane and page index), as RAIN on a datacenter "
       "drive: the parity page rotates over the dies and takes space, so "
       "the spare space drops by one die in N and WAF counts one parity "
-      "program per N - 1 data pages. Needs two dies and mapping=page; not "
-      "with die_parity or what it refuses, prog_pass2_ns, wl_spread, "
-      "pd_open_close_sec, Streams, durable_at_done, persist_ftl or the "
-      "pSLC tier. 0 (default) is off" },
+      "program per N - 1 data pages. A failed die (failed_die) is out of "
+      "every line opened after it fails, and its pages read from the other "
+      "dies of their stripe; one die can fail. Needs two dies (three with "
+      "failed_die) and mapping=page; not with die_parity or what it "
+      "refuses, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, "
+      "durable_at_done, gc_pace, blk_pe_limit, persist_ftl or the pSLC "
+      "tier. 0 (default) is off" },
     { "parity_xor_ns",
       "bbssd, CSD: with die_parity or rain_parity, controller time in ns "
       "before each "

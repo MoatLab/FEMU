@@ -233,6 +233,7 @@ struct ssdparams {
     int wl_pages;             /* pages per wordline for the fine pass */
     int die_parity;           /* a parity program per full die stripe */
     int rain_parity;          /* in-line parity pages per stripe (RAIN) */
+    int rain_fail_t;          /* failed die in pointer order; -1 = none */
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
     int tresume_ns;
@@ -345,6 +346,7 @@ typedef struct line {
     /* order in which lines filled; the FIFO policy's key */
     uint64_t close_seq;
     uint64_t stream_tag;
+    uint8_t rain_epoch;       /* rain_parity: failures when it opened */
     /* set while the line is being rewritten, so it stays out of the lists */
     bool reclaiming;
     /* taken out of service for good: worn-out blocks and no room to spare */
@@ -1003,6 +1005,7 @@ void ssd_durable_drop_all(struct ssd *ssd);
 void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
 void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp);
+bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp);
 uint64_t ssd_durable_start(struct ssd *ssd, uint64_t stime, uint64_t *book);
 void ssd_durable_slot_used(struct ssd *ssd, int64_t done);
 void ssd_durable_free(struct ssd *ssd);

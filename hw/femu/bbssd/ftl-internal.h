@@ -69,26 +69,50 @@ static inline bool ssd_wp_step_raw(struct ssdparams *spp,
 
 /*
  * rain_parity: row r = pg * pls_per_lun + pl of a line is one stripe, one
- * page per die. Its parity member is at pointer-order position
- * t = lun * nchs + ch = dies - 1 - r % dies, so row 0 has parity last and
- * a pointer that starts a line starts on data.
+ * page per member die. A line opened after a die failed (epoch 1) leaves
+ * that die out. Members are ranked in pointer order t = lun * nchs + ch;
+ * the parity of row r is the member of rank S - 1 - r % S (S members), so
+ * row 0 has parity last and a pointer that starts a line starts on data.
  *
- *          t0 t1 t2 t3
- *   row 0:  D  D  D  P
- *   row 1:  D  D  P  D
+ *          t0 t1 t2 t3            epoch 1, t1 failed (S = 3):
+ *   row 0:  D  D  D  P              row 0:  D  x  D  P
+ *   row 1:  D  D  P  D              row 1:  D  x  P  D
  */
-static inline int ssd_rain_parity_t(struct ssdparams *spp, int pl, int pg)
+static inline int ssd_rain_members(const struct ssdparams *spp, int epoch)
 {
-    int r = pg * spp->pls_per_lun + pl;
-
-    return spp->tt_luns - 1 - r % spp->tt_luns;
+    return spp->tt_luns - (epoch ? 1 : 0);
 }
 
-static inline bool ssd_rain_member(struct ssdparams *spp, int ch, int lun,
-                                   int pl, int pg)
+/* the pointer-order position of the member of rank @k */
+static inline int ssd_rain_unrank(const struct ssdparams *spp, int epoch,
+                                  int k)
 {
+    return epoch && k >= spp->rain_fail_t ? k + 1 : k;
+}
+
+static inline int ssd_rain_parity_t(const struct ssdparams *spp, int epoch,
+                                    int pl, int pg)
+{
+    int s = ssd_rain_members(spp, epoch);
+    int r = pg * spp->pls_per_lun + pl;
+
+    return ssd_rain_unrank(spp, epoch, s - 1 - r % s);
+}
+
+/* a page of a line opened at @epoch that holds no data: parity, or out */
+static inline bool ssd_rain_skip(const struct ssdparams *spp, int epoch,
+                                 int ch, int lun, int pl, int pg)
+{
+    int t = lun * spp->nchs + ch;
+
     return spp->rain_parity &&
-           lun * spp->nchs + ch == ssd_rain_parity_t(spp, pl, pg);
+           ((epoch && t == spp->rain_fail_t) ||
+            t == ssd_rain_parity_t(spp, epoch, pl, pg));
+}
+
+static inline int ssd_wp_epoch(const struct write_pointer *wpp)
+{
+    return wpp->curline ? wpp->curline->rain_epoch : 0;
 }
 
 /*
@@ -102,8 +126,19 @@ static inline bool ssd_wp_step_lim(struct ssdparams *spp,
         if (ssd_wp_step_raw(spp, wpp, pgs)) {
             return true;
         }
-    } while (ssd_rain_member(spp, wpp->ch, wpp->lun, wpp->pl, wpp->pg));
+    } while (ssd_rain_skip(spp, ssd_wp_epoch(wpp), wpp->ch, wpp->lun,
+                           wpp->pl, wpp->pg));
     return false;
+}
+
+/* a pointer at the start of its line: move it to the first data page */
+static inline void ssd_wp_first(struct ssdparams *spp,
+                                struct write_pointer *wpp)
+{
+    if (ssd_rain_skip(spp, ssd_wp_epoch(wpp), wpp->ch, wpp->lun, wpp->pl,
+                      wpp->pg)) {
+        ssd_wp_step_lim(spp, wpp, spp->pgs_per_blk);
+    }
 }
 
 /* die_parity or rain_parity: a stripe has parity, a failed die reads */
@@ -115,7 +150,13 @@ static inline bool ssd_parity_on(const struct ssdparams *spp)
 /* the pages of @line that hold data: all but the parity pages */
 static inline int ssd_line_data_pgs(struct ssd *ssd, struct line *line)
 {
-    return ssd->sp.line_data_pgs;
+    struct ssdparams *spp = &ssd->sp;
+
+    if (!spp->rain_parity) {
+        return spp->pgs_per_line;
+    }
+    return spp->pls_per_lun * spp->pgs_per_blk *
+           (ssd_rain_members(spp, line->rain_epoch) - 1);
 }
 
 /* step a write pointer over a line whose blocks take every page */

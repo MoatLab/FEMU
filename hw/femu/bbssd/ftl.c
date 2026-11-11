@@ -532,7 +532,8 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
         /* data on a parity page (rain_parity) breaks the stripe too */
         if (get_pg(ssd, &ppa)->status != PG_VALID ||
             get_rmap_ent(ssd, &ppa) != lpn ||
-            ssd_rain_member(spp, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.pg)) {
+            ssd_rain_skip(spp, get_line(ssd, &ppa)->rain_epoch, ppa.g.ch,
+                          ppa.g.lun, ppa.g.pl, ppa.g.pg)) {
             (*lost)++;
         }
     }

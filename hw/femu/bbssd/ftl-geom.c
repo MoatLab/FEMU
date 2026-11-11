@@ -45,9 +45,14 @@ int bb_gc_forced_lines(FemuCtrl *n)
 uint64_t bb_line_data_pgs(const BbCtrlParams *p)
 {
     uint64_t dies = (uint64_t)p->nchs * p->luns_per_ch;
-    uint64_t line = dies * p->pls_per_lun * p->pgs_per_blk;
+    uint64_t rows = (uint64_t)p->pls_per_lun * p->pgs_per_blk;
+    /* a die failed from the start (failed_die) is out of every line */
+    uint64_t members = dies - (p->failed_die >= 0 ? 1 : 0);
 
-    return p->rain_parity && dies ? line - line / dies : line;
+    if (!p->rain_parity || members < 2) {
+        return dies * rows;
+    }
+    return rows * (members - 1);
 }
 
 uint64_t bb_eol_reserve_lines(FemuCtrl *n)
@@ -371,11 +376,19 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         (p->rain_parity &&
          (p->die_parity || p->prog_pass2_ns || p->wl_spread ||
           p->pd_open_close_sec || n->streams || n->durable_at_done ||
+          p->gc_pace || n->blk_pe_limit ||
+          (p->failed_die >= 0 && p->nchs * p->luns_per_ch < 3) ||
           (p->tier_mode && strcmp(p->tier_mode, "off"))))) {
+        /*
+         * gc_pace and blk_pe_limit (with its read-only end of life) size
+         * their budgets by one line size; after a die failure lines have
+         * two sizes.
+         */
         error_setg(errp, "FEMU bbssd: rain_parity is 0 or 1, and does not "
                    "work with die_parity, prog_pass2_ns, wl_spread, "
-                   "pd_open_close_sec, Streams, durable_at_done or the pSLC "
-                   "tier");
+                   "pd_open_close_sec, Streams, durable_at_done, gc_pace, "
+                   "blk_pe_limit or the pSLC tier; with failed_die it needs "
+                   "three dies");
         return -1;
     }
     /* the die that OCP event 0016h (NAND Die Offline) takes offline */
@@ -585,6 +598,11 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->wl_pages = bb_pd_wl_pages(n);
     spp->die_parity = n->bb_params.die_parity;
     spp->rain_parity = n->bb_params.rain_parity;
+    /* the failed die in pointer order t = lun * nchs + ch */
+    spp->rain_fail_t = spp->rain_parity && n->bb_params.failed_die >= 0 ?
+        (n->bb_params.failed_die % n->bb_params.luns_per_ch) *
+        n->bb_params.nchs + n->bb_params.failed_die / n->bb_params.luns_per_ch :
+        -1;
     spp->parity_xor_ns = n->bb_params.parity_xor_ns;
     spp->failed_die = n->bb_params.failed_die;
     spp->tresume_ns = n->bb_params.tresume_ns;

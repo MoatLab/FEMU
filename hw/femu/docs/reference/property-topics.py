@@ -27,7 +27,7 @@ DEVICES = [
                       "x-gc-idle-order", "x-maint-idle",
                       "x-ns-test", "x-oc12-clock",
                       "x-oc12-trace", "x-ocp-lat-skew-ms", "x-idle-mw", "x-telemetry-trigger",
-                      "x-place-fail",
+                      "x-place-fail", "x-rain-fail",
                       "x-query-delay-ms", "x-range-waits",
                       "x-rber-u", "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",

@@ -377,6 +377,10 @@ static bool femu_ocp_inj_ok(FemuCtrl *n)
         n->bb_params.failed_die != n->bb_params.inject_die) {
         return false;
     }
+    /* a RAIN die failure does not heal; an injection ends (R3 adds it) */
+    if (n->bb_params.rain_parity) {
+        return false;
+    }
     for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
