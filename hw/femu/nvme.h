@@ -4167,6 +4167,7 @@ typedef struct FemuWearHealth {
     uint64_t    overworn;       /* blocks in service past their limit */
     uint64_t    grown_bad;      /* worn-out blocks out of service */
     uint64_t    retired;        /* lines out of service */
+    bool        die_failed;     /* rain_parity: a die has failed */
 } FemuWearHealth;
 void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h);
 

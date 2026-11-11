@@ -462,6 +462,11 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
         }
     }
+    /* SMART bit 2 from now on: an event, a telemetry trigger, the PEL */
+    ssd_pel_wear(ssd);
+    qatomic_or(&ssd->n->health_pending, NVME_SMART_RELIABILITY);
+    qatomic_or(&ssd->n->tel_req, NVME_SMART_RELIABILITY);
+    qemu_bh_schedule(ssd->n->aer_bh);
     return true;
 }
 
@@ -1361,7 +1366,8 @@ void ssd_pel_wear(struct ssd *ssd)
     if (ssd_available_spare(ssd) < NVME_SPARE_THRESHOLD) {
         bits |= NVME_SMART_SPARE;
     }
-    if (ssd->overworn_blocks) {
+    if (ssd->overworn_blocks ||
+        (ssd->sp.rain_parity && ssd->sp.rain_fail_t >= 0)) {
         bits |= NVME_SMART_RELIABILITY;
     }
     if (ssd->media_ro) {

@@ -996,6 +996,8 @@ uint8_t ssd_available_spare(struct ssd *ssd)
 void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
 {
     memset(h, 0, sizeof(*h));
+    /* a failed die stays failed: the media is less reliable from then on */
+    h->die_failed = ssd->sp.rain_parity && ssd->sp.rain_fail_t >= 0;
     if (!ssd->wear_on) {
         h->spare = ssd_available_spare(ssd);
         return;

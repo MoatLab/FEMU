@@ -966,6 +966,10 @@ so no die holds all the parity.
   at once. It reads those with data or parity, then adds the XOR time.
 - One die can fail. With one parity page per stripe, a second failure
   could lose data, and FEMU does not model that loss yet.
+- A failed die makes the media less reliable: SMART Critical Warning
+  bit 2 (and EGCWS bit 2) stays set. A failure at run time also raises a
+  SMART event, a telemetry trigger and a Persistent Event log record.
+  Each degraded read counts in the OCP C0h XOR Recovery Count.
 - A failure at run time (the qtest hook `x-rain-fail`) needs room for
   GC: an old line can fill two new lines, so the forced GC reserve must
   hold two lines.

@@ -10185,6 +10185,14 @@ static uint64_t femu_rain_media_reads(QTestState *qts)
     return f[6];
 }
 
+/* SMART Critical Warning bit 2 (reliability degraded) */
+static bool femu_rain_degraded(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    return qtest_readb(c->pdev->bus->qts, buf) & 0x04;
+}
+
 /*
  * rain_parity with one failed die, 4 dies (2 channels, 2 LUNs), one
  * plane, 8-page blocks. Die numbers are ch * luns_per_ch + lun; in
@@ -10194,7 +10202,8 @@ static uint64_t femu_rain_media_reads(QTestState *qts)
  *              (x-ftl-check counts data there as lost), 8 parity programs.
  *   "first":   failed_die=0 (t0): each line starts on t1. 32 writes fill
  *              two lines across the rollover: 16 parity programs.
- *   "run":     12 writes fill rows 0 to 3 (4 parity); die 1 fails; a read
+ *   "run":     12 writes fill rows 0 to 3 (4 parity); die 1 fails, which
+ *              sets SMART Critical Warning bit 2; a read
  *              of LBA page 2 (on t2) is one degraded read; 16 writes fill
  *              a line without t2 (8 more). A second die cannot fail, and
  *              the refusal changes nothing; the same die is a no-op.
@@ -10219,6 +10228,9 @@ static void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t mapped, lost, orphans;
     uint64_t parity, nread, r0;
+    uint32_t result = 0;
+    uint16_t want = 0;
+    uint16_t cid = 0;
     int pages = 16;
     int nfull = 1;
     int vpc = 16;
@@ -10227,6 +10239,24 @@ static void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
     qtest_memset(qts, buf, 0x4d, 4096);
+    /*
+     * A die failed from the start: enabling the reliability event later
+     * sends it at once (Base 2.3, 5.2.26.1.5). With "run" the event is on
+     * before the failure, and the failure completes the request.
+     */
+    if (g_str_equal(mode, "start") || g_str_equal(mode, "run")) {
+        want = femu_aer(&c);
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                                 NVME_ASYNCHRONOUS_EVENT_CONF,
+                                                 false, 0, 0x04, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    if (g_str_equal(mode, "start")) {
+        g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, want);
+        g_assert_cmphex(result & 0xffffff, ==, 0x020001);
+    }
     if (g_str_equal(mode, "first")) {
         pages = 32;
         nfull = 2;
@@ -10246,7 +10276,13 @@ static void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
     femu_parity_counters(qts, &parity, &nread, &waf);
     if (g_str_equal(mode, "run")) {
         g_assert_cmpuint(parity, ==, 4);
+        g_assert_false(femu_rain_degraded(&c, buf));
         g_assert_true(femu_rain_fail(qts, 1));
+        g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, want);
+        g_assert_cmphex(result & 0xffffff, ==, 0x020001);
+        g_assert_true(femu_rain_degraded(&c, buf));
         g_assert_true(femu_rain_fail(qts, 1));
         g_assert_false(femu_rain_fail(qts, 3));
         femu_parity_counters(qts, &parity, &nread, &waf);
@@ -10281,6 +10317,8 @@ static void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
         nfull = 0;
     } else {
         g_assert_cmpuint(parity, ==, pages / (vpc == 24 ? 3 : 2));
+        /* a die failed from the start reads as degraded at once */
+        g_assert_true(femu_rain_degraded(&c, buf) == (vpc == 16));
     }
     femu_ftl_check(qts, &mapped, &lost, &orphans);
     g_assert_cmpuint(mapped, ==, pages);

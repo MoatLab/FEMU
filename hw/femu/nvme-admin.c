@@ -2231,6 +2231,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
+    uint8_t smart_new;
 
     /* an identifier the controller does not support is an invalid field */
     if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
@@ -2561,7 +2562,21 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE,
                                NVME_AER_INFO_ANA_CHANGE, NVME_LOG_ANA);
         }
+        /*
+         * A SMART warning already set goes out when its event is enabled
+         * (Base 2.3, 5.2.26.1.5): the spare, reliability and read-only
+         * bits; temperature is evaluated below.
+         */
+        smart_new = NVME_AEC_SMART(dw11) &
+                    ~NVME_AEC_SMART(n->features.async_config) &
+                    (NVME_SMART_SPARE | NVME_SMART_RELIABILITY |
+                     NVME_SMART_MEDIA_READ_ONLY);
         n->features.async_config = dw11;
+        if (smart_new && (nvme_critical_warning(n) & smart_new)) {
+            qatomic_or(&n->health_pending,
+                       nvme_critical_warning(n) & smart_new);
+            qemu_bh_schedule(n->aer_bh);
+        }
         /* enabling temperature events during an excursion reports it */
         if (n->thermal_timer) {
             femu_temp_eval(n);
@@ -3024,6 +3039,7 @@ typedef struct FemuMediaStats {
     uint64_t grown_bad_blocks;
     uint64_t retired_lines;
     bool media_ro;              /* some namespace's media is read-only */
+    bool die_failed;            /* some namespace lost a die (rain_parity) */
     uint64_t wl_relocations;
     uint64_t wl_pages;
     uint64_t gc_copyback_pages;
@@ -3083,6 +3099,7 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
         st->media_errors += ssd_media_errors(ns->ssd);
         ssd_wear_health(ns->ssd, &wh);
         st->media_ro |= wh.media_ro;
+        st->die_failed |= wh.die_failed;
         if (wh.spare < st->available_spare) {
             st->available_spare = wh.spare;
         }
@@ -3826,7 +3843,8 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
         smart.critical_warning |= NVME_SMART_SPARE;
     }
     /* a block in service past its erase limit makes the media less reliable */
-    if (st.overworn_blocks) {
+    /* a block past its erase limit, or a failed die, makes it less reliable */
+    if (st.overworn_blocks || st.die_failed) {
         smart.critical_warning |= NVME_SMART_RELIABILITY;
     }
     /* the end of life: no block left to replace a worn-out one */
@@ -3947,7 +3965,7 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     if (st.available_spare < NVME_SPARE_THRESHOLD) {
         info.critical_warning |= NVME_SMART_SPARE;
     }
-    if (st.overworn_blocks) {
+    if (st.overworn_blocks || st.die_failed) {
         info.critical_warning |= NVME_SMART_RELIABILITY;
     }
     if (st.media_ro) {
