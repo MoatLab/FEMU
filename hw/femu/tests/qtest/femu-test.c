@@ -44977,6 +44977,22 @@ static void femu_test_durable_at_done(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* queue @a then @b on the admin queue and ring its doorbell once */
+static void femu_admin_submit2(FemuCtrlState *c, NvmeCmd *a, NvmeCmd *b)
+{
+    FemuQueue *q = &c->admin;
+    NvmeCmd *cmds[2] = { a, b };
+
+    for (int i = 0; i < 2; i++) {
+        cmds[i]->cid = cpu_to_le16(c->cid++);
+        qtest_memwrite(c->pdev->bus->qts,
+                       q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmds[i],
+                       sizeof(NvmeCmd));
+        q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+    }
+    qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
+}
+
 /* Set Features 06h with WCE @wce on the admin queue; do not wait */
 static uint16_t femu_vwc_submit(FemuCtrlState *c, bool wce)
 {
@@ -45003,6 +45019,7 @@ static void femu_test_durable_vwc_off(void *obj, void *data,
     QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd set = { 0 };
     NvmeCmd get = { 0 };
     uint64_t lpns;
     uint64_t gens;
@@ -45018,11 +45035,16 @@ static void femu_test_durable_vwc_off(void *obj, void *data,
     femu_power_flush(&c, 1);
     femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
     t0 = g_get_monotonic_time();
-    want = femu_vwc_submit(&c, false);
-    /* a Get Features 06h queued behind it runs only after it completes */
+    /*
+     * A Get Features 06h behind it, under the same doorbell, runs only
+     * after it completes.
+     */
+    set.opcode = NVME_ADM_CMD_SET_FEATURES;
+    set.cdw10 = cpu_to_le32(0x06);
     get.opcode = NVME_ADM_CMD_GET_FEATURES;
     get.cdw10 = cpu_to_le32(0x06);
-    femu_submit(&c, &c.admin, &get);
+    femu_admin_submit2(&c, &set, &get);
+    want = le16_to_cpu(set.cid);
     g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL)), ==,
                     NVME_SUCCESS);
     g_assert_cmpint(cid, ==, want);
