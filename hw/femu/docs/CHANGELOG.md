@@ -188,6 +188,7 @@ listed one by one.
 - bbssd: a Write or Write Zeroes that fails with Capacity Exceeded no longer counts the pages it did not place as host pages, so the WAF denominator holds only pages the device took, as under FDP.
 - Enabling a SMART event in Asynchronous Event Configuration now sends it at once when its warning (spare, reliability or read-only) is already set (Base 2.3, 5.2.26.1.5).
 - A failed die under `rain_parity` sets SMART Critical Warning bit 2 (reliability degraded); a failure at run time also raises the SMART event.
+- `query-femu` reports `failed-dies`, `rebuild-lines-left` and `rebuild-pages` with `rain_parity`.
 - `rain_rebuild=on` moves the lines from before a die failure into lines without that die; dies can then fail one at a time under `rain_parity`.
 - With `rain_parity=1` a die can fail (`failed_die`): lines opened after the failure leave the die out, and a read of the failed die reads the other dies of its stripe.
 - `rain_parity=1` keeps one parity page in each stripe of a line, as RAIN on a datacenter drive: the parity page rotates over the dies and takes space, so the spare space drops and WAF counts one parity program per N - 1 data pages. See [FTL](design/ftl.md#rain-rain_parity).

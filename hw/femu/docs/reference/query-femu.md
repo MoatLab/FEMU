@@ -81,7 +81,7 @@ A `bbssd` entry has these members:
 | Member | Content |
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
-| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity`), and `waf` |
+| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left` and `rebuild-pages` (only with `rain_parity`), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `fdp` | with FDP only: see [FDP namespaces](#fdp-namespaces) |

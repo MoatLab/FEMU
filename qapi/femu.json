@@ -206,10 +206,21 @@
 #     the same condition as @map-write-pages.
 #
 # @parity-write-pages: die parity programs, one per full stripe.
-#     Present only with die_parity.
+#     Present only with die_parity or rain_parity.
 #
 # @degraded-reads: reads of the failed die, served from the other dies
-#     of its stripe.  Present only with die_parity.
+#     of its stripe.  Present only with die_parity or rain_parity.
+#
+# @failed-dies: dies that have failed (rain_parity).  Present only
+#     with rain_parity.
+#
+# @rebuild-lines-left: lines opened before the last die failure that
+#     still hold live pages; a new failure waits for 0.  Present only
+#     with rain_parity.
+#
+# @rebuild-pages: pages the rebuild (rain_rebuild) has moved off lines
+#     from before a failure, over the device's life; GC and read
+#     reclaim moves do not count.  Present only with rain_parity.
 #
 # @idle-reclaims: read reclaims done in idle time.  Present only with
 #     maint_idle.
@@ -229,7 +240,9 @@
             'gc-write-pages': 'uint64', 'block-erases': 'uint64',
             '*pad-write-pages': 'uint64', '*map-write-pages': 'uint64',
             '*map-read-pages': 'uint64', '*parity-write-pages': 'uint64',
-            '*degraded-reads': 'uint64', '*idle-reclaims': 'uint64',
+            '*degraded-reads': 'uint64', '*failed-dies': 'uint64',
+            '*rebuild-lines-left': 'uint64', '*rebuild-pages': 'uint64',
+            '*idle-reclaims': 'uint64',
             '*idle-refreshes': 'uint64', '*waf': 'number' } }
 
 ##

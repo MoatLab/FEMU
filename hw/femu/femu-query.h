@@ -97,6 +97,10 @@ typedef struct FemuQueryNs {
     bool parity_on;             /* die_parity */
     uint64_t parity_pages;
     uint64_t degraded_reads;
+    bool rain_on;               /* rain_parity */
+    uint64_t rain_failed;
+    uint64_t rain_left;
+    uint64_t rain_pages;
     uint64_t map_pages;
     uint64_t map_reads;
     bool tp_on;                 /* translation pages on flash */

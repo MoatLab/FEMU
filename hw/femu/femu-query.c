@@ -761,6 +761,14 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         ctr->has_degraded_reads = true;
         ctr->degraded_reads = q->degraded_reads;
     }
+    if (q->rain_on) {
+        ctr->has_failed_dies = true;
+        ctr->failed_dies = q->rain_failed;
+        ctr->has_rebuild_lines_left = true;
+        ctr->rebuild_lines_left = q->rain_left;
+        ctr->has_rebuild_pages = true;
+        ctr->rebuild_pages = q->rain_pages;
+    }
     if (q->host_pages) {
         ctr->has_waf = true;
         ctr->waf = ((double)q->nand_pages + (double)q->gc_pages +

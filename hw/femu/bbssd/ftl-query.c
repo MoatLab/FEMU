@@ -333,6 +333,10 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->parity_on = ssd_parity_on(&ssd->sp);
     q->parity_pages = ssd->parity_pages;
     q->degraded_reads = ssd->degraded_reads;
+    q->rain_on = ssd->sp.rain_parity != 0;
+    if (q->rain_on) {
+        ssd_rain_check(ssd, &q->rain_failed, &q->rain_left, &q->rain_pages);
+    }
     q->map_pages = ssd->map_write_pages;
     q->map_reads = ssd->map_read_pages;
     q->tp_on = ssd->tp_on;

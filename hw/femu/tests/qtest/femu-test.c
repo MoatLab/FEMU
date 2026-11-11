@@ -10477,6 +10477,17 @@ static void femu_test_rain_rebuild(void *obj, void *data,
     g_assert_cmpuint(left, ==, 0);
     g_assert_cmpuint(moved, ==, 40);
     g_assert_cmpint(w, <=, 2);
+    /* query-femu reports the same */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        QDict *ctr = qdict_get_qdict(ns, "counters");
+
+        g_assert_cmpuint(qdict_get_int(ctr, "failed-dies"), ==, 1);
+        g_assert_cmpuint(qdict_get_int(ctr, "rebuild-lines-left"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(ctr, "rebuild-pages"), ==, 40);
+        qobject_unref(rsp);
+    }
 
     g_assert_true(femu_rain_fail(qts, 0));
     /* before any write: the pages now on t0 read through their stripes */
