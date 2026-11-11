@@ -969,6 +969,10 @@ so no die holds all the parity.
   the last one. `rain_rebuild=on` moves the older lines: each write
   moves at most one, when lines are to spare. Otherwise only GC moves
   them, and the hook refuses the failure until they are gone.
+- Each failure takes spare space. SMART Available Spare reports
+  `100 * (cap(F) - namespace) / (cap(0) - namespace)`, with cap(e) the
+  data pages of the lines past the GC reserve at epoch e. Below the
+  threshold (20) it also sets Critical Warning bit 0.
 - The rebuild is done when its moves are booked, as all FEMU timing is:
   the mapping moves at once, and the NAND programs end later. A failure
   after that point can come before those programs end.

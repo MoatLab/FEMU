@@ -10198,6 +10198,15 @@ static bool femu_rain_degraded(FemuCtrlState *c, uint64_t buf)
     return qtest_readb(c->pdev->bus->qts, buf) & 0x04;
 }
 
+/* SMART Available Spare (byte 3) and Critical Warning (byte 0) */
+static uint8_t femu_rain_spare(FemuCtrlState *c, uint64_t buf, uint8_t *cw)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    *cw = qtest_readb(c->pdev->bus->qts, buf);
+    return qtest_readb(c->pdev->bus->qts, buf + 3);
+}
+
 /*
  * rain_parity with one failed die, 4 dies (2 channels, 2 LUNs), one
  * plane, 8-page blocks. Die numbers are ch * luns_per_ch + lun; in
@@ -10449,6 +10458,10 @@ static void femu_test_rain_rebuild(void *obj, void *data,
     uint64_t mapped, lost, orphans;
     uint64_t nfail, left, moved;
     uint64_t parity, nread, p0, d0;
+    uint32_t result = 0;
+    uint16_t want = 0;
+    uint16_t cid = 0;
+    uint8_t cw;
     double waf;
     int w2 = 0;
     int w = 0;
@@ -10461,6 +10474,12 @@ static void femu_test_rain_rebuild(void *obj, void *data,
                         NVME_SUCCESS);
     }
     g_assert_true(femu_rain_fail(qts, 1));
+    /*
+     * 45 lines past the GC reserve and the open line, 256 pages taken:
+     * spare (45 * 8 * 2 - 256) / (45 * 8 * 3 - 256) = 56 %
+     */
+    g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 56);
+    g_assert_cmphex(cw & 0x05, ==, 0x04);
     femu_rain_check(qts, &nfail, &left, &moved);
     g_assert_cmpuint(nfail, ==, 1);
     g_assert_cmpuint(left, ==, 2);
@@ -10489,7 +10508,20 @@ static void femu_test_rain_rebuild(void *obj, void *data,
         qobject_unref(rsp);
     }
 
+    /* the spare event is on: the second failure crosses the threshold */
+    want = femu_aer(&c);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                             NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, 0x01, NULL)), ==,
+                    NVME_SUCCESS);
     g_assert_true(femu_rain_fail(qts, 0));
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0x020201);
+    /* (45 * 8 - 256) / 824 = 12 %, below the threshold of 20: bit 0 */
+    g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 12);
+    g_assert_cmphex(cw & 0x05, ==, 0x05);
     /* before any write: the pages now on t0 read through their stripes */
     femu_parity_counters(qts, &p0, &d0, &waf);
     for (int l = 0; l < 40; l++) {

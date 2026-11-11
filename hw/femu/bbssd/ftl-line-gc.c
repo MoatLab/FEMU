@@ -481,6 +481,8 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     struct write_pointer *ptrs[] = { &ssd->wp, &ssd->hot_wp, &ssd->gc_wp };
     uint64_t page = (uint64_t)spp->secsz * spp->secs_per_pg;
     uint64_t need;
+    uint32_t bits;
+    uint8_t spare;
     int victim;
     int lines;
     int rows;
@@ -526,6 +528,7 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
                    "namespace and keep room for GC", die);
         return false;
     }
+    spare = ssd_available_spare(ssd);
     ssd_rain_append(spp, t);
     ssd->rain_cursor = 0;
     for (int i = 0; i < ARRAY_SIZE(ptrs); i++) {
@@ -533,10 +536,18 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
         }
     }
-    /* SMART bit 2 from now on: an event, a telemetry trigger, the PEL */
+    /*
+     * SMART bit 2 from now on: an event, a telemetry trigger, the PEL. The
+     * spare falls too; below its threshold it raises bit 0 as well.
+     */
+    bits = NVME_SMART_RELIABILITY;
+    if (spare >= NVME_SPARE_THRESHOLD &&
+        ssd_available_spare(ssd) < NVME_SPARE_THRESHOLD) {
+        bits |= NVME_SMART_SPARE;
+    }
     ssd_pel_wear(ssd);
-    qatomic_or(&ssd->n->health_pending, NVME_SMART_RELIABILITY);
-    qatomic_or(&ssd->n->tel_req, NVME_SMART_RELIABILITY);
+    qatomic_or(&ssd->n->health_pending, bits);
+    qatomic_or(&ssd->n->tel_req, bits);
     qemu_bh_schedule(ssd->n->aer_bh);
     return true;
 }

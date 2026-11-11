@@ -974,10 +974,38 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
     return start > 0 ? MAX(left, 0) * 100 / start : 100;
 }
 
+/*
+ * rain_parity: the spare space left after the dies that failed. A line
+ * opened after e failures holds rows * (dies - e - 1) data pages, so the
+ * lines past the GC reserve hold cap(e); the namespace takes the rest.
+ *
+ *   spare % = 100 * (cap(F) - namespace) / (cap(0) - namespace)
+ */
+static uint8_t ssd_rain_spare(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
+    int64_t lines = spp->tt_lines - bb_gc_forced_lines(ssd->n) - open;
+    int64_t rows = spp->pls_per_lun * spp->pgs_per_blk;
+    int64_t page = (int64_t)spp->secsz * spp->secs_per_pg;
+    int64_t need = DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page);
+    int64_t cap0 = lines * rows * (spp->tt_luns - 1);
+    int64_t cap = lines * rows * (spp->tt_luns - spp->rain_nfail - 1);
+
+    if (!spp->rain_nfail || cap0 <= need) {
+        return 100;
+    }
+    if (cap <= need) {
+        return 0;
+    }
+    return 100 * (cap - need) / (cap0 - need);
+}
+
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t bad_pct;
+    uint8_t rain = spp->rain_parity ? ssd_rain_spare(ssd) : 100;
 
     if (ssd->wear_on) {
         uint8_t spare;
@@ -988,10 +1016,10 @@ uint8_t ssd_available_spare(struct ssd *ssd)
         return spare;
     }
     if (ssd->bad_blocks == 0 || spp->tt_blks <= 0) {
-        return 100;
+        return rain;
     }
     bad_pct = ((uint64_t)ssd->bad_blocks * 100ull) / (uint64_t)spp->tt_blks;
-    return bad_pct >= 100 ? 0 : (uint8_t)(100 - bad_pct);
+    return MIN(rain, bad_pct >= 100 ? 0 : (uint8_t)(100 - bad_pct));
 }
 
 void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
