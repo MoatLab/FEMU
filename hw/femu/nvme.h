@@ -3144,6 +3144,15 @@ typedef struct FemuCtrl {
      */
     QEMUTimer       *durable_timer;
     uint8_t         shut_wait;
+    /*
+     * durable_at_done: a cache disable (Set Features 06h, WCE 0) completes
+     * at vwc_end, when the programs it wrote back have ended. Until then
+     * its identity is held and the admin queue fetches nothing more.
+     */
+    bool            vwc_held;
+    NvmeAerHold     vwc_hold;
+    int64_t         vwc_end;
+    QEMUTimer       *vwc_timer;
     QemuMutex       ps_lock;
     uint8_t         ps_cur;
     uint8_t         ps_op;          /* the last operational state */
@@ -3787,6 +3796,9 @@ bool femu_cancel_check(FemuCtrl *n, Error **errp);
 void femu_cancel_init(FemuCtrl *n);
 void femu_cancel_exit(FemuCtrl *n);
 uint16_t femu_cancel_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+int64_t femu_durable_deadline(FemuCtrl *n);
+void femu_vwc_timer_cb(void *opaque);
+void femu_vwc_drop(FemuCtrl *n);
 void femu_cancel_fetched(FemuCtrl *n, NvmeRequest *req, int poller);
 void femu_cancel_drop_sq(FemuCtrl *n, NvmeSQueue *sq);
 void femu_cancel_retire_ns(FemuCtrl *n, NvmeNamespace *ns, uint16_t status);

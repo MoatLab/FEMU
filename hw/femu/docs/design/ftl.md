@@ -912,9 +912,12 @@ the page's bytes and LBA states before it, and the program's end time.
   The older generations stay. The FTL idle pass drops the generations
   whose program ended.
 - The mapping is not rolled back: only the payload and its LBA states.
-- DSM, Write Zeroes, Copy, Write Uncorrectable, Format, Sanitize and a
-  cache disable fail with Invalid Field, because they change parts of
-  pages or need a delayed completion.
+- A cache disable writes the buffer back and completes when those
+  programs end. Until then the admin queue runs no later command, so a
+  second cache change waits in the queue. A reset or a power cut drops
+  the held command.
+- DSM, Write Zeroes, Copy, Write Uncorrectable, Format and Sanitize fail
+  with Invalid Field, because they change parts of pages.
 
 ## Read cache
 

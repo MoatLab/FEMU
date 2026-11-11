@@ -2462,11 +2462,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
     case NVME_VOLATILE_WRITE_CACHE: {
         bool resume;
-
-        /* durable_at_done cannot delay the completion of a cache disable yet */
-        if (n->durable_at_done && !(dw11 & 1)) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
+        int64_t end;
 
         if (!n->vwc) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -2499,6 +2495,21 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             }
         }
         n->features.volatile_wc = dw11 & 0x1;
+        /*
+         * durable_at_done: the written-back pages are durable when their
+         * programs end. The command completes then; the dispatcher keeps
+         * its identity (femu_vwc_post()).
+         */
+        end = n->durable_at_done && !(dw11 & 1) ?
+              femu_durable_deadline(n) : 0;
+        if (end > femu_dev_now(n)) {
+            n->vwc_end = end;
+            n->vwc_held = true;
+            timer_mod(n->vwc_timer, n->vwc_end);
+            nvme_resume_pollers(n, resume);
+            femu_pel_set_feature(n, cmd, NULL, 0);
+            return NVME_NO_COMPLETE;
+        }
         nvme_resume_pollers(n, resume);
         break;
     }
@@ -6496,6 +6507,8 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
     qemu_mutex_unlock(&n->aer_lock);
 }
 
+static bool femu_vwc_post(FemuCtrl *n);
+
 static void nvme_run_sq_admin(void *opaque)
 {
     NvmeSQueue *sq = opaque;
@@ -6510,6 +6523,10 @@ static void nvme_run_sq_admin(void *opaque)
 
     /* before CSTS.RDY the doorbell value is kept; the commands run at ready */
     if (n->starting) {
+        return;
+    }
+    /* a held cache disable completes before any later admin command runs */
+    if (n->vwc_held && !femu_vwc_post(n)) {
         return;
     }
 
@@ -6553,6 +6570,14 @@ static void nvme_run_sq_admin(void *opaque)
                     nvme_process_aers(n);
                 }
             }
+            /* a held cache disable: nothing more runs until it completes */
+            if (cmd.opcode == NVME_ADM_CMD_SET_FEATURES && n->vwc_held) {
+                n->vwc_hold.cid = cmd.cid;
+                n->vwc_hold.sqid = sq->sqid;
+                n->vwc_hold.cqid = sq->cqid;
+                n->vwc_hold.sq_head = sq->head;
+                return;
+            }
             continue;
         }
         cqe.cid = cmd.cid;
@@ -6563,6 +6588,54 @@ static void nvme_run_sq_admin(void *opaque)
         nvme_write_cqe(n, cq, &cqe);
         nvme_inc_cq_tail(cq);
         nvme_isr_notify_admin(cq);
+    }
+}
+
+/*
+ * Post the held cache disable once its programs have ended and the admin
+ * CQ has room; until then the timer tries again. Returns true when it is
+ * no longer held.
+ */
+static bool femu_vwc_post(FemuCtrl *n)
+{
+    NvmeAerResult res = { 0 };
+    NvmeCQueue *cq;
+
+    if (!n->vwc_held) {
+        return true;
+    }
+    if (femu_dev_now(n) < n->vwc_end) {
+        /* early: the timer stays the one that completes it */
+        timer_mod(n->vwc_timer, n->vwc_end);
+        return false;
+    }
+    cq = n->cq[n->vwc_hold.cqid];
+    if (cq && nvme_cq_full(cq)) {
+        timer_mod(n->vwc_timer, femu_dev_now(n) + SCALE_MS);
+        return false;
+    }
+    nvme_post_held_cqe(n, &n->vwc_hold, &res, 0);
+    n->vwc_held = false;
+    return true;
+}
+
+/* the programs a cache disable waits for have ended: complete it */
+void femu_vwc_timer_cb(void *opaque)
+{
+    FemuCtrl *n = opaque;
+
+    if (n->vwc_held && femu_vwc_post(n) && n->sq[0]) {
+        /* the commands the hold kept in the admin queue run now */
+        nvme_process_sq_admin(n->sq[0]);
+    }
+}
+
+/* a reset, a power cut or teardown: the held command never completes */
+void femu_vwc_drop(FemuCtrl *n)
+{
+    n->vwc_held = false;
+    if (n->vwc_timer) {
+        timer_del(n->vwc_timer);
     }
 }
 

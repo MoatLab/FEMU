@@ -625,6 +625,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
      * added to do.
      */
     resume = nvme_pause_pollers(n);
+    /* the queues go below: a held cache disable cannot complete now */
+    femu_vwc_drop(n);
     /* a start still under way ends here; a cut keeps recovery_pending */
     if (n->ready_timer) {
         timer_del(n->ready_timer);
@@ -882,6 +884,8 @@ static void femu_shut_clear(FemuCtrl *n)
     n->shut_wait = 0;
     n->shut = FEMU_SHUT_NONE;
     n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
+    /* a held cache disable ends with the queues it would post to */
+    femu_vwc_drop(n);
 }
 
 /* the SHST field alone, never ORed: 01b then 10b must not read 11b */
@@ -914,7 +918,7 @@ static void femu_durable_timer_cb(void *opaque)
 }
 
 /* durable_at_done: the latest end of a pending host program, or 0 */
-static int64_t femu_durable_deadline(FemuCtrl *n)
+int64_t femu_durable_deadline(FemuCtrl *n)
 {
     int64_t end = 0;
 
@@ -3567,6 +3571,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->ready_timer, timer_free);
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
+    g_clear_pointer(&n->vwc_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
@@ -4770,6 +4775,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         /* programs end on the host clock of the device */
         n->durable_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
                                         femu_durable_timer_cb, n);
+        n->vwc_timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_vwc_timer_cb,
+                                    n);
     }
     if (n->ready_ms || n->recovery_ms) {
         /* the host polls CSTS.RDY in guest time */
@@ -5095,6 +5102,7 @@ static void femu_exit(PCIDevice *pci_dev)
     g_clear_pointer(&n->ready_timer, timer_free);
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
+    g_clear_pointer(&n->vwc_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }

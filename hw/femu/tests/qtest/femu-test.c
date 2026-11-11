@@ -44977,6 +44977,81 @@ static void femu_test_durable_at_done(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* Set Features 06h with WCE @wce on the admin queue; do not wait */
+static uint16_t femu_vwc_submit(FemuCtrlState *c, bool wce)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x06);
+    cmd.cdw11 = cpu_to_le32(wce);
+    femu_submit(c, &c->admin, &cmd);
+    return le16_to_cpu(cmd.cid);
+}
+
+/*
+ * durable_at_done, 2 s programs: a cache disable writes B back and
+ * completes when B's program ends, no earlier.
+ * - wait for its CQE: at least 1.5 s; a cut after it keeps B;
+ * - a cut 0.2 s after the submit, inside B's program, gives back A, and
+ *   the held command never completes.
+ */
+static void femu_test_durable_vwc_off(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd get = { 0 };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    uint32_t res = 0;
+    uint16_t cid;
+    uint16_t want;
+    int64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    t0 = g_get_monotonic_time();
+    want = femu_vwc_submit(&c, false);
+    /* a Get Features 06h queued behind it runs only after it completes */
+    get.opcode = NVME_ADM_CMD_GET_FEATURES;
+    get.cdw10 = cpu_to_le32(0x06);
+    femu_submit(&c, &c.admin, &get);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1500000);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, le16_to_cpu(get.cid));
+    g_assert_cmpuint(res & 1, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+
+    /* turn the cache on again; C waits in it */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_vwc_submit(&c, false);
+    g_usleep(200 * 1000);
+    /* C's program is pending: the cut lands inside it */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* durable_at_done: the commands it does not support yet, and realize */
 static void femu_test_durable_refused(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -45003,8 +45078,9 @@ static void femu_test_durable_refused(void *obj, void *data,
     cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
     cmd.nsid = cpu_to_le32(1);
     g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    /* nothing is programming: a cache disable completes at once */
     g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
-                    ==, NVME_INVALID_FIELD);
+                    ==, NVME_SUCCESS);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -61248,6 +61324,14 @@ static void femu_register_nodes(void)
     qos_add_test("sanitize-ns-refused", "femu", femu_test_sanitize_ns_refused,
                  NULL);
     qos_add_test("durable-at-done", "femu", femu_test_durable_at_done,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
+            "durable_at_done=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("durable-vwc-off", "femu", femu_test_durable_vwc_off,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
