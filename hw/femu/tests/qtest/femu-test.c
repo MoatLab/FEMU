@@ -45646,6 +45646,32 @@ static void femu_test_durable_vwc_off(void *obj, void *data,
     femu_power_cut(&c);
     femu_power_read(&c, buf, 1, 0, 0xb2);
 
+    /*
+     * A controller reset while a cache disable waits: the held command
+     * goes with the reset, no completion of it shows up later, and the
+     * admin queue answers at once. The pending program still ends, so D
+     * stays.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_vwc_submit(&c, false);
+    g_usleep(200 * 1000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    t0 = g_get_monotonic_time();
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    memset(&get, 0, sizeof(get));
+    get.opcode = NVME_ADM_CMD_GET_FEATURES;
+    get.cdw10 = cpu_to_le32(0x06);
+    femu_submit(&c, &c.admin, &get);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, le16_to_cpu(get.cid));
+    g_assert_cmpint(g_get_monotonic_time() - t0, <, 1000000);
+    femu_power_read(&c, buf, 1, 0, 0xd4);
+
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, buf);
