@@ -7307,6 +7307,8 @@ static void femu_test_pd_refused(void *obj, void *data,
           "rain_parity is 0 or 1" },
         { "'femu_mode':1,'nchs':2,'rain_parity':1,'mp_program':1",
           "die_parity and rain_parity need" },
+        { "'femu_mode':1,'rain_rebuild':true",
+          "rain_rebuild needs rain_parity" },
         { "'femu_mode':1,'pd_open_close_sec':-1", "must not be negative" },
         { "'femu_mode':1,'pd_open_read_limit':9,'read_reclaim_limit':8",
           "not be above read_reclaim_limit" },
@@ -10404,6 +10406,120 @@ static void femu_test_rain_fifo_fit(void *obj, void *data,
                         NVME_SUCCESS);
         g_assert_cmphex(qtest_readb(qts, buf), ==, last[l]);
     }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* x-rain-check of device gc-test: failures, old lines with data, moved */
+static void femu_rain_check(QTestState *qts, uint64_t *nfail, uint64_t *left,
+                            uint64_t *moved)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-rain-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           nfail, left, moved), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * rain_parity with rain_rebuild, 4 dies (2 channels, 2 LUNs), one plane,
+ * 8-page blocks: lines hold 24 data pages, 16 after one failure, 8 after
+ * two.
+ *
+ *   40 pages: one full old line, one open --fail die 1 (t2)--> 2 old lines
+ *   a second failure now could lose data: refused
+ *   unrelated writes, one old line each: 40 pages moved, 0 old lines left
+ *   fail die 0 (t0): accepted; the 40 pages read back at once, those on
+ *   t0 through their stripes (degraded reads)
+ *   the second rebuild moves the epoch 1 lines to S = 2 lines
+ *   16 writes at S = 2: one parity each
+ *   a third failure would leave one member: refused
+ */
+static void femu_test_rain_rebuild(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t nfail, left, moved;
+    uint64_t parity, nread, p0, d0;
+    double waf;
+    int w2 = 0;
+    int w = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int l = 0; l < 40; l++) {
+        qtest_memset(qts, buf, 0x80 | l, 4096);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 1);
+    g_assert_cmpuint(left, ==, 2);
+    g_assert_cmpuint(moved, ==, 0);
+    g_assert_false(femu_rain_fail(qts, 0));
+
+    qtest_memset(qts, buf, 0x11, 4096);
+    while (left && w < 20) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (100 + w) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        w++;
+        femu_rain_check(qts, &nfail, &left, &moved);
+    }
+    g_assert_cmpuint(left, ==, 0);
+    g_assert_cmpuint(moved, ==, 40);
+    g_assert_cmpint(w, <=, 2);
+
+    g_assert_true(femu_rain_fail(qts, 0));
+    /* before any write: the pages now on t0 read through their stripes */
+    femu_parity_counters(qts, &p0, &d0, &waf);
+    for (int l = 0; l < 40; l++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | l);
+    }
+    femu_parity_counters(qts, &parity, &nread, &waf);
+    g_assert_cmpuint(nread, >, d0);
+
+    /* the second rebuild: the epoch 1 lines move to S = 2 lines */
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 2);
+    g_assert_cmpuint(left, >, 0);
+    while (left && w2 < 20) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (230 + w2) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        w2++;
+        femu_rain_check(qts, &nfail, &left, &moved);
+    }
+    g_assert_cmpuint(left, ==, 0);
+
+    /* at S = 2 a row is one data page and its parity */
+    femu_parity_counters(qts, &p0, &nread, &waf);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (200 + i) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    femu_parity_counters(qts, &parity, &nread, &waf);
+    g_assert_cmpuint(parity - p0, ==, 16);
+    g_assert_false(femu_rain_fail(qts, 3));
+
+    for (int l = 0; l < 40; l++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | l);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 40 + w + w2 + 16);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
     femu_disable(&c);
     guest_free(alloc, buf);
 }
@@ -57562,6 +57678,13 @@ static void femu_register_nodes(void)
             "nchs=3,luns_per_ch=1,pls_per_lun=1,pgs_per_blk=8,"
             "blks_per_pl=40,rain_parity=1,gc_policy=fifo,"
             "gc_thres_pcent=95,gc_thres_pcent_high=95"
+    });
+    qos_add_test("rain-rebuild", "femu", femu_test_rain_rebuild,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "rain_rebuild=on,blks_per_pl=48,pls_per_lun=1"
     });
     qos_add_test("rain-seal2", "femu", femu_test_rain,
                  &(QOSGraphTestOptions) {

@@ -147,6 +147,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     exp_load_cfg();
 
     ssd_init_params(spp, n);
+    ssd_rain_init(ssd);
     /*
      * failed_die counts only with parity: the CXL SSD builds its FTL
      * from a zeroed controller. A namespace made while an injected die is
@@ -997,7 +998,7 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
 {
     memset(h, 0, sizeof(*h));
     /* a failed die stays failed: the media is less reliable from then on */
-    h->die_failed = ssd->sp.rain_parity && ssd->sp.rain_fail_t >= 0;
+    h->die_failed = ssd->sp.rain_parity && ssd->sp.rain_nfail > 0;
     if (!ssd->wear_on) {
         h->spare = ssd_available_spare(ssd);
         return;
@@ -1286,6 +1287,7 @@ void ssd_free(struct ssd *ssd)
     g_free(ssd->maptbl);
     ssd->maptbl = NULL;
     ssd_durable_free(ssd);
+    ssd_rain_free(ssd);
     g_clear_pointer(&ssd->ns_slice_lo, g_free);
     g_clear_pointer(&ssd->ns_ctr, g_free);
     ssd->nr_ns_slices = 0;

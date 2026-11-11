@@ -233,7 +233,15 @@ struct ssdparams {
     int wl_pages;             /* pages per wordline for the fine pass */
     int die_parity;           /* a parity program per full die stripe */
     int rain_parity;          /* in-line parity pages per stripe (RAIN) */
-    int rain_fail_t;          /* failed die in pointer order; -1 = none */
+    int rain_rebuild;         /* move old lines off failed dies (RAIN) */
+    /*
+     * rain_parity failures, in pointer order t = lun * nchs + ch: their
+     * count, each die's place in the failure list (INT_MAX: healthy), and
+     * per epoch e the die of each member rank k at [e * dies + k].
+     */
+    int rain_nfail;
+    int *rain_fidx;
+    int *rain_rank;
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
     int tresume_ns;
@@ -346,7 +354,7 @@ typedef struct line {
     /* order in which lines filled; the FIFO policy's key */
     uint64_t close_seq;
     uint64_t stream_tag;
-    uint8_t rain_epoch;       /* rain_parity: failures when it opened */
+    uint16_t rain_epoch;      /* rain_parity: failures when it opened */
     /* set while the line is being rewritten, so it stays out of the lists */
     bool reclaiming;
     /* taken out of service for good: worn-out blocks and no room to spare */
@@ -856,6 +864,8 @@ struct ssd {
     uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
     uint64_t pass2_staged_reads;    /* reads served before the fine pass */
     uint64_t parity_pages;          /* die parity programs (die_parity) */
+    int rain_cursor;                /* next line the rebuild looks at */
+    uint64_t rain_rebuild_pages;    /* pages the rebuild moved */
     uint64_t degraded_reads;        /* reads of the failed die (atomic) */
     /*
      * The offline die now, plus one, so that a zeroed FTL has none; atomic.
@@ -1006,6 +1016,11 @@ void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
 void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp);
 bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp);
+void ssd_rain_init(struct ssd *ssd);
+void ssd_rain_free(struct ssd *ssd);
+void ssd_rain_rebuild_step(struct ssd *ssd);
+void ssd_rain_check(struct ssd *ssd, uint64_t *nfail, uint64_t *left,
+                    uint64_t *pages);
 uint64_t ssd_durable_start(struct ssd *ssd, uint64_t stime, uint64_t *book);
 void ssd_durable_slot_used(struct ssd *ssd, int64_t done);
 void ssd_durable_free(struct ssd *ssd);

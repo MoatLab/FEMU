@@ -372,12 +372,17 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
      * on age, wear levelling's swap) or that keep their own page state
      * (the fine pass, the durability journal, a saved FTL).
      */
+    if (p->rain_rebuild && !p->rain_parity) {
+        error_setg(errp, "FEMU bbssd: rain_rebuild needs rain_parity");
+        return -1;
+    }
     if (p->rain_parity < 0 || p->rain_parity > 1 ||
         (p->rain_parity &&
          (p->die_parity || p->prog_pass2_ns || p->wl_spread ||
           p->pd_open_close_sec || n->streams || n->durable_at_done ||
           p->gc_pace || n->blk_pe_limit ||
           (p->failed_die >= 0 && p->nchs * p->luns_per_ch < 3) ||
+          p->nchs * p->luns_per_ch > 1024 ||
           (p->tier_mode && strcmp(p->tier_mode, "off"))))) {
         /*
          * gc_pace and blk_pe_limit (with its read-only end of life) size
@@ -388,7 +393,7 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
                    "work with die_parity, prog_pass2_ns, wl_spread, "
                    "pd_open_close_sec, Streams, durable_at_done, gc_pace, "
                    "blk_pe_limit or the pSLC tier; with failed_die it needs "
-                   "three dies");
+                   "three dies, and it takes at most 1024 dies");
         return -1;
     }
     /* the die that OCP event 0016h (NAND Die Offline) takes offline */
@@ -598,11 +603,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->wl_pages = bb_pd_wl_pages(n);
     spp->die_parity = n->bb_params.die_parity;
     spp->rain_parity = n->bb_params.rain_parity;
-    /* the failed die in pointer order t = lun * nchs + ch */
-    spp->rain_fail_t = spp->rain_parity && n->bb_params.failed_die >= 0 ?
-        (n->bb_params.failed_die % n->bb_params.luns_per_ch) *
-        n->bb_params.nchs + n->bb_params.failed_die / n->bb_params.luns_per_ch :
-        -1;
+    spp->rain_rebuild = n->bb_params.rain_rebuild;
     spp->parity_xor_ns = n->bb_params.parity_xor_ns;
     spp->failed_die = n->bb_params.failed_die;
     spp->tresume_ns = n->bb_params.tresume_ns;

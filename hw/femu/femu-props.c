@@ -615,11 +615,17 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "the spare space drops by one die in N and WAF counts one parity "
       "program per N - 1 data pages. A failed die (failed_die) is out of "
       "every line opened after it fails, and its pages read from the other "
-      "dies of their stripe; one die can fail. Needs two dies (three with "
+      "dies of their stripe. Dies fail one at a time: a new failure needs "
+      "the lines from before the last one moved (rain_rebuild), and two "
+      "members left. Needs two to 1024 dies (three with "
       "failed_die) and mapping=page; not with die_parity or what it "
       "refuses, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, "
       "durable_at_done, gc_pace, blk_pe_limit, persist_ftl or the pSLC "
       "tier. 0 (default) is off" },
+    { "rain_rebuild",
+      "bbssd, CSD: with rain_parity, each write moves at most one line "
+      "opened before the last die failure into a line without that die, "
+      "when lines are to spare; off (default): only GC moves them" },
     { "parity_xor_ns",
       "bbssd, CSD: with die_parity or rain_parity, controller time in ns "
       "before each "

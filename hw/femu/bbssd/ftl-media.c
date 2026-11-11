@@ -529,7 +529,6 @@ static uint64_t ssd_rain_read(struct ssd *ssd, struct ppa *ppa,
                               uint64_t stime)
 {
     struct ssdparams *spp = &ssd->sp;
-    int epoch = get_line(ssd, ppa)->rain_epoch;
     int self = ppa->g.lun * spp->nchs + ppa->g.ch;
     uint64_t done = stime;
 
@@ -537,7 +536,8 @@ static uint64_t ssd_rain_read(struct ssd *ssd, struct ppa *ppa,
         struct ppa p = *ppa;
         NandLoc loc;
 
-        if (t == self || (epoch && t == spp->rain_fail_t)) {
+        /* out of the line, or failed since: neither can be read */
+        if (t == self || spp->rain_fidx[t] < spp->rain_nfail) {
             continue;
         }
         p.g.ch = t % spp->nchs;
@@ -621,15 +621,19 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ssd->pass2_staged_reads++;
         return 0;
     }
-    if (unlikely(ssd_parity_on(&ssd->sp)) && op == NAND_MEDIA_READ &&
+    if (unlikely(ssd->sp.rain_parity) && op == NAND_MEDIA_READ &&
         !bb_io_meta(ncmd->type)) {
+        /* a page on a failed die: a member that failed after its line opened */
+        if (ssd->sp.rain_fidx[ppa->g.lun * ssd->sp.nchs + ppa->g.ch] <
+            ssd->sp.rain_nfail) {
+            return ssd_rain_read(ssd, ppa, stime) - stime;
+        }
+    } else if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&
+               !bb_io_meta(ncmd->type)) {
         int failed = ssd_offline_die(ssd);
 
         if (failed >= 0 &&
             ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == failed) {
-            if (ssd->sp.rain_parity) {
-                return ssd_rain_read(ssd, ppa, stime) - stime;
-            }
             return ssd_parity_read(ssd, ppa, failed, stime) - stime;
         }
     }

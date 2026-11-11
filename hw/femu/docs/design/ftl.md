@@ -960,15 +960,29 @@ so no die holds all the parity.
 - A line that closes early (open-block read reclaim) books the parity of
   each row it ends inside.
 - A failed die (`failed_die`) is out of every line opened after it
-  fails. Such a line has S = dies - 1 members, so it holds
-  `rows * (S - 1)` data pages.
+  fails. A line opened after e failures has S = dies - e members, so it
+  holds `rows * (S - 1)` data pages.
 - A read of a page on the failed die reads the other members of its row
   at once. It reads those with data or parity, then adds the XOR time.
-- One die can fail. With one parity page per stripe, a second failure
-  could lose data, and FEMU does not model that loss yet.
+- Dies fail one at a time. One parity page per stripe takes one failed
+  member, so a new failure needs every live page on lines opened since
+  the last one. `rain_rebuild=on` moves the older lines: each write
+  moves at most one, when lines are to spare. Otherwise only GC moves
+  them, and the hook refuses the failure until they are gone.
+- The rebuild is done when its moves are booked, as all FEMU timing is:
+  the mapping moves at once, and the NAND programs end later. A failure
+  after that point can come before those programs end.
+- A rebuild step looks at eight lines at most. A line it moves costs
+  one GC move of that line.
+
+```text
+ epoch 0: t0 t1 t2 t3 --fail t1--> epoch 1: t0 x t2 t3
+ rebuild moves the epoch 0 data --fail t0--> epoch 2: x x t2 t3
+```
 - A failed die makes the media less reliable: SMART Critical Warning
   bit 2 (and EGCWS bit 2) stays set. A failure at run time also raises a
-  SMART event, a telemetry trigger and a Persistent Event log record.
+  SMART event and a telemetry trigger. The first one adds a Persistent
+  Event log record, which logs the bit when it turns on.
   Each degraded read counts in the OCP C0h XOR Recovery Count.
 - After a failure, lines have two sizes. A GC victim that holds more
   live pages than the free room can take goes back to the queue, and the

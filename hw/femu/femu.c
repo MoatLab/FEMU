@@ -5432,6 +5432,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("prog_pass2_ns", FemuCtrl, bb_params.prog_pass2_ns, 0),
     DEFINE_PROP_INT32("die_parity", FemuCtrl, bb_params.die_parity, 0),
     DEFINE_PROP_INT32("rain_parity", FemuCtrl, bb_params.rain_parity, 0),
+    DEFINE_PROP_BOOL("rain_rebuild", FemuCtrl, bb_params.rain_rebuild, false),
     DEFINE_PROP_INT32("parity_xor_ns", FemuCtrl, bb_params.parity_xor_ns, 0),
     DEFINE_PROP_INT32("failed_die", FemuCtrl, bb_params.failed_die, -1),
     DEFINE_PROP_INT32("inject_die", FemuCtrl, bb_params.inject_die, 0),
@@ -5644,6 +5645,27 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
     } else {
         error_setg(errp, "unknown namespace fixture");
     }
+}
+
+/* rain_parity of namespace 1: failures, old lines with data, moved pages */
+static char *femu_test_rain_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    uint64_t nfail;
+    uint64_t left;
+    uint64_t pages;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "the RAIN check needs a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd_rain_check(ns->ssd, &nfail, &left, &pages);
+    nvme_resume_pollers(n, resume);
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64, nfail, left,
+                           pages);
 }
 
 /*
@@ -6479,6 +6501,8 @@ static void femu_instance_init(Object *obj)
                                 femu_test_durable_check, NULL);
         object_property_add_str(obj, "x-rain-fail", NULL,
                                 femu_test_rain_fail);
+        object_property_add_str(obj, "x-rain-check", femu_test_rain_check,
+                                NULL);
         object_property_add_str(obj, "x-tier-check", femu_test_tier_check,
                                 NULL);
         object_property_add_str(obj, "x-fdp-check", femu_test_fdp_check, NULL);

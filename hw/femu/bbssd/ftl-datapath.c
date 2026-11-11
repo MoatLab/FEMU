@@ -1259,6 +1259,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     /* refresh at most one read-stressed line per write */
     do_read_reclaim(ssd);
+    /* and move at most one line off a failed die (rain_rebuild) */
+    ssd_rain_rebuild_step(ssd);
     wl_done = do_wear_level(ssd) == 0;
 
     /* pages the host wrote, whether or not the buffer absorbs them */
@@ -1617,6 +1619,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         curlat = ssd_mp_flush(ssd, NAND_WRITE);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         ssd_note_gc_stall(ssd, passes);
+        ssd_rain_rebuild_step(ssd);
 
         return maxlat;
     }

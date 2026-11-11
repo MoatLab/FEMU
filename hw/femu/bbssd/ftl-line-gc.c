@@ -108,7 +108,7 @@ void ssd_init_write_pointer(struct ssd *ssd)
     curline = QTAILQ_FIRST(&lm->free_line_list);
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
-    curline->rain_epoch = ssd->sp.rain_fail_t >= 0;
+    curline->rain_epoch = ssd->sp.rain_nfail;
 
     /* wpp->curline is always our next-to-write super-block */
     ssd_wp_reset(wpp, curline);
@@ -139,7 +139,7 @@ struct line *get_next_free_line(struct ssd *ssd)
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
     /* rain_parity: the line leaves out the die that failed before it */
-    curline->rain_epoch = ssd->sp.rain_fail_t >= 0;
+    curline->rain_epoch = ssd->sp.rain_nfail;
     return curline;
 }
 
@@ -400,15 +400,80 @@ static void ssd_pd_close_pointer(struct ssd *ssd, struct write_pointer *wpp,
     }
 }
 
+static bool reclaim_line(struct ssd *ssd, struct line *victim_line,
+                         bool copyback);
+
+/* rain_parity: die @t (pointer order) is the next failure */
+static void ssd_rain_append(struct ssdparams *spp, int t)
+{
+    int dies = spp->tt_luns;
+    int e = spp->rain_nfail + 1;
+    int k = 0;
+
+    spp->rain_fidx[t] = spp->rain_nfail;
+    for (int d = 0; d < dies; d++) {
+        if (spp->rain_fidx[d] >= e) {
+            spp->rain_rank[(size_t)e * dies + k++] = d;
+        }
+    }
+    spp->rain_nfail = e;
+}
+
 /*
- * rain_parity: die @die (ch * luns_per_ch + lun) fails. R2a takes one
- * failed die in the life of the FTL: with one parity page per stripe, a
- * second one could lose data, which needs the loss marking of R2b. The
- * open lines close with their own layout, and the next ones leave the die
- * out. The caller has paused the FTL.
+ * rain_parity: the failure list. Epoch e can go up to dies - 2, which
+ * leaves two members (one data, one parity page per row).
+ */
+void ssd_rain_init(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int dies = spp->tt_luns;
+    int die = ssd->n ? ssd->n->bb_params.failed_die : -1;
+
+    ssd_rain_free(ssd);
+    if (!spp->rain_parity) {
+        return;
+    }
+    spp->rain_fidx = g_new(int, dies);
+    spp->rain_rank = g_new0(int, (size_t)dies * MAX(dies - 1, 1));
+    for (int d = 0; d < dies; d++) {
+        spp->rain_fidx[d] = INT_MAX;
+        spp->rain_rank[d] = d;
+    }
+    if (die >= 0 && die < dies) {
+        ssd_rain_append(spp, (die % spp->luns_per_ch) * spp->nchs +
+                             die / spp->luns_per_ch);
+    }
+}
+
+void ssd_rain_free(struct ssd *ssd)
+{
+    g_clear_pointer(&ssd->sp.rain_fidx, g_free);
+    g_clear_pointer(&ssd->sp.rain_rank, g_free);
+    ssd->sp.rain_nfail = 0;
+}
+
+/* a live page on a line opened before the last failure */
+static bool ssd_rain_old_data(struct ssd *ssd)
+{
+    for (int i = 0; i < ssd->sp.tt_lines; i++) {
+        struct line *l = &ssd->lm.lines[i];
+
+        if (l->vpc > 0 && l->rain_epoch < ssd->sp.rain_nfail) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * rain_parity: die @die (ch * luns_per_ch + lun) fails. One parity page
+ * per stripe takes one failure in a row, so a new failure needs every
+ * live page on lines opened since the last one (the rebuild, rain_rebuild,
+ * moves the old ones). The open lines close with their own layout, and
+ * the next ones leave the die out. The caller has paused the FTL.
  *
- *   before:  t0 t1 t2 t3 (S = 4)     fail t1, lines closed
- *   after:   t0  x t2 t3 (S = 3)     new lines skip t1
+ *   epoch 0: t0 t1 t2 t3 --fail t1--> epoch 1: t0 x t2 t3
+ *   rebuild moves the epoch 0 data --fail t0--> epoch 2: x x t2 t3
  */
 bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
 {
@@ -420,6 +485,7 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     int lines;
     int rows;
     int open;
+    int s;
     int t;
 
     if (!spp->rain_parity || die < 0 || die >= spp->tt_luns) {
@@ -428,35 +494,40 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
         return false;
     }
     t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
-    if (spp->rain_fail_t == t) {
+    if (spp->rain_fidx[t] != INT_MAX) {
         return true;
     }
-    if (spp->rain_fail_t >= 0 || spp->tt_luns < 3) {
-        error_setg(errp, "rain_parity takes one failed die, and keeps two "
-                   "members at least");
+    s = ssd_rain_members(spp, spp->rain_nfail);
+    if (s - 1 < 2) {
+        error_setg(errp, "rain_parity keeps two members at least");
+        return false;
+    }
+    if (ssd_rain_old_data(ssd)) {
+        error_setg(errp, "lines from before the last failure still hold "
+                   "data: a second failure there could lose it");
         return false;
     }
     /*
-     * GC must still make progress. A full old line holds up to
-     * rows * (dies - 1) live pages and a new one takes rows * (dies - 2),
-     * so one victim can need two new lines before it frees its own: the
-     * forced GC reserve and the free lines must hold them. The lines left
-     * after the reserve and the open pointers must hold the namespace.
+     * GC must still make progress. A full line holds up to rows * (S - 1)
+     * live pages and a new one takes rows * (S - 2), so one victim can need
+     * two new lines before it frees its own: the forced GC reserve and the
+     * free lines must hold them. The lines left after the reserve and the
+     * open pointers must hold the namespace.
      */
     rows = spp->pls_per_lun * spp->pgs_per_blk;
-    victim = DIV_ROUND_UP(spp->tt_luns - 1, spp->tt_luns - 2);
+    victim = DIV_ROUND_UP(s - 1, s - 2);
     open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
     lines = spp->tt_lines - bb_gc_forced_lines(ssd->n) - open;
     need = DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page);
     if (spp->gc_thres_lines_high < victim ||
         ssd->lm.free_line_cnt < victim + open || lines < 1 ||
-        (uint64_t)lines * rows * (spp->tt_luns - 2) < need) {
+        (uint64_t)lines * rows * (s - 2) < need) {
         error_setg(errp, "without die %d the lines cannot hold the "
                    "namespace and keep room for GC", die);
         return false;
     }
-    spp->rain_fail_t = t;
-    qatomic_set(&ssd->fail_die, die + 1);
+    ssd_rain_append(spp, t);
+    ssd->rain_cursor = 0;
     for (int i = 0; i < ARRAY_SIZE(ptrs); i++) {
         if (ptrs[i]->curline) {
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
@@ -468,6 +539,59 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     qatomic_or(&ssd->n->tel_req, NVME_SMART_RELIABILITY);
     qemu_bh_schedule(ssd->n->aer_bh);
     return true;
+}
+
+/*
+ * rain_rebuild: move one line opened before the last failure, with lines
+ * to spare, as read reclaim does. A cursor walks the line ids and looks at
+ * a few lines a call, so a host write pays O(1).
+ */
+void ssd_rain_rebuild_step(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+
+    if (!spp->rain_rebuild || !spp->rain_nfail || ssd->media_ro ||
+        should_gc_high(ssd) || lm->free_line_cnt < 2) {
+        return;
+    }
+    for (int n = 0; n < 8; n++) {
+        struct line *l = &lm->lines[ssd->rain_cursor];
+        int vpc = l->vpc;
+
+        ssd->rain_cursor = (ssd->rain_cursor + 1) % spp->tt_lines;
+        if (!vpc || l->rain_epoch >= spp->rain_nfail || l->reclaiming) {
+            continue;
+        }
+        if (vpc == ssd_line_data_pgs(ssd, l)) {
+            QTAILQ_REMOVE(&lm->full_line_list, l, entry);
+            lm->full_line_cnt--;
+        } else if (l->pos) {
+            pqueue_remove(lm->victim_line_pq, l);
+        } else {
+            /* open: the failure closed the old ones, so this is new */
+            continue;
+        }
+        l->reclaiming = true;
+        reclaim_line(ssd, l, false);
+        l->reclaiming = false;
+        ssd->rain_rebuild_pages += vpc - l->vpc;
+        return;
+    }
+}
+
+/* qtest: failures, old lines with live pages, pages the rebuild moved */
+void ssd_rain_check(struct ssd *ssd, uint64_t *nfail, uint64_t *left,
+                    uint64_t *pages)
+{
+    *nfail = ssd->sp.rain_nfail;
+    *left = 0;
+    for (int i = 0; i < ssd->sp.tt_lines; i++) {
+        struct line *l = &ssd->lm.lines[i];
+
+        *left += l->vpc > 0 && l->rain_epoch < ssd->sp.rain_nfail;
+    }
+    *pages = ssd->rain_rebuild_pages;
 }
 
 /*
@@ -1367,7 +1491,7 @@ void ssd_pel_wear(struct ssd *ssd)
         bits |= NVME_SMART_SPARE;
     }
     if (ssd->overworn_blocks ||
-        (ssd->sp.rain_parity && ssd->sp.rain_fail_t >= 0)) {
+        (ssd->sp.rain_parity && ssd->sp.rain_nfail > 0)) {
         bits |= NVME_SMART_RELIABILITY;
     }
     if (ssd->media_ro) {
@@ -1781,11 +1905,11 @@ static struct line *ssd_rain_fit_victim(struct ssd *ssd, struct line *victim)
     struct line *best = NULL;
     uint64_t room;
 
-    if (!spp->rain_parity || spp->rain_fail_t < 0) {
+    if (!spp->rain_parity || !spp->rain_nfail) {
         return victim;
     }
     room = (uint64_t)ssd->lm.free_line_cnt * spp->pls_per_lun *
-           spp->pgs_per_blk * (ssd_rain_members(spp, 1) - 1);
+           spp->pgs_per_blk * (ssd_rain_members(spp, spp->rain_nfail) - 1);
     if (dst->curline) {
         room += ssd_line_data_pgs(ssd, dst->curline) - dst->curline->vpc -
                 dst->curline->ipc;
