@@ -13,6 +13,17 @@
  * takes every older one of its LPN with it: their data is older than data
  * that is now durable. The mapping is not rolled back; only the payload
  * and its LBA states are (the reduced model of the T10.5 design).
+ *
+ * At most gen_cap protected programs overlap in device time: each takes
+ * the slot that is free first and starts no earlier than that, so a full
+ * journal stalls the write as a full buffer does on a real drive.
+ *
+ *   slots f1 <= f2 <= ... :  program p starts at max(stime, f1),
+ *                            ends at d, and f1 becomes d
+ *
+ * Before-images are taken when the write is handled, so the list can be
+ * longer than gen_cap; at gen_max the FTL thread waits for a program to
+ * end, which bounds the memory.
  */
 
 #include "qemu/osdep.h"
@@ -37,8 +48,65 @@ void ssd_durable_init(struct ssd *ssd)
 {
     QTAILQ_INIT(&ssd->gens);
     ssd->nr_gens = 0;
-    /* as many pages as the buffer holds; at the bound writes fail */
+    /* as many programs in flight as the buffer holds pages */
     ssd->gen_cap = MAX(ssd->sp.buffer_size, 1);
+    ssd->gen_max = MAX(8 * ssd->gen_cap, 1024);
+    ssd->gen_first = INT64_MAX;
+    if (ssd_durable_on(ssd)) {
+        ssd->gen_slot = g_new0(int64_t, ssd->gen_cap);
+    }
+}
+
+void ssd_durable_free(struct ssd *ssd)
+{
+    ssd_durable_drop_all(ssd);
+    g_clear_pointer(&ssd->gen_slot, g_free);
+}
+
+/*
+ * The start of a protected program the caller would book at @stime: no
+ * earlier than the first free slot. Sets @book and returns the wait.
+ */
+uint64_t ssd_durable_start(struct ssd *ssd, uint64_t stime, uint64_t *book)
+{
+    uint64_t base = stime ? stime : ssd_now(ssd);
+    int64_t f = ssd->gen_slot[0];
+
+    *book = stime;
+    if (f <= (int64_t)base) {
+        return 0;
+    }
+    *book = f;
+    return f - base;
+}
+
+/* the program in the first slot was placed and ends at @done */
+void ssd_durable_slot_used(struct ssd *ssd, int64_t done)
+{
+    int64_t *h = ssd->gen_slot;
+    uint32_t n = ssd->gen_cap;
+    uint32_t i = 0;
+
+    h[0] = done;
+    for (;;) {
+        uint32_t l = 2 * i + 1;
+        uint32_t m = i;
+        int64_t t;
+
+        if (l < n && h[l] < h[m]) {
+            m = l;
+        }
+        if (l + 1 < n && h[l + 1] < h[m]) {
+            m = l + 1;
+        }
+        if (m == i) {
+            break;
+        }
+        t = h[i];
+        h[i] = h[m];
+        h[m] = t;
+        i = m;
+    }
 }
 
 static void ssd_gen_free(struct ssd *ssd, ssd_gen *g)
@@ -57,6 +125,7 @@ void ssd_durable_drop_all(struct ssd *ssd)
     while ((g = QTAILQ_FIRST(&ssd->gens))) {
         ssd_gen_free(ssd, g);
     }
+    ssd->gen_first = INT64_MAX;
 }
 
 /*
@@ -73,7 +142,7 @@ void ssd_durable_retire(struct ssd *ssd, int64_t now)
     ssd_gen *next;
 
     /* the idle pass calls this often: nothing to do costs nothing */
-    if (QTAILQ_EMPTY(&ssd->gens)) {
+    if (QTAILQ_EMPTY(&ssd->gens) || now < ssd->gen_first) {
         return;
     }
     last = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, g_free);
@@ -101,19 +170,40 @@ void ssd_durable_retire(struct ssd *ssd, int64_t now)
         }
     }
     g_hash_table_destroy(last);
+    ssd->gen_first = INT64_MAX;
+    QTAILQ_FOREACH(g, &ssd->gens, link) {
+        ssd->gen_first = MIN(ssd->gen_first, g->done);
+    }
 }
 
 /*
- * Room for one more generation. Ended ones go only when the bound is
- * reached, so the common write pays one comparison.
+ * Room for one more generation. At gen_max the FTL thread waits for the
+ * first pending program to end: every one has an end, so the wait ends.
+ * A pause (a cut, a reset, an admin drain) waits for this request, so
+ * then the request goes on past gen_max, by at most its own pages, and
+ * the pause takes its time at once. False only when the FTL thread stops.
  */
 bool ssd_durable_room(struct ssd *ssd)
 {
-    if (ssd->nr_gens < ssd->gen_cap) {
+    if (ssd->nr_gens < ssd->gen_max) {
         return true;
     }
-    ssd_durable_retire(ssd, ssd_now(ssd));
-    return ssd->nr_gens < ssd->gen_cap;
+    for (;;) {
+        int64_t now = ssd_now(ssd);
+
+        ssd_durable_retire(ssd, now);
+        if (ssd->nr_gens < ssd->gen_max) {
+            return true;
+        }
+        if (qatomic_read(&ssd->n->ftl_stopping)) {
+            return false;
+        }
+        if (!qatomic_read(&ssd->n->dataplane_started)) {
+            return true;
+        }
+        ssd->durable_waits++;
+        g_usleep(MIN(MAX((ssd->gen_first - now) / 1000, 1), 1000));
+    }
 }
 
 /* keep the before-image of a booked program; takes @undo and @state */
@@ -129,6 +219,7 @@ void ssd_durable_push(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
     g->done = done;
     QTAILQ_INSERT_TAIL(&ssd->gens, g, link);
     ssd->nr_gens++;
+    ssd->gen_first = MIN(ssd->gen_first, done);
 }
 
 /*

@@ -906,11 +906,19 @@ the page's bytes and LBA states before it, and the program's end time.
   buffered copy, the generation holds the bytes from before that copy.
 - A Flush completes no earlier than the end of the last pending program,
   also when the buffer is empty. SHST 10b waits for it too.
-- The generations are at most `buffer_size`; the buffer has its own
-  bound. At the bound a direct write fails with Capacity Exceeded, and a
-  write-back stops, so a buffered write fails when the buffer is full.
-  The older generations stay. The FTL idle pass drops the generations
-  whose program ended.
+- At most `buffer_size` protected programs overlap in device time. Each
+  takes the journal slot that is free first and starts no earlier than
+  that, so a full journal makes the write wait, as a full buffer does on
+  a drive. The host sees the wait in the write's latency.
+- The before-images themselves are bounded at `max(8 * buffer_size,
+  1024)`. There the FTL thread waits in real time for the first pending
+  program to end. The FTL idle pass drops the generations whose program
+  ended.
+
+```text
+ slots f1 <= f2 <= ... (buffer_size of them)
+ program p: start = max(stime, f1), ends at d, f1 becomes d
+```
 - The mapping is not rolled back: only the payload and its LBA states.
 - A cache disable writes the buffer back and completes when those
   programs end. Until then the admin queue runs no later command, so a

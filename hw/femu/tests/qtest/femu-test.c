@@ -45228,6 +45228,106 @@ static void femu_test_durable_partial2(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * Submit @n one-page writes of @pattern to pages 0 .. @n - 1 at once and
+ * collect them; returns the time from the first submit to the last
+ * completion, in ms.
+ */
+static int64_t femu_durable_burst(FemuCtrlState *c, uint64_t buf, int n,
+                                  uint8_t pattern, bool fua, bool collect)
+{
+    int64_t t0 = g_get_monotonic_time();
+    uint16_t cid;
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, 4096);
+    for (int i = 0; i < n; i++) {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(i * 8);
+        rw.nlb = cpu_to_le16(7);
+        rw.control = cpu_to_le16(fua ? NVME_RW_FUA : 0);
+        femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    }
+    for (int i = 0; collect && i < n; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+/*
+ * durable_at_done, 500 ms programs, 16 dies, 3 journal slots
+ * (buffer_size 3): 12 programs run in 4 waves of 3, so the last ends at
+ * about 2000 ms. With no slots they would all end at 500 ms; with the
+ * latest slot each time, much later.
+ *
+ *   slots:  p0 p1 p2 | p3 p4 p5 | p6 p7 p8 | p9 p10 p11
+ *   ends:     500    |   1000   |   1500   |   2000 ms
+ *
+ * S1 failed these writes at the bound. A cut at 750 ms keeps the first
+ * wave and gives back the rest.
+ */
+static void femu_test_durable_stall(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    int64_t t0;
+    int64_t ms;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* FUA: each write completes when its program ends */
+    ms = femu_durable_burst(&c, buf, 12, 0xd4, true, true);
+    g_assert_cmpint(ms, >=, 1800);
+    g_assert_cmpint(ms, <=, 3000);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0xd4);
+    }
+
+    /* the same burst over new pages' history, cut inside the second wave */
+    g_usleep(2100 * 1000);
+    femu_durable_burst(&c, buf, 12, 0xe5, true, false);
+    g_usleep(750 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 9);
+    femu_power_cut(&c);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, i < 3 ? 0xe5 : 0xd4);
+    }
+
+    /* buffered: the Flush ends when the last of the 12 programs ends */
+    g_usleep(2100 * 1000);
+    t0 = g_get_monotonic_time();
+    femu_durable_burst(&c, buf, 12, 0xf6, false, true);
+    femu_submit(&c, &c.io, &flush);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_assert_cmpint(ms, >=, 1800);
+    g_assert_cmpint(ms, <=, 3000);
+    femu_power_cut(&c);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0xf6);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* durable_at_done: the commands it does not support yet, and realize */
 static void femu_test_durable_refused(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -61530,6 +61630,14 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,oncs=0x1f,"
             "durable_at_done=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("durable-stall", "femu", femu_test_durable_stall,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "femu_mode=1,buffer_size=3,vwc=1,power_loss=on,"
+            "durable_at_done=on,pg_wr_lat=500000000"
     });
     qos_add_test("durable-refused", "femu", femu_test_durable_refused,
                  &(QOSGraphTestOptions) {

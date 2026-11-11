@@ -871,12 +871,19 @@ struct ssd {
     uint64_t *ns_slice_lo;
     /*
      * durable_at_done (ftl-durable.c): the generations of booked host
-     * programs that have not ended, in program order, and their bound.
+     * programs that have not ended, in program order. gen_cap slots each
+     * hold the end of the program that used it last (a min-heap); a
+     * program starts no earlier than its slot is free. gen_max bounds the
+     * list itself; gen_first is at most the earliest pending end.
      * last_prog_done is the end of the last host program booked.
      */
     QTAILQ_HEAD(, ssd_gen) gens;
     uint32_t nr_gens;
     uint32_t gen_cap;
+    uint32_t gen_max;
+    int64_t *gen_slot;
+    int64_t gen_first;
+    uint64_t durable_waits;
     int64_t last_prog_done;
     struct ssd_ns_ctr *ns_ctr;
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
@@ -992,6 +999,9 @@ void ssd_durable_init(struct ssd *ssd);
 void ssd_durable_drop_all(struct ssd *ssd);
 void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
+uint64_t ssd_durable_start(struct ssd *ssd, uint64_t stime, uint64_t *book);
+void ssd_durable_slot_used(struct ssd *ssd, int64_t done);
+void ssd_durable_free(struct ssd *ssd);
 void ssd_durable_push(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
                       uint8_t *undo, uint8_t *state, int64_t done);
 int64_t ssd_durable_deadline(struct ssd *ssd);

@@ -902,6 +902,9 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
 {
     struct buffer_entry *victim;
     uint64_t maxlat = 0, curlat;
+    uint64_t book;
+    uint64_t wait;
+    bool protect;
     bool placed;
     int done = 0;
     uint64_t media0 = unlikely(ssd->tier) ? ssd_media_last_end(ssd) : 0;
@@ -953,13 +956,23 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
         if (!victim) {
             break;
         }
-        /* durable_at_done: no program without room for its generation */
-        if (ssd_durable_on(ssd) && victim->undo && !ssd_durable_room(ssd)) {
-            break;
+        /*
+         * durable_at_done: no program without room for its generation,
+         * and none before a journal slot is free.
+         */
+        protect = ssd_durable_on(ssd) && victim->undo;
+        book = stime;
+        wait = 0;
+        if (protect) {
+            if (!ssd_durable_room(ssd)) {
+                break;
+            }
+            wait = ssd_durable_start(ssd, stime, &book);
         }
 
         /* with dftl, the translation goes with the program */
-        curlat = ssd_map_and_program(ssd, victim->lpn, stime, -1, &placed);
+        curlat = wait + ssd_map_and_program(ssd, victim->lpn, book, -1,
+                                            &placed);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         /*
          * The entry leaves only once its page is placed. One with nowhere
@@ -969,7 +982,8 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
             break;
         }
         /* its bytes before the buffered write stay until the program ends */
-        if (ssd_durable_on(ssd) && victim->undo) {
+        if (protect) {
+            ssd_durable_slot_used(ssd, ssd->last_prog_done);
             ssd_durable_push(ssd, ssd_lpn_ns(ssd, victim->lpn), victim->lpn,
                              victim->undo, victim->lba_state,
                              ssd->last_prog_done);
@@ -1221,6 +1235,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint8_t *snap = NULL;
     uint8_t *snap_state = NULL;
     bool buffer_full = false;
+    uint64_t book;
+    uint64_t wait;
     bool placed;
     bool drain;
 
@@ -1360,6 +1376,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          * failed placement can put it back; no write without room for its
          * generation.
          */
+        book = req->stime;
+        wait = 0;
         if (ssd_durable_on(ssd) && req->write_data) {
             if (!ssd_durable_room(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
@@ -1367,6 +1385,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 break;
             }
             ssd_page_snapshot(ssd, req->ns, lpn, &snap, &snap_state);
+            /* the program waits for a journal slot; the host sees the wait */
+            wait = ssd_durable_start(ssd, req->stime, &book);
         }
         /*
          * Under power_loss a buffered copy keeps its undo record until this
@@ -1374,7 +1394,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          */
         buffer_write_data(ssd, req, lpn, false);
         /* with dftl, the translation goes with the program */
-        curlat = ssd_map_and_program(ssd, lpn, req->stime, stream, &placed);
+        curlat = wait + ssd_map_and_program(ssd, lpn, book, stream, &placed);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
         if (!placed) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
@@ -1388,6 +1408,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
         }
         if (snap) {
+            ssd_durable_slot_used(ssd, ssd->last_prog_done);
             ssd_durable_direct(ssd, req->ns, lpn, &snap, &snap_state);
         }
         if (ssd->write_buffer_cnt) {

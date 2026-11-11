@@ -5654,6 +5654,7 @@ static char *femu_test_durable_check(Object *obj, Error **errp)
     uint64_t lpns;
     uint64_t gens;
     uint64_t ended;
+    uint64_t waits;
     bool resume;
 
     if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
@@ -5662,9 +5663,10 @@ static char *femu_test_durable_check(Object *obj, Error **errp)
     }
     resume = nvme_pause_pollers(n);
     ssd_durable_counts(ns->ssd, &lpns, &gens, &ended);
+    waits = ns->ssd->durable_waits;
     nvme_resume_pollers(n, resume);
-    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64, lpns, gens,
-                           ended);
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
+                           lpns, gens, ended, waits);
 }
 
 /*

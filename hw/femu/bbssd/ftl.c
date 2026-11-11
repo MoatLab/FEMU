@@ -1280,7 +1280,7 @@ void ssd_free(struct ssd *ssd)
     ssd->rmap = NULL;
     g_free(ssd->maptbl);
     ssd->maptbl = NULL;
-    ssd_durable_drop_all(ssd);
+    ssd_durable_free(ssd);
     g_clear_pointer(&ssd->ns_slice_lo, g_free);
     g_clear_pointer(&ssd->ns_ctr, g_free);
     ssd->nr_ns_slices = 0;
