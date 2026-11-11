@@ -448,6 +448,20 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "power cut and enable simulate-power-loss; needs buffer_size > 0, "
       "vwc=1, page-aligned namespaces, and no meta, pi, ns_mgmt, subsys, "
       "namespace_modes or cxl_ssd" },
+    { "plp",
+      "with power_loss: power-loss protection; a cut writes the buffer "
+      "back, FUA and Flush complete without the media, and vwc=0 keeps the "
+      "buffer; C0h reports plp_health as Capacitor Health; with ocp=on it "
+      "needs vwc=0; not with durable_at_done or rain_parity; off (default)" },
+    { "plp_health",
+      "with plp: hold-up energy at realize in percent, 0 to 65534; below 1 "
+      "the check at enable and every C6h minutes (default 15) fails the "
+      "protection; 120 (default)" },
+    { "plp_fail_mode",
+      "with plp: what a failed protection does, rom (default, writes fail "
+      "82h), wtm (write-through) or normal; sets the C2h factory value, "
+      "and ocp DP-CFG-6 B needs rom; Critical Warning bit 4 and a SMART "
+      "event in every mode" },
     { "durable_at_done",
       "with power_loss: a written page is durable when its NAND program "
       "ends, not when it is booked; a cut restores the pages whose program "
@@ -1253,6 +1267,10 @@ static const FemuPropDesc femu_ctrl_runtime_descs[] = {
       "with die_slow=on: \"<ch>:<lun>:<pct>\" sets the array time of one "
       "LUN to pct percent of nominal (100 to 10000), for ops booked from "
       "then on; reading lists the LUNs not at 100" },
+    { "plp-health",
+      "with plp=on: the hold-up energy now, 0 to 65534 percent; the next "
+      "check (at enable and every C6h minutes) fails the protection below "
+      "1, and a cut below 1 keeps nothing" },
     { NULL, NULL }
 };
 

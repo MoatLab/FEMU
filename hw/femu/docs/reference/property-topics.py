@@ -85,7 +85,8 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "ns_mgmt", "bbssd_ns_limit", "streams", "streams.max",
-                    "power_loss", "durable_at_done", "ready_ms", "recovery_ms",
+                    "power_loss", "durable_at_done", "plp", "plp_health",
+                    "plp_fail_mode", "ready_ms", "recovery_ms",
                     "shutdown_ms",
                 ],
             },
@@ -231,7 +232,7 @@ DEVICES = [
                 "title": "Power loss trigger",
                 "kind": "runtime",
                 "props": [
-                    "simulate-power-loss",
+                    "simulate-power-loss", "plp-health",
                 ],
             },
             {

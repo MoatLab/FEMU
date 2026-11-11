@@ -367,6 +367,26 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 }
 
 /*
+ * The commands that change media: Write, Write Zeroes, Write Uncorrectable,
+ * Copy and a deallocating Dataset Management. A failed power-loss protection
+ * in ROM mode refuses these, as the end of life does.
+ */
+static bool nvme_media_write_class(const NvmeCmd *cmd)
+{
+    switch (cmd->opcode) {
+    case NVME_CMD_WRITE:
+    case NVME_CMD_WRITE_ZEROES:
+    case NVME_CMD_COPY:
+    case NVME_CMD_WRITE_UNCOR:
+        return true;
+    case NVME_CMD_DSM:
+        return le32_to_cpu(cmd->cdw11) & NVME_DSMGMT_AD;
+    default:
+        return false;
+    }
+}
+
+/*
  * End-of-life admission for the command at the head of @sq, before it
  * changes anything (FemuCtrl.eol_admit). Write, Write Zeroes, Write
  * Uncorrectable, Copy and a deallocating Dataset Management take credits for
@@ -567,7 +587,10 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
         assert(!req->eol_held);
         req->eol_held = eol == FEMU_EOL_ADMITTED;
         req->eol_pages = req->eol_held ? eol_pages : 0;
-        req->eol_ro = eol == FEMU_EOL_READ_ONLY;
+        /* a failed protection in ROM mode refuses writes the same way */
+        req->eol_ro = eol == FEMU_EOL_READ_ONLY ||
+                      (unlikely(qatomic_read(&n->plp_ro)) &&
+                       nvme_media_write_class(&cmd));
         eol = -1;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = req->t_submit = fetched;
@@ -3240,8 +3263,9 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
     /*
-     * The media went read-only at its end of life before this write-class
-     * command was admitted: it fails with nothing changed. Status 82h is the
+     * The media went read-only at its end of life, or after a failed
+     * power-loss protection, before this write-class command was
+     * admitted: it fails with nothing changed. Status 82h is the
      * one for media that is read-only; Namespace Is Write Protected is only
      * for the namespace write protection state (Base 2.3, Figure 102).
      */

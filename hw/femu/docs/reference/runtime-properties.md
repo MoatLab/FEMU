@@ -24,6 +24,7 @@ or in the HMP monitor with `qom-get` and `qom-set`. Event counters are cleared b
 | Property | Type | Description |
 | --- | --- | --- |
 | `simulate-power-loss` | `bool` | Write-only: setting true on a realized controller with power_loss=on drops the write buffer and resets the controller as a power cut would |
+| `plp-health` | `uint32` | with plp=on: the hold-up energy now, 0 to 65534 percent; the next check (at enable and every C6h minutes) fails the protection below 1, and a cut below 1 keeps nothing |
 
 ### ANA path state
 

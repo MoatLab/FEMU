@@ -440,6 +440,12 @@ void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits)
     pel_warning_update(n, PEL_WEAR_BITS, bits);
 }
 
+/* the bits a failed power-loss protection sets, when it fails */
+void femu_pel_plp_warning(FemuCtrl *n, uint8_t bits)
+{
+    pel_warning_update(n, bits, bits);
+}
+
 /*
  * A completion with a Media and Data Integrity status other than Access
  * Denied or Deallocated or Unwritten Logical Block (code 0Ah), carrying the

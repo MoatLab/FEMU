@@ -1666,6 +1666,7 @@ enum NvmeFeatureIds {
     NVME_RESV_NOTIFY_MASK           = 0x82,
     NVME_RESV_PERSISTENCE           = 0x83,
     NVME_OCP_EVENT_INJECTION        = 0xc0,  /* OCP 2.7, ocp=on */
+    NVME_OCP_PLP_FAIL_MODE          = 0xc2,  /* OCP 2.7, DP-CFG-6 A */
     NVME_OCP_CLEAR_PCIE_ERRORS      = 0xc3,  /* OCP 2.7, ocp=on */
     NVME_OCP_LATENCY_MONITOR        = 0xc5,  /* OCP 2.7, ocp=on */
     NVME_OCP_PLP_HEALTH_INTERVAL    = 0xc6,  /* OCP 2.7, ocp=on */
@@ -2828,6 +2829,22 @@ typedef struct FemuCtrl {
     bool        durable_at_done;
     int64_t     durable_cut;    /* the time of the cut being recovered */
     /*
+     * plp: the write buffer has hold-up energy, so a cut keeps what it
+     * holds. plp_health is that energy in percent (C0h Capacitor Health),
+     * which the check reads at enable and every C6h minutes. Below 1 the
+     * protection has failed for good; the C2h mode in force then picks
+     * read-only (plp_ro), write-through (plp_wt) or neither.
+     */
+    bool        plp;
+    char        *plp_fail_mode;
+    uint8_t     plp_mode_def;   /* C2h factory value from plp_fail_mode */
+    uint32_t    plp_health;
+    bool        plp_failed;
+    bool        plp_ro;
+    bool        plp_wt;
+    uint64_t    plp_starts;     /* cuts the protection handled (SMART-24) */
+    QEMUTimer   *plp_timer;
+    /*
      * die_slow: a table of array time in percent of nominal for each LUN,
      * nchs x luns_per_ch, read atomically by the media; NULL when off.
      */
@@ -2852,7 +2869,7 @@ typedef struct FemuCtrl {
     uint8_t     fw_slots;       /* 0 auto: 1, or 3 with ocp */
     uint8_t     ps_max_watts;   /* Maximum Power of power state 0, in watts */
     /*
-     * OCP features that only hold a value (C6h, C8h, CAh),
+     * OCP features that only hold a value (C2h, C6h, C8h, CAh),
      * indexed by FID - C0h, in their Get Features layout.
      */
     uint32_t    ocp_val[12];
@@ -3734,6 +3751,7 @@ void femu_pel_log(FemuCtrl *n, uint8_t et, uint8_t etr, const void *data,
 void femu_pel_warning(FemuCtrl *n, uint8_t warning);
 void femu_pel_temp_warning(FemuCtrl *n, bool on);
 void femu_pel_wear_warning(FemuCtrl *n, uint8_t bits);
+void femu_pel_plp_warning(FemuCtrl *n, uint8_t bits);
 bool femu_thermal_check(FemuCtrl *n, Error **errp);
 void femu_thermal_start(FemuCtrl *n);
 void femu_throttle_eval(FemuCtrl *n);
@@ -3813,6 +3831,13 @@ void bbssd_durable_patch(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
                          int how);
 void femu_vwc_timer_cb(void *opaque);
 void femu_vwc_drop(FemuCtrl *n);
+/* femu-plp.c: power-loss protection (plp) */
+bool femu_plp_ok(FemuCtrl *n);
+bool femu_plp_init(FemuCtrl *n, Error **errp);
+void femu_plp_add_props(Object *obj);
+void femu_plp_enable(FemuCtrl *n);
+void femu_plp_restart(FemuCtrl *n);
+void femu_plp_cut(FemuCtrl *n);
 void femu_cancel_fetched(FemuCtrl *n, NvmeRequest *req, int poller);
 void femu_cancel_drop_sq(FemuCtrl *n, NvmeSQueue *sq);
 void femu_cancel_retire_ns(FemuCtrl *n, NvmeNamespace *ns, uint16_t status);

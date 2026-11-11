@@ -717,11 +717,14 @@ own description allows. A message keeps its format directives (`%s`,
 - ocp needs fw_slots of 3 or more (FWUP-6)
 - ocp needs lba_index 0: the factory sector size is LBA format 0 (DP-CFG-1 B, NSM-3)
 - ocp_profile needs ocp=on
+- plp with ocp=on needs vwc=0
 - power_states does not work with ocp yet (OCP C7h maps DSSD power states to PS0)
 
 ## `ocp_profile`
 
 - ocp_profile DP-CFG-%d A needs %s, which FEMU does not support; use B
+- ocp_profile DP-CFG-6 A needs plp=on
+- ocp_profile DP-CFG-6 B needs plp_fail_mode rom
 - ocp_profile must be %d letters, each A or B (DP-CFG-1 to DP-CFG-%d)
 - ocp_profile needs ocp=on
 
@@ -879,6 +882,25 @@ own description allows. A message keeps its format directives (`%s`,
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 - plane_reads works with bbssd, CSD or KV namespaces only (KV keeps the LUN rule)
 
+## `plp`
+
+- ocp_profile DP-CFG-6 A needs plp=on
+- plp is not supported with %s
+- plp needs power_loss=on
+- plp with ocp=on needs vwc=0
+- plp-health needs plp=on and 0 to 65534
+- plp_fail_mode needs plp=on
+
+## `plp_fail_mode`
+
+- ocp_profile DP-CFG-6 B needs plp_fail_mode rom
+- plp_fail_mode must be rom, wtm or normal
+- plp_fail_mode needs plp=on
+
+## `plp_health`
+
+- plp_health must be 0 to 65534
+
 ## `poller_ratio`
 
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
@@ -895,6 +917,7 @@ own description allows. A message keeps its format directives (`%s`,
 - action power-loss needs power_loss=on
 - csd_slm_size and csd_cp cannot be used with ns_mgmt, power_loss or a CXL link
 - durable_at_done needs power_loss=on
+- plp needs power_loss=on
 - power_loss requires bbssd, buffer_size > 0, and no metadata, namespace management or subsystem
 - power_loss requires page-aligned namespaces and whole LBAs per NAND page
 - sanitize_ms and sanitize_ops do not work with power_loss yet
@@ -1166,6 +1189,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `vwc`
 
+- plp with ocp=on needs vwc=0
 - vwc, intc, cqr and extended are single bits
 
 ## `wl_spread`

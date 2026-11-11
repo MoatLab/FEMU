@@ -43,6 +43,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_OCP_DSSD_POWER_STATE]     = true,
     [NVME_OCP_EVENT_INJECTION]      = true,
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = true,
+    [NVME_OCP_PLP_FAIL_MODE]        = true,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = true,
     [NVME_OCP_TELEMETRY_PROFILE]    = true,
     [NVME_OCP_IDLE_WAKE_UP]         = true,
@@ -92,9 +93,10 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
                                       NVME_FEAT_CAP_SAVE,
     /*
      * OCP 4.15: C3h is not saveable; the others are saveable values.
-     * Device profile B, the one FEMU takes, disables C2h (DP-CFG-6) and
-     * prohibits CBh (DP-CFG-13), so neither is here.
+     * C2h exists with DP-CFG-6 A only; DP-CFG-13 prohibits CBh.
      */
+    [NVME_OCP_PLP_FAIL_MODE]        = NVME_FEAT_CAP_CHANGE |
+                                      NVME_FEAT_CAP_SAVE,
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = NVME_FEAT_CAP_CHANGE,
     /* Read Recovery Level: changeable, not saveable here */
     [NVME_READ_RECOVERY]            = NVME_FEAT_CAP_CHANGE,
@@ -113,6 +115,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
  * Features CDW11 bits that carry it, where Get Features returns it, and
  * the factory default in that layout.
  *
+ *   C2h  set 31:30 -> get 2:0    PLP failure mode, 1 ROM to 3 normal
  *   C6h  set 31:16 -> get 15:0   PLP health check interval, minutes
  *   C8h  set  7:0  -> get 7:0    telemetry profile, saved always
  *   CAh  set 15:0  -> get 15:0   idle wake up time, ms
@@ -125,6 +128,7 @@ typedef struct NvmeOcpValFeat {
 } NvmeOcpValFeat;
 
 static const NvmeOcpValFeat nvme_ocp_val_feats[] = {
+    { NVME_OCP_PLP_FAIL_MODE,       30, 0x3,    1 },
     { NVME_OCP_PLP_HEALTH_INTERVAL, 16, 0xffff, 0 },
     { NVME_OCP_TELEMETRY_PROFILE,    0, 0xff,   0 },
     { NVME_OCP_IDLE_WAKE_UP,         0, 0xffff, 0 },
@@ -147,14 +151,29 @@ static bool nvme_ocp_subsys_fid(uint8_t fid)
            fid == NVME_OCP_EVENT_INJECTION || nvme_ocp_val_feat(fid);
 }
 
+/*
+ * The factory value: plp_fail_mode picks C2h's (ROWTM-1 makes it ROM), and
+ * with plp the check runs every 15 minutes (PLP-7).
+ */
+static uint32_t nvme_ocp_val_def(FemuCtrl *n, const NvmeOcpValFeat *f)
+{
+    if (f->fid == NVME_OCP_PLP_FAIL_MODE) {
+        return n->plp_mode_def;
+    }
+    if (f->fid == NVME_OCP_PLP_HEALTH_INTERVAL && n->plp) {
+        return 15;
+    }
+    return f->def;
+}
+
 /* back to the factory defaults: realize; a reset restores the saved ones */
 void nvme_ocp_val_init(FemuCtrl *n)
 {
     for (int i = 0; i < ARRAY_SIZE(nvme_ocp_val_feats); i++) {
         const NvmeOcpValFeat *f = &nvme_ocp_val_feats[i];
 
-        n->ocp_val[f->fid - 0xc0] = f->def;
-        n->ocp_val_saved[f->fid - 0xc0] = f->def;
+        n->ocp_val[f->fid - 0xc0] = nvme_ocp_val_def(n, f);
+        n->ocp_val_saved[f->fid - 0xc0] = nvme_ocp_val_def(n, f);
     }
 }
 
@@ -172,7 +191,9 @@ static uint16_t nvme_ocp_val_set(FemuCtrl *n, const NvmeOcpValFeat *f,
 {
     uint32_t v = (dw11 >> f->shift) & f->mask;
 
-    if (dw11 & ~(f->mask << f->shift)) {
+    /* C2h: 00b is reserved (SROWTM-13) */
+    if ((dw11 & ~(f->mask << f->shift)) ||
+        (f->fid == NVME_OCP_PLP_FAIL_MODE && !v)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     n->ocp_val[f->fid - 0xc0] = v;
@@ -354,6 +375,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
         return n->ocp;
+    case NVME_OCP_PLP_FAIL_MODE:
+        return n->ocp && nvme_ocp_choice(n->ocp_profile, 6) == 'A';
     case NVME_KV_FEAT_CONFIG:
         for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
             if (n->namespaces[i].allocated && NS_KVSSD(&n->namespaces[i])) {
@@ -1954,10 +1977,11 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         /* the DSSD state of power state 0: its Maximum Power in watts */
         result = n->ps_max_watts;
         break;
+    case NVME_OCP_PLP_FAIL_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
-        result = nvme_ocp_val_feat(fid)->def;
+        result = nvme_ocp_val_def(n, nvme_ocp_val_feat(fid));
         break;
     default:
         /* every other feature starts at zero, including an empty event list */
@@ -2175,6 +2199,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* the spec gives no value (GPCIE-1); C5h's state is in log C3h */
         cqe->n.result = 0;
         break;
+    case NVME_OCP_PLP_FAIL_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP:
@@ -2570,7 +2595,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         smart_new = NVME_AEC_SMART(dw11) &
                     ~NVME_AEC_SMART(n->features.async_config) &
                     (NVME_SMART_SPARE | NVME_SMART_RELIABILITY |
-                     NVME_SMART_MEDIA_READ_ONLY);
+                     NVME_SMART_MEDIA_READ_ONLY |
+                     NVME_SMART_FAILED_VOLATILE_MEDIA);
         n->features.async_config = dw11;
         if (smart_new && (nvme_critical_warning(n) & smart_new)) {
             qatomic_or(&n->health_pending,
@@ -2634,6 +2660,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         break;
+    case NVME_OCP_PLP_FAIL_MODE:
     case NVME_OCP_PLP_HEALTH_INTERVAL:
     case NVME_OCP_TELEMETRY_PROFILE:
     case NVME_OCP_IDLE_WAKE_UP: {
@@ -2642,6 +2669,10 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 
         if (status) {
             return status;
+        }
+        /* a new interval counts from now */
+        if (fid == NVME_OCP_PLP_HEALTH_INTERVAL) {
+            femu_plp_restart(n);
         }
         break;
     }
@@ -3463,7 +3494,9 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     /* erased lines over erased and emptied lines that wait for an erase */
     log[120] = free_lines + empty_lines ?
                free_lines * 100 / (free_lines + empty_lines) : 0;
-    stw_le_p(&log[128], 0xffff);                    /* no PLP */
+    /* SMART-19 Capacitor Health, FFFFh without PLP; SMART-24 PLP starts */
+    stw_le_p(&log[128], n->plp ? qatomic_read(&n->plp_health) : 0xffff);
+    stq_le_p(&log[160], n->plp_starts);
     nvme_ocp_put(&log[136], 8, unaligned);
     /* SMART-22 the running security version, SMART-33 the rollback floor */
     stq_le_p(&log[144], n->fw.running.svn);
@@ -3848,8 +3881,12 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
         smart.critical_warning |= NVME_SMART_RELIABILITY;
     }
     /* the end of life: no block left to replace a worn-out one */
-    if (st.media_ro) {
+    if (st.media_ro || qatomic_read(&n->plp_ro)) {
         smart.critical_warning |= NVME_SMART_MEDIA_READ_ONLY;
+    }
+    /* plp: the hold-up energy failed its check */
+    if (qatomic_read(&n->plp_failed)) {
+        smart.critical_warning |= NVME_SMART_FAILED_VOLATILE_MEDIA;
     }
     /*
      * The one endurance group holds all the media, so its warnings (bits 0,

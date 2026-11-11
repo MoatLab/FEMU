@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 297 properties of its own and 3 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 300 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -136,6 +136,9 @@ Devices:
 | `streams.max` | `uint16` | `8` | Number of stream slots with streams=on, 1 to 32; bbssd reserves streams.max + 1 lines for them |
 | `power_loss` | `bool` | `off` | bbssd: roll back writes still in the write buffer on a simulated power cut and enable simulate-power-loss; needs buffer_size > 0, vwc=1, page-aligned namespaces, and no meta, pi, ns_mgmt, subsys, namespace_modes or cxl_ssd |
 | `durable_at_done` | `bool` | `off` | with power_loss: a written page is durable when its NAND program ends, not when it is booked; a cut restores the pages whose program had not ended, Flush, cache disable and shutdown wait for the last program; on a namespace with metadata, Copy and Write Zeroes without Deallocate fail with Invalid Field; not with mp_program, pe_suspend, read_prio, prog_pass2_ns, die_parity, rain_parity, ns_wp or sanitize_ns; off (default) |
+| `plp` | `bool` | `off` | with power_loss: power-loss protection; a cut writes the buffer back, FUA and Flush complete without the media, and vwc=0 keeps the buffer; C0h reports plp_health as Capacitor Health; with ocp=on it needs vwc=0; not with durable_at_done or rain_parity; off (default) |
+| `plp_health` | `uint32` | `120` | with plp: hold-up energy at realize in percent, 0 to 65534; below 1 the check at enable and every C6h minutes (default 15) fails the protection; 120 (default) |
+| `plp_fail_mode` | `str` | unset | with plp: what a failed protection does, rom (default, writes fail 82h), wtm (write-through) or normal; sets the C2h factory value, and ocp DP-CFG-6 B needs rom; Critical Warning bit 4 and a SMART event in every mode |
 | `ready_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin commands queued before ready run then; 0 (default) is ready at once |
 | `recovery_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY for the first start after a power cut, in ms, 0 or ready_ms to 7499; 0 (default) uses ready_ms |
 | `shutdown_ms` | `uint32` | `0` | time in ms of guest time CSTS.SHST reads 01b (in progress) after a shutdown, below 5000; the shutdown work is done before it; 0 (default) is complete at once |

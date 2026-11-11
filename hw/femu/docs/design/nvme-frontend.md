@@ -837,14 +837,17 @@ CEDA (bits 31:16) and CMDA (bits 15:0).
 With `ocp=on` the OCP 2.7 features answer through UUID index 0 or 1 (OCP
 4.15). C5h configures the latency monitor, C7h selects a DSSD power state
 and C9h configures the DSSD events. C6h, C8h and CAh hold one value each,
-with a current, default and saved value. FEMU only stores them: it models
-no PLP circuit or idle mode. Device profile B, the only one FEMU takes,
-disables C2h (DP-CFG-6) and prohibits CBh (DP-CFG-13), so both fail.
+with a current, default and saved value. C2h exists with DP-CFG-6 A
+only, and picks what a failed PLP does (`plp=on`, see
+[FTL](ftl.md#power-loss-protection-plp)). C6h sets how often the PLP
+check runs. FEMU models no idle mode. DP-CFG-13 prohibits CBh, so it
+fails.
 
 ```text
  FID  name                         CDW11 bits  default  note
+ C2h  PLP failure mode             31:30       01b      ROM; 10b WTM, 11b normal
  C3h  clear PCIe error counters    31          -        not saveable; reads 0
- C6h  PLP health check interval    31:16       0        minutes
+ C6h  PLP health check interval    31:16       0        minutes; 15 with plp
  C8h  telemetry profile            7:0         0        saved without SV
  CAh  idle wake up time            15:0        0        ms
 ```

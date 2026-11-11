@@ -1131,6 +1131,10 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         if (femu_wp(req->ns)) {
             break;
         }
+        /* with working plp the buffer is power safe already (NVMe-IO-3) */
+        if (femu_plp_ok(n)) {
+            break;
+        }
         lat = ssd_buffer_destage(ssd, 0, req->stime);
         /*
          * Pages the idle write-back or a cache disable took out may still be

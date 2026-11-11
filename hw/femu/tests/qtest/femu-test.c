@@ -46083,6 +46083,257 @@ static void femu_test_durable_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* qom-set plp-health on the device with id "power" */
+static void femu_plp_health(QTestState *qts, uint32_t pct)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'plp-health','value':%u}}", pct);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* SMART Critical Warning */
+static uint8_t femu_plp_cw(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, FEMU_LOG_SMART, buf, 512, 0)), ==,
+                    NVME_SUCCESS);
+    return qtest_readb(c->pdev->bus->qts, buf);
+}
+
+/* the microseconds a write takes */
+static int64_t femu_plp_write_us(FemuCtrlState *c, uint64_t buf,
+                                 uint8_t pattern, bool fua)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    femu_power_write(c, buf, 1, 0, 8, pattern, fua);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * plp=on, vwc=0, 2 s programs: the buffer stays on, a write and a FUA
+ * write both complete from it, and a cut keeps both. C0h counts the
+ * two cuts and reports Capacitor Health 120.
+ */
+static void femu_test_plp_keep(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const char *cases[][2] = {
+        { "'buffer_size':16,'plp':true", "plp needs power_loss=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'plp_health':65535", "plp_health must be 0 to 65534" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,"
+          "'plp_fail_mode':'rom'", "plp_fail_mode needs plp=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'plp_fail_mode':'off'", "must be rom, wtm or normal" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'durable_at_done':true", "plp is not supported with durable" },
+        { "'ocp':true,'ocp_profile':'BAABAAAAAABAB'",
+          "DP-CFG-6 A needs plp=on" },
+        { "'buffer_size':16,'power_loss':true,'plp':true,"
+          "'ocp':true,'plp_fail_mode':'wtm'",
+          "DP-CFG-6 B needs plp_fail_mode rom" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'ocp':true", "plp with ocp=on needs vwc=0" },
+    };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xa1, false), <, 1000000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xb2, true), <, 1000000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 128) & 0xffff, ==, 120);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *add = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'plpr','addr':'5','femu_mode':1,"
+            "'devsz_mb':8,%s}}", cases[i][0]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * ocp=on with DP-CFG-6 A, so C2h exists. Its factory value is ROM (01b,
+ * ROWTM-1); 00b is refused. With C6h at 1 minute and the energy at 0,
+ * the next check fails the protection: a SMART reliability event, CW
+ * 18h (backup failed, read only), and writes fail 82h. The buffered
+ * page was written back first, so a cut keeps it.
+ */
+static void femu_test_plp_fail_rom(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+    uint32_t r;
+    uint32_t res = 0;
+    uint16_t cid;
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 1, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 3, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r & 0x7, ==, 0x5);          /* saveable, changeable */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 0, 1, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    /* WTM saved, then ROM current: a reset brings WTM back */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 1, 1, 2u << 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 0, 1, 1u << 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 2, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 2);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    /* PLP-7: the check runs every 15 minutes from the factory */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc6, 1, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 15);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc6, 0, 1, 1u << 16, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0,
+                                             NVME_SMART_FAILED_VOLATILE_MEDIA,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    want = femu_aer(&c);
+
+    femu_plp_health(qts, 0);
+    /* not checked yet: nothing changed */
+    qtest_clock_step(qts, 30 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    qtest_clock_step(qts, 31 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020001);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x18);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 128) & 0xffff, ==, 0);
+
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_WRITE_TO_RO));
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    /* every cut starts the protection, failed or not (SMART-24) */
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 1);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x18);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * plp_fail_mode=wtm, no ocp, 2 s programs: C6h is not there, and the check
+ * runs every 15 minutes. Before it fails, a Flush has nothing to wait for
+ * (NVMe-IO-3). After it fails, CW is 10h, a write waits for its program,
+ * and a cut keeps both it and the page buffered before.
+ */
+static void femu_test_plp_fail_wtm(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    {
+        int64_t t0 = g_get_monotonic_time();
+
+        femu_power_flush(&c, 1);
+        g_assert_cmpint(g_get_monotonic_time() - t0, <, 1000000);
+    }
+    femu_plp_health(qts, 0);
+    qtest_clock_step(qts, 14 * 60 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    qtest_clock_step(qts, 61 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xc3, false), >=, 1500000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * plp_fail_mode=normal with the energy at 0 from realize: the check at
+ * the first enable fails the protection (PLP-3). CW is 10h, writes go on
+ * from the buffer, and a cut loses them as without plp. The failure stays
+ * when the energy comes back.
+ */
+static void femu_test_plp_fail_normal(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+    /* no working protection: FUA programs the page */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_plp_health(qts, 120);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 1);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -46298,7 +46549,6 @@ static void femu_test_ocp_refused(void *obj, void *data,
             /* A choices that need a function FEMU does not have */
             { "'ocp':true,'ocp_profile':'AAABABAAAABAB'", "DP-CFG-1 A" },
             { "'ocp':true,'ocp_profile':'BAAAABAAAABAB'", "DP-CFG-4 A" },
-            { "'ocp':true,'ocp_profile':'BAABAAAAAABAB'", "DP-CFG-6 A" },
             { "'ocp':true,'ocp_profile':'BAABABAAAAAAB'", "DP-CFG-11 A" },
             { "'ocp':true,'ocp_profile':'BAABABAAAABAA'", "DP-CFG-13 A" },
         };
@@ -62544,6 +62794,39 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
             "durable_at_done=on"
+    });
+    qos_add_test("plp-keep", "femu", femu_test_plp_keep,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=0,power_loss=on,plp=on,"
+            "ocp=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("plp-fail-rom", "femu", femu_test_plp_fail_rom,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=0,power_loss=on,plp=on,"
+            "ocp=on,ocp_profile=BAABAAAAAABAB"
+    });
+    qos_add_test("plp-fail-wtm", "femu", femu_test_plp_fail_wtm,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,plp=on,"
+            "plp_fail_mode=wtm,pg_wr_lat=2000000000"
+    });
+    qos_add_test("plp-fail-normal", "femu", femu_test_plp_fail_normal,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=0,power_loss=on,plp=on,"
+            "plp_fail_mode=normal,plp_health=0,ocp=on,"
+            "ocp_profile=BAABAAAAAABAB"
     });
     qos_add_test("io-stages-ns", "femu", femu_test_io_stages_ns,
                  &(QOSGraphTestOptions) {

@@ -46,8 +46,13 @@ int comp_buffer(const void *a, const void *b)
  */
 bool ssd_buffer_enabled(struct ssd *ssd)
 {
-    if ((ssd->n->power_loss && !ssd->n->vwc) ||
-        ssd->sp.buffer_size <= 0 || !ssd->wb_tree) {
+    /*
+     * Without a cache the host can see, a power_loss buffer is one that
+     * plp protects. A failed protection in WTM mode writes through.
+     */
+    if ((ssd->n->power_loss && !ssd->n->vwc && !ssd->n->plp) ||
+        ssd->sp.buffer_size <= 0 || !ssd->wb_tree ||
+        unlikely(qatomic_read(&ssd->n->plp_wt))) {
         return false;
     }
 
@@ -380,10 +385,15 @@ uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat)
                                       NVME_SUCCESS;
 }
 
-/* Admin callers hold both pollers and the FTL thread paused. */
+/*
+ * Admin callers hold both pollers and the FTL thread paused. Every
+ * namespace is written back, also after one fails; the first failure is
+ * the result.
+ */
 uint16_t bbssd_flush_all(FemuCtrl *n)
 {
     uint64_t now = femu_dev_now(n);
+    uint16_t status = NVME_SUCCESS;
 
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
@@ -399,12 +409,12 @@ uint16_t bbssd_flush_all(FemuCtrl *n)
 
             /* no command waits for these programs; a later Flush does */
             ssd->buffer_bg_fence = MAX(ssd->buffer_bg_fence, now + lat);
-            if (ssd->write_buffer_cnt) {
-                return NVME_CAP_EXCEEDED | NVME_DNR;
+            if (ssd->write_buffer_cnt && !status) {
+                status = NVME_CAP_EXCEEDED | NVME_DNR;
             }
         }
     }
-    return NVME_SUCCESS;
+    return status;
 }
 
 /*
@@ -1282,7 +1292,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * one.
      */
     /* Program stream writes directly even when a cache is enabled. */
-    if (ssd_buffer_enabled(ssd) && !fua && stream < 0 &&
+    /* with working plp the buffer is as durable as FUA asks (OCP NVMe-IO-3) */
+    if (ssd_buffer_enabled(ssd) && (!fua || femu_plp_ok(ssd->n)) &&
+        stream < 0 &&
         (!ssd->n->power_loss || req->write_data)) {
         int batch = ssd_buffer_batch(ssd);
 

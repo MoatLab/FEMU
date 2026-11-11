@@ -577,6 +577,8 @@ static void nvme_reset_features(FemuCtrl *n)
     nvme_ana_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     nvme_ocp_val_reset(n);
+    /* the next PLP check follows the C6h value the reset restored */
+    femu_plp_restart(n);
     /* a reset disables the HMB; the FTL takes the table back */
     femu_hmb_off(n);
     n->features.temp_thresh     = n->ocp ? NVME_OCP_WCTEMP :
@@ -988,6 +990,10 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             }
             femu_shut_clear(n);
             n->bar.cc = data;
+            /* the power-on protection check comes before any write */
+            if (!shutdown) {
+                femu_plp_enable(n);
+            }
             if (shutdown) {
                 /* shut down in the same write: the controller never starts */
             } else if (nvme_start_ctrl(n)) {
@@ -3574,6 +3580,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
     g_clear_pointer(&n->vwc_timer, timer_free);
+    g_clear_pointer(&n->plp_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
@@ -4326,6 +4333,9 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
     }
     n->ocp_dssd_ps_saved = n->ps_max_watts;
     n->power_mgmt_saved = 0;
+    if (!femu_plp_init(n, errp)) {
+        return false;
+    }
     nvme_ocp_val_init(n);
     if (n->fw_slots > 7) {
         error_setg(errp, "fw_slots must be 0 (auto) to 7");
@@ -4401,7 +4411,6 @@ static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
     } missing[] = {
         { 1, "a 4096-byte LBA format 0" },
         { 4, "NVMe Basic Management" },
-        { 6, "the EOL/PLP failure mode (C2h)" },
         { 11, "in-band Lockdown" },
         { 13, "Max PCIe Interface Configuration (CBh)" },
     };
@@ -5033,8 +5042,12 @@ static void femu_aer_bh(void *opaque)
                            NVME_AER_INFO_SMART_RELIABILITY,
                            NVME_LOG_SMART_INFO);
     }
-    /* media placed in read only mode is a reliability event too (Fig. 153) */
-    if (bits & aec & NVME_SMART_MEDIA_READ_ONLY) {
+    /*
+     * Media placed in read only mode is a reliability event too (Fig. 153),
+     * and so is a failed volatile memory backup (OCP INCS-1).
+     */
+    if (bits & aec & (NVME_SMART_MEDIA_READ_ONLY |
+                      NVME_SMART_FAILED_VOLATILE_MEDIA)) {
         nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
                            NVME_AER_INFO_SMART_RELIABILITY,
                            NVME_LOG_SMART_INFO);
@@ -5110,6 +5123,7 @@ static void femu_exit(PCIDevice *pci_dev)
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
     g_clear_pointer(&n->vwc_timer, timer_free);
+    g_clear_pointer(&n->plp_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);
     }
@@ -5204,6 +5218,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("cqr", FemuCtrl, cqr, 1),
     DEFINE_PROP_UINT8("vwc", FemuCtrl, vwc, 0),
     DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
+    DEFINE_PROP_BOOL("plp", FemuCtrl, plp, false),
+    DEFINE_PROP_UINT32("plp_health", FemuCtrl, plp_health, 120),
+    DEFINE_PROP_STRING("plp_fail_mode", FemuCtrl, plp_fail_mode),
     DEFINE_PROP_BOOL("durable_at_done", FemuCtrl, durable_at_done, false),
     DEFINE_PROP_UINT32("ready_ms", FemuCtrl, ready_ms, 0),
     DEFINE_PROP_UINT32("recovery_ms", FemuCtrl, recovery_ms, 0),
@@ -6318,6 +6335,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     }
     /* one cut time for every namespace, taken before any restore */
     n->durable_cut = femu_dev_now(n);
+    femu_plp_cut(n);
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
             lost |= bbssd_power_loss(&n->namespaces[i]);
@@ -6492,6 +6510,7 @@ static void femu_instance_init(Object *obj)
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
+    femu_plp_add_props(obj);
     object_property_add_str(obj, "die-slow", femu_die_slow_get,
                             femu_die_slow_set);
     nvme_ana_add_props(obj);
