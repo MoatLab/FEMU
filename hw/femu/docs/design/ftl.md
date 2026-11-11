@@ -970,6 +970,10 @@ so no die holds all the parity.
   bit 2 (and EGCWS bit 2) stays set. A failure at run time also raises a
   SMART event, a telemetry trigger and a Persistent Event log record.
   Each degraded read counts in the OCP C0h XOR Recovery Count.
+- After a failure, lines have two sizes. A GC victim that holds more
+  live pages than the free room can take goes back to the queue, and the
+  line with the fewest live pages goes instead. Without this, FIFO GC
+  could stall on a large old line.
 - A failure at run time (the qtest hook `x-rain-fail`) needs room for
   GC: an old line can fill two new lines, so the forced GC reserve must
   hold two lines.

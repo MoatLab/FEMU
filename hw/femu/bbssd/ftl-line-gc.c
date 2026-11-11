@@ -1763,6 +1763,52 @@ static void note_forced_end(struct ssd *ssd)
 
 static int pace_finish(struct ssd *ssd);
 
+/*
+ * rain_parity after a die failure: lines have two sizes. An old line can
+ * hold more live pages than the free lines and the open destination can
+ * take, and a policy that keeps it first (FIFO) would then stall GC for
+ * good. Such a victim goes back to the queue, and the line with the
+ * fewest live pages goes instead.
+ *
+ *   room = free lines * new line size + room left in the destination
+ *   victim live pages > room --> take the line with the fewest live pages
+ */
+static struct line *ssd_rain_fit_victim(struct ssd *ssd, struct line *victim)
+{
+    struct ssdparams *spp = &ssd->sp;
+    pqueue_t *pq = ssd->lm.victim_line_pq;
+    struct write_pointer *dst = spp->gc_frontier ? &ssd->gc_wp : &ssd->wp;
+    struct line *best = NULL;
+    uint64_t room;
+
+    if (!spp->rain_parity || spp->rain_fail_t < 0) {
+        return victim;
+    }
+    room = (uint64_t)ssd->lm.free_line_cnt * spp->pls_per_lun *
+           spp->pgs_per_blk * (ssd_rain_members(spp, 1) - 1);
+    if (dst->curline) {
+        room += ssd_line_data_pgs(ssd, dst->curline) - dst->curline->vpc -
+                dst->curline->ipc;
+    }
+    if ((uint64_t)victim->vpc <= room) {
+        return victim;
+    }
+    /* the heap is 1-indexed and size is count + 1 */
+    for (size_t i = 1; i < pq->size; i++) {
+        struct line *ln = pq->d[i];
+
+        if (!best || ln->vpc < best->vpc) {
+            best = ln;
+        }
+    }
+    if (!best || best->vpc >= victim->vpc) {
+        return victim;
+    }
+    pqueue_insert(pq, victim);
+    pqueue_remove(pq, best);
+    return best;
+}
+
 int do_gc(struct ssd *ssd, bool force)
 {
     int free_lines = ssd->lm.free_line_cnt;
@@ -1788,6 +1834,7 @@ int do_gc(struct ssd *ssd, bool force)
     if (!victim_line) {
         return -1;
     }
+    victim_line = ssd_rain_fit_victim(ssd, victim_line);
     trace_femu_gc_victim(victim_line->id, victim_line->vpc, victim_line->ipc);
 
     if (ssd->n->streams && victim_line->vpc && !ssd->lm.free_line_cnt) {
