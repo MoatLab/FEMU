@@ -2320,6 +2320,8 @@ static bool femu_durable_check(FemuCtrl *n, Error **errp)
         why = "prog_pass2_ns";
     } else if (bp->die_parity > 0) {
         why = "die_parity";
+    } else if (bp->rain_parity > 0) {
+        why = "rain_parity";
     } else if (n->ns_wp) {
         why = "ns_wp";
     } else if (n->sanitize_ns) {
@@ -5429,6 +5431,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("read_prio", FemuCtrl, bb_params.read_prio, 0),
     DEFINE_PROP_INT32("prog_pass2_ns", FemuCtrl, bb_params.prog_pass2_ns, 0),
     DEFINE_PROP_INT32("die_parity", FemuCtrl, bb_params.die_parity, 0),
+    DEFINE_PROP_INT32("rain_parity", FemuCtrl, bb_params.rain_parity, 0),
     DEFINE_PROP_INT32("parity_xor_ns", FemuCtrl, bb_params.parity_xor_ns, 0),
     DEFINE_PROP_INT32("failed_die", FemuCtrl, bb_params.failed_die, -1),
     DEFINE_PROP_INT32("inject_die", FemuCtrl, bb_params.inject_die, 0),

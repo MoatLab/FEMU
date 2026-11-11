@@ -232,6 +232,7 @@ struct ssdparams {
     uint32_t prog_pass2_lag;  /* wordlines between coarse and fine, 1 or more */
     int wl_pages;             /* pages per wordline for the fine pass */
     int die_parity;           /* a parity program per full die stripe */
+    int rain_parity;          /* in-line parity pages per stripe (RAIN) */
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
     int tresume_ns;
@@ -264,6 +265,7 @@ struct ssdparams {
 
     int secs_per_line;
     int pgs_per_line;
+    int line_data_pgs;        /* pages of a line that hold data */
     int blks_per_line;
     int tt_lines;
 
@@ -940,6 +942,7 @@ struct ssd {
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
+uint64_t bb_line_data_pgs(const BbCtrlParams *p);
 uint64_t bb_eol_reserve_lines(FemuCtrl *n);
 uint64_t bb_fdp_eol_units(FemuCtrl *n);
 uint64_t bb_fdp_eol_reserve(FemuCtrl *n);
@@ -999,6 +1002,7 @@ void ssd_durable_init(struct ssd *ssd);
 void ssd_durable_drop_all(struct ssd *ssd);
 void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
+void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp);
 uint64_t ssd_durable_start(struct ssd *ssd, uint64_t stime, uint64_t *book);
 void ssd_durable_slot_used(struct ssd *ssd, int64_t done);
 void ssd_durable_free(struct ssd *ssd);

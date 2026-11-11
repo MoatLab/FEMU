@@ -168,7 +168,8 @@ static const char *const persist_ftl_refused[] = {
     "wl_spread", "read_reclaim_limit", "retention_limit_sec",
     "ecc_retention_sec", "pd_open_read_limit", "pd_open_close_sec",
     "pd_open_age", "rber_ppb", "err_read_unc_ppm", "err_write_fail_ppm",
-    "die_parity", "read_cache_mb", "prog_pass2_ns", "onfi_param_page",
+    "die_parity", "rain_parity", "read_cache_mb", "prog_pass2_ns",
+    "onfi_param_page",
     "nand_profile", "mp_program", "mp_read", "onfi_cache_read",
     "pe_suspend", "read_prio", "iu_pages", "plane_first", "power_loss",
 };

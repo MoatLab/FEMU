@@ -28,7 +28,7 @@ static inline void ssd_wp_reset(struct write_pointer *wpp, struct line *line)
  * true when the step wrapped past page @pgs - 1 of each block, leaving the
  * pointer at page 0 for the caller to retire the line.
  */
-static inline bool ssd_wp_step_lim(struct ssdparams *spp,
+static inline bool ssd_wp_step_raw(struct ssdparams *spp,
                                    struct write_pointer *wpp, int pgs)
 {
     /* the dies of the pointer's window; with none set, every die */
@@ -65,6 +65,57 @@ static inline bool ssd_wp_step_lim(struct ssdparams *spp,
     }
     wpp->pg = 0;
     return true;
+}
+
+/*
+ * rain_parity: row r = pg * pls_per_lun + pl of a line is one stripe, one
+ * page per die. Its parity member is at pointer-order position
+ * t = lun * nchs + ch = dies - 1 - r % dies, so row 0 has parity last and
+ * a pointer that starts a line starts on data.
+ *
+ *          t0 t1 t2 t3
+ *   row 0:  D  D  D  P
+ *   row 1:  D  D  P  D
+ */
+static inline int ssd_rain_parity_t(struct ssdparams *spp, int pl, int pg)
+{
+    int r = pg * spp->pls_per_lun + pl;
+
+    return spp->tt_luns - 1 - r % spp->tt_luns;
+}
+
+static inline bool ssd_rain_member(struct ssdparams *spp, int ch, int lun,
+                                   int pl, int pg)
+{
+    return spp->rain_parity &&
+           lun * spp->nchs + ch == ssd_rain_parity_t(spp, pl, pg);
+}
+
+/*
+ * Step to the next page that can hold data: with rain_parity the parity
+ * member of each row is stepped over. Returns true when the line wrapped.
+ */
+static inline bool ssd_wp_step_lim(struct ssdparams *spp,
+                                   struct write_pointer *wpp, int pgs)
+{
+    do {
+        if (ssd_wp_step_raw(spp, wpp, pgs)) {
+            return true;
+        }
+    } while (ssd_rain_member(spp, wpp->ch, wpp->lun, wpp->pl, wpp->pg));
+    return false;
+}
+
+/* die_parity or rain_parity: a stripe has parity, a failed die reads */
+static inline bool ssd_parity_on(const struct ssdparams *spp)
+{
+    return spp->die_parity || spp->rain_parity;
+}
+
+/* the pages of @line that hold data: all but the parity pages */
+static inline int ssd_line_data_pgs(struct ssd *ssd, struct line *line)
+{
+    return ssd->sp.line_data_pgs;
 }
 
 /* step a write pointer over a line whose blocks take every page */

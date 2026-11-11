@@ -42,12 +42,19 @@ int bb_gc_forced_lines(FemuCtrl *n)
  * the admitted writes may hold at once, which is at least the largest write
  * any one command can make. Zero unless eol_admit is on.
  */
+uint64_t bb_line_data_pgs(const BbCtrlParams *p)
+{
+    uint64_t dies = (uint64_t)p->nchs * p->luns_per_ch;
+    uint64_t line = dies * p->pls_per_lun * p->pgs_per_blk;
+
+    return p->rain_parity && dies ? line - line / dies : line;
+}
+
 uint64_t bb_eol_reserve_lines(FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
     uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
-    uint64_t line = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
-                    p->pgs_per_blk;
+    uint64_t line = bb_line_data_pgs(p);
     uint64_t pages;
 
     /* under FDP the reclaim groups hold the reserve (bb_fdp_eol_units) */
@@ -330,8 +337,9 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
      */
     if (p->parity_xor_ns < 0 || p->failed_die < -1 ||
         p->failed_die >= p->nchs * p->luns_per_ch ||
-        ((p->parity_xor_ns || p->failed_die >= 0) && !p->die_parity) ||
-        (p->die_parity &&
+        ((p->parity_xor_ns || p->failed_die >= 0) &&
+         !p->die_parity && !p->rain_parity) ||
+        ((p->die_parity || p->rain_parity) &&
          (p->nchs * p->luns_per_ch < 2 || p->mp_program || p->mp_read ||
           p->onfi_cache_read || p->gc_copyback || KVSSD(n) ||
           n->namespace_modes || p->rber_ppb ||
@@ -343,11 +351,31 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
          * of DFTL can skip it, and degraded reads take no retry model, so
          * those are refused too; bb_flip() keeps GC timed.
          */
-        error_setg(errp, "FEMU bbssd: die_parity needs two dies at least and "
+        error_setg(errp, "FEMU bbssd: die_parity and rain_parity need two "
+                   "dies at least and "
                    "mapping=page, and does not work with mp_program, "
                    "mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, "
                    "namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - "
                    "1) need die_parity");
+        return -1;
+    }
+    /*
+     * RAIN (rain_parity): the parity page of each stripe takes a page of
+     * the line. Every line pointer must step past it, so the pointers
+     * with their own allocators (Streams, the pSLC tier) are refused, and
+     * so are the features that write pages outside the pointer order (pad
+     * on age, wear levelling's swap) or that keep their own page state
+     * (the fine pass, the durability journal, a saved FTL).
+     */
+    if (p->rain_parity < 0 || p->rain_parity > 1 ||
+        (p->rain_parity &&
+         (p->die_parity || p->prog_pass2_ns || p->wl_spread ||
+          p->pd_open_close_sec || n->streams || n->durable_at_done ||
+          (p->tier_mode && strcmp(p->tier_mode, "off"))))) {
+        error_setg(errp, "FEMU bbssd: rain_parity is 0 or 1, and does not "
+                   "work with die_parity, prog_pass2_ns, wl_spread, "
+                   "pd_open_close_sec, Streams, durable_at_done or the pSLC "
+                   "tier");
         return -1;
     }
     /* the die that OCP event 0016h (NAND Die Offline) takes offline */
@@ -556,6 +584,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->prog_pass2_lag = MAX(n->bb_params.prog_pass2_lag, 1);
     spp->wl_pages = bb_pd_wl_pages(n);
     spp->die_parity = n->bb_params.die_parity;
+    spp->rain_parity = n->bb_params.rain_parity;
     spp->parity_xor_ns = n->bb_params.parity_xor_ns;
     spp->failed_die = n->bb_params.failed_die;
     spp->tresume_ns = n->bb_params.tresume_ns;
@@ -634,6 +663,10 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
      */
     spp->blks_per_line = spp->tt_luns * spp->pls_per_lun;
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
+    /* rain_parity: one page of each row of the line holds parity */
+    spp->line_data_pgs = spp->pgs_per_line -
+                         (spp->rain_parity ? spp->pgs_per_line / spp->tt_luns
+                                           : 0);
     spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
     spp->tt_lines = spp->blks_per_pl;
 

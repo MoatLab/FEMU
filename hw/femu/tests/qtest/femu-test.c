@@ -7292,6 +7292,21 @@ static void femu_test_pd_refused(void *obj, void *data,
         { "'femu_mode':1,'pd_edge_wls':-1,'pd_edge_tiers':1",
           "must not be negative" },
         { "'femu_mode':1,'pd_open_read_limit':-1", "must not be negative" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':2", "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'die_parity':1",
+          "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'wl_spread':4",
+          "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'pd_open_close_sec':1",
+          "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'mapping':'dftl'",
+          "die_parity and rain_parity need" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'prog_pass2_ns':1000",
+          "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'streams':true",
+          "rain_parity is 0 or 1" },
+        { "'femu_mode':1,'nchs':2,'rain_parity':1,'mp_program':1",
+          "die_parity and rain_parity need" },
         { "'femu_mode':1,'pd_open_close_sec':-1", "must not be negative" },
         { "'femu_mode':1,'pd_open_read_limit':9,'read_reclaim_limit':8",
           "not be above read_reclaim_limit" },
@@ -7310,11 +7325,18 @@ static void femu_test_pd_refused(void *obj, void *data,
     QDict *rsp;
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
-        g_autofree char *cmd = g_strdup_printf(
+        /* a case may set its own channel count (rain_parity needs two) */
+        const char *nchs = "'nchs':1,";
+        g_autofree char *cmd = NULL;
+
+        if (strstr(cases[i].opts, "nchs")) {
+            nchs = "";
+        }
+        cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{"
             "'driver':'femu','id':'pd-bad','addr':'5','devsz_mb':4,"
             "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
-            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,%s%s}}",
+            "'pls_per_lun':1,'luns_per_ch':1,%s%s%s}}", nchs,
             strstr(cases[i].opts, "ecc_step_ns") ? "" :
             "'ecc_step_ns':1000000,", cases[i].opts);
 
@@ -9984,6 +10006,148 @@ static void femu_test_die_parity(void *obj, void *data, QGuestAllocator *alloc)
         femu_parity_counters(qts, &parity, &nread, &waf);
         g_assert_cmpuint(parity, ==, 1);
         g_assert_cmpuint(nread, ==, 1);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* exactly one line is full: @vpc valid pages, no invalid one */
+static void femu_rain_full_line(QTestState *qts, uint64_t vpc)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
+    QDict *cnt = qdict_get_qdict(ns, "line-counts");
+    QList *lines = qdict_get_qlist(ns, "lines");
+    QListEntry *e;
+    int full = 0;
+
+    g_assert_cmpuint(qdict_get_int(cnt, "full"), ==, 1);
+    QLIST_FOREACH_ENTRY(lines, e) {
+        QDict *l = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(l, "state"), "full")) {
+            g_assert_cmpuint(qdict_get_int(l, "vpc"), ==, vpc);
+            g_assert_cmpuint(qdict_get_int(l, "ipc"), ==, 0);
+            full++;
+        }
+    }
+    g_assert_cmpint(full, ==, 1);
+    qobject_unref(rsp);
+}
+
+/*
+ * rain_parity on 4 dies (2 channels, 2 LUNs), 8-page blocks. @data names
+ * the case:
+ *   "line":  one plane. One line holds 24 data pages: 32 pages less one
+ *            parity page per row. 24 writes fill it with no write left
+ *            over, map no page on a parity member (x-ftl-check counts that
+ *            as lost), and book 8 parity programs: WAF 32 / 24.
+ *   "pf":    the same with two planes and plane_first: 48 data pages,
+ *            16 parity programs.
+ *   "gc":    one plane, 16 lines: 2048 random writes over 256 pages make
+ *            collection move pages; the mapping stays clean and every
+ *            page reads its last pattern.
+ *   "seal":  pd_open_read_limit=4. Two pages in row 0, four reads of
+ *            page 0, then one write: the FTL seals the open line, which
+ *            books the parity of row 0 (two of three data pages), and
+ *            rewrites the two pages with the new one into a fresh row 0,
+ *            which books it again: 2 parity programs.
+ *   "seal2": the same on two planes with plane_first: the two pages
+ *            open rows 0 and 1, the seal books both (2), and the three
+ *            rewritten pages fill no row: 2 in all.
+ *   "seal5": five pages fill row 0 (1) and leave row 1 with two; the seal
+ *            books row 1 only (2), and the six rewritten pages fill both
+ *            rows of the fresh line (4).
+ *
+ *          t0  t1  t2  t3          t = lun * nchs + ch
+ *   row 0:  D   D   D   P
+ *   row 1:  D   D   P   D
+ */
+static void femu_test_rain(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t parity, nread;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    if (g_str_equal(mode, "line") || g_str_equal(mode, "pf")) {
+        int pages = g_str_equal(mode, "pf") ? 48 : 24;
+
+        qtest_memset(qts, buf, 0x3c, 4096);
+        for (int i = 0; i < pages; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, pages);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, pages / 3);
+        g_assert_cmpfloat(waf, >, 1.32);
+        g_assert_cmpfloat(waf, <, 1.34);
+        /* the last data page closed the line: full, and no longer open */
+        femu_rain_full_line(qts, pages);
+    } else if (g_str_equal(mode, "gc")) {
+        uint8_t last[256] = { 0 };
+        uint32_t x = 12345;
+
+        for (int i = 0; i < 2048; i++) {
+            int lba;
+
+            x = x * 1103515245u + 12345u;
+            lba = (x >> 8) % 256;
+            last[lba] = (uint8_t)(i | 1);
+            qtest_memset(qts, buf, last[lba], 4096);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba * 8,
+                                            buf)), ==, NVME_SUCCESS);
+        }
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 256);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        for (int lba = 0; lba < 256; lba++) {
+            if (!last[lba]) {
+                continue;
+            }
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, lba * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, last[lba]);
+        }
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_test_message("rain gc: %" PRIu64 " parity programs, WAF %.3f",
+                       parity, waf);
+        g_assert_cmpfloat(waf, >, 4.0 / 3.0);
+    } else {
+        /* seal: 2 pages, 1 plane; seal2: 2 pages, seal5: 5, two planes */
+        int n = g_str_equal(mode, "seal5") ? 5 : 2;
+        uint64_t want = g_str_equal(mode, "seal5") ? 4 : 2;
+        uint64_t before = g_str_equal(mode, "seal5") ? 1 : 0;
+
+        qtest_memset(qts, buf, 0x7e, 4096);
+        for (int i = 0; i < n; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, before);
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, n * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, want);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, n + 1);
+        g_assert_cmpuint(lost, ==, 0);
     }
     femu_disable(&c);
     guest_free(alloc, buf);
@@ -57071,6 +57235,55 @@ static void femu_register_nodes(void)
             "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=3,"
             "pg_rd_lat=100000000,die_parity=1,parity_xor_ns=50000000,"
             "failed_die=1"
+    });
+    qos_add_test("rain-line", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"line",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=40,pls_per_lun=1"
+    });
+    qos_add_test("rain-pf", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pf",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=40,pls_per_lun=2,plane_first=1"
+    });
+    qos_add_test("rain-gc", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gc",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=16,pls_per_lun=1"
+    });
+    qos_add_test("rain-seal2", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"seal2",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=40,pls_per_lun=2,plane_first=1,pd_open_read_limit=4"
+    });
+    qos_add_test("rain-seal5", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"seal5",
+        /* its own device line: qos reuses a QEMU for an equal one */
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=48,pls_per_lun=2,plane_first=1,pd_open_read_limit=4"
+    });
+    qos_add_test("rain-seal", "femu", femu_test_rain,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"seal",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=40,pls_per_lun=1,pd_open_read_limit=4"
     });
     qos_add_test("hmb", "femu", femu_test_hmb,
                  &(QOSGraphTestOptions) {

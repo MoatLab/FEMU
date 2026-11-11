@@ -458,6 +458,66 @@ static void ssd_parity_book(struct ssd *ssd, struct ppa *ppa, uint64_t done)
 }
 
 /*
+ * rain_parity: the parity program of row (@pl, @pg) of line @blk, on its
+ * parity member, @xor_ns after @t. The page stays free: it maps no data;
+ * the block counts it as programmed.
+ */
+static void ssd_rain_book(struct ssd *ssd, int blk, int pl, int pg,
+                          uint64_t t)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int tp = ssd_rain_parity_t(spp, pl, pg);
+    struct ppa p = { .ppa = 0 };
+    NandLoc loc;
+
+    p.g.blk = blk;
+    p.g.ch = tp % spp->nchs;
+    p.g.lun = tp / spp->nchs;
+    p.g.pl = pl;
+    p.g.pg = pg;
+    get_blk(ssd, &p)->wp++;
+    loc = bb_decode_loc(ssd, &p, t, false);
+    ssd->media_ops[NAND_MEDIA_PROGRAM]++;
+    qatomic_set(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM],
+                qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM]) + 1);
+    nand_media_op(&ssd->media, &loc, NAND_MEDIA_PROGRAM,
+                  t + spp->parity_xor_ns);
+    ssd->parity_pages++;
+}
+
+/*
+ * A pointer closes its line before the end: each row of its current page
+ * that holds some data but is not full gets its parity now. A full row
+ * got it when its last data page was booked. The order index of a page
+ * follows the pointer: plane before die with plane_first, else after.
+ *
+ *   row (pl, pg): data members the pointer passed = n
+ *   n == 0: nothing to protect     0 < n < dies - 1: book parity now
+ */
+void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int dies = spp->tt_luns;
+    int pls = spp->pls_per_lun;
+    int tw = wp->lun * spp->nchs + wp->ch;
+    int at = spp->plane_first ? tw * pls + wp->pl : wp->pl * dies + tw;
+
+    for (int pl = 0; pl < pls; pl++) {
+        int tp = ssd_rain_parity_t(spp, pl, wp->pg);
+        int n = 0;
+
+        for (int t = 0; t < dies; t++) {
+            int idx = spp->plane_first ? t * pls + pl : pl * dies + t;
+
+            n += t != tp && idx < at;
+        }
+        if (n > 0 && n < dies - 1) {
+            ssd_rain_book(ssd, wp->blk, pl, wp->pg, ssd_now(ssd));
+        }
+    }
+}
+
+/*
  * A read of the failed die (failed_die): the other dies of its stripe are
  * read at once, in parallel, and their XOR gives the page. Returns when
  * the page is ready. The survivors' blocks take no read count.
@@ -522,7 +582,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ssd->pass2_staged_reads++;
         return 0;
     }
-    if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&
+    if (unlikely(ssd_parity_on(&ssd->sp)) && op == NAND_MEDIA_READ &&
         !bb_io_meta(ncmd->type)) {
         int failed = ssd_offline_die(ssd);
 
@@ -555,6 +615,17 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_PROGRAM &&
         !bb_io_meta(ncmd->type)) {
         ssd_parity_book(ssd, ppa, c.done_ns);
+    }
+    /* rain_parity: the last data page of a row books the row's parity */
+    if (unlikely(ssd->sp.rain_parity) && op == NAND_MEDIA_PROGRAM &&
+        !bb_io_meta(ncmd->type)) {
+        struct ssdparams *spp = &ssd->sp;
+        int tp = ssd_rain_parity_t(spp, ppa->g.pl, ppa->g.pg);
+        int last = tp == spp->tt_luns - 1 ? tp - 1 : spp->tt_luns - 1;
+
+        if (ppa->g.lun * spp->nchs + ppa->g.ch == last) {
+            ssd_rain_book(ssd, ppa->g.blk, ppa->g.pl, ppa->g.pg, c.done_ns);
+        }
     }
     /* retries and soft decode of a host read (rber_ppb) */
     if (unlikely(ssd->sp.rber_ppb) && op == NAND_MEDIA_READ &&

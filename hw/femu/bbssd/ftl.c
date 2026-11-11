@@ -41,7 +41,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     /* bb_check_capacity() kept the reserve below 2^31 pages */
     ssd->eol_reserve_lines = ssd->eol_ro_mode ?
                              (int)bb_eol_reserve_lines(n) : 0;
-    ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->pgs_per_line;
+    ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->line_data_pgs;
     ssd->fdp_eol_reserve = 0;
     if (ssd->eol_ro_mode && n->subsys && n->subsys->params.fdp.enabled) {
         /* each reclaim group holds the reserve; the cap is in its units */
@@ -105,7 +105,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->wear_floor_lines =
         DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), (uint64_t)spp->secsz *
                                             spp->secs_per_pg),
-                     spp->pgs_per_line) + bb_gc_forced_lines(n) + 2 +
+                     spp->line_data_pgs) + bb_gc_forced_lines(n) + 2 +
         (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(n, ns);
 }
 
@@ -148,11 +148,11 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     ssd_init_params(spp, n);
     /*
-     * failed_die counts only with die_parity: the CXL SSD builds its FTL
+     * failed_die counts only with parity: the CXL SSD builds its FTL
      * from a zeroed controller. A namespace made while an injected die is
      * offline loses it too; only an ocp=on controller injects.
      */
-    ssd->fail_die = spp->die_parity ? spp->failed_die + 1 : 0;
+    ssd->fail_die = ssd_parity_on(spp) ? spp->failed_die + 1 : 0;
     if (n->ocp) {
         qemu_mutex_lock(&n->ocp_inj_lock);
         if (n->ocp_inj_set && !n->ocp_inj_reads) {
@@ -429,7 +429,7 @@ uint64_t ssd_degraded_reads(struct ssd *ssd)
  */
 void ssd_set_offline_die(struct ssd *ssd, int die)
 {
-    int base = ssd->sp.die_parity ? ssd->sp.failed_die : -1;
+    int base = ssd_parity_on(&ssd->sp) ? ssd->sp.failed_die : -1;
 
     qatomic_set(&ssd->fail_die, 1 + (die >= 0 ? die : base));
 }
@@ -529,8 +529,10 @@ void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
             continue;
         }
         (*mapped)++;
+        /* data on a parity page (rain_parity) breaks the stripe too */
         if (get_pg(ssd, &ppa)->status != PG_VALID ||
-            get_rmap_ent(ssd, &ppa) != lpn) {
+            get_rmap_ent(ssd, &ppa) != lpn ||
+            ssd_rain_member(spp, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.pg)) {
             (*lost)++;
         }
     }

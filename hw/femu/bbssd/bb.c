@@ -104,6 +104,8 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* a line is one block on every plane of every LUN, as the FTL builds it */
     uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch *
                             p->pls_per_lun * p->pgs_per_blk;
+    /* the pages of a line that hold data: rain_parity keeps one per row */
+    uint64_t data_pgs = bb_line_data_pgs(p);
     /*
      * Spare lines only replace worn-out blocks, and reserve lines wait for
      * the end of life; neither holds data before that.
@@ -144,10 +146,10 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         reserve_lines += 1;                  /* the log write pointer */
     }
     /* the admission counts pages in 31 bits of one word */
-    if (reserve_eol >= (1ULL << 31) / pgs_per_line) {
+    if (reserve_eol >= (1ULL << 31) / data_pgs) {
         error_setg(errp, "FEMU bbssd: eol_read_only needs %" PRIu64 " reserve "
                    "lines of %" PRIu64 " pages; lower mdts", reserve_eol,
-                   pgs_per_line);
+                   data_pgs);
         return -1;
     }
     reserve_lines += reserve_eol;
@@ -280,7 +282,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return 0;
     }
 
-    usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
+    usable_pgs = (tt_lines - reserve_lines) * data_pgs;
     exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
 
     if (exposed_pgs > usable_pgs && n->shared_ftl) {
@@ -769,8 +771,9 @@ static uint16_t bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* untimed collection would skip the parity programs it makes due */
-    if (n->bb_params.die_parity && cdw10 == FEMU_DISABLE_GC_DELAY) {
-        femu_log("%s,FEMU GC delay toggle ignored: die_parity=1\n",
+    if ((n->bb_params.die_parity || n->bb_params.rain_parity) &&
+        cdw10 == FEMU_DISABLE_GC_DELAY) {
+        femu_log("%s,FEMU GC delay toggle ignored: parity is on\n",
                  n->devname);
         return NVME_SUCCESS;
     }

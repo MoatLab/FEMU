@@ -936,6 +936,31 @@ the page's bytes and LBA states before it, and the program's end time.
 - A partial deallocate still unmaps the whole page in the FTL; this
   changes timing only.
 
+## RAIN (rain_parity)
+
+`rain_parity=1` keeps one parity page in each stripe of a line, as RAIN
+does on a datacenter drive. A stripe is one row of the line: one page per
+die at one plane and page index. The parity page rotates over the dies,
+so no die holds all the parity.
+
+```text
+ t = lun * nchs + ch (write pointer order), row r = pg * pls_per_lun + pl
+ parity of row r at t = dies - 1 - r % dies
+
+          t0  t1  t2  t3
+ row 0:   D   D   D   P      the pointer starts a line on data
+ row 1:   D   D   P   D      and steps over every P
+```
+
+- The parity page takes space: a line holds `pgs_per_line * (dies - 1) /
+  dies` data pages. The namespace size does not change, so the spare
+  space drops and WAF rises.
+- The last data page of a row books the parity program on its die. The
+  XOR time `parity_xor_ns` comes first.
+- A line that closes early (open-block read reclaim) books the parity of
+  each row it ends inside.
+- `failed_die` reads a page of that die from the other dies of its row.
+
 ## Read cache
 
 `read_cache_mb` adds a DRAM read cache in front of NAND reads

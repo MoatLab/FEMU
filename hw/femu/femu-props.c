@@ -608,11 +608,22 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "dies and mapping=page; not with mp_program, mp_read, "
       "onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP. "
       "0 (default) is off" },
+    { "rain_parity",
+      "bbssd, CSD: 1 keeps one parity page in each stripe of a line (one "
+      "page per die at a plane and page index), as RAIN on a datacenter "
+      "drive: the parity page rotates over the dies and takes space, so "
+      "the spare space drops by one die in N and WAF counts one parity "
+      "program per N - 1 data pages. Needs two dies and mapping=page; not "
+      "with die_parity or what it refuses, prog_pass2_ns, wl_spread, "
+      "pd_open_close_sec, Streams, durable_at_done, persist_ftl or the "
+      "pSLC tier. 0 (default) is off" },
     { "parity_xor_ns",
-      "bbssd, CSD: with die_parity, controller time in ns before each "
+      "bbssd, CSD: with die_parity or rain_parity, controller time in ns "
+      "before each "
       "parity program and added to a read of the failed die; 0 (default)" },
     { "failed_die",
-      "bbssd, CSD: with die_parity, the die (channel * luns_per_ch + LUN) "
+      "bbssd, CSD: with die_parity or rain_parity, the die (channel * "
+      "luns_per_ch + LUN) "
       "that has failed: a host read there reads the other dies of its "
       "stripe in parallel; -1 (default) is none" },
     { "inject_die",

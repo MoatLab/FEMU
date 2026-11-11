@@ -142,20 +142,20 @@ struct line *get_next_free_line(struct ssd *ssd)
 /* a write pointer has filled @line: queue it as full or as a victim */
 static void ssd_line_filled(struct ssd *ssd, struct line *line)
 {
-    struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
 
     /* record when the line filled, for age-based GC policies */
     line->close_time = ssd_now(ssd);
     line->close_seq = lm->next_close_seq++;
     /* move current line to {victim,full} line list */
-    if (line->vpc == spp->pgs_per_line) {
+    if (line->vpc == ssd_line_data_pgs(ssd, line)) {
         /* all pgs are still valid, move to full line list */
         ftl_assert(line->ipc == 0);
         QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
         lm->full_line_cnt++;
     } else {
-        ftl_assert(line->vpc >= 0 && line->vpc < spp->pgs_per_line);
+        ftl_assert(line->vpc >= 0 &&
+                   line->vpc < ssd_line_data_pgs(ssd, line));
         /* there must be some invalid pages in this line */
         ftl_assert(line->ipc > 0);
         pqueue_insert(lm->victim_line_pq, line);
@@ -256,6 +256,10 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
         QTAILQ_INSERT_TAIL(&ssd->lm.free_line_list, line, entry);
         ssd->lm.free_line_cnt++;
     } else {
+        /* the rows the line ends inside get their parity now */
+        if (sp->rain_parity) {
+            ssd_rain_close(ssd, wp);
+        }
         /* Seal unused pages so GC can reclaim a partially written line. */
         ppa.g.blk = line->id;
         for (ch = 0; ch < sp->nchs; ch++) {
@@ -266,6 +270,9 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
                     ppa.g.pl = pl;
                     for (pg = 0; pg < sp->pgs_per_blk; pg++) {
                         ppa.g.pg = pg;
+                        if (ssd_rain_member(sp, ch, lun, pl, pg)) {
+                            continue;
+                        }
                         if (get_pg(ssd, &ppa)->status == PG_FREE) {
                             get_pg(ssd, &ppa)->status = PG_INVALID;
                             get_blk(ssd, &ppa)->ipc++;
@@ -589,7 +596,6 @@ struct ppa get_new_page(struct ssd *ssd)
 void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 {
     struct line_mgmt *lm = &ssd->lm;
-    struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = NULL;
     struct nand_page *pg = NULL;
     bool was_full_line = false;
@@ -606,9 +612,9 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 
     /* update corresponding block status */
     blk = get_blk(ssd, ppa);
-    ftl_assert(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
+    ftl_assert(blk->ipc >= 0 && blk->ipc < ssd->sp.pgs_per_blk);
     blk->ipc++;
-    ftl_assert(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
+    ftl_assert(blk->vpc > 0 && blk->vpc <= ssd->sp.pgs_per_blk);
     blk->vpc--;
 
     /* update corresponding line status */
@@ -617,13 +623,13 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     if (unlikely(ssd->tier) && ftl_tier_invalidate(ssd, line)) {
         return;
     }
-    ftl_assert(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
-    if (line->vpc == spp->pgs_per_line) {
+    ftl_assert(line->ipc >= 0 && line->ipc < ssd_line_data_pgs(ssd, line));
+    if (line->vpc == ssd_line_data_pgs(ssd, line)) {
         ftl_assert(line->ipc == 0);
         was_full_line = true;
     }
     line->ipc++;
-    ftl_assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
+    ftl_assert(line->vpc > 0 && line->vpc <= ssd_line_data_pgs(ssd, line));
     /* Adjust the position of the victime line in the pq under over-writes */
     if (line->pos && !ssd->policy->by_close_order) {
         /* Note that line->vpc will be updated by this call */
@@ -666,7 +672,7 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
     if (unlikely(ssd->tier)) {
         ftl_tier_validate(ssd, line);
     }
-    ftl_assert(line->vpc >= 0 && line->vpc < ssd->sp.pgs_per_line);
+    ftl_assert(line->vpc >= 0 && line->vpc < ssd_line_data_pgs(ssd, line));
     line->vpc++;
     if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
         !line->open_time) {
@@ -936,7 +942,8 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
         return NULL;
     }
 
-    if (!force && victim_line->ipc < ssd->sp.pgs_per_line / 8) {
+    if (!force &&
+        victim_line->ipc < ssd_line_data_pgs(ssd, victim_line) / 8) {
         return NULL;
     }
 
@@ -957,7 +964,8 @@ static struct line *select_victim_line_random(struct ssd *ssd, bool force)
     if (!victim_line) {
         return NULL;
     }
-    if (!force && victim_line->ipc < ssd->sp.pgs_per_line / 8) {
+    if (!force &&
+        victim_line->ipc < ssd_line_data_pgs(ssd, victim_line) / 8) {
         pqueue_insert(lm->victim_line_pq, victim_line);
         return NULL;
     }
@@ -1009,7 +1017,7 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
         return NULL;
     }
     pqueue_remove(pq, best);
@@ -1030,7 +1038,7 @@ static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
         return NULL;
     }
     pqueue_pop(lm->victim_line_pq);
@@ -1065,7 +1073,7 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
         return NULL;
     }
     pqueue_remove(pq, best);
@@ -1410,6 +1418,12 @@ static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
+        /* a parity page (rain_parity) stays free: it maps no data */
+        if (ssd_rain_member(spp, ppa->g.ch, ppa->g.lun, ppa->g.pl, pg)) {
+            ftl_assert(pg_iter->status == PG_FREE);
+            ftl_assert(get_rmap_ent(ssd, ppa) == INVALID_LPN);
+            continue;
+        }
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
@@ -1453,7 +1467,7 @@ static void requeue_line(struct ssd *ssd, struct line *line)
 {
     struct line_mgmt *lm = &ssd->lm;
 
-    if (line->vpc == ssd->sp.pgs_per_line) {
+    if (line->vpc == ssd_line_data_pgs(ssd, line)) {
         QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
         lm->full_line_cnt++;
     } else {
@@ -1787,7 +1801,7 @@ int do_read_reclaim(struct ssd *ssd)
      * through the rewrite. Take it out and mark it so that does not happen;
      * a line from select_victim_line() already arrives in no list.
      */
-    if (line->vpc == ssd->sp.pgs_per_line) {
+    if (line->vpc == ssd_line_data_pgs(ssd, line)) {
         QTAILQ_REMOVE(&ssd->lm.full_line_list, line, entry);
         ssd->lm.full_line_cnt--;
     } else if (line->pos) {
@@ -2028,7 +2042,7 @@ static struct line *maint_scan(struct ssd *ssd, uint64_t now)
         /* closed: on the full list or in the victim queue, with data */
         if (l->close_time && l->vpc > 0 && l->kind == LINE_DATA &&
             !l->reclaiming && !l->retired && !l->spare && !l->reserve &&
-            (l->pos || l->vpc == ssd->sp.pgs_per_line) &&
+            (l->pos || l->vpc == ssd_line_data_pgs(ssd, l)) &&
             ssd_data_age_ns(ssd, l->close_time, now) >= limit) {
             return l;
         }
@@ -2271,7 +2285,7 @@ static void pace_budget(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line *cur = ssd->wp.curline;
-    uint64_t P = spp->pgs_per_line;
+    uint64_t P = ssd_line_data_pgs(ssd, ssd->pace_line);
     uint64_t v0 = ssd->pace_v0;
     uint64_t r = P - v0;
     uint64_t v = ssd->pace_line->vpc;
@@ -2351,7 +2365,7 @@ void ssd_pace_program(struct ssd *ssd)
     if (!ssd->pace_line || pace_blocked(ssd) || ssd->media_ro) {
         return;
     }
-    r = ssd->sp.pgs_per_line - ssd->pace_v0;
+    r = ssd_line_data_pgs(ssd, ssd->pace_line) - ssd->pace_v0;
     ssd->pace_acc += ssd->pace_v0;
     while (ssd->pace_line->vpc && ssd->pace_acc >= r) {
         if (!pace_copy_one(ssd)) {
@@ -2386,7 +2400,7 @@ void ssd_pace_tick(struct ssd *ssd)
         if (!victim) {
             return;
         }
-        if (victim->vpc >= ssd->sp.pgs_per_line) {
+        if (victim->vpc >= ssd_line_data_pgs(ssd, victim)) {
             /* a full line frees nothing; the queue does not hold one */
             requeue_line(ssd, victim);
             return;

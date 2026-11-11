@@ -1070,7 +1070,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint32_t npend = 0;
     uint64_t seq_stime = 0;
     /* an offline die with no parity has lost its pages (OCP event 0016h) */
-    int lost_die = spp->die_parity ? -1 : ssd_offline_die(ssd);
+    int lost_die = ssd_parity_on(spp) ? -1 : ssd_offline_die(ssd);
     bool lost = false;
     bool failed;
 
