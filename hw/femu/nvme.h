@@ -3797,6 +3797,17 @@ void femu_cancel_init(FemuCtrl *n);
 void femu_cancel_exit(FemuCtrl *n);
 uint16_t femu_cancel_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 int64_t femu_durable_deadline(FemuCtrl *n);
+/*
+ * durable_at_done: a change of LBAs with no program is durable at once;
+ * every pending before-image of the pages takes it (ftl-durable.c).
+ */
+enum {
+    FEMU_DURABLE_DEALLOC,       /* DSM: zero, unallocated, keep uncorrectable */
+    FEMU_DURABLE_ZEROES_DEAC,   /* Write Zeroes with DEAC: zero, unallocated */
+    FEMU_DURABLE_UNCOR,         /* Write Uncorrectable: allocated, bad */
+};
+void bbssd_durable_patch(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
+                         int how);
 void femu_vwc_timer_cb(void *opaque);
 void femu_vwc_drop(FemuCtrl *n);
 void femu_cancel_fetched(FemuCtrl *n, NvmeRequest *req, int poller);

@@ -1925,6 +1925,8 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     for (i = 0; i < nr_ranges; i++) {
         nvme_deallocate_range(n, ns, le64_to_cpu(ranges[i].slba),
                               le32_to_cpu(ranges[i].nlb));
+        bbssd_durable_patch(ns, le64_to_cpu(ranges[i].slba),
+                            le32_to_cpu(ranges[i].nlb), FEMU_DURABLE_DEALLOC);
     }
 
     femu_debug("DSM: Total blocks to deallocate: %lu\n", total_blocks);
@@ -2577,6 +2579,7 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (ns->uncorrectable) {
             bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
         }
+        bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
     } else {
         nvme_deallocate_range(n, ns, slba, nlb);
         nvme_mark_written(ns, slba, nlb);
@@ -2614,6 +2617,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     nvme_mark_written(ns, slba, nlb);
     bitmap_set_atomic(ns->uncorrectable, slba, nlb);
+    bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_UNCOR);
 
     /* HBMW counts it (NVM 1.2, 4.1.4.6); bbssd counts in the FTL thread */
     req->slba = slba;
@@ -3354,16 +3358,20 @@ void nvme_post_cqes_io(void *opaque)
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req)
 {
     /*
-     * durable_at_done keeps whole-page histories of host programs; these
-     * change parts of pages or other namespaces, so they wait for their
-     * rules and fail before they change anything.
+     * durable_at_done keeps whole-page histories of host programs. Write
+     * Zeroes without DEAC and Copy change bytes before their FTL step,
+     * where no before-image is taken yet, so they fail before any change.
      */
     if (unlikely(n->durable_at_done)) {
+        const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
+
         switch (req->cmd.opcode) {
-        case NVME_CMD_DSM:
         case NVME_CMD_WRITE_ZEROES:
+            if (le16_to_cpu(rw->control) & NVME_WZ_DEAC) {
+                break;
+            }
+            return NVME_INVALID_FIELD | NVME_DNR;
         case NVME_CMD_COPY:
-        case NVME_CMD_WRITE_UNCOR:
             return NVME_INVALID_FIELD | NVME_DNR;
         default:
             break;

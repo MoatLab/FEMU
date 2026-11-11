@@ -998,6 +998,7 @@ int64_t ssd_durable_deadline(struct ssd *ssd);
 void ssd_page_restore(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
                       const uint8_t *undo, const uint8_t *state);
 bool ssd_durable_cut(struct ssd *ssd, int64_t c);
+void ssd_durable_drop_ns(struct ssd *ssd, NvmeNamespace *ns);
 void ssd_durable_counts(struct ssd *ssd, uint64_t *lpns, uint64_t *gens,
                         uint64_t *ended);
 

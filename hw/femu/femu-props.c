@@ -452,8 +452,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "with power_loss: a written page is durable when its NAND program "
       "ends, not when it is booked; a cut restores the pages whose program "
       "had not ended, Flush, cache disable and shutdown wait for the last "
-      "program; DSM, Write Zeroes, Copy, Write Uncorrectable, Format and "
-      "Sanitize fail with Invalid Field; not with mp_program, pe_suspend, "
+      "program; Copy and Write Zeroes without Deallocate fail with Invalid "
+      "Field; not with mp_program, pe_suspend, "
       "read_prio, prog_pass2_ns, die_parity, ns_wp or sanitize_ns; off "
       "(default)" },
     { "ready_ms",

@@ -1623,6 +1623,10 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
     if (!ssd || !ssd->sp.tt_pgs) {
         return;
     }
+    /* durable_at_done: the namespace's data is gone, and so is its history */
+    if (ssd_durable_on(ssd)) {
+        ssd_durable_drop_ns(ssd, ns);
+    }
     if (ssd->fdp_enabled) {
         ssd_deallocate_fdp_ns(ssd, ns);
     } else if (ssd->n->shared_ftl) {

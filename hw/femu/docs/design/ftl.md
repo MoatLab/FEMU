@@ -916,8 +916,17 @@ the page's bytes and LBA states before it, and the program's end time.
   programs end. Until then the admin queue runs no later command, so a
   second cache change waits in the queue. A reset or a power cut drops
   the held command.
-- DSM, Write Zeroes, Copy, Write Uncorrectable, Format and Sanitize fail
-  with Invalid Field, because they change parts of pages.
+- DSM, Write Zeroes with DEAC and Write Uncorrectable program nothing,
+  so they are durable at once. Every pending before-image of their pages
+  takes the change: DSM zeroes the LBAs and makes them unallocated, Write
+  Zeroes with DEAC also clears their uncorrectable bit, and Write
+  Uncorrectable makes them allocated and uncorrectable. A cut then rolls
+  the other LBAs of a page back and keeps these.
+- Format and Sanitize drop the history of the namespaces they erase.
+- Copy and Write Zeroes without DEAC fail with Invalid Field: they change
+  bytes before the FTL step, where no before-image is taken yet.
+- A partial deallocate still unmaps the whole page in the FTL; this
+  changes timing only.
 
 ## Read cache
 

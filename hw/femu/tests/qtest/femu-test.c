@@ -45074,6 +45074,160 @@ static void femu_test_durable_vwc_off(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* one I/O command on @lba..@lba + @nlb - 1 of namespace 1; its status */
+static uint16_t femu_durable_cmd(FemuCtrlState *c, uint8_t opc, uint64_t buf,
+                                 uint64_t lba, uint32_t nlb, uint32_t cdw12)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t range[16] = { 0 };
+
+    cmd.opcode = opc;
+    cmd.nsid = cpu_to_le32(1);
+    if (opc == NVME_CMD_DSM) {
+        stl_le_p(range + 4, nlb);
+        stq_le_p(range + 8, lba);
+        qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw11 = cpu_to_le32(1 << 2);    /* Attribute Deallocate */
+    } else {
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+        cmd.cdw12 = cpu_to_le32((nlb - 1) | cdw12);
+    }
+    return femu_io(c, &cmd);
+}
+
+/*
+ * durable_at_done, 2 s programs: a change of LBAs with no program is
+ * durable at once. A (pages 0 and 1) is durable; B over both pages is
+ * programming. Then DSM of LBA 1, Write Zeroes with DEAC of LBA 2 and
+ * Write Uncorrectable of LBA 9. A cut inside B's programs rolls the pages
+ * back to A, and keeps the three changes. Then Format: B pending, the
+ * Format drops the history, and a cut leaves the namespace zero.
+ */
+static void femu_test_durable_partial(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(lpns, ==, 2);
+    g_assert_cmpuint(gens - ended, ==, 2);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_DSM, buf, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 2, 1,
+                                     1u << 25), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_UNCOR, buf, 9, 1, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_read(&c, buf, 1, 1, 0);
+    femu_power_read(&c, buf, 1, 2, 0);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_read(&c, buf, 1, 8, 0xa1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_READ, buf, 9, 1, 0), ==,
+                    NVME_UNRECOVERED_READ);
+
+    /* Format drops the history of the namespace */
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * durable_at_done, 2 s programs, the cases durable-partial leaves out:
+ * - two pending generations of one page (B, then C over it): a DSM patches
+ *   both, so the cut gives A with the LBA zero;
+ * - a Write Zeroes with DEAC over an LBA that was uncorrectable before the
+ *   pending write: the cut keeps it readable and zero;
+ * - Sanitize with history pending: none is left, and the cut reads zero.
+ */
+static void femu_test_durable_partial2(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* page 0: A durable; page 1: A durable, then LBA 8 uncorrectable */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_UNCOR, buf, 8, 1, 0),
+                    ==, NVME_SUCCESS);
+    /* B over both pages, then C over page 0: three pending generations */
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    femu_submit(&c, &c.io, &flush);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 3);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_DSM, buf, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 8, 1,
+                                     1u << 25), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_read(&c, buf, 1, 1, 0);
+    femu_power_read(&c, buf, 1, 8, 0);
+    femu_power_read(&c, buf, 1, 9, 0xa1);
+
+    /* Sanitize (block erase) drops the history */
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* durable_at_done: the commands it does not support yet, and realize */
 static void femu_test_durable_refused(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -45097,9 +45251,9 @@ static void femu_test_durable_refused(void *obj, void *data,
     cmd.nsid = cpu_to_le32(1);
     g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
     memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.opcode = NVME_CMD_COPY;
     cmd.nsid = cpu_to_le32(1);
-    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
     /* nothing is programming: a cache disable completes at once */
     g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
                     ==, NVME_SUCCESS);
@@ -61359,6 +61513,22 @@ static void femu_register_nodes(void)
             "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
+            "durable_at_done=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("durable-partial", "femu", femu_test_durable_partial,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,oncs=0x1f,"
+            "durable_at_done=on,pg_wr_lat=2000000000"
+    });
+    qos_add_test("durable-partial2", "femu", femu_test_durable_partial2,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,oncs=0x1f,"
             "durable_at_done=on,pg_wr_lat=2000000000"
     });
     qos_add_test("durable-refused", "femu", femu_test_durable_refused,

@@ -131,6 +131,66 @@ void ssd_durable_push(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
     ssd->nr_gens++;
 }
 
+/*
+ * LBAs [@slba, @slba + @nlb) of @ns changed with no program, durable at
+ * once (@how, FEMU_DURABLE_*). Each pending before-image of their pages
+ * takes the change, so a cut that rolls a page back keeps it. The live
+ * bytes and bits changed already.
+ */
+void bbssd_durable_patch(NvmeNamespace *ns, uint64_t slba, uint32_t nlb,
+                         int how)
+{
+    struct ssd *ssd = ns->ssd;
+    uint32_t page_size;
+    uint8_t shift = ns->lbaf.lbads;
+    ssd_gen *g;
+
+    if (!ssd || !ssd_durable_on(ssd)) {
+        return;
+    }
+    page_size = ssd_page_size(ssd);
+    QTAILQ_FOREACH(g, &ssd->gens, link) {
+        uint64_t first = (g->lpn * page_size - ns->backend_offset) >> shift;
+        uint64_t count = page_size >> shift;
+        uint64_t lo = MAX(first, slba);
+        uint64_t hi = MIN(first + count, slba + nlb);
+
+        if (g->ns != ns || lo >= hi) {
+            continue;
+        }
+        for (uint64_t lba = lo; lba < hi; lba++) {
+            uint64_t i = lba - first;
+
+            switch (how) {
+            case FEMU_DURABLE_DEALLOC:
+                memset(g->undo + (i << shift), 0, 1u << shift);
+                g->lba_state[i] &= ~1;
+                break;
+            case FEMU_DURABLE_ZEROES_DEAC:
+                memset(g->undo + (i << shift), 0, 1u << shift);
+                g->lba_state[i] = 0;
+                break;
+            case FEMU_DURABLE_UNCOR:
+                g->lba_state[i] |= 3;
+                break;
+            }
+        }
+    }
+}
+
+/* every generation of @ns goes: its data was replaced (Format, Sanitize) */
+void ssd_durable_drop_ns(struct ssd *ssd, NvmeNamespace *ns)
+{
+    ssd_gen *g;
+    ssd_gen *next;
+
+    QTAILQ_FOREACH_SAFE(g, &ssd->gens, link, next) {
+        if (g->ns == ns) {
+            ssd_gen_free(ssd, g);
+        }
+    }
+}
+
 /* the latest end of a pending program; 0 when none is pending */
 int64_t ssd_durable_deadline(struct ssd *ssd)
 {

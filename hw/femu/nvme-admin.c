@@ -4603,10 +4603,6 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     if (!nvme_can_sanitize(n)) {
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
-    /* durable_at_done keeps page histories a sanitize would bring back */
-    if (n->durable_at_done) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
     /* only Exit Media Verification runs while one is in progress */
     if (nvme_sanitize_busy(n) && sanact != 0x5) {
         return NVME_SANITIZE_IN_PROGRESS;
@@ -5458,10 +5454,6 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     /* SES is bits 11:9; bit 8 is PIL, which used to be read as an erase */
     uint8_t sec_erase = (dw10 >> 9) & 0x7;
 
-    /* durable_at_done keeps page histories a format would bring back */
-    if (n->durable_at_done) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
     if (nsid != NVME_NSID_BROADCAST) {
         if (!nvme_nsid_valid(n, nsid)) {
             return NVME_INVALID_NSID | NVME_DNR;
