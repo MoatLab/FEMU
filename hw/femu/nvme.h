@@ -2860,6 +2860,8 @@ typedef struct FemuCtrl {
     uint8_t     extended;
     uint8_t     lba_index;
     uint32_t    atomic_write_lbas; /* namespace atomic write unit; 0 = one */
+    /* power_loss: a write of at most this many blocks never tears; 0 = one */
+    uint32_t    awupf_lbas;
     bool        perf_hints;     /* NPWG, NPDG, NOWS from the bbssd geometry */
     bool        ocp;            /* OCP 2.7 feature set (optional) */
     char        *ocp_profile;   /* section 13: A or B for DP-CFG-1 to 13 */
@@ -3370,6 +3372,7 @@ typedef struct FemuCtrl {
     /* qtest only: the next pSLC fold stops after this many pages, once */
     uint32_t        test_tier_fold_stop;
     uint32_t        test_place_fail;    /* qtest: the next N placements fail */
+    uint32_t        test_place_skip;    /* qtest: placements before those */
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */

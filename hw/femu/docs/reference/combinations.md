@@ -31,6 +31,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 - atomic_write_lbas: %s
 
+## `awupf_lbas`
+
+- awupf_lbas: %s
+
 ## `bbssd_ns_limit`
 
 - bbssd_ns_limit must be between 1 and %u and cover the boot namespaces

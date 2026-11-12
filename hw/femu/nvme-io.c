@@ -2288,8 +2288,9 @@ write:
     /*
      * durable_at_done: the gathered bytes go to the FTL as a write's
      * payload, so it takes each destination page's before-image first.
+     * awupf_lbas: a short Copy is then one transaction there.
      */
-    if (n->durable_at_done) {
+    if (n->durable_at_done || n->awupf_lbas) {
         req->write_data = g_steal_pointer(&data);
         goto staged;
     }
@@ -2623,10 +2624,11 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
         }
         bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
-    } else if (n->durable_at_done) {
+    } else if (n->durable_at_done || n->awupf_lbas) {
         /*
          * The zeros go to the FTL as a write's payload: it takes each
-         * page's before-image there, before the bytes change.
+         * page's before-image there, before the bytes change, and
+         * awupf_lbas makes a short one one transaction.
          */
         req->write_data = g_malloc0((size_t)nlb << ns->lbaf.lbads);
         req->slba = slba;

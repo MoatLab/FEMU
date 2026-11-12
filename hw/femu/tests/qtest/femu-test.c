@@ -46334,6 +46334,112 @@ static void femu_test_plp_fail_normal(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * Power-fail atomicity. Pages hold 8 blocks; A writes blocks 7 and 8,
+ * one in each of pages 0 and 1, and B is a FUA write of block 0. B
+ * programs page 0 with A's block 7 in it. @data "off": without
+ * awupf_lbas both pages of A wait in the buffer, so a cut keeps block 7
+ * and loses block 8, the tear this test must see. "on": awupf_lbas=8
+ * makes A one transaction, so both blocks stay; AWUN and AWUPF are 7,
+ * and a write whose second page finds no room changes nothing. Nor does
+ * a short FUA write inside one page that finds no room.
+ */
+static void femu_test_awupf(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 7, 2, 0xb2, false);
+    femu_power_write(&c, buf, 1, 0, 1, 0xc3, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, on ? 0xb2 : 0xa1);
+    if (!on) {
+        goto out;
+    }
+
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, 1, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 526), ==, 7);    /* AWUN */
+    g_assert_cmpuint(qtest_readw(qts, buf + 528), ==, 7);    /* AWUPF */
+
+    /* page 0 finds room, page 1 does not: the write fails whole */
+    {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/power',"
+                               "'property':'x-place-skip','value':1}}");
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    femu_place_fail_id(qts, "power", 1);
+    qtest_memset(qts, buf, 0xd4, 1024);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(7);
+    rw.nlb = cpu_to_le16(1);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_CAP_EXCEEDED));
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+
+    /* a FUA write inside one page whose page finds no room changes nothing */
+    femu_place_fail_id(qts, "power", 1);
+    qtest_memset(qts, buf, 0xe5, 1024);
+    rw.slba = cpu_to_le64(2);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_CAP_EXCEEDED));
+    femu_power_read(&c, buf, 1, 2, 0xa1);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 2, 0xa1);
+    {
+        const char *cases[][2] = {
+            { "'awupf_lbas':8", "awupf_lbas: it needs power_loss=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':3",
+              "a power of two from 2 to 65536" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':8,"
+              "'durable_at_done':true", "not supported with durable_at" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':8,"
+              "'err_write_fail_ppm':10", "not supported with err_write" },
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+            g_autofree char *add = g_strdup_printf(
+                "{'execute':'device_add','arguments':{"
+                "'driver':'femu','id':'awr','addr':'5','femu_mode':1,"
+                "'devsz_mb':8,%s}}", cases[i][0]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i][0], desc);
+            g_assert_nonnull(strstr(desc, cases[i][1]));
+            qobject_unref(rsp);
+        }
+    }
+out:
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -62794,6 +62900,22 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
             "durable_at_done=on"
+    });
+    qos_add_test("awupf-control", "femu", femu_test_awupf,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=15,vwc=1,power_loss=on"
+    });
+    qos_add_test("awupf", "femu", femu_test_awupf,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,awupf_lbas=8"
     });
     qos_add_test("plp-keep", "femu", femu_test_plp_keep,
                  &(QOSGraphTestOptions) {

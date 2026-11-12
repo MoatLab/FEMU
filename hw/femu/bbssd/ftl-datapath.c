@@ -772,8 +772,19 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                     lpn, PPA_ARG(&old));
     }
 
-    /* x-place-fail: qtest makes this page find no place, before any change */
-    if (unlikely(ssd->n && qatomic_read(&ssd->n->test_place_fail))) {
+    /*
+     * x-place-fail: qtest makes this page find no place, before any change;
+     * x-place-skip lets that many placements pass first.
+     */
+    if (unlikely(ssd->n && qatomic_read(&ssd->n->test_place_skip))) {
+        uint32_t *skip = &ssd->n->test_place_skip;
+        uint32_t v = qatomic_read(skip);
+
+        /* a qom-set to 0 in between takes none */
+        while (v && qatomic_cmpxchg(skip, v, v - 1) != v) {
+            v = qatomic_read(skip);
+        }
+    } else if (unlikely(ssd->n && qatomic_read(&ssd->n->test_place_fail))) {
         uint32_t *left = &ssd->n->test_place_fail;
         uint32_t v = qatomic_read(left);
 
@@ -1250,8 +1261,24 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t wait;
     bool placed;
     bool drain;
+    bool txn;
+    bool snap_all;
+    uint8_t **txn_undo = NULL;
+    uint8_t **txn_state = NULL;
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
+    /*
+     * awupf_lbas: a write of at most N blocks over more than one page runs
+     * as one transaction. It skips the buffer, where its pages could commit
+     * one at a time, and keeps every page's before-image until all are
+     * placed. This request is one FTL step and a cut comes only between
+     * steps, so a cut finds the write all old or all new. A short write
+     * inside one page may buffer, but on the direct path it keeps its
+     * before-image too, so a failed placement leaves no new byte.
+     */
+    snap_all = ssd->n->awupf_lbas && req->write_data &&
+               req->nlb <= ssd->n->awupf_lbas;
+    txn = snap_all && start_lpn != end_lpn;
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("write past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
@@ -1294,7 +1321,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     /* Program stream writes directly even when a cache is enabled. */
     /* with working plp the buffer is as durable as FUA asks (OCP NVMe-IO-3) */
     if (ssd_buffer_enabled(ssd) && (!fua || femu_plp_ok(ssd->n)) &&
-        stream < 0 &&
+        stream < 0 && !txn &&
         (!ssd->n->power_loss || req->write_data)) {
         int batch = ssd_buffer_batch(ssd);
 
@@ -1360,6 +1387,14 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
+    if (snap_all) {
+        txn_undo = g_new0(uint8_t *, end_lpn - start_lpn + 1);
+        txn_state = g_new0(uint8_t *, end_lpn - start_lpn + 1);
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            ssd_page_snapshot(ssd, req->ns, lpn, &txn_undo[lpn - start_lpn],
+                              &txn_state[lpn - start_lpn]);
+        }
+    }
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         struct ppa target = { .ppa = INVALID_PPA };
 
@@ -1442,6 +1477,23 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 wl_done = do_wear_level(ssd) == 0;
             }
         }
+    }
+    if (snap_all) {
+        /*
+         * A page found no room: the write fails whole, so the pages it
+         * changed get their bytes and LBA states back. Buffered copies it
+         * dropped on the way stay as the restored bytes hold them.
+         */
+        for (uint64_t i = 0; i <= end_lpn - start_lpn; i++) {
+            if (lpn <= end_lpn && start_lpn + i <= lpn) {
+                ssd_page_restore(ssd, req->ns, start_lpn + i, txn_undo[i],
+                                 txn_state[i]);
+            }
+            g_free(txn_undo[i]);
+            g_free(txn_state[i]);
+        }
+        g_free(txn_undo);
+        g_free(txn_state);
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;

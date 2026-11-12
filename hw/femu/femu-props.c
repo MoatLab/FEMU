@@ -268,6 +268,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "nlbaf",
       "Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte "
       "blocks doubling with each format" },
+    { "awupf_lbas",
+      "with power_loss: a Write, Write Zeroes or Copy of at most N blocks "
+      "that spans pages runs as one transaction, so a cut or a failed "
+      "placement finds it all old or all new; AWUN and AWUPF become N - 1; "
+      "a power of two from 2 to 65536 that fits MDTS; not with "
+      "durable_at_done or err_write_fail_ppm; 0 (default) is one block" },
     { "atomic_write_lbas",
       "Namespace atomic write unit in blocks: NAWUN and the boundary "
       "NABSN become N - 1, from block 0. 0 (default) keeps one block; "

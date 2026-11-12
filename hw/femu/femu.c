@@ -1571,6 +1571,34 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
             return false;
         }
     }
+    /*
+     * awupf_lbas: a Write, Write Zeroes or Copy of at most N blocks over
+     * more than one page runs as one transaction in the FTL, so a cut finds
+     * it all old or all new. Its pages each take a program before the end.
+     */
+    if (n->awupf_lbas) {
+        uint32_t na = n->awupf_lbas;
+        uint32_t max_lbads = BDRV_SECTOR_BITS + MAX(n->nlbaf, 1) - 1;
+        const char *why = NULL;
+
+        if (na < 2 || na > 65536 || (na & (na - 1))) {
+            why = "it must be 0, or a power of two from 2 to 65536";
+        } else if (!n->power_loss) {
+            why = "it needs power_loss=on";
+        } else if (n->durable_at_done) {
+            why = "it is not supported with durable_at_done";
+        } else if (n->err_write_fail_ppm) {
+            why = "it is not supported with err_write_fail_ppm";
+        } else if (n->mdts && 12 + n->mpsmin + n->mdts < 48 &&
+                   ((uint64_t)na << max_lbads) >
+                   (1ULL << (12 + n->mpsmin + n->mdts))) {
+            why = "N blocks of the largest block size exceed MDTS";
+        }
+        if (why) {
+            error_setg(errp, "awupf_lbas: %s", why);
+            return false;
+        }
+    }
     /* the hints come from the bbssd geometry, for the format in use */
     if (n->perf_hints) {
         const char *why = NULL;
@@ -2962,8 +2990,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
      * is refused, which is what the I/O path does.
      */
     id->vwc          = n->vwc | (0x2 << 1);
-    id->awun         = cpu_to_le16(0);
-    id->awupf        = cpu_to_le16(0);
+    /* one FTL request runs each such write whole: never torn (awupf_lbas) */
+    id->awun         = cpu_to_le16(n->awupf_lbas ? n->awupf_lbas - 1 : 0);
+    id->awupf        = cpu_to_le16(n->awupf_lbas ? n->awupf_lbas - 1 : 0);
     /* MXPS is 0: Maximum Power counts in 0.01 W */
     id->psd[0].mp    = cpu_to_le16(n->ps_max_watts * 100);
     id->psd[0].enlat = cpu_to_le32(0x10);
@@ -5238,6 +5267,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
     DEFINE_PROP_UINT32("atomic_write_lbas", FemuCtrl, atomic_write_lbas, 0),
+    DEFINE_PROP_UINT32("awupf_lbas", FemuCtrl, awupf_lbas, 0),
     DEFINE_PROP_BOOL("perf_hints", FemuCtrl, perf_hints, false),
     DEFINE_PROP_BOOL("ocp", FemuCtrl, ocp, false),
     DEFINE_PROP_BOOL("telemetry_da4", FemuCtrl, telemetry_da4, false),
@@ -6587,6 +6617,8 @@ static void femu_instance_init(Object *obj)
                           &FEMU(obj)->test_tier_fold_stop, true);
         femu_test_add_u32(obj, "x-place-fail",
                           &FEMU(obj)->test_place_fail, true);
+        femu_test_add_u32(obj, "x-place-skip",
+                          &FEMU(obj)->test_place_skip, true);
         femu_test_add_u32(obj, "x-zone-lock-hold-ms",
                           &FEMU(obj)->test_zone_lock_hold_ms, true);
         femu_test_add_u32(obj, "x-zone-draining",

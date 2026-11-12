@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 300 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 301 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -107,6 +107,7 @@ Devices:
 | --- | --- | --- | --- |
 | `nlbaf` | `uint8` | `5` | Number of LBA formats, 1 to 16 (at most 8 with meta): 512-byte blocks doubling with each format |
 | `atomic_write_lbas` | `uint32` | `0` | Namespace atomic write unit in blocks: NAWUN and the boundary NABSN become N - 1, from block 0. 0 (default) keeps one block; else a power of two from 2 to 65536 that fits MDTS at the largest block size. The power-fail unit stays one block. bbssd and NoSSD only; refused with power_loss, ns_mgmt, namespace_modes and a subsystem |
+| `awupf_lbas` | `uint32` | `0` | with power_loss: a Write, Write Zeroes or Copy of at most N blocks that spans pages runs as one transaction, so a cut or a failed placement finds it all old or all new; AWUN and AWUPF become N - 1; a power of two from 2 to 65536 that fits MDTS; not with durable_at_done or err_write_fail_ppm; 0 (default) is one block |
 | `perf_hints` | `bool` | `off` | bbssd, CSD: report the optimal write and deallocate granularity (NPWG, NPWA, NPDG, NPDA) as one flash page and NOWS as one stripe, for the format in use; off (default) reports 0 (one block). Refused with FDP and ns_mgmt |
 | `hmb_mb` | `uint32` | `0` | bbssd with mapping=dftl: ask the host for a Host Memory Buffer of this many MiB (Identify HMPRE and HMMIN). While the host has it enabled (Set Features 0Dh), the mapping table lives there: a lookup costs hmb_ns and reads no translation page. 0 (default) is off |
 | `hmb_ns` | `int32` | `1000` | with hmb_mb, ns per mapping lookup in the Host Memory Buffer, the PCIe round trip; 0 or more (default 1000) |
@@ -510,7 +511,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables
