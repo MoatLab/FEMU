@@ -2309,6 +2309,8 @@ typedef struct NvmeNamespace {
     uint32_t        san_cdw10;
     unsigned long   *util;
     unsigned long   *uncorrectable;
+    /* sdc=on: blocks whose stored data a media fault spoiled */
+    unsigned long   *sdc;
     /*
      * Separate LBA metadata, ms bytes per block of the current format, kept
      * apart from the data backend so the data slice and the FTL are unchanged.
@@ -2843,6 +2845,23 @@ typedef struct FemuCtrl {
     bool        plp_ro;
     bool        plp_wt;
     uint64_t    plp_starts;     /* cuts the protection handled (SMART-24) */
+    /*
+     * sdc: media faults that leave wrong data (flip, lost, misdirect),
+     * drawn per page install on the FTL thread, and the device's internal
+     * LBA and version check (e2e_check) that turns them into 81h.
+     */
+    bool        sdc;
+    uint32_t    sdc_ppm;
+    char        *sdc_kind;
+    uint64_t    sdc_seed;
+    bool        e2e_check;
+    uint8_t     sdc_kind_v;     /* FEMU_SDC_*, 0 for mix */
+    uint64_t    sdc_rng;
+    uint32_t    e2e_detected;   /* C0h end-to-end Detected Errors */
+    uint64_t    e2e_detected_all; /* the same, unclamped, for SMART */
+    uint32_t    sdc_one_nsid;   /* qtest x-sdc: one fault, next install */
+    uint8_t     sdc_one_kind;
+    uint64_t    sdc_one_lba;
     QEMUTimer   *plp_timer;
     /*
      * die_slow: a table of array time in percent of nominal for each LUN,
@@ -3838,6 +3857,20 @@ void femu_vwc_drop(FemuCtrl *n);
 bool femu_plp_ok(FemuCtrl *n);
 bool femu_plp_init(FemuCtrl *n, Error **errp);
 void femu_plp_add_props(Object *obj);
+/* femu-sdc.c: silent data corruption faults (sdc) and e2e_check */
+enum {
+    FEMU_SDC_FLIP       = 1,
+    FEMU_SDC_LOST       = 2,
+    FEMU_SDC_MISDIRECT  = 3,
+};
+bool femu_sdc_init(FemuCtrl *n, Error **errp);
+bool femu_sdc_ns_alloc(NvmeNamespace *ns, uint64_t blks);
+void femu_sdc_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
+bool femu_lba_bad(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
+                  uint64_t *bad);
+int femu_sdc_fault(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
+                   uint64_t *flip_lba);
+void femu_sdc_add_props(Object *obj);
 void femu_plp_enable(FemuCtrl *n);
 void femu_plp_restart(FemuCtrl *n);
 void femu_plp_cut(FemuCtrl *n);

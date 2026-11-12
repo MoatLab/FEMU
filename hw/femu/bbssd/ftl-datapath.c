@@ -296,7 +296,8 @@ static void ssd_page_snapshot(struct ssd *ssd, NvmeNamespace *ns,
     *state = g_malloc(count);
     for (uint32_t i = 0; i < count; i++) {
         (*state)[i] = test_bit(slba + i, ns->util) |
-                      (test_bit(slba + i, ns->uncorrectable) << 1);
+                      (test_bit(slba + i, ns->uncorrectable) << 1) |
+                      ((ns->sdc && test_bit(slba + i, ns->sdc)) << 2);
     }
 }
 
@@ -328,6 +329,38 @@ static void ssd_durable_direct(struct ssd *ssd, NvmeNamespace *ns,
     *snap_state = NULL;
 }
 
+/*
+ * sdc misdirect: the bytes of [@first, @end) of this write land at the same
+ * offsets of the first page after the command, in this namespace; those
+ * blocks now hold data of another LBA. A namespace too small to have such
+ * a page keeps the fault a lost write.
+ */
+static void buffer_misdirect(NvmeNamespace *ns, NvmeRequest *req,
+                             uint32_t page_size, uint64_t first, uint64_t end)
+{
+    uint8_t shift = ns->lbaf.lbads;
+    uint64_t pages = (ns->ns_blks << shift) / page_size;
+    uint64_t lo = (req->slba << shift) / page_size;
+    uint64_t hi = (((req->slba + req->nlb) << shift) - 1) / page_size;
+    uint64_t y = (hi + 1) % MAX(pages, 1);
+    uint64_t off;
+    uint8_t *base = (uint8_t *)ns->ctrl->mbe->logical_space +
+                    ns->backend_offset;
+
+    if (pages <= hi - lo + 1) {
+        return;
+    }
+    off = y * page_size + first % page_size;
+    backend_lock_range(ns->ctrl->mbe, ns->backend_offset + y * page_size,
+                       page_size);
+    memcpy(base + off, req->write_data + first - (req->slba << shift),
+           end - first);
+    bitmap_set(ns->util, off >> shift, (end - first) >> shift);
+    bitmap_set(ns->sdc, off >> shift, (end - first) >> shift);
+    backend_unlock_range(ns->ctrl->mbe, ns->backend_offset + y * page_size,
+                         page_size);
+}
+
 /* Save the last durable bytes once, then apply only this write's LBAs. */
 static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
                               bool buffered)
@@ -341,6 +374,8 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     uint64_t end = MIN(page_start + page_size,
                        (req->slba + req->nlb) << shift);
     uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+    uint64_t flip_lba = 0;
+    int fault;
 
     if (!req->write_data) {
         return;
@@ -358,15 +393,29 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
             entry->lba_state = g_malloc(count);
             for (uint32_t i = 0; i < count; i++) {
                 entry->lba_state[i] = test_bit(slba + i, ns->util) |
-                    (test_bit(slba + i, ns->uncorrectable) << 1);
+                    (test_bit(slba + i, ns->uncorrectable) << 1) |
+                    ((ns->sdc && test_bit(slba + i, ns->sdc)) << 2);
             }
         }
     }
-    memcpy(base + first, req->write_data + first - (req->slba << shift),
-           end - first);
+    fault = femu_sdc_fault(ns, first >> shift, end >> shift, &flip_lba);
+    if (fault != FEMU_SDC_LOST && fault != FEMU_SDC_MISDIRECT) {
+        memcpy(base + first, req->write_data + first - (req->slba << shift),
+               end - first);
+    }
     nvme_mark_written(ns, first >> shift, (end - first) >> shift);
+    if (fault == FEMU_SDC_FLIP) {
+        base[flip_lba << shift] ^= 1;
+        set_bit(flip_lba, ns->sdc);
+    } else if (fault) {
+        /* the old bytes stay: an older version than the host wrote */
+        bitmap_set(ns->sdc, first >> shift, (end - first) >> shift);
+    }
     backend_unlock_range(ssd->n->mbe, ns->backend_offset + page_start,
                          page_size);
+    if (fault == FEMU_SDC_MISDIRECT) {
+        buffer_misdirect(ns, req, page_size, first, end);
+    }
 }
 
 /* The caller is the FTL thread or an admin handler with processing paused. */
@@ -452,6 +501,11 @@ bool bbssd_power_loss(NvmeNamespace *ns)
                 set_bit(slba + i, ns->uncorrectable);
             } else {
                 clear_bit(slba + i, ns->uncorrectable);
+            }
+            if (ns->sdc && (entry->lba_state[i] & 4)) {
+                set_bit(slba + i, ns->sdc);
+            } else if (ns->sdc) {
+                clear_bit(slba + i, ns->sdc);
             }
         }
         rcache_invalidate(ssd, entry->lpn);

@@ -30,7 +30,7 @@ DEVICES = [
                       "x-place-fail", "x-place-skip", "x-rain-check",
                       "x-rain-fail",
                       "x-query-delay-ms", "x-range-waits",
-                      "x-rber-u", "x-stage-hold-ms",
+                      "x-rber-u", "x-sdc", "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",
                       "x-tp-hold",
                       "x-zone-draining",
@@ -89,7 +89,8 @@ DEVICES = [
                 "props": [
                     "ns_mgmt", "bbssd_ns_limit", "streams", "streams.max",
                     "power_loss", "durable_at_done", "plp", "plp_health",
-                    "plp_fail_mode", "ready_ms", "recovery_ms",
+                    "plp_fail_mode", "sdc", "sdc_ppm", "sdc_kind",
+                    "sdc_seed", "e2e_check", "ready_ms", "recovery_ms",
                     "shutdown_ms",
                 ],
             },

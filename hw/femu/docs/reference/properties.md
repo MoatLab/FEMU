@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 301 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 306 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -140,6 +140,11 @@ Devices:
 | `plp` | `bool` | `off` | with power_loss: power-loss protection; a cut writes the buffer back, FUA and Flush complete without the media, and vwc=0 keeps the buffer; C0h reports plp_health as Capacitor Health; with ocp=on it needs vwc=0; not with durable_at_done or rain_parity; off (default) |
 | `plp_health` | `uint32` | `120` | with plp: hold-up energy at realize in percent, 0 to 65534; below 1 the check at enable and every C6h minutes (default 15) fails the protection; 120 (default) |
 | `plp_fail_mode` | `str` | unset | with plp: what a failed protection does, rom (default, writes fail 82h), wtm (write-through) or normal; sets the C2h factory value, and ocp DP-CFG-6 B needs rom; Critical Warning bit 4 and a SMART event in every mode |
+| `sdc` | `bool` | `off` | with power_loss: media faults that leave wrong data, drawn as each page of a write goes in (sdc_ppm, sdc_kind); a spoiled block reads back with 81h under e2e_check, else wrong data with success; not with durable_at_done, persist_file or awupf_lbas; off (default) |
+| `sdc_ppm` | `uint32` | `0` | with sdc: faults per million page installs, drawn from sdc_seed; 0 (default) injects only through x-sdc |
+| `sdc_kind` | `str` | unset | with sdc: flip (one bit), lost (the old data stays), misdirect (the data lands in the next page) or mix (default, one of the three) |
+| `sdc_seed` | `uint64` | `1` | with sdc: seed of the fault draws, in the FTL's command order; 1 (default) |
+| `e2e_check` | `bool` | `on` | with sdc: the internal LBA and version check (OCP E2E-5); a read of a spoiled block fails with 81h and counts in C0h Detected Errors; off returns the wrong data with success; on (default) |
 | `ready_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY in ms of guest time, below 7500; admin commands queued before ready run then; 0 (default) is ready at once |
 | `recovery_ms` | `uint32` | `0` | time from CC.EN to CSTS.RDY for the first start after a power cut, in ms, 0 or ready_ms to 7499; 0 (default) uses ready_ms |
 | `shutdown_ms` | `uint32` | `0` | time in ms of guest time CSTS.SHST reads 01b (in progress) after a shutdown, below 5000; the shutdown work is done before it; 0 (default) is complete at once |
@@ -511,7 +516,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-sdc`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

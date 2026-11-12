@@ -46440,6 +46440,156 @@ out:
     qos_invalidate_command_line();
 }
 
+/* qom-set x-sdc on device "power": one fault on the next install of lba */
+static void femu_sdc_one(QTestState *qts, const char *spec)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-sdc','value':%s}}", spec);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* read one block of namespace 1: the status, and its first byte in *@b0 */
+static uint16_t femu_sdc_read(FemuCtrlState *c, uint64_t buf, uint64_t lba,
+                              uint8_t *b0, uint8_t *b1)
+{
+    NvmeRwCmd rw = { 0 };
+    uint16_t status;
+
+    qtest_memset(c->pdev->bus->qts, buf, 0x5a, 512);
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    status = FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+    *b0 = qtest_readb(c->pdev->bus->qts, buf);
+    *b1 = qtest_readb(c->pdev->bus->qts, buf + 1);
+    return status;
+}
+
+/*
+ * sdc=on with power_loss: one flip, one lost and one misdirected write,
+ * each through x-sdc, into buffered pages. @data "on": e2e_check (the
+ * default) fails each read of a spoiled block with 81h and counts it in
+ * C0h Detected Errors. "off": the reads succeed with the wrong data. A
+ * new write clears a mark; a cut restores the buffered pages with their
+ * marks, while the misdirected page outside the buffer stays spoiled.
+ */
+static void femu_test_sdc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    uint16_t bad = on ? FEMU_SC(NVME_UNRECOVERED_READ) : NVME_SUCCESS;
+    uint8_t b0;
+    uint8_t b1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int p = 0; p < 3; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0xa1, true);
+    }
+
+    /* flip: block 3 holds one changed bit */
+    femu_sdc_one(qts, "1:flip:3");
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 3, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(b0, ==, 0xb3);
+        g_assert_cmphex(b1, ==, 0xb2);
+    }
+    g_assert_cmphex(femu_sdc_read(&c, buf, 4, &b0, &b1), ==, NVME_SUCCESS);
+    g_assert_cmphex(b0, ==, 0xb2);
+    /* Detected Errors in bytes 75:72; Corrected (79:76) stays 0 */
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 72), ==, on ? 1 : 0);
+    /* a new write of the block clears its mark */
+    femu_power_write(&c, buf, 1, 3, 1, 0xc3, false);
+    femu_power_read(&c, buf, 1, 3, 0xc3);
+
+    /* lost: blocks 8 to 15 keep the old data */
+    femu_sdc_one(qts, "1:lost:8");
+    femu_power_write(&c, buf, 1, 8, 8, 0xd4, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 8, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(b0, ==, 0xa1);
+    }
+
+    /* misdirect: page 2 keeps the old data, page 3 gets the new */
+    femu_sdc_one(qts, "1:misdirect:16");
+    femu_power_write(&c, buf, 1, 16, 8, 0xe5, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 16, &b0, &b1), ==, bad);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(femu_sdc_read(&c, buf, 16, &b0, &b1), ==, 0);
+        g_assert_cmphex(b0, ==, 0xa1);
+        g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, 0);
+        g_assert_cmphex(b0, ==, 0xe5);
+    }
+
+    /* the cut restores pages 0 to 2 clean; page 3 was never buffered */
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_read(&c, buf, 1, 8, 0xa1);
+    femu_power_read(&c, buf, 1, 16, 0xa1);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, bad);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 72), ==, on ? 5 : 0);
+
+    if (on) {
+        const char *cases[][2] = {
+            { "'sdc':true", "sdc needs power_loss=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'durable_at_done':true", "sdc is not supported with durable" },
+            { "'sdc_ppm':10", "sdc_ppm and sdc_kind need sdc=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'sdc_kind':'bad'", "sdc_kind flip, lost, misdirect or mix" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'awupf_lbas':8", "sdc is not supported with awupf_lbas" },
+        };
+        const char *bad_sdc[] = { "1:flip:99999999", "1:flip:3x", "2:flip:3",
+                                  "1:bend:3" };
+        QDict *qr;
+
+        /* x-sdc takes only a block of a namespace, and one at a time */
+        for (int i = 0; i < ARRAY_SIZE(bad_sdc); i++) {
+            qr = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-sdc','value':%s}}", bad_sdc[i]);
+            g_assert_true(qdict_haskey(qr, "error"));
+            qobject_unref(qr);
+        }
+        femu_sdc_one(qts, "1:flip:40");
+        qr = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                       "'path':'/machine/peripheral/power',"
+                       "'property':'x-sdc','value':'1:lost:41'}}");
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(qr, "error"),
+                                              "desc"), "already waiting"));
+        qobject_unref(qr);
+
+        for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+            g_autofree char *add = g_strdup_printf(
+                "{'execute':'device_add','arguments':{"
+                "'driver':'femu','id':'sdcr','addr':'5','femu_mode':1,"
+                "'devsz_mb':8,%s}}", cases[i][0]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i][0], desc);
+            g_assert_nonnull(strstr(desc, cases[i][1]));
+            qobject_unref(rsp);
+        }
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* power_states without power_limit: no PLS, no MUP, no feature 23h */
 static void femu_test_power_limit_off(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -62900,6 +63050,23 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,"
             "durable_at_done=on"
+    });
+    qos_add_test("sdc-check", "femu", femu_test_sdc,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,sdc=on,ocp=on"
+    });
+    qos_add_test("sdc-silent", "femu", femu_test_sdc,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=power,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,sdc=on,"
+            "e2e_check=off,sdc_kind=mix,sdc_seed=7,ocp=on"
     });
     qos_add_test("awupf-control", "femu", femu_test_awupf,
                  &(QOSGraphTestOptions) {

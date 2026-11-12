@@ -317,6 +317,11 @@ void ssd_page_restore(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
         } else {
             clear_bit(slba + i, ns->uncorrectable);
         }
+        if (ns->sdc && (state[i] & 4)) {
+            set_bit(slba + i, ns->sdc);
+        } else if (ns->sdc) {
+            clear_bit(slba + i, ns->sdc);
+        }
     }
     backend_unlock_range(ssd->n->mbe, ns->backend_offset + offset, page_size);
     rcache_invalidate(ssd, lpn);

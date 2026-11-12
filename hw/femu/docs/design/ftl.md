@@ -959,6 +959,31 @@ The FTL runs the whole command in one step, and a cut comes only
 between steps. AWUN and AWUPF report N - 1. Not with `durable_at_done`
 or `err_write_fail_ppm`.
 
+#### Silent corruption faults (sdc)
+
+`sdc=on` (with `power_loss`) adds media faults that leave wrong data.
+The FTL thread draws one as each page of a write goes into the store:
+`x-sdc` for one fault in a test, or `sdc_ppm` with `sdc_seed`.
+
+```text
+ flip       the page goes in with one bit changed
+ lost       the old bytes stay; the write still completes
+ misdirect  the old bytes stay; the new ones go to the next page
+            after the command
+ each spoiled block is marked (bit 2 of the per-LBA state, so a
+ rollback restores the mark with the bytes)
+
+ Read, Copy source, Compare, Verify of a marked block:
+   e2e_check=on  (default) --> 81h, C0h Detected Errors + 1
+   e2e_check=off           --> the wrong data, with success
+```
+
+A write of a block clears its mark, and so does a deallocation. The
+mark stands in for an LBA tag or version that no longer matches (OCP
+E2E-5). FEMU corrects no fault, so C0h Corrected Errors reads 0. Not
+with `durable_at_done`, `persist_file` or `awupf_lbas`: a misdirected
+page lies outside the transaction it would have to roll back with.
+
 #### Power-loss protection (plp)
 
 `plp=on` gives the buffer hold-up energy, as on a data-center drive

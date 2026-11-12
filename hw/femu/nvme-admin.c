@@ -3483,6 +3483,8 @@ static uint16_t nvme_ocp_smart_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     nvme_ocp_put(&log[48], 8, xor);                 /* XOR recoveries */
     nvme_ocp_put(&log[56], 8, uncorr);
     nvme_ocp_put(&log[64], 8, soft);
+    /* SMART-8: end-to-end Detected Errors; FEMU corrects none (79:76) */
+    stl_le_p(&log[72], qatomic_read(&n->e2e_detected));
     nvme_ocp_put(&log[81], 7, refresh);
     stl_le_p(&log[88], max_pe);
     stl_le_p(&log[92], min_pe == UINT32_MAX ? 0 : min_pe);
@@ -3855,7 +3857,9 @@ void nvme_smart_fill(FemuCtrl *n, NvmeSmartLog *smart_out)
     smart.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
-    smart.media_errors[0] = cpu_to_le64(st.media_errors);
+    /* blocks the internal LBA check refused are media integrity errors */
+    smart.media_errors[0] = cpu_to_le64(st.media_errors +
+                                        qatomic_read(&n->e2e_detected_all));
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
@@ -5192,6 +5196,7 @@ static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks,
                                    unsigned long **prep)
 {
     unsigned long *util, *uncorrectable;
+    unsigned long *sdc = NULL;
 
     /* fallible, so Format and Create refuse rather than abort on no memory */
     util = prep ? prep[0] : bitmap_try_new(blks);
@@ -5199,16 +5204,23 @@ static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks,
     if (prep) {
         prep[0] = prep[1] = NULL;
     }
-    if (!util || !uncorrectable) {
+    /* a new format holds no spoiled block (sdc) */
+    if (ns->ctrl->sdc) {
+        sdc = bitmap_try_new(blks);
+    }
+    if (!util || !uncorrectable || (ns->ctrl->sdc && blks && !sdc)) {
         g_free(util);
         g_free(uncorrectable);
+        g_free(sdc);
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
     g_free(ns->util);
     g_free(ns->uncorrectable);
+    g_free(ns->sdc);
     ns->util = util;
     ns->uncorrectable = uncorrectable;
+    ns->sdc = sdc;
 
     return NVME_SUCCESS;
 }

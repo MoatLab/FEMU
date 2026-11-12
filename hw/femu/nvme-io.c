@@ -1801,9 +1801,23 @@ mapped:
  * reports the blocks a Read would fail on, uncorrectable ones and, with DULBE
  * set, unwritten ones. A zoned namespace applies its read rules first.
  */
+/*
+ * A read-type command found block @lba of @ns unreadable (femu_lba_bad()):
+ * one Error Information entry names it, and the command fails with 81h.
+ */
+static uint16_t nvme_read_fail(FemuCtrl *n, NvmeRequest *req, NvmeCmd *cmd,
+                               NvmeNamespace *ns, uint64_t lba)
+{
+    nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
+                        offsetof(NvmeRwCmd, slba), lba, ns->id, cmd->opcode,
+                        ns->csi);
+    return NVME_UNRECOVERED_READ | NVME_DNR;
+}
+
 static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
 {
+    uint64_t bad;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
@@ -1823,8 +1837,8 @@ static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return status;
         }
     }
-    if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-        return NVME_UNRECOVERED_READ | NVME_DNR;
+    if (femu_lba_bad(ns, slba, elba, &bad)) {
+        return nvme_read_fail(n, req, cmd, ns, bad);
     }
 
     status = nvme_check_dulbe(n, ns, slba, elba);
@@ -2098,6 +2112,7 @@ static uint16_t nvme_copy_slm_source(FemuCtrl *n, NvmeNamespace *ns,
 static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           NvmeRequest *req)
 {
+    uint64_t bad;
     uint32_t dw12 = le32_to_cpu(cmd->cdw12);
     uint64_t sdlba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) |
                      le32_to_cpu(cmd->cdw10);
@@ -2208,8 +2223,10 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (sns[i] == ns && slba < sdlba + total && sdlba < elba) {
             return NVME_CMD_OVERLAP_IO_RANGE | NVME_DNR;
         }
-        if (find_next_bit(sns[i]->uncorrectable, elba, slba) < elba) {
-            return NVME_UNRECOVERED_READ | NVME_DNR;
+        /* Dword 0 names the source range that failed */
+        if (femu_lba_bad(sns[i], slba, elba, &bad)) {
+            req->cqe.n.result = cpu_to_le32(i);
+            return nvme_read_fail(n, req, cmd, sns[i], bad);
         }
         status = nvme_check_dulbe(n, sns[i], slba, elba);
         if (status) {
@@ -2290,7 +2307,7 @@ write:
      * payload, so it takes each destination page's before-image first.
      * awupf_lbas: a short Copy is then one transaction there.
      */
-    if (n->durable_at_done || n->awupf_lbas) {
+    if (n->durable_at_done || n->awupf_lbas || n->sdc) {
         req->write_data = g_steal_pointer(&data);
         goto staged;
     }
@@ -2341,6 +2358,7 @@ static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
                                       NvmeCmd *cmd, uint64_t slba,
                                       uint32_t nlb, uint64_t data_offset)
 {
+    uint64_t bad;
     uint16_t ms = nvme_ns_ms(ns);
     uint64_t ds = 1ULL << NVME_ID_NS_LBADS(ns);
     uint64_t unit = ds + ms;
@@ -2354,7 +2372,7 @@ static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
     if (nvme_check_mdts(n, len) || len > UINT32_MAX) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (find_next_bit(ns->uncorrectable, slba + nlb, slba) < slba + nlb) {
+    if (femu_lba_bad(ns, slba, slba + nlb, &bad)) {
         return NVME_UNRECOVERED_READ | NVME_DNR;
     }
     host = g_malloc(len);
@@ -2378,6 +2396,7 @@ static uint16_t nvme_compare_extended(FemuCtrl *n, NvmeNamespace *ns,
 static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                              NvmeRequest *req)
 {
+    uint64_t bad;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -2428,8 +2447,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_autofree uint8_t *host = g_malloc(data_size);
         uint16_t status;
 
-        if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-            return NVME_UNRECOVERED_READ | NVME_DNR;
+        if (femu_lba_bad(ns, slba, elba, &bad)) {
+            return nvme_read_fail(n, req, cmd, ns, bad);
         }
         status = dma_write_cmd(n, cmd, host, data_size);
         if (status) {
@@ -2463,9 +2482,9 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         qemu_iovec_destroy(&req->iov);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+    if (femu_lba_bad(ns, slba, elba, &bad)) {
         qemu_sglist_destroy(&req->qsg);
-        return NVME_UNRECOVERED_READ | NVME_DNR;
+        return nvme_read_fail(n, req, cmd, ns, bad);
     }
 
     /* data and metadata are compared against one snapshot of the blocks */
@@ -2624,7 +2643,7 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
         }
         bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
-    } else if (n->durable_at_done || n->awupf_lbas) {
+    } else if (n->durable_at_done || n->awupf_lbas || n->sdc) {
         /*
          * The zeros go to the FTL as a write's payload: it takes each
          * page's before-image there, before the bytes change, and

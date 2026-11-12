@@ -468,6 +468,24 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "82h), wtm (write-through) or normal; sets the C2h factory value, "
       "and ocp DP-CFG-6 B needs rom; Critical Warning bit 4 and a SMART "
       "event in every mode" },
+    { "sdc",
+      "with power_loss: media faults that leave wrong data, drawn as each "
+      "page of a write goes in (sdc_ppm, sdc_kind); a spoiled block reads "
+      "back with 81h under e2e_check, else wrong data with success; not "
+      "with durable_at_done, persist_file or awupf_lbas; off (default)" },
+    { "sdc_ppm",
+      "with sdc: faults per million page installs, drawn from sdc_seed; "
+      "0 (default) injects only through x-sdc" },
+    { "sdc_kind",
+      "with sdc: flip (one bit), lost (the old data stays), misdirect (the "
+      "data lands in the next page) or mix (default, one of the three)" },
+    { "sdc_seed",
+      "with sdc: seed of the fault draws, in the FTL's command order; "
+      "1 (default)" },
+    { "e2e_check",
+      "with sdc: the internal LBA and version check (OCP E2E-5); a read of "
+      "a spoiled block fails with 81h and counts in C0h Detected Errors; "
+      "off returns the wrong data with success; on (default)" },
     { "durable_at_done",
       "with power_loss: a written page is durable when its NAND program "
       "ends, not when it is booked; a cut restores the pages whose program "

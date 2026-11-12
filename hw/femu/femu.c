@@ -1816,6 +1816,7 @@ static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
     }
     g_free(ns->util);
     g_free(ns->uncorrectable);
+    g_clear_pointer(&ns->sdc, g_free);
     g_free(ns->mdata);
     nvme_ns_detach_fdp(n, ns);
     g_free(ns->fdp.phs);
@@ -1853,7 +1854,8 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     ns->util = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
     ns->uncorrectable = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
-    if (num_blks && (!ns->util || !ns->uncorrectable)) {
+    if ((num_blks && (!ns->util || !ns->uncorrectable)) ||
+        !femu_sdc_ns_alloc(ns, num_blks)) {
         error_setg(errp, "cannot allocate namespace bitmaps");
         return -1;
     }
@@ -4362,7 +4364,7 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
     }
     n->ocp_dssd_ps_saved = n->ps_max_watts;
     n->power_mgmt_saved = 0;
-    if (!femu_plp_init(n, errp)) {
+    if (!femu_plp_init(n, errp) || !femu_sdc_init(n, errp)) {
         return false;
     }
     nvme_ocp_val_init(n);
@@ -5248,6 +5250,11 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("vwc", FemuCtrl, vwc, 0),
     DEFINE_PROP_BOOL("power_loss", FemuCtrl, power_loss, false),
     DEFINE_PROP_BOOL("plp", FemuCtrl, plp, false),
+    DEFINE_PROP_BOOL("sdc", FemuCtrl, sdc, false),
+    DEFINE_PROP_UINT32("sdc_ppm", FemuCtrl, sdc_ppm, 0),
+    DEFINE_PROP_STRING("sdc_kind", FemuCtrl, sdc_kind),
+    DEFINE_PROP_UINT64("sdc_seed", FemuCtrl, sdc_seed, 1),
+    DEFINE_PROP_BOOL("e2e_check", FemuCtrl, e2e_check, true),
     DEFINE_PROP_UINT32("plp_health", FemuCtrl, plp_health, 120),
     DEFINE_PROP_STRING("plp_fail_mode", FemuCtrl, plp_fail_mode),
     DEFINE_PROP_BOOL("durable_at_done", FemuCtrl, durable_at_done, false),
@@ -6552,6 +6559,7 @@ static void femu_instance_init(Object *obj)
                                 femu_test_pause_stats, NULL);
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
+        femu_sdc_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-durable-check",
                                 femu_test_durable_check, NULL);

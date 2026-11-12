@@ -30,6 +30,7 @@ void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     if (ns->uncorrectable) {
         bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
     }
+    femu_sdc_clear(ns, slba, nlb);
 }
 
 /*
@@ -51,6 +52,7 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
     if (ns->util) {
         bitmap_test_and_clear_atomic(ns->util, slba, nlb);
     }
+    femu_sdc_clear(ns, slba, nlb);
     if (n->mbe && n->mbe->logical_space) {
         uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
         uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
@@ -500,6 +502,7 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
 
     uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint64_t bad;
 
     /* slba + nlb wraps for an slba near the top; test it in a form that cannot */
     if (slba > nsze || nlb > nsze - slba) {
@@ -521,9 +524,9 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             cmd->opcode, ns->csi);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+    if (!req->is_write && femu_lba_bad(ns, slba, elba, &bad)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
-                            offsetof(NvmeRwCmd, slba), elba, ns->id,
+                            offsetof(NvmeRwCmd, slba), bad, ns->id,
                             cmd->opcode, ns->csi);
         return NVME_UNRECOVERED_READ | NVME_DNR;
     }
