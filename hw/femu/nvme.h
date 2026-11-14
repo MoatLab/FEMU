@@ -1621,6 +1621,7 @@ typedef struct NvmeFeatureVal {
     uint32_t    write_atomicity;
     uint32_t    async_config;
     uint32_t    sw_prog_marker;
+    uint16_t    lsiri;      /* LBA Status Information Report Interval */
     uint8_t     host_behavior[512]; /* Host Behavior Support (16h) */
 } NvmeFeatureVal;
 
@@ -1654,6 +1655,7 @@ enum NvmeFeatureIds {
     NVME_TIMESTAMP                  = 0xe,
     NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
     NVME_READ_RECOVERY              = 0x12, /* Read Recovery Level, rrl=on */
+    NVME_LBA_STATUS_ATTR            = 0x15, /* NVM 1.2, 4.1.3.5 */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SPINUP_CONTROL             = 0x1a,
@@ -1866,6 +1868,8 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_FW_ACTIVATION (1u << 9)
 #define NVME_AEC_TELEMETRY  (1u << 10)  /* Telemetry Log Notices */
 #define NVME_AEC_ANA_CHANGE (1u << 11)  /* ANA Change Notices */
+/* LBA Status Information Poll Interval, 100 ms units; the LSIRI floor */
+#define NVME_LSIPI          10
 #define NVME_AER_INFO_ANA_CHANGE 0x03   /* notice: ANA Change */
 #define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
 #define NVME_AER_INFO_RESV_LOG  0x00    /* I/O specific: log 80h has pages */

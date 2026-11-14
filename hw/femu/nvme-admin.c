@@ -33,6 +33,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
+    [NVME_LBA_STATUS_ATTR]          = true,
     [NVME_TIMESTAMP]                = true,
     [NVME_HOST_MEM_BUFFER]          = true,
     [NVME_SPINUP_CONTROL]           = true,
@@ -66,6 +67,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
+    [NVME_LBA_STATUS_ATTR]          = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_MEM_BUFFER]          = NVME_FEAT_CAP_CHANGE,
     [NVME_HCTM]                     = NVME_FEAT_CAP_CHANGE,
@@ -363,6 +365,8 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->hmb_mb != 0;
     case NVME_READ_RECOVERY:
         return n->rrl;
+    case NVME_LBA_STATUS_ATTR:
+        return nvme_admin_effects(n, NVME_ADM_CMD_GET_LBA_STATUS);
     case NVME_SPINUP_CONTROL:
         /* mandatory with rotational media (Base 2.1, 8.1.23), and only then */
         return nvme_subsys_rotational(n->subsys);
@@ -1946,6 +1950,9 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
     case NVME_NUMBER_OF_QUEUES:
         result = (n->nr_io_queues - 1) | ((n->nr_io_queues - 1) << 16);
         break;
+    case NVME_LBA_STATUS_ATTR:
+        result = NVME_LSIPI << 16 | NVME_LSIPI;
+        break;
     case NVME_INTERRUPT_COALESCING:
         result = n->intc_thresh | (n->intc_time << 8);
         break;
@@ -2165,6 +2172,9 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         cqe->n.result = cpu_to_le32(n->features.sw_prog_marker);
+        break;
+    case NVME_LBA_STATUS_ATTR:
+        cqe->n.result = cpu_to_le32(NVME_LSIPI << 16 | n->features.lsiri);
         break;
     case NVME_COMMAND_SET_PROFILE:
         /* the only combination there is, and the only one selectable */
@@ -2611,6 +2621,11 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
         break;
+    case NVME_LBA_STATUS_ATTR:
+        /* a shorter interval than LSIPI is unsupported: the closest is LSIPI */
+        n->features.lsiri = MAX(dw11 & 0xffff, NVME_LSIPI);
+        cqe->n.result = cpu_to_le32(NVME_LSIPI << 16 | n->features.lsiri);
+        break;
     case NVME_OCP_LATENCY_MONITOR:
         /* the payload holds the configuration; SV is accepted (LMSF-10) */
         return femu_ocp_lat_set(n, cmd);
@@ -2908,6 +2923,7 @@ static bool nvme_fid_in_iocs(uint8_t fid, uint8_t csi)
     case NVME_LBA_RANGE_TYPE:
     case NVME_ERROR_RECOVERY:
     case NVME_WRITE_ATOMICITY:
+    case NVME_LBA_STATUS_ATTR:
         return csi == NVME_CSI_NVM || csi == NVME_CSI_ZONED;
     case NVME_KV_FEAT_CONFIG:
         return csi == NVME_CSI_KV;

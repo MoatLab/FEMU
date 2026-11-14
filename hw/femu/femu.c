@@ -597,6 +597,7 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
     n->features.write_atomicity = 0;
     n->features.async_config    = 0x0;
+    n->features.lsiri           = NVME_LSIPI;
     memset(n->features.host_behavior, 0, sizeof(n->features.host_behavior));
 
     for (i = 0; i <= n->nr_io_queues; i++) {

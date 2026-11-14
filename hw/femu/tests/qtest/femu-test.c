@@ -21991,6 +21991,66 @@ static void femu_test_get_lba_status(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/*
+ * LBA Status Information Attributes (NVM 1.2, 4.1.3.5): DW0 holds LSIPI
+ * (fixed, 1 s) above LSIRI. An LSIRI below LSIPI is unsupported, so the
+ * closest supported value, LSIPI, is used. The feature is not saveable
+ * and a controller reset restores the default.
+ */
+static void femu_test_lsi_feature(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 1024);
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x15, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 10);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x15, false, 0, 30, &res)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 30);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x15, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 30);
+    /* the upper half of DW11 is reserved here: LSIPI is not settable */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x15, false, 0,
+                                             0x50000 | 3, &res)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 10);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x15, false, 0, 0xffff,
+                                             &res)), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 0xffff);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x15, true, 0, 40, &res)),
+                    ==, NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x15, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 0xffff);
+    /* default and saved give the default; capabilities: changeable only */
+    for (uint8_t sel = 1; sel <= 3; sel++) {
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x15, sel, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(res, ==, sel == 3 ? 0x4 : 10 << 16 | 10);
+    }
+    /* log 12h: supported, controller scope */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x15), ==, 0x00200001);
+
+    femu_set_feature(&c, 0x15, false, 0, 30, &res);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x15, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 10 << 16 | 10);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_KV_FUZZ_KEYS   16
 
 /* Put key @k of the pool into the command, @len bytes of it. */
@@ -60696,6 +60756,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f"
     });
+    qos_add_test("lsi-feature", "femu", femu_test_lsi_feature, NULL);
     qos_add_test("mdts0-reports", "femu", femu_test_mdts0_reports,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f,mdts=0"

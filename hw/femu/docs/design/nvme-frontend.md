@@ -700,12 +700,19 @@ State Transition, 0Ch), LBA Range Type (03h), Temperature Threshold (04h), Error
 Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
-Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`), Host
-Behavior Support (16h), Command Set Profile (19h), FDP
-(1Dh, 1Eh, only with FDP on), Key Value Configuration (20h, only with
-a KV namespace) and Software Progress Marker (80h). Any other identifier, or
-one of these without what it needs, fails with Invalid Field in Command, and
-log 12h lists exactly the identifiers that answer.
+Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`), LBA
+Status Information Attributes (15h, NVM and ZNS), Host Behavior Support
+(16h), Command Set Profile (19h), FDP (1Dh, 1Eh, only with FDP on), Key
+Value Configuration (20h, only with a KV namespace) and Software Progress
+Marker (80h). Any other identifier, or one of these without what it needs,
+fails with Invalid Field in Command, and log 12h lists exactly the
+identifiers that answer.
+
+LBA Status Information Attributes (NVM 1.2, 4.1.3.5) return LSIPI in bits
+31:16 and LSIRI in bits 15:0, both in 100 ms units. LSIPI is fixed at 10
+(1 s). A Set takes LSIRI from bits 15:0; a value below 10 becomes 10, the
+closest supported value. The feature is not saveable, and a controller
+reset sets LSIRI back to 10.
 
 With `power_states=on` and `power_limit=on`, Power Limit (23h, Base 2.3
 8.1.18.6) takes a limit in CDW13 (PLS 01b or 10b, PLV). The states whose
