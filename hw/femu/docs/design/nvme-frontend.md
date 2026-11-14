@@ -746,6 +746,27 @@ ESTULB is the sum of the tracked blocks, and saturates at FFFFFFFEh.
   drops the held page and keeps R, so the same blocks do not step LSGC
   again.
 
+The alert is an AER of type Notice, information 05h, log 0Eh (AEC bit 13,
+OAES bit 13). FEMU sends it when the generation is above the last one it
+announced:
+
+```
+ new block --> wait: LSIRI after the last clear --> scan (at most 1 per 100 ms)
+           --> queue Notice 05h --> AER --> capture S, check its gen --> post
+ component failure --> no LSIRI wait (also with no tracked blocks)
+ posted --> no more 05h until a read with RAE=0 clears it
+```
+
+- The page is captured when the alert is posted, so the alert and the
+  page agree. A block added after that waits for the next alert.
+- A full event queue refuses the alert. It goes in when an event leaves
+  the queue. AEC bit 13 off drops a queued alert.
+- A controller reset keeps the generation the host was told. An alert the
+  host did not read is sent again, one LSIRI after the next enable; a
+  cleared one is not.
+- `persist_file` does not keep the alert state across a restart.
+- LSGC is 16 bits and wraps from FFFFh to 0.
+
 With `power_states=on` and `power_limit=on`, Power Limit (23h, Base 2.3
 8.1.18.6) takes a limit in CDW13 (PLS 01b or 10b, PLV). The states whose
 MP is above it are prohibited. MP falls with the state number, so these

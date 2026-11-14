@@ -849,6 +849,7 @@ static void femu_ctrl_ready(FemuCtrl *n)
     n->recovery_pending = false;
     nvme_start_dataplane(n);
     n->bar.csts = NVME_CSTS_READY;
+    femu_lsi_eval(n);
     /* the first ready controller starts the events_file times */
     femu_events_start(n);
     /* commands the host queued while the controller started */
@@ -995,6 +996,7 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             /* the power-on protection check comes before any write */
             if (!shutdown) {
                 femu_plp_enable(n);
+                femu_lsi_start(n);
             }
             if (shutdown) {
                 /* shut down in the same write: the controller never starts */
@@ -3412,6 +3414,7 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)
 {
     femu_lsi_ns_gone(n, ns);
+    femu_lsi_topology();
     if (nvme_ns_shared(n)) {
         n = n->subsys->storage;
     }
@@ -6655,6 +6658,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-stream-test", nvme_streams_test, NULL);
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         femu_sdc_add_props(obj);
+        femu_lsi_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_str(obj, "x-durable-check",
                                 femu_test_durable_check, NULL);

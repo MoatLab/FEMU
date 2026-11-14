@@ -972,6 +972,7 @@ static void nvme_clear_ns_notice(FemuCtrl *n)
         }
     }
     qemu_mutex_unlock(&n->aer_lock);
+    femu_lsi_room(n);
 }
 
 static uint16_t nvme_changed_ns_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
@@ -2267,6 +2268,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
     uint8_t smart_new;
+    uint32_t aec_old;
 
     /* an identifier the controller does not support is an invalid field */
     if (!nvme_fid_supported(n, fid) || !nvme_feature_uidx_ok(n, cmd, fid)) {
@@ -2607,6 +2609,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                     (NVME_SMART_SPARE | NVME_SMART_RELIABILITY |
                      NVME_SMART_MEDIA_READ_ONLY |
                      NVME_SMART_FAILED_VOLATILE_MEDIA);
+        aec_old = n->features.async_config;
         n->features.async_config = dw11;
         if (smart_new && (nvme_critical_warning(n) & smart_new)) {
             qatomic_or(&n->health_pending,
@@ -2617,6 +2620,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (n->thermal_timer) {
             femu_temp_eval(n);
         }
+        femu_lsi_config(n, aec_old);
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
@@ -2625,6 +2629,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* a shorter interval than LSIPI is unsupported: the closest is LSIPI */
         n->features.lsiri = MAX(dw11 & 0xffff, NVME_LSIPI);
         cqe->n.result = cpu_to_le32(NVME_LSIPI << 16 | n->features.lsiri);
+        femu_lsi_config(n, n->features.async_config);
         break;
     case NVME_OCP_LATENCY_MONITOR:
         /* the payload holds the configuration; SV is accepted (LMSF-10) */
@@ -4477,11 +4482,21 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
         if (first >= end) {
             break;
         }
+        /* test: a write clears the start bit between the two searches */
+        if (n->lsi_gls_race && map == ns->uncorrectable) {
+            n->lsi_gls_race = false;
+            femu_lsi_clear(ns, first, 1);
+        }
+        last = find_next_zero_bit(map, end, first);
+        if (last == first) {
+            /* a write cleared the bit after the first search */
+            lba = first + 1;
+            continue;
+        }
         if (nlsd == room) {
             buf[4] = 0x1;               /* INCOMPLETE */
             break;
         }
-        last = find_next_zero_bit(map, end, first);
         /* the block count is 32 bits and 0's based */
         last = MIN(last, first + ((uint64_t)UINT32_MAX + 1));
         if (8 + 16 * ((uint64_t)nlsd + 1) > cap) {
@@ -5999,6 +6014,7 @@ static uint16_t nvme_ns_attachment(FemuCtrl *n, NvmeCmd *cmd)
         nvme_ns_changed(ctrl, ns->id, true);
     }
     nvme_resume_pollers(n, resume);
+    femu_lsi_topology();
     return NVME_SUCCESS;
 }
 
@@ -6425,6 +6441,11 @@ void nvme_process_aers(FemuCtrl *n)
         if (!event) {
             return;
         }
+        /* an alert is checked against the page it announces */
+        if (femu_lsi_is_alert(event) && !femu_lsi_post(n)) {
+            g_free(event);
+            continue;
+        }
 
         if (nvme_is_ns_notice(event)) {
             n->ns_notice_masked = true;
@@ -6439,6 +6460,7 @@ void nvme_process_aers(FemuCtrl *n)
         nvme_post_held_cqe(n, &n->aer_held[n->outstanding_aers],
                            &event->result, event->nsid);
         g_free(event);
+        femu_lsi_room(n);
     }
 }
 
@@ -6446,7 +6468,7 @@ void nvme_process_aers(FemuCtrl *n)
  * Raise an asynchronous event, reporting it as soon as an AER is available. An
  * event about one namespace names it in dword 1 of the completion.
  */
-void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+bool nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                            uint8_t log_page, uint32_t nsid)
 {
     NvmeAsyncEvent *event;
@@ -6471,7 +6493,7 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
             dup->result.log_page == log_page && dup->nsid == nsid) {
             qemu_mutex_unlock(&n->aer_lock);
             g_free(event);
-            return;
+            return true;
         }
         ctrl_queued += !dup->nsid;
     }
@@ -6479,7 +6501,7 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                ctrl_queued >= FEMU_AER_MAX_QUEUED) {
         qemu_mutex_unlock(&n->aer_lock);
         g_free(event);
-        return;
+        return false;
     }
     QSIMPLEQ_INSERT_TAIL(&n->aer_queue, event, entry);
     n->aer_queued++;
@@ -6491,12 +6513,13 @@ void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
      * touch the admin completion queue the vCPU thread is serving.
      */
     qemu_bh_schedule(n->aer_bh);
+    return true;
 }
 
-void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+bool nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                         uint8_t log_page)
 {
-    nvme_enqueue_ns_event(n, event_type, event_info, log_page, 0);
+    return nvme_enqueue_ns_event(n, event_type, event_info, log_page, 0);
 }
 
 /*
@@ -6531,6 +6554,7 @@ void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
         }
     }
     qemu_mutex_unlock(&n->aer_lock);
+    femu_lsi_room(n);
 }
 
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
@@ -6554,6 +6578,7 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
         }
     }
     qemu_mutex_unlock(&n->aer_lock);
+    femu_lsi_room(n);
 }
 
 static bool femu_vwc_post(FemuCtrl *n);

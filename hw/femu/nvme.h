@@ -2995,6 +2995,25 @@ typedef struct FemuCtrl {
     struct FemuLsiPage *lsi_s;      /* the page a RAE=1 read holds */
     uint64_t        lsi_g_r;        /* generation of the last host read */
     uint64_t        lsi_g_pub;      /* highest generation given out */
+    uint64_t        lsi_r_ver;      /* steps on each successful read */
+    uint64_t        lsi_alert_gen;  /* generation of the last alert */
+    int64_t         lsi_last_clear; /* virtual ns of the last RAE=0 clear */
+    int64_t         lsi_last_scan;
+    QEMUTimer       *lsi_timer;     /* deadline and deferred evaluation */
+    uint8_t         lsi_alert;      /* idle, queued or reported */
+    bool            lsi_comp_pending;
+    bool            lsi_comp_unacked;
+    bool            lsi_listed;
+    bool            lsi_cache_ok;
+    bool            lsi_cache_tracked;
+    uint64_t        lsi_cache_gen;
+    uint64_t        lsi_cache_rver;
+    uint64_t        lsi_cache_topo;
+    uint64_t        *lsi_cache_mver;    /* media_ver per namespace slot */
+    uint64_t        lsi_rejects;    /* alerts the full queue refused */
+    uint32_t        lsi_wu_stop;    /* test: stop the next WU here */
+    bool            lsi_gls_race;   /* test: clear the next GLS start bit */
+    QLIST_ENTRY(FemuCtrl) lsi_link;
     uint64_t        ana_gchgc[NVME_MAX_NAMESPACES];
     NvmeSanitizeState sanitize;
     /*
@@ -3857,6 +3876,16 @@ void femu_lsi_loaded(NvmeNamespace *ns);
 void femu_lsi_restore(NvmeNamespace *ns, uint64_t lba, bool on,
                       uint64_t *added, uint64_t *gone);
 void femu_lsi_ns_gone(FemuCtrl *n, NvmeNamespace *ns);
+void femu_lsi_wu_stop(NvmeNamespace *ns);
+void femu_lsi_eval(FemuCtrl *n);
+bool femu_lsi_is_alert(NvmeAsyncEvent *e);
+bool femu_lsi_post(FemuCtrl *n);
+void femu_lsi_room(FemuCtrl *n);
+void femu_lsi_start(FemuCtrl *n);
+void femu_lsi_config(FemuCtrl *n, uint32_t old);
+void femu_lsi_component(FemuCtrl *n, NvmeNamespace *ns);
+void femu_lsi_topology(void);
+void femu_lsi_add_props(Object *obj);
 void femu_lsi_free_cov(FemuCtrl *n, FemuLsiCov *r);
 uint16_t femu_lsi_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                       uint64_t off, bool rae);
@@ -4155,10 +4184,10 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 void nvme_process_sq_admin(void *opaque);
 void nvme_process_aers(FemuCtrl *n);
-void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+bool nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                         uint8_t log_page);
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type);
-void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+bool nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                            uint8_t log_page, uint32_t nsid);
 void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint8_t log_page,
                           uint32_t nsid, bool drop);

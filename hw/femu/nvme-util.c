@@ -42,6 +42,7 @@ void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     if (ns->util) {
         bitmap_set_atomic(ns->util, slba, nlb);
     }
+    femu_lsi_wu_stop(ns);
     femu_lsi_mark(ns, slba, nlb);
     femu_sdc_clear(ns, slba, nlb);
 }

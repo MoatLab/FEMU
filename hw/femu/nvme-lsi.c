@@ -23,6 +23,9 @@
  */
 
 #include "./nvme.h"
+#include "qemu/main-loop.h"
+#include "qapi/error.h"
+#include "qapi/visitor.h"
 
 #define LSI_HDR             16
 #define LSI_ELEM_HDR        16
@@ -30,6 +33,25 @@
 #define LSI_MAX_DESC        256
 #define LSI_NLRD_ALL        0xffffffffu
 #define LSI_RATYPE_TRACKED  0x11
+#define LSI_INFO_ALERT      0x05        /* notice: LBA Status Information */
+#define LSI_AEC             (1u << 13)  /* AEC: LBA Status Information */
+#define LSI_UNIT_NS         (100 * SCALE_MS)
+#define LSI_SCAN_GAP_NS     (100 * SCALE_MS)
+#define LSI_STOP_HELD       0x100
+#define LSI_STOP_LIMIT_NS   (5 * NANOSECONDS_PER_SECOND)
+
+enum { LSI_IDLE, LSI_QUEUED, LSI_REPORTED };
+
+/*
+ * Every realized controller, for the kick: a namespace can be shared, and
+ * the controller its pollers run on is not the only one that reports it.
+ * Only the main loop walks or changes the list.
+ */
+static QLIST_HEAD(, FemuCtrl) lsi_ctrls = QLIST_HEAD_INITIALIZER(lsi_ctrls);
+static QEMUBH *lsi_kick_bh;
+static uint64_t lsi_topo;       /* steps on attach, detach and delete */
+
+static void lsi_stop_point(NvmeNamespace *ns, uint32_t stage);
 
 uint64_t femu_lsi_incarnation(void)
 {
@@ -98,9 +120,13 @@ void femu_lsi_changed(NvmeNamespace *ns, uint64_t added, uint64_t gone)
     qatomic_add(&ns->lsi_nr_unc, added - gone);
     if (added) {
         qatomic_inc(&ns->lsi_add_ver);
+        lsi_stop_point(ns, 2);
     }
     smp_wmb();  /* pairs with the acquire of media_ver before a scan */
     qatomic_inc(&ns->lsi_media_ver);
+    if (qatomic_read(&lsi_kick_bh)) {
+        qemu_bh_schedule(lsi_kick_bh);
+    }
 }
 
 /* mark blocks tracked; a block already tracked is no change */
@@ -191,6 +217,11 @@ static bool lsi_scan(NvmeNamespace *ns, FemuLsiRun *runs, uint32_t *nruns,
             break;
         }
         last = find_next_zero_bit(ns->uncorrectable, nsze, first);
+        if (last == first) {
+            /* a write cleared it after the first search */
+            lba = first + 1;
+            continue;
+        }
         *blocks += last - first;
         while (first < last) {
             uint64_t nlb = MIN(last - first, (uint64_t)UINT32_MAX + 1);
@@ -362,6 +393,354 @@ void femu_lsi_free_cov(FemuCtrl *n, FemuLsiCov *r)
     g_free(r);
 }
 
+static int64_t lsi_now(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static int64_t lsi_deadline(FemuCtrl *n)
+{
+    return n->lsi_last_clear + (int64_t)n->features.lsiri * LSI_UNIT_NS;
+}
+
+/*
+ * A test stops one Write Uncorrectable at @stage: 1 before its bits are
+ * set, 2 between its add_ver and media_ver steps. The first WU to reach
+ * the stage takes it; the test releases it, or 5 s of real time does.
+ */
+static void lsi_stop_point(NvmeNamespace *ns, uint32_t stage)
+{
+    FemuCtrl *n = ns->ctrl;
+    int64_t end;
+
+    if (!n || qatomic_read(&n->lsi_wu_stop) != stage ||
+        qatomic_cmpxchg(&n->lsi_wu_stop, stage, stage | LSI_STOP_HELD) !=
+        stage) {
+        return;
+    }
+    end = get_clock_realtime() + LSI_STOP_LIMIT_NS;
+    while (qatomic_read(&n->lsi_wu_stop) == (stage | LSI_STOP_HELD) &&
+           get_clock_realtime() < end) {
+        g_usleep(100);
+    }
+    qatomic_cmpxchg(&n->lsi_wu_stop, stage | LSI_STOP_HELD, 0);
+}
+
+void femu_lsi_wu_stop(NvmeNamespace *ns)
+{
+    lsi_stop_point(ns, 1);
+}
+
+static bool lsi_cache_valid(FemuCtrl *n)
+{
+    if (!n->lsi_cache_ok || n->lsi_cache_rver != n->lsi_r_ver ||
+        n->lsi_cache_topo != qatomic_read(&lsi_topo)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = nvme_ns(n, i + 1);
+        uint64_t v = ns ? qatomic_load_acquire(&ns->lsi_media_ver) : 0;
+
+        if (v != n->lsi_cache_mver[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * The generation and "tracked blocks exist" of the page a capture would
+ * make now, with the pollers running. The key is sampled before the scan,
+ * so a change that the scan misses moves media_ver past the key.
+ */
+static void lsi_eval_scan(FemuCtrl *n)
+{
+    g_autofree FemuLsiRun *runs = g_new(FemuLsiRun, LSI_MAX_DESC);
+    bool fresh = false;
+
+    n->lsi_cache_tracked = false;
+    n->lsi_cache_rver = n->lsi_r_ver;
+    n->lsi_cache_topo = qatomic_read(&lsi_topo);
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = nvme_ns(n, i + 1);
+        FemuLsiCov c = { 0 };
+        uint32_t nruns;
+        uint64_t blocks;
+        bool exact;
+
+        n->lsi_cache_mver[i] = ns ? qatomic_load_acquire(&ns->lsi_media_ver) :
+                               0;
+        if (!ns || !ns->uncorrectable) {
+            continue;
+        }
+        c.add_ver = qatomic_read(&ns->lsi_add_ver);
+        exact = lsi_scan(ns, runs, &nruns, &blocks);
+        if (!blocks) {
+            continue;
+        }
+        c.inc = ns->lsi_inc;
+        c.lbads = lsi_lbads(ns);
+        c.sentinel = !exact;
+        n->lsi_cache_tracked = true;
+        fresh |= lsi_cov_new(ns, &c, &n->lsi_r[i]);
+    }
+    n->lsi_cache_gen = MAX(n->lsi_g_pub, n->lsi_g_r + fresh);
+    n->lsi_cache_ok = true;
+}
+
+static void lsi_arm(FemuCtrl *n, int64_t when)
+{
+    if (!timer_pending(n->lsi_timer) ||
+        timer_expire_time_ns(n->lsi_timer) > when) {
+        timer_mod(n->lsi_timer, when);
+    }
+}
+
+/*
+ * Admit an alert (design 11.3, 12.1): AEC bit 13 set, none queued or
+ * reported, and a component failure, or LSIRI passed since the last clear
+ * with tracked blocks in a page of a newer generation than the last alert.
+ */
+void femu_lsi_eval(FemuCtrl *n)
+{
+    int64_t now = lsi_now();
+    bool tracked;
+    uint64_t gen;
+
+    if (!n->lsi_timer || n->lsi_alert != LSI_IDLE ||
+        !(n->features.async_config & LSI_AEC) || !NVME_CC_EN(n->bar.cc)) {
+        return;
+    }
+    if (!n->lsi_comp_pending) {
+        if (now < lsi_deadline(n)) {
+            lsi_arm(n, lsi_deadline(n));
+            return;
+        }
+        if (n->lsi_s) {
+            tracked = n->lsi_s->ncov;
+            gen = n->lsi_s->gen;
+        } else {
+            if (!lsi_cache_valid(n)) {
+                if (now < n->lsi_last_scan + LSI_SCAN_GAP_NS) {
+                    lsi_arm(n, n->lsi_last_scan + LSI_SCAN_GAP_NS);
+                    return;
+                }
+                n->lsi_last_scan = now;
+                lsi_eval_scan(n);
+            }
+            tracked = n->lsi_cache_tracked;
+            gen = n->lsi_cache_gen;
+        }
+        if (!tracked || gen <= n->lsi_alert_gen) {
+            return;
+        }
+    }
+    if (nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, LSI_INFO_ALERT,
+                           NVME_LOG_LBA_STATUS)) {
+        n->lsi_alert = LSI_QUEUED;
+    } else {
+        n->lsi_rejects++;
+    }
+}
+
+static void lsi_timer_cb(void *opaque)
+{
+    femu_lsi_eval(opaque);
+}
+
+static void lsi_kick(void *opaque)
+{
+    FemuCtrl *n;
+
+    QLIST_FOREACH(n, &lsi_ctrls, lsi_link) {
+        femu_lsi_eval(n);
+    }
+}
+
+bool femu_lsi_is_alert(NvmeAsyncEvent *e)
+{
+    return e->result.event_type == NVME_AER_TYPE_NOTICE &&
+           e->result.event_info == LSI_INFO_ALERT &&
+           e->result.log_page == NVME_LOG_LBA_STATUS;
+}
+
+/*
+ * The queued alert is about to be posted (BQL). The page and its
+ * generation come from one capture, and the alert is checked against
+ * that page. A failed check drops the event; returns whether to post.
+ */
+bool femu_lsi_post(FemuCtrl *n)
+{
+    FemuLsiPage *s = n->lsi_s;
+    bool fresh = !s;
+    bool ok;
+
+    if (fresh) {
+        bool resume = nvme_pause_pollers(n);
+
+        s = lsi_capture(n);
+        nvme_resume_pollers(n, resume);
+    }
+    n->lsi_alert = LSI_IDLE;
+    if (!s) {
+        lsi_arm(n, lsi_now() + LSI_SCAN_GAP_NS);
+        return false;
+    }
+    ok = (n->features.async_config & LSI_AEC) &&
+         (n->lsi_comp_pending ||
+          (lsi_now() >= lsi_deadline(n) && s->ncov &&
+           s->gen > n->lsi_alert_gen));
+    if (!ok) {
+        if (fresh) {
+            lsi_page_free(s);
+        }
+        n->lsi_cache_ok = false;
+        qemu_bh_schedule(lsi_kick_bh);
+        return false;
+    }
+    n->lsi_s = s;
+    n->lsi_alert_gen = s->gen;
+    n->lsi_g_pub = MAX(n->lsi_g_pub, s->gen);
+    n->lsi_alert = LSI_REPORTED;
+    n->lsi_comp_unacked = n->lsi_comp_pending;
+    n->lsi_comp_pending = false;
+    return true;
+}
+
+/* CC.EN 0 to 1 (design 9.7): LSIRI counts from here, not from ready */
+void femu_lsi_start(FemuCtrl *n)
+{
+    n->lsi_last_clear = lsi_now();
+}
+
+/* an event left the queue, so there is room for a refused alert */
+void femu_lsi_room(FemuCtrl *n)
+{
+    if (n->lsi_alert == LSI_IDLE && lsi_kick_bh) {
+        qemu_bh_schedule(lsi_kick_bh);
+    }
+}
+
+/* a successful RAE=0 read: the alert clears and LSIRI starts again */
+static void lsi_cleared(FemuCtrl *n)
+{
+    nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, NVME_LOG_LBA_STATUS, 0,
+                         true);
+    n->lsi_alert = LSI_IDLE;
+    n->lsi_comp_unacked = false;
+    n->lsi_last_clear = lsi_now();
+    femu_lsi_eval(n);
+    qemu_bh_schedule(n->aer_bh);
+}
+
+/* Set Features: AEC changed from @old, or LSIRI changed */
+void femu_lsi_config(FemuCtrl *n, uint32_t old)
+{
+    if ((old & LSI_AEC) && !(n->features.async_config & LSI_AEC) &&
+        n->lsi_alert == LSI_QUEUED) {
+        uint8_t mask = n->aer_mask;
+
+        /* an unsent alert goes; a sent one stays unacknowledged */
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, NVME_LOG_LBA_STATUS, 0,
+                             true);
+        n->aer_mask = mask;
+        n->lsi_alert = LSI_IDLE;
+    }
+    if (n->lsi_timer) {
+        timer_del(n->lsi_timer);
+    }
+    femu_lsi_eval(n);
+}
+
+/* a media failure that may have made blocks unrecoverable (R2b) */
+void femu_lsi_component(FemuCtrl *n, NvmeNamespace *ns)
+{
+    FemuCtrl *c;
+
+    QLIST_FOREACH(c, &lsi_ctrls, lsi_link) {
+        if (c == n || (nvme_ns_shared(n) && c->subsys == n->subsys &&
+                       nvme_ns(c, ns->id))) {
+            c->lsi_comp_pending = true;
+            femu_lsi_eval(c);
+        }
+    }
+}
+
+void femu_lsi_topology(void)
+{
+    qatomic_inc(&lsi_topo);
+    if (lsi_kick_bh) {
+        qemu_bh_schedule(lsi_kick_bh);
+    }
+}
+
+static void lsi_state_get(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns_allocated(n, 1);
+    g_autofree char *s = g_strdup_printf(
+        "alert=%u g_r=%" PRIu64 " g_pub=%" PRIu64 " alert_gen=%" PRIu64
+        " comp=%u unacked=%u rejects=%" PRIu64 " add=%" PRIu64
+        " media=%" PRIu64 " unc=%" PRIu64 " stop=%u",
+        n->lsi_alert, n->lsi_g_r, n->lsi_g_pub, n->lsi_alert_gen,
+        n->lsi_comp_pending, n->lsi_comp_unacked, n->lsi_rejects,
+        ns ? qatomic_read(&ns->lsi_add_ver) : 0,
+        ns ? qatomic_read(&ns->lsi_media_ver) : 0,
+        ns ? qatomic_read(&ns->lsi_nr_unc) : 0,
+        qatomic_read(&n->lsi_wu_stop));
+
+    visit_type_str(v, name, &s, errp);
+}
+
+/*
+ * Test commands: "stop:S" stops the next WU at stage S (0 releases);
+ * "component:NSID" reports a component failure; "gen:G" sets every
+ * generation to G; "glsrace:1" clears the start bit of the next Get LBA
+ * Status run; "fill:K" queues K distinct vendor events; "eval:1" runs an
+ * admission check.
+ */
+static void lsi_test_set(Object *obj, const char *value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    g_auto(GStrv) f = g_strsplit(value, ":", 2);
+    uint64_t v;
+    NvmeNamespace *ns;
+
+    if (g_strv_length(f) != 2 || qemu_strtou64(f[1], NULL, 0, &v)) {
+        error_setg(errp, "x-lsi: bad command '%s'", value);
+        return;
+    }
+    ns = v && v <= UINT32_MAX ? nvme_ns(n, v) : NULL;
+    if (!strcmp(f[0], "stop") && v <= 2) {
+        qatomic_set(&n->lsi_wu_stop, v);
+    } else if (!strcmp(f[0], "component") && ns) {
+        femu_lsi_component(n, ns);
+    } else if (!strcmp(f[0], "gen")) {
+        n->lsi_g_r = n->lsi_g_pub = n->lsi_alert_gen = v;
+        n->lsi_cache_ok = false;
+    } else if (!strcmp(f[0], "eval")) {
+        femu_lsi_eval(n);
+    } else if (!strcmp(f[0], "glsrace")) {
+        n->lsi_gls_race = v;
+    } else if (!strcmp(f[0], "fill") && v <= 64) {
+        for (uint64_t i = 0; i < v; i++) {
+            nvme_enqueue_event(n, NVME_AER_TYPE_VENDOR_SPECIFIC, 0x10 + i,
+                               0);
+        }
+    } else {
+        error_setg(errp, "x-lsi: bad command '%s'", value);
+    }
+}
+
+void femu_lsi_add_props(Object *obj)
+{
+    object_property_add(obj, "x-lsi-state", "str", lsi_state_get, NULL,
+                        NULL, NULL);
+    object_property_add_str(obj, "x-lsi", NULL, lsi_test_set);
+}
+
+
 uint16_t femu_lsi_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                       uint64_t off, bool rae)
 {
@@ -402,11 +781,13 @@ uint16_t femu_lsi_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     n->lsi_r = r;
     n->lsi_g_r = s->gen;
     n->lsi_g_pub = MAX(n->lsi_g_pub, s->gen);
+    n->lsi_r_ver++;
     if (rae) {
         n->lsi_s = s;
     } else {
         n->lsi_s = NULL;
         lsi_page_free(s);
+        lsi_cleared(n);
     }
     return NVME_SUCCESS;
 }
@@ -432,18 +813,49 @@ void femu_lsi_ns_gone(FemuCtrl *n, NvmeNamespace *ns)
 void femu_lsi_init(FemuCtrl *n)
 {
     n->lsi_r = g_new0(FemuLsiCov, n->namespace_limit);
+    n->lsi_cache_mver = g_new0(uint64_t, n->namespace_limit);
+    n->lsi_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lsi_timer_cb, n);
+    n->lsi_last_clear = lsi_now();
+    n->id_ctrl.oaes |= cpu_to_le32(LSI_AEC);
+    if (!lsi_kick_bh) {
+        qatomic_set(&lsi_kick_bh, qemu_bh_new(lsi_kick, NULL));
+    }
+    QLIST_INSERT_HEAD(&lsi_ctrls, n, lsi_link);
+    n->lsi_listed = true;
 }
 
-/* a controller reset ends a retained read; R and the counters stay */
+/*
+ * Controller reset (design 9.7): the AER queue and mask are gone. An
+ * alert the host did not acknowledge comes back after the deadline; an
+ * acknowledged state gives no new one, since alert_gen <= G_R.
+ */
 void femu_lsi_reset(FemuCtrl *n)
 {
     lsi_page_free(n->lsi_s);
     n->lsi_s = NULL;
+    if (n->lsi_alert == LSI_REPORTED) {
+        n->lsi_alert_gen = MIN(n->lsi_alert_gen, n->lsi_g_r);
+    }
+    n->lsi_alert = LSI_IDLE;
+    n->lsi_comp_pending |= n->lsi_comp_unacked;
+    n->lsi_comp_unacked = false;
+    n->lsi_cache_ok = false;
+    n->lsi_last_clear = lsi_now();
+    if (n->lsi_timer) {
+        timer_del(n->lsi_timer);
+    }
 }
 
 void femu_lsi_exit(FemuCtrl *n)
 {
-    femu_lsi_reset(n);
+    lsi_page_free(n->lsi_s);
+    n->lsi_s = NULL;
+    if (n->lsi_listed) {
+        QLIST_REMOVE(n, lsi_link);
+        n->lsi_listed = false;
+    }
+    g_clear_pointer(&n->lsi_timer, timer_free);
+    g_clear_pointer(&n->lsi_cache_mver, g_free);
     femu_lsi_free_cov(n, n->lsi_r);
     n->lsi_r = NULL;
 }

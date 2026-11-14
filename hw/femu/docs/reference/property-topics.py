@@ -21,6 +21,7 @@ DEVICES = [
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
                       "x-ftl-check", "x-ftl-hold", "x-ftl-trace",
+                      "x-lsi", "x-lsi-state",
                       "x-cpl-count", "x-cpl-hold",
                       "x-gc-frontier", "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",

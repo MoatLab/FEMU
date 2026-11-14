@@ -22173,6 +22173,7 @@ static void femu_test_lsi_log(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, dbuf);
     guest_free(alloc, buf);
     femu_disable(&c);
+    qos_invalidate_command_line();
 }
 
 /*
@@ -22212,6 +22213,7 @@ static void femu_test_lsi_many(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
     femu_mark_uncor(&c, 600, 1);
     g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 258);
     /*
      * A repair alone brings back descriptors, which that read did not
      * list. One 4 KiB write repairs blocks 0, 2, 4 and 6: 254 runs remain.
@@ -22225,6 +22227,486 @@ static void femu_test_lsi_many(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, dbuf);
     guest_free(alloc, buf);
     femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+#define FEMU_LSI_DEV    "id=lsi-test,oncs=0x19f"
+#define FEMU_LSI_AER    (2 | 0x05 << 8 | 0x0e << 16)
+#define FEMU_LSI_SEC    (1000 * 1000 * 1000LL)
+
+/* field @key of x-lsi-state */
+static uint64_t femu_lsi_state(QTestState *qts, const char *key)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/lsi-test',"
+                           "'property':'x-lsi-state'}}");
+    g_autofree char *k = g_strdup_printf(" %s=", key);
+    g_autofree char *line = NULL;
+    const char *p;
+    uint64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    line = g_strdup_printf(" %s", qdict_get_str(rsp, "return"));
+    p = strstr(line, k);
+    g_assert_nonnull(p);
+    v = g_ascii_strtoull(p + strlen(k), NULL, 10);
+    qobject_unref(rsp);
+    return v;
+}
+
+static void femu_lsi_cmd(QTestState *qts, const char *cmd)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/lsi-test',"
+                             "'property':'x-lsi','value':%s}}", cmd);
+}
+
+/* AEC with only bit 13: LBA Status Information alerts */
+static void femu_lsi_aec(FemuCtrlState *c, bool on)
+{
+    uint32_t res;
+
+    g_assert_cmphex(FEMU_SC(femu_set_feature(c, 0x0b, false, 0,
+                                             on ? 1u << 13 : 0, &res)),
+                    ==, NVME_SUCCESS);
+}
+
+/*
+ * Step virtual time, then give the main loop up to 20 ms of real time for
+ * the bottom halves the timers scheduled. True when the admin queue holds
+ * a completion.
+ */
+static bool femu_lsi_after(FemuCtrlState *c, int64_t ns)
+{
+    qtest_clock_step(c->pdev->bus->qts, ns);
+    for (int i = 0; i < 20; i++) {
+        if (femu_cq_ready(c, &c->admin)) {
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return femu_cq_ready(c, &c->admin);
+}
+
+/* the next admin completion is the alert for AER @cid */
+static void femu_lsi_alert(FemuCtrlState *c, uint16_t want)
+{
+    uint32_t res;
+    uint16_t cid;
+
+    g_assert_cmphex(femu_complete(c, &c->admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(cid, ==, want);
+    g_assert_cmphex(res, ==, FEMU_LSI_AER);
+}
+
+/*
+ * The alert (NVM 1.2, 5.2.1): no Notice 05h before LSIRI after the last
+ * clear, one by LSIRI plus the 100 ms scan gap, none while one is
+ * reported, and a new one after a RAE=0 read for blocks the frozen page
+ * left out. The page it announces is captured when it is posted.
+ */
+static void femu_test_lsi_alert(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    femu_mark_uncor(&c, 10, 1);
+    /* no AER yet, so an early admission would stay QUEUED */
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 2);
+    g_assert_cmpint(femu_lsi_state(qts, "alert_gen"), ==, 1);
+
+    /* reported: nothing more until the clear; the page stays frozen */
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_false(femu_lsi_after(&c, 2 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, true), ==, 1);
+    g_assert_false(femu_lsi_after(&c, 2 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    /* block 20 was not in it: a second alert one LSIRI after the clear */
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 2);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A host that reads the log before the alert still gets it (4.1.3.5:
+ * LSGC moved since the last alert), one LSIRI after that read, and then
+ * no repeat.
+ */
+static void femu_test_lsi_poll(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC / 2));
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    /* no AER: a repeat admission would stay QUEUED */
+    g_assert_false(femu_lsi_after(&c, 3 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_state(femu->dev.bus->qts, "alert"), ==, 0);
+    femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC));
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A component failure alerts with no LSIRI wait, also with no blocks;
+ * a second one while the first is reported goes out at the clear.
+ */
+static void femu_test_lsi_component(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 1000));
+    femu_lsi_cmd(qts, "component:1");
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_state(qts, "unacked"), ==, 1);
+
+    want = femu_aer(&c);
+    femu_lsi_cmd(qts, "component:1");
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 2);
+    g_assert_false(femu_lsi_after(&c, 2 * FEMU_LSI_SEC));
+    g_assert_cmphex(femu_lsi_read(&c, buf, 16, 0, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4), ==, 0);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 0);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A full event queue refuses the alert. When an event leaves the queue,
+ * the alert goes in with no new loss and no other command.
+ */
+static void femu_test_lsi_qfull(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint32_t res;
+    uint16_t cid;
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    femu_lsi_cmd(qts, "fill:16");
+    femu_lsi_cmd(qts, "component:1");
+    g_assert_false(femu_lsi_after(&c, 1000));
+    g_assert_cmpint(femu_lsi_state(qts, "rejects"), ==, 1);
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    g_assert_cmphex(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(cid, ==, want);
+    g_assert_cmphex(res & 7, ==, 7);
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * AEC bit 13 off drops a queued alert; on again, it is admitted again
+ * with no new loss.
+ */
+static void femu_test_lsi_disable(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC * 12 / 10));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 1);
+    femu_lsi_aec(&c, false);
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 2 * FEMU_LSI_SEC));
+    femu_lsi_aec(&c, true);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A controller reset (design 9.7). An alert the host did not read comes
+ * back at the generation it announced, which the host read alone does not
+ * give: here only G_pub holds generation 2 once block 20 is repaired.
+ * LSIRI counts from the next enable. An acknowledged alert does not come
+ * back.
+ */
+static void femu_test_lsi_reset(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    /* repaired after the post: generation 2 was given out and stays */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
+
+    femu_disable(&c);
+    qtest_clock_step(femu->dev.bus->qts, 2 * FEMU_LSI_SEC);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_lsi_aec(&c, true);
+    femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 3 * FEMU_LSI_SEC));
+
+    guest_free(alloc, dbuf);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* LSGC rolls over from FFFFh to 0, with an alert for the new block */
+static void femu_test_lsi_wrap(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_cmd(qts, "gen:65535");
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0xffff);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 12 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 0);
+    g_assert_cmpint(femu_lsi_state(qts, "alert_gen"), ==, 65536);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+static void femu_lsi_wu_submit(FemuCtrlState *c, FemuQueue *q, uint64_t slba)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_WRITE_UNCOR;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    femu_submit(c, q, (NvmeCmd *)&rw);
+}
+
+/* wait (real time) until a WU holds at the stop point */
+static void femu_lsi_held(QTestState *qts)
+{
+    for (int i = 0; i < 1000 && femu_lsi_state(qts, "stop") < 0x100; i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpint(femu_lsi_state(qts, "stop"), >=, 0x100);
+}
+
+/*
+ * A repeat Write Uncorrectable is no new block on any interleave. WU A
+ * stops where the old code had its bits clear; WU B of the same block
+ * runs on another poller meanwhile. add_ver must not move.
+ */
+static void femu_test_lsi_wu_race(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q2;
+    uint64_t add;
+    uint32_t res;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_create_pair_irq(&c, &q2, 2, 0, false);
+    femu_mark_uncor(&c, 10, 1);
+    add = femu_lsi_state(qts, "add");
+    g_assert_cmpint(add, ==, 1);
+    femu_lsi_cmd(qts, "stop:1");
+    femu_lsi_wu_submit(&c, &c.io, 10);
+    femu_lsi_held(qts);
+    femu_lsi_wu_submit(&c, &q2, 10);
+    g_assert_cmphex(femu_complete(&c, &q2, &cid, &res), ==, NVME_SUCCESS);
+    femu_lsi_cmd(qts, "stop:0");
+    g_assert_cmphex(femu_complete(&c, &c.io, &cid, &res), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsi_state(qts, "add"), ==, add);
+    /* control: a new block does move it */
+    femu_mark_uncor(&c, 11, 1);
+    g_assert_cmpint(femu_lsi_state(qts, "add"), ==, add + 1);
+
+    femu_queue_free(&c, &q2);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The counter order (design 12, 14) with a sentinel element, where only
+ * add_ver tells a new block. WU of a new block stops after its add_ver
+ * step, before media_ver; a forced check then runs. That check must not
+ * take the old add_ver under a new key: once the WU ends, the alert goes
+ * out with no other change. No AER is outstanding during the stop, so no
+ * post pauses the stopped poller.
+ */
+static void femu_test_lsi_publish(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint32_t res;
+    uint16_t cid;
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    for (int i = 0; i < 257; i++) {
+        femu_mark_uncor(&c, 2 * i, 1);
+    }
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    /* sentinel element: NLRD FFFFFFFFh, no descriptors */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 20), ==, 0xffffffff);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC * 12 / 10));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+
+    femu_lsi_cmd(qts, "stop:2");
+    femu_lsi_wu_submit(&c, &c.io, 1000);
+    femu_lsi_held(qts);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC / 5));
+    femu_lsi_cmd(qts, "eval:1");
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    femu_lsi_cmd(qts, "stop:0");
+    g_assert_cmphex(femu_complete(&c, &c.io, &cid, &res), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 5));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Get LBA Status, when a write clears a run's first block between the
+ * two bitmap searches: the scan goes on past it, with no 2^32-block run.
+ */
+static void femu_test_lsi_gls_race(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_mark_uncor(&c, 10, 3);
+    femu_mark_uncor(&c, 20, 1);
+    femu_lsi_cmd(qts, "glsrace:1");
+    g_assert_cmpint(femu_get_lba_status(&c, buf, 0, 1023, 0x11, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 2);
+    g_assert_cmpint(qtest_readq(qts, buf + 8), ==, 11);
+    g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 1);
+    g_assert_cmpint(qtest_readq(qts, buf + 24), ==, 20);
+    g_assert_cmpint(qtest_readl(qts, buf + 32), ==, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
 }
 
 #define FEMU_KV_FUZZ_KEYS   16
@@ -60940,6 +61422,46 @@ static void femu_register_nodes(void)
     qos_add_test("lsi-many", "femu", femu_test_lsi_many,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f"
+    });
+    qos_add_test("lsi-alert", "femu", femu_test_lsi_alert,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-poll", "femu", femu_test_lsi_poll,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-component", "femu", femu_test_lsi_component,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-qfull", "femu", femu_test_lsi_qfull,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-disable", "femu", femu_test_lsi_disable,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-reset", "femu", femu_test_lsi_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-wrap", "femu", femu_test_lsi_wrap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-wu-race", "femu", femu_test_lsi_wu_race,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV ",multipoller_enabled=1"
+    });
+    qos_add_test("lsi-publish", "femu", femu_test_lsi_publish,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-gls-race", "femu", femu_test_lsi_gls_race,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
     });
     qos_add_test("mdts0-reports", "femu", femu_test_mdts0_reports,
                  &(QOSGraphTestOptions) {
