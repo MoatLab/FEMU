@@ -303,6 +303,8 @@ void ssd_page_restore(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
     uint64_t offset = lpn * page_size - ns->backend_offset;
     uint64_t slba = offset >> shift;
     uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+    uint64_t added = 0;
+    uint64_t gone = 0;
 
     backend_lock_range(ssd->n->mbe, ns->backend_offset + offset, page_size);
     memcpy(base + offset, undo, page_size);
@@ -312,17 +314,14 @@ void ssd_page_restore(struct ssd *ssd, NvmeNamespace *ns, uint64_t lpn,
         } else {
             clear_bit(slba + i, ns->util);
         }
-        if (state[i] & 2) {
-            set_bit(slba + i, ns->uncorrectable);
-        } else {
-            clear_bit(slba + i, ns->uncorrectable);
-        }
+        femu_lsi_restore(ns, slba + i, state[i] & 2, &added, &gone);
         if (ns->sdc && (state[i] & 4)) {
             set_bit(slba + i, ns->sdc);
         } else if (ns->sdc) {
             clear_bit(slba + i, ns->sdc);
         }
     }
+    femu_lsi_changed(ns, added, gone);
     backend_unlock_range(ssd->n->mbe, ns->backend_offset + offset, page_size);
     rcache_invalidate(ssd, lpn);
 }

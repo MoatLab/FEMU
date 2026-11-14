@@ -4506,38 +4506,6 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
                              prp1, prp2);
 }
 
-/*
- * LBA Status Information (NVM 1.2, 4.1.4.5). No namespace elements are listed;
- * the estimate says how many blocks a Get LBA Status over each namespace
- * would find, which is what a host is told to do in that case.
- */
-static uint16_t nvme_lba_status_log(FemuCtrl *n, NvmeCmd *cmd,
-                                    uint32_t buf_len, uint64_t off)
-{
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    uint8_t log[16] = { 0 };
-    uint64_t estulb = 0;
-    int i;
-
-    if (off >= sizeof(log)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-
-        if (ns->allocated && ns->uncorrectable) {
-            estulb += bitmap_count_one(ns->uncorrectable,
-                                       le64_to_cpu(ns->id_ns.nsze));
-        }
-    }
-    stl_le_p(log, sizeof(log));
-    stl_le_p(log + 8, MIN(estulb, UINT32_MAX - 1));
-
-    return dma_read_prp(n, log + off, MIN(sizeof(log) - off, buf_len),
-                        prp1, prp2);
-}
-
 /* whether a sanitize operation is in progress (Base 2.3, 8.1.26.5) */
 bool nvme_sanitize_busy(FemuCtrl *n)
 {
@@ -4579,6 +4547,7 @@ static void nvme_sanitize_apply(FemuCtrl *n, uint32_t dw10, uint32_t dw11)
                 stl_le_p(data + b, pat);
             }
             bitmap_zero(ns->uncorrectable, ns->ns_blks);
+            femu_lsi_zeroed(ns);
             if (ns->mdata) {
                 memset(ns->mdata, 0, ns->mdata_len);
             }
@@ -4589,6 +4558,7 @@ static void nvme_sanitize_apply(FemuCtrl *n, uint32_t dw10, uint32_t dw11)
         }
         bitmap_zero(ns->util, ns->ns_blks);
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
+        femu_lsi_zeroed(ns);
         if (ns->mdata) {
             memset(ns->mdata, 0, ns->mdata_len);
         }
@@ -5002,7 +4972,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_TELEMETRY_CTRL:
         return nvme_telemetry_log(n, cmd, lid, len, off, rae);
     case NVME_LOG_LBA_STATUS:
-        return nvme_lba_status_log(n, cmd, len, off);
+        return femu_lsi_log(n, cmd, len, off, rae);
     case NVME_LOG_FID_EFFECTS:
         return nvme_fid_effects(n, cmd, csi, len, off);
     case NVME_LOG_MI_EFFECTS:
@@ -5240,6 +5210,7 @@ static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks,
     ns->util = util;
     ns->uncorrectable = uncorrectable;
     ns->sdc = sdc;
+    femu_lsi_zeroed(ns);
 
     return NVME_SUCCESS;
 }

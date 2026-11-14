@@ -83,6 +83,7 @@ static void femu_sanns_erase(FemuCtrl *n, NvmeNamespace *ns)
     }
     bitmap_zero(ns->util, ns->ns_blks);
     bitmap_zero(ns->uncorrectable, ns->ns_blks);
+    femu_lsi_zeroed(ns);
     if (ns->mdata) {
         memset(ns->mdata, 0, ns->mdata_len);
     }

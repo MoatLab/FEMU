@@ -2639,9 +2639,7 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * The blocks read back zeros now, also ones Write Uncorrectable
          * marked (OCP NVMe-IO-6): a Write Zeroes modifies them.
          */
-        if (ns->uncorrectable) {
-            bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
-        }
+        femu_lsi_clear(ns, slba, nlb);
         bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
     } else if (n->durable_at_done || n->awupf_lbas || n->sdc) {
         /*
@@ -2686,8 +2684,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (status) {
         return status;
     }
-    nvme_mark_written(ns, slba, nlb);
-    bitmap_set_atomic(ns->uncorrectable, slba, nlb);
+    nvme_mark_uncorrectable(ns, slba, nlb);
     bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_UNCOR);
 
     /* HBMW counts it (NVM 1.2, 4.1.4.6); bbssd counts in the FTL thread */

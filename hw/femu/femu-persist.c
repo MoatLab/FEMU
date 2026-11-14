@@ -724,6 +724,7 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
             !persist_read(fd, ns->uncorrectable, blen, off + blen)) {
             goto short_file;
         }
+        femu_lsi_loaded(ns);
         off += 2 * blen;
     }
     /*

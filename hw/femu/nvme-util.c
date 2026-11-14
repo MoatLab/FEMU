@@ -27,9 +27,22 @@ void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     if (ns->util) {
         bitmap_set_atomic(ns->util, slba, nlb);
     }
-    if (ns->uncorrectable) {
-        bitmap_test_and_clear_atomic(ns->uncorrectable, slba, nlb);
+    femu_lsi_clear(ns, slba, nlb);
+    femu_sdc_clear(ns, slba, nlb);
+}
+
+/*
+ * Write Uncorrectable: as a write, but the blocks stay tracked. A block
+ * already tracked is never cleared on the way, so a repeat on another
+ * poller sees no new block.
+ */
+void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
+{
+    nvme_note_ns_write(ns);
+    if (ns->util) {
+        bitmap_set_atomic(ns->util, slba, nlb);
     }
+    femu_lsi_mark(ns, slba, nlb);
     femu_sdc_clear(ns, slba, nlb);
 }
 

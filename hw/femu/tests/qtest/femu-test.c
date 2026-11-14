@@ -21953,14 +21953,23 @@ static void femu_test_get_lba_status(void *obj, void *data,
     g_assert_cmpuint(qtest_readq(qts, buf + 8), ==, 11);
     g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 1);
 
-    /* LBA Status Information: nothing listed, an estimate to look for */
+    /* LBA Status Information: one element with both runs */
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
                     NVME_SUCCESS);
     g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_LBA_STATUS) & 1, ==, 1);
-    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_LBA_STATUS, buf, 16,
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_LBA_STATUS, buf, 64,
                                          0)), ==, NVME_SUCCESS);
-    g_assert_cmpint(qtest_readl(qts, buf), ==, 16);            /* LSLPLEN */
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 64);            /* LSLPLEN */
+    g_assert_cmpint(qtest_readl(qts, buf + 4), ==, 1);         /* NLSLNE */
     g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 4);         /* ESTULB */
+    g_assert_cmpint(qtest_readw(qts, buf + 14), ==, 1);        /* LSGC */
+    g_assert_cmpint(qtest_readl(qts, buf + 16), ==, 1);        /* NEID */
+    g_assert_cmpint(qtest_readl(qts, buf + 20), ==, 2);        /* NLRD */
+    g_assert_cmpint(qtest_readb(qts, buf + 24), ==, 0x11);     /* RATYPE */
+    g_assert_cmpint(qtest_readq(qts, buf + 32), ==, 10);
+    g_assert_cmpint(qtest_readl(qts, buf + 40), ==, 2);
+    g_assert_cmpint(qtest_readq(qts, buf + 48), ==, 20);
+    g_assert_cmpint(qtest_readl(qts, buf + 56), ==, 0);
 
     /* a rewritten block is readable again and is no longer reported */
     g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
@@ -22047,6 +22056,173 @@ static void femu_test_lsi_feature(void *obj, void *data,
                     NVME_SUCCESS);
     g_assert_cmphex(res, ==, 10 << 16 | 10);
 
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* log 0Eh with RAE; PRP2 is the next page, so a read may cross one */
+static uint16_t femu_lsi_read(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                              uint64_t off, bool rae)
+{
+    uint32_t numd = (len >> 2) - 1;
+    NvmeCmd cmd;
+
+    g_assert_cmphex(buf & 4095, ==, 0);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32(0x0e | (rae ? 1u << 15 : 0) |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32((numd >> 16) & 0xffff);
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* a full read of log 0Eh: its LSGC, after checking LSLPLEN is @len */
+static uint16_t femu_lsi_gen(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                             bool rae)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_lsi_read(c, buf, 4096, 0, rae), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, len);
+    return qtest_readw(qts, buf + 14);
+}
+
+/*
+ * The LBA Status Information log (NVM 1.2, 4.1.4.5) and LSGC (Figure
+ * 109): LSGC steps only when the log lists a block that the last host
+ * read did not list. A RAE=1 read freezes the page until a RAE=0 read.
+ */
+static void femu_test_lsi_log(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    uint8_t a[128], b[128];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    g_assert_cmpint(qtest_readl(qts, buf + 4), ==, 0);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 0);
+
+    femu_mark_uncor(&c, 10, 3);
+    femu_mark_uncor(&c, 20, 1);
+    femu_mark_uncor(&c, 30, 2);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 6);
+    g_assert_cmpint(qtest_readl(qts, buf + 20), ==, 3);
+    g_assert_cmpint(qtest_readq(qts, buf + 64), ==, 30);
+    g_assert_cmpint(qtest_readl(qts, buf + 72), ==, 1);
+    /* unchanged, then a repeat of a listed block: no step */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 1);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 1);
+    /* a repair alone: no step; the same block again is new to that read */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 1);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 2);
+
+    /* RAE=1 freezes the page; a RAE=0 read still returns it */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, true), ==, 2);
+    qtest_memread(qts, buf, a, 80);
+    femu_mark_uncor(&c, 40, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, true), ==, 2);
+    qtest_memread(qts, buf, b, 80);
+    g_assert_cmpmem(a, 80, b, 80);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 2);
+    qtest_memread(qts, buf, b, 80);
+    g_assert_cmpmem(a, 80, b, 80);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 96, false), ==, 3);
+
+    /* a header-only read is a read: it takes the new block */
+    femu_mark_uncor(&c, 50, 1);
+    g_assert_cmphex(femu_lsi_read(&c, buf, 16, 0, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 14), ==, 4);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 112, false), ==, 4);
+
+    /*
+     * An offset past the page fails, holds nothing and is not a read: the
+     * block it would have taken stays new, together with a later one.
+     */
+    femu_mark_uncor(&c, 55, 1);
+    g_assert_cmphex(femu_lsi_read(&c, buf, 16, 128, true), ==,
+                    NVME_INVALID_FIELD);
+    femu_mark_uncor(&c, 60, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 144, true), ==, 5);
+    /* a reset keeps R: the same blocks do not step again */
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 144, false), ==, 5);
+    /* and drops the held page: the next read shows a later block */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 144, true), ==, 5);
+    femu_mark_uncor(&c, 70, 1);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 160, false), ==, 6);
+
+    guest_free(alloc, dbuf);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * 256 runs fit in one element (4128 bytes); 257 give FFFFFFFFh
+ * descriptors. For such an element, only a later add is new; a page
+ * that lists descriptors again is new to it.
+ */
+static void femu_test_lsi_many(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint64_t lba = 0; lba < 512; lba += 2) {
+        femu_mark_uncor(&c, lba, 1);
+    }
+    g_assert_cmphex(femu_lsi_read(&c, buf, 4128, 0, false), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf), ==, 4128);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 256);
+    g_assert_cmpint(qtest_readw(qts, buf + 14), ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 20), ==, 256);
+    /* the last descriptor sits past the first page */
+    g_assert_cmpint(qtest_readq(qts, buf + 32 + 255 * 16), ==, 510);
+    g_assert_cmpint(qtest_readl(qts, buf + 40 + 255 * 16), ==, 0);
+
+    femu_mark_uncor(&c, 512, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, buf + 20), ==, 0xffffffff);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 257);
+    /* unchanged, and a repeat: no step; a new block: a step */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+    femu_mark_uncor(&c, 0, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+    femu_mark_uncor(&c, 600, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    /*
+     * A repair alone brings back descriptors, which that read did not
+     * list. One 4 KiB write repairs blocks 0, 2, 4 and 6: 254 runs remain.
+     */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, dbuf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16 + 16 + 254 * 16, false), ==, 4);
+    g_assert_cmpint(qtest_readl(qts, buf + 8), ==, 254);
+    g_assert_cmpint(qtest_readl(qts, buf + 20), ==, 254);
+    g_assert_cmpint(qtest_readq(qts, buf + 32), ==, 8);
+
+    guest_free(alloc, dbuf);
     guest_free(alloc, buf);
     femu_disable(&c);
 }
@@ -60757,6 +60933,14 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "oncs=0x19f"
     });
     qos_add_test("lsi-feature", "femu", femu_test_lsi_feature, NULL);
+    qos_add_test("lsi-log", "femu", femu_test_lsi_log,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x19f"
+    });
+    qos_add_test("lsi-many", "femu", femu_test_lsi_many,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x19f"
+    });
     qos_add_test("mdts0-reports", "femu", femu_test_mdts0_reports,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x19f,mdts=0"

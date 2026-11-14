@@ -2315,6 +2315,10 @@ typedef struct NvmeNamespace {
     uint32_t        san_cdw10;
     unsigned long   *util;
     unsigned long   *uncorrectable;
+    uint64_t        lsi_inc;        /* identity across delete and create */
+    uint64_t        lsi_add_ver;    /* steps when a tracked block is added */
+    uint64_t        lsi_media_ver;  /* steps on each tracked-block change */
+    uint64_t        lsi_nr_unc;     /* tracked blocks; exact when paused */
     /* sdc=on: blocks whose stored data a media fault spoiled */
     unsigned long   *sdc;
     /*
@@ -2986,6 +2990,11 @@ typedef struct FemuCtrl {
     uint8_t         ana_state[NVME_MAX_NAMESPACES];
     uint64_t        ana_chgc;
     bool            ana_pending;    /* a change the host has not read */
+    /* LBA Status Information (nvme-lsi.c) */
+    struct FemuLsiCov *lsi_r;       /* what the last host read listed */
+    struct FemuLsiPage *lsi_s;      /* the page a RAE=1 read holds */
+    uint64_t        lsi_g_r;        /* generation of the last host read */
+    uint64_t        lsi_g_pub;      /* highest generation given out */
     uint64_t        ana_gchgc[NVME_MAX_NAMESPACES];
     NvmeSanitizeState sanitize;
     /*
@@ -3732,6 +3741,7 @@ static inline void femu_note_cqe_time(FemuCtrl *n, NvmeRequest *req)
 
 /* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
+void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                            uint32_t nlb);
 uint16_t nvme_check_dulbe(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
@@ -3812,6 +3822,47 @@ uint16_t femu_apst_get(FemuCtrl *n, NvmeCmd *cmd, bool dflt, uint32_t *res);
 void femu_power_reset(FemuCtrl *n);
 /* nvme-ana.c */
 bool nvme_ana_check_props(FemuCtrl *n, Error **errp);
+
+/* one namespace's coverage in a log 0Eh page (nvme-lsi.c) */
+typedef struct FemuLsiRun {
+    uint64_t slba;
+    uint64_t nlb;
+} FemuLsiRun;
+
+typedef struct FemuLsiCov {
+    uint64_t    inc;        /* namespace incarnation; 0: not listed */
+    uint64_t    add_ver;    /* add_ver at the capture */
+    uint32_t    nsid;
+    uint32_t    nruns;
+    uint32_t    boff;       /* in a page: where its descriptors start */
+    uint8_t     lbads;
+    bool        sentinel;   /* listed with FFFFFFFFh descriptors */
+    FemuLsiRun  *runs;
+} FemuLsiCov;
+
+typedef struct FemuLsiPage {
+    uint8_t     *buf;
+    uint32_t    len;
+    uint32_t    ncov;
+    uint64_t    gen;
+    FemuLsiCov  *cov;
+} FemuLsiPage;
+
+uint64_t femu_lsi_incarnation(void);
+void femu_lsi_changed(NvmeNamespace *ns, uint64_t added, uint64_t gone);
+void femu_lsi_mark(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
+void femu_lsi_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
+void femu_lsi_zeroed(NvmeNamespace *ns);
+void femu_lsi_loaded(NvmeNamespace *ns);
+void femu_lsi_restore(NvmeNamespace *ns, uint64_t lba, bool on,
+                      uint64_t *added, uint64_t *gone);
+void femu_lsi_ns_gone(FemuCtrl *n, NvmeNamespace *ns);
+void femu_lsi_free_cov(FemuCtrl *n, FemuLsiCov *r);
+uint16_t femu_lsi_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                      uint64_t off, bool rae);
+void femu_lsi_init(FemuCtrl *n);
+void femu_lsi_reset(FemuCtrl *n);
+void femu_lsi_exit(FemuCtrl *n);
 void nvme_ana_id(FemuCtrl *n, NvmeIdCtrl *id);
 void nvme_ana_ns(FemuCtrl *n, NvmeNamespace *ns);
 uint16_t nvme_ana_io_check(FemuCtrl *n, NvmeNamespace *ns);

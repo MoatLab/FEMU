@@ -485,6 +485,8 @@ bool bbssd_power_loss(NvmeNamespace *ns)
     QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
         uint64_t offset = entry->lpn * page_size - ns->backend_offset;
         uint64_t slba = offset >> shift;
+        uint64_t added = 0;
+        uint64_t gone = 0;
 
         if (!entry->undo) {
             continue;
@@ -497,17 +499,15 @@ bool bbssd_power_loss(NvmeNamespace *ns)
             } else {
                 clear_bit(slba + i, ns->util);
             }
-            if (entry->lba_state[i] & 2) {
-                set_bit(slba + i, ns->uncorrectable);
-            } else {
-                clear_bit(slba + i, ns->uncorrectable);
-            }
+            femu_lsi_restore(ns, slba + i, entry->lba_state[i] & 2, &added,
+                             &gone);
             if (ns->sdc && (entry->lba_state[i] & 4)) {
                 set_bit(slba + i, ns->sdc);
             } else if (ns->sdc) {
                 clear_bit(slba + i, ns->sdc);
             }
         }
+        femu_lsi_changed(ns, added, gone);
         rcache_invalidate(ssd, entry->lpn);
     }
     /* durable_at_done: programs that had not ended give their pages back */

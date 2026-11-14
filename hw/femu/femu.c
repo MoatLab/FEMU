@@ -575,6 +575,7 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.power_mgmt      = n->ocp ? n->power_mgmt_saved : 0;
     femu_power_reset(n);
     nvme_ana_reset(n);
+    femu_lsi_reset(n);
     n->ocp_dssd_ps              = n->ocp_dssd_ps_saved;
     nvme_ocp_val_reset(n);
     /* the next PLP check follows the C6h value the reset restored */
@@ -2822,6 +2823,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->id = i + 1;
         ns->attached = true;
         ns->allocated = true;
+        ns->lsi_inc = femu_lsi_incarnation();
         ns->nde = true;     /* never written */
 
         /* mode and command set for this namespace */
@@ -3409,6 +3411,7 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)
 {
+    femu_lsi_ns_gone(n, ns);
     if (nvme_ns_shared(n)) {
         n = n->subsys->storage;
     }
@@ -3541,6 +3544,7 @@ int nvme_ns_create(FemuCtrl *n, uint32_t nsid, uint64_t nsze, uint8_t flbas,
     nvme_ana_ns(n, ns);
     ns->nde = true;
     ns->allocated = true;
+    ns->lsi_inc = femu_lsi_incarnation();
     nvme_set_ctrl_capacity(n);
     return 0;
 
@@ -3593,6 +3597,7 @@ static void femu_realize_undo(FemuCtrl *n)
     femu_persist_abort(n);
     femu_iotrace_abort(n);
     femu_events_exit(n);
+    femu_lsi_exit(n);
     g_clear_pointer(&n->die_slow_pct, g_free);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
@@ -4881,6 +4886,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
     nvme_ana_id(n, &n->id_ctrl);
+    femu_lsi_init(n);
     /* OCP C6h: the device is "born" when it is realized */
     {
         g_autoptr(GDateTime) now = g_date_time_new_now_local();
@@ -5228,6 +5234,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_iotrace_exit(n);
     femu_persist_exit(n);
     femu_pel_exit(n);
+    femu_lsi_exit(n);
     /* no media op runs now; the FTLs that read the table are stopped */
     g_clear_pointer(&n->die_slow_pct, g_free);
     femu_fw_exit(n);

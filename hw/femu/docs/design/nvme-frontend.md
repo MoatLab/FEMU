@@ -673,7 +673,7 @@ Namespace Management.
 | OCP Latency Monitor | C3h | with `ocp=on`: 512 bytes, version 0005h, configured by Feature C5h; bytes 512 to 4095 read as zeros |
 | OCP SMART / Health Extended, Error Recovery | C0h, C1h | with `ocp=on`: OCP 2.7 layouts at UUID index 0 and 1 (CNS 17h lists the OCP UUID, then the FEMU UUID `2ff92965-47be-4ce0-923d-649d30079203`); the FEMU counters at C0h, UUID index 2. Fields FEMU does not model are 0, capacitor health is FFFFh (no PLP) |
 | Rotational Media Information | 16h | with `femu-subsys,rotational=on`: one actuator, one spinup and one load per QEMU run; Spinup Control (Feature 1Ah) is fixed off |
-| LBA Status | 0Eh | |
+| LBA Status Information | 0Eh | one element per attached namespace with tracked blocks; see [LBA Status Information](#lba-status-information-log-0eh) |
 | Feature Identifiers Supported and Effects | 12h | built from the check Get and Set Features use; per command set (CSI) when CC.CSS is 110b |
 | NVMe-MI Commands Supported and Effects | 13h | all zero: no NVMe-MI Send or Receive |
 | Command and Feature Lockdown | 14h | with `lockdown=on`: what the Lockdown command (24h) can prohibit, and what the admin queue refuses now; no Management Endpoint, so Contents 10b is Invalid Field |
@@ -713,6 +713,38 @@ LBA Status Information Attributes (NVM 1.2, 4.1.3.5) return LSIPI in bits
 (1 s). A Set takes LSIRI from bits 15:0; a value below 10 becomes 10, the
 closest supported value. The feature is not saveable, and a controller
 reset sets LSIRI back to 10.
+
+### LBA Status Information (log 0Eh)
+
+The tracked blocks are the uncorrectable map of each namespace. Write
+Uncorrectable sets them. A write, a Write Zeroes, a Format or a Sanitize
+clears them.
+
+The log has one element for each attached
+namespace with a tracked block. An element lists the runs as LBA Range
+Descriptors with RATYPE 11h. A run longer than 2^32 blocks takes several
+descriptors. More than 256 descriptors give NLRD FFFFFFFFh and no list.
+ESTULB is the sum of the tracked blocks, and saturates at FFFFFFFEh.
+
+```
+ first read after a clear --> capture (pollers paused): page S, gen G_S
+ read OK, any RAE          --> R = what S listed, G_R = G_S
+ RAE=1                     --> S stays: later reads return the same bytes
+ RAE=0                     --> S goes: the next read captures again
+ gen with no S             = max(G_pub, G_R + 1 if a tracked block is
+                             not in R)       G_pub: highest gen given out
+```
+
+- LSGC (Figure 109) steps only when the page lists a block that the last
+  host read did not list. A repair alone, or a repeat Write Uncorrectable
+  of a listed block, does not step it.
+- Take an element that the last read gave with FFFFFFFFh descriptors.
+  The next page is new when it lists descriptors, or when a block was
+  added since. Figure 109 compares descriptors only; this is the FEMU rule for
+  an element with none.
+- A failed transfer or a bad offset changes nothing. A controller reset
+  drops the held page and keeps R, so the same blocks do not step LSGC
+  again.
 
 With `power_states=on` and `power_limit=on`, Power Limit (23h, Base 2.3
 8.1.18.6) takes a limit in CDW13 (PLS 01b or 10b, PLV). The states whose
