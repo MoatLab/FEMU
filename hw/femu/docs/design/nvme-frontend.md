@@ -764,7 +764,10 @@ announced:
 - A controller reset keeps the generation the host was told. An alert the
   host did not read is sent again, one LSIRI after the next enable; a
   cleared one is not.
-- `persist_file` does not keep the alert state across a restart.
+- `persist_file` keeps the generations, the last alert, a pending
+  component failure, and the last host read. A restart then acts as a
+  reset: an alert the host did not read comes back one LSIRI after the
+  enable.
 - Format and Sanitize clear the blocks with no LSGC step. After a Format
   to the same LBA size, the last host read still covers its blocks; after
   a new LBA size it covers none. A namespace created again with the same

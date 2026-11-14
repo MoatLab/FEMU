@@ -22798,6 +22798,357 @@ static void femu_test_lsi_recreate(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+#define FEMU_LSI_PERSIST_DEV \
+    "'driver':'femu','id':'lsi-test','addr':'5','devsz_mb':16," \
+    "'femu_mode':1,'oncs':415,'persist_file':%s"
+
+/* unplug (a save of persist_file), plug again (a load), enable */
+static QPCIDevice *femu_lsi_replug(QOSState *qs, FemuCtrlState *c,
+                                   QPCIDevice *pdev, const char *path)
+{
+    QDict *rsp;
+
+    femu_disable(c);
+    femu_queue_free(c, &c->io);
+    qpci_unplug_acpi_device_test(qs->qts, "lsi-test", 5);
+    g_free(pdev);
+    rsp = qtest_qmp(qs->qts, "{'execute':'device_add','arguments':{"
+                    FEMU_LSI_PERSIST_DEV "}}", path);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    memset(c, 0, sizeof(*c));
+    femu_enable(c, pdev, &qs->alloc);
+    femu_create_io_queues(c);
+    return pdev;
+}
+
+/*
+ * persist_file keeps the LBA status state (design 15), with a sentinel
+ * R whose add_ver differs from the live one at the save:
+ *   1: alert gen 1, read gen 1; a new block read at gen 2 before its
+ *      alert; one more new block, not read
+ *   2: the gen 3 alert comes one LSIRI after enable; read gen 3; a new
+ *      block steps; a component failure with AEC off stays pending
+ *   3: the pending component alert goes out at once; read gen 4
+ *   4: everything acknowledged: no alert
+ */
+static void femu_test_lsi_persist(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lsi-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=lsi-test,addr=5,"
+        "devsz_mb=16,femu_mode=1,oncs=415,persist_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    for (int i = 0; i < 257; i++) {
+        femu_mark_uncor(&c, 2 * i, 1);
+    }
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 1);
+    femu_mark_uncor(&c, 1000, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+    femu_mark_uncor(&c, 1001, 1);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    femu_mark_uncor(&c, 1002, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 4);
+    femu_lsi_aec(&c, false);
+    femu_lsi_cmd(qts, "component:1");
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    g_assert_cmpint(femu_lsi_state(qts, "comp"), ==, 1);
+    want = femu_aer(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 4);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 3 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    g_assert_cmpint(femu_lsi_state(qts, "g_r"), ==, 4);
+
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * persist_file keeps G_pub: generation 2 was announced for blocks 10 and
+ * 20, then 20 was repaired. Only G_pub holds 2 after the load, so the
+ * unread alert comes back at 2.
+ */
+static void femu_test_lsi_persist_pub(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lsi-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=lsi-test,addr=5,"
+        "devsz_mb=16,femu_mode=1,oncs=415,persist_file=%s", path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+    uint64_t dbuf = guest_alloc(&qs->alloc, 4096);
+    uint16_t want;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    guest_free(&qs->alloc, dbuf);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+#define FEMU_LSI_CKPT_DEV   ",'femu_mode':1,'oncs':415"
+
+static void femu_ckpt_add(QTestState *qts, const char *id, int slot,
+                          const char *extra);
+static char *femu_save_data(QTestState *qts, const char *id,
+                            const char *file);
+
+/* add device lsi-test at slot 5 (persist_file @file if set) and enable it */
+static QPCIDevice *femu_lsi_ckpt_dev(QTestState *qts, QPCIBus *bus,
+                                     FemuCtrlState *c, QGuestAllocator *alloc,
+                                     const char *file)
+{
+    g_autofree char *extra = file ?
+        g_strdup_printf(FEMU_LSI_CKPT_DEV ",'persist_file':'%s'", file) :
+        g_strdup(FEMU_LSI_CKPT_DEV);
+    QPCIDevice *pdev;
+
+    femu_ckpt_add(qts, "lsi-test", 5, extra);
+    pdev = qpci_device_find(bus, QPCI_DEVFN(5, 0));
+    memset(c, 0, sizeof(*c));
+    femu_enable(c, pdev, alloc);
+    femu_create_io_queues(c);
+    return pdev;
+}
+
+static void femu_lsi_ckpt_del(QTestState *qts, FemuCtrlState *c,
+                              QPCIDevice *pdev)
+{
+    femu_disable(c);
+    femu_queue_free(c, &c->io);
+    qpci_unplug_acpi_device_test(qts, "lsi-test", 5);
+    g_free(pdev);
+}
+
+/* a device with persist_file @file fails realize with "malformed" */
+static void femu_lsi_ckpt_bad(QTestState *qts, const char *file)
+{
+    g_autofree char *args = g_strdup_printf(
+        "{'driver':'femu','id':'lsi-bad','addr':'6','devsz_mb':16"
+        FEMU_LSI_CKPT_DEV ",'persist_file':'%s'}", file);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           qobject_from_json(args, &error_abort));
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "malformed"));
+    qobject_unref(rsp);
+}
+
+/*
+ * persist_file state saved with the controller enabled, by femu-save-data
+ * (design 15), so no reset runs before the save:
+ *   ckpt1: blocks 10, 20; the host read gen 2 before its alert
+ *          (alert_gen 1) --> the gen 2 alert one LSIRI after enable
+ *   ckpt2: the gen 3 alert of block 30 posted, unread, then 30 repaired
+ *          (G_R 2, G_pub 3, alert_gen 3) --> alert_gen falls to 2: alert
+ *   ckpt3: a component alert posted, unread --> an alert at once
+ * Then six changed copies of ckpt1 each fail to load.
+ */
+static void femu_test_lsi_persist_live(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QPCIBus *bus = femu->dev.bus;
+    g_autofree char *dir = g_dir_make_tmp("femu-lsi-XXXXXX", NULL);
+    g_autofree char *f[3] = { NULL };
+    g_autofree char *bad = g_build_filename(dir, "bad", NULL);
+    g_autofree char *bytes = NULL;
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t dbuf = guest_alloc(alloc, 4096);
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    uint16_t want;
+    gsize len;
+    char *sec;
+    static const struct {
+        uint32_t off;
+        uint8_t size;
+        uint64_t val;
+    } edit[] = {
+        { 4, 8, 3 },                /* G_R past G_pub */
+        { 12, 8, 1ULL << 63 },      /* G_pub at the limit */
+        { 28, 1, 2 },               /* comp not 0 or 1 */
+        { 44, 4, 3 },               /* more runs than bytes */
+        { 48, 8, 1ULL << 40 },      /* R.add_ver ahead of add_ver */
+        { 72, 8, 5 },               /* run 2 starts inside run 1 */
+    };
+
+    for (int i = 0; i < 3; i++) {
+        f[i] = g_strdup_printf("%s/ckpt%d", dir, i + 1);
+    }
+    pdev = femu_lsi_ckpt_dev(qts, bus, &c, alloc, NULL);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 2);
+    g_assert_cmpint(femu_lsi_state(qts, "alert_gen"), ==, 1);
+    g_assert_null(femu_save_data(qts, "lsi-test", f[0]));
+    g_assert_true(g_file_get_contents(f[0], &bytes, &len, NULL));
+
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 2);
+    femu_mark_uncor(&c, 30, 1);
+    want = femu_aer(&c);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 30, dbuf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsi_state(qts, "alert_gen"), ==, 3);
+    g_assert_cmpint(femu_lsi_state(qts, "g_r"), ==, 2);
+    g_assert_null(femu_save_data(qts, "lsi-test", f[1]));
+
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 80, false), ==, 3);
+    want = femu_aer(&c);
+    femu_lsi_cmd(qts, "component:1");
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_state(qts, "unacked"), ==, 1);
+    g_assert_cmpint(femu_lsi_state(qts, "comp"), ==, 0);
+    g_assert_null(femu_save_data(qts, "lsi-test", f[2]));
+    femu_lsi_ckpt_del(qts, &c, pdev);
+
+    /* ckpt1: history B */
+    pdev = femu_lsi_ckpt_dev(qts, bus, &c, alloc, f[0]);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 2);
+    femu_lsi_ckpt_del(qts, &c, pdev);
+
+    /* ckpt2: the unread gen 3 alert comes back at 3 */
+    pdev = femu_lsi_ckpt_dev(qts, bus, &c, alloc, f[1]);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 64, false), ==, 3);
+    femu_lsi_ckpt_del(qts, &c, pdev);
+
+    /* ckpt3: the unread component alert comes back at once */
+    pdev = femu_lsi_ckpt_dev(qts, bus, &c, alloc, f[2]);
+    want = femu_aer(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    femu_lsi_ckpt_del(qts, &c, pdev);
+
+    /* changed copies of ckpt1: the section after "LSI1" */
+    sec = memmem(bytes, len, "LSI1", 4);
+    g_assert_nonnull(sec);
+    g_assert_cmpuint(len - (sec - bytes), >=, 88);
+    for (size_t i = 0; i < ARRAY_SIZE(edit); i++) {
+        g_autofree char *copy = g_memdup2(bytes, len);
+        char *e = copy + (sec - bytes) + edit[i].off;
+
+        if (edit[i].size == 8) {
+            stq_le_p(e, edit[i].val);
+        } else if (edit[i].size == 4) {
+            stl_le_p(e, edit[i].val);
+        } else {
+            *e = edit[i].val;
+        }
+        g_assert_true(g_file_set_contents(bad, copy, len, NULL));
+        femu_lsi_ckpt_bad(qts, bad);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        g_autofree char *lock = g_strconcat(f[i], ".lock", NULL);
+
+        unlink(lock);
+        unlink(f[i]);
+    }
+    {
+        g_autofree char *lock = g_strconcat(bad, ".lock", NULL);
+
+        unlink(lock);
+    }
+    unlink(bad);
+    rmdir(dir);
+    guest_free(alloc, dbuf);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /*
  * Get LBA Status, when a write clears a run's first block between the
  * two bitmap searches: the scan goes on past it, with no 2^32-block run.
@@ -31466,9 +31817,6 @@ static char *femu_ftl_counters(QTestState *qts)
     qobject_unref(rsp);
     return s;
 }
-
-static char *femu_save_data(QTestState *qts, const char *id,
-                            const char *file);
 
 /*
  * io_trace on a NoSSD device: two writes and a read, then quit. The file
@@ -61592,6 +61940,10 @@ static void femu_register_nodes(void)
             "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
             "pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
+    qos_add_test("lsi-persist", "femu", femu_test_lsi_persist, NULL);
+    qos_add_test("lsi-persist-pub", "femu", femu_test_lsi_persist_pub, NULL);
+    qos_add_test("lsi-persist-live", "femu", femu_test_lsi_persist_live,
+                 NULL);
     qos_add_test("lsi-gls-race", "femu", femu_test_lsi_gls_race,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = FEMU_LSI_DEV

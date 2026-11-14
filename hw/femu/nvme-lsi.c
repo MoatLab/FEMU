@@ -810,6 +810,170 @@ void femu_lsi_ns_gone(FemuCtrl *n, NvmeNamespace *ns)
     }
 }
 
+#define LSI_SAVE_MAGIC      "LSI1"
+#define LSI_GEN_LIMIT       (1ULL << 63)
+#define LSI_SAVE_HDR        32
+#define LSI_SAVE_NS         24
+#define LSI_SAVE_RUN        16
+
+/*
+ * persist_file (design 15): the generations, the alert generation, the
+ * component flags, and per namespace add_ver and R. S and the alert state
+ * are not saved; a load restarts them as a reset does.
+ */
+GByteArray *femu_lsi_save(FemuCtrl *n)
+{
+    GByteArray *b = g_byte_array_new();
+    uint8_t h[LSI_SAVE_HDR] = { 0 };
+
+    memcpy(h, LSI_SAVE_MAGIC, 4);
+    stq_le_p(h + 4, n->lsi_g_r);
+    stq_le_p(h + 12, n->lsi_g_pub);
+    stq_le_p(h + 20, n->lsi_alert_gen);
+    h[28] = n->lsi_comp_pending || n->lsi_comp_unacked;
+    g_byte_array_append(b, h, sizeof(h));
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        FemuLsiCov *r = ns->id && ns->id <= n->namespace_limit ?
+                        &n->lsi_r[ns->id - 1] : NULL;
+        /* an R of an older LBA size matches nothing: save it as absent */
+        bool listed = r && r->inc && r->inc == ns->lsi_inc &&
+                      r->lbads == lsi_lbads(ns);
+        uint8_t e[LSI_SAVE_NS] = { 0 };
+
+        stq_le_p(e, qatomic_read(&ns->lsi_add_ver));
+        e[8] = listed;
+        e[9] = listed && r->sentinel;
+        e[10] = listed ? r->lbads : 0;
+        stl_le_p(e + 12, listed ? r->nruns : 0);
+        stq_le_p(e + 16, listed ? r->add_ver : 0);
+        g_byte_array_append(b, e, sizeof(e));
+        for (uint32_t k = 0; listed && k < r->nruns; k++) {
+            uint8_t run[LSI_SAVE_RUN];
+
+            stq_le_p(run, r->runs[k].slba);
+            stq_le_p(run + 8, r->runs[k].nlb);
+            g_byte_array_append(b, run, sizeof(run));
+        }
+    }
+    return b;
+}
+
+/* the longest section femu_lsi_save() writes for @n */
+uint64_t femu_lsi_save_max(FemuCtrl *n)
+{
+    return LSI_SAVE_HDR + (uint64_t)n->num_namespaces *
+           (LSI_SAVE_NS + LSI_MAX_DESC * LSI_SAVE_RUN);
+}
+
+/*
+ * Load a section after femu_lsi_loaded() ran for every namespace. All of
+ * it is checked before any of it is used; a bad section changes nothing.
+ */
+bool femu_lsi_load(FemuCtrl *n, const uint8_t *p, size_t len, Error **errp)
+{
+    g_autofree FemuLsiCov *r = g_new0(FemuLsiCov, n->namespace_limit);
+    g_autofree uint64_t *add = g_new0(uint64_t, n->num_namespaces);
+    size_t off = LSI_SAVE_HDR;
+    uint32_t i;
+
+    if (len < LSI_SAVE_HDR || memcmp(p, LSI_SAVE_MAGIC, 4)) {
+        error_setg(errp, "the LBA status section has no LSI1 header");
+        return false;
+    }
+    /*
+     * Generations a run can reach: G_R and alert_gen never pass G_pub,
+     * and one step per new block cannot reach 2^63, so the + 1 of the next
+     * generation never wraps.
+     */
+    if (p[28] > 1 || p[29] || p[30] || p[31] ||
+        ldq_le_p(p + 12) >= LSI_GEN_LIMIT ||
+        ldq_le_p(p + 4) > ldq_le_p(p + 12) ||
+        ldq_le_p(p + 20) > ldq_le_p(p + 12)) {
+        goto bad;
+    }
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+        uint64_t end = 0;
+        FemuLsiCov *c;
+        uint32_t nruns;
+
+        if (len - off < LSI_SAVE_NS || !ns->id ||
+            ns->id > n->namespace_limit) {
+            goto bad;
+        }
+        add[i] = ldq_le_p(p + off);
+        nruns = ldl_le_p(p + off + 12);
+        c = &r[ns->id - 1];
+        if (p[off + 8] > 1 || p[off + 9] > 1 || p[off + 11]) {
+            goto bad;
+        }
+        if (!p[off + 8]) {
+            if (nruns || p[off + 9] || p[off + 10] ||
+                ldq_le_p(p + off + 16)) {
+                goto bad;
+            }
+            off += LSI_SAVE_NS;
+            continue;
+        }
+        if (nruns > LSI_MAX_DESC || (p[off + 9] && nruns) ||
+            (!p[off + 9] && !nruns) || p[off + 10] != lsi_lbads(ns) ||
+            (len - off - LSI_SAVE_NS) / LSI_SAVE_RUN < nruns) {
+            goto bad;
+        }
+        c->inc = ns->lsi_inc;
+        c->nsid = ns->id;
+        c->sentinel = p[off + 9];
+        c->lbads = p[off + 10];
+        c->add_ver = ldq_le_p(p + off + 16);
+        /* R saw add_ver at a read: it cannot be ahead of the namespace */
+        if (c->add_ver > add[i]) {
+            goto bad;
+        }
+        c->nruns = nruns;
+        c->runs = g_new(FemuLsiRun, MAX(nruns, 1));
+        off += LSI_SAVE_NS;
+        for (uint32_t k = 0; k < nruns; k++, off += LSI_SAVE_RUN) {
+            uint64_t slba = ldq_le_p(p + off);
+            uint64_t nlb = ldq_le_p(p + off + 8);
+
+            /* in order, apart, inside the namespace */
+            if (!nlb || nlb > (uint64_t)UINT32_MAX + 1 || slba < end ||
+                slba >= nsze || nlb > nsze - slba) {
+                goto bad;
+            }
+            c->runs[k].slba = slba;
+            c->runs[k].nlb = nlb;
+            end = slba + nlb;
+        }
+    }
+    if (off != len) {
+        goto bad;
+    }
+
+    femu_lsi_free_cov(n, n->lsi_r);
+    n->lsi_r = g_steal_pointer(&r);
+    n->lsi_g_r = ldq_le_p(p + 4);
+    n->lsi_g_pub = ldq_le_p(p + 12);
+    n->lsi_alert_gen = MIN(ldq_le_p(p + 20), n->lsi_g_r);
+    n->lsi_comp_pending = p[28];
+    n->lsi_comp_unacked = false;
+    n->lsi_alert = LSI_IDLE;
+    n->lsi_cache_ok = false;
+    for (i = 0; i < n->num_namespaces; i++) {
+        /* after femu_lsi_loaded(): its step is not a new block */
+        qatomic_set(&n->namespaces[i].lsi_add_ver, add[i]);
+    }
+    return true;
+
+bad:
+    femu_lsi_free_cov(n, r);
+    r = NULL;
+    error_setg(errp, "the LBA status section is malformed");
+    return false;
+}
+
 void femu_lsi_init(FemuCtrl *n)
 {
     n->lsi_r = g_new0(FemuLsiCov, n->namespace_limit);

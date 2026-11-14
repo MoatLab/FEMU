@@ -13,6 +13,7 @@
  *
  *   file: header (64 B) | one 32 B record per namespace | backend bytes |
  *         per namespace: allocation bitmap, uncorrectable bitmap |
+ *         version 3 with flag 2: u64 length + LBA status section |
  *         version 3 with flag 1: per namespace, u64 length + FTL section
  *   save: file.XXXXXX, write, fsync, rename, fsync the directory
  *
@@ -42,6 +43,7 @@
 #define PERSIST_VERSION   2
 #define PERSIST_V_FTL     3       /* adds the FTL sections */
 #define PERSIST_F_FTL     0x1     /* header byte 28: FTL sections follow */
+#define PERSIST_F_LSI     0x2     /* the LBA status section follows */
 #define PERSIST_HDR_SIZE  64
 #define PERSIST_NS_SIZE   32
 #define PERSIST_DRAIN_MS  10000
@@ -323,11 +325,12 @@ static bool persist_drain(FemuCtrl *n, bool *resume, Error **errp)
 
 static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
 {
-    g_autofree uint8_t *meta = persist_meta(n, n->persist_ftl ?
-                                               PERSIST_V_FTL :
-                                               PERSIST_VERSION,
-                                           n->persist_ftl ? PERSIST_F_FTL :
-                                                            0);
+    g_autofree uint8_t *meta = persist_meta(n, PERSIST_V_FTL,
+                                            PERSIST_F_LSI |
+                                            (n->persist_ftl ? PERSIST_F_FTL :
+                                                              0));
+    g_autoptr(GByteArray) lsi = femu_lsi_save(n);
+    uint8_t lsi_len[8];
     g_autofree char *tmp = g_strconcat(path, ".XXXXXX", NULL);
     g_autofree char *dir = g_path_get_dirname(path);
     int fd;
@@ -354,6 +357,9 @@ static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
         ok = persist_write(fd, ns->util, persist_bitmap_len(ns)) &&
              persist_write(fd, ns->uncorrectable, persist_bitmap_len(ns));
     }
+    stq_le_p(lsi_len, lsi->len);
+    ok = ok && persist_write(fd, lsi_len, 8) &&
+         persist_write(fd, lsi->data, lsi->len);
     for (uint32_t i = 0; ok && n->persist_ftl && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         g_autoptr(GByteArray) sec = NULL;
@@ -687,6 +693,52 @@ short_file:
     return false;
 }
 
+/* the LBA status section at *@off; a file without one keeps empty state */
+static bool persist_load_lsi(FemuCtrl *n, int fd, off_t *off, Error **errp)
+{
+    g_autofree uint8_t *sec = NULL;
+    Error *local = NULL;
+    struct stat st;
+    uint8_t lb[8];
+    uint64_t len;
+
+    if (fstat(fd, &st) < 0) {
+        error_setg_errno(errp, errno, "persist_file: cannot stat '%s'",
+                         n->persist_path);
+        return false;
+    }
+    if (!persist_read(fd, lb, 8, *off)) {
+        goto short_file;
+    }
+    len = ldq_le_p(lb);
+    *off += 8;
+    if (len > femu_lsi_save_max(n)) {
+        error_setg(errp, "persist_file '%s': the LBA status section is too "
+                   "long", n->persist_path);
+        return false;
+    }
+    if (*off > st.st_size || len > (uint64_t)(st.st_size - *off)) {
+        goto short_file;
+    }
+    sec = g_malloc(len);
+    if (!persist_read(fd, sec, len, *off)) {
+        goto short_file;
+    }
+    if (!femu_lsi_load(n, sec, len, &local)) {
+        error_setg(errp, "persist_file '%s': %s", n->persist_path,
+                   error_get_pretty(local));
+        error_free(local);
+        return false;
+    }
+    *off += len;
+    return true;
+
+short_file:
+    error_setg(errp, "persist_file '%s' has a short LBA status section",
+               n->persist_path);
+    return false;
+}
+
 static bool persist_load(FemuCtrl *n, int fd, Error **errp)
 {
     size_t len = persist_meta_len(n);
@@ -699,9 +751,10 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
         version = ldl_le_p(got + 8);
         flags = ldl_le_p(got + 28);
     }
-    /* version 2 has no flags; version 3 has the FTL flag or none */
+    /* version 2 has no flags; version 3 has the FTL and LSI flags or none */
     if ((version != PERSIST_VERSION || flags) &&
-        (version != PERSIST_V_FTL || (flags & ~PERSIST_F_FTL))) {
+        (version != PERSIST_V_FTL ||
+         (flags & ~(PERSIST_F_FTL | PERSIST_F_LSI)))) {
         version = 0;
     }
     want = persist_meta(n, version, flags);
@@ -726,6 +779,9 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
         }
         femu_lsi_loaded(ns);
         off += 2 * blen;
+    }
+    if ((flags & PERSIST_F_LSI) && !persist_load_lsi(n, fd, &off, errp)) {
+        return false;
     }
     /*
      * A file without FTL state leaves the FTL fresh; with persist_ftl off,
