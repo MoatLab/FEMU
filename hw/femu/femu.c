@@ -6627,6 +6627,8 @@ static void femu_instance_init(Object *obj)
                           &FEMU(obj)->test_place_fail, true);
         femu_test_add_u32(obj, "x-place-skip",
                           &FEMU(obj)->test_place_skip, true);
+        femu_test_add_u32(obj, "x-persist-schema",
+                          &FEMU(obj)->test_persist_schema, true);
         femu_test_add_u32(obj, "x-zone-lock-hold-ms",
                           &FEMU(obj)->test_zone_lock_hold_ms, true);
         femu_test_add_u32(obj, "x-zone-draining",

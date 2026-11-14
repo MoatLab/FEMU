@@ -437,7 +437,7 @@ static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
 {
     struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
     bool is_full = true;
-    uint64_t now = ssd_now(ssd);
+    uint64_t now = ssd_age_now(ssd);
 
     ru->vpc = 0;
     ru->close_seq = ++ssd->ru_close_seq;
@@ -561,7 +561,7 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
     line->vpc++;
     if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
         !line->open_time) {
-        line->open_time = ssd_now(ssd);
+        line->open_time = ssd_age_now(ssd);
     }
 
     /* update RU vpc from its line (single-line RU fast path) */

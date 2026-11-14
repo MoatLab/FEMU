@@ -29,6 +29,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->pace_lines = 0;
     ssd->pace_takeovers = 0;
     ssd->wl_on = false;
+    ssd->age_off = 0;
     ssd->partial_page_writes = 0;
     ssd->unaligned_writes = 0;
     ssd->grown_bad_blocks = 0;

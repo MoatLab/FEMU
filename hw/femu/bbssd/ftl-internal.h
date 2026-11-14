@@ -235,6 +235,7 @@ static inline uint64_t ssd_data_age_ns(struct ssd *ssd, uint64_t close_time,
     uint64_t age;
     uint64_t scale = ssd->sp.age_scale > 1 ? ssd->sp.age_scale : 1;
 
+    now += ssd->age_off;
     if (!close_time || now <= close_time) {
         return 0;
     }

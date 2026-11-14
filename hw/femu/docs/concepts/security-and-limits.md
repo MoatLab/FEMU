@@ -93,8 +93,9 @@ These are chosen on the host, not by the guest:
   Unplug or the end of QEMU writes it; a QEMU that is killed writes
   nothing, and the file keeps the data of the last clean end. With
   `persist_ftl`, a load checks every FTL record (mapping owners, page,
-  block and line counts, list membership, the write pointer, a CRC)
-  before it changes the FTL, so a damaged file fails realize.
+  block and line counts, list membership, the write pointer, the aging
+  records, a CRC) before it changes the FTL, so a damaged file fails
+  realize.
 - `FEMU_DUMP_LPN` (BlackBox) hex-dumps the contents of one logical page to
   QEMU's standard error on every read, which `run-blackbox.sh` copies into
   its log file. `FEMU_EXP_LOG` traces only the addresses of pages that
@@ -120,10 +121,11 @@ your command line.
 Device data lives only in host memory:
 
 - A guest reboot or a controller reset keeps the data.
-- QEMU exiting, for any reason, loses it. FEMU never writes an NVMe
-  namespace to a file, and there is no option to do so. (`femu-cxl-ssd`
-  keeps its data in the memory backend you give it; a file-backed
-  `memory-backend-file` leaves the bytes in that file.)
+- QEMU exiting loses it, unless `persist_file` is set on a bbssd or NoSSD
+  device: a clean end then writes the data to that file (see above), and
+  `persist_ftl` adds the FTL state. A QEMU that is killed writes nothing.
+  (`femu-cxl-ssd` keeps its data in the memory backend you give it; a
+  file-backed `memory-backend-file` leaves the bytes in that file.)
 - A snapshot of the guest's boot disk (for example with `qemu-img`) does not
   include the FEMU device.
 

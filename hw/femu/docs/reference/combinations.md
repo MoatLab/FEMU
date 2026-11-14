@@ -507,7 +507,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: pd_open_read_limit and pd_open_close_sec are not supported with mapping=%s
 - hmb_mb %u MiB is smaller than the mapping table of this device (8 bytes per page)
 - persist_ftl needs mapping=page
-- the FTL section comes from other FTL properties (geometry, mapping, GC or NAND timing)
+- the FTL section comes from other FTL properties (geometry, mapping, GC, NAND timing or aging)
 
 ## `max_cqes`
 
@@ -841,6 +841,7 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file '%s' does not match this device: the mode, the backend size (%
 - persist_file '%s' has a short FTL section
 - persist_file '%s' has bytes past its FTL state
+- persist_file '%s' has no FTL state, and an aging model needs the media history
 - persist_file '%s' is in use by another device
 - persist_file '%s', namespace %u: %s
 - persist_file '%s', namespace %u: the FTL section is longer than this FTL's

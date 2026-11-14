@@ -109,6 +109,7 @@ static bool persist_read(int fd, void *buf, size_t len, off_t off)
  * The properties an FTL section depends on: the layout, the mapping, the
  * GC choices and the NAND times. Each enters as "name=<JSON value>;", so
  * a section loads only into an FTL that would have built the same state.
+ * This list is the whole digest of schema 1: never change it.
  */
 static const char *const persist_ftl_props[] = {
     "femu_mode", "devsz_mb", "namespaces", "namespace_sizes", "secsz",
@@ -122,14 +123,42 @@ static const char *const persist_ftl_props[] = {
     "nand_cell_type", "cell_pages", "pgtype_lat", "lba_index",
 };
 
-static uint64_t persist_digest(FemuCtrl *n)
+/*
+ * The aging models and every property that changes what their state
+ * means: schema 2 hashes them after the list above.
+ */
+static const char *const persist_aging_props[] = {
+    "blk_pe_limit", "blk_pe_spread", "blk_pe_seed", "eol_read_only",
+    "spare_lines", "wl_spread", "read_reclaim_limit", "retention_limit_sec",
+    "ecc_retention_sec", "age_scale", "rber_ppb", "rber_timing_only",
+    "rber_seed", "rber_pe_double", "rber_age_double_sec", "rber_read_double",
+    "ecc_cw_bytes", "ecc_hard_bits", "ecc_soft_bits", "rr_steps", "rr_gain",
+    "rr_floor_pct", "rr_soft_senses", "rr_soft_ns", "mdts", "mpsmin",
+    "pe_cycles_rated", "nand_bad_blocks", "pd_edge_wls", "pd_edge_tiers",
+    "pd_open_tiers", "maint_idle", "nlbaf",
+};
+
+/* the aging models: a device with one keeps a history across restarts */
+static const char *const persist_aging_models[] = {
+    "blk_pe_limit", "spare_lines", "wl_spread", "read_reclaim_limit",
+    "retention_limit_sec", "ecc_retention_sec", "rber_ppb",
+};
+
+/* the digest of schema 1, or with @aging the digest of schema 2 */
+static uint64_t persist_digest(FemuCtrl *n, bool aging)
 {
     uint64_t h = 0xcbf29ce484222325ULL;
+    size_t n1 = ARRAY_SIZE(persist_ftl_props);
+    size_t nall = n1 + (aging ? ARRAY_SIZE(persist_aging_props) : 0);
 
-    for (size_t i = 0; i < ARRAY_SIZE(persist_ftl_props); i++) {
-        const char *name = persist_ftl_props[i];
+    for (size_t i = 0; i < nall; i++) {
+        const char *name = i < n1 ? persist_ftl_props[i] :
+                                    persist_aging_props[i - n1];
         QObject *v = object_property_get_qobject(OBJECT(n), name, NULL);
         g_autoptr(GString) s = g_string_new(name);
+
+        /* a misspelt aging name would leave its property out unseen */
+        assert(v || i < n1);
 
         g_string_append_c(s, '=');
         /* an unset mapping or GC policy is the default one */
@@ -161,13 +190,12 @@ static bool persist_ftl_ns(NvmeNamespace *ns)
     return ns->ssd && !ns->ssd_shared && NS_BBSSD(ns);
 }
 
-/* the properties a version 1 FTL section cannot carry the state of */
+/* the properties an FTL section cannot carry the state of */
 static const char *const persist_ftl_refused[] = {
     "streams", "tier_mode", "buffer_size", "hot_cold_sep", "gc_frontier",
-    "gc_pace", "gc_idle_ms", "gc_copyback", "blk_pe_limit", "spare_lines",
-    "wl_spread", "read_reclaim_limit", "retention_limit_sec",
-    "ecc_retention_sec", "pd_open_read_limit", "pd_open_close_sec",
-    "pd_open_age", "rber_ppb", "err_read_unc_ppm", "err_write_fail_ppm",
+    "gc_pace", "gc_idle_ms", "gc_copyback", "pd_open_read_limit",
+    "pd_open_close_sec", "pd_open_age", "err_read_unc_ppm",
+    "err_write_fail_ppm",
     "die_parity", "rain_parity", "read_cache_mb", "prog_pass2_ns",
     "onfi_param_page",
     "nand_profile", "mp_program", "mp_read", "onfi_cache_read",
@@ -201,6 +229,17 @@ static bool persist_prop_set(FemuCtrl *n, const char *name)
     }
     qobject_unref(v);
     return set;
+}
+
+/* an aging model is on */
+static bool persist_aging(FemuCtrl *n)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(persist_aging_models); i++) {
+        if (persist_prop_set(n, persist_aging_models[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool persist_ftl_check(FemuCtrl *n, Error **errp)
@@ -302,12 +341,14 @@ static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
     for (uint32_t i = 0; ok && n->persist_ftl && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         g_autoptr(GByteArray) sec = NULL;
+        int schema = n->test_persist_schema == 1 ? 1 : 2;
         uint8_t len[8];
 
         if (!persist_ftl_ns(ns)) {
             continue;
         }
-        sec = ssd_persist_save(ns->ssd, persist_digest(n));
+        sec = ssd_persist_save(ns->ssd, persist_digest(n, schema == 2),
+                               schema);
         stq_le_p(len, sec->len);
         ok = persist_write(fd, len, 8) && persist_write(fd, sec->data, sec->len);
     }
@@ -552,7 +593,11 @@ static bool persist_probe_dir(FemuCtrl *n, Error **errp)
  */
 static bool persist_load_ftl(FemuCtrl *n, int fd, off_t off, Error **errp)
 {
-    uint64_t digest = persist_digest(n);
+    SsdPersistKey key = {
+        .digest = persist_digest(n, true),
+        .digest1 = persist_digest(n, false),
+        .aging = persist_aging(n),
+    };
     g_autoptr(GPtrArray) secs = g_ptr_array_new_with_free_func(
                                     (GDestroyNotify)g_byte_array_unref);
     struct stat st;
@@ -609,7 +654,7 @@ static bool persist_load_ftl(FemuCtrl *n, int fd, off_t off, Error **errp)
                 continue;
             }
             sec = g_ptr_array_index(secs, k++);
-            if (!ssd_persist_load(ns->ssd, sec->data, sec->len, digest,
+            if (!ssd_persist_load(ns->ssd, sec->data, sec->len, &key,
                                   pass == 1, &local)) {
                 error_setg(errp, "persist_file '%s', namespace %u: %s",
                            n->persist_path, i + 1, error_get_pretty(local));
@@ -667,8 +712,14 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
     }
     /*
      * A file without FTL state leaves the FTL fresh; with persist_ftl off,
-     * a file's FTL state is not read, and the next save drops it.
+     * a file's FTL state is not read, and the next save drops it. An aging
+     * model would then start a new history on old data without a word.
      */
+    if (n->persist_ftl && !(flags & PERSIST_F_FTL) && persist_aging(n)) {
+        error_setg(errp, "persist_file '%s' has no FTL state, and an aging "
+                   "model needs the media history", n->persist_path);
+        return false;
+    }
     if (n->persist_ftl && (flags & PERSIST_F_FTL) &&
         !persist_load_ftl(n, fd, off, errp)) {
         return false;

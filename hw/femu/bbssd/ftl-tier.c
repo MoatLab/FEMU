@@ -982,7 +982,7 @@ void ftl_tier_advance(struct ssd *ssd)
     if (!ssd_wp_step_lim(&ssd->sp, &t->wp, t->blk_pgs)) {
         return;
     }
-    line->close_time = ssd_now(ssd);
+    line->close_time = ssd_age_now(ssd);
     t->state[line->id] = FTL_TIER_LINE_CLOSED;
     QTAILQ_INSERT_TAIL(&t->closed, line, entry);
     t->closed_cnt++;

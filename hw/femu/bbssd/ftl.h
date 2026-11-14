@@ -860,6 +860,11 @@ struct ssd {
     uint64_t eol_cap;               /* most pages admitted at once */
     uint64_t eol_word;
     uint64_t retention_refreshes;   /* lines rewritten for retention age */
+    /*
+     * Added to ssd_now() for line close and open times only. A persist_ftl
+     * load sets it when a saved data age exceeds the new host clock.
+     */
+    uint64_t age_off;
     uint64_t pd_open_reclaims;      /* lines rewritten for open-block reads */
     uint64_t pd_pad_pages;          /* pages programmed to close open lines */
     uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
@@ -1054,6 +1059,12 @@ static inline uint64_t ssd_now(struct ssd *ssd)
 static inline uint64_t ssd_now_us(struct ssd *ssd)
 {
     return femu_dev_now(ssd->n) / SCALE_US;
+}
+
+/* now on the clock of line close and open times, which data ages use */
+static inline uint64_t ssd_age_now(struct ssd *ssd)
+{
+    return ssd_now(ssd) + ssd->age_off;
 }
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */

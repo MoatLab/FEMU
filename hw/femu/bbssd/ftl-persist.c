@@ -4,16 +4,22 @@
  * namespace, little-endian, with a CRC-32C. Scope: mapping=page, without
  * the features femu-persist.c refuses, so the state below is all of it.
  *
- *   header   magic, schema, digest, page / block / line counts
+ *   header   magic, schema, aging count, digest, page / block / line counts
  *   maptbl   per LPN: page index, or all ones
  *   rmap     per page: LPN, or all ones
  *   status   per page: free, invalid, valid
- *   blocks   erase_cnt ipc vpc wp read_cnt
+ *   blocks   erase_cnt ipc vpc wp read_cnt [pe_limit overworn]
+ *   planes   [spares_used]
  *   lines    ipc vpc close_seq close_age open_age flags state
  *   lists    free ids, full ids, victim heap ids (array order)
  *   pointer  line id ch lun pl pg
- *   scalars  the counters of ssd_persist_scalars()
+ *   scalars  the counters of ftlp_scalars()
+ *   [aging]  the wear, refresh, levelling and RBER state of ftlp_aging()
  *   crc32c
+ *
+ * [] marks what schema 2 adds. Schema 1 has no aging state, so it loads
+ * only into a device without an aging model. Ages are unscaled ns before
+ * the save: the downtime does not age the media.
  *
  * A load reads and checks every record first; only a section that passes
  * reaches ssd_persist_load() with commit set.
@@ -25,10 +31,11 @@
 #include "ftl-internal.h"
 
 #define FTLP_MAGIC      "FEMUFTL1"
-#define FTLP_SCHEMA     1
+#define FTLP_SCHEMA     2
 #define FTLP_NONE       UINT64_MAX
 #define FTLP_HDR        56
-#define FTLP_BLK        24
+#define FTLP_BLK1       24
+#define FTLP_BLK        32
 #define FTLP_LINE       40
 
 enum {
@@ -36,7 +43,9 @@ enum {
     FTLP_FULL = 1,
     FTLP_VICTIM = 2,
     FTLP_ACTIVE = 3,
-    FTLP_SPARE = 4,     /* a spare or reserve line, held out of the lists */
+    FTLP_SPARE = 4,     /* schema 1: a spare or reserve line; 2: a spare line */
+    FTLP_RESERVE = 5,   /* a reserve line held for the end of life */
+    FTLP_RETIRED = 6,
 };
 
 #define FTLP_CLOSE_SET  0x1
@@ -62,6 +71,48 @@ static void ftlp_scalars(struct ssd *ssd, uint64_t *v[FTLP_NSCALARS])
 
     memcpy(v, list, sizeof(list));
 }
+
+/* the aging state of schema 2: these counters, then ftlp_aging_rest() */
+#define FTLP_NAGING_U64 18
+#define FTLP_NAGING     (FTLP_NAGING_U64 + 5)
+
+static void ftlp_aging(struct ssd *ssd, uint64_t *v[FTLP_NAGING_U64])
+{
+    uint64_t *list[FTLP_NAGING_U64] = {
+        &ssd->grown_bad_blocks, &ssd->sacrificed_blocks,
+        &ssd->overworn_blocks, &ssd->wear_pe_total, &ssd->eol_word,
+        &ssd->wl_credit, &ssd->wl_relocations, &ssd->wl_pages,
+        &ssd->read_reclaims, &ssd->retention_refreshes, &ssd->rber_rng,
+        &ssd->rber_ctr[0], &ssd->rber_ctr[1], &ssd->rber_ctr[2],
+        &ssd->rber_ctr[3], &ssd->rber_recovered, &ssd->rber_last_extra_ns,
+        &ssd->err_read_injected,
+    };
+
+    memcpy(v, list, sizeof(list));
+}
+
+/* the aging values after the counters, in this order */
+enum {
+    FTLP_A_RETIRED = FTLP_NAGING_U64,   /* retired_line_cnt */
+    FTLP_A_MEDIA_RO,
+    FTLP_A_WL_ON,
+    FTLP_A_RECLAIM_LINE,                /* line id, or FTLP_NONE */
+    FTLP_A_RECLAIM_WHY,
+};
+
+/* the index of each aging counter that the checks read */
+enum {
+    FTLP_A_GROWN = 0,
+    FTLP_A_SACRIFICED = 1,
+    FTLP_A_OVERWORN = 2,
+    FTLP_A_PE_TOTAL = 3,
+    FTLP_A_EOL_WORD = 4,
+    FTLP_A_WL_CREDIT = 5,
+};
+
+#define FTLP_EOL_RO     (1ULL << 63)
+/* the oldest data age a load takes (about 146 years), so no sum wraps */
+#define FTLP_AGE_MAX    (1ULL << 62)
 
 typedef struct FtlpCursor {
     const uint8_t *b;
@@ -178,14 +229,23 @@ static uint64_t ftlp_age(uint64_t now, uint64_t t)
     return now > t ? now - t : 0;
 }
 
-/* the line state of @line as the lists hold it now */
-static uint8_t ftlp_line_state(struct ssd *ssd, struct line *line)
+/* the line state of @line as the lists hold it now, in @schema */
+static uint8_t ftlp_line_state(struct ssd *ssd, struct line *line, int schema)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *l;
 
-    if (line->spare || line->reserve) {
+    if (schema == 1 && (line->spare || line->reserve)) {
         return FTLP_SPARE;
+    }
+    if (line->retired) {
+        return FTLP_RETIRED;
+    }
+    if (line->spare) {
+        return FTLP_SPARE;
+    }
+    if (line->reserve) {
+        return FTLP_RESERVE;
     }
     if (ssd->wp.curline == line) {
         return FTLP_ACTIVE;
@@ -210,27 +270,40 @@ uint64_t ssd_persist_max_len(struct ssd *ssd)
     uint64_t lines = ssd->lm.tt_lines;
 
     return FTLP_HDR + (uint64_t)spp->tt_pgs * 17 +
-           (uint64_t)spp->tt_blks * FTLP_BLK + lines * (FTLP_LINE + 4) +
-           3 * 8 + 5 * 4 + FTLP_NSCALARS * 8 + 4;
+           (uint64_t)spp->tt_blks * FTLP_BLK + (uint64_t)spp->tt_pls * 4 +
+           lines * (FTLP_LINE + 4) + 3 * 8 + 5 * 4 +
+           (FTLP_NSCALARS + FTLP_NAGING) * 8 + 4;
+}
+
+/* the plane of index @i, in channel, LUN, plane order */
+static struct nand_plane *ftlp_pl(struct ssd *ssd, uint64_t i)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    return &ssd->ch[i / spp->pls_per_ch]
+                .lun[i / spp->pls_per_lun % spp->luns_per_ch]
+                .pl[i % spp->pls_per_lun];
 }
 
 /*
- * The section of @ssd. The caller holds the workers paused with no request
- * between fetch and the FTL, so no list is in motion.
+ * The section of @ssd in @schema: 2, or 1 for a test of old files. The
+ * caller holds the workers paused with no request between fetch and the
+ * FTL, so no list is in motion.
  */
-GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest)
+GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest, int schema)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
     GByteArray *g = g_byte_array_new();
-    uint64_t now = ssd_now(ssd);
+    uint64_t now = ssd_age_now(ssd);
     uint64_t *sv[FTLP_NSCALARS];
+    uint64_t *av[FTLP_NAGING_U64];
     struct line *line;
     uint64_t n;
 
     g_byte_array_append(g, (const uint8_t *)FTLP_MAGIC, 8);
-    ftlp_put32(g, FTLP_SCHEMA);
-    ftlp_put32(g, 0);
+    ftlp_put32(g, schema);
+    ftlp_put32(g, schema == 1 ? 0 : FTLP_NAGING);
     ftlp_put64(g, digest);
     ftlp_put64(g, spp->tt_pgs);
     ftlp_put64(g, spp->tt_blks);
@@ -259,6 +332,16 @@ GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest)
         ftlp_put32(g, blk->vpc);
         ftlp_put32(g, blk->wp);
         ftlp_put64(g, blk->read_cnt);
+        if (schema > 1) {
+            ftlp_put32(g, blk->pe_limit);
+            ftlp_put8(g, blk->overworn);
+            ftlp_put8(g, 0);
+            ftlp_put8(g, 0);
+            ftlp_put8(g, 0);
+        }
+    }
+    for (uint64_t i = 0; schema > 1 && i < (uint64_t)spp->tt_pls; i++) {
+        ftlp_put32(g, ftlp_pl(ssd, i)->spares_used);
     }
     for (int i = 0; i < lm->tt_lines; i++) {
         line = &lm->lines[i];
@@ -269,7 +352,7 @@ GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest)
         ftlp_put64(g, ftlp_age(now, line->open_time));
         ftlp_put8(g, (line->close_time ? FTLP_CLOSE_SET : 0) |
                      (line->open_time ? FTLP_OPEN_SET : 0));
-        ftlp_put8(g, ftlp_line_state(ssd, line));
+        ftlp_put8(g, ftlp_line_state(ssd, line, schema));
         for (int k = 0; k < 6; k++) {
             ftlp_put8(g, 0);
         }
@@ -297,6 +380,18 @@ GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest)
     for (int i = 0; i < FTLP_NSCALARS; i++) {
         ftlp_put64(g, *sv[i]);
     }
+    if (schema > 1) {
+        ftlp_aging(ssd, av);
+        for (int i = 0; i < FTLP_NAGING_U64; i++) {
+            ftlp_put64(g, *av[i]);
+        }
+        ftlp_put64(g, lm->retired_line_cnt);
+        ftlp_put64(g, ssd->media_ro);
+        ftlp_put64(g, ssd->wl_on);
+        ftlp_put64(g, ssd->read_reclaim_line ?
+                      (uint64_t)ssd->read_reclaim_line->id : FTLP_NONE);
+        ftlp_put64(g, ssd->reclaim_why);
+    }
     ftlp_put32(g, ftlp_crc(g->data, g->len));
     assert(g->len <= ssd_persist_max_len(ssd));
     return g;
@@ -308,6 +403,8 @@ typedef struct FtlpBlk {
     uint32_t vpc;
     uint32_t wp;
     uint64_t read_cnt;
+    uint32_t pe_limit;
+    uint8_t overworn;
 } FtlpBlk;
 
 typedef struct FtlpLine {
@@ -322,10 +419,12 @@ typedef struct FtlpLine {
 
 /* the decoded section, owned by ssd_persist_load() */
 typedef struct FtlpState {
+    uint32_t schema;
     uint64_t *map;
     uint64_t *rmap;
     uint8_t *st;
     FtlpBlk *blk;
+    uint32_t *spares;       /* per plane; schema 2 */
     FtlpLine *line;
     uint32_t *order[3];     /* free, full, victim heap */
     uint64_t norder[3];
@@ -335,6 +434,7 @@ typedef struct FtlpState {
     uint32_t wp_pl;
     uint32_t wp_pg;
     uint64_t scalars[FTLP_NSCALARS];
+    uint64_t aging[FTLP_NAGING];
 } FtlpState;
 
 static void ftlp_free(FtlpState *s)
@@ -343,6 +443,7 @@ static void ftlp_free(FtlpState *s)
     g_free(s->rmap);
     g_free(s->st);
     g_free(s->blk);
+    g_free(s->spares);
     g_free(s->line);
     for (int i = 0; i < 3; i++) {
         g_free(s->order[i]);
@@ -350,14 +451,17 @@ static void ftlp_free(FtlpState *s)
 }
 
 static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
-                        uint64_t digest, FtlpState *s, Error **errp)
+                        const SsdPersistKey *key, FtlpState *s, Error **errp)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t tt_pgs = spp->tt_pgs;
     uint64_t tt_blks = spp->tt_blks;
+    uint64_t tt_pls = spp->tt_pls;
     uint64_t tt_lines = ssd->lm.tt_lines;
     FtlpCursor c = { .b = buf, .len = len };
     const uint8_t *p;
+    uint64_t blk_len;
+    uint32_t naging;
 
     if (len < FTLP_HDR + 4 ||
         ldl_le_p(buf + len - 4) != ftlp_crc(buf, len - 4)) {
@@ -366,14 +470,22 @@ static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
     }
     c.len = len - 4;
     p = ftlp_take(&c, 8);
-    if (!p || memcmp(p, FTLP_MAGIC, 8) || ftlp_u32(&c) != FTLP_SCHEMA ||
-        ftlp_u32(&c) != 0) {
+    s->schema = ftlp_u32(&c);
+    naging = ftlp_u32(&c);
+    if (!p || memcmp(p, FTLP_MAGIC, 8) || s->schema < 1 ||
+        s->schema > FTLP_SCHEMA ||
+        naging != (s->schema == 1 ? 0 : FTLP_NAGING)) {
         error_setg(errp, "the FTL section has another format");
         return false;
     }
-    if (ftlp_u64(&c) != digest) {
+    if (s->schema == 1 && key->aging) {
+        error_setg(errp, "the FTL section has no aging state (schema 1), "
+                   "and this device has an aging model");
+        return false;
+    }
+    if (ftlp_u64(&c) != (s->schema == 1 ? key->digest1 : key->digest)) {
         error_setg(errp, "the FTL section comes from other FTL properties "
-                   "(geometry, mapping, GC or NAND timing)");
+                   "(geometry, mapping, GC, NAND timing or aging)");
         return false;
     }
     if (ftlp_u64(&c) != tt_pgs || ftlp_u64(&c) != tt_blks ||
@@ -382,15 +494,17 @@ static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
         return false;
     }
     /* each array must fit before it is allocated */
-    if (len - c.off < tt_pgs * 17 + tt_blks * FTLP_BLK +
-                      tt_lines * FTLP_LINE) {
+    blk_len = s->schema == 1 ? tt_blks * FTLP_BLK1 :
+                               tt_blks * FTLP_BLK + tt_pls * 4;
+    if (len - c.off < tt_pgs * 17 + blk_len + tt_lines * FTLP_LINE) {
         error_setg(errp, "the FTL section is short");
         return false;
     }
     s->map = g_new(uint64_t, tt_pgs);
     s->rmap = g_new(uint64_t, tt_pgs);
     s->st = g_new(uint8_t, tt_pgs);
-    s->blk = g_new(FtlpBlk, tt_blks);
+    s->blk = g_new0(FtlpBlk, tt_blks);
+    s->spares = g_new0(uint32_t, tt_pls);
     s->line = g_new(FtlpLine, tt_lines);
     for (uint64_t i = 0; i < tt_pgs; i++) {
         s->map[i] = ftlp_u64(&c);
@@ -407,6 +521,14 @@ static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
         s->blk[b].vpc = ftlp_u32(&c);
         s->blk[b].wp = ftlp_u32(&c);
         s->blk[b].read_cnt = ftlp_u64(&c);
+        if (s->schema > 1) {
+            s->blk[b].pe_limit = ftlp_u32(&c);
+            s->blk[b].overworn = ftlp_u8(&c);
+            ftlp_take(&c, 3);
+        }
+    }
+    for (uint64_t i = 0; s->schema > 1 && i < tt_pls; i++) {
+        s->spares[i] = ftlp_u32(&c);
     }
     for (uint64_t i = 0; i < tt_lines; i++) {
         s->line[i].ipc = ftlp_u32(&c);
@@ -437,6 +559,9 @@ static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
     for (int i = 0; i < FTLP_NSCALARS; i++) {
         s->scalars[i] = ftlp_u64(&c);
     }
+    for (uint32_t i = 0; i < naging; i++) {
+        s->aging[i] = ftlp_u64(&c);
+    }
     if (c.bad || c.off != c.len) {
         error_setg(errp, "the FTL section has the wrong length");
         return false;
@@ -448,6 +573,112 @@ static bool ftlp_decode(struct ssd *ssd, const uint8_t *buf, size_t len,
 static uint64_t ftlp_key(struct ssdparams *spp, int c, int l, int p)
 {
     return ((uint64_t)p * spp->luns_per_ch + l) * spp->nchs + c;
+}
+
+/* the schema 2 records that do not need the line states; NULL when good */
+static const char *ftlp_check_aging(struct ssd *ssd, FtlpState *s)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct line_mgmt *lm = &ssd->lm;
+    uint64_t *a = s->aging;
+    uint64_t pe_total = 0, overworn = 0, spares = 0, retired = 0;
+    uint64_t grown = 0, sacrificed = 0;
+    uint64_t eol = a[FTLP_A_EOL_WORD];
+    uint64_t rl = a[FTLP_A_RECLAIM_LINE];
+
+    for (uint64_t b = 0; b < (uint64_t)spp->tt_blks; b++) {
+        FtlpBlk *bk = &s->blk[b];
+
+        if (bk->overworn > 1 || (!ssd->wear_on && bk->pe_limit) ||
+            (ssd->wear_on && !bk->pe_limit) ||
+            (bk->overworn && (!bk->pe_limit ||
+                              bk->erase_cnt < bk->pe_limit))) {
+            return "a block erase limit or overworn mark is wrong";
+        }
+        pe_total += bk->pe_limit;
+        overworn += bk->overworn;
+    }
+    for (uint64_t i = 0; i < (uint64_t)spp->tt_pls; i++) {
+        if (s->spares[i] > (uint32_t)ssd->spare_lines) {
+            return "a plane used more spare blocks than it has";
+        }
+        /*
+         * A used spare slot holds the worn block it took out of service;
+         * an unused one, a block never erased. So the count is the slot
+         * the next swap takes.
+         */
+        for (uint32_t k = 0; k < (uint32_t)ssd->spare_lines; k++) {
+            FtlpBlk *bk = &s->blk[i * spp->blks_per_pl + lm->tt_lines -
+                                  ssd->spare_lines + k];
+
+            if (bk->overworn ||
+                (k < s->spares[i]) != (bk->erase_cnt >= bk->pe_limit) ||
+                (k >= s->spares[i] && bk->erase_cnt)) {
+                return "a spare slot does not match the spares used";
+            }
+        }
+        spares += s->spares[i];
+    }
+    /* the read-only end of life retires a worn block, never keeps it */
+    if (ssd->eol_ro_mode && overworn) {
+        return "an overworn block with eol_read_only";
+    }
+    for (int i = 0; i < lm->tt_lines; i++) {
+        uint64_t worn = 0;
+
+        if (s->line[i].state != FTLP_RETIRED) {
+            continue;
+        }
+        retired++;
+        /* a retirement counts each block worn out or sacrificed */
+        for (uint64_t p = 0; p < (uint64_t)spp->tt_pls; p++) {
+            FtlpBlk *bk = &s->blk[p * spp->blks_per_pl + i];
+
+            if (bk->overworn) {
+                return "a retired line holds an overworn block";
+            }
+            worn += bk->erase_cnt >= bk->pe_limit;
+        }
+        /* a line retires only for a worn block */
+        if (!worn) {
+            return "a retired line holds no worn block";
+        }
+        grown += worn;
+        sacrificed += spp->tt_pls - worn;
+    }
+    if (pe_total != a[FTLP_A_PE_TOTAL] || overworn != a[FTLP_A_OVERWORN] ||
+        retired != a[FTLP_A_RETIRED] || spares + grown != a[FTLP_A_GROWN] ||
+        sacrificed != a[FTLP_A_SACRIFICED]) {
+        return "a wear total does not match the blocks and lines";
+    }
+    if (a[FTLP_A_WL_CREDIT] > 4ull * spp->pgs_per_line) {
+        return "the wear levelling credit is out of range";
+    }
+    if (a[FTLP_A_MEDIA_RO] > 1 || a[FTLP_A_WL_ON] > 1 ||
+        (a[FTLP_A_MEDIA_RO] && !ssd->eol_ro_mode) ||
+        eol != (a[FTLP_A_MEDIA_RO] ? FTLP_EOL_RO : 0)) {
+        return "the end-of-life state is wrong or has admitted writes";
+    }
+    /*
+     * Only read_reclaim_limit and retention_limit_sec queue a rewrite here
+     * (persist_ftl refuses the open-block limits), and only a closed line
+     * is old. With no line queued the reason is the reset one.
+     */
+    if (a[FTLP_A_RECLAIM_WHY] > RECLAIM_AGE ||
+        (rl == FTLP_NONE && a[FTLP_A_RECLAIM_WHY] != RECLAIM_READS) ||
+        (rl != FTLP_NONE && a[FTLP_A_RECLAIM_WHY] == RECLAIM_READS &&
+         !spp->read_reclaim_limit) ||
+        (rl != FTLP_NONE && a[FTLP_A_RECLAIM_WHY] == RECLAIM_AGE &&
+         (!spp->retention_limit_sec || rl >= (uint64_t)lm->tt_lines ||
+          s->line[rl].state == FTLP_ACTIVE)) ||
+        (rl != FTLP_NONE &&
+         (rl >= (uint64_t)lm->tt_lines ||
+          (s->line[rl].state != FTLP_FULL &&
+           s->line[rl].state != FTLP_VICTIM &&
+           s->line[rl].state != FTLP_ACTIVE)))) {
+        return "the line queued for a rewrite holds no data";
+    }
+    return NULL;
 }
 
 static bool ftlp_check(struct ssd *ssd, FtlpState *s, Error **errp)
@@ -463,8 +694,12 @@ static bool ftlp_check(struct ssd *ssd, FtlpState *s, Error **errp)
     uint64_t lpn_lo = ssd_ns_byte_base(ssd, ssd->ns) / pgsz;
     uint64_t lpn_hi = ssd->ns ? lpn_lo + DIV_ROUND_UP(ssd->ns->size, pgsz) :
                                 tt_pgs;
+    bool media_ro = s->aging[FTLP_A_MEDIA_RO];
     const char *why = NULL;
 
+    if (s->schema > 1) {
+        why = ftlp_check_aging(ssd, s);
+    }
     /*
      * Forward and reverse mapping. The LPNs of a namespace count from its
      * slice of the backend, as ssd_lpn_range() numbers them.
@@ -551,15 +786,37 @@ static bool ftlp_check(struct ssd *ssd, FtlpState *s, Error **errp)
         }
         if (ln->flags & ~(FTLP_CLOSE_SET | FTLP_OPEN_SET)) {
             why = "a line has unknown flags";
+        } else if (((ln->flags & FTLP_CLOSE_SET) &&
+                    ln->close_age > FTLP_AGE_MAX) ||
+                   ((ln->flags & FTLP_OPEN_SET) &&
+                    ln->open_age > FTLP_AGE_MAX)) {
+            why = "a line age is out of range";
+        } else if (s->schema == 1 && ln->state > FTLP_SPARE) {
+            why = "a line state is out of range";
+        } else if ((ln->state == FTLP_FULL || ln->state == FTLP_VICTIM) &&
+                   !(ln->flags & FTLP_CLOSE_SET)) {
+            /* a filled line always has its close time */
+            why = "a closed line has no close time";
         } else if ((ln->state == FTLP_FULL || ln->state == FTLP_VICTIM) &&
                    ln->close_seq >= s->scalars[0]) {
             why = "a closed line is newer than the next close sequence";
         } else if (v != ln->vpc || inv != ln->ipc) {
             why = "a line count does not match its blocks";
-        } else if ((live->spare || live->reserve) !=
+        } else if (s->schema == 1 && (live->spare || live->reserve) !=
                    (ln->state == FTLP_SPARE)) {
             why = "a spare or reserve line differs from this device's";
-        } else if (ln->state == FTLP_SPARE || ln->state == FTLP_FREE) {
+        } else if (s->schema > 1 &&
+                   (live->spare != (ln->state == FTLP_SPARE) ||
+                    (ln->state == FTLP_RESERVE &&
+                     (!live->reserve || media_ro)) ||
+                    (live->reserve && !media_ro &&
+                     ln->state != FTLP_RESERVE))) {
+            why = "a spare or reserve line differs from this device's";
+        } else if (ln->state == FTLP_RETIRED &&
+                   (!ssd->wear_on || live->spare || live->reserve)) {
+            why = "a line this device cannot retire is retired";
+        } else if (ln->state == FTLP_SPARE || ln->state == FTLP_FREE ||
+                   ln->state == FTLP_RESERVE || ln->state == FTLP_RETIRED) {
             if (!erased) {
                 why = "a free line holds programmed pages";
             }
@@ -642,6 +899,23 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
     struct line_mgmt *lm = &ssd->lm;
     uint64_t now = ssd_now(ssd);
     uint64_t *sv[FTLP_NSCALARS];
+    uint64_t *av[FTLP_NAGING_U64];
+    uint64_t max_age = 0;
+
+    /*
+     * The host clock can start lower than a saved age, as after a host
+     * reboot: the line-time clock then moves ahead, so no age is cut.
+     */
+    for (int i = 0; i < lm->tt_lines; i++) {
+        if (s->line[i].flags & FTLP_CLOSE_SET) {
+            max_age = MAX(max_age, s->line[i].close_age);
+        }
+        if (s->line[i].flags & FTLP_OPEN_SET) {
+            max_age = MAX(max_age, s->line[i].open_age);
+        }
+    }
+    ssd->age_off = max_age >= now ? max_age - now + 1 : 0;
+    now += ssd->age_off;
 
     for (uint64_t l = 0; l < (uint64_t)spp->tt_pgs; l++) {
         if (s->map[l] == FTLP_NONE) {
@@ -662,6 +936,13 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
         blk->vpc = s->blk[b].vpc;
         blk->wp = s->blk[b].wp;
         blk->read_cnt = s->blk[b].read_cnt;
+        if (s->schema > 1) {
+            blk->pe_limit = s->blk[b].pe_limit;
+            blk->overworn = s->blk[b].overworn;
+        }
+    }
+    for (uint64_t i = 0; s->schema > 1 && i < (uint64_t)spp->tt_pls; i++) {
+        ftlp_pl(ssd, i)->spares_used = s->spares[i];
     }
     /* rebuild the lists from the fresh FTL's: none of them holds a victim */
     while (pqueue_size(lm->victim_line_pq)) {
@@ -681,6 +962,10 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
         line->open_time = ftlp_rebase(now, ln->open_age,
                                       ln->flags & FTLP_OPEN_SET);
         line->pos = 0;
+        if (s->schema > 1) {
+            line->retired = ln->state == FTLP_RETIRED;
+            line->reserve = ln->state == FTLP_RESERVE;
+        }
     }
     for (uint64_t j = 0; j < s->norder[0]; j++) {
         QTAILQ_INSERT_TAIL(&lm->free_line_list, &lm->lines[s->order[0][j]],
@@ -710,6 +995,19 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
     for (int i = 0; i < FTLP_NSCALARS; i++) {
         *sv[i] = s->scalars[i];
     }
+    if (s->schema == 1) {
+        return;
+    }
+    ftlp_aging(ssd, av);
+    for (int i = 0; i < FTLP_NAGING_U64; i++) {
+        *av[i] = s->aging[i];
+    }
+    lm->retired_line_cnt = s->aging[FTLP_A_RETIRED];
+    ssd->media_ro = s->aging[FTLP_A_MEDIA_RO];
+    ssd->wl_on = s->aging[FTLP_A_WL_ON];
+    ssd->read_reclaim_line = s->aging[FTLP_A_RECLAIM_LINE] == FTLP_NONE ? NULL :
+                             &lm->lines[s->aging[FTLP_A_RECLAIM_LINE]];
+    ssd->reclaim_why = s->aging[FTLP_A_RECLAIM_WHY];
 }
 
 /*
@@ -717,12 +1015,12 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
  * FTL's state with it. A check that fails leaves @ssd as it was.
  */
 bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,
-                      uint64_t digest, bool commit, Error **errp)
+                      const SsdPersistKey *key, bool commit, Error **errp)
 {
     FtlpState s = { 0 };
     bool ok;
 
-    ok = ftlp_decode(ssd, buf, len, digest, &s, errp) &&
+    ok = ftlp_decode(ssd, buf, len, key, &s, errp) &&
          ftlp_check(ssd, &s, errp);
     if (ok && commit) {
         ftlp_commit(ssd, &s);

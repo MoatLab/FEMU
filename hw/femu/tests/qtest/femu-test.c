@@ -11,6 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "qemu/crc32c.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
@@ -32044,6 +32045,567 @@ static void femu_test_persist_ftl(void *obj, void *data,
     rmdir(dir);
 }
 
+/* the byte of retention_refreshes in the FEMU statistics log */
+#define FEMU_PA_REFRESH_OFF 48
+/* the byte of rber_retry_reads */
+#define FEMU_PA_RETRY_OFF   296
+
+/* persist-aging: a device of one test, its queues and buffers */
+typedef struct FemuPa {
+    QOSState *qs;
+    QTestState *qts;
+    QPCIDevice *pdev;
+    FemuCtrlState c;
+    uint64_t buf;
+    uint64_t list;
+    uint64_t log;
+    GString *trace;     /* what the segments saw, in order */
+} FemuPa;
+
+#define FEMU_PA_WEAR \
+    "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,blk_pe_limit=30," \
+    "blk_pe_spread=60,blk_pe_seed=3,spare_lines=8,eol_read_only=off," \
+    "wl_spread=8,read_reclaim_limit=6"
+#define FEMU_PA_EOL \
+    "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,blk_pe_limit=8," \
+    "spare_lines=8,mdts=2"
+#define FEMU_PA_RBER \
+    "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,rber_ppb=2000000," \
+    "rber_pe_double=1,rber_read_double=20"
+
+static void femu_pa_boot(FemuPa *p, const char *opts, const char *path)
+{
+    p->qs = qtest_pc_boot("-machine pc -nodefaults -device femu,id=pd,addr=5,"
+                          "%s,persist_ftl=on,persist_file=%s", opts, path);
+    p->qts = p->qs->qts;
+    p->pdev = qpci_device_find(p->qs->pcibus, QPCI_DEVFN(5, 0));
+    memset(&p->c, 0, sizeof(p->c));
+    femu_enable(&p->c, p->pdev, &p->qs->alloc);
+    femu_create_io_queues(&p->c);
+    p->buf = guest_alloc(&p->qs->alloc, 64 * 4096);
+    p->list = guest_alloc(&p->qs->alloc, 4096);
+    p->log = guest_alloc(&p->qs->alloc, 512);
+    qtest_memset(p->qts, p->buf, 0x3c, 64 * 4096);
+}
+
+/* quit, which saves the file, or only stop the guest */
+static void femu_pa_end(FemuPa *p, bool quit)
+{
+    femu_disable(&p->c);
+    femu_queue_free(&p->c, &p->c.io);
+    if (quit) {
+        qtest_qmp_send(p->qts, "{'execute':'quit'}");
+        qtest_set_expected_status(p->qts, 0);
+        qtest_wait_qemu(p->qts);
+    }
+    guest_free(&p->qs->alloc, p->log);
+    guest_free(&p->qs->alloc, p->list);
+    guest_free(&p->qs->alloc, p->buf);
+    g_free(p->pdev);
+    qtest_pc_shutdown(p->qs);
+}
+
+/* the media state that a restart must keep, as one text */
+static char *femu_pa_state(FemuPa *p, int nblocks)
+{
+    g_autofree char *lines = femu_ftl_dump(p->qts, "lines", 40);
+    g_autofree char *blocks = femu_ftl_dump(p->qts, "blocks", nblocks);
+    GString *s = g_string_new(NULL);
+    uint8_t page[512];
+    QDict *rsp;
+    QDict *ns = femu_query_ns(p->qts, "'path':'/machine/peripheral/pd'",
+                              &rsp);
+
+    /* the read-only bit of the FTL thread, apart from the admission one */
+    if (qdict_haskey(ns, "end-of-life")) {
+        g_autoptr(GString) eol = qobject_to_json(qdict_get(ns, "end-of-life"));
+
+        g_string_append_printf(s, "eol %s\n", eol->str);
+    }
+    qobject_unref(rsp);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&p->c, FEMU_LOG_FEMU_STATS, p->log,
+                                         512, 0)), ==, NVME_SUCCESS);
+    qtest_memread(p->qts, p->log, page, 512);
+    g_string_append_printf(s, "lines %s\nblocks %s\nstats ", lines, blocks);
+    for (int i = 0; i < 512; i++) {
+        g_string_append_printf(s, "%02x", page[i]);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&p->c, NVME_LOG_SMART_INFO, p->log,
+                                         512, 0)), ==, NVME_SUCCESS);
+    qtest_memread(p->qts, p->log, page, 512);
+    /* warning, spare, used and media errors: not the session counters */
+    g_string_append_printf(s, "\nsmart %02x %u %u %" PRIu64 "\ntrace %s",
+                           page[0], page[3], page[5], ldq_le_p(page + 160),
+                           p->trace->str);
+    return g_string_free(s, false);
+}
+
+static void femu_pa_read(FemuPa *p, int lpn)
+{
+    uint16_t sc = FEMU_SC(femu_rw(&p->c, NVME_CMD_READ, lpn * 8, p->buf));
+
+    g_assert_true(sc == NVME_SUCCESS || sc == NVME_UNRECOVERED_READ);
+    g_string_append_c(p->trace, sc == NVME_SUCCESS ? '.' : 'U');
+}
+
+static void femu_pa_segment(FemuPa *p, const char *kind, int seg)
+{
+    if (!strcmp(kind, "wear")) {
+        femu_wear_workload(&p->c, p->buf, p->list);
+        /* reads past read_reclaim_limit queue a rewrite for the next write */
+        for (int i = 0; seg == 0 && i < 7; i++) {
+            femu_pa_read(p, 3);
+        }
+    } else if (!strcmp(kind, "eol")) {
+        int ok = 0;
+
+        for (int i = 0; i < (seg ? 50000 : 256); i++) {
+            uint16_t sc = FEMU_SC(femu_rw(&p->c, NVME_CMD_WRITE,
+                                          (i % 256) * 8, p->buf));
+
+            if (sc == NVME_WRITE_TO_RO) {
+                break;
+            }
+            g_assert_cmphex(sc, ==, NVME_SUCCESS);
+            ok++;
+        }
+        g_string_append_printf(p->trace, "w%d ", ok);
+    } else {
+        for (int r = 0; seg == 0 && r < 2; r++) {
+            for (int lpn = 0; lpn < 1024; lpn++) {
+                g_assert_cmpint(FEMU_SC(femu_rw(&p->c, NVME_CMD_WRITE,
+                                                lpn * 8, p->buf)), ==,
+                                NVME_SUCCESS);
+            }
+        }
+        for (int r = 0; r < 2; r++) {
+            for (int lpn = 0; lpn < 64; lpn++) {
+                femu_pa_read(p, lpn);
+            }
+        }
+    }
+}
+
+/*
+ * persist-aging: the same two workload segments run once in one process
+ * and once with a persist_ftl restart before the second segment and after
+ * it. The two runs must end in the same media state: lines, blocks, the
+ * FEMU statistics log, SMART spare, wear and media errors, and what each
+ * read returned. @data names the aging models:
+ *   "wear": erase limits with spread, spare lines, levelling, and a read
+ *           reclaim queued at the restart;
+ *   "eol":  the reserve held at the first restart, read-only media at the
+ *           second; a write is then refused and a read succeeds;
+ *   "rber": the RBER generator, its counters and the read counts; some
+ *           reads need a retry.
+ */
+static void femu_test_persist_aging(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    const char *kind = data;
+    const char *opts = !strcmp(kind, "wear") ? FEMU_PA_WEAR :
+                       !strcmp(kind, "eol") ? FEMU_PA_EOL : FEMU_PA_RBER;
+    int nblocks = !strcmp(kind, "rber") ? 80 : 160;
+    g_autofree char *dir = g_dir_make_tmp("femu-paging-XXXXXX", NULL);
+    char *state[2];
+
+    for (int split = 0; split < 2; split++) {
+        g_autofree char *path = g_strdup_printf("%s/data%d", dir, split);
+        g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+        FemuPa p = { .trace = g_string_new(NULL) };
+
+        femu_pa_boot(&p, opts, path);
+        for (int seg = 0; seg < 2; seg++) {
+            if (split && seg) {
+                femu_pa_end(&p, true);
+                femu_pa_boot(&p, opts, path);
+            }
+            femu_pa_segment(&p, kind, seg);
+        }
+        if (split) {
+            femu_pa_end(&p, true);
+            femu_pa_boot(&p, opts, path);
+        }
+        state[split] = femu_pa_state(&p, nblocks);
+        g_test_message("persist-aging %s %s: %s", kind,
+                       split ? "split" : "straight", p.trace->str);
+        if (!strcmp(kind, "eol")) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&p.c, NVME_CMD_WRITE, 0, p.buf)),
+                            ==, NVME_WRITE_TO_RO);
+            g_assert_cmphex(FEMU_SC(femu_rw(&p.c, NVME_CMD_READ, 0, p.buf)),
+                            ==, NVME_SUCCESS);
+            g_assert_nonnull(strstr(state[split], "\"retired\""));
+        } else if (!strcmp(kind, "wear")) {
+            g_assert_nonnull(strstr(state[split], "\"retired\""));
+        } else {
+            uint8_t page[512];
+
+            /* some reads needed a retry: the generator decided them */
+            g_assert_cmpint(FEMU_SC(femu_get_log(&p.c, FEMU_LOG_FEMU_STATS,
+                                                 p.log, 512, 0)), ==,
+                            NVME_SUCCESS);
+            qtest_memread(p.qts, p.log, page, 512);
+            g_assert_cmpuint(ldq_le_p(page + FEMU_PA_RETRY_OFF), >, 0);
+        }
+        femu_pa_end(&p, false);
+        g_string_free(p.trace, true);
+        unlink(lock);
+        unlink(path);
+    }
+    g_assert_cmpstr(state[1], ==, state[0]);
+    g_free(state[0]);
+    g_free(state[1]);
+    rmdir(dir);
+}
+
+/* device_add of the aging device "pa" at slot 6; its error text or NULL */
+static char *femu_pa_add(QTestState *qts, const char *path, const char *more)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'driver':'femu','id':'pa','addr':'6','devsz_mb':2,'femu_mode':1,"
+        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':64,"
+        "'pls_per_lun':1,'luns_per_ch':1,'nchs':2,'persist_ftl':true,"
+        "'persist_file':'%s'%s}", path, more);
+    QObject *args = qobject_from_json(json, &error_abort);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           args);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/* write @n pages to "pd" with @opts and quit, which saves @path */
+static void femu_pa_file(const char *opts, const char *path, int n,
+                         bool schema1)
+{
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults -device femu,"
+                                 "id=pd,addr=5,%s,persist_file=%s", opts,
+                                 path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i < n; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    if (schema1) {
+        QDict *rsp = qtest_qmp(qs->qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/pd',"
+                               "'property':'x-persist-schema','value':1}}");
+
+        g_assert_false(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qtest_qmp_send(qs->qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qs->qts, 0);
+    qtest_wait_qemu(qs->qts);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* set aging value @idx of the one FTL section of @src to @v, in @dst */
+static void femu_pa_patch(const char *src, const char *dst, int idx,
+                          int64_t v, bool add)
+{
+    g_autofree char *b = NULL;
+    gsize len;
+    uint8_t *sec = NULL;
+    uint8_t *val;
+
+    g_assert_true(g_file_get_contents(src, &b, &len, NULL));
+    for (gsize i = 0; i + 8 <= len; i++) {
+        if (!memcmp(b + i, "FEMUFTL1", 8)) {
+            sec = (uint8_t *)b + i;
+        }
+    }
+    g_assert_nonnull(sec);
+    /* 23 aging values of 8 bytes, then the CRC */
+    val = (uint8_t *)b + len - 4 - (23 - idx) * 8;
+    stq_le_p(val, add ? ldq_le_p(val) + v : (uint64_t)v);
+    stl_le_p(b + len - 4, crc32c(0xffffffff, sec, (uint8_t *)b + len - 4 -
+                                 sec));
+    g_assert_true(g_file_set_contents(dst, b, len, NULL));
+}
+
+/*
+ * Copy FTL file @src to @dst with one record changed, and the CRC made
+ * good again. @kind 'l': the first line in state @idx (8: full or
+ * victim); @off is the byte in its 40-byte record. 'b': block @idx;
+ * @off is the byte in it. @v goes in @size bytes.
+ */
+static void femu_pa_patch_rec(const char *src, const char *dst, char kind,
+                              int idx, int off, int size, uint64_t v)
+{
+    g_autofree char *b = NULL;
+    gsize len;
+    uint8_t *sec = NULL;
+    uint8_t *rec;
+    uint64_t pgs, blks, lines;
+    uint32_t schema;
+    gsize blk_sz, pls;
+
+    g_assert_true(g_file_get_contents(src, &b, &len, NULL));
+    for (gsize i = 0; i + 8 <= len; i++) {
+        if (!memcmp(b + i, "FEMUFTL1", 8)) {
+            sec = (uint8_t *)b + i;
+        }
+    }
+    g_assert_nonnull(sec);
+    schema = ldl_le_p(sec + 8);
+    pgs = ldq_le_p(sec + 24);
+    blks = ldq_le_p(sec + 32);
+    lines = ldq_le_p(sec + 40);
+    blk_sz = schema > 1 ? 32 : 24;
+    /* each plane holds a block of every line */
+    pls = schema > 1 ? blks / lines : 0;
+    /* header, maptbl, rmap, page status */
+    rec = sec + 56 + 8 * pgs + 8 * pgs + pgs;
+    if (kind == 'b') {
+        g_assert_cmpuint(idx, <, blks);
+        rec += idx * blk_sz;
+    } else {
+        rec += blks * blk_sz + 4 * pls;
+        int i;
+
+        for (i = 0; i < lines; i++) {
+            uint8_t st = rec[i * 40 + 33];
+
+            if (st == idx || (idx == 8 && (st == 1 || st == 2))) {
+                break;
+            }
+        }
+        g_assert_cmpint(i, <, lines);
+        rec += i * 40;
+    }
+    for (int k = 0; k < size; k++) {
+        rec[off + k] = v >> (8 * k);
+    }
+    stl_le_p(b + len - 4, crc32c(0xffffffff, sec, (uint8_t *)b + len - 4 -
+                                 sec));
+    g_assert_true(g_file_set_contents(dst, b, len, NULL));
+}
+
+/* the device of persist-aging-files: room for the end-of-life reserve */
+#define FEMU_PA_FILE \
+    "devsz_mb=2,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,nchs=2"
+
+/*
+ * persist-aging-files: what an aging device takes from a file.
+ *   - The aging properties and those that change what the state means
+ *     are in the digest: each change below is refused.
+ *   - A schema 1 file (x-persist-schema) loads into a device without an
+ *     aging model, and is refused by one.
+ *   - A file without FTL state is refused by an aging device.
+ *   - Aging values with a good CRC are still checked.
+ */
+static void femu_test_persist_aging_files(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pafile-XXXXXX", NULL);
+    g_autofree char *fa = g_build_filename(dir, "aging", NULL);
+    g_autofree char *f1 = g_build_filename(dir, "schema1", NULL);
+    g_autofree char *fd = g_build_filename(dir, "dataonly", NULL);
+    g_autofree char *fc = g_build_filename(dir, "corrupt", NULL);
+    g_autofree char *fc1 = g_build_filename(dir, "corrupt1", NULL);
+    static const char *const aging = ",'blk_pe_limit':100,'rber_ppb':1";
+    static const char *const changes[] = {
+        ",'eol_read_only':false", ",'mdts':3", ",'age_scale':2",
+        ",'ecc_hard_bits':30", ",'rber_timing_only':true",
+        ",'rber_seed':7", ",'blk_pe_spread':10", ",'nlbaf':6",
+    };
+    static const struct {
+        int idx;
+        int64_t v;
+        bool add;
+        const char *msg;
+    } bad[] = {
+        { 19, 2, false, "end-of-life" },        /* media_ro */
+        { 4, 1, false, "end-of-life" },         /* admitted pages */
+        { 21, 64, false, "rewrite" },           /* reclaim line */
+        { 22, 3, false, "rewrite" },            /* reclaim reason */
+        { 3, 1, true, "wear total" },           /* wear_pe_total */
+        { 18, 1, false, "wear total" },         /* retired lines */
+        { 0, 1, true, "wear total" },           /* grown bad blocks */
+        { 5, 1 << 20, false, "levelling" },     /* wl_credit */
+        { 22, 1, false, "rewrite" },            /* age reason, none queued */
+        { 22, 2, false, "rewrite" },            /* open-block reason */
+    };
+    QOSState *qs;
+    char *err;
+
+    femu_pa_file(FEMU_PA_FILE ",persist_ftl=on,blk_pe_limit=100,rber_ppb=1",
+                 fa, 64, false);
+    femu_pa_file(FEMU_PA_FILE ",persist_ftl=on", f1, 64, true);
+    /* a free line in the reserve state, which schema 1 does not have */
+    femu_pa_patch_rec(f1, fc1, 'l', 0, 33, 1, 5);
+    femu_pa_file(FEMU_PA_FILE, fd, 64, false);
+
+    qs = qtest_pc_boot("-machine pc -nodefaults");
+    /* the control: the same properties load the file */
+    err = femu_pa_add(qs->qts, fa, aging);
+    g_assert_null(err);
+    qpci_unplug_acpi_device_test(qs->qts, "pa", 6);
+    for (size_t i = 0; i < ARRAY_SIZE(changes); i++) {
+        g_autofree char *more = g_strconcat(aging, changes[i], NULL);
+
+        err = femu_pa_add(qs->qts, fa, more);
+        g_test_message("%s: %s", changes[i], err ? err : "loaded");
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "other FTL properties"));
+        g_free(err);
+    }
+    /*
+     * schema 1: refused with aging, then loaded without it (that unplug
+     * saves the file again, in schema 2)
+     */
+    err = femu_pa_add(qs->qts, f1, aging);
+    g_test_message("schema 1, aging: %s", err ? err : "loaded");
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "no aging state"));
+    g_free(err);
+    err = femu_pa_add(qs->qts, f1, "");
+    g_assert_null(err);
+    qpci_unplug_acpi_device_test(qs->qts, "pa", 6);
+    /* data only: the aging history would start again */
+    err = femu_pa_add(qs->qts, fd, aging);
+    g_test_message("data only, aging: %s", err ? err : "loaded");
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "no FTL state"));
+    g_free(err);
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        femu_pa_patch(fa, fc, bad[i].idx, bad[i].v, bad[i].add);
+        err = femu_pa_add(qs->qts, fc, aging);
+        g_test_message("aging value %d: %s", bad[i].idx,
+                       err ? err : "loaded");
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, bad[i].msg));
+        g_free(err);
+        unlink(fc);
+    }
+    /* records the totals agree with, which the state rules refuse */
+    {
+        static const struct {
+            char kind;
+            int idx, off, size;
+            uint64_t v;
+            const char *msg;
+        } rec[] = {
+            /* a full or victim line without its close time */
+            { 'l', 8, 32, 1, 0, "no close time" },
+            /* a free line retired, with no worn block in it */
+            { 'l', 0, 33, 1, 6, "no worn block" },
+        };
+
+        for (size_t i = 0; i < ARRAY_SIZE(rec); i++) {
+            femu_pa_patch_rec(fa, fc, rec[i].kind, rec[i].idx, rec[i].off,
+                              rec[i].size, rec[i].v);
+            err = femu_pa_add(qs->qts, fc, aging);
+            g_test_message("record %zu: %s", i, err ? err : "loaded");
+            g_assert_nonnull(err);
+            g_assert_nonnull(strstr(err, rec[i].msg));
+            g_free(err);
+            unlink(fc);
+        }
+        /* a block worn and kept overworn: eol_read_only retires it */
+        femu_pa_patch_rec(fa, fc, 'b', 0, 0, 4, 100);
+        femu_pa_patch_rec(fc, fc, 'b', 0, 28, 1, 1);
+        err = femu_pa_add(qs->qts, fc, aging);
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "overworn block with eol_read_only"));
+        g_free(err);
+        unlink(fc);
+        err = femu_pa_add(qs->qts, fc1, "");
+        g_test_message("schema 1, reserve state: %s", err ? err : "loaded");
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "line state is out of range"));
+        g_free(err);
+        unlink(fc1);
+    }
+    qtest_pc_shutdown(qs);
+    {
+        const char *const files[] = { fa, f1, fd, fc, fc1 };
+
+        for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
+            g_autofree char *lock = g_strconcat(files[i], ".lock", NULL);
+
+            unlink(files[i]);
+            unlink(lock);
+        }
+    }
+    rmdir(dir);
+}
+
+/*
+ * persist-retention: retention_limit_sec=3. Run 1 fills 32 lines and
+ * quits 2 s later. Run 2 reads page 1023 and writes at once: the last line
+ * closed with that page, so it is about 2 s old, below the limit, and no
+ * refresh runs. 2 s later the same read and write refresh it: the age came
+ * back. (Page 0 closed its line at the start of a long write loop.) QEMU
+ * stays down 2 s between the runs. A load that lost the age would see 2 s
+ * at the second read; one that aged the media by the downtime would see
+ * 4 s and refresh at the first read.
+ */
+static void femu_test_persist_retention(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pret-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    const char *opts;
+    FemuPa p = { .trace = g_string_new(NULL) };
+    uint8_t page[512];
+
+    opts = "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+           "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,"
+           "retention_limit_sec=3";
+    femu_pa_boot(&p, opts, path);
+    for (int lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_WRITE, lpn * 8,
+                                        p.buf)), ==, NVME_SUCCESS);
+    }
+    g_usleep(2 * G_USEC_PER_SEC);
+    femu_pa_end(&p, true);
+    /* the downtime: 2 s more would take the line past the limit */
+    g_usleep(2 * G_USEC_PER_SEC);
+    femu_pa_boot(&p, opts, path);
+    for (int k = 0; k < 2; k++) {
+        if (k) {
+            g_usleep(2 * G_USEC_PER_SEC);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_READ, 1023 * 8,
+                                        p.buf)), ==, NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_WRITE, 0, p.buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_get_log(&p.c, FEMU_LOG_FEMU_STATS,
+                                             p.log, 512, 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(p.qts, p.log, page, 512);
+        g_test_message("retention refreshes after read %d: %" PRIu64, k,
+                       ldq_le_p(page + FEMU_PA_REFRESH_OFF));
+        g_assert_cmpuint(ldq_le_p(page + FEMU_PA_REFRESH_OFF), ==, k);
+    }
+    femu_pa_end(&p, false);
+    g_string_free(p.trace, true);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* device_add a femu device at slot 6 with @members; its error text */
 static char *femu_mode_add(QTestState *qts, const char *members)
 {
@@ -59298,6 +59860,16 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("persist-aging-wear", "femu", femu_test_persist_aging,
+                 &(QOSGraphTestOptions) { .arg = (void *)"wear" });
+    qos_add_test("persist-aging-eol", "femu", femu_test_persist_aging,
+                 &(QOSGraphTestOptions) { .arg = (void *)"eol" });
+    qos_add_test("persist-aging-rber", "femu", femu_test_persist_aging,
+                 &(QOSGraphTestOptions) { .arg = (void *)"rber" });
+    qos_add_test("persist-aging-files", "femu", femu_test_persist_aging_files,
+                 NULL);
+    qos_add_test("persist-retention", "femu", femu_test_persist_retention,
+                 NULL);
     qos_add_test("die-slow", "femu", femu_test_die_slow,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

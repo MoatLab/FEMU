@@ -149,7 +149,7 @@ static void ssd_line_filled(struct ssd *ssd, struct line *line)
     struct line_mgmt *lm = &ssd->lm;
 
     /* record when the line filled, for age-based GC policies */
-    line->close_time = ssd_now(ssd);
+    line->close_time = ssd_age_now(ssd);
     line->close_seq = lm->next_close_seq++;
     /* move current line to {victim,full} line list */
     if (line->vpc == ssd_line_data_pgs(ssd, line)) {
@@ -289,7 +289,7 @@ static void ssd_stream_close_pointer(struct ssd *ssd, struct write_pointer *wp)
                 }
             }
         }
-        line->close_time = ssd_now(ssd);
+        line->close_time = ssd_age_now(ssd);
         line->close_seq = ssd->lm.next_close_seq++;
         pqueue_insert(ssd->lm.victim_line_pq, line);
     }
@@ -889,7 +889,7 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
     line->vpc++;
     if ((ssd->sp.pd_open_age || ssd->sp.pd_open_close_sec) &&
         !line->open_time) {
-        line->open_time = ssd_now(ssd);
+        line->open_time = ssd_age_now(ssd);
     }
 }
 
@@ -1196,7 +1196,7 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
 {
     struct line_mgmt *lm = &ssd->lm;
     pqueue_t *pq = lm->victim_line_pq;
-    uint64_t now = ssd_now(ssd);
+    uint64_t now = ssd_age_now(ssd);
     struct line *best = NULL;
     uint64_t best_age = 0, best_inv = 0, best_val = 1;
 

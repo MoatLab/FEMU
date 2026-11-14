@@ -146,9 +146,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "timing yet; off (default) adds nothing to the media path" },
     { "persist_ftl",
       "bbssd with mapping=page: persist_file keeps the FTL state too "
-      "(mapping, page and block state, lines, write pointer, counters), "
+      "(mapping, page and block state, lines, write pointer, counters, "
+      "and the wear, retention, read reclaim, levelling and RBER state), "
       "so a restarted drive continues as it was; a file of other geometry, "
-      "mapping, GC or NAND timing properties fails realize. Not with "
+      "mapping, GC, NAND timing or aging properties fails realize, and so "
+      "does a file without FTL state on a device with an aging model. Not "
+      "with "
       "FDP or the FTL features whose state it does not keep (realize "
       "names the property); off (default)" },
     { "subsys",

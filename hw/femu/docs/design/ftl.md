@@ -1295,6 +1295,51 @@ queued, so new read stress cannot stop it.
 One read reclaim is queued at a time, as before; open lines and frontiers
 are not scanned, and static wear levelling stays on the write path.
 
+### Aging state across a restart (`persist_ftl`)
+
+With `persist_ftl`, the FTL section of `persist_file` (schema 2) also keeps
+the state of the aging models. A drive aged in one run goes on in the next:
+
+```text
+  run 1: blk_pe_limit, spare_lines, wl_spread, read_reclaim_limit,
+         retention_limit_sec, ecc_retention_sec or rber_ppb
+         --> clean end (unplug or quit) --> file, FTL section schema 2
+  run 2: the same properties --> load --> the same wear, ages, retirements
+         another aging property --> realize fails (digest)
+```
+
+| Kept | Fields |
+| --- | --- |
+| per block | erase count, read count, erase limit, overworn mark, at the block's slot after spare swaps |
+| per plane | spare blocks used, which names the next spare slot |
+| per line | free, open, full, victim, spare, held reserve or retired; close and open ages |
+| wear | grown bad, sacrificed and overworn blocks, the endurance total, read-only media |
+| maintenance | the line queued for a rewrite and its reason, read reclaims, retention refreshes, levelling credit, state and totals |
+| RBER | the generator, the retry counters, recovered reads and failed reads |
+
+Rules:
+
+- A data age is the age at the save: the time QEMU is down does not age
+  the media. When a saved age is above the host clock of the new run (as
+  after a host reboot), the line-time clock moves ahead to keep it.
+- A restart is a cold start: booked LUN, channel and bus times start empty.
+- The digest covers the aging models and every property that changes what
+  their state means (spread and seed, `eol_read_only`, `age_scale`, the ECC
+  and read retry steps, `mdts`, `mpsmin`, `nlbaf` and others), so a file
+  loads only into a device that reads the state the same way.
+- A load checks the aging records against each other (spare slots against
+  the count, retirements against the wear totals, the read-only bit, the
+  queued line) before it changes anything.
+- A file of schema 1 loads only into a device without an aging model. A
+  file without FTL state fails realize on a device with one, so an aging
+  history never starts again unseen.
+- Session counters start again: `die_stats`, the controller's host command
+  counts, the Error Information log and pending notifications. A load sends
+  no new wear notification; SMART reads its warnings from the loaded state.
+- The other features `persist_ftl` refuses stay refused (FDP, the write
+  buffer, Streams, idle collection, open-block maintenance, the injected
+  error rates and others; realize names the property).
+
 ## Fault insertion
 
 `err_read_unc_ppm` and `err_write_fail_ppm` turn a rate into a period,

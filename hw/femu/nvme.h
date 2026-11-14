@@ -3392,6 +3392,7 @@ typedef struct FemuCtrl {
     uint32_t        test_tier_fold_stop;
     uint32_t        test_place_fail;    /* qtest: the next N placements fail */
     uint32_t        test_place_skip;    /* qtest: placements before those */
+    uint32_t        test_persist_schema; /* qtest: 1 saves FTL schema 1 */
     /* qtest only: ms Report Zones holds the zone lock before it reports */
     uint32_t        test_zone_lock_hold_ms;
     /* qtest only: ms a ZNS write waits between admission and its copy */
@@ -4187,10 +4188,17 @@ uint64_t ssd_degraded_reads(struct ssd *ssd);
 #define NVME_RRLS               ((1u << NVME_RRL_DEFAULT) | \
                                  (1u << NVME_RRL_NO_SOFT) | \
                                  (1u << NVME_RRL_FAST_FAIL))
+/* what an FTL section must match to load */
+typedef struct SsdPersistKey {
+    uint64_t digest;        /* schema 2: FTL and aging properties */
+    uint64_t digest1;       /* schema 1: the FTL properties of that schema */
+    bool aging;             /* an aging model is on: schema 1 cannot load */
+} SsdPersistKey;
+
 uint64_t ssd_persist_max_len(struct ssd *ssd);
-GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest);
+GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest, int schema);
 bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,
-                      uint64_t digest, bool commit, Error **errp);
+                      const SsdPersistKey *key, bool commit, Error **errp);
 void ssd_set_offline_die(struct ssd *ssd, int die);
 void nvme_ocp_inj_read_done(FemuCtrl *n);
 void nvme_ocp_inj_clear(FemuCtrl *n);
