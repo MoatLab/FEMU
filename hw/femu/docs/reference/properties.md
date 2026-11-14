@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 306 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 309 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -237,6 +237,9 @@ Devices:
 | `blk_pe_limit` | `uint32` | `0` | bbssd, CSD, also FDP: mean program/erase cycles a block survives before it wears out; 0 (default) turns wear-out off. When no block can replace a worn-out one, the media goes read-only (eol_read_only). Under FDP a worn-out block retires its reclaim unit |
 | `blk_pe_spread` | `uint32` | `0` | bbssd, CSD, also FDP: how far each block's limit varies from blk_pe_limit, in percent, 0 to 90 |
 | `blk_pe_seed` | `uint64` | `0` | bbssd, CSD, also FDP: seed of the per-block erase limits; one seed gives the same limits on every run |
+| `blk_early_ppm` | `uint32` | `0` | bbssd, CSD, also FDP: blocks per million in an early-life cohort, whose erase limit is at most blk_early_pe; needs blk_pe_limit; 0 (default) turns it off |
+| `blk_early_pe` | `uint32` | `0` | bbssd, CSD, also FDP: erase limit bound of the early-life cohort (blk_early_ppm), 1 or more |
+| `erase_fail_ppm` | `uint32` | `0` | bbssd, CSD: erases per million that fail and kill the block; a spare replaces it, or its line retires. Needs blk_pe_limit and eol_read_only=on; synthetic, with no measured rate behind it |
 | `spare_lines` | `uint32` | `0` | bbssd, CSD: lines held back, needs blk_pe_limit; their blocks replace worn-out blocks of the same plane, and SMART Available Spare is the spare blocks the emptiest plane has left, in percent |
 | `eol_read_only` | `bool` | `on` | bbssd, CSD, with blk_pe_limit: on (default) puts the media in read-only mode when no block can replace a worn-out one, with reserve lines for the writes in flight; needs mdts 1 or more and limits Write Zeroes (WZSL) to mdts and Copy (MCL) to mdts or one block. off keeps a worn-out block in service with the SMART reliability warning. Under FDP each reclaim group holds reserve units |
 | `energy_read_nj` | `uint32` | `0` | bbssd, CSD, KV: energy of one plane read in nJ, for the energy total in log page C0h; 0 (default) gives no figure |

@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/crc32c.h"
+#include "qemu/host-utils.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
@@ -6755,6 +6756,13 @@ static void femu_test_wear_refused(void *obj, void *data,
         { "'femu_mode':1,'blk_pe_spread':91", "blk_pe_spread must be 0 to 90" },
         { "'femu_mode':1,'spare_lines':40", "must be below blks_per_pl" },
         { "'femu_mode':1,'age_scale':0", "age_scale must be 1 or more" },
+        { "'femu_mode':1,'blk_early_ppm':1000001",
+          "must be at most 1000000" },
+        { "'femu_mode':1,'erase_fail_ppm':1000001",
+          "must be at most 1000000" },
+        { "'femu_mode':1,'blk_early_ppm':10", "needs blk_early_pe" },
+        { "'femu_mode':1,'erase_fail_ppm':10,'eol_read_only':false",
+          "erase_fail_ppm needs eol_read_only=on" },
     };
     QDict *rsp;
     int i;
@@ -16633,6 +16641,8 @@ static void femu_test_wear_fdp_props(void *obj, void *data,
         { "'wl_spread':4", "wl_spread is not supported with FDP" },
         { "'blk_pe_limit':8,'eol_read_only':false,'gc_pace':true",
           "gc_pace is not supported with FDP" },
+        { "'blk_pe_limit':8,'erase_fail_ppm':10",
+          "erase_fail_ppm is not supported with FDP" },
         { "'blk_pe_limit':8,'eol_read_only':false,'subsys':'fdpsub'", NULL },
         { "'blk_pe_limit':8,'eol_read_only':false,'pls_per_lun':2,"
           "'subsys':'fdpsub-ii'", NULL },
@@ -32422,11 +32432,19 @@ static void femu_test_persist_aging_files(void *obj, void *data,
     g_autofree char *fd = g_build_filename(dir, "dataonly", NULL);
     g_autofree char *fc = g_build_filename(dir, "corrupt", NULL);
     g_autofree char *fc1 = g_build_filename(dir, "corrupt1", NULL);
+    g_autofree char *fe = g_build_filename(dir, "early", NULL);
     static const char *const aging = ",'blk_pe_limit':100,'rber_ppb':1";
+    static const char *const early = ",'blk_pe_limit':100,'rber_ppb':1,"
+                                     "'blk_early_ppm':10,'blk_early_pe':3";
+    static const char *const early_changes[] = {
+        ",'blk_pe_limit':100,'rber_ppb':1,'blk_early_ppm':20,'blk_early_pe':3",
+        ",'blk_pe_limit':100,'rber_ppb':1,'blk_early_ppm':10,'blk_early_pe':4",
+    };
     static const char *const changes[] = {
         ",'eol_read_only':false", ",'mdts':3", ",'age_scale':2",
         ",'ecc_hard_bits':30", ",'rber_timing_only':true",
         ",'rber_seed':7", ",'blk_pe_spread':10", ",'nlbaf':6",
+        ",'blk_early_ppm':10,'blk_early_pe':3",
     };
     static const struct {
         int idx;
@@ -32451,6 +32469,8 @@ static void femu_test_persist_aging_files(void *obj, void *data,
     femu_pa_file(FEMU_PA_FILE ",persist_ftl=on,blk_pe_limit=100,rber_ppb=1",
                  fa, 64, false);
     femu_pa_file(FEMU_PA_FILE ",persist_ftl=on", f1, 64, true);
+    femu_pa_file(FEMU_PA_FILE ",persist_ftl=on,blk_pe_limit=100,rber_ppb=1,"
+                 "blk_early_ppm=10,blk_early_pe=3", fe, 64, false);
     /* a free line in the reserve state, which schema 1 does not have */
     femu_pa_patch_rec(f1, fc1, 'l', 0, 33, 1, 5);
     femu_pa_file(FEMU_PA_FILE, fd, 64, false);
@@ -32467,6 +32487,28 @@ static void femu_test_persist_aging_files(void *obj, void *data,
         g_test_message("%s: %s", changes[i], err ? err : "loaded");
         g_assert_nonnull(err);
         g_assert_nonnull(strstr(err, "other FTL properties"));
+        g_free(err);
+    }
+    /* each early-life property is in the digest on its own */
+    err = femu_pa_add(qs->qts, fe, early);
+    g_assert_null(err);
+    qpci_unplug_acpi_device_test(qs->qts, "pa", 6);
+    for (size_t i = 0; i < ARRAY_SIZE(early_changes); i++) {
+        err = femu_pa_add(qs->qts, fe, early_changes[i]);
+        g_test_message("%s: %s", early_changes[i], err ? err : "loaded");
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "other FTL properties"));
+        g_free(err);
+    }
+    /* the FTL section has no record of a failed block */
+    {
+        g_autofree char *more = g_strconcat(aging, ",'erase_fail_ppm':10",
+                                            NULL);
+
+        err = femu_pa_add(qs->qts, fa, more);
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "persist_ftl is not supported with "
+                                "erase_fail_ppm"));
         g_free(err);
     }
     /*
@@ -32538,7 +32580,7 @@ static void femu_test_persist_aging_files(void *obj, void *data,
     }
     qtest_pc_shutdown(qs);
     {
-        const char *const files[] = { fa, f1, fd, fc, fc1 };
+        const char *const files[] = { fa, f1, fd, fc, fc1, fe };
 
         for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
             g_autofree char *lock = g_strconcat(files[i], ".lock", NULL);
@@ -55092,6 +55134,295 @@ static void femu_test_eol_limits(void *obj, void *data, QGuestAllocator *alloc)
  * that takes every request, so realize refuses MDTS 0, more requests than
  * the ring holds (65535 entries), and a reserve the geometry cannot hold.
  */
+/*
+ * Single-page writes, the fill of pages 0 to 255 and then random pages,
+ * until @n writes ran or one failed. A failure must be the read-only end
+ * of life (eol_read_only). Returns whether the media went read-only.
+ */
+static bool femu_death_writes(FemuCtrlState *c, uint64_t buf, uint64_t list,
+                              int n)
+{
+    uint32_t seed = 1;
+
+    for (int i = 0; i < n; i++) {
+        uint64_t page = i < 256 ? i : (seed >> 8) % 256;
+        uint16_t st;
+
+        seed = seed * 1103515245 + 12345;
+        st = femu_write_pages(c, page, 1, buf, list);
+        if (FEMU_SC(st) != NVME_SUCCESS) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* a uint property of the gc-test device */
+static uint64_t femu_death_prop(QTestState *qts, const char *name)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':%s}}", name);
+    uint64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+static uint64_t femu_death_mix(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+/* the draw rule of the design: h * 10^6 < ppm * 2^64 */
+static bool femu_death_hit(uint64_t h, uint32_t ppm)
+{
+    uint64_t hi;
+    uint64_t lo;
+
+    mulu64(&lo, &hi, h, 1000000);
+    return hi < ppm;
+}
+
+/*
+ * The listing of kind blocks, paged to the end, into @out (one entry per
+ * block, in channel, LUN, plane, block order). Returns the block count.
+ */
+static uint32_t femu_death_blocks(QTestState *qts, QDict **out, uint32_t max)
+{
+    uint32_t seen = 0;
+    bool more = true;
+
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", seen);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "blocks"), e) {
+            g_assert_cmpuint(seen, <, max);
+            out[seen] = qdict_clone_shallow(qobject_to(QDict,
+                                                       qlist_entry_obj(e)));
+            seen++;
+        }
+        more = qdict_haskey(ns, "next-offset");
+        qobject_unref(rsp);
+    }
+    return seen;
+}
+
+/*
+ * Before any erase, each block's limit follows the early-life rule of the
+ * design, from the device's own properties (blk_pe_spread is 0): a block
+ * in the cohort (hash A under blk_early_ppm) gets min(blk_pe_limit, 1 +
+ * hash B % blk_early_pe), the others blk_pe_limit. Returns the cohort.
+ */
+static uint32_t femu_death_check_limits(QTestState *qts, uint32_t *total)
+{
+    uint64_t seed = femu_death_prop(qts, "blk_pe_seed");
+    uint64_t limit = femu_death_prop(qts, "blk_pe_limit");
+    uint32_t ppm = femu_death_prop(qts, "blk_early_ppm");
+    uint32_t bound = femu_death_prop(qts, "blk_early_pe");
+    QDict *blk[4096];
+    uint32_t cohort = 0;
+    uint32_t n = femu_death_blocks(qts, blk, ARRAY_SIZE(blk));
+
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t want = limit;
+
+        if (ppm && femu_death_hit(femu_death_mix(seed ^
+                                  0x6561726c79636f68ULL ^
+                                  (i + 1) * 0x9e3779b97f4a7c15ULL), ppm)) {
+            want = MIN(limit, 1 + femu_death_mix(seed ^
+                                  0x6561726c7962646eULL ^
+                                  (i + 1) * 0xd6e8feb86659fd93ULL) % bound);
+            cohort++;
+        }
+        g_assert_cmpuint(qdict_get_int(blk[i], "erase-count"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(blk[i], "pe-limit"), ==, want);
+        qobject_unref(blk[i]);
+    }
+    *total = n;
+    return cohort;
+}
+
+/*
+ * Each failed block sits in a retired or a spare line, never in service,
+ * and the failed blocks add up to @failed, the statistics log count.
+ */
+static void femu_death_check_failed(QTestState *qts, uint64_t failed)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
+    QList *lines = qdict_get_qlist(ns, "lines");
+    g_autofree char **state = g_new0(char *, qlist_size(lines));
+    QDict *blk[4096];
+    uint64_t seen = 0;
+    uint32_t nl = 0;
+    uint32_t n;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(lines, e) {
+        state[nl++] = g_strdup(qdict_get_str(qobject_to(QDict,
+                               qlist_entry_obj(e)), "state"));
+    }
+    qobject_unref(rsp);
+    n = femu_death_blocks(qts, blk, ARRAY_SIZE(blk));
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t line = qdict_get_int(blk[i], "block");
+
+        if (qdict_get_bool(blk[i], "failed")) {
+            g_assert_cmpuint(line, <, nl);
+            if (strcmp(state[line], "retired") &&
+                strcmp(state[line], "spare")) {
+                g_test_message("failed block %u in a %s line", i,
+                               state[line]);
+                g_assert_not_reached();
+            }
+            seen++;
+        }
+        qobject_unref(blk[i]);
+    }
+    for (uint32_t i = 0; i < nl; i++) {
+        g_free(state[i]);
+    }
+    g_assert_cmpuint(seen, ==, failed);
+}
+
+/*
+ * Block death beyond the erase limit, with @data:
+ *   "early":      every block in the early-life cohort (limit at most 3
+ *                 of 1000): blocks wear out under a load that wears none
+ *   "early-off":  the control, without the cohort: no block wears out
+ *   "erase":      erase_fail_ppm=1000000: every erase kills its block;
+ *                 spares go first, then the media goes read-only
+ *   "erase-rate": erase_fail_ppm=100000: some erases kill their block
+ *   "early-part": part of the blocks in the cohort, with a seed
+ * Each block's limit starts as the early-life rule gives it. Every killed
+ * block counts once as grown bad, and none stays in service.
+ */
+static void femu_test_block_death(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint64_t overworn, grown, erases, failed;
+    uint32_t cohort, blocks;
+    uint8_t page[512];
+    bool ro;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cohort = femu_death_check_limits(qts, &blocks);
+    g_test_message("%s: %u of %u blocks in the early-life cohort", kind,
+                   cohort, blocks);
+    qtest_memset(qts, buf, 0x5d, 4096);
+    ro = femu_death_writes(&c, buf, list, 6000);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    overworn = ldq_le_p(page + 112);
+    grown = ldq_le_p(page + 120);
+    erases = ldq_le_p(page + 176);
+    failed = ldq_le_p(page + 328);
+    g_test_message("%s: read-only %d overworn %" PRIu64 " grown bad %" PRIu64
+                   " erases %" PRIu64 " erase failures %" PRIu64, kind, ro,
+                   overworn, grown, erases, failed);
+    g_assert_cmpuint(erases, >, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(!!(page[0] & NVME_SMART_MEDIA_READ_ONLY), ==, ro);
+
+    femu_death_check_failed(qts, failed);
+    if (!strcmp(kind, "early")) {
+        g_assert_cmpuint(cohort, ==, blocks);
+        g_assert_cmpuint(failed, ==, 0);
+        g_assert_cmpuint(grown + overworn, >, 0);
+    } else if (!strcmp(kind, "early-part")) {
+        g_assert_cmpuint(cohort, >, 0);
+        g_assert_cmpuint(cohort, <, blocks);
+        g_assert_cmpuint(failed, ==, 0);
+    } else if (!strcmp(kind, "early-off")) {
+        g_assert_cmpuint(cohort, ==, 0);
+        g_assert_cmpuint(failed, ==, 0);
+        g_assert_cmpuint(grown, ==, 0);
+        g_assert_cmpuint(overworn, ==, 0);
+        g_assert_false(ro);
+    } else {
+        /* a failed block retires or swaps, never stays in service */
+        g_assert_cmpuint(overworn, ==, 0);
+        g_assert_cmpuint(cohort, ==, 0);
+        g_assert_cmpuint(failed, >, 0);
+        g_assert_cmpuint(grown, ==, failed);
+        if (strcmp(kind, "erase-rate")) {
+            g_assert_cmpuint(failed, ==, erases);
+            g_assert_true(ro);
+            g_assert_cmpuint(page[3], ==, 0);
+        } else {
+            g_assert_cmpuint(failed, <, erases);
+        }
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A failure-rate property without blk_pe_limit is refused: the dead block
+ * needs the spare, retirement and end-of-life paths.
+ */
+static void femu_test_block_death_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const cases[][2] = {
+        { "'erase_fail_ppm':10", "erase_fail_ppm needs blk_pe_limit" },
+        { "'blk_early_ppm':10,'blk_early_pe':2",
+          "blk_early_ppm needs blk_pe_limit" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'death','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,%s}}", cases[i][0]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 static void femu_test_eol_refused(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -60197,6 +60528,65 @@ static void femu_register_nodes(void)
             "blk_pe_limit=1000,mdts=2,eol_read_only=off"
     });
     qos_add_test("eol-refused", "femu", femu_test_eol_refused, NULL);
+    qos_add_test("death-early", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"early",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,blk_early_ppm=1000000,blk_early_pe=3,spare_lines=8,eol_read_only=off"
+    });
+    qos_add_test("death-early-off", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"early-off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,spare_lines=8,eol_read_only=off"
+    });
+    qos_add_test("death-erase", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"erase",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,erase_fail_ppm=1000000,spare_lines=8,mdts=2"
+    });
+    qos_add_test("death-erase-rate", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"erase-rate",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,erase_fail_ppm=100000,spare_lines=8,mdts=2"
+    });
+    /* a normal limit below the early bound: the minimum is the limit */
+    qos_add_test("death-early-min", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"early",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=2,blk_early_ppm=1000000,blk_early_pe=100,spare_lines=8,eol_read_only=off"
+    });
+    qos_add_test("death-early-part", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"early-part",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,blk_pe_seed=12345,blk_early_ppm=300000,blk_early_pe=5,spare_lines=8,eol_read_only=off"
+    });
+    /* each erase reaches the limit of 1, and still draws */
+    qos_add_test("death-erase-limit", "femu", femu_test_block_death,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"erase-limit",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1,erase_fail_ppm=1000000,spare_lines=8,mdts=2"
+    });
+    qos_add_test("death-refused", "femu", femu_test_block_death_refused, NULL);
     qos_add_test("eol-wzsl-meta", "femu", femu_test_eol_wzsl,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"meta",

@@ -1351,6 +1351,44 @@ still timed and, for a write, still programmed and mapped; only its status
 changes. The injected counts feed SMART Media and Data Integrity Errors.
 Write Zeroes and Copy are never failed.
 
+### Block death beyond the erase limit
+
+Two opt-in models kill blocks before their erase limit. Both need
+`blk_pe_limit`, so the spare swap, retirement and read-only end of life
+handle the dead block. Each draw is a stateless hash of `blk_pe_seed`.
+The same seed, block and erase count always give the same draw. The dead
+blocks still depend on which erases run, so a run with another collection
+order can lose other blocks.
+
+```text
+ early life   at realize, per block:
+                hash A(seed, block) < blk_early_ppm
+                  --> pe_limit = min(pe_limit, 1 + hash B(seed, block) % blk_early_pe)
+ erase fail   after a line erase, per block alive before the erase:
+                hash C(seed, block uid, erase count) < erase_fail_ppm
+                  --> block failed --> spare swap, else the line retires
+                  --> spare pools set but one is empty --> read-only
+                  --> no spare pools and no room to retire --> read-only
+ the host sees success; statistics log byte 328 counts erase failures
+```
+
+- A draw hits when `hash * 10^6 < ppm * 2^64`. A rate of 0 never hits,
+  and 1000000 always hits.
+- Early life changes only the fixed limits, so `persist_ftl` keeps it.
+  The two early-life properties join the FTL digest when set.
+- A failed block keeps its erase limit. Its own flag makes it dead, and
+  it never stays in service as an overworn block: `erase_fail_ppm` needs
+  `eol_read_only=on`, which retires its line in every case.
+- The block uid moves with the block in a spare swap. A spare block that
+  takes its place draws with its own uid.
+- `erase_fail_ppm` is refused with FDP and with `persist_ftl`. The FTL
+  section has no record of the failed flag yet.
+- The rates are synthetic fault injection, with no fit to a measured
+  population.
+- Program failure is not modelled. A faithful model must stop writes to
+  the block and make every relocation commit only after its program
+  succeeds.
+
 ## Over-provisioning and capacity
 
 ### The reserve

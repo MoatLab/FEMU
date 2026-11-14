@@ -1354,6 +1354,12 @@ bool femu_ftl_policy_known(const char *name)
  * before it frees anything, and retiring victim after victim would use it up.
  * Otherwise the worn-out blocks stay in service, overworn, each counted once.
  *
+ * An erase can also fail (erase_fail_ppm): a stateless draw per block, keyed
+ * by the block and its erase count, kills it. The erase that reaches the
+ * limit draws too, so the failure count is per erase. A failed block is dead as a
+ * worn-out one is, but never stays in service: erase_fail_ppm needs
+ * eol_read_only, so with no spare the line retires.
+ *
  * Before any of that, a worn-out block is replaced by a spare block of its
  * plane when every plane with one has a spare left. The swap moves the whole
  * block, pages and counts, so addresses do not change: the line keeps its id
@@ -1379,7 +1385,18 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
                 struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
                 struct nand_block *blk = &plane->blk[line->id];
 
-                if (blk->pe_limit && blk->erase_cnt >= blk->pe_limit) {
+                /* sample each block that was alive before this erase */
+                if (ssd->erase_fail_ppm && !blk->failed &&
+                    blk->erase_cnt <= blk->pe_limit &&
+                    ftl_ppm_hit(ftl_mix64(ftl_mix64(ssd->n->blk_pe_seed ^
+                                                    0x6572617365666c74ULL ^
+                                                    blk->uid) ^
+                                          blk->erase_cnt),
+                                ssd->erase_fail_ppm)) {
+                    blk->failed = true;
+                    ssd->erase_fails++;
+                }
+                if (ssd_blk_dead(blk)) {
                     dead++;
                     spares &= plane->spares_used < ssd->spare_lines;
                 }
@@ -1398,7 +1415,7 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
                     int slot;
                     struct nand_block worn;
 
-                    if (!blk->pe_limit || blk->erase_cnt < blk->pe_limit) {
+                    if (!ssd_blk_dead(blk)) {
                         continue;
                     }
                     slot = lm->tt_lines - ssd->spare_lines +
@@ -1448,9 +1465,10 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 struct nand_block *blk =
                     &ssd->ch[ch].lun[lun].pl[pl].blk[line->id];
-                bool worn = blk->pe_limit && blk->erase_cnt >= blk->pe_limit;
+                bool worn = ssd_blk_dead(blk);
 
                 if (!retire) {
+                    assert(!blk->failed);
                     if (worn && !blk->overworn) {
                         blk->overworn = true;
                         ssd->overworn_blocks++;

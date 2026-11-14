@@ -30,6 +30,8 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->pace_takeovers = 0;
     ssd->wl_on = false;
     ssd->age_off = 0;
+    ssd->erase_fail_ppm = limit ? n->erase_fail_ppm : 0;
+    ssd->erase_fails = 0;
     ssd->partial_page_writes = 0;
     ssd->unaligned_writes = 0;
     ssd->grown_bad_blocks = 0;
@@ -72,7 +74,26 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
                     x ^= x >> 31;
                     v = limit - off + x % (2 * off + 1);
                     blk->pe_limit = limit ? MAX(MIN(v, UINT32_MAX), 1) : 0;
+                    /*
+                     * Early life (blk_early_ppm): a cohort of weak blocks
+                     * dies after at most blk_early_pe erases. Two hashes in
+                     * their own domains pick the cohort and the bound.
+                     */
+                    if (limit && n->blk_early_ppm &&
+                        ftl_ppm_hit(ftl_mix64(n->blk_pe_seed ^
+                                              0x6561726c79636f68ULL ^
+                                              (idx + 1) * 0x9e3779b97f4a7c15ULL),
+                                    n->blk_early_ppm)) {
+                        uint64_t e = 1 + ftl_mix64(n->blk_pe_seed ^
+                                         0x6561726c7962646eULL ^
+                                         (idx + 1) * 0xd6e8feb86659fd93ULL) %
+                                         n->blk_early_pe;
+
+                        blk->pe_limit = MIN(blk->pe_limit, e);
+                    }
                     blk->overworn = false;
+                    blk->failed = false;
+                    blk->uid = idx;
                     ssd->wear_pe_total += blk->pe_limit;
                 }
             }
@@ -458,8 +479,7 @@ void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *o)
 
                 for (int b = 0; b < spp->blks_per_pl; b++) {
                     struct nand_block *blk = &p->blk[b];
-                    bool worn = blk->pe_limit &&
-                                blk->erase_cnt >= blk->pe_limit;
+                    bool worn = ssd_blk_dead(blk);
                     uint32_t ec = qatomic_read(&blk->erase_cnt);
 
                     hi = MAX(hi, ec);
@@ -1043,6 +1063,7 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
     h->media_ro = ssd->media_ro;
     h->overworn = ssd->overworn_blocks;
     h->grown_bad = ssd->grown_bad_blocks;
+    h->erase_fails = ssd->erase_fails;
     h->retired = ssd->lm.retired_line_cnt;
     qemu_mutex_unlock(&ssd->wear_lock);
 }

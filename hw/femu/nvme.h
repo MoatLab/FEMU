@@ -1387,7 +1387,8 @@ typedef struct FemuStatsLog {
     uint64_t    rber_retry_passes; /* read-retry page reads */
     uint64_t    rber_soft_reads;  /* host page reads with a soft decode */
     uint64_t    rber_limit_reads; /* host page reads past the decode limit */
-    uint8_t     rsvd328[184];
+    uint64_t    erase_failures;   /* blocks an erase failure killed */
+    uint8_t     rsvd336[176];
 } FemuStatsLog;
 
 /*
@@ -1839,6 +1840,7 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
     QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_retry_reads) != 296);
     QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_limit_reads) != 320);
+    QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, erase_failures) != 328);
     QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
@@ -3110,6 +3112,9 @@ typedef struct FemuCtrl {
     uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */
     uint64_t        blk_pe_seed;    /* seed of the per-block limits */
+    uint32_t        blk_early_ppm;  /* blocks in the early-life cohort */
+    uint32_t        blk_early_pe;   /* erase limit bound of that cohort */
+    uint32_t        erase_fail_ppm; /* erases that kill a block */
     /* energy of one plane read, program and erase, nJ; 0 = no figure */
     uint32_t        energy_read_nj;
     uint32_t        energy_prog_nj;
@@ -4237,6 +4242,7 @@ typedef struct FemuWearHealth {
     bool        media_ro;       /* read-only end of life */
     uint64_t    overworn;       /* blocks in service past their limit */
     uint64_t    grown_bad;      /* worn-out blocks out of service */
+    uint64_t    erase_fails;    /* blocks an erase failure killed */
     uint64_t    retired;        /* lines out of service */
     bool        die_failed;     /* rain_parity: a die has failed */
 } FemuWearHealth;

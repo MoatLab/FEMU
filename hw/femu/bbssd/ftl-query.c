@@ -270,6 +270,7 @@ static void ssd_query_blocks(struct ssd *ssd, FemuQueryNs *q)
         out->erase_cnt = blk->erase_cnt;
         out->pe_limit = blk->pe_limit;
         out->overworn = blk->overworn;
+        out->failed = blk->failed;
     }
 }
 

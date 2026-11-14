@@ -138,6 +138,14 @@ static const char *const persist_aging_props[] = {
     "pd_open_tiers", "maint_idle", "nlbaf",
 };
 
+/*
+ * Aging properties added after schema 2: each joins the digest only when
+ * it is not zero, so a file of a device without them still loads.
+ */
+static const char *const persist_aging_opt_props[] = {
+    "blk_early_ppm", "blk_early_pe",
+};
+
 /* the aging models: a device with one keeps a history across restarts */
 static const char *const persist_aging_models[] = {
     "blk_pe_limit", "spare_lines", "wl_spread", "read_reclaim_limit",
@@ -149,13 +157,21 @@ static uint64_t persist_digest(FemuCtrl *n, bool aging)
 {
     uint64_t h = 0xcbf29ce484222325ULL;
     size_t n1 = ARRAY_SIZE(persist_ftl_props);
-    size_t nall = n1 + (aging ? ARRAY_SIZE(persist_aging_props) : 0);
+    size_t n2 = n1 + (aging ? ARRAY_SIZE(persist_aging_props) : 0);
+    size_t nall = n2 + (aging ? ARRAY_SIZE(persist_aging_opt_props) : 0);
 
     for (size_t i = 0; i < nall; i++) {
         const char *name = i < n1 ? persist_ftl_props[i] :
-                                    persist_aging_props[i - n1];
-        QObject *v = object_property_get_qobject(OBJECT(n), name, NULL);
-        g_autoptr(GString) s = g_string_new(name);
+                           i < n2 ? persist_aging_props[i - n1] :
+                                    persist_aging_opt_props[i - n2];
+        QObject *v;
+        g_autoptr(GString) s = NULL;
+
+        if (i >= n2 && !object_property_get_uint(OBJECT(n), name, NULL)) {
+            continue;
+        }
+        v = object_property_get_qobject(OBJECT(n), name, NULL);
+        s = g_string_new(name);
 
         /* a misspelt aging name would leave its property out unseen */
         assert(v || i < n1);
@@ -195,7 +211,7 @@ static const char *const persist_ftl_refused[] = {
     "streams", "tier_mode", "buffer_size", "hot_cold_sep", "gc_frontier",
     "gc_pace", "gc_idle_ms", "gc_copyback", "pd_open_read_limit",
     "pd_open_close_sec", "pd_open_age", "err_read_unc_ppm",
-    "err_write_fail_ppm",
+    "err_write_fail_ppm", "erase_fail_ppm",
     "die_parity", "rain_parity", "read_cache_mb", "prog_pass2_ns",
     "onfi_param_page",
     "nand_profile", "mp_program", "mp_read", "onfi_cache_read",

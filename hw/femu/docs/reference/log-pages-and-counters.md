@@ -53,8 +53,9 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 304 | 8 | Read-retry page reads (`rber_ppb`) |
 | 312 | 8 | Host page reads with a soft decode, passed or failed (`rber_ppb`) |
 | 320 | 8 | Host page reads past the decode limit: soft decode failed, or failed with it off (`rber_ppb`) |
+| 328 | 8 | Blocks an erase failure killed (`erase_fail_ppm`); each one also counts as a grown bad block when it leaves service |
 
-Bytes 4-7 and 328-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 336-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

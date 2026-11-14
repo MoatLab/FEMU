@@ -39,10 +39,20 @@ own description allows. A message keeps its format directives (`%s`,
 
 - bbssd_ns_limit must be between 1 and %u and cover the boot namespaces
 
+## `blk_early_pe`
+
+- femu: blk_early_ppm needs blk_early_pe of 1 or more
+
+## `blk_early_ppm`
+
+- femu: blk_early_ppm and erase_fail_ppm must be at most 1000000
+- femu: blk_early_ppm needs blk_early_pe of 1 or more
+
 ## `blk_pe_limit`
 
 - FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - femu: %s is not supported with FDP and blk_pe_limit
+- femu: %s needs blk_pe_limit
 - femu: spare_lines needs blk_pe_limit
 
 ## `blk_pe_spread`
@@ -224,7 +234,14 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: eol_read_only needs %
 - femu: eol_read_only needs mdts 1 to %d
 - femu: eol_read_only needs queues x (entries + 1) of at most %d
+- femu: erase_fail_ppm needs eol_read_only=on
 - x-eol-enter requires eol_read_only on namespace 1
+
+## `erase_fail_ppm`
+
+- femu: blk_early_ppm and erase_fail_ppm must be at most 1000000
+- femu: erase_fail_ppm is not supported with FDP
+- femu: erase_fail_ppm needs eol_read_only=on
 
 ## `events_file`
 

@@ -3821,6 +3821,11 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
             error_setg(errp, "femu: spare_lines needs blk_pe_limit");
             return false;
         }
+        if (n->blk_early_ppm || n->erase_fail_ppm) {
+            error_setg(errp, "femu: %s needs blk_pe_limit",
+                       n->blk_early_ppm ? "blk_early_ppm" : "erase_fail_ppm");
+            return false;
+        }
         if (n->blk_pe_spread || n->blk_pe_seed) {
             warn_report("femu: blk_pe_spread and blk_pe_seed have no effect "
                         "unless blk_pe_limit is set");
@@ -3836,6 +3841,32 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     if (n->blk_pe_spread > 90) {
         error_setg(errp, "femu: blk_pe_spread must be 0 to 90, got %u",
                    n->blk_pe_spread);
+        return false;
+    }
+    if (n->blk_early_ppm > 1000000 || n->erase_fail_ppm > 1000000) {
+        error_setg(errp, "femu: blk_early_ppm and erase_fail_ppm must be at "
+                   "most 1000000");
+        return false;
+    }
+    if (n->blk_early_ppm && !n->blk_early_pe) {
+        error_setg(errp, "femu: blk_early_ppm needs blk_early_pe of 1 or more");
+        return false;
+    }
+    if (n->blk_early_pe && !n->blk_early_ppm) {
+        warn_report("femu: blk_early_pe has no effect unless blk_early_ppm "
+                    "is set");
+    }
+    /*
+     * A failed block must leave service: with no spare left, only the
+     * read-only end of life retires it whatever room is left. FDP retires
+     * reclaim units on a path this model does not cover yet.
+     */
+    if (n->erase_fail_ppm && !n->eol_read_only) {
+        error_setg(errp, "femu: erase_fail_ppm needs eol_read_only=on");
+        return false;
+    }
+    if (n->erase_fail_ppm && fdp) {
+        error_setg(errp, "femu: erase_fail_ppm is not supported with FDP");
         return false;
     }
     if (!BBSSD(n) && !CSD(n)) {
@@ -5503,6 +5534,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("blk_pe_limit", FemuCtrl, blk_pe_limit, 0),
     DEFINE_PROP_UINT32("blk_pe_spread", FemuCtrl, blk_pe_spread, 0),
     DEFINE_PROP_UINT64("blk_pe_seed", FemuCtrl, blk_pe_seed, 0),
+    DEFINE_PROP_UINT32("blk_early_ppm", FemuCtrl, blk_early_ppm, 0),
+    DEFINE_PROP_UINT32("blk_early_pe", FemuCtrl, blk_early_pe, 0),
+    DEFINE_PROP_UINT32("erase_fail_ppm", FemuCtrl, erase_fail_ppm, 0),
     DEFINE_PROP_UINT32("spare_lines", FemuCtrl, spare_lines, 0),
     DEFINE_PROP_BOOL("eol_read_only", FemuCtrl, eol_read_only, true),
     DEFINE_PROP_UINT32("energy_read_nj", FemuCtrl, energy_read_nj, 0),

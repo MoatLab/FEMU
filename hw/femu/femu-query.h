@@ -35,6 +35,7 @@ typedef struct FemuQueryBlock {
     uint32_t erase_cnt;
     uint32_t pe_limit;
     bool overworn;
+    bool failed;
 } FemuQueryBlock;
 
 typedef struct FemuQueryRuh {

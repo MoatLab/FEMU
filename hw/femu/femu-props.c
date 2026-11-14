@@ -797,6 +797,17 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "blk_pe_seed",
       "bbssd, CSD, also FDP: seed of the per-block erase limits; one seed "
       "gives the same limits on every run" },
+    { "blk_early_ppm",
+      "bbssd, CSD, also FDP: blocks per million in an early-life cohort, "
+      "whose erase limit is at most blk_early_pe; needs blk_pe_limit; 0 "
+      "(default) turns it off" },
+    { "blk_early_pe",
+      "bbssd, CSD, also FDP: erase limit bound of the early-life cohort "
+      "(blk_early_ppm), 1 or more" },
+    { "erase_fail_ppm",
+      "bbssd, CSD: erases per million that fail and kill the block; a spare "
+      "replaces it, or its line retires. Needs blk_pe_limit and "
+      "eol_read_only=on; synthetic, with no measured rate behind it" },
     { "energy_read_nj",
       "bbssd, CSD, KV: energy of one plane read in nJ, for the energy total "
       "in log page C0h; 0 (default) gives no figure" },

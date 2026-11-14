@@ -3068,6 +3068,7 @@ typedef struct FemuMediaStats {
     uint64_t hybrid_erases;
     uint64_t overworn_blocks;
     uint64_t grown_bad_blocks;
+    uint64_t erase_fails;
     uint64_t retired_lines;
     bool media_ro;              /* some namespace's media is read-only */
     bool die_failed;            /* some namespace lost a die (rain_parity) */
@@ -3183,6 +3184,7 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
         st->read_reclaims += ssd_read_reclaims(ns->ssd);
         st->overworn_blocks += wh.overworn;
         st->grown_bad_blocks += wh.grown_bad;
+        st->erase_fails += wh.erase_fails;
         st->retired_lines += wh.retired;
         st->wl_relocations += ssd_wl_relocations(ns->ssd);
         st->wl_pages += ssd_wl_pages(ns->ssd);
@@ -3288,6 +3290,7 @@ static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
     stats.rber_retry_passes = cpu_to_le64(st.rber[1]);
     stats.rber_soft_reads = cpu_to_le64(st.rber[2]);
     stats.rber_limit_reads = cpu_to_le64(st.rber[3]);
+    stats.erase_failures = cpu_to_le64(st.erase_fails);
     *log = stats;
 }
 

@@ -112,12 +112,16 @@
 #
 # @overworn: the block is past @pe-limit and still in service
 #
+# @failed: an erase failure killed the block (erase_fail_ppm).  A failed
+#     block sits only in a retired or spare line.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuBlockInfo',
   'data': { 'channel': 'uint32', 'lun': 'uint32', 'plane': 'uint32',
             'block': 'uint32', 'erase-count': 'uint32',
-            'pe-limit': 'uint32', 'overworn': 'bool' } }
+            'pe-limit': 'uint32', 'overworn': 'bool',
+            'failed': 'bool' } }
 
 ##
 # @FemuLineState:

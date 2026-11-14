@@ -126,6 +126,13 @@ struct nand_block {
     uint32_t pe_limit;
     bool overworn;
     /*
+     * An erase failed (erase_fail_ppm): the block is dead whatever its
+     * count, and leaves service as a worn-out block does. uid names the
+     * physical block, and moves with it in a spare swap.
+     */
+    bool failed;
+    uint32_t uid;
+    /*
      * Reads of this block since it was last erased. Reading a page stresses the
      * others in the block, so read reclaim rewrites the line once this reaches
      * read_reclaim_limit; the largest value is also reported in log page C0h.
@@ -865,6 +872,8 @@ struct ssd {
      * load sets it when a saved data age exceeds the new host clock.
      */
     uint64_t age_off;
+    uint32_t erase_fail_ppm;        /* erase_fail_ppm */
+    uint64_t erase_fails;           /* blocks an erase failure killed */
     uint64_t pd_open_reclaims;      /* lines rewritten for open-block reads */
     uint64_t pd_pad_pages;          /* pages programmed to close open lines */
     uint64_t pass2_programs;        /* fine program passes (prog_pass2_ns) */
@@ -1062,6 +1071,33 @@ static inline uint64_t ssd_now_us(struct ssd *ssd)
 }
 
 /* now on the clock of line close and open times, which data ages use */
+/* a block at its erase limit, or killed by an erase failure */
+static inline bool ssd_blk_dead(const struct nand_block *blk)
+{
+    return blk->failed || (blk->pe_limit && blk->erase_cnt >= blk->pe_limit);
+}
+
+/* splitmix64 finalizer, for the stateless per-block draws */
+static inline uint64_t ftl_mix64(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+/*
+ * Whether a uniform 64-bit draw @h falls under @ppm parts per million:
+ * h * 10^6 < ppm * 2^64, which holds when the high 64 bits of h * 10^6
+ * are below ppm. The product splits at bit 32, so no term overflows.
+ */
+static inline bool ftl_ppm_hit(uint64_t h, uint32_t ppm)
+{
+    uint64_t lo = (h & 0xffffffffULL) * 1000000;
+    uint64_t hi = ((h >> 32) * 1000000 + (lo >> 32)) >> 32;
+
+    return hi < ppm;
+}
+
 static inline uint64_t ssd_age_now(struct ssd *ssd)
 {
     return ssd_now(ssd) + ssd->age_off;

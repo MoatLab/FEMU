@@ -818,6 +818,7 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
             bi->erase_count = q->blocks[i].erase_cnt;
             bi->pe_limit = q->blocks[i].pe_limit;
             bi->overworn = q->blocks[i].overworn;
+            bi->failed = q->blocks[i].failed;
             QAPI_LIST_APPEND(tail, bi);
         }
         info->has_offset = true;
