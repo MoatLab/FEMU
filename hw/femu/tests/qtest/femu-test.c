@@ -55530,6 +55530,28 @@ static uint16_t femu_dealloc_range(FemuCtrlState *c, uint64_t slba,
 }
 
 /*
+ * A DSM range of no blocks at LBA 0 on an FDP controller: the deallocate
+ * range ends one block before it starts, so it must touch no page. Control:
+ * a one-block range then completes too.
+ */
+static void femu_test_fdp_dsm_empty(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t list = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_dealloc_range(&c, 0, 0, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_dealloc_range(&c, 0, 1, list)), ==,
+                    NVME_SUCCESS);
+    guest_free(alloc, list);
+    femu_disable(&c);
+}
+
+/*
  * dsm-partial: a deallocate unmaps only the NAND pages it covers in full
  * (8 LBAs to a page here). A page that keeps some LBAs keeps its mapping,
  * and those LBAs still read back.
@@ -64968,6 +64990,13 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)&femu_io_fuzz_zoned,
         .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
+    });
+    qos_add_test("fdp-dsm-empty", "femu", femu_test_fdp_dsm_empty,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
     });
     qos_add_test("io-fuzz-fdp", "femu", femu_test_io_fuzz,
                  &(QOSGraphTestOptions) {

@@ -244,10 +244,12 @@ static void fdp_clear_written(struct ssd *ssd, NvmeRequest *req,
                    FDP_WRITTEN_SHIFT;
     uint64_t first, last;
 
-    if (!ssd->fdp_written) {
+    /* a range of no blocks would make last wrap below first at LBA 0 */
+    if (!ssd->fdp_written || !nlb) {
         return;
     }
     ssd_lpn_range(ssd, req, slba, nlb, &first, &last);
+    last = MIN(last, (uint64_t)ssd->sp.tt_pgs - 1);
     for (uint64_t lpn = first; lpn <= last; lpn++) {
         struct buffer_entry *e = ssd->write_buffer_cnt ?
                                  ssd_buffer_lookup(ssd, lpn) : NULL;
