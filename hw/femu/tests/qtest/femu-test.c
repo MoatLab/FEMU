@@ -22680,6 +22680,125 @@ static void femu_test_lsi_publish(void *obj, void *data,
 }
 
 /*
+ * Format (design 9.6): it clears the blocks with no LSGC step. With the
+ * same LBA size the host read still covers block 10, so a new WU of it
+ * gives no step; with a new LBA size the old read covers nothing.
+ */
+static void femu_test_lsi_format(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint8_t cur;
+    uint8_t other;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    cur = qtest_readb(qts, buf + 26) & 0xf;
+    other = cur ? 0 : 3;
+    g_assert_cmpint(qtest_readb(qts, buf + 128 + 4 * cur + 2), !=,
+                    qtest_readb(qts, buf + 128 + 4 * other + 2));
+
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    /* same size, WU again before any read: the read still covers it */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, cur, 0)), ==, NVME_SUCCESS);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    /* a new size: the same LBA is a new block */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, other, 0)), ==, NVME_SUCCESS);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+    /* the removal alone: no step */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, other, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 2);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Sanitize clears the blocks. A queued alert whose blocks are gone at
+ * the post is dropped, and LSGC does not step.
+ */
+static void femu_test_lsi_sanitize(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 1);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    for (i = 0; i < 100 && (femu_sstat(&c, buf, NULL) & 7) != 1; i++) {
+        qtest_clock_step(qts, FEMU_LSI_SEC / 10);
+    }
+    g_assert_cmphex(femu_sstat(&c, buf, NULL) & 7, ==, 1);
+    femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 2 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Delete and create NSID 1 again while a RAE=1 page holds the old
+ * namespace. The RAE=0 read of that page installs nothing for the new
+ * namespace, so its block 10 is new and steps LSGC.
+ */
+static void femu_test_lsi_recreate(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    uint16_t cntlid;
+    uint8_t flbas;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, ibuf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, ibuf + 78);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, ibuf), ==, NVME_SUCCESS);
+    flbas = qtest_readb(qts, ibuf + 26);
+    femu_create_io_queues(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, true), ==, 1);
+
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, ibuf, 64, flbas, &nsid), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&c, ibuf, 1, cntlid, true), ==,
+                    NVME_SUCCESS);
+    femu_mark_uncor(&c, 10, 1);
+    /* the held page of the old namespace */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Get LBA Status, when a write clears a run's first block between the
  * two bitmap searches: the scan goes on past it, with no 2^32-block run.
  */
@@ -61458,6 +61577,20 @@ static void femu_register_nodes(void)
     qos_add_test("lsi-publish", "femu", femu_test_lsi_publish,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-format", "femu", femu_test_lsi_format,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV
+    });
+    qos_add_test("lsi-sanitize", "femu", femu_test_lsi_sanitize,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV ",sanitize_ops=on"
+    });
+    qos_add_test("lsi-recreate", "femu", femu_test_lsi_recreate,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_LSI_DEV ",ns_mgmt=on,femu_mode=1,"
+            "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,"
+            "pls_per_lun=1,luns_per_ch=4,nchs=4"
     });
     qos_add_test("lsi-gls-race", "femu", femu_test_lsi_gls_race,
                  &(QOSGraphTestOptions) {

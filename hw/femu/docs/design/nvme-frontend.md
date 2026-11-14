@@ -765,6 +765,10 @@ announced:
   host did not read is sent again, one LSIRI after the next enable; a
   cleared one is not.
 - `persist_file` does not keep the alert state across a restart.
+- Format and Sanitize clear the blocks with no LSGC step. After a Format
+  to the same LBA size, the last host read still covers its blocks; after
+  a new LBA size it covers none. A namespace created again with the same
+  NSID is a new namespace for LSGC.
 - LSGC is 16 bits and wraps from FFFFh to 0.
 
 With `power_states=on` and `power_limit=on`, Power Limit (23h, Base 2.3
