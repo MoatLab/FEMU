@@ -35332,9 +35332,19 @@ static void femu_test_cxl_wait(void *obj, void *data,
         g_assert_cmpint(g_get_monotonic_time() - start, <,
                         G_TIME_SPAN_SECOND / 2);
     } else if (serial) {
-        /* Another page waits for the media write too, as before. */
+        /*
+         * Another page waits for the media write too, as before: the read
+         * takes most of the 1 s write. The vCPU stores its marker after
+         * the write returns, so a loaded host may show it a little later.
+         */
+        start = g_get_monotonic_time();
         g_assert_cmpuint(qtest_readb(qts, FEMU_CXL_WINDOW + 4096), ==, 0);
-        g_assert_cmpuint(qtest_readb(qts, 0x6000), ==, 2);
+        g_assert_cmpint(g_get_monotonic_time() - start, >,
+                        G_TIME_SPAN_SECOND / 10);
+        while (qtest_readb(qts, 0x6000) != 2) {
+            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+            g_usleep(1000);
+        }
     } else if (other) {
         /*
          * An access to another page must not wait for the media write: it
