@@ -3876,6 +3876,8 @@ static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
 
 static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
                                    uint32_t npages, uint64_t buf);
+static uint16_t femu_dealloc_range(FemuCtrlState *c, uint64_t slba,
+                                   uint32_t nlb, uint64_t buf);
 
 static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
                                const char *want, const FtlTraceMp *mp,
@@ -17519,6 +17521,12 @@ static uint16_t femu_write_block_placed(FemuCtrlState *c, uint64_t lba,
  *               writes block 1 with FUA, which programs the held page.
  *               Both: 80h for 48 * 8 + 32 = 416 blocks. "redo" deallocates
  *               the held page between the two: 400 blocks, as "gc-ii-part"
+ *   "gc-ii-dsm": "gc-ii", but pages 64 to 79 are written whole and then
+ *               lose block 0 to a one-block deallocate. The pages stay
+ *               mapped, and the event counts only the blocks left:
+ *               80h for 48 * 8 + 16 * 7 = 496 blocks, from block 513.
+ *               With a write buffer the pages are still held at the
+ *               deallocate.
  *   "gc-ii-rot": placement 3 writes 112 pages into B, so the 16th move fills
  *               it: 80h for 16 pages, 81h, 80h for the other 48
  *   "gc-ii-mask", "-no80", "-no81": "gc-ii-rot" with 80h and 81h, only 80h
@@ -17551,8 +17559,9 @@ static void femu_test_fdp_move_events(void *obj, void *data,
     bool mix = !strcmp(mode, "gc-ii-mix");
     bool fua = !strcmp(mode, "gc-ii-fua");
     bool redo = !strcmp(mode, "gc-ii-redo");
+    bool dsm = !strcmp(mode, "gc-ii-dsm");
     bool two = mix || fua;
-    bool part = g_str_has_suffix(mode, "-part") || two || redo;
+    bool part = g_str_has_suffix(mode, "-part") || two || redo || dsm;
     uint64_t part_lo = refresh ? 0 : 64;
     bool empty = !strcmp(mode, "gc-ii-empty");
     bool cb = !strcmp(mode, "gc-ii-cb");
@@ -17610,6 +17619,15 @@ static void femu_test_fdp_move_events(void *obj, void *data,
     for (lpn = 0; lpn < first; lpn += 16) {
         if (part && lpn == part_lo) {
             for (i = 0; i < 16; i++) {
+                if (dsm) {
+                    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(
+                                        &c, lpn + i, 1, buf, list, vpid)),
+                                    ==, NVME_SUCCESS);
+                    g_assert_cmphex(FEMU_SC(femu_dealloc_range(
+                                        &c, (lpn + i) * 8, 1, list)),
+                                    ==, NVME_SUCCESS);
+                    continue;
+                }
                 if (two || redo) {
                     g_assert_cmphex(femu_write_block_placed(&c, (lpn + i) * 8,
                                                             buf,
@@ -17714,7 +17732,8 @@ static void femu_test_fdp_move_events(void *obj, void *data,
     } else {
         want_type[nwant] = FEMU_FDP_EVT_MEDIA_REALLOC;
         want_lba[nwant] = two ? 64 * 8 : part ? 64 * 8 + 1 : 64 * per;
-        want_nlb[nwant++] = part ? 48 * 8 + (two ? 32 : 16) : 64 * per;
+        want_nlb[nwant++] = dsm ? 48 * 8 + 16 * 7 :
+                            part ? 48 * 8 + (two ? 32 : 16) : 64 * per;
     }
 
     after = femu_fdp_ctrl_events(&c, log, ev, 8);
@@ -55023,6 +55042,96 @@ static uint16_t femu_wz(FemuCtrlState *c, uint64_t slba, uint32_t nlb,
     return femu_io(c, &cmd);
 }
 
+/* deallocate @nlb logical blocks from @slba, with @buf for the range */
+static uint16_t femu_dealloc_range(FemuCtrlState *c, uint64_t slba,
+                                   uint32_t nlb, uint64_t buf)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, nlb);
+    stq_le_p(range + 8, slba);
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * dsm-partial: a deallocate unmaps only the NAND pages it covers in full
+ * (8 LBAs to a page here). A page that keeps some LBAs keeps its mapping,
+ * and those LBAs still read back.
+ *   pages 0 to 6 written
+ *   DSM LBA 1           part of page 0          --> 7 mapped
+ *   DSM LBAs 8 to 15    page 1 in full          --> 6 mapped
+ *   DSM LBAs 17 to 31   part of 2, all of 3     --> 5 mapped
+ *   WZ DEAC LBAs 33, 34 part of page 4          --> 5 mapped
+ *   WZ DEAC LBAs 40..47 page 5 in full          --> 4 mapped
+ *   DSM LBAs 48 to 50   the head of page 6      --> 4 mapped
+ */
+static void femu_test_dsm_partial(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint8_t got[1024];
+    static const struct {
+        bool wz;
+        uint64_t slba;
+        uint32_t nlb;
+        uint64_t mapped;
+    } step[] = {
+        { false, 1, 1, 7 },
+        { false, 8, 8, 6 },
+        { false, 17, 15, 5 },
+        { true, 33, 2, 5 },
+        { true, 40, 8, 4 },
+        { false, 48, 3, 4 },
+    };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0xa7, 4096);
+    for (int i = 0; i < 7; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 7);
+    for (size_t i = 0; i < ARRAY_SIZE(step); i++) {
+        uint16_t st = step[i].wz ?
+                      femu_wz(&c, step[i].slba, step[i].nlb, true) :
+                      femu_dealloc_range(&c, step[i].slba, step[i].nlb, list);
+
+        g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_test_message("step %zu: %" PRIu64 " pages mapped", i, mapped);
+        g_assert_cmpuint(mapped, ==, step[i].mapped);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+    /* LBA 0 of page 0 kept its data; LBA 1 reads as deallocated */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    g_assert_cmphex(got[0], ==, 0xa7);
+    g_assert_cmphex(got[511], ==, 0xa7);
+    for (int i = 512; i < 1024; i++) {
+        g_assert_cmphex(got[i], ==, 0);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * With read-only end of life, one write-class command needs a bound, so
  * Write Zeroes and Copy get limits that follow MDTS (16 KiB here): WZSL in
@@ -60587,6 +60696,13 @@ static void femu_register_nodes(void)
             "blk_pe_limit=1,erase_fail_ppm=1000000,spare_lines=8,mdts=2"
     });
     qos_add_test("death-refused", "femu", femu_test_block_death_refused, NULL);
+    qos_add_test("dsm-partial", "femu", femu_test_dsm_partial,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "oncs=12"
+    });
     qos_add_test("eol-wzsl-meta", "femu", femu_test_eol_wzsl,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"meta",
@@ -63137,6 +63253,24 @@ static void femu_register_nodes(void)
         .arg = (void *)"gc-ii-redo",
         .edge.extra_device_opts =
             "id=fdpev-gc-ii-redo,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "subsys=fdpsub-ii,buffer_size=16"
+    });
+    qos_add_test("fdp-events-gc-ii-dsm", "femu", femu_test_fdp_move_events,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gc-ii-dsm",
+        .edge.extra_device_opts =
+            "id=fdpev-gc-ii-dsm,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
+            "subsys=fdpsub-ii"
+    });
+    qos_add_test("fdp-events-gc-ii-dsm-buffer", "femu",
+                 femu_test_fdp_move_events, &(QOSGraphTestOptions) {
+        .arg = (void *)"gc-ii-dsm",
+        .edge.extra_device_opts =
+            "id=fdpev-gc-ii-dsm,devsz_mb=11,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
             "subsys=fdpsub-ii,buffer_size=16"

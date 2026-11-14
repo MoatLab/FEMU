@@ -1748,6 +1748,11 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         return maxlat;
     }
 
+    /* only the pages the range covers in full lose their mapping */
+    if (!ssd_lpn_range_full(ssd, req, le64_to_cpu(rw->slba),
+                            le16_to_cpu(rw->nlb) + 1, &start_lpn, &end_lpn)) {
+        return ssd_publish_cmd(ssd, req->stime);
+    }
     if (end_lpn >= spp->tt_pgs) {
         return 0;
     }
@@ -1820,8 +1825,13 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
         int trimmed_pages;
         int already_invalid = 0;
 
-        ssd_lpn_range(ssd, req, le64_to_cpu(ranges[range_idx].slba),
-                      le32_to_cpu(ranges[range_idx].nlb), &start_lpn, &end_lpn);
+        /* only the pages the range covers in full lose their mapping */
+        if (!ssd_lpn_range_full(ssd, req,
+                                le64_to_cpu(ranges[range_idx].slba),
+                                le32_to_cpu(ranges[range_idx].nlb),
+                                &start_lpn, &end_lpn)) {
+            continue;
+        }
 
         /* Boundary check */
         if (end_lpn >= spp->tt_pgs) {

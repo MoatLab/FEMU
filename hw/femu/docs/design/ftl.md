@@ -936,8 +936,9 @@ the page's bytes and LBA states before it, and the program's end time.
   each destination page's before-image, then applies the bytes, as for
   a write. On a namespace with metadata both fail with Invalid Field:
   the before-image holds data bytes only.
-- A partial deallocate still unmaps the whole page in the FTL; this
-  changes timing only.
+- A deallocate unmaps only the NAND pages it covers in full. A page
+  that keeps some of its LBAs keeps its mapping, so a read of those LBAs
+  still costs a NAND read and GC still moves the page.
 
 #### Power-fail atomicity (awupf_lbas)
 
@@ -1110,13 +1111,15 @@ so no die holds all the parity.
 
 ## Deallocate, Write Zeroes, Format and Sanitize
 
-- **Dataset Management deallocate** (`ssd_trim()`) unmaps every LPN of every
-  range: it drops the buffered copy, invalidates the physical page, clears
-  `maptbl` and `rmap`, and drops the read cache entry. A log-block scheme does
+- **Dataset Management deallocate** (`ssd_trim()`) unmaps every LPN that a
+  range covers in full: it drops the buffered copy, invalidates the
+  physical page, clears `maptbl` and `rmap`, and drops the read cache
+  entry. A page that keeps some of its LBAs keeps its mapping, so the
+  data of those LBAs stays readable and in its stripe. A log-block scheme does
   this through its `trim()` hook. A range past the device is skipped. The
   latency is `trim_lat_ns` times the number of ranges, or 0.
-- **Write Zeroes with Deallocate** unmaps the range in the same way and costs
-  no time. **Without Deallocate** it programs the range directly, after
+- **Write Zeroes with Deallocate** unmaps the pages it covers in full in
+  the same way and costs no time. **Without Deallocate** it programs the range directly, after
   forced GC if needed, and counts the pages as host writes.
 - **Format** and **Sanitize** call `bbssd_deallocate_all()` on BlackBox
   namespaces (not CSD), which unmaps every LPN of the namespace's FTL. The lines keep their wear.

@@ -539,6 +539,30 @@ static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
 }
 
 /*
+ * The NAND pages a range covers in full, for a deallocate: a page that
+ * keeps some of its LBAs keeps its mapping, so its data stays readable
+ * and stays in the stripe it was written to. Returns false when the range
+ * covers no whole page.
+ */
+static inline bool ssd_lpn_range_full(struct ssd *ssd, NvmeRequest *req,
+                                      uint64_t slba, uint64_t nlb,
+                                      uint64_t *start_lpn, uint64_t *end_lpn)
+{
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t off = ssd_lba_byte_offset(ssd, req, slba);
+    uint64_t first = DIV_ROUND_UP(off, pg);
+    uint64_t past = (off + (nlb << lbads)) / pg;
+
+    if (past <= first) {
+        return false;
+    }
+    *start_lpn = first;
+    *end_lpn = past - 1;
+    return true;
+}
+
+/*
  * Count the NAND pages a host write covers only in part: its first page when
  * it starts inside one, its last when it ends inside one. A device has to read
  * such a page to program it again; this model does not charge that read, so

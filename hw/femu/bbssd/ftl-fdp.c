@@ -232,6 +232,39 @@ static void fdp_mark_written(struct ssd *ssd, NvmeRequest *req, uint64_t slba,
 }
 
 /*
+ * A deallocate of blocks [@slba, @slba + @nlb): the blocks hold no data
+ * now, so their pieces leave fdp_written and the written mask of a held
+ * copy. A page the range covers in part keeps its mapping, and a later
+ * move of it must count only the blocks that are left.
+ */
+static void fdp_clear_written(struct ssd *ssd, NvmeRequest *req,
+                              uint64_t slba, uint64_t nlb)
+{
+    uint64_t per = ((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) >>
+                   FDP_WRITTEN_SHIFT;
+    uint64_t first, last;
+
+    if (!ssd->fdp_written) {
+        return;
+    }
+    ssd_lpn_range(ssd, req, slba, nlb, &first, &last);
+    for (uint64_t lpn = first; lpn <= last; lpn++) {
+        struct buffer_entry *e = ssd->write_buffer_cnt ?
+                                 ssd_buffer_lookup(ssd, lpn) : NULL;
+        uint64_t b, end;
+
+        fdp_page_pieces(ssd, req, slba, nlb, lpn, &b, &end);
+        if (e && e->written && b < end) {
+            bitmap_clear(e->written, b - lpn * per, end - b);
+        }
+        end = MIN(end, ssd->fdp_written_bits);
+        if (b < end) {
+            bitmap_clear(ssd->fdp_written, b, end - b);
+        }
+    }
+}
+
+/*
  * The namespace whose slice holds page @lpn. Every namespace of an FDP
  * controller places into this FTL; a page past every slice, which no write
  * makes, is put down to the namespace that built the FTL.
@@ -3017,9 +3050,15 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
         uint64_t start_lpn, end_lpn;
 
-        ssd_lpn_range(ssd, req, le64_to_cpu(ranges[range_idx].slba),
-                      le32_to_cpu(ranges[range_idx].nlb), &start_lpn, &end_lpn);
-
+        fdp_clear_written(ssd, req, le64_to_cpu(ranges[range_idx].slba),
+                          le32_to_cpu(ranges[range_idx].nlb));
+        /* only the pages the range covers in full lose their mapping */
+        if (!ssd_lpn_range_full(ssd, req,
+                                le64_to_cpu(ranges[range_idx].slba),
+                                le32_to_cpu(ranges[range_idx].nlb),
+                                &start_lpn, &end_lpn)) {
+            continue;
+        }
         if (end_lpn >= spp->tt_pgs) {
             ftl_err("FDP TRIM: range %d exceeds capacity (end_lpn=%lu "
                     "tt_pgs=%d)\n", range_idx, end_lpn, spp->tt_pgs);
@@ -3073,7 +3112,13 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
         return lat;
     }
 
-    ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);
+    fdp_clear_written(ssd, req, le64_to_cpu(rw->slba),
+                      le16_to_cpu(rw->nlb) + 1);
+    /* only the pages the range covers in full lose their mapping */
+    if (ssd_lpn_range_full(ssd, req, le64_to_cpu(rw->slba),
+                           le16_to_cpu(rw->nlb) + 1, &start_lpn, &end_lpn)) {
+        ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);
+    }
     ssd_fdp_count_unprogrammed(n, req, le16_to_cpu(rw->nlb) + 1);
 
     return 0;

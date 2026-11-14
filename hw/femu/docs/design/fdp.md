@@ -674,7 +674,9 @@ holds LBAV, the number of blocks moved (at most FFFFh) and one of them.
 
 The FTL moves whole pages, so the count takes only the blocks of a moved
 page that a host write programmed into it. The FTL notes those blocks as it
-programs each page, in 512-byte pieces. The block reported is the first such
+programs each page, in 512-byte pieces. A deallocate removes its blocks from
+that record, also when the page keeps its mapping (and also from a copy
+the write buffer holds). The block reported is the first such
 block. With a page size that is not a multiple of 512 bytes, the FTL keeps
 no such record, and 80h reports no count and no block. The FTL drops a handle's active unit when it fills with no free
 unit. That logs nothing, and the unit taken later logs the 81h.
