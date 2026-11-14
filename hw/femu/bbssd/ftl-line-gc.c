@@ -466,6 +466,31 @@ static bool ssd_rain_old_data(struct ssd *ssd)
 }
 
 /*
+ * rain_parity: whether OCP event 0016h may take die @die (ch * luns_per_ch +
+ * lun) offline. Every live stripe must keep one lost member at most, so the
+ * offline die is never needed as a source: a die that already failed can
+ * go offline at any time, another one only when no line opened before the
+ * last failure holds a live page. The caller has paused the FTL.
+ *
+ *   live line, epoch == failures: members exclude every failed die
+ *     --> lost members = {offline die} at most --> XOR of the others
+ */
+bool ssd_rain_inject_ok(struct ssd *ssd, int die)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int t;
+
+    if (!spp->rain_parity) {
+        return true;
+    }
+    if (die < 0 || die >= spp->tt_luns) {
+        return false;
+    }
+    t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
+    return spp->rain_fidx[t] != INT_MAX || !ssd_rain_old_data(ssd);
+}
+
+/*
  * rain_parity: die @die (ch * luns_per_ch + lun) fails. One parity page
  * per stripe takes one failure in a row, so a new failure needs every
  * live page on lines opened since the last one (the rebuild, rain_rebuild,
@@ -498,6 +523,16 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
     if (spp->rain_fidx[t] != INT_MAX) {
         return true;
+    }
+    /*
+     * OCP 0016h set, pending or active: another die would make a second
+     * lost member in the stripes the offline die is in.
+     */
+    if (ssd->n->ocp_inj_set && ssd->n->bb_params.inject_die != die) {
+        error_setg(errp, "die %d is offline (OCP event 0016h): a failure "
+                   "of another die could lose data",
+                   ssd->n->bb_params.inject_die);
+        return false;
     }
     s = ssd_rain_members(spp, spp->rain_nfail);
     if (s - 1 < 2) {

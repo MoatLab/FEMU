@@ -523,7 +523,11 @@ void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp)
 /*
  * rain_parity: a read of a page on the failed die reads, at once, every
  * other member of its row that holds data or parity (pg below the
- * block's program count), and their XOR gives the page.
+ * block's program count), and their XOR gives the page. In an open stripe
+ * the parity is not programmed yet: the controller holds it in RAM, so
+ * only the programmed members cost a NAND read. The offline die (OCP
+ * 0016h) is never a source: the injection rule keeps it the only lost
+ * member of a live stripe.
  */
 static uint64_t ssd_rain_read(struct ssd *ssd, struct ppa *ppa,
                               uint64_t stime)
@@ -623,9 +627,15 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     }
     if (unlikely(ssd->sp.rain_parity) && op == NAND_MEDIA_READ &&
         !bb_io_meta(ncmd->type)) {
-        /* a page on a failed die: a member that failed after its line opened */
+        int off = ssd_offline_die(ssd);
+
+        /*
+         * A page on a failed die (a member that failed after its line
+         * opened), or on the die OCP event 0016h holds offline.
+         */
         if (ssd->sp.rain_fidx[ppa->g.lun * ssd->sp.nchs + ppa->g.ch] <
-            ssd->sp.rain_nfail) {
+            ssd->sp.rain_nfail ||
+            ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == off) {
             return ssd_rain_read(ssd, ppa, stime) - stime;
         }
     } else if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&

@@ -866,7 +866,9 @@ reads.
 
 Log C0h counts the degraded reads as XOR Recovery Count (SMART-5).
 FEMU refuses the event on a controller whose namespaces live in shared
-subsystem storage, and when `failed_die` names another die.
+subsystem storage, and with `die_parity` when `failed_die` names another
+die. With `rain_parity` the event takes the die out of reads only; see
+[RAIN](ftl.md#rain-rain_parity) for when it is accepted.
 `query-femu` reports `parity-write-pages` and `degraded-reads`, and its
 WAF counts the parity programs.
 

@@ -3857,12 +3857,12 @@ typedef struct FtlTraceVar {
 
 #define FTL_TRACE_FIELDS 10
 
-/* field @i of x-ftl-trace on the device with id "trace" */
-static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
+/* field @i of x-ftl-trace on the device with id @id */
+static uint64_t femu_ftl_trace_id(QTestState *qts, const char *id, int i)
 {
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
-                           "'path':'/machine/peripheral/trace',"
-                           "'property':'x-ftl-trace'}}");
+                           "'path':%s,'property':'x-ftl-trace'}}", path);
     g_auto(GStrv) v = NULL;
     uint64_t ns;
 
@@ -3872,6 +3872,12 @@ static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
     ns = g_ascii_strtoull(v[i], NULL, 10);
     qobject_unref(rsp);
     return ns;
+}
+
+/* field @i of x-ftl-trace on the device with id "trace" */
+static uint64_t femu_ftl_trace_field(QTestState *qts, int i)
+{
+    return femu_ftl_trace_id(qts, "trace", i);
 }
 
 static uint16_t femu_dealloc_pages(FemuCtrlState *c, uint64_t page,
@@ -42085,6 +42091,160 @@ static uint64_t femu_ocp_c0h_field(FemuCtrlState *c, uint64_t buf, int off)
     return ldq_le_p(page + off);
 }
 
+/* read page @lpn of femu_test_rain_inject(): each page has its own byte */
+static void femu_rain_read1(FemuCtrlState *c, uint64_t buf, int lpn)
+{
+    g_assert_cmphex(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(c->pdev->bus->qts, buf), ==, 0x40 + lpn);
+    g_assert_cmphex(qtest_readb(c->pdev->bus->qts, buf + 4095), ==,
+                    0x40 + lpn);
+}
+
+/* read the 24 pages of femu_test_rain_inject() */
+static void femu_rain_inject_reads(FemuCtrlState *c, uint64_t buf)
+{
+    for (int i = 0; i < 24; i++) {
+        femu_rain_read1(c, buf, i);
+    }
+}
+
+/* degraded reads and media reads (x-ftl-trace field 6) so far */
+static void femu_rain_counts(QTestState *qts, uint64_t *deg, uint64_t *rd)
+{
+    uint64_t parity;
+    double waf;
+
+    femu_parity_counters(qts, &parity, deg, &waf);
+    *rd = femu_ftl_trace_id(qts, "gc-test", 6);
+}
+
+/*
+ * Read page @lpn and check what it cost: @deg degraded reads and @rd
+ * media reads.
+ */
+static void femu_rain_read_cost(FemuCtrlState *c, uint64_t buf, int lpn,
+                                uint64_t deg, uint64_t rd)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t d0, d1, r0, r1;
+
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_read1(c, buf, lpn);
+    femu_rain_counts(qts, &d1, &r1);
+    g_assert_cmpuint(d1 - d0, ==, deg);
+    g_assert_cmpuint(r1 - r0, ==, rd);
+}
+
+/*
+ * OCP event 0016h with rain_parity: inject_die goes offline for reads
+ * only, and each live stripe must keep one lost member at most. Four
+ * dies (two channels of two LUNs), 8-page blocks. A line holds 24 data
+ * pages, so 24 writes fill one line and every stripe has its parity on
+ * NAND. Page 2 is on die 1 (channel 0, LUN 1), page 1 on die 2. @data:
+ *   "base":    accepted at once; every page reads back; the 6 pages of
+ *              die 1 each read the 3 other dies (36 media reads); page 2
+ *              costs a reconstruction, page 1 does not; log C0h counts
+ *              each XOR; x-rain-fail of die 3 is refused; NUME 0 ends the
+ *              degraded reads, and then die 3 can fail
+ *   "pending": NRTDE 3: the die goes offline when the third read (page 2)
+ *              completes, so 5 reads are degraded, not 6; x-rain-fail of
+ *              die 3 is refused before and after, until NUME 0
+ *   "open":    inject_die=0 after one page: the stripe is open and its
+ *              parity is in controller RAM, so page 0 reads no NAND; after
+ *              page 1 is written, page 0 reads it
+ *   "old":     die 0 fails first and its old lines keep their data: the
+ *              event is refused (Invalid Field)
+ *   "same":    die 1 fails first: the event on the same die is accepted
+ *   "trim":    die 0 fails, then one LBA of each page is deallocated; the
+ *              pages stay mapped on the old lines, so the event is refused
+ */
+static void femu_test_rain_inject(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    bool open = !strcmp(kind, "open");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint64_t d0, d1, r0, r1, x0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i < (open ? 1 : 24); i++) {
+        qtest_memset(qts, buf, 0x40 + i, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!strcmp(kind, "old") || !strcmp(kind, "trim")) {
+        g_assert_true(femu_rain_fail(qts, 0));
+    } else if (!strcmp(kind, "same")) {
+        g_assert_true(femu_rain_fail(qts, 1));
+    }
+    if (!strcmp(kind, "trim")) {
+        for (int i = 0; i < 24; i++) {
+            g_assert_cmphex(femu_dealloc_lba(&c, i * 8 + 1, ibuf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_inj_entry(qts, ibuf, 0x0016, !strcmp(kind, "pending") ? 3 : 0);
+    if (!strcmp(kind, "old") || !strcmp(kind, "trim")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_INVALID_FIELD);
+        goto out;
+    }
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==, NVME_SUCCESS);
+    if (!strcmp(kind, "same")) {
+        femu_rain_inject_reads(&c, buf);
+        goto out;
+    }
+    if (open) {
+        /* no other member and no parity on NAND yet */
+        femu_rain_read_cost(&c, buf, 0, 1, 0);
+        qtest_memset(qts, buf, 0x41, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_rain_read_cost(&c, buf, 0, 1, 1);
+        femu_rain_read_cost(&c, buf, 1, 0, 1);
+        goto out;
+    }
+    g_assert_false(femu_rain_fail(qts, 3));
+    x0 = femu_ocp_c0h_field(&c, buf, 48);
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_inject_reads(&c, buf);
+    femu_rain_counts(qts, &d1, &r1);
+    g_test_message("%s: %" PRIu64 " degraded reads, %" PRIu64 " media reads",
+                   kind, d1 - d0, r1 - r0);
+    if (!strcmp(kind, "base")) {
+        /* 18 pages read once, the 6 of die 1 read the other 3 dies */
+        g_assert_cmpuint(d1 - d0, ==, 6);
+        g_assert_cmpuint(r1 - r0, ==, 36);
+    } else {
+        /* pages 0 to 2 read before the die went offline */
+        g_assert_cmpuint(d1 - d0, ==, 5);
+        g_assert_cmpuint(r1 - r0, ==, 34);
+    }
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48) - x0, ==, d1 - d0);
+    femu_rain_read_cost(&c, buf, 2, 1, 3);
+    femu_rain_read_cost(&c, buf, 1, 0, 1);
+    g_assert_false(femu_rain_fail(qts, 3));
+    g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==, NVME_SUCCESS);
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_inject_reads(&c, buf);
+    femu_rain_counts(qts, &d1, &r1);
+    g_assert_cmpuint(d1, ==, d0);
+    g_assert_cmpuint(r1 - r0, ==, 24);
+    femu_rain_read_cost(&c, buf, 2, 0, 1);
+    g_assert_true(femu_rain_fail(qts, 3));
+out:
+    femu_disable(&c);
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /*
  * OCP event 0016h, NAND Die Offline, takes die inject_die=3 offline. Four
  * dies, two channels of two LUNs; LBA page 3 sits on channel 1, LUN 1,
@@ -63985,6 +64145,54 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "read_cache_mb=1,ocp=on,inject_die=3"
+    });
+    qos_add_test("rain-inject-base", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"base",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=1"
+    });
+    qos_add_test("rain-inject-pending", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pending",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=1"
+    });
+    qos_add_test("rain-inject-open", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"open",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=0"
+    });
+    qos_add_test("rain-inject-old", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"old",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=1"
+    });
+    qos_add_test("rain-inject-same", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"same",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=1"
+    });
+    qos_add_test("rain-inject-trim", "femu", femu_test_rain_inject,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"trim",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,ocp=on,inject_die=1"
     });
     qos_add_test("ocp-die-offline-off", "femu", femu_test_ocp_die_offline,
                  &(QOSGraphTestOptions) {

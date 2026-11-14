@@ -173,9 +173,10 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /*
      * failed_die counts only with parity: the CXL SSD builds its FTL
      * from a zeroed controller. A namespace made while an injected die is
-     * offline loses it too; only an ocp=on controller injects.
+     * offline loses it too; only an ocp=on controller injects. RAIN keeps
+     * its failures in its own list, so there fail_die is the injection only.
      */
-    ssd->fail_die = ssd_parity_on(spp) ? spp->failed_die + 1 : 0;
+    ssd->fail_die = spp->die_parity ? spp->failed_die + 1 : 0;
     if (n->ocp) {
         qemu_mutex_lock(&n->ocp_inj_lock);
         if (n->ocp_inj_set && !n->ocp_inj_reads) {
@@ -452,7 +453,7 @@ uint64_t ssd_degraded_reads(struct ssd *ssd)
  */
 void ssd_set_offline_die(struct ssd *ssd, int die)
 {
-    int base = ssd_parity_on(&ssd->sp) ? ssd->sp.failed_die : -1;
+    int base = ssd->sp.die_parity ? ssd->sp.failed_die : -1;
 
     qatomic_set(&ssd->fail_die, 1 + (die >= 0 ? die : base));
 }

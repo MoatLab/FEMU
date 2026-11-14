@@ -199,7 +199,7 @@ Devices:
 | `rain_rebuild` | `bool` | `off` | bbssd, CSD: with rain_parity, each write moves at most one line opened before the last die failure into a line without that die, when lines are to spare; off (default): only GC moves them |
 | `parity_xor_ns` | `int32` | `0` | bbssd, CSD: with die_parity or rain_parity, controller time in ns before each parity program and added to a read of the failed die; 0 (default) |
 | `failed_die` | `int32` | `-1` | bbssd, CSD: with die_parity or rain_parity, the die (channel * luns_per_ch + LUN) that has failed: a host read there reads the other dies of its stripe in parallel; -1 (default) is none |
-| `inject_die` | `int32` | `0` | bbssd, CSD: with ocp=on, the die (channel * luns_per_ch + LUN) that OCP event injection 0016h (NAND Die Offline) takes offline; 0 (default) |
+| `inject_die` | `int32` | `0` | bbssd, CSD: with ocp=on, the die (channel * luns_per_ch + LUN) that OCP event injection 0016h (NAND Die Offline) takes offline; with rain_parity, accepted while each live stripe keeps one lost member at most; 0 (default) |
 | `nand_cell_type` | `uint8` | `0` | bbssd, CSD, KV: 0 uses the flat pg_rd_lat, pg_wr_lat and blk_er_lat; 1 SLC, 2 MLC, 3 TLC or 4 QLC uses built-in per-page-type timing (other values fall back to 0) |
 | `cell_pages` | `int32` | `0` | bbssd, CSD, KV: bits per cell (pages per wordline) for the pgtype_lat model, 0 to 5; 0 with pgtype_lat means 3 |
 | `pgtype_lat` | `int32` | `0` | bbssd, CSD, KV: non-zero scales the program time by page type (lower to upper) using cell_pages, when nand_cell_type is 0 |

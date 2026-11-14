@@ -366,30 +366,39 @@ static bool femu_ocp_inj_ftl(NvmeNamespace *ns)
 
 /*
  * Whether event 0016h applies: one FTL namespace at least, none kept by
- * the shared storage of a subsystem (the event state is per controller),
- * and a die failed at creation only when it is the same die.
+ * the shared storage of a subsystem (the event state is per controller).
+ * With die_parity a die failed at creation counts only when it is the same
+ * die. With rain_parity each FTL must keep one lost member per live stripe
+ * (ssd_rain_inject_ok()); the check runs with the pollers paused, before
+ * the caller takes ocp_inj_lock, since a poller can wait on that lock.
  */
 static bool femu_ocp_inj_ok(FemuCtrl *n)
 {
+    bool rain = n->bb_params.rain_parity;
     bool ftl = false;
+    bool ok = true;
+    bool resume;
 
-    if (n->bb_params.failed_die >= 0 &&
+    if (!rain && n->bb_params.failed_die >= 0 &&
         n->bb_params.failed_die != n->bb_params.inject_die) {
         return false;
     }
-    /* a RAIN die failure does not heal; an injection ends (R3 adds it) */
-    if (n->bb_params.rain_parity) {
-        return false;
-    }
-    for (int i = 0; n->namespaces && i < n->namespace_limit; i++) {
+    resume = rain ? nvme_pause_pollers(n) : false;
+    for (int i = 0; ok && n->namespaces && i < n->namespace_limit; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
         if (ns->allocated && ns->ctrl != n) {
-            return false;
+            ok = false;
+        } else if (femu_ocp_inj_ftl(ns)) {
+            ftl = true;
+            ok = !rain || ssd_rain_inject_ok(ns->ssd,
+                                             n->bb_params.inject_die);
         }
-        ftl |= femu_ocp_inj_ftl(ns);
     }
-    return ftl;
+    if (rain) {
+        nvme_resume_pollers(n, resume);
+    }
+    return ok && ftl;
 }
 
 /* every FTL of the controller takes the die offline, or brings it back */

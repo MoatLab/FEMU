@@ -4205,6 +4205,7 @@ GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest, int schema);
 bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,
                       const SsdPersistKey *key, bool commit, Error **errp);
 void ssd_set_offline_die(struct ssd *ssd, int die);
+bool ssd_rain_inject_ok(struct ssd *ssd, int die);
 void nvme_ocp_inj_read_done(FemuCtrl *n);
 void nvme_ocp_inj_clear(FemuCtrl *n);
 typedef struct FemuOcpBlocks {

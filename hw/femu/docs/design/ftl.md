@@ -1085,6 +1085,24 @@ so no die holds all the parity.
  row 1:   D   P   x   D
 ```
 
+- In an open stripe the parity is not programmed yet. The controller
+  holds it in RAM, so a degraded read costs NAND reads of the programmed
+  members only.
+- With `ocp=on`, OCP event 0016h (NAND Die Offline) takes `inject_die`
+  offline until NUME=0 or a power cycle. The die stays out of the failure
+  list, and lines keep their layout. A read of its page takes the other
+  members of its stripe, as for a failed die.
+- Every live stripe keeps one lost member at most, so no page becomes
+  unreadable. Set Features C0h checks this with the FTL paused:
+
+```text
+ Set 0016h, die d
+   d already failed ---------------------------------> accepted
+   a line opened before the last failure holds data -> Invalid Field
+   otherwise ----------------------------------------> accepted
+ x-rain-fail of another die while 0016h is set or waits --> refused
+```
+
 ## Read cache
 
 `read_cache_mb` adds a DRAM read cache in front of NAND reads
