@@ -508,6 +508,7 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     uint64_t need;
     uint32_t bits;
     uint8_t spare;
+    bool ro;
     int victim;
     int lines;
     int rows;
@@ -523,6 +524,15 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
     if (spp->rain_fidx[t] != INT_MAX) {
         return true;
+    }
+    /*
+     * rain_read_only: the open pointers and the epoch stay as they are once
+     * the media is read-only, so the reserve the admitted writes hold stays
+     * open for them.
+     */
+    if (ssd->media_ro) {
+        error_setg(errp, "the media is read-only: no other die can fail");
+        return false;
     }
     /*
      * OCP 0016h set, pending or active: another die would make a second
@@ -554,14 +564,24 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     rows = spp->pls_per_lun * spp->pgs_per_blk;
     victim = DIV_ROUND_UP(s - 1, s - 2);
     open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
-    lines = spp->tt_lines - bb_gc_forced_lines(ssd->n) - open;
+    lines = ssd_rain_usable_lines(ssd);
     need = DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page);
-    if (spp->gc_thres_lines_high < victim ||
-        ssd->lm.free_line_cnt < victim + open || lines < 1 ||
-        (uint64_t)lines * rows * (s - 2) < need) {
+    ro = spp->gc_thres_lines_high < victim ||
+         ssd->lm.free_line_cnt < victim + open || lines < 1 ||
+         (uint64_t)lines * rows * (s - 2) < need;
+    if (ro && !ssd->n->bb_params.rain_read_only) {
         error_setg(errp, "without die %d the lines cannot hold the "
                    "namespace and keep room for GC", die);
         return false;
+    }
+    /*
+     * rain_read_only: a failure past the spare ends the life of the media.
+     * Zero spare means read-only (OCP 2.7 EOL-5), so a writable device
+     * keeps 1% at least.
+     */
+    if (ssd->n->bb_params.rain_read_only &&
+        !ssd_rain_spare_at(ssd, spp->rain_nfail + 1)) {
+        ro = true;
     }
     spare = ssd_available_spare(ssd);
     ssd_rain_append(spp, t);
@@ -570,6 +590,10 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
         if (ptrs[i]->curline) {
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
         }
+    }
+    /* the reserve takes the admitted writes; it raises bits 3 and 0 */
+    if (ro) {
+        ssd_enter_read_only(ssd);
     }
     /*
      * SMART bit 2 from now on: an event, a telemetry trigger, the PEL. The

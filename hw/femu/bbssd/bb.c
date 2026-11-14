@@ -146,10 +146,10 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         reserve_lines += 1;                  /* the log write pointer */
     }
     /* the admission counts pages in 31 bits of one word */
-    if (reserve_eol >= (1ULL << 31) / data_pgs) {
+    if (reserve_eol >= (1ULL << 31) / bb_eol_line_pgs(p)) {
         error_setg(errp, "FEMU bbssd: eol_read_only needs %" PRIu64 " reserve "
                    "lines of %" PRIu64 " pages; lower mdts", reserve_eol,
-                   data_pgs);
+                   bb_eol_line_pgs(p));
         return -1;
     }
     reserve_lines += reserve_eol;
@@ -284,6 +284,21 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     usable_pgs = (tt_lines - reserve_lines) * data_pgs;
     exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
+
+    /*
+     * rain_read_only with a die failed from the start: Available Spare 0
+     * means read-only (OCP 2.7 EOL-5), so such a device would start at the
+     * end of its life.
+     */
+    if (p->rain_parity && p->rain_read_only && p->failed_die >= 0 &&
+        !bb_rain_spare(tt_lines - reserve_lines,
+                       (int64_t)p->pls_per_lun * p->pgs_per_blk,
+                       p->nchs * p->luns_per_ch, 1, exposed_pgs)) {
+        error_setg(errp, "FEMU bbssd: with rain_read_only, failed_die leaves "
+                   "no spare, so the media would start read-only; lower "
+                   "devsz_mb or raise blks_per_pl");
+        return -1;
+    }
 
     if (exposed_pgs > usable_pgs && n->shared_ftl) {
         error_setg(errp, "FEMU bbssd: the %u namespaces share one FTL and "

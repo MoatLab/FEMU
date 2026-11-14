@@ -118,6 +118,7 @@ DEVICES = [
                     "pe_suspend", "tsusp_ns", "pe_suspend_max", "tresume_ns",
                     "read_prio", "prog_pass2_ns", "prog_pass2_lag",
                     "die_parity", "rain_parity", "rain_rebuild",
+                    "rain_read_only",
                     "parity_xor_ns",
                     "failed_die", "inject_die",
                     "nand_cell_type", "cell_pages",

@@ -411,14 +411,23 @@ static void pel_warning_update(FemuCtrl *n, uint8_t mask, uint8_t bits)
 }
 
 /*
- * The whole byte, from a SMART collection. With the wear model on, the
- * wear bits come from the FTL thread at the moment they change instead
- * (femu_pel_wear_warning()), so a collection that read them a moment
- * earlier cannot turn one off and report it twice.
+ * The FTL thread reports the wear bits itself (femu_pel_wear_warning())
+ * with the wear model or rain_read_only on: both can end the life.
+ */
+static bool pel_ftl_owns_wear(FemuCtrl *n)
+{
+    return n->blk_pe_limit || n->bb_params.rain_read_only;
+}
+
+/*
+ * The whole byte, from a SMART collection. When the FTL thread owns the
+ * wear bits, a collection that read them a moment earlier cannot turn one
+ * off and report it twice.
  */
 void femu_pel_warning(FemuCtrl *n, uint8_t warning)
 {
-    pel_warning_update(n, n->blk_pe_limit ? ~PEL_WEAR_BITS : 0xff, warning);
+    pel_warning_update(n, pel_ftl_owns_wear(n) ? ~PEL_WEAR_BITS : 0xff,
+                       warning);
 }
 
 /*
@@ -484,13 +493,18 @@ void femu_pel_media_error(FemuCtrl *n, const NvmeCqe *cqe)
     }
 }
 
-static void pel_log_smart(FemuCtrl *n)
+/* @all: the whole byte, at power on, before any I/O can change a bit */
+static void pel_log_smart(FemuCtrl *n, bool all)
 {
     NvmeSmartLog smart;
 
     nvme_smart_fill(n, &smart);
     femu_pel_log(n, NVME_PEL_SMART_SNAPSHOT, 1, &smart, sizeof(smart));
-    femu_pel_warning(n, smart.critical_warning);
+    if (all) {
+        pel_warning_update(n, 0xff, smart.critical_warning);
+    } else {
+        femu_pel_warning(n, smart.critical_warning);
+    }
 }
 
 /*
@@ -502,7 +516,7 @@ static void pel_snapshot_timer(void *opaque)
     FemuCtrl *n = opaque;
     bool resume = nvme_pause_pollers(n);
 
-    pel_log_smart(n);
+    pel_log_smart(n, false);
     nvme_resume_pollers(n, resume);
     timer_mod(n->pel->snapshot,
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + PEL_SNAPSHOT_MS);
@@ -537,7 +551,7 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
     timer_mod(pel->snapshot, n->power_on_ms + PEL_SNAPSHOT_MS);
 
     pel_log_power_on_reset(n);
-    pel_log_smart(n);
+    pel_log_smart(n, true);
     if (!pel_file_save(n, errp)) {
         femu_pel_exit(n);
         return false;
@@ -589,7 +603,7 @@ void femu_pel_reset(FemuCtrl *n)
     qemu_mutex_unlock(&pel->lock);
 
     pel_log_power_on_reset(n);
-    pel_log_smart(n);
+    pel_log_smart(n, false);
     pel_file_write(n);
 }
 

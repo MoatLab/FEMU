@@ -2588,6 +2588,7 @@ typedef struct BbCtrlParams {
     int die_parity;           /* a parity program per full die stripe */
     int rain_parity;          /* in-line parity pages per stripe (RAIN) */
     bool rain_rebuild;        /* move old lines off failed dies (RAIN) */
+    bool rain_read_only;      /* a failure past the spare: read-only (RAIN) */
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
     int inject_die;           /* die that OCP event 0016h takes offline */

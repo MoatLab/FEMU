@@ -3804,6 +3804,30 @@ uint64_t femu_eol_max_bytes(FemuCtrl *n)
 }
 
 /*
+ * Read-only end of life holds back erased space for every write in flight,
+ * so one write needs a bound, and the ring to the FTL must take every
+ * request: a write the ring drops has changed data already. @who names the
+ * property that asks for the end of life.
+ */
+static bool femu_check_eol_bounds(FemuCtrl *n, const char *who, Error **errp)
+{
+    if (!n->mdts || 12 + n->mpsmin + n->mdts >= 48) {
+        error_setg(errp, "femu: %s needs mdts 1 to %d", who,
+                   47 - 12 - n->mpsmin);
+        return false;
+    }
+    /* a ring of FEMU_MAX_INF_REQS slots holds one entry less */
+    if ((uint64_t)n->nr_io_queues * (n->max_q_ents + 1) >
+        FEMU_MAX_INF_REQS - 1) {
+        error_setg(errp, "femu: %s needs queues x (entries + 1) of at most %d",
+                   who, FEMU_MAX_INF_REQS - 1);
+        return false;
+    }
+    n->eol_admit = true;
+    return true;
+}
+
+/*
  * Block wear-out and wear levelling run only in the plain line FTL of one
  * bbssd or CSD namespace, and block wear-out also in the reclaim units of
  * FDP. Each refused setting has its own write path or allocator that the
@@ -3924,25 +3948,51 @@ static bool femu_check_wear_props(FemuCtrl *n, Error **errp)
     if (!n->blk_pe_limit || !n->eol_read_only) {
         return true;
     }
-    /*
-     * Read-only end of life holds back erased space for every write in
-     * flight, so one write needs a bound, and the ring to the FTL must take
-     * every request: a write the ring drops has changed data already.
-     */
-    if (!n->mdts || 12 + n->mpsmin + n->mdts >= 48) {
-        error_setg(errp, "femu: eol_read_only needs mdts 1 to %d",
-                   47 - 12 - n->mpsmin);
+    return femu_check_eol_bounds(n, "eol_read_only", errp);
+}
+
+/*
+ * rain_read_only: a die failure past the spare ends the life of the media.
+ * It takes the end-of-life admission, so it refuses what that refuses
+ * outside the wear model: the buffer and IU writes program pages the
+ * admission does not count.
+ */
+static bool femu_check_rain_ro_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *why = NULL;
+
+    if (!bp->rain_read_only) {
+        return true;
+    }
+    if (bp->rain_parity != 1 || !n->eol_read_only) {
+        error_setg(errp, "femu: rain_read_only needs rain_parity=1 and "
+                   "eol_read_only=on");
         return false;
     }
-    /* a ring of FEMU_MAX_INF_REQS slots holds one entry less */
-    if ((uint64_t)n->nr_io_queues * (n->max_q_ents + 1) >
-        FEMU_MAX_INF_REQS - 1) {
-        error_setg(errp, "femu: eol_read_only needs queues x (entries + 1) "
-                   "of at most %d", FEMU_MAX_INF_REQS - 1);
+    if (!BBSSD(n) && !CSD(n)) {
+        why = "a mode other than bbssd or CSD";
+    } else if (n->cxl_dev) {
+        /* the linked device made the FTL, without the reserve */
+        why = "cxl_ssd";
+    } else if (n->blk_pe_limit) {
+        why = "blk_pe_limit";
+    } else if (bp->buffer_size > 0) {
+        /* power_loss needs a buffer, so this refuses it too */
+        why = "buffer_size";
+    } else if (bp->iu_pages > 1) {
+        why = "iu_pages above 1";
+    } else if (n->nand_bad_blocks) {
+        why = "nand_bad_blocks";
+    } else if (n->num_namespaces > 1 || n->namespace_modes ||
+               nvme_ns_shared(n) || n->ns_mgmt) {
+        why = "more than one namespace";
+    }
+    if (why) {
+        error_setg(errp, "femu: rain_read_only is not supported with %s", why);
         return false;
     }
-    n->eol_admit = true;
-    return true;
+    return femu_check_eol_bounds(n, "rain_read_only", errp);
 }
 
 /*
@@ -4659,7 +4709,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         !femu_shared_ftl_check(n, errp) || !femu_durable_check(n, errp)) {
         return;
     }
-    if (!femu_check_wear_props(n, errp)) {
+    if (!femu_check_wear_props(n, errp) ||
+        !femu_check_rain_ro_props(n, errp)) {
         return;
     }
     if (!femu_check_copyback_props(n, errp)) {
@@ -5525,6 +5576,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("die_parity", FemuCtrl, bb_params.die_parity, 0),
     DEFINE_PROP_INT32("rain_parity", FemuCtrl, bb_params.rain_parity, 0),
     DEFINE_PROP_BOOL("rain_rebuild", FemuCtrl, bb_params.rain_rebuild, false),
+    DEFINE_PROP_BOOL("rain_read_only", FemuCtrl, bb_params.rain_read_only,
+                     false),
     DEFINE_PROP_INT32("parity_xor_ns", FemuCtrl, bb_params.parity_xor_ns, 0),
     DEFINE_PROP_INT32("failed_die", FemuCtrl, bb_params.failed_die, -1),
     DEFINE_PROP_INT32("inject_die", FemuCtrl, bb_params.inject_die, 0),

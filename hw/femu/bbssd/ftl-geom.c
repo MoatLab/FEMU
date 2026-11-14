@@ -55,11 +55,47 @@ uint64_t bb_line_data_pgs(const BbCtrlParams *p)
     return rows * (members - 1);
 }
 
+/*
+ * The data pages of the line the end-of-life reserve is sized by. With
+ * rain_read_only, dies fail down to two members, so a line opened after
+ * the last of them holds one data page a row; the reserve must hold the
+ * admitted writes at every failure count.
+ */
+uint64_t bb_eol_line_pgs(const BbCtrlParams *p)
+{
+    if (p->rain_parity && p->rain_read_only) {
+        return (uint64_t)p->pls_per_lun * p->pgs_per_blk;
+    }
+    return bb_line_data_pgs(p);
+}
+
+/*
+ * rain_parity: the spare space left after @nfail die failures, in percent.
+ * @lines can hold data and @need pages hold the namespace; a line opened
+ * after e failures holds @rows * (@dies - e - 1) data pages.
+ *
+ *   spare % = 100 * (cap(nfail) - need) / (cap(0) - need)
+ */
+uint8_t bb_rain_spare(int64_t lines, int64_t rows, int dies, int nfail,
+                      int64_t need)
+{
+    int64_t cap0 = lines * rows * (dies - 1);
+    int64_t cap = lines * rows * (dies - nfail - 1);
+
+    if (!nfail || cap0 <= need) {
+        return 100;
+    }
+    if (cap <= need) {
+        return 0;
+    }
+    return 100 * (cap - need) / (cap0 - need);
+}
+
 uint64_t bb_eol_reserve_lines(FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
     uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
-    uint64_t line = bb_line_data_pgs(p);
+    uint64_t line = bb_eol_line_pgs(p);
     uint64_t pages;
 
     /* under FDP the reclaim groups hold the reserve (bb_fdp_eol_units) */

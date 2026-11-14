@@ -861,6 +861,7 @@ struct ssd {
      */
     bool eol_ro_mode;
     bool media_ro;                  /* FTL thread's copy of the bit */
+    bool wear_lock_on;              /* wear_lock is set up */
     int eol_reserve_lines;
     /* under FDP: the erased units each reclaim group holds back */
     uint64_t fdp_eol_reserve;
@@ -970,6 +971,9 @@ int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
 uint64_t bb_line_data_pgs(const BbCtrlParams *p);
+uint64_t bb_eol_line_pgs(const BbCtrlParams *p);
+uint8_t bb_rain_spare(int64_t lines, int64_t rows, int dies, int nfail,
+                      int64_t need);
 uint64_t bb_eol_reserve_lines(FemuCtrl *n);
 uint64_t bb_fdp_eol_units(FemuCtrl *n);
 uint64_t bb_fdp_eol_reserve(FemuCtrl *n);

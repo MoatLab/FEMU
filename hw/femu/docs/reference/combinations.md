@@ -61,6 +61,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `blks_per_pl`
 
+- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 - femu: spare_lines (%u) must be below blks_per_pl (%d)
 
 ## `buffer_low_pcent`
@@ -171,6 +172,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `devsz_mb`
 
+- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 - devsz_mb must be unset or %
 
 ## `did`
@@ -227,14 +229,13 @@ own description allows. A message keeps its format directives (`%s`,
 ## `entries`
 
 - entries must be in [1, 65534]
-- femu: eol_read_only needs queues x (entries + 1) of at most %d
+- femu: %s needs queues x (entries + 1) of at most %d
 
 ## `eol_read_only`
 
 - FEMU bbssd: eol_read_only needs %
-- femu: eol_read_only needs mdts 1 to %d
-- femu: eol_read_only needs queues x (entries + 1) of at most %d
 - femu: erase_fail_ppm needs eol_read_only=on
+- femu: rain_read_only needs rain_parity=1 and eol_read_only=on
 - x-eol-enter requires eol_read_only on namespace 1
 
 ## `erase_fail_ppm`
@@ -264,6 +265,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 
 ## `fdm_size`
 
@@ -540,7 +542,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `mdts`
 
-- femu: eol_read_only needs mdts 1 to %d
+- femu: %s needs mdts 1 to %d
 
 ## `meta`
 
@@ -974,7 +976,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `queues`
 
-- femu: eol_read_only needs queues x (entries + 1) of at most %d
+- femu: %s needs queues x (entries + 1) of at most %d
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
 - queues must be in [1, %d]
 - wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
@@ -984,8 +986,15 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - FEMU bbssd: rain_rebuild needs rain_parity
+- femu: rain_read_only needs rain_parity=1 and eol_read_only=on
 - rain_parity is off or die %d is out of range
 - rain_parity keeps two members at least
+
+## `rain_read_only`
+
+- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
+- femu: rain_read_only is not supported with %s
+- femu: rain_read_only needs rain_parity=1 and eol_read_only=on
 
 ## `rain_rebuild`
 

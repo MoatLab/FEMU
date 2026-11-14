@@ -39,12 +39,15 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
     ssd->spare_lines = limit ? n->spare_lines : 0;
     ssd->wear_on = limit != 0;
     ssd->wear_pe_total = 0;
-    ssd->eol_ro_mode = ssd->wear_on && n->eol_admit;
+    /* rain_read_only ends the life of the media at a die failure */
+    ssd->eol_ro_mode = (ssd->wear_on || n->bb_params.rain_read_only) &&
+                       n->eol_admit;
     ssd->media_ro = false;
     /* bb_check_capacity() kept the reserve below 2^31 pages */
     ssd->eol_reserve_lines = ssd->eol_ro_mode ?
                              (int)bb_eol_reserve_lines(n) : 0;
-    ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines * spp->line_data_pgs;
+    ssd->eol_cap = (uint64_t)ssd->eol_reserve_lines *
+                   bb_eol_line_pgs(&n->bb_params);
     ssd->fdp_eol_reserve = 0;
     if (ssd->eol_ro_mode && n->subsys && n->subsys->params.fdp.enabled) {
         /* each reclaim group holds the reserve; the cap is in its units */
@@ -53,7 +56,8 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
         ssd->fdp_eol_reserve = bb_fdp_eol_reserve(n);
     }
     ssd->eol_word = 0;
-    if (ssd->wear_on) {
+    ssd->wear_lock_on = ssd->wear_on || ssd->eol_ro_mode;
+    if (ssd->wear_lock_on) {
         qemu_mutex_init(&ssd->wear_lock);
     }
     for (int ch = 0; ch < spp->nchs; ch++) {
@@ -469,7 +473,7 @@ void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *o)
     uint32_t hi = 0, lo = UINT32_MAX;
     uint64_t sum = 0;
 
-    if (ssd->wear_on) {
+    if (ssd->wear_lock_on) {
         qemu_mutex_lock(&ssd->wear_lock);
     }
     o->bad = ssd->grown_bad_blocks + ssd->sacrificed_blocks;
@@ -505,7 +509,7 @@ void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *o)
             o->empty_lines++;
         }
     }
-    if (ssd->wear_on) {
+    if (ssd->wear_lock_on) {
         qemu_mutex_unlock(&ssd->wear_lock);
     }
     o->max_pe = hi;
@@ -689,14 +693,14 @@ void ssd_pd_stats(struct ssd *ssd, uint64_t *reclaims, uint64_t *pads,
 
 static void ssd_wear_lock(struct ssd *ssd)
 {
-    if (ssd->wear_on) {
+    if (ssd->wear_lock_on) {
         qemu_mutex_lock(&ssd->wear_lock);
     }
 }
 
 static void ssd_wear_unlock(struct ssd *ssd)
 {
-    if (ssd->wear_on) {
+    if (ssd->wear_lock_on) {
         qemu_mutex_unlock(&ssd->wear_lock);
     }
 }
@@ -1002,38 +1006,29 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
     return start > 0 ? MAX(left, 0) * 100 / start : 100;
 }
 
-/*
- * rain_parity: the spare space left after the dies that failed. A line
- * opened after e failures holds rows * (dies - e - 1) data pages, so the
- * lines past the GC reserve hold cap(e); the namespace takes the rest.
- *
- *   spare % = 100 * (cap(F) - namespace) / (cap(0) - namespace)
- */
-static uint8_t ssd_rain_spare(struct ssd *ssd)
+/* rain_parity: the spare space left after @nfail die failures */
+uint8_t ssd_rain_spare_at(struct ssd *ssd, int nfail)
 {
     struct ssdparams *spp = &ssd->sp;
-    int open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
-    int64_t lines = spp->tt_lines - bb_gc_forced_lines(ssd->n) - open;
-    int64_t rows = spp->pls_per_lun * spp->pgs_per_blk;
     int64_t page = (int64_t)spp->secsz * spp->secs_per_pg;
-    int64_t need = DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page);
-    int64_t cap0 = lines * rows * (spp->tt_luns - 1);
-    int64_t cap = lines * rows * (spp->tt_luns - spp->rain_nfail - 1);
 
-    if (!spp->rain_nfail || cap0 <= need) {
-        return 100;
-    }
-    if (cap <= need) {
-        return 0;
-    }
-    return 100 * (cap - need) / (cap0 - need);
+    return bb_rain_spare(ssd_rain_usable_lines(ssd),
+                         (int64_t)spp->pls_per_lun * spp->pgs_per_blk,
+                         spp->tt_luns, nfail,
+                         DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page));
 }
 
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t bad_pct;
-    uint8_t rain = spp->rain_parity ? ssd_rain_spare(ssd) : 100;
+    uint8_t rain;
+
+    /* read-only media has no spare left (OCP 2.7 EOL-5) */
+    if (spp->rain_parity && ssd_media_read_only(ssd)) {
+        return 0;
+    }
+    rain = spp->rain_parity ? ssd_rain_spare_at(ssd, spp->rain_nfail) : 100;
 
     if (ssd->wear_on) {
         uint8_t spare;
@@ -1056,6 +1051,16 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
     /* a failed die stays failed: the media is less reliable from then on */
     h->die_failed = ssd->sp.rain_parity && ssd->sp.rain_nfail > 0;
     if (!ssd->wear_on) {
+        /* rain_read_only: a die failure can end the life of the media */
+        if (ssd->eol_ro_mode) {
+            qemu_mutex_lock(&ssd->wear_lock);
+            h->media_ro = ssd->media_ro;
+            qemu_mutex_unlock(&ssd->wear_lock);
+        }
+        /*
+         * After the bit: media_ro never clears, so a set bit means the
+         * spare reads 0 here too.
+         */
         h->spare = ssd_available_spare(ssd);
         return;
     }
@@ -1374,10 +1379,11 @@ void ssd_free(struct ssd *ssd)
 
     nand_media_destroy(&ssd->media);
     g_clear_pointer(&ssd->media.die_stat, g_free);
-    if (ssd->wear_on) {
+    if (ssd->wear_lock_on) {
         qemu_mutex_destroy(&ssd->wear_lock);
-        ssd->wear_on = false;
+        ssd->wear_lock_on = false;
     }
+    ssd->wear_on = false;
 
     if (ssd->ch) {
         for (i = 0; i < spp->nchs; i++) {

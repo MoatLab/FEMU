@@ -166,6 +166,22 @@ static inline bool ssd_wp_step(struct ssdparams *spp, struct write_pointer *wpp)
 }
 
 /* fold the id of a collected line or reclaim unit into the victim digest */
+/*
+ * rain_parity: the lines that can hold data. The forced GC lines, the open
+ * pointers, the end-of-life reserve and the retired lines never do. The
+ * failure check and the spare figure both count these.
+ */
+static inline int ssd_rain_usable_lines(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
+
+    return spp->tt_lines - bb_gc_forced_lines(ssd->n) - open -
+           ssd->eol_reserve_lines - ssd->lm.retired_line_cnt;
+}
+
+uint8_t ssd_rain_spare_at(struct ssd *ssd, int nfail);
+
 static inline void ftl_note_victim(struct ssd *ssd, uint64_t id)
 {
     ssd->victim_digest = (ssd->victim_digest ^ (id + 1)) *

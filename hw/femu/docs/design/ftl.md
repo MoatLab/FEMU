@@ -1103,6 +1103,45 @@ so no die holds all the parity.
  x-rain-fail of another die while 0016h is set or waits --> refused
 ```
 
+### Read-only when the spare runs out (rain_read_only)
+
+A real drive with a die failure and too little spare goes read-only, and
+the host keeps its data. `rain_read_only=on` models this. Off (the
+default), such a failure is refused.
+
+```text
+ x-rain-fail(d)                      rain_read_only=off   rain_read_only=on
+ d failed before                     accepted             accepted
+ media read-only                     -                    refused
+ two members left, old live lines    refused              refused
+ no room for GC, or cap(F) < need    refused              read-only
+ Available Spare after it is 0       accepted             read-only
+ otherwise                           accepted             accepted
+```
+
+- Read-only is the end-of-life path of `eol_read_only`: the reserve lines
+  go to the allocator, and GC, the rebuild, read reclaim and refresh stop.
+  New writes fail with Write to Read Only Media.
+- The reserve is sized for a line of two dies (one data page a row), as
+  dies fail down to two members. So the writes admitted before a failure
+  always find room.
+- The failure check and Available Spare count the same lines: all lines
+  less the forced GC lines, the open pointers, the reserve and the
+  retired lines.
+- Critical Warning reads 0Dh: bit 2 for the failure, bit 3 for
+  read-only, bit 0 for no spare. Available Spare reads 0.
+- Each old line keeps one lost member, so every page still reads.
+- The default MDTS (4 MiB) needs a reserve larger than small devices
+  have, so the property is opt-in. It needs `eol_read_only=on`; it does
+  not work with `blk_pe_limit`, the write buffer or `iu_pages` above 1,
+  whose writes the admission does not count.
+- A device whose `failed_die` leaves no spare at start is refused.
+- A `cxl_ssd` link is refused too: the CXL device makes that FTL,
+  without the reserve.
+- With the property on, the FTL thread reports the spare, reliability
+  and read-only bits to the Persistent Event Log as they change, as with
+  the wear model.
+
 ## Read cache
 
 `read_cache_mb` adds a DRAM read cache in front of NAND reads

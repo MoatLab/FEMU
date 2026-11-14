@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 309 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 310 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -197,6 +197,7 @@ Devices:
 | `die_parity` | `int32` | `0` | bbssd, CSD: non-zero books one parity program per full stripe, one page per die at a plane and page index, on a die that rotates with the page; it costs die time and counts in WAF, not space. Needs two dies and mapping=page; not with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP. 0 (default) is off |
 | `rain_parity` | `int32` | `0` | bbssd, CSD: 1 keeps one parity page in each stripe of a line (one page per die at a plane and page index), as RAIN on a datacenter drive: the parity page rotates over the dies and takes space, so the spare space drops by one die in N and WAF counts one parity program per N - 1 data pages. A failed die (failed_die) is out of every line opened after it fails, and its pages read from the other dies of their stripe. Dies fail one at a time: a new failure needs the lines from before the last one moved (rain_rebuild), and two members left. Needs two to 1024 dies (three with failed_die) and mapping=page; not with die_parity or what it refuses, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit, persist_ftl or the pSLC tier. 0 (default) is off |
 | `rain_rebuild` | `bool` | `off` | bbssd, CSD: with rain_parity, each write moves at most one line opened before the last die failure into a line without that die, when lines are to spare; off (default): only GC moves them |
+| `rain_read_only` | `bool` | `off` | bbssd, CSD: with rain_parity, a die failure that leaves too little spare (Available Spare 0, or no room for GC) is accepted and the media goes read-only, as at the end of life; no new die fails after that. The end-of-life reserve is sized for a line of two dies. Needs eol_read_only=on and its mdts and queue bounds; not with blk_pe_limit, buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd or more than one namespace. Off (default): such a failure is refused |
 | `parity_xor_ns` | `int32` | `0` | bbssd, CSD: with die_parity or rain_parity, controller time in ns before each parity program and added to a read of the failed die; 0 (default) |
 | `failed_die` | `int32` | `-1` | bbssd, CSD: with die_parity or rain_parity, the die (channel * luns_per_ch + LUN) that has failed: a host read there reads the other dies of its stripe in parallel; -1 (default) is none |
 | `inject_die` | `int32` | `0` | bbssd, CSD: with ocp=on, the die (channel * luns_per_ch + LUN) that OCP event injection 0016h (NAND Die Offline) takes offline; with rain_parity, accepted while each live stripe keeps one lost member at most; 0 (default) |

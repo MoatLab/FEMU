@@ -667,6 +667,14 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: with rain_parity, each write moves at most one line "
       "opened before the last die failure into a line without that die, "
       "when lines are to spare; off (default): only GC moves them" },
+    { "rain_read_only",
+      "bbssd, CSD: with rain_parity, a die failure that leaves too little "
+      "spare (Available Spare 0, or no room for GC) is accepted and the "
+      "media goes read-only, as at the end of life; no new die fails after "
+      "that. The end-of-life reserve is sized for a line of two dies. Needs "
+      "eol_read_only=on and its mdts and queue bounds; not with "
+      "blk_pe_limit, buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd "
+      "or more than one namespace. Off (default): such a failure is refused" },
     { "parity_xor_ns",
       "bbssd, CSD: with die_parity or rain_parity, controller time in ns "
       "before each "
